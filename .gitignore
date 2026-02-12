@@ -1,0 +1,6 @@
+/target/
+*.pdb
+.env
+.env.*
+!.env.example
+kaml/src/baml_client/

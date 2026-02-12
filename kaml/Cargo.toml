@@ -1,0 +1,20 @@
+[package]
+name = "kaml"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+tempfile = "3"
+tracing = "0.1"
+baml = "0.218.0"
+regex = "1"
+reqwest = { version = "0.12", features = ["json"] }
+xxhash-rust = { version = "0.8", features = ["xxh32"] }
+globset = "0.4"
+ignore = "0.4"

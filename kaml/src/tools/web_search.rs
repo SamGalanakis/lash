@@ -1,0 +1,111 @@
+use serde_json::json;
+
+use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
+
+/// Web search via Tavily API.
+pub struct WebSearch {
+    api_key: String,
+    client: reqwest::Client,
+}
+
+impl WebSearch {
+    pub fn new(api_key: impl Into<String>) -> Self {
+        Self {
+            api_key: api_key.into(),
+            client: reqwest::Client::new(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolProvider for WebSearch {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            name: "search_web".into(),
+            description: "Search the web and return relevant results".into(),
+            params: vec![
+                ToolParam::typed("query", "str"),
+                ToolParam {
+                    name: "max_results".into(),
+                    r#type: "int".into(),
+                    description: "Maximum results to return (default 5)".into(),
+                    required: false,
+                },
+            ],
+            returns: "list".into(),
+        }]
+    }
+
+    async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let max_results = args
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5);
+
+        let body = json!({
+            "api_key": self.api_key,
+            "query": query,
+            "max_results": max_results,
+            "include_answer": true,
+        });
+
+        let resp = self
+            .client
+            .post("https://api.tavily.com/search")
+            .json(&body)
+            .send()
+            .await;
+
+        match resp {
+            Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+                Ok(data) => {
+                    let results: Vec<serde_json::Value> = data
+                        .get("results")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .map(|r| {
+                                    json!({
+                                        "title": r.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                                        "url": r.get("url").and_then(|v| v.as_str()).unwrap_or(""),
+                                        "content": r.get("content").and_then(|v| v.as_str()).unwrap_or(""),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    let mut result = json!({ "results": results });
+                    if let Some(answer) = data.get("answer").and_then(|v| v.as_str()) {
+                        result["answer"] = json!(answer);
+                    }
+
+                    ToolResult {
+                        success: true,
+                        result,
+                    }
+                }
+                Err(e) => ToolResult {
+                    success: false,
+                    result: json!(format!("Failed to parse response: {e}")),
+                },
+            },
+            Ok(r) => {
+                let status = r.status();
+                let body = r.text().await.unwrap_or_default();
+                ToolResult {
+                    success: false,
+                    result: json!(format!("Tavily API error ({status}): {body}")),
+                }
+            }
+            Err(e) => ToolResult {
+                success: false,
+                result: json!(format!("Request failed: {e}")),
+            },
+        }
+    }
+}

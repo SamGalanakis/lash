@@ -1,0 +1,7 @@
+[workspace]
+members = ["kaml", "kaml-demo"]
+resolver = "3"
+
+[profile.release]
+lto = "thin"
+strip = true

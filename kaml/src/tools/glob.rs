@@ -1,0 +1,136 @@
+use serde_json::json;
+use std::path::{Path, PathBuf};
+
+use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
+
+/// Find files by glob pattern.
+pub struct Glob;
+
+impl Glob {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for Glob {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+const MAX_RESULTS: usize = 100;
+
+#[async_trait::async_trait]
+impl ToolProvider for Glob {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            name: "glob".into(),
+            description: "Find files matching a glob pattern, sorted by modification time (newest first). Returns up to 100 results.".into(),
+            params: vec![
+                ToolParam::typed("pattern", "str"),
+                ToolParam {
+                    name: "path".into(),
+                    r#type: "str".into(),
+                    description: "Base directory to search in (default: current directory)".into(),
+                    required: false,
+                },
+            ],
+            returns: "list".into(),
+        }]
+    }
+
+    async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
+        let pattern = args
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+
+        if pattern.is_empty() {
+            return ToolResult {
+                success: false,
+                result: json!("Missing required parameter: pattern"),
+            };
+        }
+
+        let base_dir = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or(".");
+
+        let base = Path::new(base_dir);
+        if !base.is_dir() {
+            return ToolResult {
+                success: false,
+                result: json!(format!("Not a directory: {}", base_dir)),
+            };
+        }
+
+        // Build the glob matcher
+        let glob = match globset::GlobBuilder::new(pattern)
+            .literal_separator(false)
+            .build()
+        {
+            Ok(g) => g,
+            Err(e) => {
+                return ToolResult {
+                    success: false,
+                    result: json!(format!("Invalid glob pattern: {}", e)),
+                };
+            }
+        };
+
+        let matcher = match globset::GlobSetBuilder::new().add(glob).build() {
+            Ok(m) => m,
+            Err(e) => {
+                return ToolResult {
+                    success: false,
+                    result: json!(format!("Failed to build glob matcher: {}", e)),
+                };
+            }
+        };
+
+        // Walk the directory tree, respecting .gitignore
+        let walker = ignore::WalkBuilder::new(base)
+            .hidden(false)
+            .git_ignore(true)
+            .build();
+
+        let mut matches: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+
+        for entry in walker {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            let path = entry.path();
+            // Match against relative path from base
+            let rel_path = match path.strip_prefix(base) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            if matcher.is_match(rel_path) {
+                let mtime = path
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                matches.push((path.to_path_buf(), mtime));
+            }
+        }
+
+        // Sort by mtime, newest first
+        matches.sort_by(|a, b| b.1.cmp(&a.1));
+        matches.truncate(MAX_RESULTS);
+
+        let paths: Vec<String> = matches
+            .iter()
+            .map(|(p, _)| p.to_string_lossy().to_string())
+            .collect();
+
+        ToolResult {
+            success: true,
+            result: json!(paths.join("\n")),
+        }
+    }
+}
