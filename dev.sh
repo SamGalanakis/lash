@@ -12,14 +12,7 @@ if [ -z "${OPENROUTER_API_KEY:-}" ]; then
   exit 1
 fi
 
-MODEL="${1:-google/gemini-3-flash-preview}"
+MODEL="${1:-z-ai/glm-5}"
 
 # cargo run always rebuilds if sources changed — guarantees latest binary.
-case "${1:-}" in
-  test)
-    exec cargo run -p kaml-demo --bin test-session
-    ;;
-  *)
-    exec cargo run -p kaml-demo --bin kaml-demo -- --model "$MODEL"
-    ;;
-esac
+exec cargo run -p kaml-cli --bin kaml -- --model "$MODEL"

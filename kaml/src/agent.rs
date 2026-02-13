@@ -9,6 +9,7 @@ use crate::session::Session;
 use crate::ToolDefinition;
 
 /// Configuration for the agent loop.
+#[derive(Clone)]
 pub struct AgentConfig {
     /// Model identifier (e.g. "anthropic/claude-sonnet-4-5")
     pub model: String,
@@ -20,6 +21,8 @@ pub struct AgentConfig {
     pub max_iterations: usize,
     /// Maximum total character budget for context truncation
     pub max_context_chars: usize,
+    /// When true, use SubAgentStep prompt instead of CodeActStep
+    pub sub_agent: bool,
 }
 
 impl Default for AgentConfig {
@@ -30,6 +33,7 @@ impl Default for AgentConfig {
             base_url: "https://openrouter.ai/api/v1".to_string(),
             max_iterations: 15,
             max_context_chars: 400_000,
+            sub_agent: false,
         }
     }
 }
@@ -97,12 +101,17 @@ impl Agent {
         Self { session, config }
     }
 
+    pub fn set_model(&mut self, model: String) {
+        self.config.model = model;
+    }
+
     /// Run the agent loop with user messages, emitting events.
+    /// Returns the updated message history (including assistant/system feedback).
     pub async fn run(
         &mut self,
         messages: Vec<ChatMsg>,
         event_tx: mpsc::Sender<AgentEvent>,
-    ) {
+    ) -> Vec<ChatMsg> {
         macro_rules! emit {
             ($event:expr) => {
                 if !event_tx.is_closed() {
@@ -129,8 +138,9 @@ impl Agent {
         );
         cr.set_primary_client("DefaultClient");
 
-        // Generate tool docs
+        // Generate tool docs and context
         let tool_list = ToolDefinition::format_tool_docs(&self.session.tools().definitions());
+        let context = build_context();
 
         let mut msgs = messages;
 
@@ -169,11 +179,15 @@ impl Agent {
 
                     let llm_start = std::time::Instant::now();
 
-                    let step = B
-                        .CodeActStep
-                        .with_client_registry(&cr);
-
-                    let mut call = match step.stream(&msgs, &tool_list) {
+                    let mut call = match if self.config.sub_agent {
+                        B.SubAgentStep
+                            .with_client_registry(&cr)
+                            .stream(&msgs, &tool_list, &context)
+                    } else {
+                        B.CodeActStep
+                            .with_client_registry(&cr)
+                            .stream(&msgs, &tool_list, &context)
+                    } {
                         Ok(c) => c,
                         Err(e) => {
                             let msg = format!("{}", e);
@@ -188,8 +202,9 @@ impl Agent {
                         }
                     };
 
-                    // Accumulate LLM tokens
+                    // Stream LLM tokens incrementally
                     let mut stream_error = None;
+                    let mut prev_len = 0usize;
                     loop {
                         match tokio::time::timeout(LLM_STREAM_TIMEOUT, call.next()).await {
                             Err(_timeout) => {
@@ -197,10 +212,18 @@ impl Agent {
                                     message: "LLM response timed out".to_string(),
                                 });
                                 emit!(AgentEvent::Done);
-                                return;
+                                return msgs;
                             }
                             Ok(None) => break,
-                            Ok(Some(Ok(_partial))) => {}
+                            Ok(Some(Ok(partial))) => {
+                                if partial.len() > prev_len {
+                                    let delta = &partial[prev_len..];
+                                    emit!(AgentEvent::TextDelta {
+                                        content: delta.to_string(),
+                                    });
+                                    prev_len = partial.len();
+                                }
+                            }
                             Ok(Some(Err(e))) => {
                                 stream_error = Some(format!("{}", e));
                                 break;
@@ -217,7 +240,7 @@ impl Agent {
                             message: format!("LLM error: {}", err),
                         });
                         emit!(AgentEvent::Done);
-                        return;
+                        return msgs;
                     }
 
                     let text = match call.get_final_response().await {
@@ -253,14 +276,6 @@ impl Agent {
                 String::new()
             };
 
-            // Emit prose (no code blocks) to the consumer
-            let prose = strip_code_blocks(&full_text);
-            if !prose.is_empty() {
-                emit!(AgentEvent::TextDelta {
-                    content: prose.clone()
-                });
-            }
-
             // Extract ```python code blocks
             let code = extract_code(&full_text);
 
@@ -270,19 +285,44 @@ impl Agent {
                     content: "I didn't get a response — please try again.".to_string()
                 });
                 emit!(AgentEvent::Done);
-                return;
+                return msgs;
             }
 
             // No code blocks = pure prose answer, done
             if code.is_empty() {
+                msgs.push(ChatMsg {
+                    role: "assistant".to_string(),
+                    content: full_text,
+                });
                 emit!(AgentEvent::Done);
-                return;
+                return msgs;
             }
 
             emit!(AgentEvent::CodeBlock { code: code.clone() });
 
+            // Set up message forwarding for this execution
+            let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<crate::SandboxMessage>();
+            self.session.set_message_sender(msg_tx);
+            let event_tx_clone = event_tx.clone();
+            let drain_handle = tokio::spawn(async move {
+                while let Some(sandbox_msg) = msg_rx.recv().await {
+                    if !event_tx_clone.is_closed() {
+                        let _ = event_tx_clone
+                            .send(AgentEvent::Message {
+                                text: sandbox_msg.text,
+                                kind: sandbox_msg.kind,
+                            })
+                            .await;
+                    }
+                }
+            });
+
             // Execute via Python REPL
             let exec_result = self.session.run_code(&code).await;
+
+            // Clean up message forwarding
+            self.session.clear_message_sender();
+            let _ = drain_handle.await;
 
             match exec_result {
                 Ok(r) => {
@@ -310,8 +350,12 @@ impl Agent {
                         emit!(AgentEvent::TextDelta {
                             content: format!("\n\n{}", r.response),
                         });
+                        msgs.push(ChatMsg {
+                            role: "assistant".to_string(),
+                            content: full_text.clone(),
+                        });
                         emit!(AgentEvent::Done);
-                        return;
+                        return msgs;
                     }
 
                     // Build labeled feedback
@@ -336,13 +380,17 @@ impl Agent {
                         ));
                     } else {
                         // No output, no error, no tool calls
+                        msgs.push(ChatMsg {
+                            role: "assistant".to_string(),
+                            content: full_text.clone(),
+                        });
                         emit!(AgentEvent::Done);
-                        return;
+                        return msgs;
                     }
 
                     msgs.push(ChatMsg {
                         role: "assistant".to_string(),
-                        content: prose,
+                        content: full_text.clone(),
                     });
                     msgs.push(ChatMsg {
                         role: "system".to_string(),
@@ -358,7 +406,7 @@ impl Agent {
 
                     msgs.push(ChatMsg {
                         role: "assistant".to_string(),
-                        content: prose,
+                        content: full_text.clone(),
                     });
                     msgs.push(ChatMsg {
                         role: "system".to_string(),
@@ -378,11 +426,20 @@ impl Agent {
         }
 
         emit!(AgentEvent::Done);
+        msgs
     }
 
     /// Get the inner session (for pooling, snapshot, etc.)
     pub fn into_session(self) -> Session {
         self.session
+    }
+}
+
+/// Build environment context string for the system prompt.
+fn build_context() -> String {
+    match std::env::current_dir() {
+        Ok(cwd) => format!("Working directory: {}", cwd.display()),
+        Err(_) => String::new(),
     }
 }
 
@@ -395,27 +452,6 @@ fn is_retryable(error: &str) -> bool {
         || lower.contains("502")
         || lower.contains("overloaded")
         || lower.contains("temporarily")
-}
-
-/// Strip fenced code blocks from text, returning only the prose portions.
-fn strip_code_blocks(text: &str) -> String {
-    let mut result = String::new();
-    let mut in_block = false;
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") {
-            in_block = !in_block;
-            continue;
-        }
-        if !in_block {
-            result.push_str(line);
-            result.push('\n');
-        }
-    }
-    while result.contains("\n\n\n") {
-        result = result.replace("\n\n\n", "\n\n");
-    }
-    result.trim().to_string()
 }
 
 /// Extract ```python fenced code blocks from LLM text.

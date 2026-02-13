@@ -69,7 +69,7 @@ impl ToolProvider for Ls {
         }
 
         let mut builder = ignore::WalkBuilder::new(base);
-        builder.hidden(false).git_ignore(true).max_depth(Some(10));
+        builder.hidden(true).git_ignore(true).max_depth(Some(3));
 
         // Add custom ignore patterns
         let mut overrides = ignore::overrides::OverrideBuilder::new(base);

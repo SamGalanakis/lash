@@ -19,6 +19,8 @@ pub enum HostMessage {
     Snapshot { id: String },
     #[serde(rename = "restore")]
     Restore { id: String, data: String },
+    #[serde(rename = "reset")]
+    Reset { id: String },
     #[serde(rename = "shutdown")]
     Shutdown,
 }
@@ -47,4 +49,6 @@ pub enum PythonMessage {
     },
     #[serde(rename = "snapshot_result")]
     SnapshotResult { id: String, data: String },
+    #[serde(rename = "reset_result")]
+    ResetResult { id: String },
 }

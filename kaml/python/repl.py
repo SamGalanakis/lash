@@ -13,6 +13,8 @@ import threading
 import uuid
 import queue
 
+import dill
+
 # --- Save real stdio before we redirect anything ---
 _real_stdout = sys.stdout
 _real_stdin = sys.stdin
@@ -138,6 +140,18 @@ def _list_tools():
     return _Awaitable(result)
 
 
+def _reset_repl():
+    """Reset the REPL namespace and re-register tools."""
+    global _tools_initialized
+    # Preserve the stored tool definitions
+    saved_defs = json.dumps(_tool_defs)
+    _ns.clear()
+    _tools_initialized = False
+    _register_tools(saved_defs)
+    print("REPL reset: namespace cleared, tools re-registered.")
+    return _Awaitable("REPL reset complete")
+
+
 def _register_tools(tools_json):
     """Register tool wrappers from JSON tool definitions."""
     global _tools_initialized, _tool_defs
@@ -213,7 +227,7 @@ def _register_tools(tools_json):
     _async_tool_names.update(name for name in (t["name"] for t in _tool_defs))
     _ns.update({
         "json": json, "print": print, "message": _message, "asyncio": asyncio,
-        "list_tools": _list_tools,
+        "list_tools": _list_tools, "reset_repl": _reset_repl,
     })
 
 
@@ -352,24 +366,33 @@ async def _handle_exec(exec_id, code):
 
 
 def _handle_snapshot(snap_id):
-    """Serialize JSON-safe variables from the namespace."""
+    """Serialize the REPL namespace using dill."""
+    skip = {"json", "asyncio", "dill", "print", "message", "list_tools", "reset_repl"}
+    skip.update(t["name"] for t in _tool_defs)
+
     data = {}
     for k, v in _ns.items():
-        if k.startswith("_") or callable(v) or k in ("json", "asyncio"):
+        if k.startswith("_") or k in skip:
             continue
         try:
-            json.dumps(v)
+            dill.dumps(v)
             data[k] = v
-        except (TypeError, ValueError):
+        except Exception:
             continue
-    _send({"type": "snapshot_result", "id": snap_id, "data": json.dumps(data)})
+    _send({"type": "snapshot_result", "id": snap_id, "data": dill.dumps(data).hex()})
 
 
 def _handle_restore(restore_id, data_str):
-    """Restore variables into the namespace."""
-    saved = json.loads(data_str)
+    """Restore namespace from a dill snapshot."""
+    saved = dill.loads(bytes.fromhex(data_str))
     _ns.update(saved)
     _send({"type": "exec_result", "id": restore_id, "output": "", "response": "", "error": None})
+
+
+def _handle_reset(reset_id):
+    """Reset the REPL namespace via the protocol."""
+    _reset_repl()
+    _send({"type": "reset_result", "id": reset_id})
 
 
 def _reader_thread():
@@ -422,6 +445,8 @@ def main():
             _handle_snapshot(msg["id"])
         elif msg_type == "restore":
             _handle_restore(msg["id"], msg["data"])
+        elif msg_type == "reset":
+            _handle_reset(msg["id"])
         elif msg_type == "shutdown":
             break
 

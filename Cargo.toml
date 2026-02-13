@@ -1,5 +1,5 @@
 [workspace]
-members = ["kaml", "kaml-demo"]
+members = ["kaml", "kaml-cli"]
 resolver = "3"
 
 [profile.release]

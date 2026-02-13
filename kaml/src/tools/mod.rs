@@ -1,4 +1,5 @@
 mod composite;
+mod delegate_task;
 mod edit_file;
 mod fetch_url;
 mod glob;
@@ -11,6 +12,7 @@ mod web_search;
 mod write_file;
 
 pub use composite::CompositeTools;
+pub use delegate_task::DelegateTask;
 pub use edit_file::EditFile;
 pub use fetch_url::FetchUrl;
 pub use glob::Glob;

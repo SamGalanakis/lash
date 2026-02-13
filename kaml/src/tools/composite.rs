@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{ToolDefinition, ToolProvider, ToolResult};
 
 /// Combines multiple `ToolProvider`s into one.
@@ -22,6 +24,25 @@ impl CompositeTools {
     pub fn add(mut self, provider: impl ToolProvider) -> Self {
         self.providers.push(Box::new(provider));
         self
+    }
+
+    /// Add an `Arc<dyn ToolProvider>` (e.g. to share a tool set with sub-agents).
+    pub fn add_arc(mut self, provider: Arc<dyn ToolProvider>) -> Self {
+        self.providers.push(Box::new(ArcToolProvider(provider)));
+        self
+    }
+}
+
+/// Wrapper so an `Arc<dyn ToolProvider>` can live inside a `Box<dyn ToolProvider>`.
+struct ArcToolProvider(Arc<dyn ToolProvider>);
+
+#[async_trait::async_trait]
+impl ToolProvider for ArcToolProvider {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        self.0.definitions()
+    }
+    async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
+        self.0.execute(name, args).await
     }
 }
 

@@ -155,6 +155,11 @@ impl Session {
         self.message_tx = Some(tx);
     }
 
+    /// Clear the message sender (drops the sender, causing receivers to terminate).
+    pub fn clear_message_sender(&mut self) {
+        self.message_tx = None;
+    }
+
     /// Execute code in the persistent Python REPL.
     pub async fn run_code(&mut self, code: &str) -> Result<ExecResponse, SessionError> {
         self.tool_calls.clear();
@@ -168,9 +173,10 @@ impl Session {
         })
         .await?;
 
-        // Read messages until we get exec_result
+        // Read messages until we get exec_result (60s timeout per message)
+        let exec_timeout = std::time::Duration::from_secs(60);
         loop {
-            let msg = self.recv().await?;
+            let msg = self.recv_timeout(exec_timeout).await?;
             match msg {
                 PythonMessage::ToolCall {
                     id: call_id,
@@ -227,16 +233,31 @@ impl Session {
                 PythonMessage::Ready => {
                     // Unexpected but harmless
                 }
-                PythonMessage::SnapshotResult { .. } => {
+                PythonMessage::SnapshotResult { .. } | PythonMessage::ResetResult { .. } => {
                     return Err(SessionError::Protocol(
-                        "unexpected snapshot_result during exec".to_string(),
+                        "unexpected snapshot/reset result during exec".to_string(),
                     ));
                 }
             }
         }
     }
 
-    /// Snapshot the session: Python variables + scratch filesystem.
+    /// Reset the Python REPL namespace and re-register tools.
+    pub async fn reset(&mut self) -> Result<(), SessionError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.send(HostMessage::Reset { id: id.clone() }).await?;
+
+        loop {
+            match self.recv().await? {
+                PythonMessage::ResetResult { .. } => break,
+                _ => continue,
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Snapshot the session: Python namespace (via dill) + scratch filesystem.
     pub async fn snapshot(&mut self) -> Result<Vec<u8>, SessionError> {
         let id = uuid::Uuid::new_v4().to_string();
         self.send(HostMessage::Snapshot { id: id.clone() })
@@ -249,13 +270,11 @@ impl Session {
             }
         };
 
-        let vars: serde_json::Value =
-            serde_json::from_str(&data).unwrap_or(json!({}));
-
         // Collect scratch files
         let files = collect_files(self.scratch_dir.path()).unwrap_or_default();
 
-        let combined = json!({ "vars": vars, "files": files });
+        // `data` is opaque (hex-encoded dill bytes or JSON string) — store as-is
+        let combined = json!({ "vars": data, "files": files });
         Ok(serde_json::to_vec(&combined).unwrap())
     }
 
@@ -263,13 +282,12 @@ impl Session {
     pub async fn restore(&mut self, data: &[u8]) -> Result<(), SessionError> {
         let parsed: serde_json::Value = serde_json::from_slice(data).unwrap_or(json!({}));
 
-        // Restore Python variables
-        let vars_str = if let Some(vars) = parsed.get("vars") {
-            serde_json::to_string(vars).unwrap_or_else(|_| "{}".to_string())
-        } else {
-            // Backward compat: old snapshots are just the vars object
-            String::from_utf8_lossy(data).to_string()
-        };
+        // `vars` is a hex-encoded dill blob
+        let vars_str = parsed
+            .get("vars")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let id = uuid::Uuid::new_v4().to_string();
         self.send(HostMessage::Restore {
@@ -323,7 +341,17 @@ impl Session {
         &self.tool_calls
     }
 
+    /// Check if the Python child process is still alive.
+    fn check_alive(&mut self) -> Result<(), SessionError> {
+        match self.child.try_wait() {
+            Ok(Some(_status)) => Err(SessionError::ChildExited),
+            Ok(None) => Ok(()), // still running
+            Err(e) => Err(SessionError::Io(e)),
+        }
+    }
+
     async fn send(&mut self, msg: HostMessage) -> Result<(), SessionError> {
+        self.check_alive()?;
         let mut line = serde_json::to_string(&msg)?;
         line.push('\n');
         self.stdin.write_all(line.as_bytes()).await?;
@@ -339,6 +367,18 @@ impl Session {
         }
         let msg: PythonMessage = serde_json::from_str(line.trim())?;
         Ok(msg)
+    }
+
+    /// Receive with a timeout. Returns SessionError on timeout or if the child is dead.
+    async fn recv_timeout(&mut self, timeout: std::time::Duration) -> Result<PythonMessage, SessionError> {
+        match tokio::time::timeout(timeout, self.recv()).await {
+            Ok(result) => result,
+            Err(_) => {
+                // Check if the child died while we were waiting
+                self.check_alive()?;
+                Err(SessionError::Protocol("recv timed out".to_string()))
+            }
+        }
     }
 }
 
@@ -375,6 +415,8 @@ fn find_python(config: &SessionConfig, repl_path: &Path) -> Result<(String, Vec<
             "run".to_string(),
             "--python".to_string(),
             "3.13".to_string(),
+            "--with".to_string(),
+            "dill".to_string(),
             "python3".to_string(),
             repl,
         ],
