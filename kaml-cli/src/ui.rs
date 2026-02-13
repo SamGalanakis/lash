@@ -38,6 +38,12 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             format!("  {}", spinner_char),
             Style::default().fg(Color::Yellow),
         ));
+        if let Some(status) = &app.status_text {
+            spans.push(Span::styled(
+                format!(" {}", status),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
     }
 
     let bar = Paragraph::new(Line::from(spans))
@@ -164,12 +170,6 @@ fn render_block<'a>(block: &'a DisplayBlock, code_expanded_global: bool, lines: 
                     Style::default().fg(Color::DarkGray),
                 )));
             }
-        }
-        DisplayBlock::Progress(text) => {
-            lines.push(Line::from(Span::styled(
-                text.to_string(),
-                Style::default().fg(Color::Cyan),
-            )));
         }
         DisplayBlock::Error(msg) => {
             lines.push(Line::from(Span::styled(

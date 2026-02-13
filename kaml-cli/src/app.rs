@@ -17,7 +17,6 @@ pub enum DisplayBlock {
         output: String,
         error: Option<String>,
     },
-    Progress(String),
     Error(String),
 }
 
@@ -50,7 +49,7 @@ impl DisplayBlock {
                 }
                 h
             }
-            DisplayBlock::Progress(_) | DisplayBlock::Error(_) => 1,
+            DisplayBlock::Error(_) => 1,
         }
     }
 }
@@ -68,6 +67,8 @@ pub struct App {
     pub input_history_idx: Option<usize>,
     /// Spinner frame counter
     pub tick: usize,
+    /// Latest progress message — shown on status bar next to spinner
+    pub status_text: Option<String>,
     /// Buffered TextDelta — only flushed as AssistantText on Done (prose-only response).
     /// Discarded when a CodeBlock arrives (it was intermediate thinking with code fences).
     pending_text: String,
@@ -87,6 +88,7 @@ impl App {
             input_history: Vec::new(),
             input_history_idx: None,
             tick: 0,
+            status_text: None,
             pending_text: String::new(),
         }
     }
@@ -144,8 +146,7 @@ impl App {
             }
             AgentEvent::Message { text, kind } => {
                 if kind == "progress" {
-                    self.blocks.push(DisplayBlock::Progress(text));
-                    self.scroll_to_bottom();
+                    self.status_text = Some(text);
                 }
             }
             AgentEvent::LlmRequest { iteration, .. } => {
@@ -162,6 +163,7 @@ impl App {
                     self.scroll_to_bottom();
                 }
                 self.running = false;
+                self.status_text = None;
             }
             AgentEvent::Error { message } => {
                 self.blocks.push(DisplayBlock::Error(message));
