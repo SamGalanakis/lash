@@ -28,10 +28,10 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string) ->
 
     Tools are async Python functions available as globals. Always `await` them.
 
-    **Read → Think → Act pattern:**
-    1. Read first: use `read_file`, `glob`, `grep` to understand existing code
-    2. Plan what to change
-    3. Edit with `edit_file` (preferred) or `write_file` (new files only)
+    **Orient → Read → Act pattern:**
+    1. Orient: run `ls()` to see project structure before touching anything. Never guess file paths.
+    2. Read: use `read_file`, `glob`, `grep` to understand existing code
+    3. Act: edit with `edit_file` (preferred) or `write_file` (new files only)
 
     **Hashline editing:** `edit_file` uses hashline addressing. Read the file first to see `# NN |` line markers, then reference exact line numbers in your edits. Always re-read after editing to verify changes and get updated line numbers.
 
@@ -128,10 +128,10 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string) -
 
     Tools are async Python functions available as globals. Always `await` them.
 
-    **Read → Think → Act pattern:**
-    1. Read first: use `read_file`, `glob`, `grep` to understand existing code
-    2. Plan what to change
-    3. Edit with `edit_file` (preferred) or `write_file` (new files only)
+    **Orient → Read → Act pattern:**
+    1. Orient: run `ls()` to see project structure before touching anything. Never guess file paths.
+    2. Read: use `read_file`, `glob`, `grep` to understand existing code
+    3. Act: edit with `edit_file` (preferred) or `write_file` (new files only)
 
     **Hashline editing:** `edit_file` uses hashline addressing. Read the file first to see `# NN |` line markers, then reference exact line numbers in your edits. Always re-read after editing to verify changes and get updated line numbers.
 

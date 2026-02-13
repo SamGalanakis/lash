@@ -437,10 +437,39 @@ impl Agent {
 
 /// Build environment context string for the system prompt.
 fn build_context() -> String {
-    match std::env::current_dir() {
-        Ok(cwd) => format!("Working directory: {}", cwd.display()),
-        Err(_) => String::new(),
+    let mut parts = Vec::new();
+
+    if let Ok(cwd) = std::env::current_dir() {
+        parts.push(format!("Working directory: {}", cwd.display()));
+
+        // Detect git repo
+        let git_dir = cwd.join(".git");
+        if git_dir.exists() {
+            parts.push("Git repository: yes".into());
+        }
+
+        // List top-level entries so the model knows what exists
+        if let Ok(entries) = std::fs::read_dir(&cwd) {
+            let mut names: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        format!("{}/", name)
+                    } else {
+                        name
+                    }
+                })
+                .filter(|n| !n.starts_with('.'))
+                .collect();
+            names.sort();
+            if !names.is_empty() {
+                parts.push(format!("Top-level entries: {}", names.join(", ")));
+            }
+        }
     }
+
+    parts.join("\n")
 }
 
 /// Check if an LLM error is retryable (rate limits, server errors).
