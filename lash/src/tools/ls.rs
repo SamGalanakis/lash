@@ -25,7 +25,7 @@ impl ToolProvider for Ls {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "ls".into(),
-            description: "List directory tree structure, respecting .gitignore.".into(),
+            description: "List directory tree structure (max 3 levels, 500 entries), respecting .gitignore. Use this to explore project structure.".into(),
             params: vec![
                 ToolParam {
                     name: "path".into(),

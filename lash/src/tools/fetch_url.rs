@@ -29,7 +29,7 @@ impl ToolProvider for FetchUrl {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "fetch_url".into(),
-            description: "Fetch a URL and return its text content".into(),
+            description: "Fetch a URL and return its text content (truncated at 100KB).".into(),
             params: vec![ToolParam::typed("url", "str")],
             returns: "str".into(),
         }]

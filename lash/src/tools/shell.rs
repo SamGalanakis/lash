@@ -33,7 +33,7 @@ impl ToolProvider for Shell {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "bash".into(),
-            description: "Run a bash command and return its output".into(),
+            description: "Run a bash command and return stdout+stderr (30s timeout, 50KB output limit).".into(),
             params: vec![ToolParam::typed("command", "str")],
             returns: "str".into(),
         }]

@@ -73,8 +73,27 @@ def _message(text, *, kind):
     return _Awaitable()
 
 
+class ToolError:
+    """Returned instead of raising when a tool call fails.
+
+    This allows asyncio.gather() to complete all calls even if some fail.
+    """
+    def __init__(self, name, error):
+        self.name = name
+        self.error = error
+
+    def __repr__(self):
+        return f"ToolError({self.name!r}, {self.error!r})"
+
+    def __str__(self):
+        return f"Error calling {self.name}: {self.error}"
+
+    def __bool__(self):
+        return False
+
+
 async def _call(name, params):
-    """Call a tool by name. Returns parsed JSON result or raises."""
+    """Call a tool by name. Returns parsed JSON result or ToolError on failure."""
     call_id = str(uuid.uuid4())
     _send({"type": "tool_call", "id": call_id, "name": name, "args": json.dumps(params)})
 
@@ -86,7 +105,8 @@ async def _call(name, params):
     if result["success"]:
         return json.loads(result["result"]) if result["result"] else None
     else:
-        raise Exception(json.loads(result["result"]) if result["result"] else "Tool call failed")
+        error = json.loads(result["result"]) if result["result"] else "Tool call failed"
+        return ToolError(name, error)
 
 
 def _resolve_tool_result(msg):

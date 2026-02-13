@@ -100,10 +100,6 @@ impl SessionLogger {
 }
 
 fn cleanup_terminal() {
-    let _ = crossterm::execute!(
-        std::io::stdout(),
-        crossterm::event::DisableMouseCapture,
-    );
     ratatui::restore();
 }
 
@@ -163,9 +159,8 @@ async fn main() -> anyhow::Result<()> {
         default_hook(info);
     }));
 
-    // Initialize terminal
+    // Initialize terminal (no mouse capture — allows text selection)
     let terminal = ratatui::init();
-    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
 
     let result = run_app(terminal, agent, &mut logger, &args).await;
 
@@ -361,19 +356,6 @@ async fn run_app(
                         app.scroll_down(10, vh, vw);
                     }
                     KeyCode::Char(c) => app.insert_char(c),
-                    _ => {}
-                }
-            }
-            AppEvent::Terminal(TermEvent::Mouse(mouse)) => {
-                use crossterm::event::MouseEventKind;
-                match mouse.kind {
-                    MouseEventKind::ScrollUp => app.scroll_up(3),
-                    MouseEventKind::ScrollDown => {
-                        let size = terminal.size()?;
-                        let vh = size.height.saturating_sub(5) as usize;
-                        let vw = size.width as usize;
-                        app.scroll_down(3, vh, vw);
-                    }
                     _ => {}
                 }
             }

@@ -28,7 +28,7 @@ impl ToolProvider for ReadFile {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "read_file".into(),
-            description: "Read a file and return its content with line:hash prefixes. If path is a directory, lists its entries.".into(),
+            description: "Read a file and return its content with hashline prefixes. Path must be a file, not a directory (use `ls` for directories).".into(),
             params: vec![
                 ToolParam::typed("path", "str"),
                 ToolParam {
@@ -70,9 +70,15 @@ impl ToolProvider for ReadFile {
             };
         }
 
-        // Directory support
+        // Directory — still works but nudges toward ls
         if path.is_dir() {
-            return list_directory(path).await;
+            let mut result = list_directory(path).await;
+            if result.success {
+                if let serde_json::Value::String(ref mut s) = result.result {
+                    s.insert_str(0, "(Hint: use `ls` for directory listings.)\n");
+                }
+            }
+            return result;
         }
 
         // Binary detection

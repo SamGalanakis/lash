@@ -22,7 +22,7 @@ impl ToolProvider for WebSearch {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "search_web".into(),
-            description: "Search the web and return relevant results".into(),
+            description: "Search the web and return a list of {title, url, content} results.".into(),
             params: vec![
                 ToolParam::typed("query", "str"),
                 ToolParam {

@@ -190,16 +190,16 @@ fn render_block<'a>(
             let chalk = theme::assistant_text();
             let sodium = Style::default().fg(theme::SODIUM);
 
-            // LASH wordmark — sodium slash cuts straight between S and H
-            // Slash: ╱ descending 1 col/row for a clean diagonal
+            // LASH wordmark — thick sodium ██ slash overlays letters
+            // Letters are complete; slash recolors blocks where it crosses
             //
-            //  ██       ████   ██████    ╱ ██   ██
-            //  ██      ██  ██  ██       ╱  ██   ██
-            //  ██      ██████  ██████  ╱   ███████
-            //  ██      ██  ██      ██ ╱    ██   ██
-            //  ██████  ██  ██  ██████╱     ██   ██
-            //                       ╱
-            let content_width = 35;
+            //  ██       ████   ██████▓▓  ██
+            //  ██      ██  ██  ██   ▓▓█  ██
+            //  ██      ██████  ████▓▓██████
+            //  ██      ██  ██      ▓▓██  ██
+            //  ██████  ██  ██  ██▓▓  ██  ██
+            //                    ▓▓
+            let content_width = 30;
             let content_height = 9; // 6 logo + scribe + tagline + blank
             let cx = viewport_width.saturating_sub(content_width) / 2;
             let cy = viewport_height.saturating_sub(content_height) / 2;
@@ -209,31 +209,31 @@ fn render_block<'a>(
                 lines.push(Line::from(""));
             }
 
-            // Each row: [before chalk] [╱ sodium] [after chalk]
+            // Each row: [before chalk] [██ sodium overlay] [after chalk]
             let logo: &[(&str, &str)] = &[
-                ("██       ████   ██████    ", " ██   ██"),
-                ("██      ██  ██  ██       ", "  ██   ██"),
-                ("██      ██████  ██████  ", "   ███████"),
-                ("██      ██  ██      ██ ", "    ██   ██"),
-                ("██████  ██  ██  ██████", "     ██   ██"),
+                ("██       ████   ██████  ", "  ██"),
+                ("██      ██  ██  ██     ", "█  ██"),
+                ("██      ██████  ██████", "██████"),
+                ("██      ██  ██      █", " ██  ██"),
+                ("██████  ██  ██  ████", "  ██  ██"),
             ];
             for &(before, after) in logo {
                 lines.push(Line::from(vec![
                     Span::styled(format!("{}{}", pad, before), chalk),
-                    Span::styled("\u{2571}", sodium),
+                    Span::styled("██", sodium),
                     Span::styled(after, chalk),
                 ]));
             }
             // Slash tail
             lines.push(Line::from(Span::styled(
-                format!("{}                       \u{2571}", pad),
+                format!("{}                   ██", pad),
                 sodium,
             )));
             // Scribe line
             lines.push(Line::from(vec![
-                Span::styled(format!("{}──────────────", pad), sodium),
-                Span::styled("──────────────", Style::default().fg(theme::ASH_MID)),
-                Span::styled("───────", Style::default().fg(theme::ASH)),
+                Span::styled(format!("{}──────────", pad), sodium),
+                Span::styled("──────────", Style::default().fg(theme::ASH_MID)),
+                Span::styled("──────────", Style::default().fg(theme::ASH)),
             ]));
             // Tagline
             lines.push(Line::from(Span::styled(

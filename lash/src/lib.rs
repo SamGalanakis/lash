@@ -104,11 +104,20 @@ impl ToolDefinition {
         tools
             .iter()
             .map(|t| {
-                let mut line = format!("- `{}`", t.signature());
+                let mut lines = format!("- `{}`", t.signature());
                 if !t.description.is_empty() {
-                    line.push_str(&format!(" — {}", t.description));
+                    lines.push_str(&format!(" — {}", t.description));
                 }
-                line
+                // Include parameter descriptions if any have them
+                for p in &t.params {
+                    if !p.description.is_empty() {
+                        lines.push_str(&format!(
+                            "\n    - `{}`: {}",
+                            p.name, p.description
+                        ));
+                    }
+                }
+                lines
             })
             .collect::<Vec<_>>()
             .join("\n")
