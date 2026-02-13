@@ -353,8 +353,10 @@ async fn run_app(
                     KeyCode::Down => app.history_down(),
                     KeyCode::PageUp => app.scroll_up(10),
                     KeyCode::PageDown => {
-                        let vh = terminal.size()?.height.saturating_sub(5) as usize;
-                        app.scroll_down(10, vh);
+                        let size = terminal.size()?;
+                        let vh = size.height.saturating_sub(5) as usize;
+                        let vw = size.width as usize;
+                        app.scroll_down(10, vh, vw);
                     }
                     KeyCode::Char(c) => app.insert_char(c),
                     _ => {}
@@ -365,8 +367,10 @@ async fn run_app(
                 match mouse.kind {
                     MouseEventKind::ScrollUp => app.scroll_up(3),
                     MouseEventKind::ScrollDown => {
-                        let vh = terminal.size()?.height.saturating_sub(5) as usize;
-                        app.scroll_down(3, vh);
+                        let size = terminal.size()?;
+                        let vh = size.height.saturating_sub(5) as usize;
+                        let vw = size.width as usize;
+                        app.scroll_down(3, vh, vw);
                     }
                     _ => {}
                 }

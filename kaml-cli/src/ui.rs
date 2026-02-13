@@ -53,7 +53,8 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
     let viewport_height = area.height as usize;
-    let total_height = app.total_content_height();
+    let viewport_width = area.width as usize;
+    let total_height = app.total_content_height(viewport_width);
 
     // Clamp scroll offset
     let max_scroll = total_height.saturating_sub(viewport_height);
@@ -195,6 +196,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
 
     let input = Paragraph::new(display)
         .style(style)
+        .wrap(Wrap { trim: false })
         .block(
             Block::default()
                 .borders(Borders::TOP | Borders::BOTTOM)

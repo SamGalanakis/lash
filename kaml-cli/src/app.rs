@@ -20,16 +20,48 @@ pub enum DisplayBlock {
     Error(String),
 }
 
+/// How many visual rows a single line of text takes when wrapped to `width`.
+fn wrapped_line_height(line: &str, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let len = line.chars().count();
+    if len == 0 {
+        1
+    } else {
+        (len + width - 1) / width
+    }
+}
+
+/// Sum of wrapped visual rows for a multi-line string, with an optional prefix width per line.
+fn wrapped_text_height(text: &str, width: usize, prefix_chars: usize) -> usize {
+    let effective = width.saturating_sub(prefix_chars);
+    let mut h = 0;
+    let mut any = false;
+    for line in text.lines() {
+        h += wrapped_line_height(line, effective);
+        any = true;
+    }
+    if !any {
+        h = 1; // empty string → 1 blank line
+    }
+    h
+}
+
 impl DisplayBlock {
-    /// Number of lines this block takes when rendered.
-    pub fn height(&self, code_expanded: bool) -> usize {
+    /// Number of visual lines this block takes when rendered at `width` columns.
+    pub fn height(&self, code_expanded: bool, width: usize) -> usize {
         match self {
-            DisplayBlock::UserInput(s) => s.lines().count().max(1) + 1, // blank line after
-            DisplayBlock::AssistantText(s) => s.lines().count().max(1),
+            DisplayBlock::UserInput(s) => {
+                // Each line has "> " prefix (2 chars)
+                wrapped_text_height(s, width, 2) + 1 // +1 blank line after
+            }
+            DisplayBlock::AssistantText(s) => wrapped_text_height(s, width, 0),
             DisplayBlock::CodeBlock { code, expanded } => {
                 let show = if code_expanded { *expanded } else { false };
                 if show {
-                    code.lines().count() + 2 // border top + bottom
+                    // "│ " prefix (2 chars) on code lines + header + footer
+                    wrapped_text_height(code, width, 2) + 2
                 } else {
                     1 // collapsed single line
                 }
@@ -37,19 +69,22 @@ impl DisplayBlock {
             DisplayBlock::ToolCall { .. } => 1,
             DisplayBlock::CodeOutput { output, error } => {
                 let mut h = 0;
-                // stdout only shown when expanded
                 if code_expanded && !output.is_empty() {
-                    h += 1 + output.lines().count();
+                    // header + "│ " prefixed lines
+                    h += 1 + wrapped_text_height(output, width, 2);
                 }
                 if let Some(err) = error {
-                    h += 1 + err.lines().count();
+                    // header + "│ " prefixed lines
+                    h += 1 + wrapped_text_height(err, width, 2);
                 }
                 if h > 0 {
                     h += 1; // bottom border
                 }
                 h
             }
-            DisplayBlock::Error(_) => 1,
+            DisplayBlock::Error(msg) => {
+                wrapped_line_height(&format!("Error: {}", msg), width)
+            }
         }
     }
 }
@@ -187,8 +222,8 @@ impl App {
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
     }
 
-    pub fn scroll_down(&mut self, amount: usize, viewport_height: usize) {
-        let total = self.total_content_height();
+    pub fn scroll_down(&mut self, amount: usize, viewport_height: usize, viewport_width: usize) {
+        let total = self.total_content_height(viewport_width);
         let max_scroll = total.saturating_sub(viewport_height);
         self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max_scroll);
     }
@@ -198,10 +233,10 @@ impl App {
         self.scroll_offset = usize::MAX;
     }
 
-    pub fn total_content_height(&self) -> usize {
+    pub fn total_content_height(&self, width: usize) -> usize {
         self.blocks
             .iter()
-            .map(|b| b.height(self.code_expanded))
+            .map(|b| b.height(self.code_expanded, width))
             .sum()
     }
 
