@@ -1,5 +1,7 @@
 mod app;
 mod event;
+#[allow(dead_code)]
+mod theme;
 mod ui;
 
 use std::path::PathBuf;
@@ -8,12 +10,12 @@ use std::sync::Arc;
 
 use clap::Parser;
 use crossterm::event::{Event as TermEvent, KeyCode, KeyModifiers};
-use kaml::agent::ChatMsg;
-use kaml::tools::{
+use lash::agent::ChatMsg;
+use lash::tools::{
     CompositeTools, DelegateTask, EditFile, FetchUrl, Glob, Grep, Ls, ReadFile, Shell, WebSearch,
     WriteFile,
 };
-use kaml::*;
+use lash::*;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 
@@ -50,7 +52,7 @@ struct SessionLogger {
 impl SessionLogger {
     fn new(model: &str) -> anyhow::Result<Self> {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        let dir = PathBuf::from(home).join(".kaml").join("sessions");
+        let dir = PathBuf::from(home).join(".lash").join("sessions");
         std::fs::create_dir_all(&dir)?;
 
         let now = chrono::Local::now();
@@ -115,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    // Build tools (same pattern as kaml-demo)
+    // Build tools
     let mut base = CompositeTools::new()
         .add(Shell::new())
         .add(FetchUrl::new())

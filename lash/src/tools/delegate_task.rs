@@ -115,9 +115,7 @@ impl ToolProvider for DelegateTask {
                     current_prose.clear();
                 }
                 AgentEvent::Done => break,
-                AgentEvent::Error { message } => {
-                    context.push(format!("[error] {message}"));
-                }
+                AgentEvent::Error { .. } => {}
                 _ => {}
             }
         }

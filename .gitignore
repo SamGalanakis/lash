@@ -3,4 +3,4 @@
 .env
 .env.*
 !.env.example
-kaml/src/baml_client/
+lash/src/baml_client/

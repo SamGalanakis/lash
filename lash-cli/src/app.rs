@@ -1,4 +1,4 @@
-use kaml::AgentEvent;
+use lash::AgentEvent;
 
 /// A renderable block in the scrollable history.
 pub enum DisplayBlock {
@@ -18,6 +18,7 @@ pub enum DisplayBlock {
         error: Option<String>,
     },
     Error(String),
+    Splash,
 }
 
 /// How many visual rows a single line of text takes when wrapped to `width`.
@@ -53,7 +54,7 @@ impl DisplayBlock {
     pub fn height(&self, code_expanded: bool, width: usize) -> usize {
         match self {
             DisplayBlock::UserInput(s) => {
-                // Each line has "> " prefix (2 chars)
+                // Each line has "/ " prefix (2 chars)
                 wrapped_text_height(s, width, 2) + 1 // +1 blank line after
             }
             DisplayBlock::AssistantText(s) => wrapped_text_height(s, width, 0),
@@ -85,6 +86,7 @@ impl DisplayBlock {
             DisplayBlock::Error(msg) => {
                 wrapped_line_height(&format!("Error: {}", msg), width)
             }
+            DisplayBlock::Splash => 9,
         }
     }
 }
@@ -112,7 +114,7 @@ pub struct App {
 impl App {
     pub fn new(model: String) -> Self {
         Self {
-            blocks: Vec::new(),
+            blocks: vec![DisplayBlock::Splash],
             input: String::new(),
             cursor_pos: 0,
             scroll_offset: 0,

@@ -1,5 +1,5 @@
 [workspace]
-members = ["kaml", "kaml-cli"]
+members = ["lash", "lash-cli"]
 resolver = "3"
 
 [profile.release]

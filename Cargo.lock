@@ -1087,7 +1087,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kaml"
+name = "lash"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -1107,14 +1107,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "kaml-cli"
+name = "lash-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
  "clap",
  "crossterm",
- "kaml",
+ "lash",
  "ratatui",
  "serde_json",
  "tokio",

@@ -1,5 +1,5 @@
 use crossterm::event::Event as TermEvent;
-use kaml::AgentEvent;
+use lash::AgentEvent;
 
 /// Unified event type for the main loop.
 pub enum AppEvent {

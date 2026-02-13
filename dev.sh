@@ -15,4 +15,4 @@ fi
 MODEL="${1:-z-ai/glm-5}"
 
 # cargo run always rebuilds if sources changed — guarantees latest binary.
-exec cargo run -p kaml-cli --bin kaml -- --model "$MODEL"
+exec cargo run -p lash-cli --bin lash -- --model "$MODEL"

@@ -1,0 +1,1442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LASH — Design System</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Archivo+Black&family=Instrument+Sans:wght@400;500;600;700&family=Azeret+Mono:wght@300;400;500;700;900&family=DM+Mono:wght@300;400;500&family=Darker+Grotesque:wght@300;400;500;600;700;800;900&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    /* ── Core palette ── */
+    --form:    #0e0d0b;
+    --ash:     #2a2a28;
+    --chalk:   #e8e4d0;
+    --sodium:  #e8a33c;
+    --lichen:  #8a9e6c;
+
+    /* ── Extended greys ── */
+    --form-deep:   #080807;
+    --form-raised: #141412;
+    --ash-light:   #3a3a34;
+    --ash-mid:     #4a4a44;
+    --ash-text:    #5a5a50;
+    --chalk-dim:   #7a7a70;
+    --chalk-mid:   #c8c4b8;
+
+    /* ── Semantic ── */
+    --bg:          var(--form);
+    --bg-raised:   var(--form-raised);
+    --bg-surface:  var(--ash);
+    --border:      var(--ash);
+    --border-faint:#1f1e1c;
+    --text:        var(--chalk);
+    --text-dim:    var(--ash-text);
+    --text-muted:  var(--ash-mid);
+    --accent:      var(--sodium);
+    --success:     var(--lichen);
+    --error:       #c44;
+
+    /* ── Typography ── */
+    --font-display: 'Archivo Black', sans-serif;
+    --font-body:    'Instrument Sans', sans-serif;
+    --font-mono:    'JetBrains Mono', monospace;
+    --font-system:  'Azeret Mono', monospace;
+    --font-ui:      'DM Mono', monospace;
+  }
+
+  body {
+    background: var(--form);
+    color: var(--chalk);
+    font-family: var(--font-ui);
+    font-size: 14px;
+    line-height: 1.6;
+    overflow-x: hidden;
+  }
+
+  /* ============================================
+     TEXTURE OVERLAYS
+     ============================================ */
+  .texture-noise {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 0;
+    pointer-events: none;
+    opacity: 0.45;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 512 512' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.7' numOctaves='5' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.07'/%3E%3C/svg%3E");
+    mix-blend-mode: overlay;
+  }
+  .texture-scores {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 0;
+    pointer-events: none;
+    background:
+      repeating-linear-gradient(
+        -55deg,
+        transparent,
+        transparent 80px,
+        rgba(232, 163, 60, 0.015) 80px,
+        rgba(232, 163, 60, 0.015) 81px
+      );
+  }
+
+  .page { position: relative; z-index: 1; }
+
+  /* ============================================
+     DOCUMENT HEADER
+     ============================================ */
+  .doc-header {
+    padding: 64px 64px 48px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+  }
+  .doc-title-block {}
+  .doc-label {
+    font-family: var(--font-system);
+    font-size: 9px;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    color: var(--ash-mid);
+    margin-bottom: 16px;
+  }
+  .doc-title {
+    font-family: var(--font-display);
+    font-size: 64px;
+    line-height: 0.85;
+    letter-spacing: -0.02em;
+    color: var(--chalk);
+    text-transform: uppercase;
+    position: relative;
+    display: inline-block;
+  }
+  .doc-title-slash {
+    position: absolute;
+    top: -10%;
+    left: 53%;
+    width: 3px;
+    height: 120%;
+    background: var(--sodium);
+    transform: rotate(-18deg);
+    opacity: 0.7;
+  }
+  .doc-subtitle {
+    font-family: var(--font-body);
+    font-size: 16px;
+    color: var(--ash-text);
+    margin-top: 16px;
+    font-weight: 400;
+  }
+  .doc-meta {
+    text-align: right;
+    font-family: var(--font-system);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    color: var(--ash-mid);
+    line-height: 2;
+    text-transform: uppercase;
+  }
+
+  /* ============================================
+     SECTIONS
+     ============================================ */
+  .section {
+    padding: 64px;
+    border-bottom: 1px solid var(--border);
+  }
+  .section-header {
+    display: flex;
+    align-items: baseline;
+    gap: 20px;
+    margin-bottom: 48px;
+  }
+  .section-number {
+    font-family: var(--font-system);
+    font-weight: 900;
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    color: var(--ash-mid);
+  }
+  .section-title {
+    font-family: var(--font-display);
+    font-size: 20px;
+    color: var(--chalk);
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
+  .section-desc {
+    font-family: var(--font-body);
+    font-size: 14px;
+    color: var(--ash-text);
+    margin-left: auto;
+    max-width: 400px;
+    text-align: right;
+    line-height: 1.6;
+  }
+
+  /* ============================================
+     01 — IDENTITY
+     ============================================ */
+  .identity-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 64px;
+    align-items: center;
+  }
+
+  .logo-display {
+    position: relative;
+  }
+  .logo-reg {
+    position: absolute;
+    top: -24px; left: -24px;
+    width: 16px; height: 16px;
+  }
+  .logo-reg::before {
+    content: '';
+    position: absolute;
+    top: 7px; left: 0;
+    width: 16px; height: 1px;
+    background: var(--ash-mid);
+  }
+  .logo-reg::after {
+    content: '';
+    position: absolute;
+    left: 7px; top: 0;
+    width: 1px; height: 16px;
+    background: var(--ash-mid);
+  }
+
+  .logo-main {
+    font-family: var(--font-display);
+    font-size: 180px;
+    line-height: 0.8;
+    letter-spacing: -0.02em;
+    color: var(--chalk);
+    text-transform: uppercase;
+    position: relative;
+    display: inline-block;
+  }
+  .logo-main::before {
+    content: 'LASH';
+    position: absolute;
+    top: 3px; left: 3px;
+    color: transparent;
+    -webkit-text-stroke: 1px rgba(232, 163, 60, 0.08);
+  }
+  .logo-slash {
+    position: absolute;
+    top: -12%;
+    left: 52%;
+    width: 3px;
+    height: 125%;
+    background: var(--sodium);
+    transform: rotate(-18deg);
+    opacity: 0.7;
+  }
+  .logo-slash::before {
+    content: '';
+    position: absolute;
+    top: -6px; left: -5px;
+    width: 13px; height: 13px;
+    border-radius: 50%;
+    background: rgba(232, 163, 60, 0.2);
+    filter: blur(4px);
+  }
+  .logo-scribe {
+    height: 1px;
+    background: linear-gradient(90deg, var(--sodium), rgba(232, 163, 60, 0) 50%);
+    margin-top: 20px;
+    opacity: 0.5;
+  }
+  .logo-label {
+    font-family: var(--font-system);
+    font-size: 11px;
+    letter-spacing: 0.4em;
+    text-transform: uppercase;
+    color: var(--ash-mid);
+    margin-top: 16px;
+  }
+
+  .identity-notes {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+  .identity-note {
+    padding-left: 16px;
+    border-left: 2px solid var(--ash);
+  }
+  .identity-note-title {
+    font-family: var(--font-system);
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--sodium);
+    margin-bottom: 6px;
+  }
+  .identity-note-body {
+    font-family: var(--font-body);
+    font-size: 14px;
+    color: var(--chalk-dim);
+    line-height: 1.7;
+  }
+
+  /* Logo variations */
+  .logo-variations {
+    display: flex;
+    gap: 48px;
+    margin-top: 48px;
+    padding-top: 48px;
+    border-top: 1px solid var(--border);
+  }
+  .logo-var {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .logo-var-label {
+    font-family: var(--font-system);
+    font-size: 9px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--ash-mid);
+  }
+  .logo-var-sm {
+    font-family: var(--font-display);
+    font-size: 32px;
+    color: var(--chalk);
+    text-transform: uppercase;
+    letter-spacing: -0.01em;
+    position: relative;
+    display: inline-block;
+    align-self: flex-start;
+  }
+  .logo-var-sm .lv-slash {
+    position: absolute;
+    top: -10%;
+    left: 52%;
+    width: 2px;
+    height: 120%;
+    background: var(--sodium);
+    transform: rotate(-18deg);
+    opacity: 0.7;
+  }
+  .logo-var-mono {
+    font-family: var(--font-mono);
+    font-size: 16px;
+    color: var(--chalk-dim);
+    font-weight: 500;
+  }
+  .logo-var-mono span { color: var(--sodium); }
+  .logo-var-icon {
+    font-family: var(--font-display);
+    font-size: 40px;
+    color: var(--chalk);
+    text-transform: uppercase;
+    width: 56px;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--form-raised);
+    border: 1px solid var(--ash);
+    position: relative;
+    overflow: hidden;
+  }
+  .logo-var-icon::after {
+    content: '';
+    position: absolute;
+    top: -20%;
+    left: 52%;
+    width: 2px;
+    height: 140%;
+    background: var(--sodium);
+    transform: rotate(-18deg);
+    opacity: 0.6;
+  }
+
+  /* ============================================
+     02 — COLOR
+     ============================================ */
+  .color-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 3px;
+    margin-bottom: 48px;
+  }
+  .color-swatch {
+    aspect-ratio: 1.4;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding: 12px;
+    position: relative;
+  }
+  .color-swatch-name {
+    font-family: var(--font-system);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin-bottom: 2px;
+  }
+  .color-swatch-hex {
+    font-family: var(--font-system);
+    font-size: 9px;
+    opacity: 0.5;
+    letter-spacing: 0.08em;
+  }
+  .color-swatch-role {
+    font-family: var(--font-body);
+    font-size: 10px;
+    opacity: 0.6;
+    margin-top: 4px;
+  }
+
+  .cs-form   { background: var(--form);   color: var(--ash-mid); border: 1px solid var(--ash); }
+  .cs-ash    { background: var(--ash);    color: var(--ash-text); }
+  .cs-chalk  { background: var(--chalk);  color: var(--chalk-dim); }
+  .cs-sodium { background: var(--sodium); color: var(--form); }
+  .cs-lichen { background: var(--lichen); color: var(--form); }
+
+  /* Extended palette */
+  .color-extended {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 48px;
+  }
+  .color-scale {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  .color-scale-title {
+    font-family: var(--font-system);
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--ash-mid);
+    margin-bottom: 12px;
+  }
+  .color-scale-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border-faint);
+  }
+  .color-scale-chip {
+    width: 32px;
+    height: 16px;
+    border-radius: 1px;
+    flex-shrink: 0;
+  }
+  .color-scale-name {
+    font-family: var(--font-system);
+    font-size: 10px;
+    color: var(--ash-text);
+    letter-spacing: 0.1em;
+    width: 100px;
+  }
+  .color-scale-val {
+    font-family: var(--font-ui);
+    font-size: 10px;
+    color: var(--ash-mid);
+  }
+  .color-scale-use {
+    font-family: var(--font-body);
+    font-size: 11px;
+    color: var(--ash-mid);
+    margin-left: auto;
+  }
+
+  /* Semantic mapping */
+  .color-semantic {
+    margin-top: 48px;
+    padding-top: 48px;
+    border-top: 1px solid var(--border);
+  }
+  .color-sem-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+  }
+  .color-sem-card {
+    padding: 16px;
+    background: var(--form-raised);
+    border: 1px solid var(--border-faint);
+  }
+  .color-sem-label {
+    font-family: var(--font-system);
+    font-size: 9px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--ash-mid);
+    margin-bottom: 8px;
+  }
+  .color-sem-value {
+    font-family: var(--font-ui);
+    font-size: 12px;
+    margin-bottom: 4px;
+  }
+  .color-sem-desc {
+    font-family: var(--font-body);
+    font-size: 11px;
+    color: var(--ash-mid);
+  }
+
+  /* ============================================
+     03 — TYPOGRAPHY
+     ============================================ */
+  .type-specimen {
+    display: flex;
+    flex-direction: column;
+    gap: 48px;
+  }
+  .type-row {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    gap: 48px;
+    align-items: start;
+    padding-bottom: 48px;
+    border-bottom: 1px solid var(--border-faint);
+  }
+  .type-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .type-meta-role {
+    font-family: var(--font-system);
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--sodium);
+  }
+  .type-meta-name {
+    font-family: var(--font-body);
+    font-size: 14px;
+    color: var(--chalk);
+    font-weight: 600;
+  }
+  .type-meta-weights {
+    font-family: var(--font-ui);
+    font-size: 11px;
+    color: var(--ash-mid);
+  }
+  .type-meta-usage {
+    font-family: var(--font-body);
+    font-size: 12px;
+    color: var(--ash-text);
+    line-height: 1.7;
+    margin-top: 8px;
+  }
+
+  .type-sample-display {
+    font-family: var(--font-display);
+    font-size: 72px;
+    line-height: 0.9;
+    color: var(--chalk);
+    text-transform: uppercase;
+    letter-spacing: -0.02em;
+  }
+  .type-sample-body {
+    font-family: var(--font-body);
+    font-size: 18px;
+    line-height: 1.65;
+    color: var(--chalk-dim);
+    max-width: 560px;
+  }
+  .type-sample-body strong {
+    color: var(--chalk);
+    font-weight: 600;
+  }
+  .type-sample-mono {
+    font-family: var(--font-mono);
+    font-size: 15px;
+    line-height: 1.8;
+    color: var(--ash-text);
+  }
+  .type-sample-mono .tm-prompt { color: var(--sodium); font-weight: 700; }
+  .type-sample-mono .tm-ok { color: var(--lichen); }
+  .type-sample-mono .tm-err { color: var(--error); }
+
+  /* Scale */
+  .type-scale {
+    margin-top: 48px;
+    padding-top: 48px;
+    border-top: 1px solid var(--border);
+  }
+  .type-scale-row {
+    display: flex;
+    align-items: baseline;
+    gap: 24px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border-faint);
+  }
+  .type-scale-size {
+    font-family: var(--font-system);
+    font-size: 10px;
+    color: var(--ash-mid);
+    width: 60px;
+    flex-shrink: 0;
+    letter-spacing: 0.1em;
+  }
+  .type-scale-name {
+    font-family: var(--font-system);
+    font-size: 10px;
+    color: var(--ash-text);
+    width: 100px;
+    flex-shrink: 0;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  /* ============================================
+     04 — TERMINAL
+     ============================================ */
+  .terminal-examples {
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+  }
+
+  .terminal-window {
+    background: var(--form-deep);
+    border: 1px solid var(--ash);
+    padding: 32px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 2;
+    position: relative;
+  }
+  .terminal-window::before {
+    content: '';
+    position: absolute;
+    top: 10px; left: 10px; right: 10px; bottom: 10px;
+    border: 1px solid var(--border-faint);
+    pointer-events: none;
+  }
+  .terminal-window::after {
+    content: '';
+    position: absolute;
+    top: 0; right: 0;
+    border-style: solid;
+    border-width: 0 20px 20px 0;
+    border-color: transparent var(--form) transparent transparent;
+    z-index: 2;
+  }
+
+  .t-prompt { color: var(--sodium); font-weight: 500; }
+  .t-cmd { color: var(--chalk-mid); }
+  .t-flag { color: var(--sodium); opacity: 0.7; }
+  .t-out { color: var(--ash-mid); }
+  .t-ok { color: var(--lichen); }
+  .t-err { color: var(--error); }
+  .t-dim { color: var(--ash); }
+  .t-bold { color: var(--chalk); font-weight: 500; }
+  .t-separator { color: var(--ash); }
+
+  .terminal-label {
+    font-family: var(--font-system);
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--ash-mid);
+    margin-bottom: 12px;
+  }
+
+  .terminal-tokens {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-top: 32px;
+  }
+  .terminal-token {
+    padding: 16px;
+    background: var(--form-raised);
+    border: 1px solid var(--border-faint);
+  }
+  .terminal-token-name {
+    font-family: var(--font-system);
+    font-size: 9px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--ash-mid);
+    margin-bottom: 8px;
+  }
+  .terminal-token-sample {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    margin-bottom: 4px;
+  }
+  .terminal-token-note {
+    font-family: var(--font-body);
+    font-size: 11px;
+    color: var(--ash-mid);
+  }
+
+  /* ============================================
+     05 — ELEMENTS
+     ============================================ */
+  .elements-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 32px;
+  }
+  .element-card {
+    padding: 24px;
+    background: var(--form-raised);
+    border: 1px solid var(--border-faint);
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .element-card-title {
+    font-family: var(--font-system);
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--sodium);
+  }
+  .element-card-demo {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 12px;
+  }
+  .element-card-note {
+    font-family: var(--font-body);
+    font-size: 11px;
+    color: var(--ash-mid);
+    line-height: 1.6;
+  }
+
+  /* Formwork seam */
+  .demo-formwork {
+    padding: 20px;
+    background: var(--form-deep);
+    border: 1px solid var(--ash);
+    position: relative;
+  }
+  .demo-formwork::before {
+    content: '';
+    position: absolute;
+    top: 8px; left: 8px; right: 8px; bottom: 8px;
+    border: 1px solid var(--border-faint);
+    pointer-events: none;
+  }
+  .demo-formwork-text {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--ash-text);
+  }
+
+  /* Registration mark */
+  .demo-regmark-container {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+  }
+  .demo-regmark {
+    width: 24px; height: 24px;
+    position: relative;
+    flex-shrink: 0;
+  }
+  .demo-regmark::before {
+    content: '';
+    position: absolute;
+    top: 11px; left: 0;
+    width: 24px; height: 1px;
+    background: var(--ash-mid);
+  }
+  .demo-regmark::after {
+    content: '';
+    position: absolute;
+    left: 11px; top: 0;
+    width: 1px; height: 24px;
+    background: var(--ash-mid);
+  }
+
+  /* Cut corner */
+  .demo-cutcorner {
+    width: 100px;
+    height: 60px;
+    background: var(--form-deep);
+    border: 1px solid var(--ash);
+    position: relative;
+  }
+  .demo-cutcorner::before {
+    content: '';
+    position: absolute;
+    top: 0; right: 0;
+    border-style: solid;
+    border-width: 0 16px 16px 0;
+    border-color: transparent var(--form-raised) transparent transparent;
+  }
+
+  /* Score lines */
+  .demo-scorelines {
+    height: 60px;
+    position: relative;
+    overflow: hidden;
+  }
+  .demo-scorelines::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background:
+      repeating-linear-gradient(
+        -55deg,
+        transparent,
+        transparent 12px,
+        rgba(232, 163, 60, 0.06) 12px,
+        rgba(232, 163, 60, 0.06) 13px
+      );
+  }
+
+  /* Scribe line */
+  .demo-scribe {
+    height: 1px;
+    background: linear-gradient(90deg, var(--sodium), rgba(232, 163, 60, 0) 60%);
+    opacity: 0.5;
+  }
+
+  /* Separator dots */
+  .demo-dots {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--ash);
+    letter-spacing: 0;
+  }
+
+  /* Slash mark */
+  .demo-slash-container {
+    display: flex;
+    align-items: center;
+    gap: 32px;
+  }
+  .demo-slash {
+    width: 3px;
+    height: 60px;
+    background: var(--sodium);
+    transform: rotate(-18deg);
+    opacity: 0.7;
+    position: relative;
+  }
+  .demo-slash::before {
+    content: '';
+    position: absolute;
+    top: -5px; left: -4px;
+    width: 11px; height: 11px;
+    border-radius: 50%;
+    background: rgba(232, 163, 60, 0.2);
+    filter: blur(3px);
+  }
+
+  /* ============================================
+     06 — PRINCIPLES
+     ============================================ */
+  .principles-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0;
+  }
+  .principle {
+    padding: 32px;
+    border-right: 1px solid var(--border-faint);
+  }
+  .principle:last-child { border-right: none; }
+  .principle-number {
+    font-family: var(--font-system);
+    font-size: 32px;
+    font-weight: 900;
+    color: var(--ash);
+    margin-bottom: 16px;
+  }
+  .principle-title {
+    font-family: var(--font-display);
+    font-size: 16px;
+    color: var(--chalk);
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+  .principle-body {
+    font-family: var(--font-body);
+    font-size: 13px;
+    color: var(--ash-text);
+    line-height: 1.7;
+  }
+
+  /* ============================================
+     FOOTER
+     ============================================ */
+  .doc-footer {
+    padding: 48px 64px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .doc-footer-left {
+    font-family: var(--font-system);
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    color: var(--ash-mid);
+    text-transform: uppercase;
+  }
+  .doc-footer-right {
+    font-family: var(--font-system);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    color: var(--ash-mid);
+  }
+</style>
+</head>
+<body>
+
+<div class="texture-noise"></div>
+<div class="texture-scores"></div>
+
+<div class="page">
+
+  <!-- ==========================================
+       HEADER
+       ========================================== -->
+  <header class="doc-header">
+    <div class="doc-title-block">
+      <div class="doc-label">Design System</div>
+      <div class="doc-title">
+        LASH
+        <div class="doc-title-slash"></div>
+      </div>
+      <div class="doc-subtitle">Whipcrack energy, industrial warmth. Built, not designed.</div>
+    </div>
+    <div class="doc-meta">
+      Doc: LASH-DS-001<br>
+      Status: Active<br>
+      Direction: Hybrid<br>
+      Updated: 2026-02-13
+    </div>
+  </header>
+
+  <!-- ==========================================
+       01 — IDENTITY
+       ========================================== -->
+  <section class="section">
+    <div class="section-header">
+      <span class="section-number">01</span>
+      <span class="section-title">Identity</span>
+      <span class="section-desc">The logo is Archivo Black with an amber slash mark at -18deg. The slash is the brand &mdash; it appears everywhere as a construction mark.</span>
+    </div>
+    <div class="identity-grid">
+      <div class="logo-display">
+        <div class="logo-reg"></div>
+        <div class="logo-main">
+          LASH
+          <div class="logo-slash"></div>
+        </div>
+        <div class="logo-scribe"></div>
+        <div class="logo-label">Agent &middot; Runtime</div>
+      </div>
+      <div class="identity-notes">
+        <div class="identity-note">
+          <div class="identity-note-title">The Slash</div>
+          <div class="identity-note-body">Always at -18deg. Always amber (#e8a33c). It cuts between the S and H, suggesting both a forward slash / and a mark left by impact. In small sizes, the slash alone can serve as the icon.</div>
+        </div>
+        <div class="identity-note">
+          <div class="identity-note-title">Registration Marks</div>
+          <div class="identity-note-body">Crosshair marks at corners signal precision and alignment. Borrowed from print production &mdash; they say "this was built with care." Used on containers and key layout anchors.</div>
+        </div>
+        <div class="identity-note">
+          <div class="identity-note-title">Scribe Line</div>
+          <div class="identity-note-body">The amber gradient line under the logo. Like a chalk line on a construction surface &mdash; it grounds the mark and provides a visual baseline. Fades from sodium to transparent.</div>
+        </div>
+      </div>
+    </div>
+    <div class="logo-variations">
+      <div class="logo-var">
+        <div class="logo-var-label">Display</div>
+        <div class="logo-var-sm">LASH<div class="lv-slash"></div></div>
+      </div>
+      <div class="logo-var">
+        <div class="logo-var-label">Terminal / Prompt</div>
+        <div class="logo-var-mono"><span>/</span> lash</div>
+      </div>
+      <div class="logo-var">
+        <div class="logo-var-label">Inline</div>
+        <div class="logo-var-mono">lash</div>
+      </div>
+      <div class="logo-var">
+        <div class="logo-var-label">Icon</div>
+        <div class="logo-var-icon">L</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==========================================
+       02 — COLOR
+       ========================================== -->
+  <section class="section">
+    <div class="section-header">
+      <span class="section-number">02</span>
+      <span class="section-title">Color</span>
+      <span class="section-desc">Warm industrial palette. Olive-tinted blacks, chalk whites, sodium amber accent, lichen green for success.</span>
+    </div>
+
+    <div class="color-grid">
+      <div class="color-swatch cs-form">
+        <div class="color-swatch-name">Form</div>
+        <div class="color-swatch-hex">#0e0d0b</div>
+        <div class="color-swatch-role">Backgrounds</div>
+      </div>
+      <div class="color-swatch cs-ash">
+        <div class="color-swatch-name">Ash</div>
+        <div class="color-swatch-hex">#2a2a28</div>
+        <div class="color-swatch-role">Borders, surfaces</div>
+      </div>
+      <div class="color-swatch cs-chalk">
+        <div class="color-swatch-name">Chalk</div>
+        <div class="color-swatch-hex">#e8e4d0</div>
+        <div class="color-swatch-role">Primary text</div>
+      </div>
+      <div class="color-swatch cs-sodium">
+        <div class="color-swatch-name">Sodium</div>
+        <div class="color-swatch-hex">#e8a33c</div>
+        <div class="color-swatch-role">Accent, prompt, marks</div>
+      </div>
+      <div class="color-swatch cs-lichen">
+        <div class="color-swatch-name">Lichen</div>
+        <div class="color-swatch-hex">#8a9e6c</div>
+        <div class="color-swatch-role">Success states</div>
+      </div>
+    </div>
+
+    <div class="color-extended">
+      <div class="color-scale">
+        <div class="color-scale-title">Grey Scale</div>
+        <div class="color-scale-row">
+          <div class="color-scale-chip" style="background:#080807; border:1px solid #1a1a18"></div>
+          <span class="color-scale-name">form-deep</span>
+          <span class="color-scale-val">#080807</span>
+          <span class="color-scale-use">Recessed backgrounds</span>
+        </div>
+        <div class="color-scale-row">
+          <div class="color-scale-chip" style="background:#0e0d0b"></div>
+          <span class="color-scale-name">form</span>
+          <span class="color-scale-val">#0e0d0b</span>
+          <span class="color-scale-use">Primary background</span>
+        </div>
+        <div class="color-scale-row">
+          <div class="color-scale-chip" style="background:#141412"></div>
+          <span class="color-scale-name">form-raised</span>
+          <span class="color-scale-val">#141412</span>
+          <span class="color-scale-use">Cards, elevated surfaces</span>
+        </div>
+        <div class="color-scale-row">
+          <div class="color-scale-chip" style="background:#1f1e1c"></div>
+          <span class="color-scale-name">border-faint</span>
+          <span class="color-scale-val">#1f1e1c</span>
+          <span class="color-scale-use">Subtle dividers</span>
+        </div>
+        <div class="color-scale-row">
+          <div class="color-scale-chip" style="background:#2a2a28"></div>
+          <span class="color-scale-name">ash</span>
+          <span class="color-scale-val">#2a2a28</span>
+          <span class="color-scale-use">Borders, separators</span>
+        </div>
+        <div class="color-scale-row">
+          <div class="color-scale-chip" style="background:#3a3a34"></div>
+          <span class="color-scale-name">ash-light</span>
+          <span class="color-scale-val">#3a3a34</span>
+          <span class="color-scale-use">Disabled text</span>
+        </div>
+        <div class="color-scale-row">
+          <div class="color-scale-chip" style="background:#4a4a44"></div>
+          <span class="color-scale-name">ash-mid</span>
+          <span class="color-scale-val">#4a4a44</span>
+          <span class="color-scale-use">Muted text, labels</span>
+        </div>
+        <div class="color-scale-row">
+          <div class="color-scale-chip" style="background:#5a5a50"></div>
+          <span class="color-scale-name">ash-text</span>
+          <span class="color-scale-val">#5a5a50</span>
+          <span class="color-scale-use">Secondary text</span>
+        </div>
+      </div>
+      <div class="color-scale">
+        <div class="color-scale-title">Light Scale + Accents</div>
+        <div class="color-scale-row">
+          <div class="color-scale-chip" style="background:#7a7a70"></div>
+          <span class="color-scale-name">chalk-dim</span>
+          <span class="color-scale-val">#7a7a70</span>
+          <span class="color-scale-use">Tertiary text</span>
+        </div>
+        <div class="color-scale-row">
+          <div class="color-scale-chip" style="background:#c8c4b8"></div>
+          <span class="color-scale-name">chalk-mid</span>
+          <span class="color-scale-val">#c8c4b8</span>
+          <span class="color-scale-use">Commands, input text</span>
+        </div>
+        <div class="color-scale-row">
+          <div class="color-scale-chip" style="background:#e8e4d0"></div>
+          <span class="color-scale-name">chalk</span>
+          <span class="color-scale-val">#e8e4d0</span>
+          <span class="color-scale-use">Primary text, headings</span>
+        </div>
+        <div class="color-scale-row" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border)">
+          <div class="color-scale-chip" style="background:#e8a33c"></div>
+          <span class="color-scale-name">sodium</span>
+          <span class="color-scale-val">#e8a33c</span>
+          <span class="color-scale-use">Accent, brand, prompts</span>
+        </div>
+        <div class="color-scale-row">
+          <div class="color-scale-chip" style="background:#8a9e6c"></div>
+          <span class="color-scale-name">lichen</span>
+          <span class="color-scale-val">#8a9e6c</span>
+          <span class="color-scale-use">Success, done, ok</span>
+        </div>
+        <div class="color-scale-row">
+          <div class="color-scale-chip" style="background:#cc4444"></div>
+          <span class="color-scale-name">error</span>
+          <span class="color-scale-val">#cc4444</span>
+          <span class="color-scale-use">Errors, failures</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="color-semantic">
+      <div class="color-scale-title" style="margin-bottom: 16px">Semantic Mapping</div>
+      <div class="color-sem-grid">
+        <div class="color-sem-card">
+          <div class="color-sem-label">Prompt character</div>
+          <div class="color-sem-value" style="color:var(--sodium)">/ </div>
+          <div class="color-sem-desc">Sodium amber. The slash is the brand.</div>
+        </div>
+        <div class="color-sem-card">
+          <div class="color-sem-label">User input</div>
+          <div class="color-sem-value" style="color:var(--chalk-mid)">lash run deploy.yaml</div>
+          <div class="color-sem-desc">Chalk-mid. Readable but not dominant.</div>
+        </div>
+        <div class="color-sem-card">
+          <div class="color-sem-label">System output</div>
+          <div class="color-sem-value" style="color:var(--ash-mid)">resolving task graph</div>
+          <div class="color-sem-desc">Ash-mid. Recedes behind input.</div>
+        </div>
+        <div class="color-sem-card">
+          <div class="color-sem-label">Success</div>
+          <div class="color-sem-value" style="color:var(--lichen)">done</div>
+          <div class="color-sem-desc">Lichen. Organic, earned, alive.</div>
+        </div>
+        <div class="color-sem-card">
+          <div class="color-sem-label">Error</div>
+          <div class="color-sem-value" style="color:var(--error)">FAIL test_auth: timeout</div>
+          <div class="color-sem-desc">Muted red. Attention without alarm.</div>
+        </div>
+        <div class="color-sem-card">
+          <div class="color-sem-label">Emphasis</div>
+          <div class="color-sem-value" style="color:var(--chalk)">ready to execute</div>
+          <div class="color-sem-desc">Full chalk. Rare, meaningful.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==========================================
+       03 — TYPOGRAPHY
+       ========================================== -->
+  <section class="section">
+    <div class="section-header">
+      <span class="section-number">03</span>
+      <span class="section-title">Typography</span>
+      <span class="section-desc">Three voices. Display screams, body explains, mono works. The tension between heavy display type and quiet body text is deliberate.</span>
+    </div>
+    <div class="type-specimen">
+      <div class="type-row">
+        <div class="type-meta">
+          <div class="type-meta-role">Display</div>
+          <div class="type-meta-name">Archivo Black</div>
+          <div class="type-meta-weights">Regular only</div>
+          <div class="type-meta-usage">Headlines, the logo wordmark, section titles. Always uppercase. The heavy weight carries the Whipcrack energy.</div>
+        </div>
+        <div class="type-sample-display">The weight of intent</div>
+      </div>
+      <div class="type-row">
+        <div class="type-meta">
+          <div class="type-meta-role">Body</div>
+          <div class="type-meta-name">Instrument Sans</div>
+          <div class="type-meta-weights">400, 500, 600, 700</div>
+          <div class="type-meta-usage">Descriptions, documentation, UI labels. The neutral counterweight to the display type. Clean, readable, warm.</div>
+        </div>
+        <div class="type-sample-body">Lash is an AI agent runtime built in Rust. It plans, delegates, and executes &mdash; <strong>autonomously resolving</strong> complex tasks through coordinated sub-agents. The tool doesn't ask permission. It asks forgiveness.</div>
+      </div>
+      <div class="type-row" style="border-bottom: none; padding-bottom: 0">
+        <div class="type-meta">
+          <div class="type-meta-role">Code / UI</div>
+          <div class="type-meta-name">JetBrains Mono</div>
+          <div class="type-meta-weights">300, 400, 500, 700</div>
+          <div class="type-meta-usage">Terminal output, code snippets, CLI interface. The daily driver. Where the actual work happens.</div>
+        </div>
+        <div class="type-sample-mono">
+          <span class="tm-prompt">/</span> lash delegate --plan<br>
+          &nbsp; [PLAN] decomposing scope<br>
+          &nbsp; [EXEC] 3 agents dispatched<br>
+          <span class="tm-ok">&nbsp; done</span> converged in 2 rounds<br>
+          <br>
+          <span class="tm-prompt">/</span> lash test --all<br>
+          &nbsp; running 47 tests<br>
+          <span class="tm-err">&nbsp; FAIL test_auth: timeout</span><br>
+          &nbsp; 46 passed, <span class="tm-err">1 failed</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="type-scale">
+      <div class="color-scale-title" style="margin-bottom: 16px">Scale</div>
+      <div class="type-scale-row">
+        <span class="type-scale-size">9px</span>
+        <span class="type-scale-name">Micro</span>
+        <span style="font-family:var(--font-system); font-size:9px; letter-spacing:0.2em; color:var(--ash-mid); text-transform:uppercase">System labels, section markers</span>
+      </div>
+      <div class="type-scale-row">
+        <span class="type-scale-size">11px</span>
+        <span class="type-scale-name">Small</span>
+        <span style="font-family:var(--font-body); font-size:11px; color:var(--ash-text)">Captions, metadata, helper text</span>
+      </div>
+      <div class="type-scale-row">
+        <span class="type-scale-size">13px</span>
+        <span class="type-scale-name">Mono</span>
+        <span style="font-family:var(--font-mono); font-size:13px; color:var(--ash-text)">Terminal output, code, CLI interface</span>
+      </div>
+      <div class="type-scale-row">
+        <span class="type-scale-size">14-15px</span>
+        <span class="type-scale-name">Body</span>
+        <span style="font-family:var(--font-body); font-size:14px; color:var(--chalk-dim)">Paragraphs, descriptions, documentation</span>
+      </div>
+      <div class="type-scale-row">
+        <span class="type-scale-size">20px</span>
+        <span class="type-scale-name">Heading</span>
+        <span style="font-family:var(--font-display); font-size:20px; color:var(--chalk); text-transform:uppercase">SECTION TITLES</span>
+      </div>
+      <div class="type-scale-row">
+        <span class="type-scale-size">48-72px</span>
+        <span class="type-scale-name">Display</span>
+        <span style="font-family:var(--font-display); font-size:36px; color:var(--chalk); text-transform:uppercase; letter-spacing:-0.02em; line-height:1">HERO</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==========================================
+       04 — TERMINAL
+       ========================================== -->
+  <section class="section">
+    <div class="section-header">
+      <span class="section-number">04</span>
+      <span class="section-title">Terminal</span>
+      <span class="section-desc">The terminal is where lash lives. Formwork seams, cut corners, dot separators. The / prompt is the brand touchpoint.</span>
+    </div>
+    <div class="terminal-examples">
+      <div>
+        <div class="terminal-label">Standard session</div>
+        <div class="terminal-window">
+          <span class="t-prompt">/</span> <span class="t-cmd">lash init</span><br>
+          <span class="t-out">&nbsp; workspace ready</span><br>
+          <br>
+          <span class="t-prompt">/</span> <span class="t-cmd">lash run</span> <span class="t-flag">deploy.yaml</span><br>
+          <span class="t-out">&nbsp; scanning 14 dependencies</span><br>
+          <span class="t-out">&nbsp; resolving task graph</span><br>
+          <span class="t-separator">&nbsp; &middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;</span><br>
+          <span class="t-ok">&nbsp; done</span> <span class="t-out">14/14 &mdash; 0.3s</span><br>
+          <br>
+          <span class="t-prompt">/</span> <span class="t-cmd">lash delegate</span> <span class="t-flag">--plan</span><br>
+          <span class="t-out">&nbsp; [PLAN] decomposing scope</span><br>
+          <span class="t-out">&nbsp; [EXEC] 3 agents dispatched</span><br>
+          <span class="t-out">&nbsp; [agent.0] analyzing</span><br>
+          <span class="t-out">&nbsp; [agent.1] researching</span><br>
+          <span class="t-out">&nbsp; [agent.2] drafting</span><br>
+          <span class="t-separator">&nbsp; &middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;</span><br>
+          <span class="t-ok">&nbsp; done</span> <span class="t-out">converged in 2 rounds</span><br>
+          <br>
+          <span class="t-prompt">/</span> <span class="t-cmd">lash test</span> <span class="t-flag">--all</span><br>
+          <span class="t-out">&nbsp; running 47 tests</span><br>
+          <span class="t-err">&nbsp; FAIL test_auth_flow: timeout after 5s</span><br>
+          <span class="t-out">&nbsp; 46 passed, </span><span class="t-err">1 failed</span><br>
+          <span class="t-prompt">/</span> <span style="opacity:0.3">_</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="terminal-tokens">
+      <div class="terminal-token">
+        <div class="terminal-token-name">Prompt</div>
+        <div class="terminal-token-sample"><span style="color:var(--sodium); font-family:var(--font-mono); font-weight:700">/</span></div>
+        <div class="terminal-token-note">Sodium. The forward slash. Always bold.</div>
+      </div>
+      <div class="terminal-token">
+        <div class="terminal-token-name">Input</div>
+        <div class="terminal-token-sample" style="color:var(--chalk-mid); font-family:var(--font-mono)">lash run</div>
+        <div class="terminal-token-note">Chalk-mid. User-typed commands.</div>
+      </div>
+      <div class="terminal-token">
+        <div class="terminal-token-name">Flags</div>
+        <div class="terminal-token-sample" style="color:var(--sodium); opacity:0.7; font-family:var(--font-mono)">--plan</div>
+        <div class="terminal-token-note">Sodium at 70%. Distinguishes flags from commands.</div>
+      </div>
+      <div class="terminal-token">
+        <div class="terminal-token-name">Output</div>
+        <div class="terminal-token-sample" style="color:var(--ash-mid); font-family:var(--font-mono)">scanning dependencies</div>
+        <div class="terminal-token-note">Ash-mid. Recedes behind input.</div>
+      </div>
+      <div class="terminal-token">
+        <div class="terminal-token-name">Success</div>
+        <div class="terminal-token-sample" style="color:var(--lichen); font-family:var(--font-mono)">done</div>
+        <div class="terminal-token-note">Lichen green. Organic, earned.</div>
+      </div>
+      <div class="terminal-token">
+        <div class="terminal-token-name">Error</div>
+        <div class="terminal-token-sample" style="color:var(--error); font-family:var(--font-mono)">FAIL timeout</div>
+        <div class="terminal-token-note">Muted red. Not alarm, just attention.</div>
+      </div>
+      <div class="terminal-token">
+        <div class="terminal-token-name">Separator</div>
+        <div class="terminal-token-sample" style="color:var(--ash); font-family:var(--font-mono)">&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;</div>
+        <div class="terminal-token-note">Ash. Dot separators between phases.</div>
+      </div>
+      <div class="terminal-token">
+        <div class="terminal-token-name">Emphasis</div>
+        <div class="terminal-token-sample" style="color:var(--chalk); font-family:var(--font-mono); font-weight:500">ready to execute</div>
+        <div class="terminal-token-note">Full chalk. Rare, meaningful moments.</div>
+      </div>
+      <div class="terminal-token">
+        <div class="terminal-token-name">Phase label</div>
+        <div class="terminal-token-sample" style="color:var(--ash-mid); font-family:var(--font-mono)">[PLAN]</div>
+        <div class="terminal-token-note">Bracketed, ash-mid. Agent/phase tags.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==========================================
+       05 — ELEMENTS
+       ========================================== -->
+  <section class="section">
+    <div class="section-header">
+      <span class="section-number">05</span>
+      <span class="section-title">Elements</span>
+      <span class="section-desc">Visual vocabulary borrowed from construction and print production. Each element has a functional metaphor.</span>
+    </div>
+    <div class="elements-grid">
+      <div class="element-card">
+        <div class="element-card-title">Formwork Seam</div>
+        <div class="element-card-demo">
+          <div class="demo-formwork">
+            <div class="demo-formwork-text">Inner border at 8-12px offset. Like the seam left when concrete formwork is removed.</div>
+          </div>
+        </div>
+        <div class="element-card-note">Used on terminal windows and key containers. Signals "this was constructed." Border: var(--border-faint), inset 10-12px from outer edge.</div>
+      </div>
+      <div class="element-card">
+        <div class="element-card-title">Registration Mark</div>
+        <div class="element-card-demo">
+          <div class="demo-regmark-container">
+            <div class="demo-regmark"></div>
+            <div style="font-family:var(--font-body); font-size:13px; color:var(--ash-text)">Crosshair alignment mark. Borrowed from print production. Signals precision.</div>
+          </div>
+        </div>
+        <div class="element-card-note">16-24px, color: var(--ash-mid). Placed at top-left of logo and key layout anchors. Two pseudo-elements: horizontal + vertical 1px lines.</div>
+      </div>
+      <div class="element-card">
+        <div class="element-card-title">Cut Corner</div>
+        <div class="element-card-demo">
+          <div style="display:flex; gap:24px; align-items:center">
+            <div class="demo-cutcorner"></div>
+            <div style="font-family:var(--font-body); font-size:13px; color:var(--ash-text)">Chamfered top-right corner. From Whipcrack &mdash; suggests a diagonal cut.</div>
+          </div>
+        </div>
+        <div class="element-card-note">16-24px triangle via border trick. Applied to terminal windows. Color matches parent background to create the cut effect.</div>
+      </div>
+      <div class="element-card">
+        <div class="element-card-title">Score Lines</div>
+        <div class="element-card-demo">
+          <div class="demo-scorelines"></div>
+        </div>
+        <div class="element-card-note">Diagonal repeating lines at -55deg. Very subtle (0.015 opacity). Background texture on large surfaces. Amber-tinted. Creates directional energy without being visible on casual inspection.</div>
+      </div>
+      <div class="element-card">
+        <div class="element-card-title">Scribe Line</div>
+        <div class="element-card-demo">
+          <div style="padding: 16px 0">
+            <div class="demo-scribe"></div>
+          </div>
+        </div>
+        <div class="element-card-note">1px height, gradient from sodium to transparent. Like a chalk line snapped on a surface. Used under logos and as section dividers. Opacity: 0.5.</div>
+      </div>
+      <div class="element-card">
+        <div class="element-card-title">Dot Separator</div>
+        <div class="element-card-demo">
+          <div class="demo-dots">&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;</div>
+        </div>
+        <div class="element-card-note">Middle dots in var(--ash). Used in terminal output between phases. Replaces dashes or blank lines. Feels like a construction progress marker.</div>
+      </div>
+      <div class="element-card">
+        <div class="element-card-title">Slash Mark</div>
+        <div class="element-card-demo">
+          <div class="demo-slash-container">
+            <div class="demo-slash"></div>
+            <div style="font-family:var(--font-body); font-size:13px; color:var(--ash-text)">3px wide, -18deg rotation. The core brand mark. Sodium amber with a soft glow at the tip.</div>
+          </div>
+        </div>
+        <div class="element-card-note">Always at -18deg. Width: 3px (display) or 2px (small). Glow: rgba sodium at 0.2, blur 3-4px. The one element that appears across all contexts.</div>
+      </div>
+      <div class="element-card">
+        <div class="element-card-title">Grain / Noise</div>
+        <div class="element-card-demo">
+          <div style="height:60px; position:relative; background:var(--form-deep); overflow:hidden">
+            <div style="position:absolute; top:0; left:0; right:0; bottom:0; opacity:0.45; background-image:url('data:image/svg+xml,%3Csvg viewBox=%270 0 512 512%27 xmlns=%27http://www.w3.org/2000/svg%27%3E%3Cfilter id=%27n%27%3E%3CfeTurbulence type=%27fractalNoise%27 baseFrequency=%270.7%27 numOctaves=%275%27 stitchTiles=%27stitch%27/%3E%3C/filter%3E%3Crect width=%27100%25%27 height=%27100%25%27 filter=%27url(%23n)%27 opacity=%270.07%27/%3E%3C/svg%3E'); mix-blend-mode:overlay"></div>
+          </div>
+        </div>
+        <div class="element-card-note">SVG feTurbulence noise, mix-blend-mode: overlay, opacity 0.4-0.5. Applied globally. Adds physical grain to the dark surfaces. Makes flat backgrounds feel like raw material.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==========================================
+       06 — PRINCIPLES
+       ========================================== -->
+  <section class="section" style="border-bottom: none">
+    <div class="section-header">
+      <span class="section-number">06</span>
+      <span class="section-title">Principles</span>
+    </div>
+    <div class="principles-grid">
+      <div class="principle">
+        <div class="principle-number">01</div>
+        <div class="principle-title">Built, Not Designed</div>
+        <div class="principle-body">Every visual element has a construction metaphor. Formwork seams, registration marks, scribe lines. Nothing is decorative &mdash; everything refers to a process of making. The aesthetic should feel like it was assembled, not styled.</div>
+      </div>
+      <div class="principle">
+        <div class="principle-number">02</div>
+        <div class="principle-title">Weight With Warmth</div>
+        <div class="principle-body">Heavy display type says "this has presence." Warm olive-tinted blacks and sodium amber say "but you can live here." The combination avoids both cold tech sterility and aggressive developer machismo. It's serious and approachable.</div>
+      </div>
+      <div class="principle">
+        <div class="principle-number">03</div>
+        <div class="principle-title">Meaning Through Scarcity</div>
+        <div class="principle-body">Color is used sparingly. Sodium amber appears only at brand touchpoints (slash, prompt, accents). Lichen green only for success. Error red only for failures. When a color appears, it means something. Quiet until it matters.</div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="doc-footer">
+    <div class="doc-footer-left">Lash Design System &mdash; 2026</div>
+    <div class="doc-footer-right">Direction: Hybrid (Whipcrack &times; Concrete)</div>
+  </footer>
+
+</div>
+
+</body>
+</html>
