@@ -29,6 +29,7 @@ impl ToolProvider for WriteFile {
                 ToolParam::typed("content", "str"),
             ],
             returns: "str".into(),
+            hidden: false,
         }]
     }
 
@@ -43,10 +44,7 @@ impl ToolProvider for WriteFile {
             .unwrap_or_default();
 
         if path_str.is_empty() {
-            return ToolResult {
-                success: false,
-                result: json!("Missing required parameter: path"),
-            };
+            return ToolResult::err(json!("Missing required parameter: path"));
         }
 
         let path = Path::new(path_str);
@@ -55,10 +53,7 @@ impl ToolProvider for WriteFile {
         if let Some(parent) = path.parent() {
             if !parent.exists() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
-                    return ToolResult {
-                        success: false,
-                        result: json!(format!("Failed to create directories: {}", e)),
-                    };
+                    return ToolResult::err(json!(format!("Failed to create directories: {}", e)));
                 }
             }
         }
@@ -66,15 +61,61 @@ impl ToolProvider for WriteFile {
         match std::fs::write(path, content) {
             Ok(()) => {
                 let bytes = content.len();
-                ToolResult {
-                    success: true,
-                    result: json!(format!("Wrote {} bytes to {}", bytes, path_str)),
-                }
+                ToolResult::ok(json!(format!("Wrote {} bytes to {}", bytes, path_str)))
             }
-            Err(e) => ToolResult {
-                success: false,
-                result: json!(format!("Failed to write file: {}", e)),
-            },
+            Err(e) => ToolResult::err(json!(format!("Failed to write file: {}", e))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ToolProvider;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_write_new_file() {
+        let dir = TempDir::new().unwrap();
+        let tool = WriteFile::default();
+        let path = dir.path().join("test.txt");
+        let result = tool
+            .execute("write_file", &json!({"path": path.to_str().unwrap(), "content": "hello world"}))
+            .await;
+        assert!(result.success);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_write_nested_path() {
+        let dir = TempDir::new().unwrap();
+        let tool = WriteFile::default();
+        let path = dir.path().join("a/b/c/test.txt");
+        let result = tool
+            .execute("write_file", &json!({"path": path.to_str().unwrap(), "content": "nested"}))
+            .await;
+        assert!(result.success);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "nested");
+    }
+
+    #[tokio::test]
+    async fn test_overwrite_file() {
+        let dir = TempDir::new().unwrap();
+        let tool = WriteFile::default();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "old content").unwrap();
+        let result = tool
+            .execute("write_file", &json!({"path": path.to_str().unwrap(), "content": "new content"}))
+            .await;
+        assert!(result.success);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
+    }
+
+    #[tokio::test]
+    async fn test_missing_path() {
+        let tool = WriteFile::default();
+        let result = tool.execute("write_file", &json!({"content": "hello"})).await;
+        assert!(!result.success);
     }
 }

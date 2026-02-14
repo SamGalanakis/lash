@@ -1,34 +1,43 @@
 use serde_json::json;
 use std::path::Path;
+use std::sync::Arc;
 
-use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
+use crate::{InstructionLoader, ToolDefinition, ToolImage, ToolParam, ToolProvider, ToolResult};
 
 use super::hashline;
 
-/// Read files with hashline-prefixed output.
-pub struct ReadFile;
+/// Read files with hashline-prefixed output. Supports images natively.
+pub struct ReadFile {
+    _instructions: Option<Arc<InstructionLoader>>,
+}
 
 impl ReadFile {
-    pub fn new() -> Self {
-        Self
+    pub fn new(instructions: Arc<InstructionLoader>) -> Self {
+        Self {
+            _instructions: Some(instructions),
+        }
     }
 }
 
 impl Default for ReadFile {
     fn default() -> Self {
-        Self::new()
+        Self {
+            _instructions: None,
+        }
     }
 }
 
 const DEFAULT_LIMIT: usize = 2000;
 const MAX_LINE_LEN: usize = 2000;
+/// Max text file size we'll read (1 MB). Larger files must use offset/limit.
+const MAX_TEXT_BYTES: u64 = 1_000_000;
 
 #[async_trait::async_trait]
 impl ToolProvider for ReadFile {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "read_file".into(),
-            description: "Read a file and return its content with hashline prefixes. Path must be a file, not a directory (use `ls` for directories).".into(),
+            description: "Read a file. Text files return hashline-prefixed content. Image files (png, jpg, gif, webp, bmp) are read for visual inspection. Use `ls` for directories.".into(),
             params: vec![
                 ToolParam::typed("path", "str"),
                 ToolParam {
@@ -45,6 +54,7 @@ impl ToolProvider for ReadFile {
                 },
             ],
             returns: "str".into(),
+            hidden: false,
         }]
     }
 
@@ -55,19 +65,13 @@ impl ToolProvider for ReadFile {
             .unwrap_or_default();
 
         if path_str.is_empty() {
-            return ToolResult {
-                success: false,
-                result: json!("Missing required parameter: path"),
-            };
+            return ToolResult::err(json!("Missing required parameter: path"));
         }
 
         let path = Path::new(path_str);
 
         if !path.exists() {
-            return ToolResult {
-                success: false,
-                result: json!(format!("Path does not exist: {}", path_str)),
-            };
+            return ToolResult::err(json!(format!("Path does not exist: {}", path_str)));
         }
 
         // Directory — still works but nudges toward ls
@@ -81,21 +85,32 @@ impl ToolProvider for ReadFile {
             return result;
         }
 
+        // Image files — return as visual attachment
+        if let Some(mime) = image_mime(path) {
+            return read_image(path, path_str, mime);
+        }
+
         // Binary detection
         if is_likely_binary(path) {
-            return ToolResult {
-                success: false,
-                result: json!(format!("Binary file detected: {}", path_str)),
-            };
+            return ToolResult::err(json!(format!("Binary file detected: {}", path_str)));
+        }
+
+        // Check file size before reading
+        let file_size = match std::fs::metadata(path) {
+            Ok(m) => m.len(),
+            Err(e) => return ToolResult::err(json!(format!("Failed to stat file: {}", e))),
+        };
+        if file_size > MAX_TEXT_BYTES {
+            return ToolResult::err(json!(format!(
+                "File too large ({} bytes, max {}). Use offset and limit parameters to read in chunks.",
+                file_size, MAX_TEXT_BYTES
+            )));
         }
 
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => {
-                return ToolResult {
-                    success: false,
-                    result: json!(format!("Failed to read file: {}", e)),
-                };
+                return ToolResult::err(json!(format!("Failed to read file: {}", e)));
             }
         };
 
@@ -145,10 +160,7 @@ impl ToolProvider for ReadFile {
             ));
         }
 
-        ToolResult {
-            success: true,
-            result: json!(formatted),
-        }
+        ToolResult::ok(json!(formatted))
     }
 }
 
@@ -168,15 +180,9 @@ async fn list_directory(path: &Path) -> ToolResult {
                 }
             }
             items.sort();
-            ToolResult {
-                success: true,
-                result: json!(items.join("\n")),
-            }
+            ToolResult::ok(json!(items.join("\n")))
         }
-        Err(e) => ToolResult {
-            success: false,
-            result: json!(format!("Failed to read directory: {}", e)),
-        },
+        Err(e) => ToolResult::err(json!(format!("Failed to read directory: {}", e))),
     }
 }
 
@@ -193,4 +199,160 @@ fn is_likely_binary(path: &Path) -> bool {
         Err(_) => return false,
     };
     buf[..n].contains(&0)
+}
+
+/// Return the MIME type for supported image extensions.
+fn image_mime(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        _ => None,
+    }
+}
+
+/// Read an image file, extract dimensions from the header, and return as a ToolImage.
+fn read_image(path: &Path, path_str: &str, mime: &str) -> ToolResult {
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
+        Err(e) => return ToolResult::err(json!(format!("Failed to read image: {}", e))),
+    };
+
+    let size_kb = data.len() / 1024;
+    let dims = image_dimensions(&data, mime);
+    let label = match dims {
+        Some((w, h)) => format!("{} ({}KB {}x{})", path_str, size_kb, w, h),
+        None => format!("{} ({}KB)", path_str, size_kb),
+    };
+
+    let image = ToolImage {
+        mime: mime.to_string(),
+        data,
+        label: label.clone(),
+    };
+
+    ToolResult::with_images(true, json!(format!("[Image: {}]", label)), vec![image])
+}
+
+/// Extract width x height from image headers (zero deps).
+fn image_dimensions(data: &[u8], mime: &str) -> Option<(u32, u32)> {
+    match mime {
+        "image/png" => png_dimensions(data),
+        "image/jpeg" => jpeg_dimensions(data),
+        "image/gif" => gif_dimensions(data),
+        _ => None,
+    }
+}
+
+/// PNG: width at bytes 16-19, height at bytes 20-23 (IHDR chunk, big-endian).
+fn png_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    if data.len() < 24 {
+        return None;
+    }
+    // Verify PNG signature
+    if &data[..8] != b"\x89PNG\r\n\x1a\n" {
+        return None;
+    }
+    let w = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
+    let h = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
+    Some((w, h))
+}
+
+/// JPEG: scan for SOF0/SOF2 marker (0xFF 0xC0 or 0xFF 0xC2), height then width.
+fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    let mut i = 0;
+    while i + 1 < data.len() {
+        if data[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let marker = data[i + 1];
+        // SOF0 (0xC0) or SOF2 (0xC2) — baseline or progressive
+        if marker == 0xC0 || marker == 0xC2 {
+            if i + 9 >= data.len() {
+                return None;
+            }
+            let h = u16::from_be_bytes([data[i + 5], data[i + 6]]) as u32;
+            let w = u16::from_be_bytes([data[i + 7], data[i + 8]]) as u32;
+            return Some((w, h));
+        }
+        // Skip non-SOF markers
+        if marker == 0xD8 || marker == 0xD9 || marker == 0x01 || (0xD0..=0xD7).contains(&marker)
+        {
+            i += 2;
+        } else if i + 3 < data.len() {
+            let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+            i += 2 + len;
+        } else {
+            break;
+        }
+    }
+    None
+}
+
+/// GIF: width at bytes 6-7, height at bytes 8-9 (little-endian).
+fn gif_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    if data.len() < 10 {
+        return None;
+    }
+    // Verify GIF signature
+    if &data[..3] != b"GIF" {
+        return None;
+    }
+    let w = u16::from_le_bytes([data[6], data[7]]) as u32;
+    let h = u16::from_le_bytes([data[8], data[9]]) as u32;
+    Some((w, h))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ToolProvider;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_read_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "line1\nline2\nline3").unwrap();
+        let tool = ReadFile::default();
+        let result = tool
+            .execute("read_file", &json!({"path": path.to_str().unwrap()}))
+            .await;
+        assert!(result.success);
+        let text = result.result.as_str().unwrap();
+        assert!(text.contains("|line1"));
+        assert!(text.contains("|line2"));
+        assert!(text.contains("|line3"));
+    }
+
+    #[tokio::test]
+    async fn test_read_with_offset_and_limit() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "line1\nline2\nline3\nline4\nline5").unwrap();
+        let tool = ReadFile::default();
+        let result = tool
+            .execute("read_file", &json!({"path": path.to_str().unwrap(), "offset": 2, "limit": 2}))
+            .await;
+        assert!(result.success);
+        let text = result.result.as_str().unwrap();
+        assert!(text.contains("|line2"));
+        assert!(text.contains("|line3"));
+        assert!(!text.contains("|line1"));
+        assert!(!text.contains("|line4"));
+    }
+
+    #[tokio::test]
+    async fn test_read_nonexistent() {
+        let tool = ReadFile::default();
+        let result = tool
+            .execute("read_file", &json!({"path": "/nonexistent/path/to/file.txt"}))
+            .await;
+        assert!(!result.success);
+    }
 }

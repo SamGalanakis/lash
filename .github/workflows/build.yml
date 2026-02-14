@@ -1,0 +1,70 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-14
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.target }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd libreadline-dev libexpat1-dev libzstd-dev \
+            uuid-dev libsqlite3-dev libncursesw5-dev libffi-dev liblzma-dev \
+            libbz2-dev libmpdec-dev
+
+      - name: Install system dependencies (Linux cross)
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Install baml-cli
+        run: cargo install baml-cli
+
+      - name: Cache python-standalone
+        uses: actions/cache@v4
+        with:
+          path: target/python-standalone
+          key: python-standalone-${{ matrix.target }}-3.14.3+20260211
+
+      - name: Fetch python-standalone
+        run: ./scripts/fetch-python.sh ${{ matrix.target }}
+
+      - name: Build
+        env:
+          PYO3_CONFIG_FILE: ${{ github.workspace }}/target/python-standalone/pyo3-config.txt
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release -p lash-cli --target ${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lash-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/lash

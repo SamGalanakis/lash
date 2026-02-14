@@ -8,7 +8,7 @@ pub struct FetchUrl {
 }
 
 impl FetchUrl {
-    pub fn new() -> Self {
+    pub fn new(_api_key: impl AsRef<str>) -> Self {
         Self {
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
@@ -20,7 +20,7 @@ impl FetchUrl {
 
 impl Default for FetchUrl {
     fn default() -> Self {
-        Self::new()
+        Self::new("")
     }
 }
 
@@ -32,6 +32,7 @@ impl ToolProvider for FetchUrl {
             description: "Fetch a URL and return its text content (truncated at 100KB).".into(),
             params: vec![ToolParam::typed("url", "str")],
             returns: "str".into(),
+            hidden: false,
         }]
     }
 
@@ -42,10 +43,7 @@ impl ToolProvider for FetchUrl {
             .unwrap_or_default();
 
         if url.is_empty() {
-            return ToolResult {
-                success: false,
-                result: json!("Missing required parameter: url"),
-            };
+            return ToolResult::err(json!("Missing required parameter: url"));
         }
 
         let resp = self.client.get(url).send().await;
@@ -62,28 +60,16 @@ impl ToolProvider for FetchUrl {
                         if bytes.len() > MAX_BYTES {
                             text.push_str("\n[truncated]");
                         }
-                        ToolResult {
-                            success: true,
-                            result: json!(text),
-                        }
+                        ToolResult::ok(json!(text))
                     }
-                    Err(e) => ToolResult {
-                        success: false,
-                        result: json!(format!("Failed to read body: {e}")),
-                    },
+                    Err(e) => ToolResult::err(json!(format!("Failed to read body: {e}"))),
                 }
             }
             Ok(r) => {
                 let status = r.status();
-                ToolResult {
-                    success: false,
-                    result: json!(format!("HTTP {status}")),
-                }
+                ToolResult::err(json!(format!("HTTP {status}")))
             }
-            Err(e) => ToolResult {
-                success: false,
-                result: json!(format!("Request failed: {e}")),
-            },
+            Err(e) => ToolResult::err(json!(format!("Request failed: {e}"))),
         }
     }
 }

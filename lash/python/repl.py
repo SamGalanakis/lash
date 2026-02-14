@@ -9,15 +9,15 @@ import traceback
 import types
 import typing
 import asyncio
-import threading
 import uuid
-import queue
 
 import dill
 
-# --- Save real stdio before we redirect anything ---
-_real_stdout = sys.stdout
-_real_stdin = sys.stdin
+# _rust_bridge is injected by the Rust runtime before any functions are called.
+# It provides:
+#   send_message(json_str) -> None
+#   call_tool(py, call_id, name, args_json) -> str
+_rust_bridge = None
 
 # --- Persistent REPL namespace ---
 _ns = {}
@@ -26,11 +26,6 @@ _tools_initialized = False
 # --- Tool call resolution ---
 _pending_calls = {}  # id -> asyncio.Future
 _loop = None
-# Queue for incoming messages read by the background reader thread.
-# During exec, tool_result messages are pulled from here.
-_inbox = queue.Queue()
-# Event signaling that exec is active and reader should feed _inbox
-_exec_active = threading.Event()
 
 
 class _Awaitable:
@@ -50,27 +45,141 @@ class _Awaitable:
 
 
 def _send(msg):
-    """Send a JSONL message to the host via real stdout."""
-    _real_stdout.write(json.dumps(msg) + "\n")
-    _real_stdout.flush()
+    """Send a message to Rust via the bridge."""
+    _rust_bridge.send_message(json.dumps(msg))
 
 
-def _recv_raw():
-    """Read a JSONL message from real stdin (blocking)."""
-    line = _real_stdin.readline()
-    if not line:
-        sys.exit(0)
-    return json.loads(line.strip())
-
-
-def _message(text, *, kind):
-    """Send a message to the user.
-
-    kind="progress" — streams immediately, execution continues.
-    kind="final" — streams to user, stops the turn.
-    """
-    _send({"type": "message", "text": str(text), "kind": kind})
+def _respond(text):
+    """Send a final response to the user. Ends the turn."""
+    _send({"type": "message", "text": str(text), "kind": "final"})
     return _Awaitable()
+
+def _status(text):
+    """Show a status update to the user. Non-blocking — execution continues."""
+    _send({"type": "message", "text": str(text), "kind": "progress"})
+    return _Awaitable()
+
+
+async def _ask(question, options=None):
+    """Ask the user a question. Blocks until they respond."""
+    payload = json.dumps({"question": str(question), "options": options})
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, _rust_bridge.ask_user, payload)
+    # Print the answer so it appears in execution output, ensuring the agent
+    # continues to the next LLM iteration with the user's response in context.
+    print(f"[User response: {result}]")
+    return result
+
+
+class BashHandle:
+    """Handle to a running bash process (PTY-backed).
+
+    Returned by bash(command=...). Provides:
+      .result(timeout=None) — wait for exit, return output
+      .write(text)         — send stdin input
+      .output()            — read accumulated output (non-blocking)
+      .kill()              — send SIGTERM
+    """
+    def __init__(self, id):
+        self.id = id
+
+    async def result(self, timeout=None):
+        """Wait for the process to exit and return its full output."""
+        return await _call("bash_result", {"id": self.id, "timeout": timeout})
+
+    async def write(self, text):
+        """Send input to the process's stdin."""
+        return await _call("bash_write", {"id": self.id, "input": text})
+
+    async def output(self):
+        """Read accumulated output so far (non-blocking)."""
+        return await _call("bash_output", {"id": self.id})
+
+    async def kill(self):
+        """Send SIGTERM to the process."""
+        return await _call("bash_kill", {"id": self.id})
+
+    def __repr__(self):
+        return f"BashHandle(id='{self.id}')"
+
+    def __str__(self):
+        return f"BashHandle({self.id})"
+
+
+class Task:
+    """A task in the task management system.
+
+    Returned by create_task(), get_task(), update_task(), and items in tasks().
+    Provides convenience methods that call the underlying tools.
+
+    repr: Task(a1b2 ~ 'Fix auth bug' high)
+    str:  [~ in_progress] Fix auth bug  (a1b2, high)
+          description text here
+          blocked_by: c3d4, e5f6
+    """
+
+    _STATUS_SYMBOLS = {
+        "pending": "\u25cb",      # ○
+        "in_progress": "~",
+        "completed": "\u2713",    # ✓
+        "cancelled": "\u2717",    # ✗
+    }
+
+    def __init__(self, data):
+        self.id = data.get("id", "")
+        self.subject = data.get("subject", "")
+        self.description = data.get("description", "")
+        self.status = data.get("status", "pending")
+        self.priority = data.get("priority", "medium")
+        self.active_form = data.get("active_form", "")
+        self.blocks = data.get("blocks", [])
+        self.blocked_by = data.get("blocked_by", [])
+        self.metadata = data.get("metadata", {})
+
+    def _sym(self):
+        return self._STATUS_SYMBOLS.get(self.status, "?")
+
+    def __repr__(self):
+        return f"Task({self.id} {self._sym()} '{self.subject}' {self.priority})"
+
+    def __str__(self):
+        lines = [f"[{self._sym()} {self.status}] {self.subject}  ({self.id}, {self.priority})"]
+        if self.description:
+            lines.append(f"  {self.description}")
+        if self.blocked_by:
+            lines.append(f"  blocked_by: {', '.join(self.blocked_by)}")
+        if self.blocks:
+            lines.append(f"  blocks: {', '.join(self.blocks)}")
+        return "\n".join(lines)
+
+    async def start(self):
+        """Set status to in_progress."""
+        return await _call("update_task", {"id": self.id, "status": "in_progress"})
+
+    async def done(self):
+        """Set status to completed."""
+        return await _call("update_task", {"id": self.id, "status": "completed"})
+
+    async def cancel(self):
+        """Set status to cancelled."""
+        return await _call("update_task", {"id": self.id, "status": "cancelled"})
+
+    async def delete(self):
+        """Permanently remove this task."""
+        await _call("delete_task", {"id": self.id})
+
+    async def block(self, *ids):
+        """Mark task IDs that this task blocks."""
+        return await _call("update_task", {"id": self.id, "add_blocks": list(ids)})
+
+    async def wait_on(self, *ids):
+        """Mark task IDs that block this task."""
+        return await _call("update_task", {"id": self.id, "add_blocked_by": list(ids)})
+
+    async def update(self, **kw):
+        """General update — pass any updatable fields as keyword args."""
+        kw["id"] = self.id
+        return await _call("update_task", kw)
 
 
 class ToolError:
@@ -95,27 +204,32 @@ class ToolError:
 async def _call(name, params):
     """Call a tool by name. Returns parsed JSON result or ToolError on failure."""
     call_id = str(uuid.uuid4())
-    _send({"type": "tool_call", "id": call_id, "name": name, "args": json.dumps(params)})
+    args_json = json.dumps(params)
 
-    # Create a future that will be resolved when we get the tool_result back
-    future = _loop.create_future()
-    _pending_calls[call_id] = future
-    result = await future
+    # Use run_in_executor to offload the blocking Rust call to a thread pool.
+    # This keeps the asyncio loop responsive for concurrent tool calls.
+    loop = asyncio.get_event_loop()
+    result_json = await loop.run_in_executor(
+        None, _rust_bridge.call_tool, call_id, name, args_json
+    )
 
+    result = json.loads(result_json)
     if result["success"]:
-        return json.loads(result["result"]) if result["result"] else None
+        value = json.loads(result["result"]) if result["result"] else None
+        # Wrap bash handles automatically
+        if isinstance(value, dict) and value.get("__handle__") == "bash":
+            return BashHandle(value["id"])
+        # Wrap task types
+        if isinstance(value, dict) and "__type__" in value:
+            t = value["__type__"]
+            if t == "task":
+                return Task(value)
+            if t == "task_list":
+                return [Task(item) for item in value.get("items", [])]
+        return value
     else:
         error = json.loads(result["result"]) if result["result"] else "Tool call failed"
         return ToolError(name, error)
-
-
-def _resolve_tool_result(msg):
-    """Resolve a pending tool call future with the result."""
-    call_id = msg["id"]
-    if call_id in _pending_calls:
-        future = _pending_calls.pop(call_id)
-        if not future.done():
-            future.set_result(msg)
 
 
 _TYPE_MAP = {
@@ -133,7 +247,7 @@ _tool_defs = []
 def _list_tools():
     """List all available tools with their signatures."""
     lines = []
-    for t in _tool_defs:
+    for t in (t for t in _tool_defs if not t.get("hidden", False)):
         params = t.get("params", [])
         if params:
             parts = []
@@ -243,11 +357,15 @@ def _register_tools(tools_json):
             fn.__signature__ = inspect.Signature(params_list, return_annotation=ret_annotation)
             return fn
 
-        _ns[name] = make_fn(name, desc, param_info, returns)
+        # Hidden tools are callable via _call() but not exposed in the REPL namespace
+        if not tool.get("hidden", False):
+            _ns[name] = make_fn(name, desc, param_info, returns)
     _async_tool_names.update(name for name in (t["name"] for t in _tool_defs))
+    _async_tool_names.add("ask")
     _ns.update({
-        "json": json, "print": print, "message": _message, "asyncio": asyncio,
-        "list_tools": _list_tools, "reset_repl": _reset_repl,
+        "json": json, "print": print, "respond": _respond, "status": _status, "asyncio": asyncio,
+        "list_tools": _list_tools, "reset_repl": _reset_repl, "ask": _ask,
+        "Task": Task,
     })
 
 
@@ -311,29 +429,8 @@ def _displayhook(value):
     print(repr(value))
 
 
-async def _drain_inbox():
-    """Async task: drains _inbox and resolves tool call futures."""
-    while True:
-        try:
-            msg = _inbox.get_nowait()
-            if msg.get("type") == "tool_result":
-                _resolve_tool_result(msg)
-            _inbox.task_done()
-        except queue.Empty:
-            await asyncio.sleep(0.005)
-
-
 async def _handle_exec(exec_id, code):
     """Execute code using real REPL semantics (ast.Interactive + "single" mode)."""
-    global _loop
-    _loop = asyncio.get_event_loop()
-
-    # Start inbox drainer that resolves tool_result futures
-    drainer = asyncio.create_task(_drain_inbox())
-
-    # Signal the reader thread to feed messages into _inbox
-    _exec_active.set()
-
     stdout_buf = io.StringIO()
     old_stdout, old_stderr = sys.stdout, sys.stderr
     old_displayhook = sys.displayhook
@@ -367,14 +464,6 @@ async def _handle_exec(exec_id, code):
     sys.stdout, sys.stderr = old_stdout, old_stderr
     sys.displayhook = old_displayhook
 
-    # Stop the inbox drainer and reader feeding
-    _exec_active.clear()
-    drainer.cancel()
-    try:
-        await drainer
-    except asyncio.CancelledError:
-        pass
-
     output = stdout_buf.getvalue()
     _send({
         "type": "exec_result",
@@ -387,7 +476,7 @@ async def _handle_exec(exec_id, code):
 
 def _handle_snapshot(snap_id):
     """Serialize the REPL namespace using dill."""
-    skip = {"json", "asyncio", "dill", "print", "message", "list_tools", "reset_repl"}
+    skip = {"json", "asyncio", "dill", "print", "respond", "status", "list_tools", "reset_repl", "ask"}
     skip.update(t["name"] for t in _tool_defs)
 
     data = {}
@@ -413,63 +502,3 @@ def _handle_reset(reset_id):
     """Reset the REPL namespace via the protocol."""
     _reset_repl()
     _send({"type": "reset_result", "id": reset_id})
-
-
-def _reader_thread():
-    """Background thread: reads all stdin messages.
-
-    During exec (_exec_active is set), tool_result messages go to _inbox.
-    Other messages are queued for the main loop.
-    """
-    while True:
-        try:
-            line = _real_stdin.readline()
-            if not line:
-                break
-            msg = json.loads(line.strip())
-            if _exec_active.is_set() and msg.get("type") == "tool_result":
-                _inbox.put(msg)
-            else:
-                # Put non-tool-result messages into _inbox for main loop to pick up
-                _inbox.put(msg)
-        except Exception:
-            break
-
-
-def main():
-    """Main REPL loop: reads JSONL commands from stdin, dispatches."""
-    scratch = os.environ.get("SCRATCH_DIR", "/tmp/scratch")
-    os.makedirs(scratch, exist_ok=True)
-
-    # Wait for init (read directly, before starting reader thread)
-    msg = _recv_raw()
-    assert msg["type"] == "init", f"Expected init, got {msg['type']}"
-    _register_tools(msg["tools"])
-    _send({"type": "ready"})
-
-    # Start persistent reader thread
-    reader = threading.Thread(target=_reader_thread, daemon=True)
-    reader.start()
-
-    # Create an event loop for async execution
-    loop = asyncio.new_event_loop()
-
-    while True:
-        # Read next command from inbox (reader thread fills it)
-        msg = _inbox.get()
-        msg_type = msg["type"]
-
-        if msg_type == "exec":
-            loop.run_until_complete(_handle_exec(msg["id"], msg["code"]))
-        elif msg_type == "snapshot":
-            _handle_snapshot(msg["id"])
-        elif msg_type == "restore":
-            _handle_restore(msg["id"], msg["data"])
-        elif msg_type == "reset":
-            _handle_reset(msg["id"])
-        elif msg_type == "shutdown":
-            break
-
-
-if __name__ == "__main__":
-    main()

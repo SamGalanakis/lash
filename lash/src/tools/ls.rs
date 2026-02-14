@@ -41,6 +41,7 @@ impl ToolProvider for Ls {
                 },
             ],
             returns: "str".into(),
+            hidden: false,
         }]
     }
 
@@ -62,10 +63,7 @@ impl ToolProvider for Ls {
 
         let base = Path::new(base_dir);
         if !base.is_dir() {
-            return ToolResult {
-                success: false,
-                result: json!(format!("Not a directory: {}", base_dir)),
-            };
+            return ToolResult::err(json!(format!("Not a directory: {}", base_dir)));
         }
 
         let mut builder = ignore::WalkBuilder::new(base);
@@ -120,9 +118,54 @@ impl ToolProvider for Ls {
 
         let tree = entries.join("\n");
 
-        ToolResult {
-            success: true,
-            result: json!(tree),
-        }
+        ToolResult::ok(json!(tree))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ToolProvider;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_ls_files_and_dirs() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("file.txt"), "").unwrap();
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+        std::fs::write(dir.path().join("subdir/nested.rs"), "").unwrap();
+        let tool = Ls::default();
+        let result = tool
+            .execute("ls", &json!({"path": dir.path().to_str().unwrap()}))
+            .await;
+        assert!(result.success);
+        let text = result.result.as_str().unwrap();
+        assert!(text.contains("file.txt"));
+        assert!(text.contains("subdir/"));
+        assert!(text.contains("nested.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_ls_empty_dir() {
+        let dir = TempDir::new().unwrap();
+        let tool = Ls::default();
+        let result = tool
+            .execute("ls", &json!({"path": dir.path().to_str().unwrap()}))
+            .await;
+        assert!(result.success);
+        assert!(result.result.as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_ls_not_a_dir() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("file.txt");
+        std::fs::write(&path, "").unwrap();
+        let tool = Ls::default();
+        let result = tool
+            .execute("ls", &json!({"path": path.to_str().unwrap()}))
+            .await;
+        assert!(!result.success);
     }
 }

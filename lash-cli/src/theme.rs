@@ -22,12 +22,12 @@ pub const LICHEN: Color = Color::Rgb(138, 158, 108);
 pub const ERROR: Color = Color::Rgb(204, 68, 68);
 
 // ── Character constants ────────────────────────────────────────────
-pub const PROMPT_CHAR: &str = "/";
+pub const PROMPT_CHAR: &str = "❯";
 pub const STATUS_SEP: &str = " · ";
 
 // ── Style helpers ──────────────────────────────────────────────────
 
-/// Sodium bold `/` prompt character
+/// Sodium bold `❯` prompt character
 pub fn prompt() -> Style {
     Style::default().fg(SODIUM).add_modifier(Modifier::BOLD)
 }
@@ -135,4 +135,29 @@ pub fn bar_bg() -> Style {
 /// History area background
 pub fn history_bg() -> Style {
     Style::default().bg(FORM)
+}
+
+/// System message text (e.g. /help output)
+pub fn system_message() -> Style {
+    Style::default().fg(ASH_TEXT)
+}
+
+/// Scroll mode indicator in status bar
+pub fn scroll_indicator() -> Style {
+    Style::default().fg(SODIUM).add_modifier(Modifier::BOLD)
+}
+
+/// Markdown heading (bold + sodium)
+pub fn heading() -> Style {
+    Style::default().fg(SODIUM).add_modifier(Modifier::BOLD)
+}
+
+/// Markdown inline code
+pub fn inline_code() -> Style {
+    Style::default().fg(SODIUM)
+}
+
+/// Image attachment badge
+pub fn image_attachment() -> Style {
+    Style::default().fg(SODIUM)
 }

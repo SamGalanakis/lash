@@ -5,4 +5,8 @@ use lash::AgentEvent;
 pub enum AppEvent {
     Terminal(TermEvent),
     Agent(AgentEvent),
+    /// 100ms tick for spinner animation (only triggers redraw when agent is running).
+    Tick,
+    /// Graceful shutdown (e.g. SIGTERM).
+    Quit,
 }

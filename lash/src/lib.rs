@@ -1,23 +1,35 @@
 pub mod agent;
 #[allow(non_snake_case, unused_imports, non_camel_case_types, dead_code)]
 pub(crate) mod baml_client;
+pub mod embedded;
+pub mod instructions;
+pub mod model_info;
 pub mod manager;
-pub mod protocol;
+pub mod oauth;
+pub mod provider;
+pub mod python_home;
 pub mod session;
+pub mod store;
 pub mod tools;
 
 // Re-exports
-pub use agent::{Agent, AgentConfig, AgentEvent};
+pub use agent::{Agent, AgentConfig, AgentEvent, Message, MessageRole, Part, PartKind, PruneState, TokenUsage};
+pub use instructions::InstructionLoader;
 pub use manager::SessionManager;
-pub use session::{ExecResponse, Session, SessionConfig, SessionError};
+pub use store::{AgentState, Store};
+pub use provider::{LashConfig, Provider};
+pub use session::{ExecResponse, Session, SessionConfig, SessionError, UserPrompt};
 
 /// A message sent from the sandbox to the host during execution.
 #[derive(Clone, Debug)]
 pub struct SandboxMessage {
     pub text: String,
-    /// "progress" or "final"
+    /// "progress", "final", or "tool_output"
     pub kind: String,
 }
+
+/// Sender for streaming progress messages from tools (e.g. live bash output).
+pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<SandboxMessage>;
 
 /// A typed parameter for a tool definition.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -71,6 +83,9 @@ pub struct ToolDefinition {
         skip_serializing_if = "String::is_empty"
     )]
     pub returns: String,
+    /// Hidden tools are callable via `_call()` but don't appear in the REPL namespace or agent prompt.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 impl ToolDefinition {
@@ -124,11 +139,32 @@ impl ToolDefinition {
     }
 }
 
+/// An image returned by a tool (e.g. read_file on a PNG).
+#[derive(Clone, Debug)]
+pub struct ToolImage {
+    pub mime: String,
+    pub data: Vec<u8>,
+    pub label: String,
+}
+
 /// Result of executing a tool.
 #[derive(Clone, Debug)]
 pub struct ToolResult {
     pub success: bool,
     pub result: serde_json::Value,
+    pub images: Vec<ToolImage>,
+}
+
+impl ToolResult {
+    pub fn ok(result: serde_json::Value) -> Self {
+        Self { success: true, result, images: vec![] }
+    }
+    pub fn err(result: serde_json::Value) -> Self {
+        Self { success: false, result, images: vec![] }
+    }
+    pub fn with_images(success: bool, result: serde_json::Value, images: Vec<ToolImage>) -> Self {
+        Self { success, result, images }
+    }
 }
 
 /// Record of a tool call (for context/logging).
@@ -146,4 +182,14 @@ pub struct ToolCallRecord {
 pub trait ToolProvider: Send + Sync + 'static {
     fn definitions(&self) -> Vec<ToolDefinition>;
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult;
+
+    /// Execute with progress streaming. Default: delegates to execute().
+    async fn execute_streaming(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        _progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        self.execute(name, args).await
+    }
 }

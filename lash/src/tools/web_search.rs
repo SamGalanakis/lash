@@ -33,6 +33,7 @@ impl ToolProvider for WebSearch {
                 },
             ],
             returns: "list".into(),
+            hidden: false,
         }]
     }
 
@@ -84,28 +85,16 @@ impl ToolProvider for WebSearch {
                         result["answer"] = json!(answer);
                     }
 
-                    ToolResult {
-                        success: true,
-                        result,
-                    }
+                    ToolResult::ok(result)
                 }
-                Err(e) => ToolResult {
-                    success: false,
-                    result: json!(format!("Failed to parse response: {e}")),
-                },
+                Err(e) => ToolResult::err(json!(format!("Failed to parse response: {e}"))),
             },
             Ok(r) => {
                 let status = r.status();
                 let body = r.text().await.unwrap_or_default();
-                ToolResult {
-                    success: false,
-                    result: json!(format!("Tavily API error ({status}): {body}")),
-                }
+                ToolResult::err(json!(format!("Tavily API error ({status}): {body}")))
             }
-            Err(e) => ToolResult {
-                success: false,
-                result: json!(format!("Request failed: {e}")),
-            },
+            Err(e) => ToolResult::err(json!(format!("Request failed: {e}"))),
         }
     }
 }

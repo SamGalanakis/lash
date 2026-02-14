@@ -3,14 +3,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::protocol::{HostMessage, PythonMessage};
-use crate::{SandboxMessage, ToolCallRecord, ToolProvider};
+use crate::embedded::{PythonRequest, PythonResponse, PythonRuntime};
+use crate::{SandboxMessage, ToolCallRecord, ToolImage, ToolProvider};
 
-const REPL_PY: &str = include_str!("../python/repl.py");
+/// A prompt from the agent asking the user a question.
+/// The `response_tx` travels all the way to the TUI, which sends the answer
+/// directly back to the Python bridge thread.
+pub struct UserPrompt {
+    pub question: String,
+    pub options: Vec<String>,
+    pub response_tx: std::sync::mpsc::Sender<String>,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -18,21 +23,15 @@ pub enum SessionError {
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("child process exited unexpectedly")]
-    ChildExited,
+    #[error("python runtime exited unexpectedly")]
+    RuntimeExited,
     #[error("protocol error: {0}")]
     Protocol(String),
-    #[error("spawn error: {0}")]
-    Spawn(String),
 }
 
 /// Configuration for a Python REPL session.
 pub struct SessionConfig {
-    /// Optional syd config file path for syscall sandboxing.
-    pub syd_config: Option<PathBuf>,
-    /// Override the Python command (default: auto-detect uv/python3).
-    pub python: Option<String>,
-    /// Working directory for the subprocess.
+    /// Working directory for the session.
     pub working_dir: Option<PathBuf>,
     /// Extra environment variables.
     pub env: HashMap<String, String>,
@@ -41,8 +40,6 @@ pub struct SessionConfig {
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
-            syd_config: None,
-            python: None,
             working_dir: None,
             env: HashMap::new(),
         }
@@ -50,12 +47,12 @@ impl Default for SessionConfig {
 }
 
 pub struct Session {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    runtime: PythonRuntime,
     tools: Arc<dyn ToolProvider>,
     tool_calls: Vec<ToolCallRecord>,
+    tool_images: Vec<ToolImage>,
     message_tx: Option<UnboundedSender<SandboxMessage>>,
+    prompt_tx: Option<UnboundedSender<UserPrompt>>,
     final_response: Option<String>,
     scratch_dir: tempfile::TempDir,
 }
@@ -63,68 +60,20 @@ pub struct Session {
 impl Session {
     pub async fn new(
         tools: Arc<dyn ToolProvider>,
-        config: SessionConfig,
+        _config: SessionConfig,
     ) -> Result<Self, SessionError> {
         let scratch_dir = tempfile::TempDir::new()?;
 
-        // Write embedded repl.py to a temp file
-        let repl_file = tempfile::NamedTempFile::new()?;
-        std::fs::write(repl_file.path(), REPL_PY)?;
+        // Start the embedded Python runtime
+        let runtime = PythonRuntime::start()?;
 
-        // Find Python command
-        let (program, mut base_args) = find_python(&config, repl_file.path())?;
-
-        // If syd_config is set, wrap with syd
-        let (final_program, final_args) = if let Some(syd_cfg) = &config.syd_config {
-            let syd_path = std::env::var("SYD_PATH").unwrap_or_else(|_| "syd".to_string());
-            let mut args = vec![
-                "-c".to_string(),
-                syd_cfg.to_string_lossy().to_string(),
-                "--".to_string(),
-                program,
-            ];
-            args.append(&mut base_args);
-            (syd_path, args)
-        } else {
-            (program, base_args)
-        };
-
-        let mut cmd = tokio::process::Command::new(&final_program);
-        cmd.args(&final_args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
-            .env("SCRATCH_DIR", scratch_dir.path());
-
-        if let Some(cwd) = &config.working_dir {
-            cmd.current_dir(cwd);
-        }
-        for (k, v) in &config.env {
-            cmd.env(k, v);
-        }
-
-        let mut child = cmd.spawn().map_err(|e| SessionError::Spawn(e.to_string()))?;
-
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| SessionError::Spawn("missing stdin".to_string()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| SessionError::Spawn("missing stdout".to_string()))?;
-
-        // Keep the temp file alive by leaking the NamedTempFile handle.
-        // It will be cleaned up when the process exits.
-        let _persisted = repl_file.into_temp_path();
-
-        let mut session = Self {
-            child,
-            stdin,
-            stdout: BufReader::new(stdout),
+        let session = Self {
+            runtime,
             tools,
             tool_calls: Vec::new(),
+            tool_images: Vec::new(),
             message_tx: None,
+            prompt_tx: None,
             final_response: None,
             scratch_dir,
         };
@@ -133,16 +82,16 @@ impl Session {
         let defs = session.tools.definitions();
         let tools_json = serde_json::to_string(&defs).unwrap_or_else(|_| "[]".to_string());
         session
-            .send(HostMessage::Init { tools: tools_json })
-            .await?;
+            .runtime
+            .send(PythonRequest::Init { tools_json })?;
 
         // Wait for ready
-        match session.recv().await? {
-            PythonMessage::Ready => {}
+        match session.runtime.recv()? {
+            PythonResponse::Ready => {}
             other => {
                 return Err(SessionError::Protocol(format!(
                     "expected ready, got: {:?}",
-                    other
+                    std::mem::discriminant(&other)
                 )));
             }
         }
@@ -160,34 +109,64 @@ impl Session {
         self.message_tx = None;
     }
 
+    /// Set the prompt sender for forwarding user prompts during execution.
+    pub fn set_prompt_sender(&mut self, tx: UnboundedSender<UserPrompt>) {
+        self.prompt_tx = Some(tx);
+    }
+
+    /// Clear the prompt sender.
+    pub fn clear_prompt_sender(&mut self) {
+        self.prompt_tx = None;
+    }
+
     /// Execute code in the persistent Python REPL.
     pub async fn run_code(&mut self, code: &str) -> Result<ExecResponse, SessionError> {
         self.tool_calls.clear();
+        self.tool_images.clear();
         self.final_response = None;
         let start = std::time::Instant::now();
         let id = uuid::Uuid::new_v4().to_string();
 
-        self.send(HostMessage::Exec {
-            id: id.clone(),
-            code: code.to_string(),
-        })
-        .await?;
+        // Strip markdown separator lines (all dashes + whitespace) the LLM
+        // sometimes emits between code blocks.
+        let clean_code: String = code
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                trimmed.is_empty() || trimmed.trim_matches('-').chars().any(|c| !c.is_whitespace())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
 
-        // Read messages until we get exec_result (60s timeout per message)
-        let exec_timeout = std::time::Duration::from_secs(60);
+        self.runtime.send(PythonRequest::Exec {
+            id: id.clone(),
+            code: clean_code,
+        })?;
+
+        // Read messages until we get exec_result.
+        // Use block_in_place so tokio knows this thread is blocked and can
+        // schedule drain tasks (prompt forwarding, message forwarding) on other threads.
         loop {
-            let msg = self.recv_timeout(exec_timeout).await?;
-            match msg {
-                PythonMessage::ToolCall {
-                    id: call_id,
+            let runtime = &self.runtime;
+            let response = tokio::task::block_in_place(|| runtime.recv())
+                .map_err(|_| SessionError::RuntimeExited)?;
+            match response {
+                PythonResponse::ToolCall {
+                    id: _call_id,
                     name,
                     args,
+                    result_tx,
                 } => {
                     let tools = Arc::clone(&self.tools);
                     let parsed_args: serde_json::Value =
                         serde_json::from_str(&args).unwrap_or(json!({}));
                     let tool_start = std::time::Instant::now();
-                    let result = tools.execute(&name, &parsed_args).await;
+                    let mut result = tools
+                        .execute_streaming(&name, &parsed_args, self.message_tx.as_ref())
+                        .await;
+
+                    // Collect any images returned by the tool
+                    self.tool_images.append(&mut result.images);
 
                     self.tool_calls.push(ToolCallRecord {
                         tool: name,
@@ -197,17 +176,14 @@ impl Session {
                         duration_ms: tool_start.elapsed().as_millis() as u64,
                     });
 
-                    let result_str = serde_json::to_string(&result.result)
-                        .unwrap_or_else(|_| "null".to_string());
-
-                    self.send(HostMessage::ToolResult {
-                        id: call_id,
-                        success: result.success,
-                        result: result_str,
-                    })
-                    .await?;
+                    // Send result back to Python via the oneshot channel
+                    let result_json = json!({
+                        "success": result.success,
+                        "result": serde_json::to_string(&result.result).unwrap_or_else(|_| "null".to_string()),
+                    });
+                    let _ = result_tx.send(result_json.to_string());
                 }
-                PythonMessage::Message { text, kind } => {
+                PythonResponse::Message { text, kind } => {
                     if kind == "final" {
                         self.final_response = Some(text.clone());
                     }
@@ -215,10 +191,9 @@ impl Session {
                         let _ = tx.send(SandboxMessage { text, kind });
                     }
                 }
-                PythonMessage::ExecResult {
+                PythonResponse::ExecResult {
                     id: _,
                     output,
-                    response: _,
                     error,
                 } => {
                     let response = self.final_response.clone().unwrap_or_default();
@@ -226,30 +201,63 @@ impl Session {
                         output,
                         response,
                         tool_calls: self.tool_calls.clone(),
+                        images: std::mem::take(&mut self.tool_images),
                         error,
                         duration_ms: start.elapsed().as_millis() as u64,
                     });
                 }
-                PythonMessage::Ready => {
+                PythonResponse::Ready => {
                     // Unexpected but harmless
                 }
-                PythonMessage::SnapshotResult { .. } | PythonMessage::ResetResult { .. } => {
+                PythonResponse::AskUser {
+                    question,
+                    options,
+                    result_tx,
+                } => {
+                    if let Some(tx) = &self.prompt_tx {
+                        let _ = tx.send(UserPrompt {
+                            question,
+                            options,
+                            response_tx: result_tx,
+                        });
+                    } else {
+                        // No prompt handler — unblock Python with empty string
+                        let _ = result_tx.send(String::new());
+                    }
+                }
+                PythonResponse::SnapshotResult { .. }
+                | PythonResponse::ResetResult { .. }
+                | PythonResponse::CheckCompleteResult { .. } => {
                     return Err(SessionError::Protocol(
-                        "unexpected snapshot/reset result during exec".to_string(),
+                        "unexpected response during exec".to_string(),
                     ));
                 }
             }
         }
     }
 
+    /// Check if a code string is syntactically complete Python.
+    /// Uses `ast.parse()` on the Python thread — returns true if the code parses.
+    pub fn check_complete(&self, code: &str) -> Result<bool, SessionError> {
+        self.runtime.send(PythonRequest::CheckComplete {
+            code: code.to_string(),
+        })?;
+        let response = tokio::task::block_in_place(|| self.runtime.recv())
+            .map_err(|_| SessionError::RuntimeExited)?;
+        match response {
+            PythonResponse::CheckCompleteResult { is_complete } => Ok(is_complete),
+            _ => Ok(false),
+        }
+    }
+
     /// Reset the Python REPL namespace and re-register tools.
     pub async fn reset(&mut self) -> Result<(), SessionError> {
         let id = uuid::Uuid::new_v4().to_string();
-        self.send(HostMessage::Reset { id: id.clone() }).await?;
+        self.runtime.send(PythonRequest::Reset { id: id.clone() })?;
 
         loop {
-            match self.recv().await? {
-                PythonMessage::ResetResult { .. } => break,
+            match self.runtime.recv()? {
+                PythonResponse::ResetResult { .. } => break,
                 _ => continue,
             }
         }
@@ -260,12 +268,12 @@ impl Session {
     /// Snapshot the session: Python namespace (via dill) + scratch filesystem.
     pub async fn snapshot(&mut self) -> Result<Vec<u8>, SessionError> {
         let id = uuid::Uuid::new_v4().to_string();
-        self.send(HostMessage::Snapshot { id: id.clone() })
-            .await?;
+        self.runtime
+            .send(PythonRequest::Snapshot { id: id.clone() })?;
 
         let data = loop {
-            match self.recv().await? {
-                PythonMessage::SnapshotResult { id: _, data } => break data,
+            match self.runtime.recv()? {
+                PythonResponse::SnapshotResult { id: _, data } => break data,
                 _ => continue,
             }
         };
@@ -290,16 +298,15 @@ impl Session {
             .to_string();
 
         let id = uuid::Uuid::new_v4().to_string();
-        self.send(HostMessage::Restore {
+        self.runtime.send(PythonRequest::Restore {
             id,
             data: vars_str,
-        })
-        .await?;
+        })?;
 
         // Wait for acknowledgment (exec_result with empty response)
         loop {
-            match self.recv().await? {
-                PythonMessage::ExecResult { .. } => break,
+            match self.runtime.recv()? {
+                PythonResponse::ExecResult { .. } => break,
                 _ => continue,
             }
         }
@@ -340,87 +347,19 @@ impl Session {
     pub fn last_tool_calls(&self) -> &[ToolCallRecord] {
         &self.tool_calls
     }
-
-    /// Check if the Python child process is still alive.
-    fn check_alive(&mut self) -> Result<(), SessionError> {
-        match self.child.try_wait() {
-            Ok(Some(_status)) => Err(SessionError::ChildExited),
-            Ok(None) => Ok(()), // still running
-            Err(e) => Err(SessionError::Io(e)),
-        }
-    }
-
-    async fn send(&mut self, msg: HostMessage) -> Result<(), SessionError> {
-        self.check_alive()?;
-        let mut line = serde_json::to_string(&msg)?;
-        line.push('\n');
-        self.stdin.write_all(line.as_bytes()).await?;
-        self.stdin.flush().await?;
-        Ok(())
-    }
-
-    async fn recv(&mut self) -> Result<PythonMessage, SessionError> {
-        let mut line = String::new();
-        let n = self.stdout.read_line(&mut line).await?;
-        if n == 0 {
-            return Err(SessionError::ChildExited);
-        }
-        let msg: PythonMessage = serde_json::from_str(line.trim())?;
-        Ok(msg)
-    }
-
-    /// Receive with a timeout. Returns SessionError on timeout or if the child is dead.
-    async fn recv_timeout(&mut self, timeout: std::time::Duration) -> Result<PythonMessage, SessionError> {
-        match tokio::time::timeout(timeout, self.recv()).await {
-            Ok(result) => result,
-            Err(_) => {
-                // Check if the child died while we were waiting
-                self.check_alive()?;
-                Err(SessionError::Protocol("recv timed out".to_string()))
-            }
-        }
-    }
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        // Best-effort: send shutdown and kill if needed
-        let _ = self.child.start_kill();
-    }
 }
 
 #[derive(Clone, Debug)]
 pub struct ExecResponse {
     /// Captured stdout — model's own context (print, auto-printed expressions).
     pub output: String,
-    /// User-facing final response from message(kind="final").
+    /// User-facing final response from respond().
     pub response: String,
     pub tool_calls: Vec<ToolCallRecord>,
+    /// Images returned by tools during this execution (e.g. read_file on a PNG).
+    pub images: Vec<ToolImage>,
     pub error: Option<String>,
     pub duration_ms: u64,
-}
-
-/// Build the Python command. Requires uv.
-fn find_python(config: &SessionConfig, repl_path: &Path) -> Result<(String, Vec<String>), SessionError> {
-    let repl = repl_path.to_string_lossy().to_string();
-
-    // Explicit override
-    if let Some(python) = &config.python {
-        return Ok((python.clone(), vec![repl]));
-    }
-
-    Ok((
-        "uv".to_string(),
-        vec![
-            "run".to_string(),
-            "--python".to_string(),
-            "3.13".to_string(),
-            "--with".to_string(),
-            "dill".to_string(),
-            "python3".to_string(),
-            repl,
-        ],
-    ))
 }
 
 /// Walk a directory recursively and collect all files as relative_path -> contents.

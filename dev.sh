@@ -7,12 +7,13 @@ if [ -f .env ]; then
   set -a; source .env; set +a
 fi
 
-if [ -z "${OPENROUTER_API_KEY:-}" ]; then
-  echo "OPENROUTER_API_KEY not set. Add it to .env or export it."
-  exit 1
+# Point PyO3 at the standalone Python for static linking
+if [ -z "${PYO3_CONFIG_FILE:-}" ]; then
+  config="target/python-standalone/pyo3-config.txt"
+  if [ -f "$config" ]; then
+    export PYO3_CONFIG_FILE="$PWD/$config"
+  fi
 fi
 
-MODEL="${1:-z-ai/glm-5}"
-
 # cargo run always rebuilds if sources changed — guarantees latest binary.
-exec cargo run -p lash-cli --bin lash -- --model "$MODEL"
+exec cargo run -p lash-cli --bin lash -- "$@"

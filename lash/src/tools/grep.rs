@@ -46,6 +46,7 @@ impl ToolProvider for Grep {
                 },
             ],
             returns: "list".into(),
+            hidden: false,
         }]
     }
 
@@ -56,10 +57,7 @@ impl ToolProvider for Grep {
             .unwrap_or_default();
 
         if pattern.is_empty() {
-            return ToolResult {
-                success: false,
-                result: json!("Missing required parameter: pattern"),
-            };
+            return ToolResult::err(json!("Missing required parameter: pattern"));
         }
 
         let base_dir = args
@@ -72,10 +70,7 @@ impl ToolProvider for Grep {
         let re = match regex::Regex::new(pattern) {
             Ok(r) => r,
             Err(e) => {
-                return ToolResult {
-                    success: false,
-                    result: json!(format!("Invalid regex pattern: {}", e)),
-                };
+                return ToolResult::err(json!(format!("Invalid regex pattern: {}", e)));
             }
         };
 
@@ -96,17 +91,11 @@ impl ToolProvider for Grep {
         // If it's a single file, search just that file
         if base.is_file() {
             let results = search_file(base, &re);
-            return ToolResult {
-                success: true,
-                result: json!(format_matches(&results)),
-            };
+            return ToolResult::ok(json!(format_matches(&results)));
         }
 
         if !base.is_dir() {
-            return ToolResult {
-                success: false,
-                result: json!(format!("Not a file or directory: {}", base_dir)),
-            };
+            return ToolResult::err(json!(format!("Not a file or directory: {}", base_dir)));
         }
 
         let walker = ignore::WalkBuilder::new(base)
@@ -146,10 +135,7 @@ impl ToolProvider for Grep {
             all_matches.extend(results);
         }
 
-        ToolResult {
-            success: true,
-            result: json!(format_matches(&all_matches)),
-        }
+        ToolResult::ok(json!(format_matches(&all_matches)))
     }
 }
 
@@ -190,4 +176,51 @@ fn search_file(path: &Path, re: &regex::Regex) -> Vec<serde_json::Value> {
         }
     }
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_grep_matches() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("test.txt"), "hello world\nfoo bar\nhello again").unwrap();
+        let tool = Grep::default();
+        let result = tool
+            .execute("grep", &json!({"pattern": "hello", "path": dir.path().to_str().unwrap()}))
+            .await;
+        assert!(result.success);
+        let text = result.result.as_str().unwrap();
+        assert!(text.contains("hello world"));
+        assert!(text.contains("hello again"));
+        assert!(!text.contains("foo bar"));
+    }
+
+    #[tokio::test]
+    async fn test_grep_no_matches() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("test.txt"), "hello world").unwrap();
+        let tool = Grep::default();
+        let result = tool
+            .execute("grep", &json!({"pattern": "xyz", "path": dir.path().to_str().unwrap()}))
+            .await;
+        assert!(result.success);
+        assert!(result.result.as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_grep_single_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.rs");
+        std::fs::write(&path, "fn main() {\n    println!(\"hello\");\n}").unwrap();
+        let tool = Grep::default();
+        let result = tool
+            .execute("grep", &json!({"pattern": "println", "path": path.to_str().unwrap()}))
+            .await;
+        assert!(result.success);
+        assert!(result.result.as_str().unwrap().contains("println"));
+    }
 }

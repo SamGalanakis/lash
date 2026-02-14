@@ -36,6 +36,7 @@ impl ToolProvider for Glob {
                 },
             ],
             returns: "list".into(),
+            hidden: false,
         }]
     }
 
@@ -46,10 +47,7 @@ impl ToolProvider for Glob {
             .unwrap_or_default();
 
         if pattern.is_empty() {
-            return ToolResult {
-                success: false,
-                result: json!("Missing required parameter: pattern"),
-            };
+            return ToolResult::err(json!("Missing required parameter: pattern"));
         }
 
         let base_dir = args
@@ -59,10 +57,7 @@ impl ToolProvider for Glob {
 
         let base = Path::new(base_dir);
         if !base.is_dir() {
-            return ToolResult {
-                success: false,
-                result: json!(format!("Not a directory: {}", base_dir)),
-            };
+            return ToolResult::err(json!(format!("Not a directory: {}", base_dir)));
         }
 
         // Build the glob matcher
@@ -72,20 +67,14 @@ impl ToolProvider for Glob {
         {
             Ok(g) => g,
             Err(e) => {
-                return ToolResult {
-                    success: false,
-                    result: json!(format!("Invalid glob pattern: {}", e)),
-                };
+                return ToolResult::err(json!(format!("Invalid glob pattern: {}", e)));
             }
         };
 
         let matcher = match globset::GlobSetBuilder::new().add(glob).build() {
             Ok(m) => m,
             Err(e) => {
-                return ToolResult {
-                    success: false,
-                    result: json!(format!("Failed to build glob matcher: {}", e)),
-                };
+                return ToolResult::err(json!(format!("Failed to build glob matcher: {}", e)));
             }
         };
 
@@ -128,9 +117,55 @@ impl ToolProvider for Glob {
             .map(|(p, _)| p.to_string_lossy().to_string())
             .collect();
 
-        ToolResult {
-            success: true,
-            result: json!(paths.join("\n")),
-        }
+        ToolResult::ok(json!(paths.join("\n")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_glob_matches() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "").unwrap();
+        std::fs::write(dir.path().join("c.txt"), "").unwrap();
+        let tool = Glob::default();
+        let result = tool
+            .execute("glob", &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}))
+            .await;
+        assert!(result.success);
+        let text = result.result.as_str().unwrap();
+        assert!(text.contains("a.rs"));
+        assert!(text.contains("b.rs"));
+        assert!(!text.contains("c.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_glob_no_matches() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "").unwrap();
+        let tool = Glob::default();
+        let result = tool
+            .execute("glob", &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}))
+            .await;
+        assert!(result.success);
+        assert!(result.result.as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_glob_nested() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("sub/deep")).unwrap();
+        std::fs::write(dir.path().join("sub/deep/file.rs"), "").unwrap();
+        let tool = Glob::default();
+        let result = tool
+            .execute("glob", &json!({"pattern": "**/*.rs", "path": dir.path().to_str().unwrap()}))
+            .await;
+        assert!(result.success);
+        assert!(result.result.as_str().unwrap().contains("file.rs"));
     }
 }

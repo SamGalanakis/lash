@@ -42,6 +42,7 @@ impl ToolProvider for EditFile {
                 },
             ],
             returns: "str".into(),
+            hidden: false,
         }]
     }
 
@@ -52,74 +53,50 @@ impl ToolProvider for EditFile {
             .unwrap_or_default();
 
         if path_str.is_empty() {
-            return ToolResult {
-                success: false,
-                result: json!("Missing required parameter: path"),
-            };
+            return ToolResult::err(json!("Missing required parameter: path"));
         }
 
         let path = Path::new(path_str);
 
         if !path.exists() {
-            return ToolResult {
-                success: false,
-                result: json!(format!("File does not exist: {}", path_str)),
-            };
+            return ToolResult::err(json!(format!("File does not exist: {}", path_str)));
         }
 
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => {
-                return ToolResult {
-                    success: false,
-                    result: json!(format!("Failed to read file: {}", e)),
-                };
+                return ToolResult::err(json!(format!("Failed to read file: {}", e)));
             }
         };
 
         let edits_json = match args.get("edits").and_then(|v| v.as_array()) {
             Some(arr) => arr,
             None => {
-                return ToolResult {
-                    success: false,
-                    result: json!("Missing or invalid 'edits' parameter: expected a list"),
-                };
+                return ToolResult::err(json!("Missing or invalid 'edits' parameter: expected a list"));
             }
         };
 
         let edits = match parse_edits(edits_json) {
             Ok(e) => e,
             Err(msg) => {
-                return ToolResult {
-                    success: false,
-                    result: json!(msg),
-                };
+                return ToolResult::err(json!(msg));
             }
         };
 
         match hashline::apply_hashline_edits(&content, edits) {
             Ok(new_content) => {
                 if let Err(e) = std::fs::write(path, &new_content) {
-                    return ToolResult {
-                        success: false,
-                        result: json!(format!("Failed to write file: {}", e)),
-                    };
+                    return ToolResult::err(json!(format!("Failed to write file: {}", e)));
                 }
                 let new_lines = new_content.lines().count();
-                ToolResult {
-                    success: true,
-                    result: json!(format!(
+                ToolResult::ok(json!(format!(
                         "Applied {} edit(s) to {} ({} lines)",
                         edits_json.len(),
                         path_str,
                         new_lines,
-                    )),
-                }
+                    )))
             }
-            Err(msg) => ToolResult {
-                success: false,
-                result: json!(msg),
-            },
+            Err(msg) => ToolResult::err(json!(msg)),
         }
     }
 }
@@ -212,4 +189,83 @@ fn parse_single_edit(edit: &serde_json::Value) -> Result<HashlineEdit, String> {
         "Unknown edit type. Expected one of: set_line, replace_lines, insert_after, replace. Got: {}",
         edit
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ToolProvider;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_set_line() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "line1\nline2\nline3\n").unwrap();
+        let hash = hashline::compute_line_hash("line2");
+        let tool = EditFile::default();
+        let result = tool
+            .execute("edit_file", &json!({
+                "path": path.to_str().unwrap(),
+                "edits": [{"set_line": {"anchor": format!("2:{}", hash), "new_text": "replaced"}}]
+            }))
+            .await;
+        assert!(result.success);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "line1\nreplaced\nline3\n");
+    }
+
+    #[tokio::test]
+    async fn test_insert_after() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "line1\nline2\nline3").unwrap();
+        let hash = hashline::compute_line_hash("line1");
+        let tool = EditFile::default();
+        let result = tool
+            .execute("edit_file", &json!({
+                "path": path.to_str().unwrap(),
+                "edits": [{"insert_after": {"anchor": format!("1:{}", hash), "text": "inserted"}}]
+            }))
+            .await;
+        assert!(result.success);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "line1\ninserted\nline2\nline3");
+    }
+
+    #[tokio::test]
+    async fn test_replace_lines() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "a\nb\nc\nd\ne").unwrap();
+        let hash_b = hashline::compute_line_hash("b");
+        let hash_d = hashline::compute_line_hash("d");
+        let tool = EditFile::default();
+        let result = tool
+            .execute("edit_file", &json!({
+                "path": path.to_str().unwrap(),
+                "edits": [{"replace_lines": {
+                    "start_anchor": format!("2:{}", hash_b),
+                    "end_anchor": format!("4:{}", hash_d),
+                    "new_text": "X\nY"
+                }}]
+            }))
+            .await;
+        assert!(result.success);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nX\nY\ne");
+    }
+
+    #[tokio::test]
+    async fn test_stale_anchor() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "line1\nline2\nline3").unwrap();
+        let tool = EditFile::default();
+        let result = tool
+            .execute("edit_file", &json!({
+                "path": path.to_str().unwrap(),
+                "edits": [{"set_line": {"anchor": "2:ff", "new_text": "replaced"}}]
+            }))
+            .await;
+        assert!(!result.success);
+    }
 }
