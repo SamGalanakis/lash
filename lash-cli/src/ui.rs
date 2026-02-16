@@ -17,7 +17,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     let strike_h = if app.running { 1 } else { 0 };
     let image_h = if app.pending_images.is_empty() { 0 } else { 1 };
-    let task_tray_h = app.task_tray_height();
+    let task_tray_h = app.task_tray_height(frame.area().width);
 
     // Dynamic input height: account for visual wrapping, not just newline count.
     // Inner width = frame width minus 2 (border chars are 0 since TOP/BOTTOM only, but
@@ -34,7 +34,6 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Constraint::Length(image_h),     // [3] image attachment badges
         Constraint::Length(task_tray_h), // [4] task tray
         Constraint::Length(input_h),     // [5] input (dynamic height)
-        Constraint::Length(1),           // [6] help bar
     ])
     .split(frame.area());
 
@@ -50,19 +49,134 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_session_picker(frame, app, chunks[1]); // overlay on history area
     draw_skill_picker(frame, app, chunks[1]); // overlay on history area
     draw_prompt(frame, app, chunks[1]); // overlay on history area
-    draw_help_bar(frame, app, chunks[6]);
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let mut left_spans = vec![
-        Span::styled(" lash", theme::app_title()),
-        Span::styled(theme::STATUS_SEP, theme::status_separator()),
-        Span::styled(&app.model, theme::model_name()),
-    ];
+    let width = area.width as usize;
+    if width == 0 {
+        return;
+    }
 
-    if app.mode == crate::app::Mode::Plan {
-        left_spans.push(Span::styled(theme::STATUS_SEP, theme::status_separator()));
-        left_spans.push(Span::styled(
+    let is_plan = app.mode == crate::app::Mode::Plan;
+
+    // ── Left-side segment widths (progressive: name → model → mode) ──
+    let name_w = " lash".chars().count();
+    let sep_w = theme::STATUS_SEP.chars().count();
+    let model_w = app.model.chars().count();
+    let left_1 = name_w;
+    let left_2 = name_w + sep_w + model_w;
+    let left_3 = left_2 + if is_plan { sep_w + 4 } else { 0 };
+
+    // ── Right-side: token components ──
+    let has_usage = app.token_usage.total() > 0;
+    let ctx_pct: Option<u64> = app.context_window.and_then(|ctx_win| {
+        if app.last_input_tokens > 0 && ctx_win > 0 {
+            Some((app.last_input_tokens as f64 / ctx_win as f64 * 100.0) as u64)
+        } else {
+            None
+        }
+    });
+
+    let in_out = if has_usage {
+        format!(
+            "{} in \u{b7} {} out",
+            crate::app::format_tokens(app.token_usage.input_tokens),
+            crate::app::format_tokens(app.token_usage.output_tokens),
+        )
+    } else {
+        String::new()
+    };
+    let total = if has_usage {
+        format!(
+            "{} total",
+            crate::app::format_tokens(app.token_usage.total()),
+        )
+    } else {
+        String::new()
+    };
+    let ctx = ctx_pct.map(|p| format!("{}% ctx", p)).unwrap_or_default();
+
+    // Build right-side variants from longest to shortest
+    let join_parts = |parts: &[&str]| -> String {
+        parts
+            .iter()
+            .filter(|s| !s.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" \u{b7} ")
+    };
+    let r0 = join_parts(&[&in_out, &total, &ctx]);
+    let r1 = join_parts(&[&total, &ctx]);
+    let r2 = ctx.clone();
+    let right_variants = [r0, r1, r2, String::new()];
+
+    let right_w = |idx: usize| -> usize {
+        let s = &right_variants[idx];
+        if s.is_empty() {
+            0
+        } else {
+            s.chars().count() + 1 // +1 trailing space
+        }
+    };
+
+    // ── Session/cwd (lowest priority, moved from help bar) ──
+    let session_cwd_w = UnicodeWidthStr::width(app.session_name.as_str())
+        + 3 // " · "
+        + UnicodeWidthStr::width(app.cwd.as_str())
+        + 1; // trailing space
+
+    // ── Progressive fit (drop lowest priority first) ──
+    let left_w = |level: usize| match level {
+        3 => left_3,
+        2 => left_2,
+        _ => left_1,
+    };
+    let check = |ll: usize, ri: usize| -> bool {
+        let lw = left_w(ll);
+        let rw = right_w(ri);
+        if rw > 0 {
+            lw + 1 + rw <= width
+        } else {
+            lw <= width
+        }
+    };
+
+    let mut left_level = 3usize;
+    let mut right_idx = 0usize;
+    let mut show_session = false;
+
+    if !check(left_level, right_idx) {
+        right_idx = 1;
+    }
+    if !check(left_level, right_idx) {
+        right_idx = 2;
+    }
+    if !check(left_level, right_idx) {
+        right_idx = 3;
+    }
+    if !check(left_level, right_idx) {
+        left_level = 2;
+    }
+    if !check(left_level, right_idx) {
+        left_level = 1;
+    }
+
+    // Session fits after tokens?
+    let rw = right_w(right_idx);
+    let used = left_w(left_level) + rw + if rw > 0 { 1 } else { 0 };
+    if used + session_cwd_w <= width {
+        show_session = true;
+    }
+
+    // ── Build spans ──
+    let mut spans: Vec<Span> = vec![Span::styled(" lash", theme::app_title())];
+    if left_level >= 2 {
+        spans.push(Span::styled(theme::STATUS_SEP, theme::status_separator()));
+        spans.push(Span::styled(&app.model, theme::model_name()));
+    }
+    if left_level >= 3 && is_plan {
+        spans.push(Span::styled(theme::STATUS_SEP, theme::status_separator()));
+        spans.push(Span::styled(
             "PLAN",
             Style::default()
                 .fg(theme::SODIUM)
@@ -70,60 +184,72 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
-    // Token counts on the right side (only if we have usage data)
-    if app.token_usage.total() > 0 {
-        let mut token_str = format!(
-            "{} in \u{b7} {} out \u{b7} {} total",
-            crate::app::format_tokens(app.token_usage.input_tokens),
-            crate::app::format_tokens(app.token_usage.output_tokens),
-            crate::app::format_tokens(app.token_usage.total()),
-        );
+    // Padding between left and right
+    let actual_left: usize = spans.iter().map(|s| s.width()).sum();
+    let total_right = right_w(right_idx) + if show_session { session_cwd_w } else { 0 };
+    let pad = width.saturating_sub(actual_left + total_right);
+    if pad > 0 {
+        spans.push(Span::styled(" ".repeat(pad), theme::bar_bg()));
+    }
 
-        // Append context window percentage if available
-        let ctx_pct = if let Some(ctx_win) = app.context_window {
-            if app.last_input_tokens > 0 && ctx_win > 0 {
-                Some((app.last_input_tokens as f64 / ctx_win as f64 * 100.0) as u64)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+    // Token spans
+    if right_idx < 3 && !right_variants[right_idx].is_empty() {
+        let token_text = &right_variants[right_idx];
         if let Some(pct) = ctx_pct {
-            token_str.push_str(&format!(" \u{b7} {}% ctx", pct));
-        }
-
-        // Calculate padding to right-align
-        let left_width: usize = left_spans.iter().map(|s| s.content.chars().count()).sum();
-        let right_width = token_str.chars().count() + 1; // +1 trailing space
-        let pad = (area.width as usize).saturating_sub(left_width + right_width);
-        if pad > 0 {
-            left_spans.push(Span::styled(" ".repeat(pad), theme::bar_bg()));
-        }
-
-        // Split token string and context percentage into separate styled spans
-        if let Some(pct) = ctx_pct {
-            let ctx_suffix = format!(" \u{b7} {}% ctx", pct);
-            let tokens_part = &token_str[..token_str.len() - ctx_suffix.len()];
-            left_spans.push(Span::styled(
-                tokens_part.to_string(),
-                Style::default().fg(theme::CHALK_DIM),
-            ));
             let ctx_color = if pct >= 80 {
                 theme::SODIUM
             } else {
                 theme::CHALK_DIM
             };
-            left_spans.push(Span::styled(ctx_suffix, Style::default().fg(ctx_color)));
+            if right_idx == 2 {
+                // ctx only
+                spans.push(Span::styled(
+                    token_text.clone(),
+                    Style::default().fg(ctx_color),
+                ));
+            } else {
+                let ctx_suffix = format!(" \u{b7} {}% ctx", pct);
+                if let Some(prefix) = token_text.strip_suffix(&ctx_suffix) {
+                    spans.push(Span::styled(
+                        prefix.to_string(),
+                        Style::default().fg(theme::CHALK_DIM),
+                    ));
+                    spans.push(Span::styled(ctx_suffix, Style::default().fg(ctx_color)));
+                } else {
+                    // text IS just the ctx (no prefix)
+                    spans.push(Span::styled(
+                        token_text.clone(),
+                        Style::default().fg(ctx_color),
+                    ));
+                }
+            }
         } else {
-            left_spans.push(Span::styled(
-                token_str,
+            spans.push(Span::styled(
+                token_text.clone(),
                 Style::default().fg(theme::CHALK_DIM),
             ));
         }
+        spans.push(Span::styled(" ", theme::bar_bg()));
     }
 
-    let bar = Paragraph::new(Line::from(left_spans)).style(theme::bar_bg());
+    // Session/cwd
+    if show_session {
+        spans.push(Span::styled(
+            app.session_name.as_str(),
+            Style::default().fg(theme::CHALK_DIM).bg(theme::FORM_RAISED),
+        ));
+        spans.push(Span::styled(
+            " \u{b7} ",
+            Style::default().fg(theme::ASH_MID).bg(theme::FORM_RAISED),
+        ));
+        spans.push(Span::styled(
+            app.cwd.as_str(),
+            Style::default().fg(theme::ASH_TEXT).bg(theme::FORM_RAISED),
+        ));
+        spans.push(Span::styled(" ", theme::bar_bg()));
+    }
+
+    let bar = Paragraph::new(Line::from(spans)).style(theme::bar_bg());
     frame.render_widget(bar, area);
 }
 
@@ -285,9 +411,7 @@ fn render_block<'a>(
                         } => {
                             total_lines += c.lines().count();
                         }
-                        DisplayBlock::ToolCall { .. }
-                        | DisplayBlock::CodeOutput { .. }
-                        | DisplayBlock::TaskList { .. } => continue,
+                        DisplayBlock::ToolCall { .. } | DisplayBlock::CodeOutput { .. } => continue,
                         _ => break,
                     }
                 }
@@ -591,11 +715,8 @@ fn render_plan_block<'a>(content: &'a str, lines: &mut Vec<Line<'a>>, viewport_w
     );
     // Ensure we close with ┐ if there's room
     let top_line = if viewport_width > 2 {
-        let padded = format!(
-            "{}\u{2510}",
-            &top[..top.chars().count().min(viewport_width - 1)]
-        );
-        padded
+        let truncated: String = top.chars().take(viewport_width - 1).collect();
+        format!("{}\u{2510}", truncated)
     } else {
         top
     };
@@ -820,97 +941,105 @@ fn draw_task_tray(frame: &mut Frame, app: &App, area: Rect) {
         .collect();
 
     let inner_w = width.saturating_sub(2); // "│ " prefix
-    let mut pill_spans: Vec<Span> = Vec::new();
-    let mut used_width = 0usize;
-
-    // Reserve space for overflow indicator so first pill truncates cleanly
-    let overflow_reserve = if active_tasks.len() > 1 {
-        format!("  +{}", active_tasks.len() - 1).len()
-    } else {
-        0
-    };
-
-    for (i, task) in active_tasks.iter().enumerate() {
-        let (marker, marker_color, text_color) = match task.status.as_str() {
-            "in_progress" => ("\u{25c6}", theme::SODIUM, theme::SODIUM),
-            _ => ("\u{25cb}", theme::ASH_MID, theme::CHALK_DIM),
-        };
-
-        let sep_w = if i > 0 { 3 } else { 0 };
-
-        // Truncate label to fit: account for overflow indicator on first pill
-        let reserve = if i == 0 { overflow_reserve } else { 0 };
-        let avail_for_label = inner_w.saturating_sub(used_width + sep_w + 2 + reserve);
-        let label: String = if task.label.chars().count() > avail_for_label && avail_for_label > 1 {
-            let trunc: String = task
-                .label
-                .chars()
-                .take(avail_for_label.saturating_sub(1))
-                .collect();
-            format!("{}\u{2026}", trunc)
-        } else {
-            task.label.clone()
-        };
-
-        let owner_part = if !task.owner.is_empty() {
-            format!("  {}", task.owner)
-        } else {
-            String::new()
-        };
-        let pill_text = format!("{} {}{}", marker, label, owner_part);
-        let pill_w = UnicodeWidthStr::width(pill_text.as_str());
-
-        if used_width + sep_w + pill_w > inner_w && i > 0 {
-            let overflow_count = active_tasks.len() - i;
-            pill_spans.push(Span::styled(
-                format!("  +{}", overflow_count),
-                Style::default().fg(theme::ASH_MID),
-            ));
-            break;
-        }
-
-        if i > 0 {
-            pill_spans.push(Span::styled("   ", Style::default()));
-            used_width += 3;
-        }
-
-        pill_spans.push(Span::styled(
-            marker.to_string(),
-            Style::default().fg(marker_color),
-        ));
-        pill_spans.push(Span::styled(
-            format!(" {}", label),
-            Style::default().fg(text_color),
-        ));
-        if !task.owner.is_empty() {
-            pill_spans.push(Span::styled(
-                format!("  {}", task.owner),
-                Style::default().fg(theme::ASH_MID),
-            ));
-        }
-        used_width += pill_w;
-    }
-
-    if active_tasks.is_empty() {
-        pill_spans.push(Span::styled(
-            "all completed",
-            Style::default().fg(theme::LICHEN),
-        ));
-    }
-
-    let mut pill_line_spans = vec![Span::styled("\u{2502} ", Style::default().fg(theme::ASH))];
-    pill_line_spans.extend(pill_spans);
-    let pill_line = Line::from(pill_line_spans);
-
-    // Bottom border
-    let bottom_fill = width.saturating_sub(2);
-    let bottom_line = Line::from(Span::styled(
-        format!("\u{2514}{}\u{2518}", "\u{2500}".repeat(bottom_fill)),
-        Style::default().fg(theme::ASH),
-    ));
 
     // Breathing line above the tray so it doesn't collide with content above
-    let mut lines = vec![Line::from(""), top_line, pill_line];
+    let mut lines = vec![Line::from(""), top_line];
+
+    if active_tasks.is_empty() {
+        // All tasks completed — single row
+        let dismiss_text = match app.task_dismiss_remaining() {
+            Some(s) if s > 0 => format!("all completed \u{2500} {}s", s),
+            Some(_) => "all completed".to_string(),
+            None => "all completed".to_string(),
+        };
+        lines.push(Line::from(vec![
+            Span::styled("\u{2502} ", Style::default().fg(theme::ASH)),
+            Span::styled(dismiss_text, Style::default().fg(theme::LICHEN)),
+        ]));
+    } else {
+        // Compute pill display widths
+        let pill_widths: Vec<usize> = active_tasks
+            .iter()
+            .map(|task| {
+                let owner_w = if task.owner.is_empty() {
+                    0
+                } else {
+                    2 + UnicodeWidthStr::width(task.owner.as_str())
+                };
+                1 + 1 + UnicodeWidthStr::width(task.label.as_str()) + owner_w
+            })
+            .collect();
+
+        // Flow pills into rows (max 3)
+        let max_rows = 3usize;
+        let mut rows: Vec<Vec<usize>> = vec![vec![]];
+        let mut row_used = 0usize;
+
+        for (i, &pw) in pill_widths.iter().enumerate() {
+            let gap = if rows.last().unwrap().is_empty() {
+                0
+            } else {
+                3
+            };
+            if row_used > 0 && row_used + gap + pw > inner_w {
+                if rows.len() >= max_rows {
+                    break;
+                }
+                rows.push(vec![]);
+                row_used = pw.min(inner_w);
+                rows.last_mut().unwrap().push(i);
+            } else {
+                row_used += gap + pw;
+                rows.last_mut().unwrap().push(i);
+            }
+        }
+
+        let shown: usize = rows.iter().map(|r| r.len()).sum();
+        let overflow = active_tasks.len() - shown;
+
+        // Render each pill row
+        for (row_idx, row) in rows.iter().enumerate() {
+            let mut spans: Vec<Span> =
+                vec![Span::styled("\u{2502} ", Style::default().fg(theme::ASH))];
+
+            for (j, &task_idx) in row.iter().enumerate() {
+                let task = active_tasks[task_idx];
+                let (marker, marker_color, text_color) = match task.status.as_str() {
+                    "in_progress" => ("\u{25c6}", theme::SODIUM, theme::SODIUM),
+                    _ => ("\u{25cb}", theme::ASH_MID, theme::CHALK_DIM),
+                };
+
+                if j > 0 {
+                    spans.push(Span::styled("   ", Style::default()));
+                }
+
+                spans.push(Span::styled(
+                    marker.to_string(),
+                    Style::default().fg(marker_color),
+                ));
+                spans.push(Span::styled(
+                    format!(" {}", task.label),
+                    Style::default().fg(text_color),
+                ));
+                if !task.owner.is_empty() {
+                    spans.push(Span::styled(
+                        format!("  {}", task.owner),
+                        Style::default().fg(theme::ASH_MID),
+                    ));
+                }
+            }
+
+            // Overflow indicator on last row
+            if row_idx == rows.len() - 1 && overflow > 0 {
+                spans.push(Span::styled(
+                    format!("  +{}", overflow),
+                    Style::default().fg(theme::ASH_MID),
+                ));
+            }
+
+            lines.push(Line::from(spans));
+        }
+    }
 
     // Progress bar (2+ tasks) — scribe-line style: heavy ━ for done, light ─ for remaining.
     // Ratio already shown in the title so the bar is purely visual.
@@ -940,7 +1069,12 @@ fn draw_task_tray(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(progress_spans));
     }
 
-    lines.push(bottom_line);
+    // Bottom border
+    let bottom_fill = width.saturating_sub(2);
+    lines.push(Line::from(Span::styled(
+        format!("\u{2514}{}\u{2518}", "\u{2500}".repeat(bottom_fill)),
+        Style::default().fg(theme::ASH),
+    )));
 
     let paragraph = Paragraph::new(lines).style(theme::history_bg());
     frame.render_widget(paragraph, area);
@@ -1037,72 +1171,6 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     frame.set_cursor_position((cursor_x, cursor_y));
 }
 
-fn draw_help_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let mut spans = if app.running {
-        let mut s = vec![
-            Span::styled(" Esc", theme::help_key()),
-            Span::styled(" cancel  ", theme::help_desc()),
-            Span::styled("Enter", theme::help_key()),
-            Span::styled(" queue  ", theme::help_desc()),
-            Span::styled("^O", theme::help_key()),
-            Span::styled(" toggle code  ", theme::help_desc()),
-        ];
-        if app.queue_count() > 0 {
-            s.push(Span::styled("Bksp", theme::help_key()));
-            s.push(Span::styled(" unqueue  ", theme::help_desc()));
-            s.push(Span::styled(
-                format!(" {} queued ", app.queue_count()),
-                Style::default()
-                    .fg(theme::SODIUM)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        s.push(Span::styled("^C", theme::help_key()));
-        s.push(Span::styled(" quit", theme::help_desc()));
-        s
-    } else {
-        vec![
-            Span::styled(" ^U/^D", theme::help_key()),
-            Span::styled(" scroll  ", theme::help_desc()),
-            Span::styled("S-Tab", theme::help_key()),
-            Span::styled(" plan  ", theme::help_desc()),
-            Span::styled("^O", theme::help_key()),
-            Span::styled(" code  ", theme::help_desc()),
-            Span::styled("S-Enter", theme::help_key()),
-            Span::styled(" newline  ", theme::help_desc()),
-            Span::styled("^Y", theme::help_key()),
-            Span::styled(" copy  ", theme::help_desc()),
-            Span::styled("^C", theme::help_key()),
-            Span::styled(" quit", theme::help_desc()),
-        ]
-    };
-
-    // Right side: session_name · cwd
-    let right_str = format!("{} \u{b7} {} ", app.session_name, app.cwd);
-    let left_width: usize = spans.iter().map(|s| s.width()).sum();
-    let right_width = UnicodeWidthStr::width(right_str.as_str());
-    let pad = (area.width as usize).saturating_sub(left_width + right_width);
-    if pad > 0 {
-        spans.push(Span::styled(" ".repeat(pad), theme::bar_bg()));
-        spans.push(Span::styled(
-            &app.session_name,
-            Style::default().fg(theme::CHALK_DIM).bg(theme::FORM_RAISED),
-        ));
-        spans.push(Span::styled(
-            " \u{b7} ",
-            Style::default().fg(theme::ASH_MID).bg(theme::FORM_RAISED),
-        ));
-        spans.push(Span::styled(
-            &app.cwd,
-            Style::default().fg(theme::ASH_TEXT).bg(theme::FORM_RAISED),
-        ));
-        spans.push(Span::styled(" ", theme::bar_bg()));
-    }
-
-    let bar = Paragraph::new(Line::from(spans)).style(theme::bar_bg());
-    frame.render_widget(bar, area);
-}
-
 /// Draw the autocomplete popup above the input area (slash commands or @path).
 fn draw_suggestions(frame: &mut Frame, app: &App, input_area: Rect) {
     if app.suggestions.is_empty() {
@@ -1115,6 +1183,7 @@ fn draw_suggestions(frame: &mut Frame, app: &App, input_area: Rect) {
     let base_width: u16 = if is_path { 50 } else { 40 };
     let width = base_width.min(input_area.width);
     let y = input_area.y.saturating_sub(height);
+    let height = height.min(frame.area().bottom().saturating_sub(y));
 
     let popup_area = Rect::new(input_area.x, y, width, height);
 
@@ -1176,9 +1245,10 @@ fn draw_session_picker(frame: &mut Frame, app: &App, history_area: Rect) {
     let height = visible + 2; // +2 for borders
     let width = 80u16.min(history_area.width.saturating_sub(4));
 
-    // Center in history area
+    // Center in history area, clamped to frame
     let x = history_area.x + (history_area.width.saturating_sub(width)) / 2;
     let y = history_area.y + (history_area.height.saturating_sub(height)) / 2;
+    let height = height.min(frame.area().bottom().saturating_sub(y));
     let popup_area = Rect::new(x, y, width, height);
 
     frame.render_widget(Clear, popup_area);
@@ -1274,9 +1344,10 @@ fn draw_skill_picker(frame: &mut Frame, app: &App, history_area: Rect) {
     let height = visible + 2; // +2 for borders
     let width = 60u16.min(history_area.width.saturating_sub(4));
 
-    // Center in history area
+    // Center in history area, clamped to frame
     let x = history_area.x + (history_area.width.saturating_sub(width)) / 2;
     let y = history_area.y + (history_area.height.saturating_sub(height)) / 2;
+    let height = height.min(frame.area().bottom().saturating_sub(y));
     let popup_area = Rect::new(x, y, width, height);
 
     frame.render_widget(Clear, popup_area);

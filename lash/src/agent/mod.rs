@@ -405,11 +405,16 @@ impl Agent {
                 }
             });
 
-            // Execution state for incremental execution
+            // Execution state for fence-aware parsing
             let mut acc = ExecAccumulator::new();
             let mut response = String::new();
-            let mut exec_pos = 0usize;
-            let mut stop_marker_hit = false;
+            let mut prose_parts: Vec<String> = Vec::new();
+            let mut code_parts: Vec<String> = Vec::new();
+            // Fence parser state
+            let mut in_code_fence = false;
+            let mut current_prose = String::new();
+            let mut current_code = String::new();
+            let mut last_line_start = 0usize; // byte offset of current incomplete line
 
             // LLM call with retry on transient API errors
             let full_text = 'llm_retry: {
@@ -491,7 +496,7 @@ impl Agent {
                         }
                     };
 
-                    // Stream LLM tokens with incremental execution
+                    // Stream LLM tokens with fence-aware parsing
                     let mut stream_error = None;
                     loop {
                         if cancel.is_cancelled() {
@@ -518,60 +523,70 @@ impl Agent {
                             Ok(Some(Ok(partial))) => {
                                 if partial.len() > response.len() {
                                     let delta = &partial[response.len()..];
-                                    emit!(AgentEvent::TextDelta {
-                                        content: delta.to_string(),
-                                    });
-
                                     response.push_str(delta);
 
-                                    // Stop marker: execute accumulated code, break to new iteration
-                                    let pending = &response[exec_pos..];
-                                    if let Some(turn_pos) = find_stop_marker(pending) {
-                                        let code = &pending[..turn_pos];
-                                        if !code.trim().is_empty() && !acc.had_failure {
-                                            execute_and_collect(
-                                                &mut self.session,
-                                                code,
-                                                &mut acc,
-                                                &event_tx,
-                                            )
-                                            .await;
-                                        }
-                                        exec_pos += turn_pos;
-                                        stop_marker_hit = true;
-                                        break;
-                                    }
+                                    // Process complete lines from the response buffer
+                                    while let Some(nl) = response[last_line_start..].find('\n') {
+                                        let line_end = last_line_start + nl;
+                                        let line = response[last_line_start..line_end].to_string();
+                                        last_line_start = line_end + 1;
 
-                                    // Incremental execution on complete statements
-                                    if delta.contains('\n') && !acc.had_failure {
-                                        loop {
-                                            let pending = &response[exec_pos..];
-                                            let boundaries = find_candidate_boundaries(pending);
-                                            let mut executed_any = false;
-                                            for &pos in boundaries.iter().rev() {
-                                                let prefix = &pending[..pos];
-                                                if prefix.trim().is_empty() {
-                                                    continue;
+                                        if !in_code_fence {
+                                            // Check for opening fence
+                                            let trimmed = line.trim();
+                                            if trimmed == "```python"
+                                                || trimmed == "```py"
+                                                || trimmed == "```Python"
+                                                || trimmed.starts_with("```python ")
+                                                || trimmed.starts_with("```py ")
+                                            {
+                                                // Flush accumulated prose
+                                                let prose = current_prose.trim().to_string();
+                                                if !prose.is_empty() {
+                                                    prose_parts.push(prose);
                                                 }
-                                                if self
-                                                    .session
-                                                    .check_complete(prefix)
-                                                    .unwrap_or(false)
-                                                {
-                                                    execute_and_collect(
-                                                        &mut self.session,
-                                                        prefix,
-                                                        &mut acc,
-                                                        &event_tx,
-                                                    )
-                                                    .await;
-                                                    exec_pos += pos;
-                                                    executed_any = true;
-                                                    break; // re-scan remaining buffer
+                                                current_prose.clear();
+                                                in_code_fence = true;
+                                                current_code.clear();
+                                            } else {
+                                                // Prose line — emit as TextDelta
+                                                if !current_prose.is_empty() {
+                                                    current_prose.push('\n');
                                                 }
+                                                current_prose.push_str(&line);
+                                                emit!(AgentEvent::TextDelta {
+                                                    content: format!("{}\n", line),
+                                                });
                                             }
-                                            if !executed_any {
-                                                break;
+                                        } else {
+                                            // Inside code fence
+                                            let trimmed = line.trim();
+                                            if trimmed == "```" || trimmed == "``` " {
+                                                // Closing fence — execute the code block
+                                                in_code_fence = false;
+                                                let code = current_code.clone();
+                                                if !code.trim().is_empty() {
+                                                    code_parts.push(code.clone());
+                                                    emit!(AgentEvent::CodeBlock {
+                                                        code: code.clone(),
+                                                    });
+                                                    if !acc.had_failure {
+                                                        execute_and_collect(
+                                                            &mut self.session,
+                                                            &code,
+                                                            &mut acc,
+                                                            &event_tx,
+                                                        )
+                                                        .await;
+                                                    }
+                                                }
+                                                current_code.clear();
+                                            } else {
+                                                // Code line — accumulate (no TextDelta)
+                                                if !current_code.is_empty() {
+                                                    current_code.push('\n');
+                                                }
+                                                current_code.push_str(&line);
                                             }
                                         }
                                     }
@@ -582,30 +597,6 @@ impl Agent {
                                 break;
                             }
                         }
-                    }
-
-                    // Stop marker hit — drop stream, log usage
-                    if stop_marker_hit {
-                        drop(call);
-                        let code = &response[..exec_pos];
-                        emit!(AgentEvent::LlmResponse {
-                            iteration,
-                            content: code.to_string(),
-                            duration_ms: llm_start.elapsed().as_millis() as u64,
-                        });
-
-                        collect_usage(
-                            &collector,
-                            &mut cumulative_usage,
-                            iteration,
-                            code,
-                            &self.config,
-                            &self.agent_id,
-                            &event_tx,
-                        )
-                        .await;
-
-                        break 'llm_retry code.to_string();
                     }
 
                     if let Some(err) = stream_error {
@@ -635,7 +626,6 @@ impl Agent {
                     }
 
                     // Finalize the BAML stream (for collector/usage tracking).
-                    // We ignore the return value — response is our source of truth.
                     match call.get_final_response().await {
                         Ok(_) => {}
                         Err(e) => tracing::warn!("get_final_response: {}", e),
@@ -658,11 +648,45 @@ impl Agent {
                     )
                     .await;
 
-                    // Execute remaining un-executed code
-                    let remaining = &response[exec_pos..];
-                    if !remaining.trim().is_empty() && !acc.had_failure {
-                        execute_and_collect(&mut self.session, remaining, &mut acc, &event_tx)
+                    // Handle any remaining content after stream ends
+                    // If we were in a code fence (unclosed), execute remaining code
+                    if in_code_fence && !current_code.trim().is_empty() {
+                        code_parts.push(current_code.clone());
+                        emit!(AgentEvent::CodeBlock {
+                            code: current_code.clone(),
+                        });
+                        if !acc.had_failure {
+                            execute_and_collect(
+                                &mut self.session,
+                                &current_code,
+                                &mut acc,
+                                &event_tx,
+                            )
                             .await;
+                        }
+                        current_code.clear();
+                        in_code_fence = false;
+                    }
+
+                    // Flush any remaining prose
+                    let remaining_prose = current_prose.trim().to_string();
+                    if !remaining_prose.is_empty() {
+                        prose_parts.push(remaining_prose);
+                    }
+                    // Also handle any trailing incomplete line as prose
+                    if last_line_start < response.len() && !in_code_fence {
+                        let trailing = response[last_line_start..].trim().to_string();
+                        if !trailing.is_empty() {
+                            emit!(AgentEvent::TextDelta {
+                                content: trailing.clone(),
+                            });
+                            if let Some(last) = prose_parts.last_mut() {
+                                last.push('\n');
+                                last.push_str(&trailing);
+                            } else {
+                                prose_parts.push(trailing);
+                            }
+                        }
                     }
 
                     break 'llm_retry response.clone();
@@ -688,6 +712,7 @@ impl Agent {
             let _ = prompt_drain_handle.await;
 
             let executed_text = full_text;
+            let has_code = !code_parts.is_empty();
 
             // Check for empty response with no execution
             if executed_text.trim().is_empty()
@@ -716,15 +741,11 @@ impl Agent {
                     kind: "final".to_string(),
                 });
                 let mid = format!("m{}", msgs.len());
+                let asst_parts = build_assistant_parts(&mid, &prose_parts, &code_parts);
                 msgs.push(Message {
                     id: mid.clone(),
                     role: MessageRole::Assistant,
-                    parts: vec![Part {
-                        id: format!("{}.p0", mid),
-                        kind: PartKind::Code,
-                        content: executed_text.clone(),
-                        prune_state: PruneState::Intact,
-                    }],
+                    parts: asst_parts,
                 });
                 self.store.mark_agent_done(&self.agent_id);
                 emit!(AgentEvent::Done);
@@ -777,15 +798,33 @@ impl Agent {
 
             // Build structured feedback parts from accumulated execution state
             {
-                let mut feedback_parts = vec![Part {
-                    id: String::new(),
-                    kind: PartKind::Code,
-                    content: executed_text.clone(),
-                    prune_state: PruneState::Intact,
-                }];
-
                 let has_output = !acc.combined_output.is_empty();
                 let has_tool_calls = !acc.tool_calls.is_empty();
+
+                // Pure prose response with no code execution — turn ends
+                if !has_code && !has_output && !has_tool_calls && !acc.had_failure {
+                    let mid = format!("m{}", msgs.len());
+                    let asst_parts = build_assistant_parts(&mid, &prose_parts, &code_parts);
+                    msgs.push(Message {
+                        id: mid.clone(),
+                        role: MessageRole::Assistant,
+                        parts: asst_parts,
+                    });
+                    self.store.mark_agent_done(&self.agent_id);
+                    emit!(AgentEvent::Done);
+                    return (msgs, iteration);
+                }
+
+                // Build feedback: code blocks wrapped in fences, then output/error
+                let mut feedback_parts: Vec<Part> = Vec::new();
+                for code in &code_parts {
+                    feedback_parts.push(Part {
+                        id: String::new(),
+                        kind: PartKind::Code,
+                        content: code.clone(),
+                        prune_state: PruneState::Intact,
+                    });
+                }
 
                 if has_output {
                     let mut output_text = acc.combined_output;
@@ -816,34 +855,15 @@ impl Agent {
                         content: format!("{}\nFix and retry.", err),
                         prune_state: PruneState::Intact,
                     });
-                } else if !has_output && !has_tool_calls {
-                    let mid = format!("m{}", msgs.len());
-                    msgs.push(Message {
-                        id: mid.clone(),
-                        role: MessageRole::Assistant,
-                        parts: vec![Part {
-                            id: format!("{}.p0", mid),
-                            kind: PartKind::Code,
-                            content: executed_text.clone(),
-                            prune_state: PruneState::Intact,
-                        }],
-                    });
-                    self.store.mark_agent_done(&self.agent_id);
-                    emit!(AgentEvent::Done);
-                    return (msgs, iteration);
                 }
 
-                // Push assistant message
+                // Push assistant message with prose+code parts
                 let asst_id = format!("m{}", msgs.len());
+                let asst_parts = build_assistant_parts(&asst_id, &prose_parts, &code_parts);
                 msgs.push(Message {
                     id: asst_id.clone(),
                     role: MessageRole::Assistant,
-                    parts: vec![Part {
-                        id: format!("{}.p0", asst_id),
-                        kind: PartKind::Code,
-                        content: executed_text.clone(),
-                        prune_state: PruneState::Intact,
-                    }],
+                    parts: asst_parts,
                 });
 
                 // Push system feedback with typed parts
@@ -1039,29 +1059,55 @@ fn is_retryable(error: &str) -> bool {
         || lower.contains("temporarily")
 }
 
-/// Find a stop marker (`observe()` or `<turn>`) in the buffer.
-fn find_stop_marker(buf: &str) -> Option<usize> {
-    let mut offset = 0;
-    for line in buf.split('\n') {
-        let trimmed = line.trim();
-        if trimmed == "observe()" || trimmed == "<turn>" {
-            return Some(offset);
-        }
-        offset += line.len() + 1;
-    }
-    None
-}
+/// Build alternating Prose/Code parts for an assistant message.
+fn build_assistant_parts(msg_id: &str, prose_parts: &[String], code_parts: &[String]) -> Vec<Part> {
+    let mut parts = Vec::new();
+    let mut idx = 0;
+    let mut prose_iter = prose_parts.iter();
+    let mut code_iter = code_parts.iter();
 
-/// Find byte offsets of candidate statement boundaries in code.
-fn find_candidate_boundaries(code: &str) -> Vec<usize> {
-    let mut boundaries = Vec::new();
-    for (i, _) in code.match_indices('\n') {
-        if let Some(c) = code[i + 1..].chars().next()
-            && !c.is_whitespace()
-            && c != '#'
+    // Interleave prose and code parts in order they appeared
+    // Pattern: prose0, code0, prose1, code1, ...
+    // (first prose may be empty if response starts with code)
+    loop {
+        let prose = prose_iter.next();
+        let code = code_iter.next();
+        if prose.is_none() && code.is_none() {
+            break;
+        }
+        if let Some(p) = prose
+            && !p.is_empty()
         {
-            boundaries.push(i + 1);
+            parts.push(Part {
+                id: format!("{}.p{}", msg_id, idx),
+                kind: PartKind::Prose,
+                content: p.clone(),
+                prune_state: PruneState::Intact,
+            });
+            idx += 1;
+        }
+        if let Some(c) = code
+            && !c.is_empty()
+        {
+            parts.push(Part {
+                id: format!("{}.p{}", msg_id, idx),
+                kind: PartKind::Code,
+                content: c.clone(),
+                prune_state: PruneState::Intact,
+            });
+            idx += 1;
         }
     }
-    boundaries
+
+    // If nothing was added (shouldn't happen), add an empty prose part
+    if parts.is_empty() {
+        parts.push(Part {
+            id: format!("{}.p0", msg_id),
+            kind: PartKind::Prose,
+            content: String::new(),
+            prune_state: PruneState::Intact,
+        });
+    }
+
+    parts
 }

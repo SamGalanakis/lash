@@ -40,7 +40,7 @@ pub use store::{AgentState, Store, TaskEntry};
 #[derive(Clone, Debug)]
 pub struct SandboxMessage {
     pub text: String,
-    /// "say", "final", or "tool_output"
+    /// "final" or "tool_output"
     pub kind: String,
 }
 

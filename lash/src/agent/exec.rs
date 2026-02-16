@@ -97,16 +97,7 @@ pub(crate) async fn execute_and_collect(
                 )
                 .await;
             }
-            for say_text in &r.say_messages {
-                send_event(
-                    event_tx,
-                    AgentEvent::Message {
-                        text: say_text.clone(),
-                        kind: "say".to_string(),
-                    },
-                )
-                .await;
-            }
+
             acc.tool_calls.extend(r.tool_calls);
             acc.images.extend(r.images);
             if !r.output.is_empty() {

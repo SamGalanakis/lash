@@ -243,7 +243,7 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
                     .unwrap_or("")
                     .to_string();
                 let kind = val.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-                if (kind == "final" || kind == "say") && !text.is_empty() {
+                if kind == "final" && !text.is_empty() {
                     blocks.push(DisplayBlock::AssistantText(text));
                 }
             }

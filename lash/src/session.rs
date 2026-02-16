@@ -146,7 +146,6 @@ impl Session {
         // asyncio.gather() can dispatch multiple tools in parallel.
         let mut tool_handles: Vec<tokio::task::JoinHandle<(ToolCallRecord, Vec<ToolImage>)>> =
             Vec::new();
-        let mut say_messages: Vec<String> = Vec::new();
 
         // Use block_in_place so tokio knows this thread is blocked and can
         // schedule drain tasks (prompt forwarding, message forwarding) on other threads.
@@ -209,10 +208,6 @@ impl Session {
                 PythonResponse::Message { text, kind } => {
                     if kind == "final" {
                         self.final_response = Some(text.clone());
-                    } else if kind == "say" {
-                        // Collect say messages for synchronous emission by agent
-                        // (avoids async drain_handle ordering issues).
-                        say_messages.push(text);
                     } else if let Some(tx) = &self.message_tx {
                         let _ = tx.send(SandboxMessage { text, kind });
                     }
@@ -256,7 +251,6 @@ impl Session {
                         images: std::mem::take(&mut self.tool_images),
                         error,
                         duration_ms: start.elapsed().as_millis() as u64,
-                        say_messages,
                     });
                 }
                 PythonResponse::Ready => {
@@ -400,8 +394,6 @@ pub struct ExecResponse {
     pub images: Vec<ToolImage>,
     pub error: Option<String>,
     pub duration_ms: u64,
-    /// Collected say() messages, emitted synchronously by the agent for correct ordering.
-    pub say_messages: Vec<String>,
 }
 
 /// Walk a directory recursively and collect all files as relative_path -> contents.

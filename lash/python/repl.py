@@ -299,17 +299,7 @@ def _done(value):
     _send({"type": "message", "text": text, "kind": "final"})
     return _Awaitable()
 
-def _say(value):
-    """Show text to the user. Non-blocking — execution continues."""
-    text = _format_value(value)
-    if text is not None:
-        _send({"type": "message", "text": text, "kind": "say"})
-    return _Awaitable()
 
-
-def _observe():
-    """Stop and view output. Handled by the runtime — this is a no-op fallback."""
-    return None
 
 
 async def _ask(question, options=None):
@@ -718,7 +708,7 @@ def _register_tools(tools_json, agent_id=""):
 
     _ns["_history"] = TurnHistory()
     _ns.update({
-        "json": json, "print": print, "done": _done, "say": _say, "observe": _observe,
+        "json": json, "print": print, "done": _done,
         "asyncio": asyncio, "list_tools": _list_tools, "reset_repl": _reset_repl, "ask": _ask,
         "Task": Task, "Skill": Skill, "SkillSummary": SkillSummary, "ToolError": ToolError,
         "TurnHistory": TurnHistory, "Turn": Turn, "ToolCall": ToolCall, "ToolName": ToolName,
@@ -860,7 +850,7 @@ async def _handle_exec(exec_id, code):
 
 def _handle_snapshot(snap_id):
     """Serialize the REPL namespace using dill."""
-    skip = {"json", "asyncio", "dill", "print", "done", "say", "observe", "list_tools", "reset_repl", "ask"}
+    skip = {"json", "asyncio", "dill", "print", "done", "list_tools", "reset_repl", "ask"}
     skip.update(t["name"] for t in _tool_defs)
 
     data = {}

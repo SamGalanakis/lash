@@ -32,6 +32,7 @@ pub enum PartKind {
     Code,
     Output,
     Error,
+    Prose,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -75,7 +76,21 @@ impl Message {
                         PartKind::Code => format!("```python\n{}\n```", rendered),
                         PartKind::Output => format!("Output:\n```\n{}\n```", rendered),
                         PartKind::Error => format!("Error:\n```\n{}\n```", rendered),
-                        PartKind::Text => rendered,
+                        PartKind::Text | PartKind::Prose => rendered,
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        } else if self.role == MessageRole::Assistant {
+            // Assistant messages: prose renders as-is, code wrapped in ```python fences
+            self.parts
+                .iter()
+                .map(|p| {
+                    let rendered = p.render();
+                    match p.kind {
+                        PartKind::Code => format!("```python\n{}\n```", rendered),
+                        PartKind::Prose | PartKind::Text => rendered,
+                        _ => rendered,
                     }
                 })
                 .collect::<Vec<_>>()
@@ -131,17 +146,36 @@ impl Message {
             return Message { id, role, parts };
         }
 
-        // User and assistant messages: single Text part
+        if role == MessageRole::Assistant {
+            // Parse assistant messages: prose + ```python code blocks
+            let mut parts = Vec::new();
+            let sections = parse_assistant_sections(&msg.content);
+            for (idx, (kind, text)) in sections.into_iter().enumerate() {
+                parts.push(Part {
+                    id: format!("{}.p{}", id, idx),
+                    kind,
+                    content: text,
+                    prune_state: PruneState::Intact,
+                });
+            }
+            if parts.is_empty() {
+                parts.push(Part {
+                    id: format!("{}.p0", id),
+                    kind: PartKind::Prose,
+                    content: msg.content.clone(),
+                    prune_state: PruneState::Intact,
+                });
+            }
+            return Message { id, role, parts };
+        }
+
+        // User messages: single Text part
         Message {
             id: id.clone(),
             role,
             parts: vec![Part {
                 id: format!("{}.p0", id),
-                kind: if role == MessageRole::Assistant {
-                    PartKind::Code
-                } else {
-                    PartKind::Text
-                },
+                kind: PartKind::Text,
                 content: msg.content.clone(),
                 prune_state: PruneState::Intact,
             }],
@@ -228,6 +262,66 @@ fn parse_markdown_sections(content: &str) -> Vec<(PartKind, String)> {
             let trimmed = text.trim().to_string();
             if !trimmed.is_empty() {
                 sections.push((PartKind::Text, trimmed));
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    sections
+}
+
+/// Parse assistant message content into alternating Prose/Code sections.
+fn parse_assistant_sections(content: &str) -> Vec<(PartKind, String)> {
+    let mut sections = Vec::new();
+    let lines: Vec<&str> = content.lines().collect();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim();
+
+        // Check for opening code fence
+        if trimmed == "```python"
+            || trimmed == "```py"
+            || trimmed == "```Python"
+            || trimmed.starts_with("```python ")
+            || trimmed.starts_with("```py ")
+        {
+            i += 1;
+            let mut code = String::new();
+            while i < lines.len() && lines[i].trim() != "```" {
+                if !code.is_empty() {
+                    code.push('\n');
+                }
+                code.push_str(lines[i]);
+                i += 1;
+            }
+            i += 1; // skip closing ```
+            if !code.is_empty() {
+                sections.push((PartKind::Code, code));
+            }
+        } else if !trimmed.is_empty() {
+            // Prose text
+            let mut text = String::from(line);
+            i += 1;
+            while i < lines.len() {
+                let next_trimmed = lines[i].trim();
+                if next_trimmed == "```python"
+                    || next_trimmed == "```py"
+                    || next_trimmed == "```Python"
+                    || next_trimmed.starts_with("```python ")
+                    || next_trimmed.starts_with("```py ")
+                {
+                    break;
+                }
+                text.push('\n');
+                text.push_str(lines[i]);
+                i += 1;
+            }
+            let trimmed_text = text.trim().to_string();
+            if !trimmed_text.is_empty() {
+                sections.push((PartKind::Prose, trimmed_text));
             }
         } else {
             i += 1;

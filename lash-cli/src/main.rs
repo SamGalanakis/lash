@@ -517,6 +517,28 @@ struct AgentRunResult {
     turn: usize,
 }
 
+/// Build the controls text shown by /controls.
+fn controls_text() -> String {
+    [
+        "Controls:",
+        "  Shift+Tab          Toggle plan mode",
+        "  Esc                Cancel agent (while running)",
+        "  Enter              Queue message (while running)",
+        "  Backspace          Unqueue last (while running)",
+        "  Ctrl+U / Ctrl+D    Scroll half-page up / down",
+        "  PgUp / PgDn        Scroll page up / down",
+        "  Shift+Enter        Insert newline",
+        "  Ctrl+V             Paste image (or text fallback)",
+        "  Ctrl+Shift+V       Paste text only",
+        "  Ctrl+Y             Copy last response to clipboard",
+        "  Ctrl+O             Toggle code block expansion",
+        "  Up / Down          Input history",
+        "  Shift+Drag         Select text (terminal native)",
+        "  Ctrl+C             Quit",
+    ]
+    .join("\n")
+}
+
 /// Build the help text shown by /help.
 fn help_text(skills: &skill::SkillRegistry) -> String {
     let mut lines = vec![
@@ -676,7 +698,8 @@ async fn run_app(
         if app.dirty {
             // Pre-compute height cache before immutable borrow in draw
             let size = terminal.size()?;
-            let overhead: u16 = (if app.running { 6 } else { 5 }) + app.task_tray_height();
+            let overhead: u16 =
+                (if app.running { 5 } else { 4 }) + app.task_tray_height(size.width);
             let vh = size.height.saturating_sub(overhead) as usize;
             let vw = size.width as usize;
             app.ensure_height_cache_pub(vw, vh);
@@ -782,7 +805,8 @@ async fn run_app(
                 // ── Always-on scroll keys (work in all states) ──
                 {
                     let size = terminal.size()?;
-                    let overhead: u16 = (if app.running { 6 } else { 5 }) + app.task_tray_height();
+                    let overhead: u16 =
+                        (if app.running { 5 } else { 4 }) + app.task_tray_height(size.width);
                     let vh = size.height.saturating_sub(overhead) as usize;
                     let vw = size.width as usize;
                     let half_page = vh / 2;
@@ -1060,6 +1084,12 @@ async fn run_app(
                                     app.invalidate_height_cache();
                                     app.scroll_to_bottom();
                                 }
+                                command::Command::Controls => {
+                                    app.blocks
+                                        .push(DisplayBlock::SystemMessage(controls_text()));
+                                    app.invalidate_height_cache();
+                                    app.scroll_to_bottom();
+                                }
                                 command::Command::Help => {
                                     app.blocks
                                         .push(DisplayBlock::SystemMessage(help_text(&app.skills)));
@@ -1258,7 +1288,7 @@ async fn run_app(
                     MouseEventKind::ScrollDown => {
                         let size = terminal.size()?;
                         let overhead: u16 =
-                            (if app.running { 6 } else { 5 }) + app.task_tray_height();
+                            (if app.running { 5 } else { 4 }) + app.task_tray_height(size.width);
                         let vh = size.height.saturating_sub(overhead) as usize;
                         let vw = size.width as usize;
                         app.scroll_down(3, vh, vw);
@@ -1283,7 +1313,11 @@ async fn run_app(
                     app.tick += 1;
                     app.dirty = true;
                 }
-                // When idle, tick does NOT set dirty → 0% CPU
+                // Auto-dismiss task tray after countdown
+                if app.task_all_done_at.is_some() {
+                    app.dirty = true; // keep redrawing for countdown
+                    app.maybe_dismiss_task_tray();
+                }
             }
             AppEvent::Agent(event) => {
                 app.dirty = true;

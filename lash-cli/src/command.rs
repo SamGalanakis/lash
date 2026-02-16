@@ -3,6 +3,7 @@ use crate::skill::SkillRegistry;
 /// Primary commands shown in autocomplete (command, description).
 pub const COMMANDS: &[(&str, &str)] = &[
     ("/clear", "Reset conversation"),
+    ("/controls", "Show keyboard shortcuts"),
     ("/model", "Switch LLM model"),
     ("/provider", "Change LLM provider"),
     ("/logout", "Remove stored credentials"),
@@ -27,6 +28,8 @@ pub fn completions(prefix: &str, skills: &SkillRegistry) -> Vec<(String, String)
 pub enum Command {
     /// Reset conversation to splash screen
     Clear,
+    /// Show keyboard shortcuts
+    Controls,
     /// Switch LLM model
     Model(String),
     /// Show message to restart with --provider
@@ -60,6 +63,7 @@ pub fn parse(input: &str, skills: &SkillRegistry) -> Option<Command> {
     // Built-in commands always win
     match cmd {
         "clear" | "new" => Some(Command::Clear),
+        "controls" => Some(Command::Controls),
         "model" => arg
             .filter(|a| !a.is_empty())
             .map(|a| Command::Model(a.to_string())),

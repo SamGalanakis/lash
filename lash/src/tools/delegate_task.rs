@@ -192,8 +192,6 @@ impl DelegateInner {
                 AgentEvent::Message { text, kind } => {
                     if kind == "final" {
                         final_message = Some(text);
-                    } else if kind == "say" {
-                        context.push(text);
                     }
                 }
                 AgentEvent::CodeBlock { .. } => {

@@ -268,6 +268,8 @@ pub struct App {
     pub store: Option<Arc<Store>>,
     /// Snapshots for the persistent task tray (bottom panel).
     pub task_tray: Vec<TaskSnapshot>,
+    /// When all tasks completed — used for auto-dismiss countdown.
+    pub task_all_done_at: Option<std::time::Instant>,
     /// Active delegate sub-agent: (name, task description, started_at).
     pub active_delegate: Option<(String, String, std::time::Instant)>,
 }
@@ -328,6 +330,7 @@ impl App {
             cwd,
             store,
             task_tray: Vec::new(),
+            task_all_done_at: None,
             active_delegate: None,
         }
     }
@@ -363,9 +366,7 @@ impl App {
         for block in self.blocks.iter().rev() {
             match block {
                 DisplayBlock::CodeBlock { .. } => return true,
-                DisplayBlock::ToolCall { .. }
-                | DisplayBlock::CodeOutput { .. }
-                | DisplayBlock::TaskList { .. } => continue,
+                DisplayBlock::ToolCall { .. } | DisplayBlock::CodeOutput { .. } => continue,
                 _ => return false,
             }
         }
@@ -380,7 +381,14 @@ impl App {
                 self.scroll_to_bottom();
             }
             AgentEvent::CodeBlock { code } => {
-                self.pending_text.clear();
+                if !self.pending_text.trim().is_empty() {
+                    self.blocks.push(DisplayBlock::AssistantText(std::mem::take(
+                        &mut self.pending_text,
+                    )));
+                    self.invalidate_height_cache();
+                } else {
+                    self.pending_text.clear();
+                }
                 let trimmed = code.trim_matches('\n');
                 if !trimmed.is_empty() {
                     let continuation = self.is_code_continuation();
@@ -455,7 +463,14 @@ impl App {
                 self.iteration = iteration + 1;
             }
             AgentEvent::Done => {
-                self.pending_text.clear();
+                if !self.pending_text.trim().is_empty() {
+                    self.blocks.push(DisplayBlock::AssistantText(std::mem::take(
+                        &mut self.pending_text,
+                    )));
+                    self.invalidate_height_cache();
+                } else {
+                    self.pending_text.clear();
+                }
                 self.running = false;
                 self.status_text = None;
                 self.streaming_output.clear();
@@ -632,9 +647,6 @@ impl App {
 
         let all_tasks = store.list_tasks(None, None);
         if all_tasks.is_empty() {
-            // Remove existing TaskList block if any
-            self.blocks
-                .retain(|b| !matches!(b, DisplayBlock::TaskList { .. }));
             self.task_tray.clear();
             self.invalidate_height_cache();
             return;
@@ -680,33 +692,89 @@ impl App {
                 .then_with(|| a.id.cmp(&b.id))
         });
 
-        self.task_tray = snapshots.clone();
-
-        let new_block = DisplayBlock::TaskList { tasks: snapshots };
-
-        // Replace existing TaskList in-place, or push new one
-        let existing_idx = self
-            .blocks
+        // Track when all tasks become completed for auto-dismiss.
+        let all_done = snapshots
             .iter()
-            .rposition(|b| matches!(b, DisplayBlock::TaskList { .. }));
-        if let Some(idx) = existing_idx {
-            self.blocks[idx] = new_block;
+            .all(|t| t.status == "completed" || t.status == "cancelled");
+        if all_done {
+            if self.task_all_done_at.is_none() {
+                self.task_all_done_at = Some(std::time::Instant::now());
+            }
         } else {
-            self.blocks.push(new_block);
+            self.task_all_done_at = None;
         }
 
+        self.task_tray = snapshots;
         self.invalidate_height_cache();
     }
 
-    /// Height of the persistent task tray: 0/4/5 lines (includes 1-line pad above).
-    pub fn task_tray_height(&self) -> u16 {
-        if self.task_tray.is_empty() {
-            0
-        } else if self.task_tray.len() == 1 {
-            4 // pad + top border + pills + bottom border
-        } else {
-            5 // pad + top border + pills + progress bar + bottom border
+    /// Auto-dismiss the task tray 5s after all tasks complete. Returns true if dismissed.
+    pub fn maybe_dismiss_task_tray(&mut self) -> bool {
+        if let Some(done_at) = self.task_all_done_at
+            && done_at.elapsed() >= std::time::Duration::from_secs(5)
+        {
+            self.task_tray.clear();
+            self.task_all_done_at = None;
+            self.invalidate_height_cache();
+            return true;
         }
+        false
+    }
+
+    /// Seconds remaining before the task tray auto-dismisses (None if not counting down).
+    pub fn task_dismiss_remaining(&self) -> Option<u64> {
+        self.task_all_done_at
+            .map(|done_at| 5u64.saturating_sub(done_at.elapsed().as_secs()))
+    }
+
+    /// Height of the persistent task tray (0 when empty, dynamic based on width).
+    /// Includes 1-line pad above, top/bottom borders, pill rows, and optional progress bar.
+    pub fn task_tray_height(&self, width: u16) -> u16 {
+        if self.task_tray.is_empty() {
+            return 0;
+        }
+
+        let active: Vec<&TaskSnapshot> = self
+            .task_tray
+            .iter()
+            .filter(|t| t.status != "completed" && t.status != "cancelled")
+            .collect();
+
+        let pill_rows = if active.is_empty() {
+            1 // "all completed" row
+        } else {
+            let inner_w = (width as usize).saturating_sub(2); // "│ " prefix
+            let max_rows = 3usize;
+            let mut rows = 1usize;
+            let mut row_used = 0usize;
+
+            for task in &active {
+                let owner_w = if task.owner.is_empty() {
+                    0
+                } else {
+                    2 + unicode_width::UnicodeWidthStr::width(task.owner.as_str())
+                };
+                let pill_w =
+                    1 + 1 + unicode_width::UnicodeWidthStr::width(task.label.as_str()) + owner_w;
+                let gap = if row_used == 0 { 0 } else { 3 };
+
+                if row_used > 0 && row_used + gap + pill_w > inner_w {
+                    if rows >= max_rows {
+                        break;
+                    }
+                    rows += 1;
+                    row_used = pill_w.min(inner_w);
+                } else {
+                    row_used += gap + pill_w;
+                }
+            }
+
+            rows
+        };
+
+        let has_progress = self.task_tray.len() >= 2;
+        // 1 (pad) + 1 (top border) + pill_rows + (1 if progress bar) + 1 (bottom border)
+        1 + 1 + pill_rows as u16 + u16::from(has_progress) + 1
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
@@ -960,9 +1028,9 @@ impl App {
 
     /// Update the suggestion list based on current input.
     pub fn update_suggestions(&mut self) {
-        // 1. Check slash commands first
-        if self.input.starts_with('/') && !self.input.contains(' ') {
-            self.suggestions = command::completions(&self.input, &self.skills);
+        // 1. Check slash commands at cursor
+        if let Some((_slash_pos, prefix)) = self.slash_token_at_cursor() {
+            self.suggestions = command::completions(&prefix, &self.skills);
             self.suggestion_kind = SuggestionKind::Command;
             if self.suggestions.is_empty() {
                 self.suggestion_idx = 0;
@@ -1011,6 +1079,28 @@ impl App {
         Some((at_byte, partial.to_string()))
     }
 
+    /// Scan backwards from cursor to find the nearest `/` token.
+    /// Returns `Some((slash_byte_pos, prefix_including_slash))` or `None`.
+    /// The `/` must be at start of input or preceded by whitespace/newline.
+    /// The prefix is everything from `/` to cursor (no spaces allowed).
+    fn slash_token_at_cursor(&self) -> Option<(usize, String)> {
+        let before = &self.input[..self.cursor_pos];
+        let slash_byte = before.rfind('/')?;
+        // '/' must be at start or preceded by whitespace
+        if slash_byte > 0 {
+            let prev_byte = self.input.as_bytes()[slash_byte - 1];
+            if !prev_byte.is_ascii_whitespace() {
+                return None;
+            }
+        }
+        // Prefix is everything from '/' to cursor — must have no spaces
+        let prefix = &self.input[slash_byte..self.cursor_pos];
+        if prefix.contains(' ') || prefix.contains('\n') {
+            return None;
+        }
+        Some((slash_byte, prefix.to_string()))
+    }
+
     /// Whether the suggestion popup is active.
     pub fn has_suggestions(&self) -> bool {
         !self.suggestions.is_empty()
@@ -1034,11 +1124,16 @@ impl App {
     pub fn complete_suggestion(&mut self) {
         match self.suggestion_kind {
             SuggestionKind::Command => {
-                if let Some((cmd, _)) = self.suggestions.get(self.suggestion_idx).cloned() {
+                if let Some((slash_pos, _prefix)) = self.slash_token_at_cursor()
+                    && let Some((cmd, _)) = self.suggestions.get(self.suggestion_idx).cloned()
+                {
                     let needs_arg =
                         cmd == "/model" || self.skills.get(cmd.trim_start_matches('/')).is_some();
-                    self.input = if needs_arg { format!("{} ", cmd) } else { cmd };
-                    self.cursor_pos = self.input.len();
+                    let replacement = if needs_arg { format!("{} ", cmd) } else { cmd };
+                    let before = self.input[..slash_pos].to_string();
+                    let after = self.input[self.cursor_pos..].to_string();
+                    self.input = format!("{}{}{}", before, replacement, after);
+                    self.cursor_pos = slash_pos + replacement.len();
                 }
                 self.suggestions.clear();
                 self.suggestion_idx = 0;
