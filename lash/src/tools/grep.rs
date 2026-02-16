@@ -60,10 +60,7 @@ impl ToolProvider for Grep {
             return ToolResult::err(json!("Missing required parameter: pattern"));
         }
 
-        let base_dir = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
+        let base_dir = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         let include = args.get("include").and_then(|v| v.as_str());
 
@@ -76,10 +73,7 @@ impl ToolProvider for Grep {
 
         let include_glob = if let Some(inc) = include {
             match globset::GlobBuilder::new(inc).build() {
-                Ok(g) => {
-                    let set = globset::GlobSetBuilder::new().add(g).build().ok();
-                    set
-                }
+                Ok(g) => globset::GlobSetBuilder::new().add(g).build().ok(),
                 Err(_) => None,
             }
         } else {
@@ -123,7 +117,7 @@ impl ToolProvider for Grep {
 
             // Apply include filter
             if let Some(ref glob_set) = include_glob {
-                let filename = path.file_name().map(|n| Path::new(n)).unwrap_or(path);
+                let filename = path.file_name().map(Path::new).unwrap_or(path);
                 if !glob_set.is_match(filename) {
                     continue;
                 }
@@ -187,10 +181,17 @@ mod tests {
     #[tokio::test]
     async fn test_grep_matches() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("test.txt"), "hello world\nfoo bar\nhello again").unwrap();
+        std::fs::write(
+            dir.path().join("test.txt"),
+            "hello world\nfoo bar\nhello again",
+        )
+        .unwrap();
         let tool = Grep::default();
         let result = tool
-            .execute("grep", &json!({"pattern": "hello", "path": dir.path().to_str().unwrap()}))
+            .execute(
+                "grep",
+                &json!({"pattern": "hello", "path": dir.path().to_str().unwrap()}),
+            )
             .await;
         assert!(result.success);
         let text = result.result.as_str().unwrap();
@@ -205,7 +206,10 @@ mod tests {
         std::fs::write(dir.path().join("test.txt"), "hello world").unwrap();
         let tool = Grep::default();
         let result = tool
-            .execute("grep", &json!({"pattern": "xyz", "path": dir.path().to_str().unwrap()}))
+            .execute(
+                "grep",
+                &json!({"pattern": "xyz", "path": dir.path().to_str().unwrap()}),
+            )
             .await;
         assert!(result.success);
         assert!(result.result.as_str().unwrap().is_empty());
@@ -218,7 +222,10 @@ mod tests {
         std::fs::write(&path, "fn main() {\n    println!(\"hello\");\n}").unwrap();
         let tool = Grep::default();
         let result = tool
-            .execute("grep", &json!({"pattern": "println", "path": path.to_str().unwrap()}))
+            .execute(
+                "grep",
+                &json!({"pattern": "println", "path": path.to_str().unwrap()}),
+            )
             .await;
         assert!(result.success);
         assert!(result.result.as_str().unwrap().contains("println"));

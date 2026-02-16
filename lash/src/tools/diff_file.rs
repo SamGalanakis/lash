@@ -49,10 +49,7 @@ impl ToolProvider for DiffFile {
             return ToolResult::err(json!("Missing required parameter: path"));
         }
 
-        let git_ref = args
-            .get("ref")
-            .and_then(|v| v.as_str())
-            .unwrap_or("HEAD");
+        let git_ref = args.get("ref").and_then(|v| v.as_str()).unwrap_or("HEAD");
 
         let output = tokio::process::Command::new("git")
             .args(["diff", git_ref, "--", path])
@@ -69,7 +66,10 @@ impl ToolProvider for DiffFile {
                 }
 
                 if stdout.is_empty() {
-                    ToolResult::ok(json!(format!("No changes detected in {} vs {}", path, git_ref)))
+                    ToolResult::ok(json!(format!(
+                        "No changes detected in {} vs {}",
+                        path, git_ref
+                    )))
                 } else {
                     ToolResult::ok(json!(stdout.as_ref()))
                 }

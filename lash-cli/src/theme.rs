@@ -67,6 +67,21 @@ pub fn code_chrome() -> Style {
     Style::default().fg(ASH)
 }
 
+/// Expanded code block left border — dimmed sodium "scribe line"
+pub fn code_scribe() -> Style {
+    Style::default().fg(Color::Rgb(100, 72, 28))
+}
+
+/// Streaming code preview content (not yet executed) — one step dimmer than code_content
+pub fn code_streaming() -> Style {
+    Style::new().fg(Color::Rgb(90, 90, 80)) // ASH_TEXT
+}
+
+/// Streaming code preview chrome (│) — subtler than normal code chrome
+pub fn code_streaming_chrome() -> Style {
+    Style::new().fg(Color::Rgb(31, 30, 28)) // BORDER_FAINT
+}
+
 /// Code block header (▶ python, ▼ python)
 pub fn code_header() -> Style {
     Style::default().fg(ASH_MID)

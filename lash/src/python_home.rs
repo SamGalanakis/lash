@@ -18,12 +18,11 @@ pub fn ensure_python_home() -> Result<PathBuf, std::io::Error> {
     let version_file = cache_dir.join(".version");
 
     // Check if already extracted and up-to-date
-    if version_file.exists() {
-        if let Ok(v) = std::fs::read_to_string(&version_file) {
-            if v.trim() == STDLIB_HASH {
-                return Ok(lib_dir);
-            }
-        }
+    if version_file.exists()
+        && let Ok(v) = std::fs::read_to_string(&version_file)
+        && v.trim() == STDLIB_HASH
+    {
+        return Ok(lib_dir);
     }
 
     tracing::info!("Extracting Python stdlib to {}", cache_dir.display());

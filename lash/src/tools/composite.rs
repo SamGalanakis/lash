@@ -22,6 +22,7 @@ impl CompositeTools {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, provider: impl ToolProvider) -> Self {
         self.providers.push(Box::new(provider));
         self
@@ -95,12 +96,14 @@ impl ToolProvider for CompositeTools {
 }
 
 /// Wraps a `ToolProvider` and only exposes tools whose names are in the allow set.
+#[allow(dead_code)]
 pub struct FilteredTools {
     inner: Arc<dyn ToolProvider>,
     allowed: HashSet<String>,
 }
 
 impl FilteredTools {
+    #[allow(dead_code)]
     pub fn new(inner: Arc<dyn ToolProvider>, allowed: &[&str]) -> Self {
         Self {
             inner,
@@ -136,5 +139,105 @@ impl ToolProvider for FilteredTools {
             return ToolResult::err(serde_json::json!(format!("Unknown tool: {name}")));
         }
         self.inner.execute_streaming(name, args, progress).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ToolParam;
+
+    struct MockProviderA;
+
+    #[async_trait::async_trait]
+    impl ToolProvider for MockProviderA {
+        fn definitions(&self) -> Vec<ToolDefinition> {
+            vec![ToolDefinition {
+                name: "tool_a".into(),
+                description: "Tool A".into(),
+                params: vec![],
+                returns: "str".into(),
+                hidden: false,
+            }]
+        }
+        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
+            ToolResult::ok(serde_json::json!("result_a"))
+        }
+    }
+
+    struct MockProviderB;
+
+    #[async_trait::async_trait]
+    impl ToolProvider for MockProviderB {
+        fn definitions(&self) -> Vec<ToolDefinition> {
+            vec![ToolDefinition {
+                name: "tool_b".into(),
+                description: "Tool B".into(),
+                params: vec![ToolParam::typed("x", "int")],
+                returns: "int".into(),
+                hidden: false,
+            }]
+        }
+        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
+            ToolResult::ok(serde_json::json!(42))
+        }
+    }
+
+    // ── CompositeTools ──
+
+    #[tokio::test]
+    async fn composite_combines_definitions() {
+        let tools = CompositeTools::new().add(MockProviderA).add(MockProviderB);
+        let defs = tools.definitions();
+        assert_eq!(defs.len(), 2);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"tool_a"));
+        assert!(names.contains(&"tool_b"));
+    }
+
+    #[tokio::test]
+    async fn composite_routes_execute() {
+        let tools = CompositeTools::new().add(MockProviderA).add(MockProviderB);
+        let r = tools.execute("tool_a", &serde_json::json!({})).await;
+        assert!(r.success);
+        assert_eq!(r.result, serde_json::json!("result_a"));
+
+        let r = tools.execute("tool_b", &serde_json::json!({"x": 1})).await;
+        assert!(r.success);
+        assert_eq!(r.result, serde_json::json!(42));
+    }
+
+    #[tokio::test]
+    async fn composite_unknown_tool() {
+        let tools = CompositeTools::new().add(MockProviderA);
+        let r = tools.execute("nonexistent", &serde_json::json!({})).await;
+        assert!(!r.success);
+    }
+
+    // ── FilteredTools ──
+
+    #[tokio::test]
+    async fn filtered_definitions() {
+        let inner = Arc::new(CompositeTools::new().add(MockProviderA).add(MockProviderB));
+        let filtered = FilteredTools::new(inner, &["tool_a"]);
+        let defs = filtered.definitions();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "tool_a");
+    }
+
+    #[tokio::test]
+    async fn filtered_blocks_disallowed() {
+        let inner = Arc::new(CompositeTools::new().add(MockProviderA).add(MockProviderB));
+        let filtered = FilteredTools::new(inner, &["tool_a"]);
+        let r = filtered.execute("tool_b", &serde_json::json!({})).await;
+        assert!(!r.success);
+    }
+
+    #[tokio::test]
+    async fn filtered_allows_allowed() {
+        let inner = Arc::new(CompositeTools::new().add(MockProviderA).add(MockProviderB));
+        let filtered = FilteredTools::new(inner, &["tool_b"]);
+        let r = filtered.execute("tool_b", &serde_json::json!({})).await;
+        assert!(r.success);
     }
 }

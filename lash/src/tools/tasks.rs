@@ -27,6 +27,7 @@ impl TaskStore {
             "status": t.status,
             "priority": t.priority,
             "active_form": t.active_form,
+            "owner": t.owner,
             "blocks": t.blocks,
             "blocked_by": t.blocked_by,
             "metadata": t.metadata,
@@ -39,17 +40,31 @@ impl TaskStore {
             _ => return Self::err("Missing required parameter: subject"),
         };
 
-        let description = args.get("description").and_then(|v| v.as_str()).unwrap_or("");
-        let priority = args.get("priority").and_then(|v| v.as_str()).unwrap_or("medium");
-        let active_form = args.get("active_form").and_then(|v| v.as_str()).unwrap_or("");
+        let description = args
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let priority = args
+            .get("priority")
+            .and_then(|v| v.as_str())
+            .unwrap_or("medium");
+        let active_form = args
+            .get("active_form")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let metadata = args.get("metadata").cloned().unwrap_or_else(|| json!({}));
 
         if !matches!(priority, "high" | "medium" | "low") {
-            return Self::err(format!("Invalid priority '{}': must be high, medium, or low", priority));
+            return Self::err(format!(
+                "Invalid priority '{}': must be high, medium, or low",
+                priority
+            ));
         }
 
         let id = self.store.next_task_id();
-        let entry = self.store.create_task(&id, subject, description, priority, active_form, &metadata);
+        let entry =
+            self.store
+                .create_task(&id, subject, description, priority, active_form, &metadata);
 
         ToolResult::ok(Self::task_to_json(&entry))
     }
@@ -86,21 +101,24 @@ impl TaskStore {
             None => return Self::err("Missing required parameter: id"),
         };
 
-        if let Some(status) = args.get("status").and_then(|v| v.as_str()) {
-            if !matches!(status, "pending" | "in_progress" | "completed" | "cancelled") {
-                return Self::err(format!(
-                    "Invalid status '{}': must be pending, in_progress, completed, or cancelled",
-                    status
-                ));
-            }
+        if let Some(status) = args.get("status").and_then(|v| v.as_str())
+            && !matches!(
+                status,
+                "pending" | "in_progress" | "completed" | "cancelled"
+            )
+        {
+            return Self::err(format!(
+                "Invalid status '{}': must be pending, in_progress, completed, or cancelled",
+                status
+            ));
         }
-        if let Some(priority) = args.get("priority").and_then(|v| v.as_str()) {
-            if !matches!(priority, "high" | "medium" | "low") {
-                return Self::err(format!(
-                    "Invalid priority '{}': must be high, medium, or low",
-                    priority
-                ));
-            }
+        if let Some(priority) = args.get("priority").and_then(|v| v.as_str())
+            && !matches!(priority, "high" | "medium" | "low")
+        {
+            return Self::err(format!(
+                "Invalid priority '{}': must be high, medium, or low",
+                priority
+            ));
         }
 
         let metadata_merge = args.get("metadata").and_then(|v| v.as_object());
@@ -151,6 +169,22 @@ impl TaskStore {
         match self.store.get_task(id) {
             Some(updated) => ToolResult::ok(Self::task_to_json(&updated)),
             None => Self::err(format!("Task not found after update: {}", id)),
+        }
+    }
+
+    fn execute_claim(&self, args: &serde_json::Value) -> ToolResult {
+        let id = args
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        let owner = match args.get("owner").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s,
+            _ => return Self::err("Missing required parameter: owner"),
+        };
+
+        match self.store.claim_task(id, owner) {
+            Ok(entry) => ToolResult::ok(Self::task_to_json(&entry)),
+            Err(msg) => Self::err(msg),
         }
     }
 
@@ -226,6 +260,16 @@ impl ToolProvider for TaskStore {
                 hidden: false,
             },
             ToolDefinition {
+                name: "claim_task".into(),
+                description: "Claim a task. If no id given, claims the next available task. Owner is auto-filled.".into(),
+                params: vec![
+                    ToolParam { name: "id".into(), r#type: "str".into(), description: "Task ID to claim (omit to auto-pick next available)".into(), required: false },
+                    ToolParam { name: "owner".into(), r#type: "str".into(), description: "Agent name (auto-filled)".into(), required: false },
+                ],
+                returns: "Task".into(),
+                hidden: true,
+            },
+            ToolDefinition {
                 name: "delete_task".into(),
                 description: "Permanently remove a task.".into(),
                 params: vec![ToolParam::typed("id", "str")],
@@ -248,6 +292,7 @@ impl ToolProvider for TaskStore {
             "tasks" => self.execute_tasks(args),
             "get_task" => self.execute_get(args),
             "update_task" => self.execute_update(args),
+            "claim_task" => self.execute_claim(args),
             "delete_task" => self.execute_delete(args),
             "tasks_summary" => self.execute_summary(),
             _ => ToolResult::err(json!(format!("Unknown tool: {}", name))),
@@ -280,8 +325,12 @@ mod tests {
     #[tokio::test]
     async fn test_list_tasks() {
         let store = make_store();
-        store.execute("create_task", &json!({"subject": "Task A"})).await;
-        store.execute("create_task", &json!({"subject": "Task B"})).await;
+        store
+            .execute("create_task", &json!({"subject": "Task A"}))
+            .await;
+        store
+            .execute("create_task", &json!({"subject": "Task B"}))
+            .await;
         let result = store.execute("tasks", &json!({})).await;
         assert!(result.success);
         let items = result.result["items"].as_array().unwrap();
@@ -309,13 +358,9 @@ mod tests {
             .execute("create_task", &json!({"subject": "Doomed"}))
             .await;
         let id = created.result["id"].as_str().unwrap().to_string();
-        let del = store
-            .execute("delete_task", &json!({"id": id}))
-            .await;
+        let del = store.execute("delete_task", &json!({"id": id})).await;
         assert!(del.success);
-        let get = store
-            .execute("get_task", &json!({"id": id}))
-            .await;
+        let get = store.execute("get_task", &json!({"id": id})).await;
         assert!(!get.success);
     }
 
@@ -327,5 +372,165 @@ mod tests {
         assert!(result.success);
         let text = result.result.as_str().unwrap();
         assert!(text.contains("pending"));
+    }
+
+    // ── claim_task ──
+
+    #[tokio::test]
+    async fn test_claim_task() {
+        let store = make_store();
+        let created = store.execute("create_task", &json!({"subject": "T"})).await;
+        let id = created.result["id"].as_str().unwrap().to_string();
+        let result = store
+            .execute("claim_task", &json!({"id": id, "owner": "agent-1"}))
+            .await;
+        assert!(result.success);
+        assert_eq!(result.result["owner"], "agent-1");
+        assert_eq!(result.result["status"], "in_progress");
+    }
+
+    #[tokio::test]
+    async fn test_claim_task_double_claim_different_owner() {
+        let store = make_store();
+        let created = store.execute("create_task", &json!({"subject": "T"})).await;
+        let id = created.result["id"].as_str().unwrap().to_string();
+        store
+            .execute("claim_task", &json!({"id": id, "owner": "agent-1"}))
+            .await;
+        let result = store
+            .execute("claim_task", &json!({"id": id, "owner": "agent-2"}))
+            .await;
+        assert!(!result.success);
+    }
+
+    #[tokio::test]
+    async fn test_claim_blocked_task() {
+        let store = make_store();
+        let t1 = store
+            .execute("create_task", &json!({"subject": "Blocker"}))
+            .await;
+        let t2 = store
+            .execute("create_task", &json!({"subject": "Blocked"}))
+            .await;
+        let id1 = t1.result["id"].as_str().unwrap().to_string();
+        let id2 = t2.result["id"].as_str().unwrap().to_string();
+        store
+            .execute("update_task", &json!({"id": id2, "add_blocked_by": [id1]}))
+            .await;
+        let result = store
+            .execute("claim_task", &json!({"id": id2, "owner": "a"}))
+            .await;
+        assert!(!result.success);
+    }
+
+    // ── Dependency management via update_task ──
+
+    #[tokio::test]
+    async fn test_add_and_remove_deps() {
+        let store = make_store();
+        let t1 = store.execute("create_task", &json!({"subject": "A"})).await;
+        let t2 = store.execute("create_task", &json!({"subject": "B"})).await;
+        let id1 = t1.result["id"].as_str().unwrap().to_string();
+        let id2 = t2.result["id"].as_str().unwrap().to_string();
+
+        // add_blocks: t1 blocks t2
+        let updated = store
+            .execute("update_task", &json!({"id": id1, "add_blocks": [id2]}))
+            .await;
+        assert!(
+            updated.result["blocks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == &json!(id2))
+        );
+
+        // remove_blocks
+        let updated = store
+            .execute("update_task", &json!({"id": id1, "remove_blocks": [id2]}))
+            .await;
+        assert!(updated.result["blocks"].as_array().unwrap().is_empty());
+
+        // add_blocked_by
+        let updated = store
+            .execute("update_task", &json!({"id": id2, "add_blocked_by": [id1]}))
+            .await;
+        assert!(
+            updated.result["blocked_by"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == &json!(id1))
+        );
+
+        // remove_blocked_by
+        let updated = store
+            .execute(
+                "update_task",
+                &json!({"id": id2, "remove_blocked_by": [id1]}),
+            )
+            .await;
+        assert!(updated.result["blocked_by"].as_array().unwrap().is_empty());
+    }
+
+    // ── Owner auto-clear via tool ──
+
+    #[tokio::test]
+    async fn test_owner_cleared_on_completed() {
+        let store = make_store();
+        let created = store.execute("create_task", &json!({"subject": "T"})).await;
+        let id = created.result["id"].as_str().unwrap().to_string();
+        store
+            .execute("claim_task", &json!({"id": id, "owner": "agent-1"}))
+            .await;
+        let result = store
+            .execute("update_task", &json!({"id": id, "status": "completed"}))
+            .await;
+        assert!(result.success);
+        assert_eq!(result.result["owner"], "");
+    }
+
+    // ── Validation ──
+
+    #[tokio::test]
+    async fn test_invalid_priority() {
+        let store = make_store();
+        let result = store
+            .execute(
+                "create_task",
+                &json!({"subject": "T", "priority": "urgent"}),
+            )
+            .await;
+        assert!(!result.success);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_status() {
+        let store = make_store();
+        let created = store.execute("create_task", &json!({"subject": "T"})).await;
+        let id = created.result["id"].as_str().unwrap().to_string();
+        let result = store
+            .execute("update_task", &json!({"id": id, "status": "invalid"}))
+            .await;
+        assert!(!result.success);
+    }
+
+    // ── Summary content ──
+
+    #[tokio::test]
+    async fn test_summary_counts() {
+        let store = make_store();
+        store.execute("create_task", &json!({"subject": "A"})).await;
+        store.execute("create_task", &json!({"subject": "B"})).await;
+        let b = store.execute("create_task", &json!({"subject": "C"})).await;
+        let id_c = b.result["id"].as_str().unwrap().to_string();
+        store
+            .execute("update_task", &json!({"id": id_c, "status": "completed"}))
+            .await;
+        let result = store.execute("tasks_summary", &json!({})).await;
+        let text = result.result.as_str().unwrap();
+        assert!(text.contains("3 total"));
+        assert!(text.contains("2 pending"));
+        assert!(text.contains("1 completed"));
     }
 }

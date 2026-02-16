@@ -3,7 +3,7 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme;
 
@@ -14,10 +14,34 @@ fn pad_display(s: &str, target: usize) -> String {
     format!("{}{}", s, " ".repeat(padding))
 }
 
+/// Truncate a string to fit within `max_w` display columns, appending `…` if truncated.
+/// Uses Unicode character widths for correct handling of CJK and other wide characters.
+fn truncate_display(s: &str, max_w: usize) -> String {
+    let w = UnicodeWidthStr::width(s);
+    if w <= max_w {
+        return s.to_string();
+    }
+    // Need to truncate — reserve 1 column for '…'
+    let target = max_w.saturating_sub(1);
+    let mut result = String::new();
+    let mut col = 0;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if col + cw > target {
+            break;
+        }
+        result.push(ch);
+        col += cw;
+    }
+    result.push('\u{2026}');
+    result
+}
+
 /// Parse markdown text and return styled ratatui Lines.
+/// `max_width` constrains table rendering so borders are never wider than the viewport.
 /// Used for finalized AssistantText blocks only (not streaming).
-pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
-    let mut renderer = MdRenderer::new();
+pub fn render_markdown(text: &str, max_width: usize) -> Vec<Line<'static>> {
+    let mut renderer = MdRenderer::new(max_width);
     let opts = Options::ENABLE_TABLES;
     let parser = Parser::new_ext(text, opts);
     for event in parser {
@@ -31,6 +55,7 @@ struct MdRenderer {
     lines: Vec<Line<'static>>,
     spans: Vec<Span<'static>>,
     style_stack: Vec<Style>,
+    max_width: usize,
     in_code_block: bool,
     in_list: bool,
     in_item: bool,
@@ -43,11 +68,12 @@ struct MdRenderer {
 }
 
 impl MdRenderer {
-    fn new() -> Self {
+    fn new(max_width: usize) -> Self {
         Self {
             lines: Vec::new(),
             spans: Vec::new(),
             style_stack: vec![theme::assistant_text()],
+            max_width,
             in_code_block: false,
             in_list: false,
             in_item: false,
@@ -60,7 +86,10 @@ impl MdRenderer {
     }
 
     fn current_style(&self) -> Style {
-        self.style_stack.last().copied().unwrap_or(theme::assistant_text())
+        self.style_stack
+            .last()
+            .copied()
+            .unwrap_or(theme::assistant_text())
     }
 
     fn push_style(&mut self, style: Style) {
@@ -85,6 +114,7 @@ impl MdRenderer {
     }
 
     /// Render the buffered table as aligned columns with box-drawing borders.
+    /// Column widths are constrained to `self.max_width` so borders never wrap.
     fn flush_table(&mut self) {
         let head = std::mem::take(&mut self.table_head);
         let rows = std::mem::take(&mut self.table_rows);
@@ -93,8 +123,10 @@ impl MdRenderer {
             return;
         }
 
-        // Compute column count and display widths (using Unicode width, not byte len)
-        let col_count = head.len().max(rows.iter().map(|r| r.len()).max().unwrap_or(0));
+        // Compute column count and natural display widths (using Unicode width)
+        let col_count = head
+            .len()
+            .max(rows.iter().map(|r| r.len()).max().unwrap_or(0));
         let mut widths = vec![0usize; col_count];
         for (i, cell) in head.iter().enumerate() {
             widths[i] = widths[i].max(UnicodeWidthStr::width(cell.as_str()));
@@ -105,17 +137,56 @@ impl MdRenderer {
             }
         }
 
+        // Constrain total table width to max_width
+        if self.max_width > 0 && col_count > 0 {
+            // border_overhead: leading │ + (space + content + space + │) per column
+            let border_overhead = 1 + col_count * 3;
+            let available = self.max_width.saturating_sub(border_overhead);
+            let total: usize = widths.iter().sum();
+            if total > available && available > 0 {
+                let min_col = 3usize;
+                // Shrink each column proportionally, with a minimum of min_col
+                let mut new_widths = vec![0usize; col_count];
+                for (i, &w) in widths.iter().enumerate() {
+                    new_widths[i] = ((w as u64 * available as u64) / total as u64) as usize;
+                    new_widths[i] = new_widths[i].max(min_col);
+                }
+                // If rounding pushed us over, trim the widest columns
+                let mut new_total: usize = new_widths.iter().sum();
+                while new_total > available {
+                    // Find widest column and shrink by 1
+                    if let Some(max_idx) = new_widths
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, w)| **w > min_col)
+                        .max_by_key(|(_, w)| **w)
+                        .map(|(i, _)| i)
+                    {
+                        new_widths[max_idx] -= 1;
+                        new_total -= 1;
+                    } else {
+                        break; // all columns at minimum
+                    }
+                }
+                widths = new_widths;
+            }
+        }
+
         let chrome = theme::code_chrome();
         let head_style = theme::assistant_text().add_modifier(Modifier::BOLD);
         let cell_style = theme::assistant_text();
 
-        // Helper: build a row line with display-width-padded cells
+        // Helper: build a row line with display-width-padded, truncated cells
         let build_row = |cells: &[String], style: Style, widths: &[usize]| -> Line<'static> {
             let mut spans: Vec<Span<'static>> = Vec::new();
             spans.push(Span::styled("\u{2502}", chrome)); // │
             for (i, w) in widths.iter().enumerate() {
                 let text = cells.get(i).map(|s| s.as_str()).unwrap_or("");
-                spans.push(Span::styled(format!(" {} ", pad_display(text, *w)), style));
+                let display = truncate_display(text, *w);
+                spans.push(Span::styled(
+                    format!(" {} ", pad_display(&display, *w)),
+                    style,
+                ));
                 spans.push(Span::styled("\u{2502}", chrome)); // │
             }
             Line::from(spans)
@@ -138,13 +209,15 @@ impl MdRenderer {
         };
 
         // Top border: ┌──┬──┐
-        self.lines.push(build_sep("\u{250c}", "\u{252c}", "\u{2510}", &widths));
+        self.lines
+            .push(build_sep("\u{250c}", "\u{252c}", "\u{2510}", &widths));
 
         // Header row
         if !head.is_empty() {
             self.lines.push(build_row(&head, head_style, &widths));
             // Header separator: ├──┼──┤
-            self.lines.push(build_sep("\u{251c}", "\u{253c}", "\u{2524}", &widths));
+            self.lines
+                .push(build_sep("\u{251c}", "\u{253c}", "\u{2524}", &widths));
         }
 
         // Data rows
@@ -153,7 +226,8 @@ impl MdRenderer {
         }
 
         // Bottom border: └──┴──┘
-        self.lines.push(build_sep("\u{2514}", "\u{2534}", "\u{2518}", &widths));
+        self.lines
+            .push(build_sep("\u{2514}", "\u{2534}", "\u{2518}", &widths));
         self.blank_line();
     }
 
@@ -233,7 +307,8 @@ impl MdRenderer {
                 if self.in_table {
                     self.current_cell.push_str(&code);
                 } else {
-                    self.spans.push(Span::styled(code.to_string(), theme::inline_code()));
+                    self.spans
+                        .push(Span::styled(code.to_string(), theme::inline_code()));
                 }
             }
 
@@ -276,10 +351,13 @@ impl MdRenderer {
                         ]));
                     }
                 } else if self.in_item && self.spans.is_empty() {
-                    self.spans.push(Span::styled("  \u{2022} ", self.current_style()));
-                    self.spans.push(Span::styled(text.to_string(), self.current_style()));
+                    self.spans
+                        .push(Span::styled("  \u{2022} ", self.current_style()));
+                    self.spans
+                        .push(Span::styled(text.to_string(), self.current_style()));
                 } else {
-                    self.spans.push(Span::styled(text.to_string(), self.current_style()));
+                    self.spans
+                        .push(Span::styled(text.to_string(), self.current_style()));
                 }
             }
             Event::SoftBreak => {
@@ -301,16 +379,6 @@ impl MdRenderer {
                 self.blank_line();
             }
 
-            // ── Horizontal rule (---) ──
-            Event::Rule => {
-                self.flush_line();
-                self.lines.push(Line::from(Span::styled(
-                    "\u{2500}".repeat(40),
-                    theme::code_chrome(),
-                )));
-                self.blank_line();
-            }
-
             // ── Links ──
             Event::Start(Tag::Link { .. }) => {}
             Event::End(TagEnd::Link) => {}
@@ -320,9 +388,164 @@ impl MdRenderer {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── pad_display ──
+
+    #[test]
+    fn pad_display_already_correct() {
+        assert_eq!(pad_display("abc", 3), "abc");
+    }
+
+    #[test]
+    fn pad_display_under_width() {
+        assert_eq!(pad_display("ab", 5), "ab   ");
+    }
+
+    #[test]
+    fn pad_display_over_width() {
+        // Over target width — no padding added (saturating_sub → 0)
+        assert_eq!(pad_display("abcdef", 3), "abcdef");
+    }
+
+    #[test]
+    fn pad_display_cjk() {
+        // CJK char is 2 columns, so "世" = width 2, target 5 → 3 spaces
+        let result = pad_display("\u{4e16}", 5);
+        assert_eq!(result, "\u{4e16}   ");
+    }
+
+    // ── render_markdown ──
+
+    #[test]
+    fn render_plain_text() {
+        let lines = render_markdown("hello world", 80);
+        // Plain text → paragraph with text + blank line after
+        assert!(lines.len() >= 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("hello world"));
+    }
+
+    #[test]
+    fn render_heading() {
+        let lines = render_markdown("# Title", 80);
+        // Should have a bold styled line and a blank line
+        assert!(lines.len() >= 2);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("Title"));
+    }
+
+    #[test]
+    fn render_bullet_list() {
+        let lines = render_markdown("- item one\n- item two", 80);
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(all_text.contains("\u{2022}"));
+        assert!(all_text.contains("item one"));
+        assert!(all_text.contains("item two"));
+    }
+
+    #[test]
+    fn render_code_block() {
+        let lines = render_markdown("```\nfn main() {}\n```", 80);
+        // Code block lines have "│ " prefix
+        let has_code_chrome = lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains('\u{2502}')));
+        assert!(has_code_chrome);
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(all_text.contains("fn main()"));
+    }
+
+    #[test]
+    fn render_bold_and_italic() {
+        let lines = render_markdown("**bold** and *italic*", 80);
+        // Just verify it doesn't crash and produces output
+        assert!(!lines.is_empty());
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(all_text.contains("bold"));
+        assert!(all_text.contains("italic"));
+    }
+
+    #[test]
+    fn render_table() {
+        let lines = render_markdown("| A | B |\n|---|---|\n| 1 | 2 |", 80);
+        // Table should have box-drawing characters
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(all_text.contains('\u{250c}')); // ┌
+        assert!(all_text.contains('\u{2514}')); // └
+        assert!(all_text.contains("A"));
+        assert!(all_text.contains("1"));
+    }
+
+    #[test]
+    fn render_table_truncated() {
+        // Table with long content forced into narrow width
+        let lines = render_markdown(
+            "| Name | Description |\n|---|---|\n| short | A very long description that should be truncated |",
+            30,
+        );
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(all_text.contains('\u{250c}')); // ┌
+        assert!(all_text.contains('\u{2026}')); // … (truncation marker)
+        // Each line should fit within max_width
+        for line in &lines {
+            assert!(
+                line.width() <= 30,
+                "line width {} > 30: {:?}",
+                line.width(),
+                line
+            );
+        }
+    }
+
+    // ── markdown_height ──
+
+    #[test]
+    fn markdown_height_simple() {
+        let h = markdown_height("hello", 80);
+        assert!(h >= 1);
+    }
+
+    #[test]
+    fn markdown_height_multiline() {
+        let h = markdown_height("line1\n\nline2", 80);
+        assert!(h >= 2);
+    }
+
+    #[test]
+    fn markdown_height_wrapping() {
+        // Very narrow width forces wrapping
+        let h_narrow = markdown_height("a long line of text", 5);
+        let h_wide = markdown_height("a long line of text", 200);
+        assert!(h_narrow > h_wide);
+    }
+}
+
 /// Count the visual height of rendered markdown, accounting for line wrapping at `width`.
 pub fn markdown_height(text: &str, width: usize) -> usize {
-    let lines = render_markdown(text);
+    let lines = render_markdown(text, width);
     if width == 0 {
         return lines.len();
     }
@@ -330,11 +553,7 @@ pub fn markdown_height(text: &str, width: usize) -> usize {
         .iter()
         .map(|line| {
             let w = line.width();
-            if w == 0 {
-                1
-            } else {
-                (w + width - 1) / width
-            }
+            if w == 0 { 1 } else { w.div_ceil(width) }
         })
         .sum::<usize>()
         .max(1)

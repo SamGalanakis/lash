@@ -4,11 +4,12 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    Agent, AgentConfig, AgentEvent, Message, MessageRole, Part, PartKind, PruneState,
-    Session, SessionConfig, Store, ToolDefinition, ToolParam, ToolProvider, ToolResult,
-};
 use crate::provider::DelegateModels;
+use crate::{
+    Agent, AgentConfig, AgentEvent, Message, MessageRole, Part, PartKind, ProgressSender,
+    PruneState, SandboxMessage, Session, SessionConfig, Store, ToolDefinition, ToolParam,
+    ToolProvider, ToolResult,
+};
 
 /// Delegate tier determines model choice and turn limits.
 enum Tier {
@@ -18,6 +19,7 @@ enum Tier {
 }
 
 /// Shared delegate sub-agent core.
+#[allow(dead_code)]
 struct DelegateInner {
     tools: Arc<dyn ToolProvider>,
     config: AgentConfig,
@@ -86,7 +88,10 @@ impl DelegateInner {
                 model,
                 provider: config.provider.clone(),
                 sub_agent: true,
+                include_soul: matches!(tier, Tier::Deep),
                 max_turns: Some(max_turns),
+                llm_log_path: config.llm_log_path.clone(),
+                headless: config.headless,
                 ..Default::default()
             },
             store,
@@ -100,11 +105,29 @@ impl DelegateInner {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.tool_name.into(),
-            description: format!("{} Returns {{\"result\": str, \"context\": [str]}}.", self.description),
+            description: format!(
+                "{} Returns {{\"result\": str, \"context\": [str]}}.",
+                self.description
+            ),
             params: vec![ToolParam::typed("prompt", "str")],
             returns: "dict".into(),
             hidden: false,
         }
+    }
+
+    async fn execute_streaming(
+        &self,
+        args: &serde_json::Value,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        if let Some(tx) = progress {
+            let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+            let _ = tx.send(SandboxMessage {
+                text: json!({ "name": self.tool_name, "task": prompt }).to_string(),
+                kind: "delegate_start".into(),
+            });
+        }
+        self.execute(args).await
     }
 
     async fn execute(&self, args: &serde_json::Value) -> ToolResult {
@@ -117,20 +140,28 @@ impl DelegateInner {
             return ToolResult::err(json!("Missing required parameter: prompt"));
         }
 
+        // Generate agent ID for the sub-agent (used for task ownership + state)
+        let agent_id = uuid::Uuid::new_v4().to_string();
+
         // Create a new session with the base tools (no delegate tools)
-        let session =
-            match Session::new(Arc::clone(&self.tools), SessionConfig::default()).await {
-                Ok(s) => s,
-                Err(e) => {
-                    return ToolResult::err(json!(format!("Failed to create sub-agent session: {e}")));
-                }
-            };
+        let session = match Session::new(
+            Arc::clone(&self.tools),
+            SessionConfig::default(),
+            &agent_id,
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                return ToolResult::err(json!(format!("Failed to create sub-agent session: {e}")));
+            }
+        };
 
         let mut agent = Agent::new(
             session,
             self.config.clone(),
             Arc::clone(&self.store),
-            None,
+            Some(agent_id),
         );
         let messages = vec![Message {
             id: uuid::Uuid::new_v4().to_string(),
@@ -148,7 +179,7 @@ impl DelegateInner {
 
         // Run agent in a spawned task so we can drain events concurrently
         let run_handle =
-            tokio::spawn(async move { agent.run(messages, vec![], event_tx, cancel).await });
+            tokio::spawn(async move { agent.run(messages, vec![], event_tx, cancel, 0).await });
 
         let mut final_message: Option<String> = None;
         let mut context: Vec<String> = Vec::new();
@@ -162,7 +193,7 @@ impl DelegateInner {
                 AgentEvent::Message { text, kind } => {
                     if kind == "final" {
                         final_message = Some(text);
-                    } else if kind == "progress" {
+                    } else if kind == "say" {
                         context.push(text);
                     }
                 }
@@ -206,7 +237,15 @@ impl DelegateTask {
         cancel: CancellationToken,
         parent_id: String,
     ) -> Self {
-        Self(DelegateInner::new(tools, config, delegate_models, store, cancel, parent_id, Tier::Task))
+        Self(DelegateInner::new(
+            tools,
+            config,
+            delegate_models,
+            store,
+            cancel,
+            parent_id,
+            Tier::Task,
+        ))
     }
 }
 
@@ -217,6 +256,14 @@ impl ToolProvider for DelegateTask {
     }
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
         self.0.execute(args).await
+    }
+    async fn execute_streaming(
+        &self,
+        _name: &str,
+        args: &serde_json::Value,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        self.0.execute_streaming(args, progress).await
     }
 }
 
@@ -232,7 +279,15 @@ impl DelegateSearch {
         cancel: CancellationToken,
         parent_id: String,
     ) -> Self {
-        Self(DelegateInner::new(tools, config, delegate_models, store, cancel, parent_id, Tier::Search))
+        Self(DelegateInner::new(
+            tools,
+            config,
+            delegate_models,
+            store,
+            cancel,
+            parent_id,
+            Tier::Search,
+        ))
     }
 }
 
@@ -243,6 +298,14 @@ impl ToolProvider for DelegateSearch {
     }
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
         self.0.execute(args).await
+    }
+    async fn execute_streaming(
+        &self,
+        _name: &str,
+        args: &serde_json::Value,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        self.0.execute_streaming(args, progress).await
     }
 }
 
@@ -258,7 +321,15 @@ impl DelegateDeep {
         cancel: CancellationToken,
         parent_id: String,
     ) -> Self {
-        Self(DelegateInner::new(tools, config, delegate_models, store, cancel, parent_id, Tier::Deep))
+        Self(DelegateInner::new(
+            tools,
+            config,
+            delegate_models,
+            store,
+            cancel,
+            parent_id,
+            Tier::Deep,
+        ))
     }
 }
 
@@ -269,5 +340,13 @@ impl ToolProvider for DelegateDeep {
     }
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
         self.0.execute(args).await
+    }
+    async fn execute_streaming(
+        &self,
+        _name: &str,
+        args: &serde_json::Value,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        self.0.execute_streaming(args, progress).await
     }
 }

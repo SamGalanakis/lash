@@ -50,12 +50,11 @@ impl ToolProvider for WriteFile {
         let path = Path::new(path_str);
 
         // Create parent directories
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
-                    return ToolResult::err(json!(format!("Failed to create directories: {}", e)));
-                }
-            }
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            return ToolResult::err(json!(format!("Failed to create directories: {}", e)));
         }
 
         match std::fs::write(path, content) {
@@ -81,7 +80,10 @@ mod tests {
         let tool = WriteFile::default();
         let path = dir.path().join("test.txt");
         let result = tool
-            .execute("write_file", &json!({"path": path.to_str().unwrap(), "content": "hello world"}))
+            .execute(
+                "write_file",
+                &json!({"path": path.to_str().unwrap(), "content": "hello world"}),
+            )
             .await;
         assert!(result.success);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
@@ -93,7 +95,10 @@ mod tests {
         let tool = WriteFile::default();
         let path = dir.path().join("a/b/c/test.txt");
         let result = tool
-            .execute("write_file", &json!({"path": path.to_str().unwrap(), "content": "nested"}))
+            .execute(
+                "write_file",
+                &json!({"path": path.to_str().unwrap(), "content": "nested"}),
+            )
             .await;
         assert!(result.success);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "nested");
@@ -106,7 +111,10 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "old content").unwrap();
         let result = tool
-            .execute("write_file", &json!({"path": path.to_str().unwrap(), "content": "new content"}))
+            .execute(
+                "write_file",
+                &json!({"path": path.to_str().unwrap(), "content": "new content"}),
+            )
             .await;
         assert!(result.success);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
@@ -115,7 +123,9 @@ mod tests {
     #[tokio::test]
     async fn test_missing_path() {
         let tool = WriteFile::default();
-        let result = tool.execute("write_file", &json!({"content": "hello"})).await;
+        let result = tool
+            .execute("write_file", &json!({"content": "hello"}))
+            .await;
         assert!(!result.success);
     }
 }

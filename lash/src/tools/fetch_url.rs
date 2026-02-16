@@ -37,10 +37,7 @@ impl ToolProvider for FetchUrl {
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
-        let url = args
-            .get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
+        let url = args.get("url").and_then(|v| v.as_str()).unwrap_or_default();
 
         if url.is_empty() {
             return ToolResult::err(json!("Missing required parameter: url"));
@@ -54,9 +51,9 @@ impl ToolProvider for FetchUrl {
                 const MAX_BYTES: usize = 100_000;
                 match r.bytes().await {
                     Ok(bytes) => {
-                        let mut text = String::from_utf8_lossy(
-                            &bytes[..bytes.len().min(MAX_BYTES)],
-                        ).to_string();
+                        let mut text =
+                            String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_BYTES)])
+                                .to_string();
                         if bytes.len() > MAX_BYTES {
                             text.push_str("\n[truncated]");
                         }

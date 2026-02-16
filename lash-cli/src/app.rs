@@ -1,10 +1,20 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use lash::{AgentEvent, TokenUsage};
+use lash::{AgentEvent, Store, TokenUsage};
 
 use crate::command;
 use crate::markdown;
 use crate::skill::SkillRegistry;
+
+#[derive(Clone, Debug)]
+pub struct TaskSnapshot {
+    pub id: String,
+    pub label: String,
+    pub status: String,
+    pub owner: String,
+    pub is_blocked: bool,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Mode {
@@ -42,6 +52,9 @@ pub enum DisplayBlock {
     CodeBlock {
         code: String,
         expanded: bool,
+        /// If true, this block is a continuation of a prior code-block group.
+        /// In collapsed mode it is hidden; the group leader shows total lines.
+        continuation: bool,
     },
     ToolCall {
         name: String,
@@ -72,6 +85,10 @@ pub enum DisplayBlock {
         /// Whether this is the last in a consecutive sequence (uses └─ instead of ├─).
         is_last: bool,
     },
+    /// Live task list (bordered inline display).
+    TaskList {
+        tasks: Vec<TaskSnapshot>,
+    },
     Splash,
 }
 
@@ -81,11 +98,7 @@ fn wrapped_line_height(line: &str, width: usize) -> usize {
         return 1;
     }
     let len = unicode_width::UnicodeWidthStr::width(line);
-    if len == 0 {
-        1
-    } else {
-        (len + width - 1) / width
-    }
+    if len == 0 { 1 } else { len.div_ceil(width) }
 }
 
 /// Sum of wrapped visual rows for a multi-line string, with an optional prefix width per line.
@@ -113,11 +126,17 @@ impl DisplayBlock {
                 wrapped_text_height(s, width, 2) + 1 // +1 blank line after
             }
             DisplayBlock::AssistantText(s) => markdown::markdown_height(s, width),
-            DisplayBlock::CodeBlock { code, expanded } => {
+            DisplayBlock::CodeBlock {
+                code,
+                expanded,
+                continuation,
+            } => {
                 let show = if code_expanded { *expanded } else { false };
                 if show {
-                    // "│ " prefix (2 chars) on code lines + header + footer
-                    wrapped_text_height(code, width, 2) + 2
+                    // "│ " prefix (2 chars) on code lines
+                    wrapped_text_height(code, width, 2)
+                } else if *continuation {
+                    0 // hidden in collapsed mode — leader shows total
                 } else {
                     1 // collapsed single line
                 }
@@ -126,15 +145,10 @@ impl DisplayBlock {
             DisplayBlock::CodeOutput { output, error } => {
                 let mut h = 0;
                 if code_expanded && !output.is_empty() {
-                    // header + "│ " prefixed lines
-                    h += 1 + wrapped_text_height(output, width, 2);
+                    h += wrapped_text_height(output, width, 2);
                 }
                 if let Some(err) = error {
-                    // header + "│ " prefixed lines
-                    h += 1 + wrapped_text_height(err, width, 2);
-                }
-                if h > 0 {
-                    h += 1; // bottom border
+                    h += wrapped_text_height(err, width, 2);
                 }
                 h
             }
@@ -149,14 +163,15 @@ impl DisplayBlock {
                 h += 1; // bottom border
                 h
             }
-            DisplayBlock::Error(msg) => {
-                wrapped_line_height(&format!("Error: {}", msg), width)
-            }
+            DisplayBlock::Error(msg) => wrapped_line_height(&format!("Error: {}", msg), width),
             DisplayBlock::SystemMessage(s) => wrapped_text_height(s, width, 0) + 1, // +1 blank after
             DisplayBlock::SubAgentResult { .. } => 2, // task line + status line
             DisplayBlock::PlanContent(s) => {
                 // borders (2) + title line is part of top border + markdown content height
                 2 + markdown::markdown_height(s, width.saturating_sub(2))
+            }
+            DisplayBlock::TaskList { tasks } => {
+                2 + tasks.len() // top border + tasks + bottom border
             }
             DisplayBlock::Splash => {
                 // Splash fills the entire viewport (centered content + top/bottom padding)
@@ -232,11 +247,32 @@ pub struct App {
     pub plan_file: Option<PathBuf>,
     /// Last modification time of the plan file, for change detection.
     pub plan_file_mtime: Option<std::time::SystemTime>,
+    /// Unique session name (e.g. "alpine-canyon").
+    pub session_name: String,
+    /// Current working directory with ~ substitution.
+    pub cwd: String,
+    /// Store handle for reading task data (shared with agent).
+    pub store: Option<Arc<Store>>,
+    /// Snapshots for the persistent task tray (bottom panel).
+    pub task_tray: Vec<TaskSnapshot>,
+    /// Active delegate sub-agent: (name, task description, started_at).
+    pub active_delegate: Option<(String, String, std::time::Instant)>,
 }
 
 impl App {
-    pub fn new(model: String) -> Self {
+    pub fn new(model: String, session_name: String, store: Option<Arc<Store>>) -> Self {
         let context_window = lash::model_info::context_window(&model);
+        let cwd = {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let dir = std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| ".".into());
+            if !home.is_empty() && dir.starts_with(&home) {
+                format!("~{}", &dir[home.len()..])
+            } else {
+                dir
+            }
+        };
         Self {
             blocks: vec![DisplayBlock::Splash],
             input: String::new(),
@@ -275,6 +311,11 @@ impl App {
             mode: Mode::Normal,
             plan_file: None,
             plan_file_mtime: None,
+            session_name,
+            cwd,
+            store,
+            task_tray: Vec::new(),
+            active_delegate: None,
         }
     }
 
@@ -301,6 +342,23 @@ impl App {
         self.height_cache.clear();
     }
 
+    /// Check whether a new CodeBlock belongs to an existing code-block group.
+    /// Returns `true` if there is a prior CodeBlock with only ToolCall /
+    /// CodeOutput / TaskList blocks between it and the end (no user-facing
+    /// boundary like AssistantText, Error, UserInput, etc.).
+    fn is_code_continuation(&self) -> bool {
+        for block in self.blocks.iter().rev() {
+            match block {
+                DisplayBlock::CodeBlock { .. } => return true,
+                DisplayBlock::ToolCall { .. }
+                | DisplayBlock::CodeOutput { .. }
+                | DisplayBlock::TaskList { .. } => continue,
+                _ => return false,
+            }
+        }
+        false
+    }
+
     /// Process an agent event, updating display blocks.
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
@@ -310,11 +368,16 @@ impl App {
             }
             AgentEvent::CodeBlock { code } => {
                 self.pending_text.clear();
-                self.blocks.push(DisplayBlock::CodeBlock {
-                    code,
-                    expanded: self.code_expanded,
-                });
-                self.invalidate_height_cache();
+                let trimmed = code.trim_matches('\n');
+                if !trimmed.is_empty() {
+                    let continuation = self.is_code_continuation();
+                    self.blocks.push(DisplayBlock::CodeBlock {
+                        code: trimmed.to_string(),
+                        expanded: self.code_expanded,
+                        continuation,
+                    });
+                    self.invalidate_height_cache();
+                }
                 self.scroll_to_bottom();
             }
             AgentEvent::ToolCall {
@@ -324,30 +387,51 @@ impl App {
                 ..
             } => {
                 self.streaming_output.clear();
+                if name.starts_with("delegate_") {
+                    self.active_delegate = None;
+                }
+                let is_task_tool = matches!(
+                    name.as_str(),
+                    "create_task" | "update_task" | "claim_task" | "delete_task"
+                );
                 self.blocks.push(DisplayBlock::ToolCall {
                     name,
                     success,
                     duration_ms,
                 });
                 self.invalidate_height_cache();
+                if is_task_tool {
+                    self.refresh_tasks();
+                }
                 self.scroll_to_bottom();
             }
             AgentEvent::CodeOutput { output, error } => {
                 if error.is_some() || !output.is_empty() {
                     self.blocks.push(DisplayBlock::CodeOutput { output, error });
                     self.invalidate_height_cache();
-                    self.scroll_to_bottom();
                 }
+                self.scroll_to_bottom();
             }
             AgentEvent::Message { text, kind } => {
-                if kind == "tool_output" {
+                if kind == "delegate_start" {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                        let name = v
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("delegate")
+                            .to_string();
+                        let task = v
+                            .get("task")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        self.active_delegate = Some((name, task, std::time::Instant::now()));
+                    }
+                    self.scroll_to_bottom();
+                } else if kind == "tool_output" {
                     self.streaming_output.push(text);
                     self.scroll_to_bottom();
-                } else if kind == "progress" {
-                    // status() calls → show next to spinner
-                    self.status_text = Some(text);
                 } else {
-                    // "final" or any other kind → show in history
                     self.blocks.push(DisplayBlock::AssistantText(text));
                     self.invalidate_height_cache();
                     self.scroll_to_bottom();
@@ -362,13 +446,16 @@ impl App {
                 self.running = false;
                 self.status_text = None;
                 self.streaming_output.clear();
+                self.active_delegate = None;
             }
             AgentEvent::Error { message } => {
                 self.blocks.push(DisplayBlock::Error(message));
                 self.invalidate_height_cache();
                 self.scroll_to_bottom();
             }
-            AgentEvent::TokenUsage { usage, cumulative, .. } => {
+            AgentEvent::TokenUsage {
+                usage, cumulative, ..
+            } => {
                 self.token_usage = cumulative;
                 self.last_input_tokens = usage.input_tokens;
             }
@@ -438,6 +525,8 @@ impl App {
         self.pending_images.clear();
         self.streaming_output.clear();
         self.message_queue.clear();
+        self.task_tray.clear();
+        self.active_delegate = None;
         self.token_usage = TokenUsage::default();
         self.last_input_tokens = 0;
         self.invalidate_height_cache();
@@ -472,8 +561,30 @@ impl App {
         path
     }
 
-    /// Toggle code block expansion.
+    /// Toggle code block expansion with scroll anchoring.
+    ///
+    /// When the user is scrolled to a specific position, we anchor to the block
+    /// at the top of the viewport so the same content stays visible after
+    /// code blocks change height.
     pub fn toggle_code_expand(&mut self) {
+        // Determine anchor before toggling
+        let anchor = if self.follow_output || self.height_cache_width == 0 {
+            None
+        } else if !self.height_cache.is_empty() {
+            let cache = &self.height_cache;
+            let idx = cache.partition_point(|&cum| cum <= self.scroll_offset);
+            if idx >= self.blocks.len() {
+                None
+            } else {
+                let block_start = if idx == 0 { 0 } else { cache[idx - 1] };
+                let skip = self.scroll_offset - block_start;
+                Some((idx, skip))
+            }
+        } else {
+            None
+        };
+
+        // Toggle expansion state
         self.code_expanded = !self.code_expanded;
         for block in &mut self.blocks {
             if let DisplayBlock::CodeBlock { expanded, .. } = block {
@@ -481,6 +592,108 @@ impl App {
             }
         }
         self.invalidate_height_cache();
+
+        // Restore scroll to keep the anchor block visible
+        if let Some((anchor_idx, anchor_skip)) = anchor {
+            let w = self.height_cache_width;
+            let vh = self.height_cache_vh;
+            self.ensure_height_cache(w, vh);
+
+            let new_block_start = if anchor_idx == 0 {
+                0
+            } else {
+                self.height_cache[anchor_idx - 1]
+            };
+            let new_block_height = self.height_cache[anchor_idx] - new_block_start;
+            let clamped_skip = anchor_skip.min(new_block_height.saturating_sub(1));
+            self.scroll_offset = new_block_start + clamped_skip;
+        }
+    }
+
+    /// Refresh the task list display block from the Store.
+    pub fn refresh_tasks(&mut self) {
+        let store = match &self.store {
+            Some(s) => s,
+            None => return,
+        };
+
+        let all_tasks = store.list_tasks(None, None);
+        if all_tasks.is_empty() {
+            // Remove existing TaskList block if any
+            self.blocks
+                .retain(|b| !matches!(b, DisplayBlock::TaskList { .. }));
+            self.task_tray.clear();
+            self.invalidate_height_cache();
+            return;
+        }
+
+        let mut snapshots: Vec<TaskSnapshot> = all_tasks
+            .iter()
+            .map(|t| {
+                let is_blocked = !t.blocked_by.is_empty()
+                    && t.blocked_by.iter().any(|bid| {
+                        all_tasks.iter().any(|bt| {
+                            bt.id == *bid && bt.status != "completed" && bt.status != "cancelled"
+                        })
+                    });
+                let label = if t.status == "in_progress" && !t.active_form.is_empty() {
+                    t.active_form.clone()
+                } else {
+                    t.subject.clone()
+                };
+                TaskSnapshot {
+                    id: t.id.clone(),
+                    label,
+                    status: t.status.clone(),
+                    owner: t.owner.clone(),
+                    is_blocked,
+                }
+            })
+            .collect();
+
+        // Sort: in_progress first, then pending, then completed/cancelled. Within group, by ID.
+        snapshots.sort_by(|a, b| {
+            fn status_order(s: &str) -> u8 {
+                match s {
+                    "in_progress" => 0,
+                    "pending" => 1,
+                    "completed" => 2,
+                    "cancelled" => 3,
+                    _ => 4,
+                }
+            }
+            status_order(&a.status)
+                .cmp(&status_order(&b.status))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        self.task_tray = snapshots.clone();
+
+        let new_block = DisplayBlock::TaskList { tasks: snapshots };
+
+        // Replace existing TaskList in-place, or push new one
+        let existing_idx = self
+            .blocks
+            .iter()
+            .rposition(|b| matches!(b, DisplayBlock::TaskList { .. }));
+        if let Some(idx) = existing_idx {
+            self.blocks[idx] = new_block;
+        } else {
+            self.blocks.push(new_block);
+        }
+
+        self.invalidate_height_cache();
+    }
+
+    /// Height of the persistent task tray: 0/3/4 lines.
+    pub fn task_tray_height(&self) -> u16 {
+        if self.task_tray.is_empty() {
+            0
+        } else if self.task_tray.len() == 1 {
+            3 // top border + pills + bottom border
+        } else {
+            4 // top border + pills + progress bar + bottom border
+        }
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
@@ -538,19 +751,12 @@ impl App {
     pub fn total_content_height(&mut self, width: usize, viewport_height: usize) -> usize {
         self.ensure_height_cache(width, viewport_height);
         let block_height = self.height_cache.last().copied().unwrap_or(0);
-        // Include streaming pending_text height when running
-        let pending_height = if self.running && !self.pending_text.is_empty() {
-            pending_text_height(&self.pending_text, width, self.code_expanded)
-        } else {
-            0
-        };
         // Include live streaming output lines
         let streaming_height = self.streaming_output.len();
-        // Bottom padding so content doesn't butt against the input area
-        let padding = 0;
-        block_height + pending_height + streaming_height + padding
+        // Include active delegate indicator line
+        let delegate_height = if self.active_delegate.is_some() { 1 } else { 0 };
+        block_height + streaming_height + delegate_height
     }
-
 
     /// Which line (0-indexed) the cursor is on in multi-line input.
     pub fn cursor_line(&self) -> usize {
@@ -811,12 +1017,9 @@ impl App {
         match self.suggestion_kind {
             SuggestionKind::Command => {
                 if let Some((cmd, _)) = self.suggestions.get(self.suggestion_idx).cloned() {
-                    let needs_arg = cmd == "/model" || self.skills.get(cmd.trim_start_matches('/')).is_some();
-                    self.input = if needs_arg {
-                        format!("{} ", cmd)
-                    } else {
-                        cmd
-                    };
+                    let needs_arg =
+                        cmd == "/model" || self.skills.get(cmd.trim_start_matches('/')).is_some();
+                    self.input = if needs_arg { format!("{} ", cmd) } else { cmd };
                     self.cursor_pos = self.input.len();
                 }
                 self.suggestions.clear();
@@ -824,17 +1027,17 @@ impl App {
                 self.suggestion_kind = SuggestionKind::None;
             }
             SuggestionKind::Path => {
-                if let Some((at_pos, _partial)) = self.at_token_at_cursor() {
-                    if let Some((path, _)) = self.suggestions.get(self.suggestion_idx).cloned() {
-                        let before = self.input[..at_pos].to_string();
-                        let after = self.input[self.cursor_pos..].to_string();
-                        let is_dir = path.ends_with('/');
-                        self.input = format!("{}@{}{}", before, path, after);
-                        self.cursor_pos = at_pos + 1 + path.len(); // +1 for @
-                        if is_dir {
-                            // Don't dismiss — re-trigger for deeper completion
-                            return;
-                        }
+                if let Some((at_pos, _partial)) = self.at_token_at_cursor()
+                    && let Some((path, _)) = self.suggestions.get(self.suggestion_idx).cloned()
+                {
+                    let before = self.input[..at_pos].to_string();
+                    let after = self.input[self.cursor_pos..].to_string();
+                    let is_dir = path.ends_with('/');
+                    self.input = format!("{}@{}{}", before, path, after);
+                    self.cursor_pos = at_pos + 1 + path.len(); // +1 for @
+                    if is_dir {
+                        // Don't dismiss — re-trigger for deeper completion
+                        return;
                     }
                 }
                 self.suggestions.clear();
@@ -897,8 +1100,7 @@ impl App {
     /// Move skill picker selection down.
     pub fn skill_picker_down(&mut self) {
         if !self.skill_picker.is_empty() {
-            self.skill_picker_idx =
-                (self.skill_picker_idx + 1).min(self.skill_picker.len() - 1);
+            self.skill_picker_idx = (self.skill_picker_idx + 1).min(self.skill_picker.len() - 1);
         }
     }
 
@@ -928,30 +1130,30 @@ impl App {
 
     /// Whether the prompt is in extra-text editing mode.
     pub fn is_prompt_editing_extra(&self) -> bool {
-        self.prompt.as_ref().map_or(false, |p| p.editing_extra)
+        self.prompt.as_ref().is_some_and(|p| p.editing_extra)
     }
 
     /// Whether the prompt is freeform-only (no options).
     pub fn is_prompt_freeform(&self) -> bool {
-        self.prompt.as_ref().map_or(false, |p| p.options.is_empty())
+        self.prompt.as_ref().is_some_and(|p| p.options.is_empty())
     }
 
     /// Move prompt selection up.
     pub fn prompt_up(&mut self) {
-        if let Some(p) = &mut self.prompt {
-            if !p.options.is_empty() {
-                p.selected_idx = p.selected_idx.saturating_sub(1);
-            }
+        if let Some(p) = &mut self.prompt
+            && !p.options.is_empty()
+        {
+            p.selected_idx = p.selected_idx.saturating_sub(1);
         }
     }
 
     /// Move prompt selection down.
     pub fn prompt_down(&mut self) {
-        if let Some(p) = &mut self.prompt {
-            if !p.options.is_empty() {
-                // options.len() = "Other" index
-                p.selected_idx = (p.selected_idx + 1).min(p.options.len());
-            }
+        if let Some(p) = &mut self.prompt
+            && !p.options.is_empty()
+        {
+            // options.len() = "Other" index
+            p.selected_idx = (p.selected_idx + 1).min(p.options.len());
         }
     }
 
@@ -972,16 +1174,16 @@ impl App {
 
     /// Delete character before cursor in prompt extra text.
     pub fn prompt_backspace(&mut self) {
-        if let Some(p) = &mut self.prompt {
-            if p.extra_cursor > 0 {
-                let prev = p.extra_text[..p.extra_cursor]
-                    .char_indices()
-                    .next_back()
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                p.extra_text.drain(prev..p.extra_cursor);
-                p.extra_cursor = prev;
-            }
+        if let Some(p) = &mut self.prompt
+            && p.extra_cursor > 0
+        {
+            let prev = p.extra_text[..p.extra_cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            p.extra_text.drain(prev..p.extra_cursor);
+            p.extra_cursor = prev;
         }
     }
 
@@ -995,7 +1197,11 @@ impl App {
                 // Option selected
                 let label = &p.options[p.selected_idx];
                 let truncated: String = label.chars().take(40).collect();
-                let suffix = if label.chars().count() > 40 { "..." } else { "" };
+                let suffix = if label.chars().count() > 40 {
+                    "..."
+                } else {
+                    ""
+                };
                 let base = format!("{}. {}{}", p.selected_idx + 1, truncated, suffix);
                 if p.extra_text.is_empty() {
                     base
@@ -1101,22 +1307,6 @@ fn complete_path(partial: &str) -> Vec<(String, String)> {
 }
 
 /// Compute the visual height of pending streaming text.
-/// Only code lines are shown (when code_expanded), comments/blanks are hidden.
-pub fn pending_text_height(text: &str, width: usize, code_expanded: bool) -> usize {
-    if !code_expanded {
-        return 0;
-    }
-    let mut h = 0;
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if !trimmed.is_empty() && !trimmed.starts_with('#') {
-            // "  " prefix (2 chars)
-            h += wrapped_line_height(line, width.saturating_sub(2));
-        }
-    }
-    h
-}
-
 /// Format a token count for display: 1234 → "1.2k", 567 → "567", 12345 → "12.3k"
 pub fn format_tokens(n: i64) -> String {
     if n >= 1_000_000 {
@@ -1141,19 +1331,154 @@ fn find_git_root(start: &std::path::Path) -> Option<PathBuf> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── wrapped_line_height ──
+
+    #[test]
+    fn wrapped_line_height_empty() {
+        // Empty line with newline has width 0 → returns 1
+        assert_eq!(wrapped_line_height("", 80), 1);
+    }
+
+    #[test]
+    fn wrapped_line_height_short() {
+        assert_eq!(wrapped_line_height("hello", 80), 1);
+    }
+
+    #[test]
+    fn wrapped_line_height_exact_width() {
+        assert_eq!(wrapped_line_height("abcd", 4), 1);
+    }
+
+    #[test]
+    fn wrapped_line_height_one_over() {
+        assert_eq!(wrapped_line_height("abcde", 4), 2);
+    }
+
+    #[test]
+    fn wrapped_line_height_zero_width() {
+        assert_eq!(wrapped_line_height("hello", 0), 1);
+    }
+
+    #[test]
+    fn wrapped_line_height_cjk() {
+        // CJK characters take 2 columns each
+        // 3 CJK chars = 6 columns, width 4 → ceil(6/4) = 2
+        assert_eq!(wrapped_line_height("\u{4e16}\u{754c}\u{597d}", 4), 2);
+    }
+
+    // ── wrapped_text_height ──
+
+    #[test]
+    fn wrapped_text_height_single_line() {
+        assert_eq!(wrapped_text_height("hello", 80, 0), 1);
+    }
+
+    #[test]
+    fn wrapped_text_height_multi_line() {
+        assert_eq!(wrapped_text_height("line1\nline2\nline3", 80, 0), 3);
+    }
+
+    #[test]
+    fn wrapped_text_height_empty() {
+        assert_eq!(wrapped_text_height("", 80, 0), 1);
+    }
+
+    #[test]
+    fn wrapped_text_height_with_prefix() {
+        // "hello" = 5 chars, width 6, prefix 2 → effective width 4 → ceil(5/4) = 2
+        assert_eq!(wrapped_text_height("hello", 6, 2), 2);
+    }
+
+    // ── format_tokens ──
+
+    #[test]
+    fn format_tokens_small() {
+        assert_eq!(format_tokens(0), "0");
+        assert_eq!(format_tokens(999), "999");
+    }
+
+    #[test]
+    fn format_tokens_thousands() {
+        assert_eq!(format_tokens(1000), "1.0k");
+        assert_eq!(format_tokens(1234), "1.2k");
+        assert_eq!(format_tokens(999999), "1000.0k");
+    }
+
+    #[test]
+    fn format_tokens_millions() {
+        assert_eq!(format_tokens(1_000_000), "1.0M");
+        assert_eq!(format_tokens(2_500_000), "2.5M");
+    }
+
+    // ── DisplayBlock::height ──
+
+    #[test]
+    fn display_block_tool_call_height() {
+        let block = DisplayBlock::ToolCall {
+            name: "read_file".into(),
+            success: true,
+            duration_ms: 50,
+        };
+        assert_eq!(block.height(false, 80, 0), 1);
+    }
+
+    #[test]
+    fn display_block_error_height() {
+        let block = DisplayBlock::Error("short error".into());
+        assert_eq!(block.height(false, 80, 0), 1);
+    }
+
+    #[test]
+    fn display_block_user_input_height() {
+        // "hello" with 2-char prefix = 1 line + 1 blank after = 2
+        let block = DisplayBlock::UserInput("hello".into());
+        assert_eq!(block.height(false, 80, 0), 2);
+    }
+
+    #[test]
+    fn display_block_task_list_height() {
+        let tasks = vec![
+            TaskSnapshot {
+                id: "01".into(),
+                label: "A".into(),
+                status: "pending".into(),
+                owner: String::new(),
+                is_blocked: false,
+            },
+            TaskSnapshot {
+                id: "02".into(),
+                label: "B".into(),
+                status: "pending".into(),
+                owner: String::new(),
+                is_blocked: false,
+            },
+        ];
+        let block = DisplayBlock::TaskList { tasks };
+        assert_eq!(block.height(false, 80, 0), 4); // top border + 2 tasks + bottom border
+    }
+
+    #[test]
+    fn display_block_splash_height() {
+        let block = DisplayBlock::Splash;
+        assert_eq!(block.height(false, 80, 24), 24);
+    }
+}
+
 /// Generate a readable slug like "swift-falcon" from small word lists.
 fn generate_plan_slug() -> String {
     const ADJECTIVES: &[&str] = &[
-        "swift", "bold", "calm", "dark", "keen", "warm", "cool", "fair",
-        "deep", "wild", "soft", "pure", "vast", "slim", "rare", "firm",
-        "lean", "rich", "true", "wise", "fast", "safe", "full", "neat",
-        "open", "flat", "pale", "dry", "raw", "new",
+        "swift", "bold", "calm", "dark", "keen", "warm", "cool", "fair", "deep", "wild", "soft",
+        "pure", "vast", "slim", "rare", "firm", "lean", "rich", "true", "wise", "fast", "safe",
+        "full", "neat", "open", "flat", "pale", "dry", "raw", "new",
     ];
     const NOUNS: &[&str] = &[
-        "falcon", "ember", "coral", "prism", "ridge", "cedar", "bloom",
-        "frost", "stone", "grain", "drift", "spark", "forge", "shade",
-        "crest", "brook", "flint", "moss", "peak", "dust", "glow", "wave",
-        "pine", "iron", "salt", "bone", "mist", "clay", "sage", "arch",
+        "falcon", "ember", "coral", "prism", "ridge", "cedar", "bloom", "frost", "stone", "grain",
+        "drift", "spark", "forge", "shade", "crest", "brook", "flint", "moss", "peak", "dust",
+        "glow", "wave", "pine", "iron", "salt", "bone", "mist", "clay", "sage", "arch",
     ];
 
     use std::collections::hash_map::DefaultHasher;

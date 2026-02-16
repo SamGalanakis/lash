@@ -1,0 +1,43 @@
+exclude: 'lash/src/baml_client/.*'
+
+repos:
+  - repo: builtin
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+
+  - repo: local
+    hooks:
+      # Rust — lash (core library)
+      - id: cargo-fmt-lash
+        name: cargo fmt (lash)
+        language: system
+        entry: cargo fmt --manifest-path lash/Cargo.toml --check
+        files: '^lash/.*\.rs$'
+        pass_filenames: false
+
+      # Rust — lash-cli
+      - id: cargo-fmt-cli
+        name: cargo fmt (lash-cli)
+        language: system
+        entry: cargo fmt --manifest-path lash-cli/Cargo.toml --check
+        files: '^lash-cli/.*\.rs$'
+        pass_filenames: false
+
+      # Rust clippy — lash (core library)
+      - id: cargo-clippy-lash
+        name: cargo clippy (lash)
+        language: system
+        entry: cargo clippy --manifest-path lash/Cargo.toml -- -D warnings
+        files: '^lash/.*\.rs$'
+        pass_filenames: false
+
+      # Rust clippy — lash-cli
+      - id: cargo-clippy-cli
+        name: cargo clippy (lash-cli)
+        language: system
+        entry: cargo clippy --manifest-path lash-cli/Cargo.toml -- -D warnings
+        files: '^lash-cli/.*\.rs$'
+        pass_filenames: false

@@ -30,20 +30,12 @@ pub enum SessionError {
 }
 
 /// Configuration for a Python REPL session.
+#[derive(Default)]
 pub struct SessionConfig {
     /// Working directory for the session.
     pub working_dir: Option<PathBuf>,
     /// Extra environment variables.
     pub env: HashMap<String, String>,
-}
-
-impl Default for SessionConfig {
-    fn default() -> Self {
-        Self {
-            working_dir: None,
-            env: HashMap::new(),
-        }
-    }
 }
 
 pub struct Session {
@@ -61,6 +53,7 @@ impl Session {
     pub async fn new(
         tools: Arc<dyn ToolProvider>,
         _config: SessionConfig,
+        agent_id: &str,
     ) -> Result<Self, SessionError> {
         let scratch_dir = tempfile::TempDir::new()?;
 
@@ -78,12 +71,13 @@ impl Session {
             scratch_dir,
         };
 
-        // Send init with tool definitions
+        // Send init with tool definitions and agent identity
         let defs = session.tools.definitions();
         let tools_json = serde_json::to_string(&defs).unwrap_or_else(|_| "[]".to_string());
-        session
-            .runtime
-            .send(PythonRequest::Init { tools_json })?;
+        session.runtime.send(PythonRequest::Init {
+            tools_json,
+            agent_id: agent_id.to_string(),
+        })?;
 
         // Wait for ready
         match session.runtime.recv()? {
@@ -133,7 +127,11 @@ impl Session {
             .lines()
             .filter(|line| {
                 let trimmed = line.trim();
-                trimmed.is_empty() || trimmed.trim_matches('-').chars().any(|c| !c.is_whitespace())
+                trimmed.is_empty()
+                    || trimmed
+                        .trim_matches('-')
+                        .chars()
+                        .any(|c| !c.is_whitespace())
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -144,6 +142,12 @@ impl Session {
         })?;
 
         // Read messages until we get exec_result.
+        // Tool calls are spawned as concurrent tokio tasks so that Python's
+        // asyncio.gather() can dispatch multiple tools in parallel.
+        let mut tool_handles: Vec<tokio::task::JoinHandle<(ToolCallRecord, Vec<ToolImage>)>> =
+            Vec::new();
+        let mut say_messages: Vec<String> = Vec::new();
+
         // Use block_in_place so tokio knows this thread is blocked and can
         // schedule drain tasks (prompt forwarding, message forwarding) on other threads.
         loop {
@@ -157,37 +161,59 @@ impl Session {
                     args,
                     result_tx,
                 } => {
+                    let tc_num = tool_handles.len();
+                    tracing::info!(
+                        "PARALLEL: ToolCall #{tc_num} '{name}' received at t+{:.3}s",
+                        start.elapsed().as_secs_f64()
+                    );
                     let tools = Arc::clone(&self.tools);
                     let parsed_args: serde_json::Value =
                         serde_json::from_str(&args).unwrap_or(json!({}));
-                    let tool_start = std::time::Instant::now();
-                    let mut result = tools
-                        .execute_streaming(&name, &parsed_args, self.message_tx.as_ref())
-                        .await;
+                    let msg_tx = self.message_tx.clone();
+                    let run_start = start;
 
-                    // Collect any images returned by the tool
-                    self.tool_images.append(&mut result.images);
+                    let handle = tokio::spawn(async move {
+                        tracing::info!(
+                            "PARALLEL: task #{tc_num} '{name}' executing at t+{:.3}s",
+                            run_start.elapsed().as_secs_f64()
+                        );
+                        let tool_start = std::time::Instant::now();
+                        let mut result = tools
+                            .execute_streaming(&name, &parsed_args, msg_tx.as_ref())
+                            .await;
 
-                    self.tool_calls.push(ToolCallRecord {
-                        tool: name,
-                        args: parsed_args,
-                        result: result.result.clone(),
-                        success: result.success,
-                        duration_ms: tool_start.elapsed().as_millis() as u64,
+                        // Send result back to Python via the oneshot channel
+                        let result_json = json!({
+                            "success": result.success,
+                            "result": serde_json::to_string(&result.result)
+                                .unwrap_or_else(|_| "null".to_string()),
+                        });
+                        let _ = result_tx.send(result_json.to_string());
+                        tracing::info!(
+                            "PARALLEL: task #{tc_num} '{name}' done at t+{:.3}s",
+                            run_start.elapsed().as_secs_f64()
+                        );
+
+                        let images = std::mem::take(&mut result.images);
+                        let record = ToolCallRecord {
+                            tool: name,
+                            args: parsed_args,
+                            result: result.result,
+                            success: result.success,
+                            duration_ms: tool_start.elapsed().as_millis() as u64,
+                        };
+                        (record, images)
                     });
-
-                    // Send result back to Python via the oneshot channel
-                    let result_json = json!({
-                        "success": result.success,
-                        "result": serde_json::to_string(&result.result).unwrap_or_else(|_| "null".to_string()),
-                    });
-                    let _ = result_tx.send(result_json.to_string());
+                    tool_handles.push(handle);
                 }
                 PythonResponse::Message { text, kind } => {
                     if kind == "final" {
                         self.final_response = Some(text.clone());
-                    }
-                    if let Some(tx) = &self.message_tx {
+                    } else if kind == "say" {
+                        // Collect say messages for synchronous emission by agent
+                        // (avoids async drain_handle ordering issues).
+                        say_messages.push(text);
+                    } else if let Some(tx) = &self.message_tx {
                         let _ = tx.send(SandboxMessage { text, kind });
                     }
                 }
@@ -196,6 +222,32 @@ impl Session {
                     output,
                     error,
                 } => {
+                    tracing::info!(
+                        "PARALLEL: ExecResult received at t+{:.3}s ({} handles)",
+                        start.elapsed().as_secs_f64(),
+                        tool_handles.len()
+                    );
+                    // Collect results from all concurrent tool calls.
+                    // By the time Python sends ExecResult, all tool futures have
+                    // resolved (asyncio.gather waits), so these awaits are instant.
+                    for handle in tool_handles {
+                        match handle.await {
+                            Ok((record, images)) => {
+                                self.tool_calls.push(record);
+                                self.tool_images.extend(images);
+                            }
+                            Err(e) => {
+                                self.tool_calls.push(ToolCallRecord {
+                                    tool: "unknown".into(),
+                                    args: json!({}),
+                                    result: json!({"error": format!("task panicked: {e}")}),
+                                    success: false,
+                                    duration_ms: 0,
+                                });
+                            }
+                        }
+                    }
+
                     let response = self.final_response.clone().unwrap_or_default();
                     return Ok(ExecResponse {
                         output,
@@ -204,6 +256,7 @@ impl Session {
                         images: std::mem::take(&mut self.tool_images),
                         error,
                         duration_ms: start.elapsed().as_millis() as u64,
+                        say_messages,
                     });
                 }
                 PythonResponse::Ready => {
@@ -298,10 +351,8 @@ impl Session {
             .to_string();
 
         let id = uuid::Uuid::new_v4().to_string();
-        self.runtime.send(PythonRequest::Restore {
-            id,
-            data: vars_str,
-        })?;
+        self.runtime
+            .send(PythonRequest::Restore { id, data: vars_str })?;
 
         // Wait for acknowledgment (exec_result with empty response)
         loop {
@@ -313,8 +364,7 @@ impl Session {
 
         // Restore scratch files
         if let Some(files_val) = parsed.get("files")
-            && let Ok(files) =
-                serde_json::from_value::<HashMap<String, String>>(files_val.clone())
+            && let Ok(files) = serde_json::from_value::<HashMap<String, String>>(files_val.clone())
         {
             // Clear existing scratch contents
             if let Ok(entries) = std::fs::read_dir(self.scratch_dir.path()) {
@@ -360,6 +410,8 @@ pub struct ExecResponse {
     pub images: Vec<ToolImage>,
     pub error: Option<String>,
     pub duration_ms: u64,
+    /// Collected say() messages, emitted synchronously by the agent for correct ordering.
+    pub say_messages: Vec<String>,
 }
 
 /// Walk a directory recursively and collect all files as relative_path -> contents.

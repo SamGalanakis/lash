@@ -25,6 +25,7 @@ rusqlite = { version = "0.33", features = ["bundled"] }
 pty-process = { version = "0.4", features = ["async"] }
 pyo3 = { version = "0.28" }
 dirs = "6"
+chrono = "0.4"
 flate2 = "1"
 tar = "0.4"
 

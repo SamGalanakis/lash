@@ -24,3 +24,4 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 pulldown-cmark = "0.13"
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4"] }
+rand = "0.9"

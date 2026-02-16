@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     status      TEXT NOT NULL DEFAULT 'pending',
     priority    TEXT NOT NULL DEFAULT 'medium',
     active_form TEXT NOT NULL DEFAULT '',
+    owner       TEXT NOT NULL DEFAULT '',
     metadata    TEXT NOT NULL DEFAULT '{}'
 );
 
@@ -74,6 +75,7 @@ pub struct TaskEntry {
     pub status: String,
     pub priority: String,
     pub active_form: String,
+    pub owner: String,
     pub blocks: Vec<String>,
     pub blocked_by: Vec<String>,
     pub metadata: serde_json::Value,
@@ -100,6 +102,8 @@ impl Store {
         let conn = Connection::open(path)?;
         apply_pragmas(&conn)?;
         conn.execute_batch(SCHEMA)?;
+        // Migration: add owner column if missing
+        let _ = conn.execute_batch("ALTER TABLE tasks ADD COLUMN owner TEXT NOT NULL DEFAULT ''");
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -187,7 +191,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT id, subject, description, status, priority, active_form, metadata
+                "SELECT id, subject, description, status, priority, active_form, owner, metadata
                  FROM tasks WHERE id = ?1",
             )
             .ok()?;
@@ -200,7 +204,8 @@ impl Store {
                     status: row.get(3)?,
                     priority: row.get(4)?,
                     active_form: row.get(5)?,
-                    metadata_str: row.get(6)?,
+                    owner: row.get(6)?,
+                    metadata_str: row.get(7)?,
                 })
             })
             .ok()?;
@@ -215,6 +220,7 @@ impl Store {
             status: entry.status,
             priority: entry.priority,
             active_form: entry.active_form,
+            owner: entry.owner,
             blocks,
             blocked_by,
             metadata: serde_json::from_str(&entry.metadata_str).unwrap_or_default(),
@@ -228,7 +234,7 @@ impl Store {
         blocked_filter: Option<bool>,
     ) -> Vec<TaskEntry> {
         let conn = self.conn.lock().unwrap();
-        let mut query = "SELECT id, subject, description, status, priority, active_form, metadata FROM tasks".to_string();
+        let mut query = "SELECT id, subject, description, status, priority, active_form, owner, metadata FROM tasks".to_string();
         let mut conditions = Vec::new();
         if let Some(s) = status_filter {
             conditions.push(format!("status = '{}'", s.replace('\'', "''")));
@@ -253,7 +259,8 @@ impl Store {
                     status: row.get(3)?,
                     priority: row.get(4)?,
                     active_form: row.get(5)?,
-                    metadata_str: row.get(6)?,
+                    owner: row.get(6)?,
+                    metadata_str: row.get(7)?,
                 })
             })
             .ok()
@@ -266,10 +273,10 @@ impl Store {
             let blocked_by = self.get_blocked_by_locked(&conn, &entry.id);
             let is_blocked = self.is_blocked_locked(&conn, &entry.id);
 
-            if let Some(want_blocked) = blocked_filter {
-                if want_blocked != is_blocked {
-                    continue;
-                }
+            if let Some(want_blocked) = blocked_filter
+                && want_blocked != is_blocked
+            {
+                continue;
             }
 
             result.push(TaskEntry {
@@ -279,6 +286,7 @@ impl Store {
                 status: entry.status,
                 priority: entry.priority,
                 active_form: entry.active_form,
+                owner: entry.owner,
                 blocks,
                 blocked_by,
                 metadata: serde_json::from_str(&entry.metadata_str).unwrap_or_default(),
@@ -288,6 +296,7 @@ impl Store {
     }
 
     /// Update fields on a task. Only non-None fields are changed.
+    #[allow(clippy::too_many_arguments)]
     pub fn update_task(
         &self,
         id: &str,
@@ -309,23 +318,49 @@ impl Store {
         }
 
         if let Some(v) = subject {
-            conn.execute("UPDATE tasks SET subject = ?1 WHERE id = ?2", params![v, id]).unwrap();
+            conn.execute(
+                "UPDATE tasks SET subject = ?1 WHERE id = ?2",
+                params![v, id],
+            )
+            .unwrap();
         }
         if let Some(v) = description {
-            conn.execute("UPDATE tasks SET description = ?1 WHERE id = ?2", params![v, id]).unwrap();
+            conn.execute(
+                "UPDATE tasks SET description = ?1 WHERE id = ?2",
+                params![v, id],
+            )
+            .unwrap();
         }
         if let Some(v) = status {
-            conn.execute("UPDATE tasks SET status = ?1 WHERE id = ?2", params![v, id]).unwrap();
+            conn.execute("UPDATE tasks SET status = ?1 WHERE id = ?2", params![v, id])
+                .unwrap();
+            // Auto-clear owner when status changes to pending/completed/cancelled
+            if matches!(v, "pending" | "completed" | "cancelled") {
+                conn.execute("UPDATE tasks SET owner = '' WHERE id = ?1", params![id])
+                    .unwrap();
+            }
         }
         if let Some(v) = priority {
-            conn.execute("UPDATE tasks SET priority = ?1 WHERE id = ?2", params![v, id]).unwrap();
+            conn.execute(
+                "UPDATE tasks SET priority = ?1 WHERE id = ?2",
+                params![v, id],
+            )
+            .unwrap();
         }
         if let Some(v) = active_form {
-            conn.execute("UPDATE tasks SET active_form = ?1 WHERE id = ?2", params![v, id]).unwrap();
+            conn.execute(
+                "UPDATE tasks SET active_form = ?1 WHERE id = ?2",
+                params![v, id],
+            )
+            .unwrap();
         }
         if let Some(merge) = metadata_merge {
             let current_str: String = conn
-                .query_row("SELECT metadata FROM tasks WHERE id = ?1", params![id], |row| row.get(0))
+                .query_row(
+                    "SELECT metadata FROM tasks WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
                 .unwrap_or_else(|_| "{}".into());
             let mut current: serde_json::Map<String, serde_json::Value> =
                 serde_json::from_str(&current_str).unwrap_or_default();
@@ -337,11 +372,86 @@ impl Store {
                 }
             }
             let new_str = serde_json::to_string(&current).unwrap_or_else(|_| "{}".into());
-            conn.execute("UPDATE tasks SET metadata = ?1 WHERE id = ?2", params![new_str, id]).unwrap();
+            conn.execute(
+                "UPDATE tasks SET metadata = ?1 WHERE id = ?2",
+                params![new_str, id],
+            )
+            .unwrap();
         }
 
         drop(conn);
         self.get_task(id)
+    }
+
+    /// Atomically claim a task: set owner and flip status to in_progress.
+    /// If `id` is None, auto-picks the next claimable task (highest priority, unblocked, unclaimed pending).
+    /// Returns Ok(TaskEntry) on success, Err(message) on failure.
+    pub fn claim_task(&self, id: Option<&str>, owner: &str) -> Result<TaskEntry, String> {
+        let resolved_id = match id {
+            Some(i) => i.to_string(),
+            None => {
+                // Auto-pick: highest priority pending task that is unclaimed and unblocked
+                let conn = self.conn.lock().unwrap();
+                let picked = self.next_claimable_locked(&conn);
+                drop(conn);
+                match picked {
+                    Some(i) => i,
+                    None => return Err("no claimable tasks".into()),
+                }
+            }
+        };
+
+        let conn = self.conn.lock().unwrap();
+
+        // Fetch current task state
+        let row = conn.query_row(
+            "SELECT status, owner FROM tasks WHERE id = ?1",
+            params![resolved_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        );
+        let (status, current_owner) = match row {
+            Ok(r) => r,
+            Err(_) => return Err(format!("task not found: {}", resolved_id)),
+        };
+
+        // Already completed/cancelled
+        if status == "completed" || status == "cancelled" {
+            return Err(format!("task is {}, cannot claim", status));
+        }
+
+        // Already claimed by different owner
+        if !current_owner.is_empty() && current_owner != owner {
+            return Err(format!("already claimed by {}", current_owner));
+        }
+
+        // Check blocked by incomplete deps
+        let blockers: Vec<String> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT d.blocker_id FROM task_deps d
+                 JOIN tasks t ON t.id = d.blocker_id
+                 WHERE d.blocked_id = ?1 AND t.status NOT IN ('completed', 'cancelled')",
+                )
+                .unwrap();
+            stmt.query_map(params![&resolved_id], |row| row.get(0))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+        if !blockers.is_empty() {
+            return Err(format!("blocked by: {}", blockers.join(", ")));
+        }
+
+        // Idempotent: already claimed by same owner
+        // Set owner and status
+        conn.execute(
+            "UPDATE tasks SET owner = ?1, status = 'in_progress' WHERE id = ?2",
+            params![owner, resolved_id],
+        )
+        .unwrap();
+
+        drop(conn);
+        Ok(self.get_task(&resolved_id).unwrap())
     }
 
     /// Delete a task and clean up its dependency edges.
@@ -383,10 +493,34 @@ impl Store {
             return "No tasks.".into();
         }
 
-        let pending: i64 = conn.query_row("SELECT COUNT(*) FROM tasks WHERE status = 'pending'", [], |row| row.get(0)).unwrap_or(0);
-        let in_progress: i64 = conn.query_row("SELECT COUNT(*) FROM tasks WHERE status = 'in_progress'", [], |row| row.get(0)).unwrap_or(0);
-        let completed: i64 = conn.query_row("SELECT COUNT(*) FROM tasks WHERE status = 'completed'", [], |row| row.get(0)).unwrap_or(0);
-        let cancelled: i64 = conn.query_row("SELECT COUNT(*) FROM tasks WHERE status = 'cancelled'", [], |row| row.get(0)).unwrap_or(0);
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let in_progress: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE status = 'in_progress'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let completed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE status = 'completed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let cancelled: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE status = 'cancelled'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
 
         let mut lines = vec![format!(
             "Tasks: {} total  |  {} pending  {} in_progress  {} completed  {} cancelled",
@@ -429,18 +563,26 @@ impl Store {
         for (id, subject) in &active {
             let blocked_by = self.get_blocked_by_locked(&conn, id);
             // Filter to only non-completed/non-cancelled blockers
-            let active_blockers: Vec<&String> = blocked_by.iter().filter(|bid| {
-                conn.query_row(
-                    "SELECT status FROM tasks WHERE id = ?1",
-                    params![bid],
-                    |row| row.get::<_, String>(0),
-                )
-                .map(|s| s != "completed" && s != "cancelled")
-                .unwrap_or(false)
-            }).collect();
+            let active_blockers: Vec<&String> = blocked_by
+                .iter()
+                .filter(|bid| {
+                    conn.query_row(
+                        "SELECT status FROM tasks WHERE id = ?1",
+                        params![bid],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map(|s| s != "completed" && s != "cancelled")
+                    .unwrap_or(false)
+                })
+                .collect();
             if !active_blockers.is_empty() {
                 let blocker_ids: Vec<&str> = active_blockers.iter().map(|s| s.as_str()).collect();
-                blocked_lines.push(format!("  {} '{}'  blocked by: {}", id, subject, blocker_ids.join(", ")));
+                blocked_lines.push(format!(
+                    "  {} '{}'  blocked by: {}",
+                    id,
+                    subject,
+                    blocker_ids.join(", ")
+                ));
             }
         }
         if !blocked_lines.is_empty() {
@@ -559,6 +701,30 @@ impl Store {
 
     // ─── Internal helpers (require caller to already hold the lock) ───
 
+    /// Find the next claimable task: pending, unclaimed, unblocked, highest priority first, then by ID.
+    fn next_claimable_locked(&self, conn: &Connection) -> Option<String> {
+        // Get all pending unclaimed tasks, ordered by priority (high > medium > low) then ID
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM tasks
+             WHERE status = 'pending' AND owner = ''
+             ORDER BY
+                 CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END,
+                 id",
+            )
+            .ok()?;
+        let candidates: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .ok()?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Return first candidate that is not blocked
+        candidates
+            .into_iter()
+            .find(|id| !self.is_blocked_locked(conn, id))
+    }
+
     /// Tasks that `id` blocks (id is the blocker).
     fn get_blocks_locked(&self, conn: &Connection, id: &str) -> Vec<String> {
         let mut stmt = conn
@@ -596,6 +762,262 @@ impl Store {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem() -> Store {
+        Store::memory().unwrap()
+    }
+
+    // ── Archive ──
+
+    #[test]
+    fn archive_round_trip() {
+        let s = mem();
+        let hash = s.store_archive("hello world");
+        assert_eq!(hash.len(), 12);
+        assert_eq!(s.get_archive(&hash).unwrap(), "hello world");
+    }
+
+    #[test]
+    fn archive_dedup() {
+        let s = mem();
+        let h1 = s.store_archive("same content");
+        let h2 = s.store_archive("same content");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn archive_missing_hash() {
+        let s = mem();
+        assert!(s.get_archive("000000000000").is_none());
+    }
+
+    // ── Task ID ──
+
+    #[test]
+    fn next_task_id_increments() {
+        let s = mem();
+        assert_eq!(s.next_task_id(), "0001");
+        assert_eq!(s.next_task_id(), "0002");
+        assert_eq!(s.next_task_id(), "0003");
+    }
+
+    // ── claim_task ──
+
+    #[test]
+    fn claim_pending_unblocked() {
+        let s = mem();
+        let id = s.next_task_id();
+        s.create_task(&id, "t1", "", "medium", "", &serde_json::json!({}));
+        let t = s.claim_task(Some(&id), "agent-a").unwrap();
+        assert_eq!(t.owner, "agent-a");
+        assert_eq!(t.status, "in_progress");
+    }
+
+    #[test]
+    fn claim_nonexistent() {
+        let s = mem();
+        let err = s.claim_task(Some("9999"), "a").unwrap_err();
+        assert!(err.contains("task not found"));
+    }
+
+    #[test]
+    fn claim_completed() {
+        let s = mem();
+        let id = s.next_task_id();
+        s.create_task(&id, "t", "", "medium", "", &serde_json::json!({}));
+        s.update_task(&id, None, None, Some("completed"), None, None, None);
+        let err = s.claim_task(Some(&id), "a").unwrap_err();
+        assert!(err.contains("completed"));
+    }
+
+    #[test]
+    fn claim_cancelled() {
+        let s = mem();
+        let id = s.next_task_id();
+        s.create_task(&id, "t", "", "medium", "", &serde_json::json!({}));
+        s.update_task(&id, None, None, Some("cancelled"), None, None, None);
+        let err = s.claim_task(Some(&id), "a").unwrap_err();
+        assert!(err.contains("cancelled"));
+    }
+
+    #[test]
+    fn claim_different_owner() {
+        let s = mem();
+        let id = s.next_task_id();
+        s.create_task(&id, "t", "", "medium", "", &serde_json::json!({}));
+        s.claim_task(Some(&id), "agent-a").unwrap();
+        let err = s.claim_task(Some(&id), "agent-b").unwrap_err();
+        assert!(err.contains("already claimed by agent-a"));
+    }
+
+    #[test]
+    fn claim_same_owner_idempotent() {
+        let s = mem();
+        let id = s.next_task_id();
+        s.create_task(&id, "t", "", "medium", "", &serde_json::json!({}));
+        s.claim_task(Some(&id), "agent-a").unwrap();
+        let t = s.claim_task(Some(&id), "agent-a").unwrap();
+        assert_eq!(t.owner, "agent-a");
+    }
+
+    #[test]
+    fn claim_blocked_task() {
+        let s = mem();
+        let id1 = s.next_task_id();
+        let id2 = s.next_task_id();
+        s.create_task(&id1, "blocker", "", "medium", "", &serde_json::json!({}));
+        s.create_task(&id2, "blocked", "", "medium", "", &serde_json::json!({}));
+        s.add_dep(&id1, &id2);
+        let err = s.claim_task(Some(&id2), "a").unwrap_err();
+        assert!(err.contains("blocked by"));
+        assert!(err.contains(&id1));
+    }
+
+    #[test]
+    fn auto_pick_claims_highest_priority() {
+        let s = mem();
+        let low = s.next_task_id();
+        let high = s.next_task_id();
+        s.create_task(&low, "low-task", "", "low", "", &serde_json::json!({}));
+        s.create_task(&high, "high-task", "", "high", "", &serde_json::json!({}));
+        let t = s.claim_task(None, "a").unwrap();
+        assert_eq!(t.id, high);
+    }
+
+    #[test]
+    fn auto_pick_no_claimable() {
+        let s = mem();
+        let err = s.claim_task(None, "a").unwrap_err();
+        assert!(err.contains("no claimable tasks"));
+    }
+
+    // ── Dependencies ──
+
+    #[test]
+    fn add_remove_dep() {
+        let s = mem();
+        let a = s.next_task_id();
+        let b = s.next_task_id();
+        s.create_task(&a, "A", "", "medium", "", &serde_json::json!({}));
+        s.create_task(&b, "B", "", "medium", "", &serde_json::json!({}));
+        s.add_dep(&a, &b);
+        let tb = s.get_task(&b).unwrap();
+        assert!(tb.blocked_by.contains(&a));
+        let ta = s.get_task(&a).unwrap();
+        assert!(ta.blocks.contains(&b));
+        s.remove_dep(&a, &b);
+        let tb2 = s.get_task(&b).unwrap();
+        assert!(tb2.blocked_by.is_empty());
+    }
+
+    // ── Owner auto-clear ──
+
+    #[test]
+    fn owner_cleared_on_pending() {
+        let s = mem();
+        let id = s.next_task_id();
+        s.create_task(&id, "t", "", "medium", "", &serde_json::json!({}));
+        s.claim_task(Some(&id), "agent-a").unwrap();
+        s.update_task(&id, None, None, Some("pending"), None, None, None);
+        let t = s.get_task(&id).unwrap();
+        assert!(t.owner.is_empty());
+    }
+
+    #[test]
+    fn owner_cleared_on_completed() {
+        let s = mem();
+        let id = s.next_task_id();
+        s.create_task(&id, "t", "", "medium", "", &serde_json::json!({}));
+        s.claim_task(Some(&id), "agent-a").unwrap();
+        s.update_task(&id, None, None, Some("completed"), None, None, None);
+        let t = s.get_task(&id).unwrap();
+        assert!(t.owner.is_empty());
+    }
+
+    // ── Metadata merge ──
+
+    #[test]
+    fn metadata_merge_add_and_delete() {
+        let s = mem();
+        let id = s.next_task_id();
+        s.create_task(&id, "t", "", "medium", "", &serde_json::json!({"a": 1}));
+        let mut merge = serde_json::Map::new();
+        merge.insert("b".into(), serde_json::json!(2));
+        merge.insert("a".into(), serde_json::Value::Null);
+        s.update_task(&id, None, None, None, None, None, Some(&merge));
+        let t = s.get_task(&id).unwrap();
+        assert_eq!(t.metadata.get("b").unwrap(), 2);
+        assert!(t.metadata.get("a").is_none());
+    }
+
+    // ── Blocked filter ──
+
+    #[test]
+    fn list_tasks_blocked_filter() {
+        let s = mem();
+        let a = s.next_task_id();
+        let b = s.next_task_id();
+        s.create_task(&a, "A", "", "medium", "", &serde_json::json!({}));
+        s.create_task(&b, "B", "", "medium", "", &serde_json::json!({}));
+        s.add_dep(&a, &b);
+        let blocked = s.list_tasks(None, Some(true));
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].id, b);
+        let unblocked = s.list_tasks(None, Some(false));
+        assert_eq!(unblocked.len(), 1);
+        assert_eq!(unblocked[0].id, a);
+    }
+
+    // ── Agent state ──
+
+    #[test]
+    fn agent_state_round_trip() {
+        let s = mem();
+        s.save_agent_state(
+            "ag1",
+            Some("parent"),
+            "active",
+            "[]",
+            5,
+            "{}",
+            None,
+            100,
+            50,
+            10,
+        );
+        let a = s.load_agent_state("ag1").unwrap();
+        assert_eq!(a.agent_id, "ag1");
+        assert_eq!(a.parent_id.as_deref(), Some("parent"));
+        assert_eq!(a.status, "active");
+        assert_eq!(a.iteration, 5);
+        assert_eq!(a.input_tokens, 100);
+    }
+
+    #[test]
+    fn mark_agent_done() {
+        let s = mem();
+        s.save_agent_state("ag1", None, "active", "[]", 0, "{}", None, 0, 0, 0);
+        s.mark_agent_done("ag1");
+        let a = s.load_agent_state("ag1").unwrap();
+        assert_eq!(a.status, "done");
+    }
+
+    #[test]
+    fn list_active_agents_filters() {
+        let s = mem();
+        s.save_agent_state("ag1", Some("p1"), "active", "[]", 0, "{}", None, 0, 0, 0);
+        s.save_agent_state("ag2", Some("p1"), "active", "[]", 0, "{}", None, 0, 0, 0);
+        s.save_agent_state("ag3", Some("p2"), "active", "[]", 0, "{}", None, 0, 0, 0);
+        s.mark_agent_done("ag2");
+        let active = s.list_active_agents(Some("p1"));
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].agent_id, "ag1");
+    }
+}
+
 /// Internal row type for reading from SQLite before adding dep info.
 struct TaskEntryRow {
     id: String,
@@ -604,5 +1026,6 @@ struct TaskEntryRow {
     status: String,
     priority: String,
     active_form: String,
+    owner: String,
     metadata_str: String,
 }

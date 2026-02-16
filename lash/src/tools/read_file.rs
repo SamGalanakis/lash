@@ -7,6 +7,7 @@ use crate::{InstructionLoader, ToolDefinition, ToolImage, ToolParam, ToolProvide
 use super::hashline;
 
 /// Read files with hashline-prefixed output. Supports images natively.
+#[derive(Default)]
 pub struct ReadFile {
     _instructions: Option<Arc<InstructionLoader>>,
 }
@@ -15,14 +16,6 @@ impl ReadFile {
     pub fn new(instructions: Arc<InstructionLoader>) -> Self {
         Self {
             _instructions: Some(instructions),
-        }
-    }
-}
-
-impl Default for ReadFile {
-    fn default() -> Self {
-        Self {
-            _instructions: None,
         }
     }
 }
@@ -77,10 +70,10 @@ impl ToolProvider for ReadFile {
         // Directory — still works but nudges toward ls
         if path.is_dir() {
             let mut result = list_directory(path).await;
-            if result.success {
-                if let serde_json::Value::String(ref mut s) = result.result {
-                    s.insert_str(0, "(Hint: use `ls` for directory listings.)\n");
-                }
+            if result.success
+                && let serde_json::Value::String(ref mut s) = result.result
+            {
+                s.insert_str(0, "(Hint: use `ls` for directory listings.)\n");
             }
             return result;
         }
@@ -168,15 +161,13 @@ async fn list_directory(path: &Path) -> ToolResult {
     match std::fs::read_dir(path) {
         Ok(entries) => {
             let mut items: Vec<String> = Vec::new();
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                    if is_dir {
-                        items.push(format!("{}/", name));
-                    } else {
-                        items.push(name);
-                    }
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                if is_dir {
+                    items.push(format!("{}/", name));
+                } else {
+                    items.push(name);
                 }
             }
             items.sort();
@@ -280,8 +271,7 @@ fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
             return Some((w, h));
         }
         // Skip non-SOF markers
-        if marker == 0xD8 || marker == 0xD9 || marker == 0x01 || (0xD0..=0xD7).contains(&marker)
-        {
+        if marker == 0xD8 || marker == 0xD9 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
             i += 2;
         } else if i + 3 < data.len() {
             let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
@@ -337,7 +327,10 @@ mod tests {
         std::fs::write(&path, "line1\nline2\nline3\nline4\nline5").unwrap();
         let tool = ReadFile::default();
         let result = tool
-            .execute("read_file", &json!({"path": path.to_str().unwrap(), "offset": 2, "limit": 2}))
+            .execute(
+                "read_file",
+                &json!({"path": path.to_str().unwrap(), "offset": 2, "limit": 2}),
+            )
             .await;
         assert!(result.success);
         let text = result.result.as_str().unwrap();
@@ -351,8 +344,109 @@ mod tests {
     async fn test_read_nonexistent() {
         let tool = ReadFile::default();
         let result = tool
-            .execute("read_file", &json!({"path": "/nonexistent/path/to/file.txt"}))
+            .execute(
+                "read_file",
+                &json!({"path": "/nonexistent/path/to/file.txt"}),
+            )
             .await;
         assert!(!result.success);
+    }
+
+    // ── PNG dimensions ──
+
+    #[test]
+    fn test_png_dimensions_valid() {
+        // Minimal valid PNG header (first 24 bytes)
+        let mut data = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        // IHDR chunk length (4 bytes)
+        data.extend_from_slice(&[0, 0, 0, 13]);
+        // IHDR tag
+        data.extend_from_slice(b"IHDR");
+        // Width: 640 (big-endian)
+        data.extend_from_slice(&640u32.to_be_bytes());
+        // Height: 480 (big-endian)
+        data.extend_from_slice(&480u32.to_be_bytes());
+        let (w, h) = png_dimensions(&data).unwrap();
+        assert_eq!((w, h), (640, 480));
+    }
+
+    #[test]
+    fn test_png_dimensions_truncated() {
+        assert!(png_dimensions(&[0x89, b'P', b'N', b'G']).is_none());
+    }
+
+    #[test]
+    fn test_png_dimensions_wrong_sig() {
+        let data = vec![0; 24];
+        assert!(png_dimensions(&data).is_none());
+    }
+
+    // ── JPEG dimensions ──
+
+    #[test]
+    fn test_jpeg_dimensions_valid() {
+        // Minimal JPEG with SOI + SOF0
+        let mut data = vec![0xFF, 0xD8]; // SOI
+        // SOF0 marker
+        data.extend_from_slice(&[0xFF, 0xC0]);
+        // Length (including these 2 bytes)
+        data.extend_from_slice(&[0x00, 0x11]);
+        // Precision
+        data.push(8);
+        // Height: 480 (big-endian u16)
+        data.extend_from_slice(&480u16.to_be_bytes());
+        // Width: 640 (big-endian u16)
+        data.extend_from_slice(&640u16.to_be_bytes());
+        // Padding to satisfy i+9 < len bounds check
+        data.push(0);
+        let (w, h) = jpeg_dimensions(&data).unwrap();
+        assert_eq!((w, h), (640, 480));
+    }
+
+    #[test]
+    fn test_jpeg_dimensions_truncated() {
+        assert!(jpeg_dimensions(&[0xFF, 0xD8, 0xFF, 0xC0]).is_none());
+    }
+
+    // ── GIF dimensions ──
+
+    #[test]
+    fn test_gif87a_dimensions() {
+        let mut data = b"GIF87a".to_vec();
+        // Width: 320 (little-endian u16)
+        data.extend_from_slice(&320u16.to_le_bytes());
+        // Height: 200 (little-endian u16)
+        data.extend_from_slice(&200u16.to_le_bytes());
+        let (w, h) = gif_dimensions(&data).unwrap();
+        assert_eq!((w, h), (320, 200));
+    }
+
+    #[test]
+    fn test_gif89a_dimensions() {
+        let mut data = b"GIF89a".to_vec();
+        data.extend_from_slice(&100u16.to_le_bytes());
+        data.extend_from_slice(&50u16.to_le_bytes());
+        let (w, h) = gif_dimensions(&data).unwrap();
+        assert_eq!((w, h), (100, 50));
+    }
+
+    #[test]
+    fn test_gif_bad_signature() {
+        let data = b"NOT_GIF___".to_vec();
+        assert!(gif_dimensions(&data).is_none());
+    }
+
+    // ── image_mime ──
+
+    #[test]
+    fn test_image_mime() {
+        assert_eq!(image_mime(Path::new("photo.png")), Some("image/png"));
+        assert_eq!(image_mime(Path::new("photo.jpg")), Some("image/jpeg"));
+        assert_eq!(image_mime(Path::new("photo.jpeg")), Some("image/jpeg"));
+        assert_eq!(image_mime(Path::new("anim.gif")), Some("image/gif"));
+        assert_eq!(image_mime(Path::new("photo.webp")), Some("image/webp"));
+        assert_eq!(image_mime(Path::new("photo.bmp")), Some("image/bmp"));
+        assert_eq!(image_mime(Path::new("file.txt")), None);
+        assert_eq!(image_mime(Path::new("noext")), None);
     }
 }

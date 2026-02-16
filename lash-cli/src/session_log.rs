@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use lash::agent::{ChatMsg, Message};
 use lash::TokenUsage;
+use lash::agent::{ChatMsg, Message};
 
 use crate::app::DisplayBlock;
 
@@ -167,6 +167,7 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
                     blocks.push(DisplayBlock::CodeBlock {
                         code: code.to_string(),
                         expanded: false,
+                        continuation: false,
                     });
                 }
             }
@@ -212,12 +213,19 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
             }
             "sub_agent_done" => {
                 sub_agent_count += 1;
-                let task = val.get("task").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let usage: TokenUsage = val.get("usage")
+                let task = val
+                    .get("task")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let usage: TokenUsage = val
+                    .get("usage")
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
                     .unwrap_or_default();
-                let tool_calls = val.get("tool_calls").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                let iterations = val.get("iterations").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let tool_calls =
+                    val.get("tool_calls").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let iterations =
+                    val.get("iterations").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 let success = val.get("success").and_then(|v| v.as_bool()).unwrap_or(true);
                 blocks.push(DisplayBlock::SubAgentResult {
                     task,
@@ -227,6 +235,17 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
                     success,
                     is_last: true, // will be fixed below
                 });
+            }
+            "message" => {
+                let text = val
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let kind = val.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                if (kind == "final" || kind == "say") && !text.is_empty() {
+                    blocks.push(DisplayBlock::AssistantText(text));
+                }
             }
             "error" => {
                 if let Some(msg) = val.get("message").and_then(|v| v.as_str()) {
@@ -243,7 +262,10 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
         // only the last one should have is_last = true.
         let mut in_run = false;
         for i in (0..blocks.len()).rev() {
-            if let DisplayBlock::SubAgentResult { ref mut is_last, .. } = blocks[i] {
+            if let DisplayBlock::SubAgentResult {
+                ref mut is_last, ..
+            } = blocks[i]
+            {
                 if !in_run {
                     *is_last = true;
                     in_run = true;

@@ -65,17 +65,15 @@ fn main() {
     if target.contains("linux") {
         // Static libpython deps — all C libraries that CPython's builtin modules need
         for lib in &[
-            "z", "m", "pthread", "dl", "util", "readline", "expat", "zstd", "uuid",
-            "sqlite3", "ncursesw", "panelw", "ffi", "lzma", "bz2", "mpdec",
-            "ssl", "crypto",
+            "z", "m", "pthread", "dl", "util", "readline", "expat", "zstd", "uuid", "sqlite3",
+            "ncursesw", "panelw", "ffi", "lzma", "bz2", "mpdec", "ssl", "crypto",
         ] {
             println!("cargo:rustc-link-lib={lib}");
         }
     } else if target.contains("apple") {
         for lib in &[
-            "z", "m", "pthread", "dl", "util", "readline", "expat", "zstd",
-            "sqlite3", "ncurses", "panel", "ffi", "lzma", "bz2", "mpdec",
-            "ssl", "crypto",
+            "z", "m", "pthread", "dl", "util", "readline", "expat", "zstd", "sqlite3", "ncurses",
+            "panel", "ffi", "lzma", "bz2", "mpdec", "ssl", "crypto",
         ] {
             println!("cargo:rustc-link-lib={lib}");
         }
@@ -90,20 +88,20 @@ fn ensure_python_standalone(python_dir: &Path, target: &str) -> PathBuf {
     let marker = python_dir.join(".version");
 
     let expected_version = format!("{PYTHON_VERSION}+{PBS_RELEASE}");
-    if marker.exists() {
-        if let Ok(v) = std::fs::read_to_string(&marker) {
-            if v.trim() == expected_version {
-                return install_dir;
-            }
-        }
+    if marker.exists()
+        && let Ok(v) = std::fs::read_to_string(&marker)
+        && v.trim() == expected_version
+    {
+        return install_dir;
     }
 
     eprintln!("Downloading python-build-standalone {PYTHON_VERSION}+{PBS_RELEASE} for {target}...");
 
     // Map Rust target triple to PBS triple
     let pbs_triple = map_target_triple(target);
-    let filename =
-        format!("cpython-{PYTHON_VERSION}+{PBS_RELEASE}-{pbs_triple}-pgo+lto-full.tar.zst");
+    let filename = format!(
+        "cpython-{PYTHON_VERSION}+{PBS_RELEASE}-{pbs_triple}-freethreaded+pgo+lto-full.tar.zst"
+    );
     let url = format!(
         "https://github.com/astral-sh/python-build-standalone/releases/download/{PBS_RELEASE}/{filename}"
     );
@@ -152,12 +150,13 @@ fn ensure_python_standalone(python_dir: &Path, target: &str) -> PathBuf {
 
     // Remove shared libraries so static linking is used
     let lib_dir = install_dir.join("lib");
-    for entry in std::fs::read_dir(&lib_dir).expect("Failed to read lib dir") {
-        if let Ok(entry) = entry {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.contains("libpython") && name.contains(".so") {
-                let _ = std::fs::remove_file(entry.path());
-            }
+    for entry in std::fs::read_dir(&lib_dir)
+        .expect("Failed to read lib dir")
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.contains("libpython") && name.contains(".so") {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 
@@ -216,7 +215,7 @@ fn generate_pyo3_config(install_dir: &Path, config_path: &Path, target: &str) {
          lib_name=python{PYTHON_MAJOR_MINOR}\n\
          lib_dir={lib_dir}\n\
          pointer_width={pointer_width}\n\
-         build_flags=\n\
+         build_flags=Py_GIL_DISABLED\n\
          suppress_build_script_link_lines=true\n",
         lib_dir = lib_dir.display(),
     );
@@ -249,10 +248,10 @@ fn bundle_stdlib(install_dir: &Path, archive_path: &Path) {
             .map(|p| p.join(".version"))
             .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
 
-        if let (Some(am), Some(mm)) = (archive_mtime, marker_mtime) {
-            if am > mm {
-                return; // Archive is newer than install, skip
-            }
+        if let (Some(am), Some(mm)) = (archive_mtime, marker_mtime)
+            && am > mm
+        {
+            return; // Archive is newer than install, skip
         }
     }
 
@@ -354,34 +353,29 @@ fn generate_model_info() {
     // Parse the JSON and build the match arms
     // Structure: { "provider_name": { "id": ..., "models": { "model_id": { "limit": { "context": N } } } } }
     let mut arms = Vec::new();
-    if cache_path.exists() {
-        if let Ok(data) = std::fs::read_to_string(&cache_path) {
-            if let Ok(providers) = serde_json::from_str::<serde_json::Value>(&data) {
-                if let Some(obj) = providers.as_object() {
-                    for (provider, provider_info) in obj {
-                        let models = provider_info.get("models").and_then(|m| m.as_object());
-                        if let Some(models_obj) = models {
-                            for (model_id, info) in models_obj {
-                                let ctx = info
-                                    .get("limit")
-                                    .and_then(|l| l.get("context"))
-                                    .and_then(|c| c.as_u64());
-                                if let Some(context_limit) = ctx {
-                                    // Full qualified name: provider/model_id
-                                    let full_id = format!("{}/{}", provider, model_id);
-                                    arms.push(format!(
-                                        "        {:?} => Some({}),",
-                                        full_id, context_limit
-                                    ));
-                                    // For anthropic provider, also add bare model name alias
-                                    if provider == "anthropic" {
-                                        arms.push(format!(
-                                            "        {:?} => Some({}),",
-                                            model_id, context_limit
-                                        ));
-                                    }
-                                }
-                            }
+    if cache_path.exists()
+        && let Ok(data) = std::fs::read_to_string(&cache_path)
+        && let Ok(providers) = serde_json::from_str::<serde_json::Value>(&data)
+        && let Some(obj) = providers.as_object()
+    {
+        for (provider, provider_info) in obj {
+            let models = provider_info.get("models").and_then(|m| m.as_object());
+            if let Some(models_obj) = models {
+                for (model_id, info) in models_obj {
+                    let ctx = info
+                        .get("limit")
+                        .and_then(|l| l.get("context"))
+                        .and_then(|c| c.as_u64());
+                    if let Some(context_limit) = ctx {
+                        // Full qualified name: provider/model_id
+                        let full_id = format!("{}/{}", provider, model_id);
+                        arms.push(format!("        {:?} => Some({}),", full_id, context_limit));
+                        // For anthropic provider, also add bare model name alias
+                        if provider == "anthropic" {
+                            arms.push(format!(
+                                "        {:?} => Some({}),",
+                                model_id, context_limit
+                            ));
                         }
                     }
                 }

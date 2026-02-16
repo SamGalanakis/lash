@@ -256,15 +256,13 @@ pub async fn codex_exchange_code(
     let resp = client
         .post(CODEX_TOKEN_URL)
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(
-            url_form_encode(&[
-                ("grant_type", "authorization_code"),
-                ("code", code),
-                ("redirect_uri", CODEX_DEVICE_CALLBACK),
-                ("client_id", CODEX_CLIENT_ID),
-                ("code_verifier", code_verifier),
-            ]),
-        )
+        .body(url_form_encode(&[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", CODEX_DEVICE_CALLBACK),
+            ("client_id", CODEX_CLIENT_ID),
+            ("code_verifier", code_verifier),
+        ]))
         .send()
         .await?;
 
@@ -311,13 +309,11 @@ pub async fn codex_refresh_tokens(refresh: &str) -> Result<OAuthTokens, OAuthErr
     let resp = client
         .post(CODEX_TOKEN_URL)
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(
-            url_form_encode(&[
-                ("grant_type", "refresh_token"),
-                ("refresh_token", refresh),
-                ("client_id", CODEX_CLIENT_ID),
-            ]),
-        )
+        .body(url_form_encode(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh),
+            ("client_id", CODEX_CLIENT_ID),
+        ]))
         .send()
         .await?;
 
@@ -362,26 +358,24 @@ fn extract_codex_account_id(jwt: &str) -> Option<String> {
     let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
 
     // Try direct field first
-    if let Some(id) = claims["chatgpt_account_id"].as_str() {
-        if !id.is_empty() {
-            return Some(id.to_string());
-        }
+    if let Some(id) = claims["chatgpt_account_id"].as_str()
+        && !id.is_empty()
+    {
+        return Some(id.to_string());
     }
     // Try nested auth claim
-    if let Some(id) = claims["https://api.openai.com/auth"]["chatgpt_account_id"].as_str() {
-        if !id.is_empty() {
-            return Some(id.to_string());
-        }
+    if let Some(id) = claims["https://api.openai.com/auth"]["chatgpt_account_id"].as_str()
+        && !id.is_empty()
+    {
+        return Some(id.to_string());
     }
     // Fall back to first organization ID
-    if let Some(orgs) = claims["organizations"].as_array() {
-        if let Some(org) = orgs.first() {
-            if let Some(id) = org["id"].as_str() {
-                if !id.is_empty() {
-                    return Some(id.to_string());
-                }
-            }
-        }
+    if let Some(orgs) = claims["organizations"].as_array()
+        && let Some(org) = orgs.first()
+        && let Some(id) = org["id"].as_str()
+        && !id.is_empty()
+    {
+        return Some(id.to_string());
     }
     None
 }

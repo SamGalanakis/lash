@@ -29,14 +29,20 @@ pub fn format_hashlines(content: &str, start_line: usize) -> String {
 pub fn parse_anchor(anchor: &str) -> Result<(usize, String), String> {
     let parts: Vec<&str> = anchor.splitn(2, ':').collect();
     if parts.len() != 2 {
-        return Err(format!("Invalid anchor format '{}', expected LINE:HASH", anchor));
+        return Err(format!(
+            "Invalid anchor format '{}', expected LINE:HASH",
+            anchor
+        ));
     }
     let line_num: usize = parts[0]
         .parse()
         .map_err(|_| format!("Invalid line number in anchor '{}'", anchor))?;
     let hash = parts[1].to_string();
     if hash.len() != 2 {
-        return Err(format!("Invalid hash in anchor '{}', expected 2 hex chars", anchor));
+        return Err(format!(
+            "Invalid hash in anchor '{}', expected 2 hex chars",
+            anchor
+        ));
     }
     Ok((line_num, hash))
 }
@@ -93,10 +99,7 @@ fn try_strip_prefix(line: &str) -> Option<&str> {
 #[derive(Debug, Clone)]
 pub enum HashlineEdit {
     /// Replace a single line identified by anchor.
-    SetLine {
-        anchor: String,
-        new_text: String,
-    },
+    SetLine { anchor: String, new_text: String },
     /// Replace a range of lines (inclusive).
     ReplaceLines {
         start_anchor: String,
@@ -104,10 +107,7 @@ pub enum HashlineEdit {
         new_text: String,
     },
     /// Insert text after the anchor line.
-    InsertAfter {
-        anchor: String,
-        text: String,
-    },
+    InsertAfter { anchor: String, text: String },
     /// Find-and-replace text (fallback, no anchors).
     Replace {
         old_text: String,
@@ -117,10 +117,7 @@ pub enum HashlineEdit {
 }
 
 /// Validate an anchor against file lines. Returns the 0-indexed line index.
-fn validate_anchor(
-    lines: &[&str],
-    anchor: &str,
-) -> Result<usize, String> {
+fn validate_anchor(lines: &[&str], anchor: &str) -> Result<usize, String> {
     let (line_num, expected_hash) = parse_anchor(anchor)?;
     // line_num is 1-based
     if line_num == 0 || line_num > lines.len() {
@@ -373,5 +370,75 @@ mod tests {
         let result = apply_hashline_edits(content, edits);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Hash mismatch"));
+    }
+
+    // ── Additional edge cases ──
+
+    #[test]
+    fn test_strip_hashline_prefix_mixed() {
+        let input = "1:ab|prefixed line\nnormal line\n42:ff|another prefixed";
+        let result = strip_hashline_prefix(input);
+        assert_eq!(result, "prefixed line\nnormal line\nanother prefixed");
+    }
+
+    #[test]
+    fn test_empty_edits_unchanged() {
+        let content = "line1\nline2\nline3";
+        let result = apply_hashline_edits(content, vec![]).unwrap();
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_insert_after_last_line() {
+        let content = "line1\nline2\nline3";
+        let hash3 = compute_line_hash("line3");
+        let edits = vec![HashlineEdit::InsertAfter {
+            anchor: format!("3:{}", hash3),
+            text: "line4\nline5".into(),
+        }];
+        let result = apply_hashline_edits(content, edits).unwrap();
+        assert_eq!(result, "line1\nline2\nline3\nline4\nline5");
+    }
+
+    #[test]
+    fn test_overlapping_ranges_error() {
+        let content = "a\nb\nc\nd\ne";
+        let hash_a = compute_line_hash("a");
+        let hash_c = compute_line_hash("c");
+        let hash_b = compute_line_hash("b");
+        let hash_d = compute_line_hash("d");
+        let edits = vec![
+            HashlineEdit::ReplaceLines {
+                start_anchor: format!("1:{}", hash_a),
+                end_anchor: format!("3:{}", hash_c),
+                new_text: "X".into(),
+            },
+            HashlineEdit::ReplaceLines {
+                start_anchor: format!("2:{}", hash_b),
+                end_anchor: format!("4:{}", hash_d),
+                new_text: "Y".into(),
+            },
+        ];
+        let result = apply_hashline_edits(content, edits);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Overlapping"));
+    }
+
+    #[test]
+    fn test_validate_anchor_hash_mismatch_message() {
+        let lines = vec!["hello"];
+        let result = validate_anchor(&lines, "1:ff");
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("Hash mismatch at line 1"));
+        assert!(msg.contains("expected 'ff'"));
+    }
+
+    #[test]
+    fn test_validate_anchor_out_of_bounds() {
+        let lines = vec!["hello"];
+        let result = validate_anchor(&lines, "5:ab");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("out of range"));
     }
 }

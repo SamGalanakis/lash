@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 /// A skill loaded from a markdown file with YAML frontmatter.
+#[allow(dead_code)]
 pub struct Skill {
     pub name: String,
     pub description: String,
@@ -8,15 +9,8 @@ pub struct Skill {
 }
 
 impl Skill {
-    /// Parse a skill from a markdown file.
-    /// Expected format:
-    /// ```
-    /// ---
-    /// name: my-skill
-    /// description: One-liner for autocomplete
-    /// ---
-    /// Markdown body (instructions for the LLM)
-    /// ```
+    /// Parse a skill from a markdown file (SKILL.md or legacy .md).
+    /// Name is optional in frontmatter — caller fills from directory name.
     fn parse(path: &std::path::Path) -> Option<Self> {
         let text = std::fs::read_to_string(path).ok()?;
         let text = text.trim_start();
@@ -33,22 +27,24 @@ impl Skill {
         let body_start = 3 + close_idx + 4; // skip "---" + "\n---"
         let content = text[body_start..].trim().to_string();
 
-        let mut name = None;
+        let mut name = String::new();
         let mut description = None;
 
         for line in frontmatter.lines() {
             let line = line.trim();
             if let Some(val) = line.strip_prefix("name:") {
-                name = Some(val.trim().to_string());
+                name = val.trim().to_string();
             } else if let Some(val) = line.strip_prefix("description:") {
                 description = Some(val.trim().to_string());
             }
         }
 
-        let name = name.filter(|n| !n.is_empty())?;
-
-        // Validate name: only lowercase alphanumeric and hyphens
-        if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        // Validate name if present
+        if !name.is_empty()
+            && !name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
             return None;
         }
 
@@ -92,10 +88,22 @@ impl SkillRegistry {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            if !path.is_dir() {
                 continue;
             }
-            if let Some(skill) = Skill::parse(&path) {
+            let skill_md = path.join("SKILL.md");
+            if !skill_md.is_file() {
+                continue;
+            }
+            if let Some(mut skill) = Skill::parse(&skill_md) {
+                // Default name to directory name if not set in frontmatter
+                if skill.name.is_empty() {
+                    if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+                        skill.name = dir_name.to_string();
+                    } else {
+                        continue;
+                    }
+                }
                 // Remove any existing skill with the same name (project-local overrides global)
                 skills.retain(|s| s.name != skill.name);
                 skills.push(skill);

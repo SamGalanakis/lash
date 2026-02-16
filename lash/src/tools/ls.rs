@@ -46,19 +46,12 @@ impl ToolProvider for Ls {
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
-        let base_dir = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
+        let base_dir = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         let ignore_patterns: Vec<&str> = args
             .get("ignore")
             .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .collect()
-            })
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
 
         let base = Path::new(base_dir);

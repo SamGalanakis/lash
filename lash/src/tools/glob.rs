@@ -50,10 +50,7 @@ impl ToolProvider for Glob {
             return ToolResult::err(json!("Missing required parameter: pattern"));
         }
 
-        let base_dir = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
+        let base_dir = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         let base = Path::new(base_dir);
         if !base.is_dir() {
@@ -135,7 +132,10 @@ mod tests {
         std::fs::write(dir.path().join("c.txt"), "").unwrap();
         let tool = Glob::default();
         let result = tool
-            .execute("glob", &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}))
+            .execute(
+                "glob",
+                &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
+            )
             .await;
         assert!(result.success);
         let text = result.result.as_str().unwrap();
@@ -150,7 +150,10 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
         let tool = Glob::default();
         let result = tool
-            .execute("glob", &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}))
+            .execute(
+                "glob",
+                &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
+            )
             .await;
         assert!(result.success);
         assert!(result.result.as_str().unwrap().is_empty());
@@ -163,7 +166,10 @@ mod tests {
         std::fs::write(dir.path().join("sub/deep/file.rs"), "").unwrap();
         let tool = Glob::default();
         let result = tool
-            .execute("glob", &json!({"pattern": "**/*.rs", "path": dir.path().to_str().unwrap()}))
+            .execute(
+                "glob",
+                &json!({"pattern": "**/*.rs", "path": dir.path().to_str().unwrap()}),
+            )
             .await;
         assert!(result.success);
         assert!(result.result.as_str().unwrap().contains("file.rs"));

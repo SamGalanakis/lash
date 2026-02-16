@@ -5,9 +5,9 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, DisplayBlock, SuggestionKind};
+use crate::app::{App, DisplayBlock, SuggestionKind, TaskSnapshot};
 use crate::markdown;
 use crate::theme;
 
@@ -17,22 +17,24 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     let strike_h = if app.running { 1 } else { 0 };
     let image_h = if app.pending_images.is_empty() { 0 } else { 1 };
+    let task_tray_h = app.task_tray_height();
 
     // Dynamic input height: account for visual wrapping, not just newline count.
     // Inner width = frame width minus 2 (border chars are 0 since TOP/BOTTOM only, but
     // the "/ " prefix eats 2 columns).
-    let inner_w = frame.area().width.saturating_sub(2) as usize; // usable columns after "/ " prefix
+    let inner_w = frame.area().width as usize; // full rendering width; prefix handled by wrap_line
     let visual_lines = input_visual_lines(&app.input, inner_w);
     let queue_lines = app.queue_count() as u16;
     let input_h = (visual_lines as u16 + 2 + queue_lines).min(12); // +2 for borders, max 12 for queue room
 
     let chunks = Layout::vertical([
-        Constraint::Length(1),        // status bar
-        Constraint::Min(3),           // history
-        Constraint::Length(strike_h), // strike zone (only when running)
-        Constraint::Length(image_h),  // image attachment badges
-        Constraint::Length(input_h),  // input (dynamic height)
-        Constraint::Length(1),        // help bar
+        Constraint::Length(1),           // [0] status bar
+        Constraint::Min(3),              // [1] history
+        Constraint::Length(strike_h),    // [2] strike zone (only when running)
+        Constraint::Length(image_h),     // [3] image attachment badges
+        Constraint::Length(task_tray_h), // [4] task tray
+        Constraint::Length(input_h),     // [5] input (dynamic height)
+        Constraint::Length(1),           // [6] help bar
     ])
     .split(frame.area());
 
@@ -42,12 +44,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_strike_zone(frame, app, chunks[2]);
     }
     draw_image_badges(frame, app, chunks[3]);
-    draw_input(frame, app, chunks[4]);
-    draw_suggestions(frame, app, chunks[4]);
+    draw_task_tray(frame, app, chunks[4]);
+    draw_input(frame, app, chunks[5]);
+    draw_suggestions(frame, app, chunks[5]);
     draw_session_picker(frame, app, chunks[1]); // overlay on history area
-    draw_skill_picker(frame, app, chunks[1]);   // overlay on history area
-    draw_prompt(frame, app, chunks[1]);          // overlay on history area
-    draw_help_bar(frame, app, chunks[5]);
+    draw_skill_picker(frame, app, chunks[1]); // overlay on history area
+    draw_prompt(frame, app, chunks[1]); // overlay on history area
+    draw_help_bar(frame, app, chunks[6]);
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -61,7 +64,9 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         left_spans.push(Span::styled(theme::STATUS_SEP, theme::status_separator()));
         left_spans.push(Span::styled(
             "PLAN",
-            Style::default().fg(theme::SODIUM).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::SODIUM)
+                .add_modifier(Modifier::BOLD),
         ));
     }
 
@@ -100,11 +105,21 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         if let Some(pct) = ctx_pct {
             let ctx_suffix = format!(" \u{b7} {}% ctx", pct);
             let tokens_part = &token_str[..token_str.len() - ctx_suffix.len()];
-            left_spans.push(Span::styled(tokens_part.to_string(), Style::default().fg(theme::CHALK_DIM)));
-            let ctx_color = if pct >= 80 { theme::SODIUM } else { theme::CHALK_DIM };
+            left_spans.push(Span::styled(
+                tokens_part.to_string(),
+                Style::default().fg(theme::CHALK_DIM),
+            ));
+            let ctx_color = if pct >= 80 {
+                theme::SODIUM
+            } else {
+                theme::CHALK_DIM
+            };
             left_spans.push(Span::styled(ctx_suffix, Style::default().fg(ctx_color)));
         } else {
-            left_spans.push(Span::styled(token_str, Style::default().fg(theme::CHALK_DIM)));
+            left_spans.push(Span::styled(
+                token_str,
+                Style::default().fg(theme::CHALK_DIM),
+            ));
         }
     }
 
@@ -125,26 +140,17 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::with_capacity(viewport_height + skip_lines + 20);
 
     // Render only blocks from first_idx until we have enough lines
-    for block in app.blocks[first_idx..].iter() {
-        render_block(block, app.code_expanded, &mut lines, viewport_width, viewport_height);
+    for idx in first_idx..app.blocks.len() {
+        render_block(
+            &app.blocks,
+            idx,
+            app.code_expanded,
+            &mut lines,
+            viewport_width,
+            viewport_height,
+        );
         if lines.len() >= viewport_height + skip_lines {
             break;
-        }
-    }
-
-    // Render streaming pending_text (code lines only, when code_expanded)
-    if app.running && app.code_expanded && !app.pending_text.is_empty() && lines.len() < viewport_height + skip_lines {
-        for line in app.pending_text.lines() {
-            let trimmed = line.trim_start();
-            if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                lines.push(Line::from(Span::styled(
-                    format!("  {}", line),
-                    theme::code_content(),
-                )));
-            }
-            if lines.len() >= viewport_height + skip_lines {
-                break;
-            }
         }
     }
 
@@ -161,13 +167,34 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
+    // Render active delegate indicator
+    if let Some((ref name, ref task, ref started)) = app.active_delegate
+        && lines.len() < viewport_height + skip_lines
+    {
+        render_delegate_line(
+            app.tick,
+            name,
+            task,
+            started.elapsed(),
+            &mut lines,
+            viewport_width,
+        );
+    }
+
     // Bottom-align content when it doesn't fill the viewport (chat-style).
     // Use visual row count (accounting for line wrapping) not logical line count.
     if scroll == 0 {
-        let total_visual: usize = lines.iter().map(|line| {
-            let w = line.width();
-            if w == 0 { 1 } else { (w + viewport_width - 1) / viewport_width }
-        }).sum();
+        let total_visual: usize = lines
+            .iter()
+            .map(|line| {
+                let w = line.width();
+                if w == 0 {
+                    1
+                } else {
+                    w.div_ceil(viewport_width)
+                }
+            })
+            .sum();
         let pad_count = viewport_height.saturating_sub(total_visual);
         if pad_count > 0 {
             let mut padded = Vec::with_capacity(pad_count + lines.len());
@@ -208,12 +235,14 @@ fn find_visible_block_readonly(app: &App, scroll_offset: usize, _width: usize) -
 }
 
 fn render_block<'a>(
-    block: &'a DisplayBlock,
+    blocks: &'a [DisplayBlock],
+    idx: usize,
     code_expanded_global: bool,
     lines: &mut Vec<Line<'a>>,
     viewport_width: usize,
     viewport_height: usize,
 ) {
+    let block = &blocks[idx];
     match block {
         DisplayBlock::UserInput(text) => {
             for line in text.lines() {
@@ -225,30 +254,45 @@ fn render_block<'a>(
             lines.push(Line::from(""));
         }
         DisplayBlock::AssistantText(text) => {
-            let rendered = markdown::render_markdown(text);
+            let rendered = markdown::render_markdown(text, viewport_width);
             lines.extend(rendered);
         }
-        DisplayBlock::CodeBlock { code, expanded } => {
+        DisplayBlock::CodeBlock {
+            code,
+            expanded,
+            continuation,
+        } => {
             let show = code_expanded_global && *expanded;
-            let line_count = code.lines().count();
             if show {
-                lines.push(Line::from(Span::styled(
-                    format!("\u{25bc} python ({} lines)", line_count),
-                    theme::code_header(),
-                )));
+                // Expanded: render every block's own code, even continuations
                 for line in code.lines() {
                     lines.push(Line::from(vec![
-                        Span::styled("\u{2502} ", theme::code_chrome()),
+                        Span::styled("\u{2502} ", theme::code_scribe()),
                         Span::styled(line, theme::code_content()),
                     ]));
                 }
-                lines.push(Line::from(Span::styled(
-                    "\u{2514}\u{2500}\u{2500}\u{2500}",
-                    theme::code_chrome(),
-                )));
+            } else if *continuation {
+                // Collapsed continuation: hidden (height 0)
             } else {
+                // Collapsed group leader: show total lines across group
+                let mut total_lines = code.lines().count();
+                for b in &blocks[idx + 1..] {
+                    match b {
+                        DisplayBlock::CodeBlock {
+                            code: c,
+                            continuation: true,
+                            ..
+                        } => {
+                            total_lines += c.lines().count();
+                        }
+                        DisplayBlock::ToolCall { .. }
+                        | DisplayBlock::CodeOutput { .. }
+                        | DisplayBlock::TaskList { .. } => continue,
+                        _ => break,
+                    }
+                }
                 lines.push(Line::from(Span::styled(
-                    format!("\u{25b6} python ({} lines)", line_count),
+                    format!("\u{25b6} python ({} lines)", total_lines),
                     theme::code_header(),
                 )));
             }
@@ -259,21 +303,23 @@ fn render_block<'a>(
             duration_ms,
         } => {
             let icon = if *success { "+" } else { "x" };
-            let style = if *success { theme::tool_success() } else { theme::tool_failure() };
+            let style = if *success {
+                theme::tool_success()
+            } else {
+                theme::tool_failure()
+            };
             lines.push(Line::from(Span::styled(
-                format!("  [{}] {} ({}ms)", icon, name, duration_ms),
+                format!(
+                    "  [{}] {} ({})",
+                    icon,
+                    name,
+                    crate::util::format_duration_ms(*duration_ms)
+                ),
                 style,
             )));
         }
         DisplayBlock::CodeOutput { output, error } => {
-            let show_stdout = code_expanded_global && !output.is_empty();
-            let has_error = error.is_some();
-
-            if show_stdout {
-                lines.push(Line::from(Span::styled(
-                    "\u{251c}\u{2500} stdout \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
-                    theme::code_chrome(),
-                )));
+            if code_expanded_global && !output.is_empty() {
                 for line in output.lines() {
                     lines.push(Line::from(vec![
                         Span::styled("\u{2502} ", theme::code_chrome()),
@@ -282,14 +328,6 @@ fn render_block<'a>(
                 }
             }
             if let Some(err) = error {
-                lines.push(Line::from(vec![
-                    Span::styled("\u{251c}\u{2500} ", theme::code_chrome()),
-                    Span::styled("error", theme::error()),
-                    Span::styled(
-                        " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
-                        theme::code_chrome(),
-                    ),
-                ]));
                 for line in err.lines() {
                     lines.push(Line::from(vec![
                         Span::styled("\u{2502} ", theme::code_chrome()),
@@ -297,14 +335,12 @@ fn render_block<'a>(
                     ]));
                 }
             }
-            if show_stdout || has_error {
-                lines.push(Line::from(Span::styled(
-                    "\u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
-                    theme::code_chrome(),
-                )));
-            }
         }
-        DisplayBlock::ShellOutput { command, output, error } => {
+        DisplayBlock::ShellOutput {
+            command,
+            output,
+            error,
+        } => {
             lines.push(Line::from(Span::styled(
                 format!("$ {}", command),
                 theme::code_chrome(),
@@ -350,7 +386,11 @@ fn render_block<'a>(
             is_last,
             ..
         } => {
-            let connector = if *is_last { "\u{2514}\u{2500}" } else { "\u{251c}\u{2500}" };
+            let connector = if *is_last {
+                "\u{2514}\u{2500}"
+            } else {
+                "\u{251c}\u{2500}"
+            };
             let status_connector = if *is_last { "   " } else { "\u{2502}  " };
 
             // Truncate task to fit: connector(2) + space(1) + task + sep(3) + stats(~30)
@@ -384,6 +424,9 @@ fn render_block<'a>(
                 Span::styled(status_label, status_style),
             ]));
         }
+        DisplayBlock::TaskList { tasks } => {
+            render_task_list(tasks, lines, viewport_width);
+        }
         DisplayBlock::PlanContent(content) => {
             render_plan_block(content, lines, viewport_width);
         }
@@ -392,7 +435,7 @@ fn render_block<'a>(
             let sodium = Style::default().fg(theme::SODIUM);
 
             let content_width = 30;
-            let content_height = 9;
+            let content_height = 8;
             let cx = viewport_width.saturating_sub(content_width) / 2;
             let cy = viewport_height.saturating_sub(content_height) / 2;
             let pad = " ".repeat(cx);
@@ -424,10 +467,6 @@ fn render_block<'a>(
                 Span::styled("──────────", Style::default().fg(theme::ASH_MID)),
                 Span::styled("──────────", Style::default().fg(theme::ASH)),
             ]));
-            lines.push(Line::from(Span::styled(
-                format!("{}A G E N T  \u{b7}  R U N T I M E", pad),
-                Style::default().fg(theme::ASH_TEXT),
-            )));
             lines.push(Line::from(""));
 
             // Bottom padding to fill viewport (so bottom-align logic sees full viewport)
@@ -437,6 +476,104 @@ fn render_block<'a>(
             }
         }
     }
+}
+
+/// Render the task list as a bordered block with status markers and owner.
+fn render_task_list<'a>(
+    tasks: &'a [TaskSnapshot],
+    lines: &mut Vec<Line<'a>>,
+    viewport_width: usize,
+) {
+    let title = " TASKS ";
+    let border_w = viewport_width.saturating_sub(2);
+    let title_len = title.len();
+    let rule_after = border_w.saturating_sub(title_len + 1);
+
+    // Top border: ┌─ TASKS ────────────────────────┐
+    lines.push(Line::from(vec![
+        Span::styled("\u{250c}\u{2500}", Style::default().fg(theme::ASH)),
+        Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(theme::SODIUM)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "{}\u{2510}",
+                "\u{2500}".repeat(rule_after.saturating_sub(1))
+            ),
+            Style::default().fg(theme::ASH),
+        ),
+    ]));
+
+    // Inner width for content (inside borders + padding)
+    let inner_w = viewport_width.saturating_sub(4); // │ + space + content + │
+
+    for task in tasks {
+        let (marker, marker_color, text_color) = match task.status.as_str() {
+            "in_progress" => ("\u{25c6}", theme::SODIUM, theme::SODIUM), // ◆
+            "pending" if task.is_blocked => ("\u{25cb}", theme::ASH, theme::ASH_TEXT), // ○
+            "pending" => ("\u{25cb}", theme::ASH_MID, theme::CHALK_DIM), // ○
+            "completed" => ("\u{2713}", theme::LICHEN, theme::ASH_TEXT), // ✓
+            "cancelled" => ("\u{2717}", theme::ASH, theme::ASH),         // ✗
+            _ => ("\u{25cb}", theme::ASH_MID, theme::CHALK_DIM),
+        };
+
+        // Build the label with optional (blocked) suffix
+        let label = if task.is_blocked && task.status == "pending" {
+            format!("{} (blocked)", task.label)
+        } else {
+            task.label.clone()
+        };
+
+        // Calculate space for label: inner_w - marker(1) - space(1) - owner_space
+        let owner_width = if task.owner.is_empty() {
+            0
+        } else {
+            task.owner.len() + 2
+        }; // 2 spaces padding
+        let label_max = inner_w.saturating_sub(2 + owner_width);
+        let label_display: String = label.chars().take(label_max).collect();
+        let label_truncated = label.chars().count() > label_max;
+        let label_final = if label_truncated {
+            format!(
+                "{}\u{2026}",
+                &label_display[..label_display.len().saturating_sub(1)]
+            )
+        } else {
+            label_display
+        };
+
+        let mut spans = vec![
+            Span::styled("\u{2502} ", Style::default().fg(theme::ASH)),
+            Span::styled(marker, Style::default().fg(marker_color)),
+            Span::styled(" ", Style::default()),
+            Span::styled(label_final.clone(), Style::default().fg(text_color)),
+        ];
+
+        // Right-align owner if present
+        if !task.owner.is_empty() {
+            let used = 2 + 1 + 1 + UnicodeWidthStr::width(label_final.as_str()); // "│ " + marker + space + label
+            let pad = inner_w.saturating_sub(used + owner_width);
+            if pad > 0 || inner_w > used + owner_width {
+                spans.push(Span::styled(" ".repeat(pad + 2), Style::default()));
+                spans.push(Span::styled(
+                    task.owner.as_str(),
+                    Style::default().fg(theme::ASH_MID),
+                ));
+            }
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    // Bottom border: └──────────────────────────────┘
+    let bottom_fill = viewport_width.saturating_sub(2);
+    lines.push(Line::from(Span::styled(
+        format!("\u{2514}{}\u{2518}", "\u{2500}".repeat(bottom_fill)),
+        Style::default().fg(theme::ASH),
+    )));
 }
 
 /// Render plan content as a bordered block with markdown inside.
@@ -454,7 +591,10 @@ fn render_plan_block<'a>(content: &'a str, lines: &mut Vec<Line<'a>>, viewport_w
     );
     // Ensure we close with ┐ if there's room
     let top_line = if viewport_width > 2 {
-        let padded = format!("{}\u{2510}", &top[..top.chars().count().min(viewport_width - 1)]);
+        let padded = format!(
+            "{}\u{2510}",
+            &top[..top.chars().count().min(viewport_width - 1)]
+        );
         padded
     } else {
         top
@@ -467,7 +607,9 @@ fn render_plan_block<'a>(content: &'a str, lines: &mut Vec<Line<'a>>, viewport_w
         ),
         Span::styled(
             title.to_string(),
-            Style::default().fg(theme::SODIUM).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::SODIUM)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(
@@ -479,7 +621,7 @@ fn render_plan_block<'a>(content: &'a str, lines: &mut Vec<Line<'a>>, viewport_w
     ]));
 
     // Content: render markdown lines with │ prefix
-    let md_lines = markdown::render_markdown(content);
+    let md_lines = markdown::render_markdown(content, viewport_width.saturating_sub(2));
     for line in md_lines {
         let mut spans = vec![Span::styled("\u{2502} ", Style::default().fg(theme::ASH))];
         spans.extend(line.spans);
@@ -489,12 +631,73 @@ fn render_plan_block<'a>(content: &'a str, lines: &mut Vec<Line<'a>>, viewport_w
     // Bottom border: └──────────────────────────────┘
     let bottom_fill = viewport_width.saturating_sub(2); // minus └ and ┘
     lines.push(Line::from(Span::styled(
-        format!(
-            "\u{2514}{}\u{2518}",
-            "\u{2500}".repeat(bottom_fill)
-        ),
+        format!("\u{2514}{}\u{2518}", "\u{2500}".repeat(bottom_fill)),
         Style::default().fg(theme::ASH),
     )));
+}
+
+// ── Delegate running indicator ───────────────────────────────────────
+
+/// Render an animated line showing a running delegate sub-agent.
+/// Format: `  ╲─ delegate_deep · Do a thorough investigation of th…   12.3s`
+fn render_delegate_line<'a>(
+    tick: usize,
+    name: &'a str,
+    task: &'a str,
+    elapsed: std::time::Duration,
+    lines: &mut Vec<Line<'a>>,
+    viewport_width: usize,
+) {
+    const ANGLES: &[char] = &['\u{2572}', '\u{2500}', '\u{2571}', '\u{2502}']; // ╲ ─ ╱ │
+    let idx = (tick / 2) % ANGLES.len();
+    let trail_idx = (idx + ANGLES.len() - 1) % ANGLES.len();
+    let lead = ANGLES[idx];
+    let trail = ANGLES[trail_idx];
+
+    // Format elapsed time
+    let secs = elapsed.as_secs_f64();
+    let time_str = if secs >= 60.0 {
+        format!("{:.0}m{:.0}s", (secs / 60.0).floor(), secs % 60.0)
+    } else {
+        format!("{:.1}s", secs)
+    };
+
+    // Fixed-width parts: "  " + trail + lead + "─ " + name + " · " + ... + "  " + time
+    // prefix: 2 + 1 + 1 + 2 = 6, separator: 3, time suffix: 2 + time_str.len()
+    let prefix_w = 6;
+    let name_w = name.len();
+    let sep_w = 3; // " · "
+    let time_w = 2 + time_str.len(); // "  " + time
+    let fixed_w = prefix_w + name_w + sep_w + time_w;
+
+    let task_max = viewport_width.saturating_sub(fixed_w);
+    let task_chars: String = task.chars().take(task_max).collect();
+    let task_display = if task.chars().count() > task_max {
+        // Replace last char with ellipsis
+        let mut truncated: String = task.chars().take(task_max.saturating_sub(1)).collect();
+        truncated.push('\u{2026}');
+        truncated
+    } else {
+        task_chars
+    };
+
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(trail.to_string(), Style::default().fg(theme::ASH_TEXT)),
+        Span::styled(
+            format!("{}\u{2500} ", lead),
+            Style::default()
+                .fg(theme::SODIUM)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(name, Style::default().fg(theme::CHALK_MID)),
+        Span::styled(" \u{b7} ", Style::default().fg(theme::ASH)),
+        Span::styled(task_display, Style::default().fg(theme::ASH_TEXT)),
+        Span::styled(
+            format!("  {}", time_str),
+            Style::default().fg(theme::ASH_MID),
+        ),
+    ]));
 }
 
 // ── Strike zone ─────────────────────────────────────────────────────
@@ -503,6 +706,14 @@ fn render_plan_block<'a>(content: &'a str, lines: &mut Vec<Line<'a>>, viewport_w
 // text follows on the same line. One line, focused, no noise.
 
 fn draw_strike_zone(frame: &mut Frame, app: &App, area: Rect) {
+    // Suppress the normal spinner when a delegate is running — the delegate
+    // line in the history area serves as the activity indicator.
+    if app.active_delegate.is_some() {
+        let paragraph = Paragraph::new(Line::from("")).style(theme::history_bg());
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
     // Four angles of the slash mark rotating in place
     const ANGLES: &[char] = &['╲', '─', '╱', '│'];
     // Divide tick by 2 → 200ms per angle, 800ms full rotation
@@ -516,13 +727,12 @@ fn draw_strike_zone(frame: &mut Frame, app: &App, area: Rect) {
 
     let mut spans = vec![
         Span::raw("  "),
-        Span::styled(
-            trail.to_string(),
-            Style::default().fg(theme::ASH_TEXT),
-        ),
+        Span::styled(trail.to_string(), Style::default().fg(theme::ASH_TEXT)),
         Span::styled(
             lead.to_string(),
-            Style::default().fg(theme::SODIUM).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::SODIUM)
+                .add_modifier(Modifier::BOLD),
         ),
     ];
 
@@ -566,6 +776,163 @@ fn draw_image_badges(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
+fn draw_task_tray(frame: &mut Frame, app: &App, area: Rect) {
+    if app.task_tray.is_empty() {
+        return;
+    }
+
+    let width = area.width as usize;
+    let total = app.task_tray.len();
+    let completed = app
+        .task_tray
+        .iter()
+        .filter(|t| t.status == "completed" || t.status == "cancelled")
+        .count();
+    let ratio_str = format!("{}/{}", completed, total);
+
+    // Top border: ┌─ TASKS ─ 2/5 ──────────────────────┐
+    let title = format!(" TASKS \u{2500} {} ", ratio_str);
+    let title_len = UnicodeWidthStr::width(title.as_str());
+    let rule_after = width.saturating_sub(2 + title_len);
+
+    let top_line = Line::from(vec![
+        Span::styled("\u{250c}\u{2500}", Style::default().fg(theme::ASH)),
+        Span::styled(
+            title,
+            Style::default()
+                .fg(theme::SODIUM)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "{}\u{2510}",
+                "\u{2500}".repeat(rule_after.saturating_sub(1))
+            ),
+            Style::default().fg(theme::ASH),
+        ),
+    ]);
+
+    // Build pills for non-completed tasks
+    let active_tasks: Vec<&crate::app::TaskSnapshot> = app
+        .task_tray
+        .iter()
+        .filter(|t| t.status != "completed" && t.status != "cancelled")
+        .collect();
+
+    let inner_w = width.saturating_sub(2); // "│ " prefix
+    let mut pill_spans: Vec<Span> = Vec::new();
+    let mut used_width = 0usize;
+
+    for (i, task) in active_tasks.iter().enumerate() {
+        let (marker, marker_color, text_color) = match task.status.as_str() {
+            "in_progress" => ("\u{25c6}", theme::SODIUM, theme::SODIUM),
+            _ => ("\u{25cb}", theme::ASH_MID, theme::CHALK_DIM),
+        };
+
+        let owner_part = if !task.owner.is_empty() {
+            format!("  {}", task.owner)
+        } else {
+            String::new()
+        };
+        let pill_text = format!("{} {}{}", marker, task.label, owner_part);
+        let pill_w = UnicodeWidthStr::width(pill_text.as_str());
+
+        let sep_w = if i > 0 { 3 } else { 0 };
+
+        if used_width + sep_w + pill_w > inner_w && i > 0 {
+            let overflow_count = active_tasks.len() - i;
+            pill_spans.push(Span::styled(
+                format!("  +{}", overflow_count),
+                Style::default().fg(theme::ASH_MID),
+            ));
+            break;
+        }
+
+        if i > 0 {
+            pill_spans.push(Span::styled("   ", Style::default()));
+            used_width += 3;
+        }
+
+        pill_spans.push(Span::styled(
+            marker.to_string(),
+            Style::default().fg(marker_color),
+        ));
+        pill_spans.push(Span::styled(
+            format!(" {}", task.label),
+            Style::default().fg(text_color),
+        ));
+        if !task.owner.is_empty() {
+            pill_spans.push(Span::styled(
+                format!("  {}", task.owner),
+                Style::default().fg(theme::ASH_MID),
+            ));
+        }
+        used_width += pill_w;
+    }
+
+    if active_tasks.is_empty() {
+        pill_spans.push(Span::styled(
+            "all completed",
+            Style::default().fg(theme::LICHEN),
+        ));
+    }
+
+    let mut pill_line_spans = vec![Span::styled("\u{2502} ", Style::default().fg(theme::ASH))];
+    pill_line_spans.extend(pill_spans);
+    let pill_line = Line::from(pill_line_spans);
+
+    // Bottom border
+    let bottom_fill = width.saturating_sub(2);
+    let bottom_line = Line::from(Span::styled(
+        format!("\u{2514}{}\u{2518}", "\u{2500}".repeat(bottom_fill)),
+        Style::default().fg(theme::ASH),
+    ));
+
+    let mut lines = vec![top_line, pill_line];
+
+    // Progress bar (2+ tasks)
+    if total >= 2 {
+        let ratio_display = format!("{}/{}", completed, total);
+        let ratio_w = ratio_display.len();
+        let bar_w = inner_w.saturating_sub(ratio_w + 2);
+        let filled = if total > 0 {
+            (completed * bar_w) / total
+        } else {
+            0
+        };
+        let empty = bar_w.saturating_sub(filled);
+
+        let mut progress_spans = vec![Span::styled("\u{2502} ", Style::default().fg(theme::ASH))];
+        if filled > 0 {
+            progress_spans.push(Span::styled(
+                "\u{25b0}".repeat(filled),
+                Style::default().fg(theme::SODIUM),
+            ));
+        }
+        if empty > 0 {
+            progress_spans.push(Span::styled(
+                "\u{25b1}".repeat(empty),
+                Style::default().fg(theme::ASH),
+            ));
+        }
+        let pad = inner_w.saturating_sub(filled + empty + ratio_w);
+        if pad > 0 {
+            progress_spans.push(Span::styled(" ".repeat(pad), Style::default()));
+        }
+        progress_spans.push(Span::styled(
+            ratio_display,
+            Style::default().fg(theme::LICHEN),
+        ));
+
+        lines.push(Line::from(progress_spans));
+    }
+
+    lines.push(bottom_line);
+
+    let paragraph = Paragraph::new(lines).style(theme::history_bg());
+    frame.render_widget(paragraph, area);
+}
+
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines = Vec::new();
 
@@ -577,14 +944,21 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
             let num = i + 1;
             let is_last = i == queue_len - 1;
             // Collapse newlines to spaces and truncate
-            let collapsed: String = msg.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+            let collapsed: String = msg
+                .chars()
+                .map(|c| if c == '\n' { ' ' } else { c })
+                .collect();
             let truncated: String = collapsed.chars().take(max_msg_w).collect();
             let display = if collapsed.chars().count() > max_msg_w {
                 format!("{}\u{2026}", truncated)
             } else {
                 truncated
             };
-            let content_style = if is_last { theme::CHALK_MID } else { theme::CHALK_DIM };
+            let content_style = if is_last {
+                theme::CHALK_MID
+            } else {
+                theme::CHALK_DIM
+            };
             lines.push(Line::from(vec![
                 Span::styled(format!("  {}. ", num), Style::default().fg(theme::ASH_MID)),
                 Span::styled(display, Style::default().fg(content_style)),
@@ -592,29 +966,41 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // Multi-line input rendering
+    // Multi-line input rendering with manual character-level wrapping.
+    // We pre-wrap each logical line using wrap_line() so that rendering and
+    // cursor positioning use identical wrapping logic (no Paragraph::wrap).
+    let total_width = area.width as usize;
+    let prefix_w = 2; // "❯ " or "  "
     let input_lines: Vec<&str> = app.input.split('\n').collect();
-    for (i, line) in input_lines.iter().enumerate() {
-        if i == 0 {
-            lines.push(Line::from(vec![
-                Span::styled(format!("{} ", theme::PROMPT_CHAR), theme::prompt()),
-                Span::styled(line.to_string(), theme::user_input()),
-            ]));
-        } else {
-            lines.push(Line::from(vec![
-                Span::styled("  ", Style::default().fg(theme::ASH)), // continuation indent
-                Span::styled(line.to_string(), theme::user_input()),
-            ]));
+    for (i, logical_line) in input_lines.iter().enumerate() {
+        let segments = wrap_line(logical_line, prefix_w, total_width);
+        for (j, &(seg_start, seg_end)) in segments.iter().enumerate() {
+            let seg_text = &logical_line[seg_start..seg_end];
+            if j == 0 {
+                // First visual line of this logical line — gets prefix
+                if i == 0 {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{} ", theme::PROMPT_CHAR), theme::prompt()),
+                        Span::styled(seg_text, theme::user_input()),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled("  ", Style::default().fg(theme::ASH)),
+                        Span::styled(seg_text, theme::user_input()),
+                    ]));
+                }
+            } else {
+                // Wrapped continuation line — no prefix
+                lines.push(Line::from(Span::styled(seg_text, theme::user_input())));
+            }
         }
     }
 
-    let input = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::TOP | Borders::BOTTOM)
-                .border_style(theme::input_border()),
-        );
+    let input = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .border_style(theme::input_border()),
+    );
     frame.render_widget(input, area);
 
     // Position cursor accounting for visual wrapping and queue lines
@@ -636,8 +1022,8 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_help_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let help = if app.running {
-        let mut spans = vec![
+    let mut spans = if app.running {
+        let mut s = vec![
             Span::styled(" Esc", theme::help_key()),
             Span::styled(" cancel  ", theme::help_desc()),
             Span::styled("Enter", theme::help_key()),
@@ -646,18 +1032,20 @@ fn draw_help_bar(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(" toggle code  ", theme::help_desc()),
         ];
         if app.queue_count() > 0 {
-            spans.push(Span::styled("Bksp", theme::help_key()));
-            spans.push(Span::styled(" unqueue  ", theme::help_desc()));
-            spans.push(Span::styled(
+            s.push(Span::styled("Bksp", theme::help_key()));
+            s.push(Span::styled(" unqueue  ", theme::help_desc()));
+            s.push(Span::styled(
                 format!(" {} queued ", app.queue_count()),
-                Style::default().fg(theme::SODIUM).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme::SODIUM)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
-        spans.push(Span::styled("^C", theme::help_key()));
-        spans.push(Span::styled(" quit", theme::help_desc()));
-        Line::from(spans)
+        s.push(Span::styled("^C", theme::help_key()));
+        s.push(Span::styled(" quit", theme::help_desc()));
+        s
     } else {
-        Line::from(vec![
+        vec![
             Span::styled(" ^U/^D", theme::help_key()),
             Span::styled(" scroll  ", theme::help_desc()),
             Span::styled("S-Tab", theme::help_key()),
@@ -670,10 +1058,32 @@ fn draw_help_bar(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(" copy  ", theme::help_desc()),
             Span::styled("^C", theme::help_key()),
             Span::styled(" quit", theme::help_desc()),
-        ])
+        ]
     };
 
-    let bar = Paragraph::new(help).style(theme::bar_bg());
+    // Right side: session_name · cwd
+    let right_str = format!("{} \u{b7} {} ", app.session_name, app.cwd);
+    let left_width: usize = spans.iter().map(|s| s.width()).sum();
+    let right_width = UnicodeWidthStr::width(right_str.as_str());
+    let pad = (area.width as usize).saturating_sub(left_width + right_width);
+    if pad > 0 {
+        spans.push(Span::styled(" ".repeat(pad), theme::bar_bg()));
+        spans.push(Span::styled(
+            &app.session_name,
+            Style::default().fg(theme::CHALK_DIM).bg(theme::FORM_RAISED),
+        ));
+        spans.push(Span::styled(
+            " \u{b7} ",
+            Style::default().fg(theme::ASH_MID).bg(theme::FORM_RAISED),
+        ));
+        spans.push(Span::styled(
+            &app.cwd,
+            Style::default().fg(theme::ASH_TEXT).bg(theme::FORM_RAISED),
+        ));
+        spans.push(Span::styled(" ", theme::bar_bg()));
+    }
+
+    let bar = Paragraph::new(Line::from(spans)).style(theme::bar_bg());
     frame.render_widget(bar, area);
 }
 
@@ -714,9 +1124,7 @@ fn draw_suggestions(frame: &mut Frame, app: &App, input_area: Rect) {
                     ),
                     Span::styled(
                         format!(" {}", desc),
-                        Style::default()
-                            .fg(theme::CHALK_MID)
-                            .bg(theme::FORM_RAISED),
+                        Style::default().fg(theme::CHALK_MID).bg(theme::FORM_RAISED),
                     ),
                 ])
             } else {
@@ -725,10 +1133,7 @@ fn draw_suggestions(frame: &mut Frame, app: &App, input_area: Rect) {
                         format!(" {:<w$}", cmd, w = name_col),
                         Style::default().fg(theme::CHALK_DIM),
                     ),
-                    Span::styled(
-                        format!(" {}", desc),
-                        Style::default().fg(theme::ASH_MID),
-                    ),
+                    Span::styled(format!(" {}", desc), Style::default().fg(theme::ASH_MID)),
                 ])
             }
         })
@@ -807,7 +1212,10 @@ fn draw_session_picker(frame: &mut Frame, app: &App, history_area: Rect) {
                     Style::default().fg(theme::SODIUM).bg(bg),
                     Style::default().fg(theme::CHALK).bg(bg),
                     Style::default().fg(theme::ASH_MID).bg(bg),
-                    Style::default().fg(theme::SODIUM).bg(bg).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::SODIUM)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
                 )
             } else {
                 (
@@ -882,9 +1290,15 @@ fn draw_skill_picker(frame: &mut Frame, app: &App, history_area: Rect) {
             let (name_style, desc_style, prefix_style) = if selected {
                 let bg = theme::FORM_RAISED;
                 (
-                    Style::default().fg(theme::SODIUM).bg(bg).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::SODIUM)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
                     Style::default().fg(theme::CHALK).bg(bg),
-                    Style::default().fg(theme::SODIUM).bg(bg).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::SODIUM)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
                 )
             } else {
                 (
@@ -921,18 +1335,26 @@ fn draw_prompt(frame: &mut Frame, app: &App, history_area: Rect) {
     };
 
     let has_options = !prompt.options.is_empty();
-    let option_count = if has_options { prompt.options.len() + 1 } else { 0 }; // +1 for "Other"
+    let option_count = if has_options {
+        prompt.options.len() + 1
+    } else {
+        0
+    }; // +1 for "Other"
 
     // Count question lines (manual wrapping)
     let inner_w = 46usize; // 50 - 4 (borders + padding)
     let q_lines = if prompt.question.is_empty() {
         1
     } else {
-        (prompt.question.chars().count() + inner_w - 1) / inner_w
+        prompt.question.chars().count().div_ceil(inner_w)
     };
 
     // Calculate content height
-    let extra_h: u16 = if prompt.editing_extra || !has_options { 3 } else { 0 };
+    let extra_h: u16 = if prompt.editing_extra || !has_options {
+        3
+    } else {
+        0
+    };
     let content_h = 1 // top padding
         + q_lines as u16 // question
         + 1 // blank after question
@@ -968,7 +1390,9 @@ fn draw_prompt(frame: &mut Frame, app: &App, history_area: Rect) {
             let chunk: String = q_chars[start..end].iter().collect();
             lines.push(Line::from(Span::styled(
                 format!("  {}", chunk),
-                Style::default().fg(theme::CHALK).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme::CHALK)
+                    .add_modifier(Modifier::BOLD),
             )));
             start = end;
         }
@@ -992,7 +1416,10 @@ fn draw_prompt(frame: &mut Frame, app: &App, history_area: Rect) {
                     ),
                     Span::styled(
                         truncated,
-                        Style::default().fg(theme::SODIUM).bg(theme::FORM_RAISED).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(theme::SODIUM)
+                            .bg(theme::FORM_RAISED)
+                            .add_modifier(Modifier::BOLD),
                     ),
                 ]));
             } else {
@@ -1014,7 +1441,10 @@ fn draw_prompt(frame: &mut Frame, app: &App, history_area: Rect) {
                 ),
                 Span::styled(
                     "Other",
-                    Style::default().fg(theme::SODIUM).bg(theme::FORM_RAISED).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::SODIUM)
+                        .bg(theme::FORM_RAISED)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]));
         } else {
@@ -1031,13 +1461,21 @@ fn draw_prompt(frame: &mut Frame, app: &App, history_area: Rect) {
 
     // Extra text input area (shown when Shift+Tab active, or always for freeform)
     if prompt.editing_extra || !has_options {
-        let label = if has_options { " Extra context " } else { " Your answer " };
+        let label = if has_options {
+            " Extra context "
+        } else {
+            " Your answer "
+        };
         let rule_w = inner_w.saturating_sub(label.chars().count() + 3);
         lines.push(Line::from(Span::styled(
             format!("  \u{250c}{}\u{2500}{}", label, "\u{2500}".repeat(rule_w)),
             Style::default().fg(theme::ASH_MID),
         )));
-        let text_display: String = prompt.extra_text.chars().take(inner_w.saturating_sub(4)).collect();
+        let text_display: String = prompt
+            .extra_text
+            .chars()
+            .take(inner_w.saturating_sub(4))
+            .collect();
         lines.push(Line::from(vec![
             Span::styled("  \u{2502} ", Style::default().fg(theme::ASH_MID)),
             Span::styled(text_display, Style::default().fg(theme::CHALK)),
@@ -1075,7 +1513,12 @@ fn draw_prompt(frame: &mut Frame, app: &App, history_area: Rect) {
 
     let title = " Agent Question ";
     let block = Block::default()
-        .title(Span::styled(title, Style::default().fg(theme::SODIUM).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(theme::SODIUM)
+                .add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::ASH_LIGHT));
     let paragraph = Paragraph::new(lines)
@@ -1084,55 +1527,77 @@ fn draw_prompt(frame: &mut Frame, app: &App, history_area: Rect) {
     frame.render_widget(paragraph, popup_area);
 }
 
+/// Wrap a single logical line into visual line segments, returning byte-offset ranges.
+/// `prefix_width` columns are reserved on the first visual line (for the prompt prefix).
+/// Continuation (wrapped) visual lines use the full `total_width`.
+/// Uses character-level wrapping with proper Unicode width calculation.
+fn wrap_line(text: &str, prefix_width: usize, total_width: usize) -> Vec<(usize, usize)> {
+    if total_width == 0 {
+        return vec![(0, text.len())];
+    }
+    let first_cap = total_width.saturating_sub(prefix_width);
+    let mut result = Vec::new();
+    let mut line_start = 0;
+    let mut col = 0;
+    let mut capacity = first_cap;
+
+    for (byte_idx, ch) in text.char_indices() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if col + w > capacity && col > 0 {
+            result.push((line_start, byte_idx));
+            line_start = byte_idx;
+            col = w;
+            capacity = total_width;
+        } else {
+            col += w;
+        }
+    }
+    result.push((line_start, text.len()));
+    result
+}
+
 /// Count total visual lines the input text occupies, accounting for wrapping.
-/// Each logical line (split by '\n') wraps at `width` columns.
+/// `width` is the total rendering width (prefix is accounted for internally).
 fn input_visual_lines(input: &str, width: usize) -> usize {
     if width == 0 {
         return 1;
     }
+    let prefix_w = 2; // "❯ " or "  "
     let mut total = 0;
     for line in input.split('\n') {
-        let len = line.chars().count();
-        if len == 0 {
-            total += 1;
-        } else {
-            total += (len + width - 1) / width;
-        }
+        total += wrap_line(line, prefix_w, width).len();
     }
     total.max(1)
 }
 
 /// Compute the visual (row, col) of the cursor in the input, accounting for wrapping.
-/// `full_width` is the total rendering width of the paragraph inner area.
-/// The returned column is absolute (includes the 2-char prefix on the first visual line
-/// of each logical line, and starts from 0 on wrapped continuation lines).
+/// `full_width` is the total rendering width; the 2-column prefix is handled internally.
 fn input_cursor_position(input: &str, cursor_pos: usize, full_width: usize) -> (usize, usize) {
-    let prefix = 2usize; // "❯ " or "  " prefix on each logical line
-    let before_cursor = &input[..cursor_pos];
-    let mut vis_row: usize = 0;
+    let prefix_w = 2usize; // "❯ " or "  "
+    let mut vis_row = 0usize;
+    let mut byte_offset = 0usize;
 
-    // Process each logical line before the cursor's line
-    let last_newline = before_cursor.rfind('\n').map(|i| i + 1).unwrap_or(0);
-    if last_newline > 0 {
-        for line in input[..last_newline - 1].split('\n') {
-            let total = UnicodeWidthStr::width(line) + prefix;
-            if full_width > 0 {
-                vis_row += (total.max(1) + full_width - 1) / full_width;
-            } else {
+    for logical_line in input.split('\n') {
+        let line_end = byte_offset + logical_line.len();
+        let segments = wrap_line(logical_line, prefix_w, full_width);
+
+        if cursor_pos <= line_end {
+            let cursor_in_line = cursor_pos - byte_offset;
+            for (i, &(seg_start, seg_end)) in segments.iter().enumerate() {
+                let is_last = i == segments.len() - 1;
+                if cursor_in_line >= seg_start && (cursor_in_line < seg_end || is_last) {
+                    let text_before = &logical_line[seg_start..cursor_in_line];
+                    let col = UnicodeWidthStr::width(text_before);
+                    return (vis_row, if i == 0 { col + prefix_w } else { col });
+                }
                 vis_row += 1;
             }
+            return (vis_row, prefix_w);
         }
+
+        vis_row += segments.len();
+        byte_offset = line_end + 1; // +1 for '\n'
     }
 
-    // Column position within the current logical line (visual width, not char count)
-    let col = UnicodeWidthStr::width(&input[last_newline..cursor_pos]);
-    // Absolute position including prefix — matches how ratatui wraps the Line content
-    let abs_pos = prefix + col;
-
-    if full_width > 0 && abs_pos > 0 {
-        vis_row += abs_pos / full_width;
-        (vis_row, abs_pos % full_width)
-    } else {
-        (vis_row, abs_pos)
-    }
+    (vis_row.saturating_sub(1), prefix_w)
 }

@@ -9,20 +9,22 @@ mod skill;
 #[allow(dead_code)]
 mod theme;
 mod ui;
+mod util;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
 use lash::agent::{Message, MessageRole, Part, PartKind, PruneState};
+use lash::provider::LashConfig;
 use lash::tools::{
     CompositeTools, DelegateDeep, DelegateSearch, DelegateTask, DiffFile, EditFile, FetchUrl,
-    FindReplace, Glob, Grep, Ls, ReadFile, Shell, TaskStore, ViewMessage, WebSearch, WriteFile,
+    FindReplace, Glob, Grep, Ls, ReadFile, Shell, SkillStore, TaskStore, ViewMessage, WebSearch,
+    WriteFile,
 };
-use lash::provider::LashConfig;
 use lash::*;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
@@ -60,12 +62,17 @@ struct Args {
     /// Delete all lash data (~/.lash/ and ~/.cache/lash/) and exit
     #[arg(long)]
     reset: bool,
+
+    /// Run headlessly: execute prompt, print response to stdout, exit
+    #[arg(short = 'p', long = "print")]
+    print_prompt: Option<String>,
 }
 
 #[allow(dead_code)]
 struct SessionLogger {
     file: std::fs::File,
     session_id: String,
+    session_name: String,
 }
 
 impl SessionLogger {
@@ -79,11 +86,17 @@ impl SessionLogger {
         let path = dir.join(&filename);
         let file = std::fs::File::create(&path)?;
         let session_id = uuid::Uuid::new_v4().to_string();
+        let session_name = generate_session_name(&dir);
 
-        let mut logger = Self { file, session_id: session_id.clone() };
+        let mut logger = Self {
+            file,
+            session_id: session_id.clone(),
+            session_name: session_name.clone(),
+        };
         logger.write_json(&serde_json::json!({
             "type": "session_start",
             "session_id": session_id,
+            "session_name": session_name,
             "ts": now.to_rfc3339(),
             "model": model,
             "cwd": std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()),
@@ -150,8 +163,7 @@ async fn main() -> anyhow::Result<()> {
         let log_file = std::fs::File::create(log_dir.join("lash.log"))?;
 
         use tracing_subscriber::EnvFilter;
-        let filter = EnvFilter::try_from_env("LASH_LOG")
-            .unwrap_or_else(|_| EnvFilter::new("warn"));
+        let filter = EnvFilter::try_from_env("LASH_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_writer(log_file)
@@ -166,11 +178,11 @@ async fn main() -> anyhow::Result<()> {
         use std::io::Write;
 
         // Design system ANSI colors
-        const SODIUM: &str = "\x1b[38;2;232;163;60m";   // #e8a33c
-        const CHALK: &str = "\x1b[38;2;232;228;208m";   // #e8e4d0
-        const ASH_TEXT: &str = "\x1b[38;2;90;90;80m";   // #5a5a50
-        const LICHEN: &str = "\x1b[38;2;138;158;108m";  // #8a9e6c
-        const ERR: &str = "\x1b[38;2;204;68;68m";       // #c44
+        const SODIUM: &str = "\x1b[38;2;232;163;60m"; // #e8a33c
+        const CHALK: &str = "\x1b[38;2;232;228;208m"; // #e8e4d0
+        const ASH_TEXT: &str = "\x1b[38;2;90;90;80m"; // #5a5a50
+        const LICHEN: &str = "\x1b[38;2;138;158;108m"; // #8a9e6c
+        const ERR: &str = "\x1b[38;2;204;68;68m"; // #c44
         const BOLD: &str = "\x1b[1m";
         const RESET: &str = "\x1b[0m";
 
@@ -183,8 +195,14 @@ async fn main() -> anyhow::Result<()> {
         eprintln!();
         eprintln!("  {ERR}This will permanently delete all lash data:{RESET}");
         eprintln!();
-        eprintln!("    {ASH_TEXT}config, credentials   {CHALK}{}{RESET}", lash_dir.display());
-        eprintln!("    {ASH_TEXT}python cache           {CHALK}{}{RESET}", cache_dir.display());
+        eprintln!(
+            "    {ASH_TEXT}config, credentials   {CHALK}{}{RESET}",
+            lash_dir.display()
+        );
+        eprintln!(
+            "    {ASH_TEXT}python cache           {CHALK}{}{RESET}",
+            cache_dir.display()
+        );
         eprintln!();
         eprint!("  {SODIUM}Are you sure? [y/N]{RESET} ");
         std::io::stderr().flush()?;
@@ -218,6 +236,17 @@ async fn main() -> anyhow::Result<()> {
                 tavily_api_key: args.tavily_api_key.clone(),
                 delegate_models: None,
             }
+        } else if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+            // ANTHROPIC_API_KEY env var → use as direct Claude bearer token
+            LashConfig {
+                provider: Provider::Claude {
+                    access_token: key,
+                    refresh_token: String::new(),
+                    expires_at: u64::MAX,
+                },
+                tavily_api_key: args.tavily_api_key.clone(),
+                delegate_models: None,
+            }
         } else {
             setup::run_setup().await?
         }
@@ -233,13 +262,34 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ref key) = args.tavily_api_key {
         lash_config.tavily_api_key = Some(key.clone());
     }
-    lash_config.save()?;
+    if args.print_prompt.is_none() {
+        lash_config.save()?;
+    }
 
-    let model = args.model.clone().unwrap_or_else(|| lash_config.provider.default_model().to_string());
+    let model = args
+        .model
+        .clone()
+        .unwrap_or_else(|| lash_config.provider.default_model().to_string());
+
+    let llm_log_path = std::env::var("LASH_LOG").ok().and_then(|level| {
+        let l = level.to_lowercase();
+        if l == "debug" || l == "trace" || l.contains("debug") || l.contains("trace") {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            let dir = PathBuf::from(home).join(".lash").join("sessions");
+            Some(dir.join(format!(
+                "{}.llm.jsonl",
+                chrono::Local::now().format("%Y%m%d_%H%M%S")
+            )))
+        } else {
+            None
+        }
+    });
 
     let config = AgentConfig {
         model: model.clone(),
         provider: lash_config.provider.clone(),
+        llm_log_path,
+        headless: args.print_prompt.is_some(),
         ..Default::default()
     };
 
@@ -247,7 +297,10 @@ async fn main() -> anyhow::Result<()> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let sessions_dir = PathBuf::from(&home).join(".lash").join("sessions");
     std::fs::create_dir_all(&sessions_dir)?;
-    let db_path = sessions_dir.join(format!("{}.db", chrono::Local::now().format("%Y%m%d_%H%M%S")));
+    let db_path = sessions_dir.join(format!(
+        "{}.db",
+        chrono::Local::now().format("%Y%m%d_%H%M%S")
+    ));
     let store = Arc::new(Store::open(&db_path).expect("Failed to open session database"));
 
     let task_store: Arc<TaskStore> = Arc::new(TaskStore::new(Arc::clone(&store)));
@@ -270,36 +323,62 @@ async fn main() -> anyhow::Result<()> {
     }
     let base_tools: Arc<dyn ToolProvider> = Arc::new(base);
 
+    // SkillStore — available to root + balanced/deep delegates, NOT search delegates
+    let skill_dirs = vec![
+        PathBuf::from(&home).join(".lash").join("skills"),
+        PathBuf::from(".lash").join("skills"),
+    ];
+    let tools_with_skills: Arc<dyn ToolProvider> = Arc::new(
+        CompositeTools::new()
+            .add_arc(Arc::clone(&base_tools))
+            .add(SkillStore::new(skill_dirs)),
+    );
+
     // Root cancel token — lives for the whole app lifetime, child tokens are created per run
     let root_cancel = CancellationToken::new();
 
-    let delegate_args = (
-        Arc::clone(&base_tools),
-        &config,
-        lash_config.delegate_models.clone(),
-        Arc::clone(&store),
-        root_cancel.clone(),
-        "root".to_string(),
-    );
     let tools: Arc<dyn ToolProvider> = Arc::new(
         CompositeTools::new()
-            .add_arc(Arc::clone(&base_tools))
+            .add_arc(Arc::clone(&tools_with_skills))
             .add(DelegateSearch::new(
-                delegate_args.0.clone(), delegate_args.1, delegate_args.2.clone(),
-                delegate_args.3.clone(), delegate_args.4.clone(), delegate_args.5.clone(),
+                Arc::clone(&base_tools),
+                &config,
+                lash_config.delegate_models.clone(),
+                Arc::clone(&store),
+                root_cancel.clone(),
+                "root".to_string(),
             ))
             .add(DelegateTask::new(
-                delegate_args.0.clone(), delegate_args.1, delegate_args.2.clone(),
-                delegate_args.3.clone(), delegate_args.4.clone(), delegate_args.5.clone(),
+                Arc::clone(&tools_with_skills),
+                &config,
+                lash_config.delegate_models.clone(),
+                Arc::clone(&store),
+                root_cancel.clone(),
+                "root".to_string(),
             ))
             .add(DelegateDeep::new(
-                delegate_args.0, delegate_args.1, delegate_args.2,
-                delegate_args.3, delegate_args.4, delegate_args.5,
+                Arc::clone(&tools_with_skills),
+                &config,
+                lash_config.delegate_models.clone(),
+                Arc::clone(&store),
+                root_cancel.clone(),
+                "root".to_string(),
             )),
     );
-    let session = Session::new(tools, SessionConfig::default()).await?;
+    let session = Session::new(tools, SessionConfig::default(), "root").await?;
 
-    let agent = Agent::new(session, config, Arc::clone(&store), Some("root".to_string()));
+    let agent = Agent::new(
+        session,
+        config,
+        Arc::clone(&store),
+        Some("root".to_string()),
+    );
+
+    // ── Headless mode: skip TUI, run agent, print to stdout ──
+    if let Some(prompt) = args.print_prompt {
+        return run_headless(agent, prompt, Arc::clone(&store)).await;
+    }
+
     let mut logger = SessionLogger::new(&model)?;
 
     // Install panic hook that restores the terminal
@@ -330,26 +409,30 @@ async fn main() -> anyhow::Result<()> {
 
     // Enable mouse capture by default (scroll wheel works always)
     if !args.no_mouse {
-        crossterm::execute!(
-            std::io::stdout(),
-            crossterm::event::EnableMouseCapture
-        )?;
+        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
     }
 
     // Enable focus change tracking for gating desktop notifications
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableFocusChange)?;
 
-    let result = run_app(terminal, agent, &mut logger, &args, model).await;
+    let session_name = logger.session_name.clone();
+    let result = run_app(
+        terminal,
+        agent,
+        &mut logger,
+        &args,
+        model,
+        session_name,
+        Arc::clone(&store),
+    )
+    .await;
 
     // Disable focus change tracking
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableFocusChange);
 
     // Disable mouse capture
     if !args.no_mouse {
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::event::DisableMouseCapture
-        );
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     }
 
     // Pop kitty keyboard protocol
@@ -363,10 +446,75 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
+/// Run the agent headlessly: send prompt, consume events, print final response to stdout.
+async fn run_headless(mut agent: Agent, prompt: String, _store: Arc<Store>) -> anyhow::Result<()> {
+    let prompt = transform_at_references(&prompt);
+
+    let history = vec![Message {
+        id: "m0".to_string(),
+        role: MessageRole::User,
+        parts: vec![Part {
+            id: "m0.p0".to_string(),
+            kind: PartKind::Text,
+            content: prompt,
+            prune_state: PruneState::Intact,
+        }],
+    }];
+
+    let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
+    let cancel = CancellationToken::new();
+
+    // Spawn agent run
+    let (return_tx, return_rx) = tokio::sync::oneshot::channel::<AgentRunResult>();
+    let msgs = history.clone();
+    tokio::spawn(async move {
+        let (new_history, final_turn) = agent.run(msgs, Vec::new(), event_tx, cancel, 0).await;
+        let _ = return_tx.send(AgentRunResult {
+            agent,
+            history: new_history,
+            turn: final_turn,
+        });
+    });
+
+    let mut exit_code = 0i32;
+
+    // Consume events
+    while let Some(event) = event_rx.recv().await {
+        match event {
+            AgentEvent::Message { text, kind } => {
+                if kind == "final" {
+                    println!("{}", text);
+                }
+            }
+            AgentEvent::ToolCall { .. } => {}
+            AgentEvent::Error { message } => {
+                eprintln!("error: {}", message);
+                exit_code = 1;
+            }
+            AgentEvent::Prompt { response_tx, .. } => {
+                // No human available — send empty string
+                let _ = response_tx.send(String::new());
+            }
+            AgentEvent::Done => break,
+            // Ignore streaming deltas, code blocks, token usage, etc.
+            _ => {}
+        }
+    }
+
+    // Wait for agent task to finish
+    let _ = return_rx.await;
+
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+    Ok(())
+}
+
 /// Returned by the spawned agent task so we can reclaim ownership.
 struct AgentRunResult {
     agent: Agent,
     history: Vec<Message>,
+    turn: usize,
 }
 
 /// Build the help text shown by /help.
@@ -408,6 +556,7 @@ fn help_text(skills: &skill::SkillRegistry) -> String {
         "  Ctrl+Shift+V       Paste text only".to_string(),
         "  Ctrl+Y             Copy last response to clipboard".to_string(),
         "  Ctrl+O             Toggle code block expansion".to_string(),
+        "  Shift+Drag         Select text (terminal native)".to_string(),
         "  Up/Down            Input history".to_string(),
         "  Ctrl+C             Quit".to_string(),
     ]);
@@ -421,10 +570,13 @@ async fn run_app(
     logger: &mut SessionLogger,
     _args: &Args,
     model: String,
+    session_name: String,
+    store: Arc<Store>,
 ) -> anyhow::Result<()> {
-    let mut app = App::new(model);
+    let mut app = App::new(model, session_name, Some(store));
     app.load_history();
     let mut history: Vec<Message> = Vec::new();
+    let mut turn_counter: usize = 0;
     let mut agent = Some(agent);
 
     // Cancellation token for interrupting a running agent
@@ -474,7 +626,7 @@ async fn run_app(
     // SIGTERM handler for graceful shutdown
     let sigterm_tx = app_tx.clone();
     tokio::spawn(async move {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         if let Ok(mut sig) = signal(SignalKind::terminate()) {
             sig.recv().await;
             let _ = sigterm_tx.send(AppEvent::Quit);
@@ -491,14 +643,23 @@ async fn run_app(
                 Ok(result) => {
                     agent = Some(result.agent);
                     history = result.history;
+                    turn_counter = result.turn;
                     agent_return_rx = None;
                     cancel_token = None;
 
                     // Auto-drain: if there are queued messages, send the next one
                     if let Some(queued_input) = app.dequeue_message() {
                         send_user_message(
-                            queued_input, Vec::new(), &mut app, logger, &mut history,
-                            &mut agent, &mut agent_return_rx, &mut cancel_token, &app_tx,
+                            queued_input,
+                            Vec::new(),
+                            &mut app,
+                            logger,
+                            &mut history,
+                            &mut agent,
+                            &mut agent_return_rx,
+                            &mut cancel_token,
+                            &app_tx,
+                            turn_counter,
                         );
                     }
                 }
@@ -515,7 +676,7 @@ async fn run_app(
         if app.dirty {
             // Pre-compute height cache before immutable borrow in draw
             let size = terminal.size()?;
-            let overhead: u16 = if app.running { 6 } else { 5 };
+            let overhead: u16 = (if app.running { 6 } else { 5 }) + app.task_tray_height();
             let vh = size.height.saturating_sub(overhead) as usize;
             let vw = size.width as usize;
             app.ensure_height_cache_pub(vw, vh);
@@ -542,9 +703,7 @@ async fn run_app(
                 }
                 app.dirty = true;
                 // CTRL+C: dismiss prompt if active, else quit
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && key.code == KeyCode::Char('c')
-                {
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     if app.has_prompt() {
                         app.dismiss_prompt();
                         continue;
@@ -553,17 +712,13 @@ async fn run_app(
                 }
 
                 // CTRL+O: toggle code expand (works in all modes)
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && key.code == KeyCode::Char('o')
-                {
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o') {
                     app.toggle_code_expand();
                     continue;
                 }
 
                 // CTRL+Y: copy last response to clipboard
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && key.code == KeyCode::Char('y')
-                {
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('y') {
                     copy_last_response(&app);
                     continue;
                 }
@@ -573,13 +728,13 @@ async fn run_app(
                     && key.modifiers.contains(KeyModifiers::SHIFT)
                     && key.code == KeyCode::Char('V')
                 {
-                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                        if let Ok(text) = clipboard.get_text() {
-                            for c in text.chars() {
-                                app.insert_char(c);
-                            }
-                            app.update_suggestions();
+                    if let Ok(mut clipboard) = arboard::Clipboard::new()
+                        && let Ok(text) = clipboard.get_text()
+                    {
+                        for c in text.chars() {
+                            app.insert_char(c);
                         }
+                        app.update_suggestions();
                     }
                     continue;
                 }
@@ -593,7 +748,8 @@ async fn run_app(
                         let got_image = clipboard.get_image().ok().and_then(|img_data| {
                             let w = img_data.width as u32;
                             let h = img_data.height as u32;
-                            let rgba = image::RgbaImage::from_raw(w, h, img_data.bytes.into_owned())?;
+                            let rgba =
+                                image::RgbaImage::from_raw(w, h, img_data.bytes.into_owned())?;
                             let mut png_buf = std::io::Cursor::new(Vec::new());
                             rgba.write_to(&mut png_buf, image::ImageFormat::Png).ok()?;
                             Some(png_buf.into_inner())
@@ -626,7 +782,7 @@ async fn run_app(
                 // ── Always-on scroll keys (work in all states) ──
                 {
                     let size = terminal.size()?;
-                    let overhead: u16 = if app.running { 6 } else { 5 };
+                    let overhead: u16 = (if app.running { 6 } else { 5 }) + app.task_tray_height();
                     let vh = size.height.saturating_sub(overhead) as usize;
                     let vw = size.width as usize;
                     let half_page = vh / 2;
@@ -683,9 +839,10 @@ async fn run_app(
                                     Some((msgs, blocks)) => {
                                         history = msgs;
                                         app.blocks = blocks;
-                                        app.blocks.push(DisplayBlock::SystemMessage(
-                                            format!("Resumed: {}", filename),
-                                        ));
+                                        app.blocks.push(DisplayBlock::SystemMessage(format!(
+                                            "Resumed: {}",
+                                            filename
+                                        )));
 
                                         // Try to restore agent state from .db
                                         restore_agent_state(
@@ -693,15 +850,17 @@ async fn run_app(
                                             &mut history,
                                             &mut agent,
                                             &mut app,
-                                        ).await;
+                                        )
+                                        .await;
 
                                         app.invalidate_height_cache();
                                         app.scroll_to_bottom();
                                     }
                                     None => {
-                                        app.blocks.push(DisplayBlock::SystemMessage(
-                                            format!("Could not load: {}", filename),
-                                        ));
+                                        app.blocks.push(DisplayBlock::SystemMessage(format!(
+                                            "Could not load: {}",
+                                            filename
+                                        )));
                                         app.invalidate_height_cache();
                                         app.scroll_to_bottom();
                                     }
@@ -719,11 +878,17 @@ async fn run_app(
                         KeyCode::Up => app.prompt_up(),
                         KeyCode::Down => app.prompt_down(),
                         KeyCode::BackTab => app.prompt_toggle_extra(),
-                        KeyCode::Enter => { app.take_prompt_response(); }
-                        KeyCode::Char(c) if app.is_prompt_editing_extra() || app.is_prompt_freeform() => {
+                        KeyCode::Enter => {
+                            app.take_prompt_response();
+                        }
+                        KeyCode::Char(c)
+                            if app.is_prompt_editing_extra() || app.is_prompt_freeform() =>
+                        {
                             app.prompt_insert_char(c);
                         }
-                        KeyCode::Backspace if app.is_prompt_editing_extra() || app.is_prompt_freeform() => {
+                        KeyCode::Backspace
+                            if app.is_prompt_editing_extra() || app.is_prompt_freeform() =>
+                        {
                             app.prompt_backspace();
                         }
                         _ => {}
@@ -744,7 +909,9 @@ async fn run_app(
                             // Show relative path if possible
                             let display = std::env::current_dir()
                                 .ok()
-                                .and_then(|cwd| path.strip_prefix(&cwd).ok().map(|p| p.to_path_buf()))
+                                .and_then(|cwd| {
+                                    path.strip_prefix(&cwd).ok().map(|p| p.to_path_buf())
+                                })
                                 .unwrap_or_else(|| path.clone());
                             format!("Switched to plan mode \u{2014} {}", display.display())
                         }
@@ -780,7 +947,7 @@ async fn run_app(
 
                         let input = app.take_input();
                         app.update_suggestions();
-                        if input.is_empty() {
+                        if input.is_empty() && app.pending_images.is_empty() {
                             continue;
                         }
 
@@ -800,17 +967,16 @@ async fn run_app(
                                 use tokio::process::Command as TokioCommand;
                                 let result = tokio::time::timeout(
                                     std::time::Duration::from_secs(30),
-                                    TokioCommand::new("bash")
-                                        .arg("-c")
-                                        .arg(cmd_str)
-                                        .output(),
+                                    TokioCommand::new("bash").arg("-c").arg(cmd_str).output(),
                                 )
                                 .await;
 
                                 match result {
                                     Ok(Ok(output)) => {
-                                        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                                        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                                        let stdout =
+                                            String::from_utf8_lossy(&output.stdout).to_string();
+                                        let stderr =
+                                            String::from_utf8_lossy(&output.stderr).to_string();
                                         let error = if !output.status.success() {
                                             let mut err = stderr.clone();
                                             if let Some(code) = output.status.code() {
@@ -832,14 +998,16 @@ async fn run_app(
                                         });
                                     }
                                     Ok(Err(e)) => {
-                                        app.blocks.push(DisplayBlock::Error(
-                                            format!("Failed to run '{}': {}", cmd_str, e),
-                                        ));
+                                        app.blocks.push(DisplayBlock::Error(format!(
+                                            "Failed to run '{}': {}",
+                                            cmd_str, e
+                                        )));
                                     }
                                     Err(_) => {
-                                        app.blocks.push(DisplayBlock::Error(
-                                            format!("Command '{}' timed out after 30s", cmd_str),
-                                        ));
+                                        app.blocks.push(DisplayBlock::Error(format!(
+                                            "Command '{}' timed out after 30s",
+                                            cmd_str
+                                        )));
                                     }
                                 }
                                 app.invalidate_height_cache();
@@ -863,7 +1031,8 @@ async fn run_app(
                                     if let Some(ag) = agent.as_mut() {
                                         ag.set_model(new_model.clone());
                                     }
-                                    app.context_window = lash::model_info::context_window(&new_model);
+                                    app.context_window =
+                                        lash::model_info::context_window(&new_model);
                                     app.model = new_model;
                                 }
                                 command::Command::ChangeProvider => {
@@ -882,9 +1051,10 @@ async fn run_app(
                                             ));
                                         }
                                         Err(e) => {
-                                            app.blocks.push(DisplayBlock::SystemMessage(
-                                                format!("Failed to remove credentials: {}", e),
-                                            ));
+                                            app.blocks.push(DisplayBlock::SystemMessage(format!(
+                                                "Failed to remove credentials: {}",
+                                                e
+                                            )));
                                         }
                                     }
                                     app.invalidate_height_cache();
@@ -913,7 +1083,8 @@ async fn run_app(
                                                     &mut history,
                                                     &mut agent,
                                                     &mut app,
-                                                ).await;
+                                                )
+                                                .await;
 
                                                 app.invalidate_height_cache();
                                                 app.scroll_to_bottom();
@@ -951,7 +1122,8 @@ async fn run_app(
                                     if items.is_empty() {
                                         app.blocks.push(DisplayBlock::SystemMessage(
                                             "No skills found.\n\
-                                             Add .md files to ~/.lash/skills/ or .lash/skills/"
+                                             Add skill directories to ~/.lash/skills/ or .lash/skills/\n\
+                                             Each skill is a directory with a SKILL.md file."
                                                 .to_string(),
                                         ));
                                         app.invalidate_height_cache();
@@ -962,10 +1134,14 @@ async fn run_app(
                                     }
                                 }
                                 command::Command::Skill(name, args) => {
-                                    if let Some(skill) = app.skills.get(&name) {
-                                        let skill_content = skill.content.clone();
-                                        let user_msg = args.unwrap_or_else(|| format!("Apply the {} skill.", name));
+                                    if app.skills.get(&name).is_some() {
+                                        let user_msg = match args {
+                                            Some(a) => format!("[SKILL:{}] {}", name, a),
+                                            None => format!("[SKILL:{}]", name),
+                                        };
 
+                                        // Reuse send_user_message — display shows original input,
+                                        // but we send [SKILL:name] as the user message content
                                         app.blocks.push(DisplayBlock::UserInput(input.clone()));
                                         app.invalidate_height_cache();
                                         app.scroll_to_bottom();
@@ -974,17 +1150,6 @@ async fn run_app(
 
                                         logger.log_user_input(&input);
 
-                                        let sys_id = format!("m{}", history.len());
-                                        history.push(Message {
-                                            id: sys_id.clone(),
-                                            role: MessageRole::System,
-                                            parts: vec![Part {
-                                                id: format!("{}.p0", sys_id),
-                                                kind: PartKind::Text,
-                                                content: skill_content,
-                                                prune_state: PruneState::Intact,
-                                            }],
-                                        });
                                         let usr_id = format!("m{}", history.len());
                                         history.push(Message {
                                             id: usr_id.clone(),
@@ -997,7 +1162,8 @@ async fn run_app(
                                             }],
                                         });
 
-                                        let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
+                                        let (event_tx, mut event_rx) =
+                                            mpsc::channel::<AgentEvent>(100);
                                         let fwd_tx = app_tx.clone();
                                         tokio::spawn(async move {
                                             while let Some(ev) = event_rx.recv().await {
@@ -1007,19 +1173,26 @@ async fn run_app(
                                             }
                                         });
 
-                                        let mut ag = agent.take().expect("agent should be available when not running");
+                                        let mut ag = agent
+                                            .take()
+                                            .expect("agent should be available when not running");
                                         let msgs = history.clone();
-                                        let (return_tx, return_rx) = tokio::sync::oneshot::channel();
+                                        let (return_tx, return_rx) =
+                                            tokio::sync::oneshot::channel();
                                         agent_return_rx = Some(return_rx);
 
                                         let cancel = CancellationToken::new();
                                         cancel_token = Some(cancel.clone());
 
+                                        let offset = turn_counter;
                                         tokio::spawn(async move {
-                                            let new_history = ag.run(msgs, Vec::new(), event_tx, cancel).await;
+                                            let (new_history, final_turn) = ag
+                                                .run(msgs, Vec::new(), event_tx, cancel, offset)
+                                                .await;
                                             let _ = return_tx.send(AgentRunResult {
                                                 agent: ag,
                                                 history: new_history,
+                                                turn: final_turn,
                                             });
                                         });
                                     }
@@ -1036,8 +1209,16 @@ async fn run_app(
                         // Regular user message — send to agent
                         let images = app.take_images();
                         send_user_message(
-                            input, images, &mut app, logger, &mut history,
-                            &mut agent, &mut agent_return_rx, &mut cancel_token, &app_tx,
+                            input,
+                            images,
+                            &mut app,
+                            logger,
+                            &mut history,
+                            &mut agent,
+                            &mut agent_return_rx,
+                            &mut cancel_token,
+                            &app_tx,
+                            turn_counter,
                         );
                     }
                     KeyCode::Backspace => {
@@ -1076,7 +1257,8 @@ async fn run_app(
                     MouseEventKind::ScrollUp => app.scroll_up(3),
                     MouseEventKind::ScrollDown => {
                         let size = terminal.size()?;
-                        let overhead: u16 = if app.running { 6 } else { 5 };
+                        let overhead: u16 =
+                            (if app.running { 6 } else { 5 }) + app.task_tray_height();
                         let vh = size.height.saturating_sub(overhead) as usize;
                         let vw = size.width as usize;
                         app.scroll_down(3, vh, vw);
@@ -1106,7 +1288,12 @@ async fn run_app(
             AppEvent::Agent(event) => {
                 app.dirty = true;
                 // Intercept Prompt events — set up dialog state instead of passing to handle_agent_event
-                if let AgentEvent::Prompt { question, options, response_tx } = event {
+                if let AgentEvent::Prompt {
+                    question,
+                    options,
+                    response_tx,
+                } = event
+                {
                     let is_freeform = options.is_empty();
                     app.prompt = Some(app::PromptState {
                         question,
@@ -1123,18 +1310,18 @@ async fn run_app(
                     app.handle_agent_event(event);
                     if is_done {
                         // Display plan content if plan file was modified
-                        if app.mode == app::Mode::Plan {
-                            if let Some(ref plan_path) = app.plan_file {
-                                let new_mtime = std::fs::metadata(plan_path)
-                                    .ok()
-                                    .and_then(|m| m.modified().ok());
-                                if new_mtime != app.plan_file_mtime && plan_path.exists() {
-                                    app.plan_file_mtime = new_mtime;
-                                    if let Ok(content) = std::fs::read_to_string(plan_path) {
-                                        app.blocks.push(DisplayBlock::PlanContent(content));
-                                        app.invalidate_height_cache();
-                                        app.scroll_to_bottom();
-                                    }
+                        if app.mode == app::Mode::Plan
+                            && let Some(ref plan_path) = app.plan_file
+                        {
+                            let new_mtime = std::fs::metadata(plan_path)
+                                .ok()
+                                .and_then(|m| m.modified().ok());
+                            if new_mtime != app.plan_file_mtime && plan_path.exists() {
+                                app.plan_file_mtime = new_mtime;
+                                if let Ok(content) = std::fs::read_to_string(plan_path) {
+                                    app.blocks.push(DisplayBlock::PlanContent(content));
+                                    app.invalidate_height_cache();
+                                    app.scroll_to_bottom();
                                 }
                             }
                         }
@@ -1158,6 +1345,7 @@ async fn run_app(
 }
 
 /// Send a user message to the agent: push display block, transform refs, log, update history, spawn agent run.
+#[allow(clippy::too_many_arguments)]
 fn send_user_message(
     input: String,
     images: Vec<Vec<u8>>,
@@ -1168,6 +1356,7 @@ fn send_user_message(
     agent_return_rx: &mut Option<tokio::sync::oneshot::Receiver<AgentRunResult>>,
     cancel_token: &mut Option<CancellationToken>,
     app_tx: &mpsc::UnboundedSender<AppEvent>,
+    turn_counter: usize,
 ) {
     app.blocks.push(DisplayBlock::UserInput(input.clone()));
     app.invalidate_height_cache();
@@ -1248,7 +1437,9 @@ fn send_user_message(
         }
     });
 
-    let mut ag = agent.take().expect("agent should be available when not running");
+    let mut ag = agent
+        .take()
+        .expect("agent should be available when not running");
     let msgs = history.clone();
     let (return_tx, return_rx) = tokio::sync::oneshot::channel();
     *agent_return_rx = Some(return_rx);
@@ -1256,11 +1447,13 @@ fn send_user_message(
     let cancel = CancellationToken::new();
     *cancel_token = Some(cancel.clone());
 
+    let offset = turn_counter;
     tokio::spawn(async move {
-        let new_history = ag.run(msgs, images, event_tx, cancel).await;
+        let (new_history, final_turn) = ag.run(msgs, images, event_tx, cancel, offset).await;
         let _ = return_tx.send(AgentRunResult {
             agent: ag,
             history: new_history,
+            turn: final_turn,
         });
     });
 }
@@ -1385,9 +1578,10 @@ async fn restore_agent_state(
         }
 
         if !active_subs.is_empty() {
-            app.blocks.push(DisplayBlock::SystemMessage(
-                format!("{} interrupted sub-agent(s) noted in context.", active_subs.len()),
-            ));
+            app.blocks.push(DisplayBlock::SystemMessage(format!(
+                "{} interrupted sub-agent(s) noted in context.",
+                active_subs.len()
+            )));
         }
     } else {
         // No root agent state in .db
@@ -1469,22 +1663,123 @@ fn notify_done() {
         .spawn();
 }
 
+/// Generate a unique session name like "juniper-mountain".
+/// Scans existing session files for collisions.
+fn generate_session_name(sessions_dir: &std::path::Path) -> String {
+    use rand::Rng;
+    use std::io::{BufRead, BufReader};
+
+    const ADJECTIVES: &[&str] = &[
+        "alpine", "amber", "ancient", "ashen", "autumn", "blazing", "bright", "calm", "cedar",
+        "coastal", "copper", "coral", "crimson", "crystal", "dappled", "deep", "desert", "distant",
+        "dusky", "ember", "fading", "fern", "flint", "foggy", "forest", "frozen", "gentle",
+        "gilded", "glacial", "golden", "granite", "hollow", "iron", "ivory", "jade", "keen",
+        "lofty", "lunar", "marble", "misty", "mossy", "northern", "obsidian", "onyx", "opal",
+        "pale", "pine", "quiet", "radiant", "rugged", "rustic", "sandy", "silver", "silent",
+        "solar", "stone", "sunlit", "tidal", "twilight", "verdant", "violet", "wild", "winter",
+    ];
+    const NOUNS: &[&str] = &[
+        "basin",
+        "birch",
+        "bluff",
+        "boulder",
+        "brook",
+        "canyon",
+        "cavern",
+        "cliff",
+        "cove",
+        "creek",
+        "delta",
+        "dune",
+        "falls",
+        "field",
+        "fjord",
+        "glade",
+        "gorge",
+        "grove",
+        "harbor",
+        "heath",
+        "hill",
+        "island",
+        "lake",
+        "ledge",
+        "marsh",
+        "meadow",
+        "mesa",
+        "mountain",
+        "oasis",
+        "ocean",
+        "pass",
+        "peak",
+        "plain",
+        "plateau",
+        "pond",
+        "prairie",
+        "ravine",
+        "reef",
+        "ridge",
+        "river",
+        "shore",
+        "slope",
+        "spring",
+        "stone",
+        "summit",
+        "terrace",
+        "thicket",
+        "timber",
+        "trail",
+        "tundra",
+        "vale",
+        "valley",
+        "vista",
+        "volcano",
+        "waterfall",
+        "willow",
+        "woods",
+    ];
+
+    // Collect existing session names from session files
+    let mut existing = std::collections::HashSet::new();
+    if let Ok(entries) = std::fs::read_dir(sessions_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+                && let Ok(file) = std::fs::File::open(&path)
+            {
+                let reader = BufReader::new(file);
+                if let Some(Ok(first_line)) = reader.lines().next()
+                    && let Ok(v) = serde_json::from_str::<serde_json::Value>(&first_line)
+                    && let Some(name) = v.get("session_name").and_then(|n| n.as_str())
+                {
+                    existing.insert(name.to_string());
+                }
+            }
+        }
+    }
+
+    let mut rng = rand::rng();
+    loop {
+        let adj = ADJECTIVES[rng.random_range(0..ADJECTIVES.len())];
+        let noun = NOUNS[rng.random_range(0..NOUNS.len())];
+        let name = format!("{}-{}", adj, noun);
+        if !existing.contains(&name) {
+            return name;
+        }
+    }
+}
+
 /// Copy the last assistant response to the system clipboard.
 fn copy_last_response(app: &App) {
-    let last_text = app
-        .blocks
-        .iter()
-        .rev()
-        .find_map(|b| {
-            if let DisplayBlock::AssistantText(text) = b {
-                Some(text.clone())
-            } else {
-                None
-            }
-        });
-    if let Some(text) = last_text {
-        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-            let _ = clipboard.set_text(text);
+    let last_text = app.blocks.iter().rev().find_map(|b| {
+        if let DisplayBlock::AssistantText(text) = b {
+            Some(text.clone())
+        } else {
+            None
         }
+    });
+    if let Some(text) = last_text
+        && let Ok(mut clipboard) = arboard::Clipboard::new()
+    {
+        let _ = clipboard.set_text(text);
     }
 }

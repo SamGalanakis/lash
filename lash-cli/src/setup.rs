@@ -2,11 +2,11 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use lash::oauth;
 use lash::provider::{LashConfig, Provider};
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Paragraph},
-    Frame,
 };
 
 use crate::theme;
@@ -14,15 +14,25 @@ use crate::theme;
 // ── State machine ───────────────────────────────────────────────────
 
 enum SetupStep {
-    SelectProvider { selected: usize },
-    InputCredential { input: String, cursor: usize, error: Option<String>, verifier: Option<String> },
+    SelectProvider {
+        selected: usize,
+    },
+    InputCredential {
+        input: String,
+        cursor: usize,
+        error: Option<String>,
+        verifier: Option<String>,
+    },
     CodexDeviceAuth {
         user_code: String,
         device_auth_id: String,
         interval: u64,
         error: Option<String>,
     },
-    InputTavily { input: String, cursor: usize },
+    InputTavily {
+        input: String,
+        cursor: usize,
+    },
     Done,
 }
 
@@ -53,10 +63,7 @@ pub async fn run_setup() -> anyhow::Result<LashConfig> {
     let result = run_setup_inner(&mut terminal).await;
 
     // Restore terminal
-    crossterm::execute!(
-        std::io::stdout(),
-        crossterm::style::Print("\x1b]111\x1b\\")
-    )?;
+    crossterm::execute!(std::io::stdout(), crossterm::style::Print("\x1b]111\x1b\\"))?;
     ratatui::restore();
 
     result
@@ -84,7 +91,9 @@ async fn run_setup_inner(terminal: &mut ratatui::DefaultTerminal) -> anyhow::Res
             if event::poll(poll_timeout)? {
                 let ev = event::read()?;
                 if let Event::Key(key) = ev {
-                    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('c')
+                    {
                         anyhow::bail!("Setup cancelled");
                     }
                     if key.code == KeyCode::Esc {
@@ -236,7 +245,11 @@ async fn run_setup_inner(terminal: &mut ratatui::DefaultTerminal) -> anyhow::Res
                 }
                 KeyCode::Right => {
                     if *cursor < input.len() {
-                        *cursor += input[*cursor..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+                        *cursor += input[*cursor..]
+                            .chars()
+                            .next()
+                            .map(|c| c.len_utf8())
+                            .unwrap_or(0);
                     }
                 }
                 KeyCode::Enter => {
@@ -319,7 +332,11 @@ async fn run_setup_inner(terminal: &mut ratatui::DefaultTerminal) -> anyhow::Res
                 }
                 KeyCode::Right => {
                     if *cursor < input.len() {
-                        *cursor += input[*cursor..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+                        *cursor += input[*cursor..]
+                            .chars()
+                            .next()
+                            .map(|c| c.len_utf8())
+                            .unwrap_or(0);
                     }
                 }
                 KeyCode::Enter => {
@@ -361,22 +378,30 @@ fn draw_setup(frame: &mut Frame, app: &SetupApp) {
     let logo_height = 8; // 5 logo + 1 trailing slash + 1 scribe + 1 tagline
 
     let step_height: u16 = match &app.step {
-        SetupStep::SelectProvider { .. } => 9,  // blank + label + blank + 3 options + blank + help + pad
+        SetupStep::SelectProvider { .. } => 9, // blank + label + blank + 3 options + blank + help + pad
         SetupStep::InputCredential { error, .. } => {
-            if error.is_some() { 10 } else { 8 }
+            if error.is_some() {
+                10
+            } else {
+                8
+            }
         }
         SetupStep::CodexDeviceAuth { error, .. } => {
-            if error.is_some() { 10 } else { 9 }
+            if error.is_some() {
+                10
+            } else {
+                9
+            }
         }
         SetupStep::InputTavily { .. } => 7,
         SetupStep::Done => 4,
     };
 
     let chunks = Layout::vertical([
-        Constraint::Min(0),                  // top spacer
-        Constraint::Length(logo_height),      // logo
-        Constraint::Length(step_height),      // step content
-        Constraint::Min(0),                  // bottom spacer
+        Constraint::Min(0),              // top spacer
+        Constraint::Length(logo_height), // logo
+        Constraint::Length(step_height), // step content
+        Constraint::Min(0),              // bottom spacer
     ])
     .split(frame.area());
 
@@ -389,11 +414,20 @@ fn draw_setup(frame: &mut Frame, app: &SetupApp) {
             cursor,
             error,
             verifier,
-        } => draw_credential_input(frame, chunks[2], input, *cursor, error.as_deref(), verifier.is_some()),
+        } => draw_credential_input(
+            frame,
+            chunks[2],
+            input,
+            *cursor,
+            error.as_deref(),
+            verifier.is_some(),
+        ),
         SetupStep::CodexDeviceAuth {
             user_code, error, ..
         } => draw_codex_device_auth(frame, chunks[2], user_code, error.as_deref(), app.tick),
-        SetupStep::InputTavily { input, cursor } => draw_tavily_input(frame, chunks[2], input, *cursor),
+        SetupStep::InputTavily { input, cursor } => {
+            draw_tavily_input(frame, chunks[2], input, *cursor)
+        }
         SetupStep::Done => draw_done(frame, chunks[2]),
     }
 }
@@ -433,9 +467,11 @@ fn draw_logo(frame: &mut Frame, area: Rect) {
         Span::styled("──────────", Style::default().fg(theme::ASH_MID)),
         Span::styled("──────────", Style::default().fg(theme::ASH)),
     ]));
-    // Tagline
+    // Tagline (27 chars — center independently)
+    let tagline = "A G E N T  \u{b7}  R U N T I M E";
+    let tagline_pad = " ".repeat((area.width as usize).saturating_sub(tagline.len()) / 2);
     lines.push(Line::from(Span::styled(
-        format!("{}A G E N T  \u{b7}  R U N T I M E", pad),
+        format!("{}{}", tagline_pad, tagline),
         Style::default().fg(theme::ASH_TEXT),
     )));
 
@@ -464,10 +500,15 @@ fn draw_provider_select(frame: &mut Frame, area: Rect, selected: usize) {
     for (i, (name, desc)) in options.iter().enumerate() {
         if i == selected {
             lines.push(Line::from(vec![
-                Span::styled(format!("{}\u{25b8} ", pad), Style::default().fg(theme::SODIUM)),
+                Span::styled(
+                    format!("{}\u{25b8} ", pad),
+                    Style::default().fg(theme::SODIUM),
+                ),
                 Span::styled(
                     format!("{:<14}", name),
-                    Style::default().fg(theme::CHALK).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::CHALK)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(*desc, Style::default().fg(theme::CHALK_DIM)),
             ]));
@@ -554,8 +595,14 @@ fn draw_credential_input(
     let text_pad = inner_w.saturating_sub(display_text.chars().count());
     lines.push(Line::from(vec![
         Span::styled(format!("{}\u{2502} ", pad), Style::default().fg(theme::ASH)),
-        Span::styled(format!("{} ", theme::PROMPT_CHAR), Style::default().fg(theme::SODIUM)),
-        Span::styled(display_text.to_string(), Style::default().fg(theme::CHALK_MID)),
+        Span::styled(
+            format!("{} ", theme::PROMPT_CHAR),
+            Style::default().fg(theme::SODIUM),
+        ),
+        Span::styled(
+            display_text.to_string(),
+            Style::default().fg(theme::CHALK_MID),
+        ),
         Span::styled(
             format!("{}\u{2502}", " ".repeat(text_pad)),
             Style::default().fg(theme::ASH),
@@ -597,7 +644,7 @@ fn draw_credential_input(
     let vis_start = visible_start(input, inner_w, cursor);
     let cursor_offset = cursor_chars.saturating_sub(vis_start);
     let cursor_x = (cx + 4 + cursor_offset) as u16; // pad + "│ / " = 4
-    let cursor_y = area.y + if is_claude { 4 } else { 4 };
+    let cursor_y = area.y + 4;
     if cursor_x < area.x + area.width && cursor_y < area.y + area.height {
         frame.set_cursor_position((area.x + cursor_x, cursor_y));
     }
@@ -624,7 +671,10 @@ fn draw_codex_device_auth(
     )));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled(format!("{}Visit: ", pad), Style::default().fg(theme::ASH_TEXT)),
+        Span::styled(
+            format!("{}Visit: ", pad),
+            Style::default().fg(theme::ASH_TEXT),
+        ),
         Span::styled(
             "auth.openai.com/codex/device",
             Style::default().fg(theme::CHALK_MID),
@@ -633,17 +683,25 @@ fn draw_codex_device_auth(
 
     if !user_code.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled(format!("{}Enter code: ", pad), Style::default().fg(theme::ASH_TEXT)),
+            Span::styled(
+                format!("{}Enter code: ", pad),
+                Style::default().fg(theme::ASH_TEXT),
+            ),
             Span::styled(
                 user_code,
-                Style::default().fg(theme::SODIUM).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme::SODIUM)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]));
     }
 
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled(format!("{}{}", pad, spinner), Style::default().fg(theme::SODIUM)),
+        Span::styled(
+            format!("{}{}", pad, spinner),
+            Style::default().fg(theme::SODIUM),
+        ),
         Span::styled(
             "\u{2500} Waiting for authorization...",
             Style::default().fg(theme::ASH_MID),
@@ -693,8 +751,14 @@ fn draw_tavily_input(frame: &mut Frame, area: Rect, input: &str, cursor: usize) 
     let text_pad = inner_w.saturating_sub(display_text.chars().count());
     lines.push(Line::from(vec![
         Span::styled(format!("{}\u{2502} ", pad), Style::default().fg(theme::ASH)),
-        Span::styled(format!("{} ", theme::PROMPT_CHAR), Style::default().fg(theme::SODIUM)),
-        Span::styled(display_text.to_string(), Style::default().fg(theme::CHALK_MID)),
+        Span::styled(
+            format!("{} ", theme::PROMPT_CHAR),
+            Style::default().fg(theme::SODIUM),
+        ),
+        Span::styled(
+            display_text.to_string(),
+            Style::default().fg(theme::CHALK_MID),
+        ),
         Span::styled(
             format!("{}\u{2502}", " ".repeat(text_pad)),
             Style::default().fg(theme::ASH),
@@ -742,7 +806,9 @@ fn draw_done(frame: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(
             format!("{}Authenticated!", pad),
-            Style::default().fg(theme::LICHEN).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::LICHEN)
+                .add_modifier(Modifier::BOLD),
         )),
     ];
 

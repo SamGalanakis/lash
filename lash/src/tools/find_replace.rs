@@ -80,10 +80,7 @@ impl crate::ToolProvider for FindReplace {
             }
         };
 
-        let replace_all = args
-            .get("all")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let replace_all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
 
         let path = Path::new(path_str);
 
@@ -147,10 +144,7 @@ mod tests {
             )
             .await;
         assert!(result.success);
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "qux bar foo baz"
-        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "qux bar foo baz");
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 use std::ffi::CString;
 use std::sync::mpsc as std_mpsc;
+use std::sync::{Mutex, Once};
 use std::thread::JoinHandle;
 
 use pyo3::prelude::*;
@@ -9,16 +10,46 @@ use crate::python_home;
 
 const REPL_PY: &str = include_str!("../python/repl.py");
 
+static PYTHON_INIT: Once = Once::new();
+
+/// Initialize the Python interpreter exactly once (process-wide).
+/// With free-threaded Python 3.14t, there is no GIL — multiple threads
+/// can call `Python::attach()` concurrently after this.
+fn ensure_python_initialized(home_dir: &std::path::Path) {
+    PYTHON_INIT.call_once(|| {
+        unsafe {
+            std::env::set_var("PYTHONHOME", home_dir);
+            std::env::set_var("PYTHONNOUSERSITE", "1");
+        }
+        Python::initialize();
+    });
+}
+
 // ── Request/Response types ──
 
 #[derive(Debug)]
 pub enum PythonRequest {
-    Init { tools_json: String },
-    Exec { id: String, code: String },
-    Snapshot { id: String },
-    Restore { id: String, data: String },
-    Reset { id: String },
-    CheckComplete { code: String },
+    Init {
+        tools_json: String,
+        agent_id: String,
+    },
+    Exec {
+        id: String,
+        code: String,
+    },
+    Snapshot {
+        id: String,
+    },
+    Restore {
+        id: String,
+        data: String,
+    },
+    Reset {
+        id: String,
+    },
+    CheckComplete {
+        code: String,
+    },
     Shutdown,
 }
 
@@ -47,7 +78,9 @@ pub enum PythonResponse {
     ResetResult {
         id: String,
     },
-    CheckCompleteResult { is_complete: bool },
+    CheckCompleteResult {
+        is_complete: bool,
+    },
     AskUser {
         question: String,
         options: Vec<String>,
@@ -55,36 +88,32 @@ pub enum PythonResponse {
     },
 }
 
-/// Wrapper to mark a `!Sync` type as `Sync` for GIL release.
-/// Safety: only used when the inner value is accessed by a single thread.
-struct SyncWrapper<T>(T);
-unsafe impl<T> Sync for SyncWrapper<T> {}
-
 // ── RustBridge: injected into Python as _rust_bridge ──
 
-#[pyclass]
+#[pyclass(frozen)]
 struct RustBridge {
-    response_tx: std_mpsc::Sender<PythonResponse>,
+    response_tx: Mutex<std_mpsc::Sender<PythonResponse>>,
 }
 
 #[pymethods]
 impl RustBridge {
     /// Called by Python to send messages/results back to Rust.
     fn send_message(&self, json_str: &str) -> PyResult<()> {
-        let msg: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("invalid JSON: {e}"))
-        })?;
+        let msg: serde_json::Value = serde_json::from_str(json_str)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid JSON: {e}")))?;
 
-        let msg_type = msg
-            .get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or("");
+        let msg_type = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
         let response = match msg_type {
-            "message" => PythonResponse::Message {
-                text: msg["text"].as_str().unwrap_or("").to_string(),
-                kind: msg["kind"].as_str().unwrap_or("progress").to_string(),
-            },
+            "message" => {
+                let kind = msg["kind"].as_str().ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err("message missing 'kind' field")
+                })?;
+                PythonResponse::Message {
+                    text: msg["text"].as_str().unwrap_or("").to_string(),
+                    kind: kind.to_string(),
+                }
+            }
             "exec_result" => PythonResponse::ExecResult {
                 id: msg["id"].as_str().unwrap_or("").to_string(),
                 output: msg["output"].as_str().unwrap_or("").to_string(),
@@ -104,12 +133,12 @@ impl RustBridge {
             }
         };
 
-        let _ = self.response_tx.send(response);
+        let _ = self.response_tx.lock().unwrap().send(response);
         Ok(())
     }
 
     /// Called by Python to invoke a tool. Blocks until the tool result is ready.
-    /// GIL is released while waiting so other Python threads can run.
+    /// We detach from Python so other threads can call Python::attach().
     fn call_tool(
         &self,
         py: Python<'_>,
@@ -119,19 +148,19 @@ impl RustBridge {
     ) -> PyResult<String> {
         let (result_tx, result_rx) = std_mpsc::channel();
 
-        let _ = self.response_tx.send(PythonResponse::ToolCall {
-            id: call_id,
-            name,
-            args: args_json,
-            result_tx,
-        });
+        let _ = self
+            .response_tx
+            .lock()
+            .unwrap()
+            .send(PythonResponse::ToolCall {
+                id: call_id,
+                name,
+                args: args_json,
+                result_tx,
+            });
 
-        // Release GIL while waiting for the tool result.
-        // Safety: result_rx is only accessed from this thread — wrapping
-        // in SyncWrapper is sound because no concurrent access occurs.
-        let wrapper = SyncWrapper(result_rx);
         py.detach(move || {
-            wrapper.0.recv().map_err(|e| {
+            result_rx.recv().map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "tool result channel closed: {e}"
                 ))
@@ -140,12 +169,9 @@ impl RustBridge {
     }
 
     /// Called by Python to ask the user a question. Blocks until the user responds.
-    /// GIL is released while waiting.
     fn ask_user(&self, py: Python<'_>, payload_json: String) -> PyResult<String> {
-        let payload: serde_json::Value =
-            serde_json::from_str(&payload_json).map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!("invalid JSON: {e}"))
-            })?;
+        let payload: serde_json::Value = serde_json::from_str(&payload_json)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid JSON: {e}")))?;
 
         let question = payload
             .get("question")
@@ -164,19 +190,19 @@ impl RustBridge {
 
         let (result_tx, result_rx) = std_mpsc::channel();
 
-        let _ = self.response_tx.send(PythonResponse::AskUser {
-            question,
-            options,
-            result_tx,
-        });
+        let _ = self
+            .response_tx
+            .lock()
+            .unwrap()
+            .send(PythonResponse::AskUser {
+                question,
+                options,
+                result_tx,
+            });
 
-        // Release GIL while waiting for the user's answer.
-        let wrapper = SyncWrapper(result_rx);
         py.detach(move || {
-            wrapper.0.recv().map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "ask_user channel closed: {e}"
-                ))
+            result_rx.recv().map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("ask_user channel closed: {e}"))
             })
         })
     }
@@ -193,9 +219,16 @@ pub struct PythonRuntime {
 impl PythonRuntime {
     /// Start the embedded Python runtime on a dedicated OS thread.
     pub fn start() -> Result<Self, std::io::Error> {
+        tracing::info!("PythonRuntime::start() called");
+
         // Extract stdlib to cache before starting the thread
         let lib_dir = python_home::ensure_python_home()?;
         let home_dir = python_home::python_home(&lib_dir);
+
+        // Initialize Python once (process-wide). With free-threaded 3.14t,
+        // subsequent threads can call Python::attach() concurrently.
+        ensure_python_initialized(&home_dir);
+        tracing::info!("Python initialized, spawning thread");
 
         let (request_tx, request_rx) = std_mpsc::channel::<PythonRequest>();
         let (response_tx, response_rx) = std_mpsc::channel::<PythonResponse>();
@@ -203,8 +236,21 @@ impl PythonRuntime {
         let thread = std::thread::Builder::new()
             .name("python-runtime".into())
             .spawn(move || {
-                python_thread_main(home_dir, request_rx, response_tx);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    python_thread_main(request_rx, response_tx);
+                }));
+                if let Err(e) = result {
+                    let msg = if let Some(s) = e.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = e.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        "unknown panic".to_string()
+                    };
+                    tracing::error!("python-runtime thread panicked: {msg}");
+                }
             })?;
+        tracing::info!("python-runtime thread spawned");
 
         Ok(Self {
             request_tx,
@@ -214,15 +260,15 @@ impl PythonRuntime {
     }
 
     pub fn send(&self, request: PythonRequest) -> Result<(), std::io::Error> {
-        self.request_tx.send(request).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "python thread gone")
-        })
+        self.request_tx
+            .send(request)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "python thread gone"))
     }
 
     pub fn recv(&self) -> Result<PythonResponse, std::io::Error> {
-        self.response_rx.recv().map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "python thread gone")
-        })
+        self.response_rx
+            .recv()
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "python thread gone"))
     }
 
     /// Non-blocking try_recv.
@@ -250,29 +296,23 @@ impl Drop for PythonRuntime {
 // ── Python thread ──
 
 fn python_thread_main(
-    home_dir: std::path::PathBuf,
     request_rx: std_mpsc::Receiver<PythonRequest>,
     response_tx: std_mpsc::Sender<PythonResponse>,
 ) {
-    // Set PYTHONHOME before Python initializes
-    unsafe {
-        std::env::set_var("PYTHONHOME", &home_dir);
-        // Disable user site-packages
-        std::env::set_var("PYTHONNOUSERSITE", "1");
-    }
-
-    Python::initialize();
-
+    // Python is already initialized by ensure_python_initialized().
+    // With free-threaded 3.14t, attach() gives us thread state without a GIL.
     Python::attach(|py| {
-        // Load repl.py as a module — PyModule::from_code takes &CStr
-        let code_cstr =
-            CString::new(REPL_PY).expect("repl.py contains null byte");
-        let repl = match PyModule::from_code(
-            py,
-            &code_cstr,
-            c"repl.py",
-            c"repl",
-        ) {
+        // Each thread needs a UNIQUE module name to avoid clobbering each other
+        // in sys.modules (shared in free-threaded Python).
+        static MODULE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let module_id = MODULE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let module_name = format!("_lash_repl_{module_id}");
+        let module_name_cstr = CString::new(module_name.as_str()).unwrap();
+        let file_name = format!("repl_{module_id}.py");
+        let file_name_cstr = CString::new(file_name.as_str()).unwrap();
+
+        let code_cstr = CString::new(REPL_PY).expect("repl.py contains null byte");
+        let repl = match PyModule::from_code(py, &code_cstr, &file_name_cstr, &module_name_cstr) {
             Ok(m) => m,
             Err(e) => {
                 tracing::error!("Failed to load repl.py: {e}");
@@ -285,7 +325,7 @@ fn python_thread_main(
         let bridge = Py::new(
             py,
             RustBridge {
-                response_tx: response_tx.clone(),
+                response_tx: Mutex::new(response_tx.clone()),
             },
         )
         .expect("Failed to create RustBridge");
@@ -294,17 +334,14 @@ fn python_thread_main(
             tracing::error!("Failed to inject _rust_bridge: {e}");
             return;
         }
-
         // Main request loop
-        loop {
-            let request = match request_rx.recv() {
-                Ok(r) => r,
-                Err(_) => break, // Channel closed
-            };
-
+        while let Ok(request) = request_rx.recv() {
             match request {
-                PythonRequest::Init { tools_json } => {
-                    if let Err(e) = repl.call_method1("_register_tools", (&tools_json,)) {
+                PythonRequest::Init {
+                    tools_json,
+                    agent_id,
+                } => {
+                    if let Err(e) = repl.call_method1("_register_tools", (&tools_json, &agent_id)) {
                         tracing::error!("_register_tools failed: {e}");
                         e.print(py);
                     }

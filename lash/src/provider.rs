@@ -91,7 +91,11 @@ impl Provider {
     }
 
     /// Build BAML ClientRegistry options for this provider.
-    pub fn baml_options(&self, model: &str, reasoning_effort: Option<&str>) -> HashMap<String, serde_json::Value> {
+    pub fn baml_options(
+        &self,
+        model: &str,
+        reasoning_effort: Option<&str>,
+    ) -> HashMap<String, serde_json::Value> {
         match self {
             Provider::OpenRouter { api_key, base_url } => HashMap::from([
                 ("base_url".into(), serde_json::json!(base_url)),
@@ -109,7 +113,7 @@ impl Provider {
                     "headers".into(),
                     serde_json::json!({
                         "authorization": format!("Bearer {}", access_token),
-                        "anthropic-beta": "oauth-2025-04-20,interleaved-thinking-2025-05-14",
+                        "anthropic-beta": "oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-2024-07-31",
                         "x-api-key": "",
                     }),
                 ),
@@ -127,7 +131,10 @@ impl Provider {
                     headers["chatgpt-account-id"] = serde_json::json!(id);
                 }
                 let mut opts = HashMap::from([
-                    ("base_url".into(), serde_json::json!("https://chatgpt.com/backend-api/codex")),
+                    (
+                        "base_url".into(),
+                        serde_json::json!("https://chatgpt.com/backend-api/codex"),
+                    ),
                     ("api_key".into(), serde_json::json!("noop")),
                     ("model".into(), serde_json::json!(model)),
                     ("temperature".into(), serde_json::json!(0)),
@@ -204,25 +211,25 @@ impl LashConfig {
     /// Load from ~/.lash/config.json (falls back to legacy provider.json)
     pub fn load() -> Option<Self> {
         let path = Self::config_path();
-        if let Ok(data) = std::fs::read_to_string(&path) {
-            if let Ok(config) = serde_json::from_str(&data) {
-                return Some(config);
-            }
+        if let Ok(data) = std::fs::read_to_string(&path)
+            && let Ok(config) = serde_json::from_str(&data)
+        {
+            return Some(config);
         }
 
         // Migrate legacy provider.json
         let legacy = path.with_file_name("provider.json");
-        if let Ok(data) = std::fs::read_to_string(&legacy) {
-            if let Ok(provider) = serde_json::from_str::<Provider>(&data) {
-                let config = LashConfig {
-                    provider,
-                    tavily_api_key: None,
-                    delegate_models: None,
-                };
-                let _ = config.save();
-                let _ = std::fs::remove_file(&legacy);
-                return Some(config);
-            }
+        if let Ok(data) = std::fs::read_to_string(&legacy)
+            && let Ok(provider) = serde_json::from_str::<Provider>(&data)
+        {
+            let config = LashConfig {
+                provider,
+                tavily_api_key: None,
+                delegate_models: None,
+            };
+            let _ = config.save();
+            let _ = std::fs::remove_file(&legacy);
+            return Some(config);
         }
 
         None
@@ -234,8 +241,7 @@ impl LashConfig {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let data = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let data = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         std::fs::write(&path, &data)?;
 
         #[cfg(unix)]
@@ -262,6 +268,141 @@ impl LashConfig {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn openrouter() -> Provider {
+        Provider::OpenRouter {
+            api_key: "test-key".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+        }
+    }
+
+    fn claude() -> Provider {
+        Provider::Claude {
+            access_token: "tok".into(),
+            refresh_token: "ref".into(),
+            expires_at: u64::MAX,
+        }
+    }
+
+    fn codex() -> Provider {
+        Provider::Codex {
+            access_token: "tok".into(),
+            refresh_token: "ref".into(),
+            expires_at: u64::MAX,
+            account_id: Some("acct".into()),
+        }
+    }
+
+    #[test]
+    fn default_model() {
+        assert_eq!(openrouter().default_model(), "anthropic/claude-opus-4.6");
+        assert_eq!(claude().default_model(), "claude-opus-4-6");
+        assert_eq!(codex().default_model(), "gpt-5.1-codex");
+    }
+
+    #[test]
+    fn baml_provider() {
+        assert_eq!(openrouter().baml_provider(), "openai-generic");
+        assert_eq!(claude().baml_provider(), "anthropic");
+        assert_eq!(codex().baml_provider(), "openai-responses");
+    }
+
+    #[test]
+    fn default_delegate_model_claude() {
+        let p = claude();
+        assert_eq!(
+            p.default_delegate_model("quick"),
+            Some(("claude-haiku-4-5", None))
+        );
+        assert_eq!(
+            p.default_delegate_model("balanced"),
+            Some(("claude-sonnet-4-5", None))
+        );
+        assert_eq!(
+            p.default_delegate_model("thorough"),
+            Some(("claude-opus-4-6", None))
+        );
+    }
+
+    #[test]
+    fn default_delegate_model_openrouter() {
+        let p = openrouter();
+        assert!(p.default_delegate_model("quick").is_some());
+        assert!(p.default_delegate_model("balanced").is_some());
+        assert!(p.default_delegate_model("thorough").is_none()); // inherit parent
+    }
+
+    #[test]
+    fn default_delegate_model_codex() {
+        let p = codex();
+        let (m, re) = p.default_delegate_model("balanced").unwrap();
+        assert_eq!(m, "gpt-5.3-codex");
+        assert_eq!(re, Some("medium"));
+        let (m, re) = p.default_delegate_model("thorough").unwrap();
+        assert_eq!(m, "gpt-5.3-codex");
+        assert_eq!(re, Some("high"));
+    }
+
+    #[test]
+    fn default_delegate_model_unknown_tier() {
+        assert!(claude().default_delegate_model("unknown").is_none());
+        assert!(openrouter().default_delegate_model("").is_none());
+        assert!(codex().default_delegate_model("extreme").is_none());
+    }
+
+    #[test]
+    fn resolve_model_claude_strips_prefix() {
+        let p = claude();
+        assert_eq!(
+            p.resolve_model("anthropic/claude-sonnet-4-5"),
+            "claude-sonnet-4-5"
+        );
+        assert_eq!(p.resolve_model("claude-opus-4-6"), "claude-opus-4-6");
+    }
+
+    #[test]
+    fn resolve_model_openrouter_passthrough() {
+        let p = openrouter();
+        assert_eq!(
+            p.resolve_model("anthropic/claude-opus-4.6"),
+            "anthropic/claude-opus-4.6"
+        );
+    }
+
+    #[test]
+    fn resolve_model_codex_passthrough() {
+        let p = codex();
+        assert_eq!(p.resolve_model("gpt-5.1-codex"), "gpt-5.1-codex");
+    }
+
+    #[test]
+    fn baml_options_keys() {
+        let opts = openrouter().baml_options("test-model", None);
+        assert!(opts.contains_key("base_url"));
+        assert!(opts.contains_key("api_key"));
+        assert!(opts.contains_key("model"));
+        assert!(opts.contains_key("temperature"));
+        assert!(opts.contains_key("max_tokens"));
+        assert_eq!(opts["model"], serde_json::json!("test-model"));
+    }
+
+    #[test]
+    fn baml_options_codex_reasoning() {
+        let opts = codex().baml_options("gpt-5.3-codex", Some("high"));
+        assert!(opts.contains_key("reasoning"));
+        assert_eq!(opts["reasoning"]["effort"], serde_json::json!("high"));
+    }
+
+    #[test]
+    fn baml_options_codex_no_reasoning() {
+        let opts = codex().baml_options("gpt-5.1-codex", None);
+        assert!(!opts.contains_key("reasoning"));
+    }
+}
+
 /// Save just the provider portion (preserves other config fields like API keys).
 /// Used by the agent loop after token refresh.
 pub fn save_provider(provider: &Provider) -> Result<(), std::io::Error> {
@@ -273,4 +414,3 @@ pub fn save_provider(provider: &Provider) -> Result<(), std::io::Error> {
     config.provider = provider.clone();
     config.save()
 }
-
