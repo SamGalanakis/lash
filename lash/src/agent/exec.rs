@@ -34,14 +34,6 @@ pub(crate) async fn execute_and_collect(
     acc: &mut ExecAccumulator,
     event_tx: &mpsc::Sender<AgentEvent>,
 ) {
-    send_event(
-        event_tx,
-        AgentEvent::CodeBlock {
-            code: code.to_string(),
-        },
-    )
-    .await;
-
     match session.run_code(code).await {
         Ok(r) => {
             for tc in &r.tool_calls {

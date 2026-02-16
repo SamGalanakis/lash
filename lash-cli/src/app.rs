@@ -73,6 +73,9 @@ pub enum DisplayBlock {
         name: String,
         success: bool,
         duration_ms: u64,
+        /// If true, this block is a continuation of a prior tool-call group.
+        /// In collapsed mode it is hidden; the group leader shows a summary.
+        continuation: bool,
     },
     CodeOutput {
         output: String,
@@ -154,14 +157,24 @@ impl DisplayBlock {
                     1 // collapsed single line
                 }
             }
-            DisplayBlock::ToolCall { .. } => 1,
+            DisplayBlock::ToolCall { continuation, .. } => {
+                if !code_expanded && *continuation {
+                    0 // hidden — group leader shows summary
+                } else {
+                    1
+                }
+            }
             DisplayBlock::CodeOutput { output, error } => {
                 let mut h = 0;
                 if code_expanded && !output.is_empty() {
                     h += wrapped_text_height(output, width, 2);
                 }
                 if let Some(err) = error {
-                    h += wrapped_text_height(err, width, 2);
+                    if code_expanded {
+                        h += wrapped_text_height(err, width, 2);
+                    } else {
+                        h += 1; // collapsed error summary
+                    }
                 }
                 h
             }
@@ -415,10 +428,13 @@ impl App {
                     name.as_str(),
                     "create_task" | "update_task" | "claim_task" | "delete_task"
                 );
+                let continuation =
+                    matches!(self.blocks.last(), Some(DisplayBlock::ToolCall { .. }));
                 self.blocks.push(DisplayBlock::ToolCall {
                     name,
                     success,
                     duration_ms,
+                    continuation,
                 });
                 self.invalidate_height_cache();
                 if is_task_tool {
@@ -475,6 +491,7 @@ impl App {
                 self.status_text = None;
                 self.streaming_output.clear();
                 self.active_delegate = None;
+                self.scroll_to_bottom();
             }
             AgentEvent::Error { message } => {
                 self.blocks.push(DisplayBlock::Error(message));
@@ -1535,8 +1552,17 @@ mod tests {
             name: "read_file".into(),
             success: true,
             duration_ms: 50,
+            continuation: false,
         };
         assert_eq!(block.height(false, 80, 0), 1);
+        let cont = DisplayBlock::ToolCall {
+            name: "read_file".into(),
+            success: true,
+            duration_ms: 50,
+            continuation: true,
+        };
+        assert_eq!(cont.height(false, 80, 0), 0); // hidden when collapsed
+        assert_eq!(cont.height(true, 80, 0), 1); // visible when expanded
     }
 
     #[test]

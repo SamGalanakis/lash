@@ -177,10 +177,12 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
                     val.get("success").and_then(|v| v.as_bool()),
                     val.get("duration_ms").and_then(|v| v.as_u64()),
                 ) {
+                    let continuation = matches!(blocks.last(), Some(DisplayBlock::ToolCall { .. }));
                     blocks.push(DisplayBlock::ToolCall {
                         name: name.to_string(),
                         success,
                         duration_ms,
+                        continuation,
                     });
                 }
             }

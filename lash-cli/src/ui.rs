@@ -119,12 +119,6 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         }
     };
 
-    // ── Session/cwd (lowest priority, moved from help bar) ──
-    let session_cwd_w = UnicodeWidthStr::width(app.session_name.as_str())
-        + 3 // " · "
-        + UnicodeWidthStr::width(app.cwd.as_str())
-        + 1; // trailing space
-
     // ── Progressive fit (drop lowest priority first) ──
     let left_w = |level: usize| match level {
         3 => left_3,
@@ -143,7 +137,6 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 
     let mut left_level = 3usize;
     let mut right_idx = 0usize;
-    let mut show_session = false;
 
     if !check(left_level, right_idx) {
         right_idx = 1;
@@ -159,13 +152,6 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     }
     if !check(left_level, right_idx) {
         left_level = 1;
-    }
-
-    // Session fits after tokens?
-    let rw = right_w(right_idx);
-    let used = left_w(left_level) + rw + if rw > 0 { 1 } else { 0 };
-    if used + session_cwd_w <= width {
-        show_session = true;
     }
 
     // ── Build spans ──
@@ -186,7 +172,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 
     // Padding between left and right
     let actual_left: usize = spans.iter().map(|s| s.width()).sum();
-    let total_right = right_w(right_idx) + if show_session { session_cwd_w } else { 0 };
+    let total_right = right_w(right_idx);
     let pad = width.saturating_sub(actual_left + total_right);
     if pad > 0 {
         spans.push(Span::styled(" ".repeat(pad), theme::bar_bg()));
@@ -229,23 +215,6 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(theme::CHALK_DIM),
             ));
         }
-        spans.push(Span::styled(" ", theme::bar_bg()));
-    }
-
-    // Session/cwd
-    if show_session {
-        spans.push(Span::styled(
-            app.session_name.as_str(),
-            Style::default().fg(theme::CHALK_DIM).bg(theme::FORM_RAISED),
-        ));
-        spans.push(Span::styled(
-            " \u{b7} ",
-            Style::default().fg(theme::ASH_MID).bg(theme::FORM_RAISED),
-        ));
-        spans.push(Span::styled(
-            app.cwd.as_str(),
-            Style::default().fg(theme::ASH_TEXT).bg(theme::FORM_RAISED),
-        ));
         spans.push(Span::styled(" ", theme::bar_bg()));
     }
 
@@ -425,22 +394,88 @@ fn render_block<'a>(
             name,
             success,
             duration_ms,
+            continuation,
         } => {
-            let icon = if *success { "+" } else { "x" };
-            let style = if *success {
-                theme::tool_success()
-            } else {
-                theme::tool_failure()
-            };
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "  [{}] {} ({})",
-                    icon,
-                    name,
-                    crate::util::format_duration_ms(*duration_ms)
-                ),
-                style,
-            )));
+            if code_expanded_global {
+                // Expanded: individual tool call lines
+                let icon = if *success { "+" } else { "x" };
+                let style = if *success {
+                    theme::tool_success()
+                } else {
+                    theme::tool_failure()
+                };
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  [{}] {} ({})",
+                        icon,
+                        name,
+                        crate::util::format_duration_ms(*duration_ms)
+                    ),
+                    style,
+                )));
+            } else if !continuation {
+                // Collapsed group leader: scan ahead and build summary
+                let mut total_ms = *duration_ms;
+                let mut any_failed = !success;
+                let mut groups: Vec<(&str, usize)> = vec![];
+                let mut cur_name: &str = name.as_str();
+                let mut cur_count = 1usize;
+
+                for b in &blocks[idx + 1..] {
+                    if let DisplayBlock::ToolCall {
+                        name: n,
+                        success: s,
+                        duration_ms: d,
+                        continuation: true,
+                    } = b
+                    {
+                        total_ms += d;
+                        if !s {
+                            any_failed = true;
+                        }
+                        if n.as_str() == cur_name {
+                            cur_count += 1;
+                        } else {
+                            groups.push((cur_name, cur_count));
+                            cur_name = n.as_str();
+                            cur_count = 1;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                groups.push((cur_name, cur_count));
+
+                let icon = if any_failed { "x" } else { "+" };
+                let style = if any_failed {
+                    theme::tool_failure()
+                } else {
+                    theme::tool_success()
+                };
+
+                let group_text: String = groups
+                    .iter()
+                    .map(|(n, c)| {
+                        if *c > 1 {
+                            format!("{} \u{00d7}{}", n, c)
+                        } else {
+                            (*n).to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  [{}] {} ({})",
+                        icon,
+                        group_text,
+                        crate::util::format_duration_ms(total_ms)
+                    ),
+                    style,
+                )));
+            }
+            // else: continuation in collapsed mode — render nothing (height 0)
         }
         DisplayBlock::CodeOutput { output, error } => {
             if code_expanded_global && !output.is_empty() {
@@ -452,11 +487,27 @@ fn render_block<'a>(
                 }
             }
             if let Some(err) = error {
-                for line in err.lines() {
-                    lines.push(Line::from(vec![
-                        Span::styled("\u{2502} ", theme::code_chrome()),
-                        Span::styled(line, theme::error()),
-                    ]));
+                if code_expanded_global {
+                    for line in err.lines() {
+                        lines.push(Line::from(vec![
+                            Span::styled("\u{2502} ", theme::code_chrome()),
+                            Span::styled(line, theme::error()),
+                        ]));
+                    }
+                } else {
+                    // Collapsed: show first meaningful line only
+                    let summary = err
+                        .lines()
+                        .find(|l| {
+                            !l.trim().is_empty()
+                                && !l.trim_start().starts_with("File ")
+                                && !l.trim_start().starts_with("Traceback")
+                        })
+                        .unwrap_or(err.lines().next().unwrap_or("error"));
+                    lines.push(Line::from(Span::styled(
+                        format!("  \u{2716} {}", summary.trim()),
+                        theme::error(),
+                    )));
                 }
             }
         }
@@ -1165,6 +1216,31 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         )
         .scroll((scroll_offset as u16, 0));
     frame.render_widget(input, area);
+
+    // Session/cwd on the bottom border, right-aligned
+    let session_w = UnicodeWidthStr::width(app.session_name.as_str())
+        + 3 // " · "
+        + UnicodeWidthStr::width(app.cwd.as_str())
+        + 2; // padding
+    if session_w + 2 <= area.width as usize {
+        let x = area.x + area.width - session_w as u16;
+        let y = area.y + area.height - 1;
+        let session_area = Rect::new(x, y, session_w as u16, 1);
+        let session_line = Line::from(vec![
+            Span::styled(" ", Style::default().fg(theme::ASH)),
+            Span::styled(
+                app.session_name.as_str(),
+                Style::default().fg(theme::ASH_MID),
+            ),
+            Span::styled(" \u{b7} ", Style::default().fg(theme::ASH)),
+            Span::styled(app.cwd.as_str(), Style::default().fg(theme::ASH_TEXT)),
+            Span::styled(" ", Style::default().fg(theme::ASH)),
+        ]);
+        frame.render_widget(
+            Paragraph::new(session_line).style(theme::history_bg()),
+            session_area,
+        );
+    }
 
     let cursor_x = area.x + vis_col as u16;
     let cursor_y = area.y + 1 + (cursor_abs_row - scroll_offset) as u16;
