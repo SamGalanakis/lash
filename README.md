@@ -4,7 +4,7 @@ AI coding agent with persistent Python REPL and hashline editing.
 
 ## Overview
 
-Lash uses a **Code-Act loop**: the LLM outputs Python code each turn, executed in a persistent REPL where variables survive between turns. Tools are async Python functions—file edits, shell commands, web search, sub-agent delegation—called with `await`. The agent communicates back via `respond()` (final answer) or `say()` (progress update).
+Lash uses a **Code-Act loop**: the LLM outputs Python code each turn, executed in a persistent REPL where variables survive between turns. Tools are async Python functions—file edits, shell commands, web search, sub-agent delegation—called with `await`. The agent communicates back via `done()` (final answer) or `say()` (progress update).
 
 ## Architecture
 

@@ -3,20 +3,11 @@ use std::path::{Path, PathBuf};
 
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
+use super::require_str;
+
 /// Find files by glob pattern.
+#[derive(Default)]
 pub struct Glob;
-
-impl Glob {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for Glob {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 const MAX_RESULTS: usize = 100;
 
@@ -41,20 +32,16 @@ impl ToolProvider for Glob {
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
-        let pattern = args
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-
-        if pattern.is_empty() {
-            return ToolResult::err(json!("Missing required parameter: pattern"));
-        }
+        let pattern = match require_str(args, "pattern") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
 
         let base_dir = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         let base = Path::new(base_dir);
         if !base.is_dir() {
-            return ToolResult::err(json!(format!("Not a directory: {}", base_dir)));
+            return ToolResult::err_fmt(format_args!("Not a directory: {base_dir}"));
         }
 
         // Build the glob matcher
@@ -64,14 +51,14 @@ impl ToolProvider for Glob {
         {
             Ok(g) => g,
             Err(e) => {
-                return ToolResult::err(json!(format!("Invalid glob pattern: {}", e)));
+                return ToolResult::err_fmt(format_args!("Invalid glob pattern: {e}"));
             }
         };
 
         let matcher = match globset::GlobSetBuilder::new().add(glob).build() {
             Ok(m) => m,
             Err(e) => {
-                return ToolResult::err(json!(format!("Failed to build glob matcher: {}", e)));
+                return ToolResult::err_fmt(format_args!("Failed to build glob matcher: {e}"));
             }
         };
 

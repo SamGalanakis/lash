@@ -22,6 +22,10 @@ fn ensure_python_initialized(home_dir: &std::path::Path) {
             std::env::set_var("PYTHONNOUSERSITE", "1");
         }
         Python::initialize();
+        unsafe {
+            std::env::remove_var("PYTHONHOME");
+            std::env::remove_var("PYTHONNOUSERSITE");
+        }
     });
 }
 
@@ -316,7 +320,6 @@ fn python_thread_main(
             Ok(m) => m,
             Err(e) => {
                 tracing::error!("Failed to load repl.py: {e}");
-                e.print(py);
                 return;
             }
         };
@@ -343,7 +346,6 @@ fn python_thread_main(
                 } => {
                     if let Err(e) = repl.call_method1("_register_tools", (&tools_json, &agent_id)) {
                         tracing::error!("_register_tools failed: {e}");
-                        e.print(py);
                     }
                     let _ = response_tx.send(PythonResponse::Ready);
                 }
@@ -354,7 +356,6 @@ fn python_thread_main(
                         Ok(c) => c,
                         Err(e) => {
                             tracing::error!("_handle_exec failed: {e}");
-                            e.print(py);
                             let _ = response_tx.send(PythonResponse::ExecResult {
                                 id,
                                 output: String::new(),
@@ -365,30 +366,28 @@ fn python_thread_main(
                     };
                     if let Err(e) = asyncio.call_method1("run", (coro,)) {
                         tracing::error!("asyncio.run failed: {e}");
-                        e.print(py);
                     }
                 }
                 PythonRequest::Snapshot { id } => {
                     if let Err(e) = repl.call_method1("_handle_snapshot", (&id,)) {
                         tracing::error!("_handle_snapshot failed: {e}");
-                        e.print(py);
                     }
                 }
                 PythonRequest::Restore { id, data } => {
                     if let Err(e) = repl.call_method1("_handle_restore", (&id, &data)) {
                         tracing::error!("_handle_restore failed: {e}");
-                        e.print(py);
                     }
                 }
                 PythonRequest::Reset { id } => {
                     if let Err(e) = repl.call_method1("_handle_reset", (&id,)) {
                         tracing::error!("_handle_reset failed: {e}");
-                        e.print(py);
                     }
                 }
                 PythonRequest::CheckComplete { code } => {
-                    let ast = py.import("ast").expect("ast import");
-                    let is_complete = ast.call_method1("parse", (&code,)).is_ok();
+                    let is_complete = repl
+                        .call_method1("_check_complete", (&code,))
+                        .and_then(|r| r.extract::<bool>())
+                        .unwrap_or(false);
                     let _ = response_tx.send(PythonResponse::CheckCompleteResult { is_complete });
                 }
                 PythonRequest::Shutdown => break,

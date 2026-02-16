@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::{InstructionLoader, ToolDefinition, ToolImage, ToolParam, ToolProvider, ToolResult};
 
 use super::hashline;
+use super::{read_to_string, require_str};
 
 /// Read files with hashline-prefixed output. Supports images natively.
 #[derive(Default)]
@@ -52,19 +53,15 @@ impl ToolProvider for ReadFile {
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
-        let path_str = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-
-        if path_str.is_empty() {
-            return ToolResult::err(json!("Missing required parameter: path"));
-        }
+        let path_str = match require_str(args, "path") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
 
         let path = Path::new(path_str);
 
         if !path.exists() {
-            return ToolResult::err(json!(format!("Path does not exist: {}", path_str)));
+            return ToolResult::err_fmt(format_args!("Path does not exist: {path_str}"));
         }
 
         // Directory — still works but nudges toward ls
@@ -85,26 +82,23 @@ impl ToolProvider for ReadFile {
 
         // Binary detection
         if is_likely_binary(path) {
-            return ToolResult::err(json!(format!("Binary file detected: {}", path_str)));
+            return ToolResult::err_fmt(format_args!("Binary file detected: {path_str}"));
         }
 
         // Check file size before reading
         let file_size = match std::fs::metadata(path) {
             Ok(m) => m.len(),
-            Err(e) => return ToolResult::err(json!(format!("Failed to stat file: {}", e))),
+            Err(e) => return ToolResult::err_fmt(format_args!("Failed to stat file: {e}")),
         };
         if file_size > MAX_TEXT_BYTES {
-            return ToolResult::err(json!(format!(
-                "File too large ({} bytes, max {}). Use offset and limit parameters to read in chunks.",
-                file_size, MAX_TEXT_BYTES
-            )));
+            return ToolResult::err_fmt(format_args!(
+                "File too large ({file_size} bytes, max {MAX_TEXT_BYTES}). Use offset and limit parameters to read in chunks."
+            ));
         }
 
-        let content = match std::fs::read_to_string(path) {
+        let content = match read_to_string(path) {
             Ok(c) => c,
-            Err(e) => {
-                return ToolResult::err(json!(format!("Failed to read file: {}", e)));
-            }
+            Err(e) => return e,
         };
 
         let offset = args
@@ -173,7 +167,7 @@ async fn list_directory(path: &Path) -> ToolResult {
             items.sort();
             ToolResult::ok(json!(items.join("\n")))
         }
-        Err(e) => ToolResult::err(json!(format!("Failed to read directory: {}", e))),
+        Err(e) => ToolResult::err_fmt(format_args!("Failed to read directory: {e}")),
     }
 }
 
@@ -209,7 +203,7 @@ fn image_mime(path: &Path) -> Option<&'static str> {
 fn read_image(path: &Path, path_str: &str, mime: &str) -> ToolResult {
     let data = match std::fs::read(path) {
         Ok(d) => d,
-        Err(e) => return ToolResult::err(json!(format!("Failed to read image: {}", e))),
+        Err(e) => return ToolResult::err_fmt(format_args!("Failed to read image: {e}")),
     };
 
     let size_kb = data.len() / 1024;

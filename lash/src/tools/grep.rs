@@ -3,20 +3,11 @@ use std::path::Path;
 
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
+use super::require_str;
+
 /// Search file contents using regex patterns.
+#[derive(Default)]
 pub struct Grep;
-
-impl Grep {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for Grep {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 const MAX_RESULTS: usize = 100;
 const MAX_LINE_LEN: usize = 500;
@@ -51,14 +42,10 @@ impl ToolProvider for Grep {
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
-        let pattern = args
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-
-        if pattern.is_empty() {
-            return ToolResult::err(json!("Missing required parameter: pattern"));
-        }
+        let pattern = match require_str(args, "pattern") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
 
         let base_dir = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
@@ -67,7 +54,7 @@ impl ToolProvider for Grep {
         let re = match regex::Regex::new(pattern) {
             Ok(r) => r,
             Err(e) => {
-                return ToolResult::err(json!(format!("Invalid regex pattern: {}", e)));
+                return ToolResult::err_fmt(format_args!("Invalid regex pattern: {e}"));
             }
         };
 
@@ -89,7 +76,7 @@ impl ToolProvider for Grep {
         }
 
         if !base.is_dir() {
-            return ToolResult::err(json!(format!("Not a file or directory: {}", base_dir)));
+            return ToolResult::err_fmt(format_args!("Not a file or directory: {base_dir}"));
         }
 
         let walker = ignore::WalkBuilder::new(base)

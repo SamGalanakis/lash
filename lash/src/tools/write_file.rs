@@ -3,20 +3,11 @@ use std::path::Path;
 
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
+use super::require_str;
+
 /// Write complete file contents, creating parent directories if needed.
+#[derive(Default)]
 pub struct WriteFile;
-
-impl WriteFile {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for WriteFile {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[async_trait::async_trait]
 impl ToolProvider for WriteFile {
@@ -34,18 +25,14 @@ impl ToolProvider for WriteFile {
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
-        let path_str = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
+        let path_str = match require_str(args, "path") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
         let content = args
             .get("content")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-
-        if path_str.is_empty() {
-            return ToolResult::err(json!("Missing required parameter: path"));
-        }
 
         let path = Path::new(path_str);
 
@@ -54,7 +41,7 @@ impl ToolProvider for WriteFile {
             && !parent.exists()
             && let Err(e) = std::fs::create_dir_all(parent)
         {
-            return ToolResult::err(json!(format!("Failed to create directories: {}", e)));
+            return ToolResult::err_fmt(format_args!("Failed to create directories: {e}"));
         }
 
         match std::fs::write(path, content) {
@@ -62,7 +49,7 @@ impl ToolProvider for WriteFile {
                 let bytes = content.len();
                 ToolResult::ok(json!(format!("Wrote {} bytes to {}", bytes, path_str)))
             }
-            Err(e) => ToolResult::err(json!(format!("Failed to write file: {}", e))),
+            Err(e) => ToolResult::err_fmt(format_args!("Failed to write file: {e}")),
         }
     }
 }

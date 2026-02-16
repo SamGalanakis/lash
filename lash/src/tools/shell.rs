@@ -9,6 +9,8 @@ use tokio::sync::Notify;
 
 use crate::{ProgressSender, SandboxMessage, ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
+use super::require_str;
+
 /// A running process managed by the Shell.
 struct ShellProcess {
     pid: u32,
@@ -123,15 +125,16 @@ fn spawn_reader(
 
 impl Shell {
     fn spawn_process(&self, command: &str) -> Result<(String, serde_json::Value), String> {
-        let mut child = tokio::process::Command::new(&self.shell_path)
-            .arg("-c")
+        let mut cmd = tokio::process::Command::new(&self.shell_path);
+        cmd.arg("-c")
             .arg(command)
             .current_dir(&self.cwd)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to spawn: {e}"))?;
+            // Create a new process group so kill(-pgid) catches all children
+            .process_group(0);
+        let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn: {e}"))?;
 
         let pid = child.id().unwrap_or(0);
         let stdin = child.stdin.take();
@@ -158,7 +161,7 @@ impl Shell {
 
         self.processes.lock().unwrap().insert(id.clone(), process);
 
-        Ok((id.clone(), json!({"__handle__": "bash", "id": id})))
+        Ok((id.clone(), json!({"__handle__": "shell", "id": id})))
     }
 
     #[allow(clippy::type_complexity)]
@@ -185,7 +188,7 @@ impl Shell {
     }
 
     /// Wait for process exit, streaming progress. Returns final output.
-    async fn bash_result(
+    async fn shell_result(
         &self,
         id: &str,
         timeout: Option<f64>,
@@ -229,8 +232,16 @@ impl Shell {
                     procs.get(id).map(|p| p.pid)
                 };
                 if let Some(pid) = pid {
+                    // Kill process group then SIGKILL fallback
                     let _ = tokio::process::Command::new("kill")
-                        .arg(pid.to_string())
+                        .arg("--")
+                        .arg(format!("-{pid}"))
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .await;
+                    let _ = tokio::process::Command::new("kill")
+                        .args(["-9", &pid.to_string()])
+                        .stderr(std::process::Stdio::null())
                         .status()
                         .await;
                 }
@@ -270,11 +281,11 @@ impl Shell {
     }
 
     /// Drain accumulated output without waiting (non-blocking).
-    fn bash_output(&self, id: &str) -> ToolResult {
+    fn shell_output(&self, id: &str) -> ToolResult {
         let procs = self.processes.lock().unwrap();
         let proc = match procs.get(id) {
             Some(p) => p,
-            None => return ToolResult::err(json!(format!("No process with id: {id}"))),
+            None => return ToolResult::err_fmt(format_args!("No process with id: {id}")),
         };
         let mut buf = proc.buffer.lock().unwrap();
         let output = buf.clone();
@@ -283,12 +294,12 @@ impl Shell {
     }
 
     /// Write to the process's stdin.
-    async fn bash_write(&self, id: &str, input: &str) -> ToolResult {
+    async fn shell_write(&self, id: &str, input: &str) -> ToolResult {
         let stdin = {
             let mut procs = self.processes.lock().unwrap();
             let proc = match procs.get_mut(id) {
                 Some(p) => p,
-                None => return ToolResult::err(json!(format!("No process with id: {id}"))),
+                None => return ToolResult::err_fmt(format_args!("No process with id: {id}")),
             };
             proc.stdin.take()
         };
@@ -301,27 +312,47 @@ impl Shell {
             }
             match result {
                 Ok(_) => ToolResult::ok(json!(null)),
-                Err(e) => ToolResult::err(json!(format!("Write failed: {e}"))),
+                Err(e) => ToolResult::err_fmt(format_args!("Write failed: {e}")),
             }
         } else {
             ToolResult::err(json!("Process stdin not available"))
         }
     }
 
-    /// Send SIGTERM to the process.
-    async fn bash_kill(&self, id: &str) -> ToolResult {
-        let pid = {
+    /// Kill the process group (SIGTERM → wait → SIGKILL) and clean up.
+    async fn shell_kill(&self, id: &str) -> ToolResult {
+        let (pid, exit_notify) = {
             let procs = self.processes.lock().unwrap();
             match procs.get(id) {
-                Some(p) => p.pid,
-                None => return ToolResult::err(json!(format!("No process with id: {id}"))),
+                Some(p) => (p.pid, p.exit_notify.clone()),
+                None => return ToolResult::err_fmt(format_args!("No process with id: {id}")),
             }
         };
 
+        // Kill the entire process group (negative PID) so child processes die too
         let _ = tokio::process::Command::new("kill")
-            .arg(pid.to_string())
+            .arg("--")
+            .arg(format!("-{pid}"))
+            .stderr(std::process::Stdio::null())
             .status()
             .await;
+
+        // Wait briefly for graceful exit, then SIGKILL
+        let exited =
+            tokio::time::timeout(std::time::Duration::from_secs(2), exit_notify.notified()).await;
+
+        if exited.is_err() {
+            let _ = tokio::process::Command::new("kill")
+                .args(["-9", "--", &format!("-{pid}")])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await;
+            let _ = tokio::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await;
+        }
 
         self.processes.lock().unwrap().remove(id);
         ToolResult::ok(json!(null))
@@ -336,14 +367,14 @@ impl ToolProvider for Shell {
             ToolDefinition {
                 name: "shell".into(),
                 description: format!(
-                    "Run a command via {shell_name}. Returns a BashHandle with .result(), .output(), .write(), .kill()."
+                    "Run a command via {shell_name}. Returns a ShellHandle with .result(), .output(), .write(), .kill()."
                 ),
                 params: vec![ToolParam::typed("command", "str")],
-                returns: "BashHandle".into(),
+                returns: "ShellHandle".into(),
                 hidden: false,
             },
             ToolDefinition {
-                name: "bash_result".into(),
+                name: "shell_result".into(),
                 description: "Wait for a shell process to exit and return its output.".into(),
                 params: vec![
                     ToolParam::typed("id", "str"),
@@ -353,7 +384,7 @@ impl ToolProvider for Shell {
                 hidden: true,
             },
             ToolDefinition {
-                name: "bash_output".into(),
+                name: "shell_output".into(),
                 description: "Read accumulated output from a running shell process (non-blocking)."
                     .into(),
                 params: vec![ToolParam::typed("id", "str")],
@@ -361,7 +392,7 @@ impl ToolProvider for Shell {
                 hidden: true,
             },
             ToolDefinition {
-                name: "bash_write".into(),
+                name: "shell_write".into(),
                 description: "Write input to a shell process's stdin.".into(),
                 params: vec![
                     ToolParam::typed("id", "str"),
@@ -371,7 +402,7 @@ impl ToolProvider for Shell {
                 hidden: true,
             },
             ToolDefinition {
-                name: "bash_kill".into(),
+                name: "shell_kill".into(),
                 description: "Send SIGTERM to a running shell process.".into(),
                 params: vec![ToolParam::typed("id", "str")],
                 returns: "None".into(),
@@ -383,40 +414,37 @@ impl ToolProvider for Shell {
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
         match name {
             "shell" => {
-                let command = args
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                if command.is_empty() {
-                    return ToolResult::err(json!("Missing required parameter: command"));
-                }
+                let command = match require_str(args, "command") {
+                    Ok(s) => s,
+                    Err(e) => return e,
+                };
                 match self.spawn_process(command) {
                     Ok((_id, handle)) => ToolResult::ok(handle),
-                    Err(e) => ToolResult::err(json!(e)),
+                    Err(e) => ToolResult::err_fmt(e),
                 }
             }
-            "bash_result" => {
+            "shell_result" => {
                 let id = args.get("id").and_then(|v| v.as_str()).unwrap_or_default();
                 let timeout = args.get("timeout").and_then(|v| v.as_f64());
-                self.bash_result(id, timeout, None).await
+                self.shell_result(id, timeout, None).await
             }
-            "bash_output" => {
+            "shell_output" => {
                 let id = args.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-                self.bash_output(id)
+                self.shell_output(id)
             }
-            "bash_write" => {
+            "shell_write" => {
                 let id = args.get("id").and_then(|v| v.as_str()).unwrap_or_default();
                 let input = args
                     .get("input")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
-                self.bash_write(id, input).await
+                self.shell_write(id, input).await
             }
-            "bash_kill" => {
+            "shell_kill" => {
                 let id = args.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-                self.bash_kill(id).await
+                self.shell_kill(id).await
             }
-            _ => ToolResult::err(json!(format!("Unknown tool: {name}"))),
+            _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
         }
     }
 
@@ -426,10 +454,10 @@ impl ToolProvider for Shell {
         args: &serde_json::Value,
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
-        if name == "bash_result" {
+        if name == "shell_result" {
             let id = args.get("id").and_then(|v| v.as_str()).unwrap_or_default();
             let timeout = args.get("timeout").and_then(|v| v.as_f64());
-            self.bash_result(id, timeout, progress).await
+            self.shell_result(id, timeout, progress).await
         } else {
             self.execute(name, args).await
         }
@@ -450,11 +478,11 @@ mod tests {
             .await;
         assert!(result.success);
         let handle: serde_json::Value = result.result;
-        assert_eq!(handle["__handle__"], "bash");
+        assert_eq!(handle["__handle__"], "shell");
         let id = handle["id"].as_str().unwrap();
 
         let result = shell
-            .execute("bash_result", &json!({"id": id, "timeout": 5.0}))
+            .execute("shell_result", &json!({"id": id, "timeout": 5.0}))
             .await;
         assert!(result.success);
         assert!(result.result.as_str().unwrap().contains("hello"));
@@ -467,7 +495,7 @@ mod tests {
         let id = handle.result["id"].as_str().unwrap();
 
         let result = shell
-            .execute("bash_result", &json!({"id": id, "timeout": 5.0}))
+            .execute("shell_result", &json!({"id": id, "timeout": 5.0}))
             .await;
         assert!(!result.success);
         assert!(result.result.as_str().unwrap().contains("exit code: 1"));
@@ -482,7 +510,7 @@ mod tests {
         let id = handle.result["id"].as_str().unwrap();
 
         let result = shell
-            .execute("bash_result", &json!({"id": id, "timeout": 0.2}))
+            .execute("shell_result", &json!({"id": id, "timeout": 0.2}))
             .await;
         assert!(!result.success);
         assert!(result.result.as_str().unwrap().contains("timed out"));
@@ -505,11 +533,11 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        let result = shell.execute("bash_output", &json!({"id": id})).await;
+        let result = shell.execute("shell_output", &json!({"id": id})).await;
         assert!(result.success);
         assert!(result.result.as_str().unwrap().contains("line1"));
 
-        shell.execute("bash_kill", &json!({"id": id})).await;
+        shell.execute("shell_kill", &json!({"id": id})).await;
     }
 
     #[tokio::test]
@@ -521,12 +549,12 @@ mod tests {
         let id = handle.result["id"].as_str().unwrap();
 
         let write_result = shell
-            .execute("bash_write", &json!({"id": id, "input": "hello\n"}))
+            .execute("shell_write", &json!({"id": id, "input": "hello\n"}))
             .await;
         assert!(write_result.success);
 
         let result = shell
-            .execute("bash_result", &json!({"id": id, "timeout": 5.0}))
+            .execute("shell_result", &json!({"id": id, "timeout": 5.0}))
             .await;
         assert!(result.success);
         assert!(result.result.as_str().unwrap().contains("got:hello"));
@@ -540,10 +568,10 @@ mod tests {
             .await;
         let id = handle.result["id"].as_str().unwrap();
 
-        let result = shell.execute("bash_kill", &json!({"id": id})).await;
+        let result = shell.execute("shell_kill", &json!({"id": id})).await;
         assert!(result.success);
 
-        let result = shell.execute("bash_result", &json!({"id": id})).await;
+        let result = shell.execute("shell_result", &json!({"id": id})).await;
         assert!(!result.success);
     }
 
@@ -557,7 +585,11 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let result = shell
-            .execute_streaming("bash_result", &json!({"id": id, "timeout": 5.0}), Some(&tx))
+            .execute_streaming(
+                "shell_result",
+                &json!({"id": id, "timeout": 5.0}),
+                Some(&tx),
+            )
             .await;
         assert!(result.success);
 
@@ -585,7 +617,7 @@ mod tests {
         let handle = shell.execute("shell", &json!({"command": "pwd"})).await;
         let id = handle.result["id"].as_str().unwrap();
         let result = shell
-            .execute("bash_result", &json!({"id": id, "timeout": 5.0}))
+            .execute("shell_result", &json!({"id": id, "timeout": 5.0}))
             .await;
         assert!(result.success);
         assert!(result.result.as_str().unwrap().contains("/tmp"));
@@ -600,7 +632,7 @@ mod tests {
         let id = handle.result["id"].as_str().unwrap();
 
         // No timeout — should still return once process exits
-        let result = shell.execute("bash_result", &json!({"id": id})).await;
+        let result = shell.execute("shell_result", &json!({"id": id})).await;
         assert!(result.success);
         assert!(result.result.as_str().unwrap().contains("done"));
     }

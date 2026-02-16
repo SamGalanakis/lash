@@ -64,21 +64,18 @@ impl DelegateInner {
         tier: Tier,
     ) -> Self {
         let model = pick_model(config, &delegate_models, &tier);
-        let (tool_name, description, max_turns) = match tier {
+        let (tool_name, description) = match tier {
             Tier::Search => (
                 "delegate_search",
                 "Spawn a fast sub-agent for quick lookups, searches, and simple questions.",
-                5usize,
             ),
             Tier::Task => (
                 "delegate_task",
                 "Spawn a sub-agent to handle a task autonomously. It has its own REPL and full tool access.",
-                10,
             ),
             Tier::Deep => (
                 "delegate_deep",
                 "Spawn a thorough sub-agent for complex analysis, multi-step reasoning, or deep investigation.",
-                20,
             ),
         };
 
@@ -89,7 +86,7 @@ impl DelegateInner {
                 provider: config.provider.clone(),
                 sub_agent: true,
                 include_soul: matches!(tier, Tier::Deep),
-                max_turns: Some(max_turns),
+                max_turns: None,
                 llm_log_path: config.llm_log_path.clone(),
                 headless: config.headless,
                 ..Default::default()
@@ -153,7 +150,9 @@ impl DelegateInner {
         {
             Ok(s) => s,
             Err(e) => {
-                return ToolResult::err(json!(format!("Failed to create sub-agent session: {e}")));
+                return ToolResult::err_fmt(format_args!(
+                    "Failed to create sub-agent session: {e}"
+                ));
             }
         };
 
@@ -215,8 +214,11 @@ impl DelegateInner {
 
         let result = if let Some(msg) = final_message {
             msg
-        } else {
+        } else if !current_prose.trim().is_empty() {
             current_prose.trim().to_string()
+        } else {
+            // No done() was called — fall back to accumulated context
+            context.join("\n\n")
         };
 
         ToolResult::ok(json!({"result": result, "context": context}))
@@ -225,128 +227,45 @@ impl DelegateInner {
 
 // ─── Public delegate types ───
 
-/// Balanced sub-agent for general-purpose autonomous tasks.
-pub struct DelegateTask(DelegateInner);
+macro_rules! delegate_type {
+    ($(#[$meta:meta])* $name:ident, $tier:expr) => {
+        $(#[$meta])*
+        pub struct $name(DelegateInner);
 
-impl DelegateTask {
-    pub fn new(
-        tools: Arc<dyn ToolProvider>,
-        config: &AgentConfig,
-        delegate_models: Option<DelegateModels>,
-        store: Arc<Store>,
-        cancel: CancellationToken,
-        parent_id: String,
-    ) -> Self {
-        Self(DelegateInner::new(
-            tools,
-            config,
-            delegate_models,
-            store,
-            cancel,
-            parent_id,
-            Tier::Task,
-        ))
-    }
+        impl $name {
+            pub fn new(
+                tools: Arc<dyn ToolProvider>,
+                config: &AgentConfig,
+                delegate_models: Option<DelegateModels>,
+                store: Arc<Store>,
+                cancel: CancellationToken,
+                parent_id: String,
+            ) -> Self {
+                Self(DelegateInner::new(tools, config, delegate_models, store, cancel, parent_id, $tier))
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ToolProvider for $name {
+            fn definitions(&self) -> Vec<ToolDefinition> { vec![self.0.definition()] }
+            async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
+                self.0.execute(args).await
+            }
+            async fn execute_streaming(
+                &self,
+                _name: &str,
+                args: &serde_json::Value,
+                progress: Option<&ProgressSender>,
+            ) -> ToolResult {
+                self.0.execute_streaming(args, progress).await
+            }
+        }
+    };
 }
 
-#[async_trait::async_trait]
-impl ToolProvider for DelegateTask {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![self.0.definition()]
-    }
-    async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
-        self.0.execute(args).await
-    }
-    async fn execute_streaming(
-        &self,
-        _name: &str,
-        args: &serde_json::Value,
-        progress: Option<&ProgressSender>,
-    ) -> ToolResult {
-        self.0.execute_streaming(args, progress).await
-    }
-}
-
-/// Fast sub-agent for quick lookups and searches.
-pub struct DelegateSearch(DelegateInner);
-
-impl DelegateSearch {
-    pub fn new(
-        tools: Arc<dyn ToolProvider>,
-        config: &AgentConfig,
-        delegate_models: Option<DelegateModels>,
-        store: Arc<Store>,
-        cancel: CancellationToken,
-        parent_id: String,
-    ) -> Self {
-        Self(DelegateInner::new(
-            tools,
-            config,
-            delegate_models,
-            store,
-            cancel,
-            parent_id,
-            Tier::Search,
-        ))
-    }
-}
-
-#[async_trait::async_trait]
-impl ToolProvider for DelegateSearch {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![self.0.definition()]
-    }
-    async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
-        self.0.execute(args).await
-    }
-    async fn execute_streaming(
-        &self,
-        _name: &str,
-        args: &serde_json::Value,
-        progress: Option<&ProgressSender>,
-    ) -> ToolResult {
-        self.0.execute_streaming(args, progress).await
-    }
-}
-
-/// Thorough sub-agent for deep analysis and complex reasoning.
-pub struct DelegateDeep(DelegateInner);
-
-impl DelegateDeep {
-    pub fn new(
-        tools: Arc<dyn ToolProvider>,
-        config: &AgentConfig,
-        delegate_models: Option<DelegateModels>,
-        store: Arc<Store>,
-        cancel: CancellationToken,
-        parent_id: String,
-    ) -> Self {
-        Self(DelegateInner::new(
-            tools,
-            config,
-            delegate_models,
-            store,
-            cancel,
-            parent_id,
-            Tier::Deep,
-        ))
-    }
-}
-
-#[async_trait::async_trait]
-impl ToolProvider for DelegateDeep {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![self.0.definition()]
-    }
-    async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
-        self.0.execute(args).await
-    }
-    async fn execute_streaming(
-        &self,
-        _name: &str,
-        args: &serde_json::Value,
-        progress: Option<&ProgressSender>,
-    ) -> ToolResult {
-        self.0.execute_streaming(args, progress).await
-    }
-}
+delegate_type!(/// Balanced sub-agent for general-purpose autonomous tasks.
+    DelegateTask, Tier::Task);
+delegate_type!(/// Fast sub-agent for quick lookups and searches.
+    DelegateSearch, Tier::Search);
+delegate_type!(/// Thorough sub-agent for deep analysis and complex reasoning.
+    DelegateDeep, Tier::Deep);

@@ -383,19 +383,9 @@ impl Session {
         Ok(())
     }
 
-    /// Path to the scratch directory on the host filesystem.
-    pub fn scratch_path(&self) -> &Path {
-        self.scratch_dir.path()
-    }
-
     /// Access the tool provider.
     pub fn tools(&self) -> &Arc<dyn ToolProvider> {
         &self.tools
-    }
-
-    /// Get tool call records from the last run_code execution.
-    pub fn last_tool_calls(&self) -> &[ToolCallRecord] {
-        &self.tool_calls
     }
 }
 
@@ -403,7 +393,7 @@ impl Session {
 pub struct ExecResponse {
     /// Captured stdout — model's own context (print, auto-printed expressions).
     pub output: String,
-    /// User-facing final response from respond().
+    /// User-facing final response from done().
     pub response: String,
     pub tool_calls: Vec<ToolCallRecord>,
     /// Images returned by tools during this execution (e.g. read_file on a PNG).

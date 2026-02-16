@@ -4,21 +4,11 @@ use std::path::Path;
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
 use super::hashline::{self, HashlineEdit};
+use super::{read_to_string, require_str};
 
 /// Hashline-aware file editing tool.
+#[derive(Default)]
 pub struct EditFile;
-
-impl EditFile {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for EditFile {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[async_trait::async_trait]
 impl ToolProvider for EditFile {
@@ -47,26 +37,20 @@ impl ToolProvider for EditFile {
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
-        let path_str = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-
-        if path_str.is_empty() {
-            return ToolResult::err(json!("Missing required parameter: path"));
-        }
+        let path_str = match require_str(args, "path") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
 
         let path = Path::new(path_str);
 
         if !path.exists() {
-            return ToolResult::err(json!(format!("File does not exist: {}", path_str)));
+            return ToolResult::err_fmt(format_args!("File does not exist: {path_str}"));
         }
 
-        let content = match std::fs::read_to_string(path) {
+        let content = match read_to_string(path) {
             Ok(c) => c,
-            Err(e) => {
-                return ToolResult::err(json!(format!("Failed to read file: {}", e)));
-            }
+            Err(e) => return e,
         };
 
         let edits_json = match args.get("edits").and_then(|v| v.as_array()) {
@@ -88,7 +72,7 @@ impl ToolProvider for EditFile {
         match hashline::apply_hashline_edits(&content, edits) {
             Ok(new_content) => {
                 if let Err(e) = std::fs::write(path, &new_content) {
-                    return ToolResult::err(json!(format!("Failed to write file: {}", e)));
+                    return ToolResult::err_fmt(format_args!("Failed to write file: {e}"));
                 }
                 let new_lines = new_content.lines().count();
                 ToolResult::ok(json!(format!(

@@ -2,20 +2,11 @@ use serde_json::json;
 
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
+use super::require_str;
+
 /// Show unified diff for a file against a git ref.
+#[derive(Default)]
 pub struct DiffFile;
-
-impl DiffFile {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for DiffFile {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[async_trait::async_trait]
 impl ToolProvider for DiffFile {
@@ -40,14 +31,10 @@ impl ToolProvider for DiffFile {
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
-        let path = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-
-        if path.is_empty() {
-            return ToolResult::err(json!("Missing required parameter: path"));
-        }
+        let path = match require_str(args, "path") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
 
         let git_ref = args.get("ref").and_then(|v| v.as_str()).unwrap_or("HEAD");
 
@@ -62,7 +49,7 @@ impl ToolProvider for DiffFile {
                 let stderr = String::from_utf8_lossy(&out.stderr);
 
                 if !out.status.success() {
-                    return ToolResult::err(json!(format!("git diff failed: {}", stderr.trim())));
+                    return ToolResult::err_fmt(format_args!("git diff failed: {}", stderr.trim()));
                 }
 
                 if stdout.is_empty() {
@@ -74,7 +61,7 @@ impl ToolProvider for DiffFile {
                     ToolResult::ok(json!(stdout.as_ref()))
                 }
             }
-            Err(e) => ToolResult::err(json!(format!("Failed to run git: {}", e))),
+            Err(e) => ToolResult::err_fmt(format_args!("Failed to run git: {e}")),
         }
     }
 }

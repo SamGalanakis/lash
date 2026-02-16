@@ -2,6 +2,8 @@ use serde_json::json;
 
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
+use super::require_str;
+
 /// Fetch a URL and return its content as text.
 pub struct FetchUrl {
     client: reqwest::Client,
@@ -37,11 +39,10 @@ impl ToolProvider for FetchUrl {
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
-        let url = args.get("url").and_then(|v| v.as_str()).unwrap_or_default();
-
-        if url.is_empty() {
-            return ToolResult::err(json!("Missing required parameter: url"));
-        }
+        let url = match require_str(args, "url") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
 
         let resp = self.client.get(url).send().await;
 
@@ -59,14 +60,14 @@ impl ToolProvider for FetchUrl {
                         }
                         ToolResult::ok(json!(text))
                     }
-                    Err(e) => ToolResult::err(json!(format!("Failed to read body: {e}"))),
+                    Err(e) => ToolResult::err_fmt(format_args!("Failed to read body: {e}")),
                 }
             }
             Ok(r) => {
                 let status = r.status();
-                ToolResult::err(json!(format!("HTTP {status}")))
+                ToolResult::err_fmt(format_args!("HTTP {status}"))
             }
-            Err(e) => ToolResult::err(json!(format!("Request failed: {e}"))),
+            Err(e) => ToolResult::err_fmt(format_args!("Request failed: {e}")),
         }
     }
 }

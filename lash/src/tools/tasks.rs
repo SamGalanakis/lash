@@ -295,7 +295,7 @@ impl ToolProvider for TaskStore {
             "claim_task" => self.execute_claim(args),
             "delete_task" => self.execute_delete(args),
             "tasks_summary" => self.execute_summary(),
-            _ => ToolResult::err(json!(format!("Unknown tool: {}", name))),
+            _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
         }
     }
 }

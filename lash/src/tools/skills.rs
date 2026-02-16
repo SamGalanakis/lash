@@ -4,6 +4,8 @@ use serde_json::json;
 
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
+use super::read_to_string;
+
 pub struct SkillStore {
     skill_dirs: Vec<PathBuf>, // [~/.lash/skills, .lash/skills] — later overrides earlier
 }
@@ -147,7 +149,7 @@ impl SkillStore {
                 "files": skill.files,
                 "file_count": skill.files.len(),
             })),
-            None => ToolResult::err(json!(format!("Skill not found: {}", name))),
+            None => ToolResult::err_fmt(format_args!("Skill not found: {name}")),
         }
     }
 
@@ -163,19 +165,19 @@ impl SkillStore {
 
         let skill = match self.find_skill(skill_name) {
             Some(s) => s,
-            None => return ToolResult::err(json!(format!("Skill not found: {}", skill_name))),
+            None => return ToolResult::err_fmt(format_args!("Skill not found: {skill_name}")),
         };
 
         // Resolve and validate path doesn't escape skill directory
         let target = skill.base_path.join(path);
         let canonical_base = match skill.base_path.canonicalize() {
             Ok(p) => p,
-            Err(e) => return ToolResult::err(json!(format!("Skill directory error: {}", e))),
+            Err(e) => return ToolResult::err_fmt(format_args!("Skill directory error: {e}")),
         };
         let canonical_target = match target.canonicalize() {
             Ok(p) => p,
             Err(_) => {
-                return ToolResult::err(json!(format!("File not found: {}", path)));
+                return ToolResult::err_fmt(format_args!("File not found: {path}"));
             }
         };
 
@@ -183,9 +185,9 @@ impl SkillStore {
             return ToolResult::err(json!("Path escapes skill directory"));
         }
 
-        match std::fs::read_to_string(&canonical_target) {
+        match read_to_string(&canonical_target) {
             Ok(content) => ToolResult::ok(json!(content)),
-            Err(e) => ToolResult::err(json!(format!("Failed to read file: {}", e))),
+            Err(e) => e,
         }
     }
 }
@@ -265,7 +267,7 @@ impl ToolProvider for SkillStore {
             "skills" => self.execute_skills(),
             "load_skill" => self.execute_load_skill(args),
             "read_skill_file" => self.execute_read_skill_file(args),
-            _ => ToolResult::err(json!(format!("Unknown tool: {}", name))),
+            _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
         }
     }
 }

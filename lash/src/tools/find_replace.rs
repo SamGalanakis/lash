@@ -3,20 +3,11 @@ use std::path::Path;
 
 use crate::{ToolDefinition, ToolParam, ToolResult};
 
+use super::{read_to_string, require_str};
+
 /// Simple text find-and-replace tool (no anchors needed).
+#[derive(Default)]
 pub struct FindReplace;
-
-impl FindReplace {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for FindReplace {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[async_trait::async_trait]
 impl crate::ToolProvider for FindReplace {
@@ -57,27 +48,19 @@ impl crate::ToolProvider for FindReplace {
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
-        let path_str = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-
-        if path_str.is_empty() {
-            return ToolResult::err(json!("Missing required parameter: path"));
-        }
+        let path_str = match require_str(args, "path") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
 
         let old_text = match args.get("old_text").and_then(|v| v.as_str()) {
             Some(s) => s,
-            None => {
-                return ToolResult::err(json!("Missing required parameter: old_text"));
-            }
+            None => return ToolResult::err_fmt("Missing required parameter: old_text"),
         };
 
         let new_text = match args.get("new_text").and_then(|v| v.as_str()) {
             Some(s) => s,
-            None => {
-                return ToolResult::err(json!("Missing required parameter: new_text"));
-            }
+            None => return ToolResult::err_fmt("Missing required parameter: new_text"),
         };
 
         let replace_all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -85,18 +68,16 @@ impl crate::ToolProvider for FindReplace {
         let path = Path::new(path_str);
 
         if !path.exists() {
-            return ToolResult::err(json!(format!("File does not exist: {}", path_str)));
+            return ToolResult::err_fmt(format_args!("File does not exist: {path_str}"));
         }
 
-        let content = match std::fs::read_to_string(path) {
+        let content = match read_to_string(path) {
             Ok(c) => c,
-            Err(e) => {
-                return ToolResult::err(json!(format!("Failed to read file: {}", e)));
-            }
+            Err(e) => return e,
         };
 
         if !content.contains(old_text) {
-            return ToolResult::err(json!("old_text not found in file"));
+            return ToolResult::err_fmt("old_text not found in file");
         }
 
         let (new_content, count) = if replace_all {
@@ -107,7 +88,7 @@ impl crate::ToolProvider for FindReplace {
         };
 
         if let Err(e) = std::fs::write(path, &new_content) {
-            return ToolResult::err(json!(format!("Failed to write file: {}", e)));
+            return ToolResult::err_fmt(format_args!("Failed to write file: {e}"));
         }
 
         let label = if count == 1 {

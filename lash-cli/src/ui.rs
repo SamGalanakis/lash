@@ -823,10 +823,33 @@ fn draw_task_tray(frame: &mut Frame, app: &App, area: Rect) {
     let mut pill_spans: Vec<Span> = Vec::new();
     let mut used_width = 0usize;
 
+    // Reserve space for overflow indicator so first pill truncates cleanly
+    let overflow_reserve = if active_tasks.len() > 1 {
+        format!("  +{}", active_tasks.len() - 1).len()
+    } else {
+        0
+    };
+
     for (i, task) in active_tasks.iter().enumerate() {
         let (marker, marker_color, text_color) = match task.status.as_str() {
             "in_progress" => ("\u{25c6}", theme::SODIUM, theme::SODIUM),
             _ => ("\u{25cb}", theme::ASH_MID, theme::CHALK_DIM),
+        };
+
+        let sep_w = if i > 0 { 3 } else { 0 };
+
+        // Truncate label to fit: account for overflow indicator on first pill
+        let reserve = if i == 0 { overflow_reserve } else { 0 };
+        let avail_for_label = inner_w.saturating_sub(used_width + sep_w + 2 + reserve);
+        let label: String = if task.label.chars().count() > avail_for_label && avail_for_label > 1 {
+            let trunc: String = task
+                .label
+                .chars()
+                .take(avail_for_label.saturating_sub(1))
+                .collect();
+            format!("{}\u{2026}", trunc)
+        } else {
+            task.label.clone()
         };
 
         let owner_part = if !task.owner.is_empty() {
@@ -834,10 +857,8 @@ fn draw_task_tray(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             String::new()
         };
-        let pill_text = format!("{} {}{}", marker, task.label, owner_part);
+        let pill_text = format!("{} {}{}", marker, label, owner_part);
         let pill_w = UnicodeWidthStr::width(pill_text.as_str());
-
-        let sep_w = if i > 0 { 3 } else { 0 };
 
         if used_width + sep_w + pill_w > inner_w && i > 0 {
             let overflow_count = active_tasks.len() - i;
@@ -858,7 +879,7 @@ fn draw_task_tray(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(marker_color),
         ));
         pill_spans.push(Span::styled(
-            format!(" {}", task.label),
+            format!(" {}", label),
             Style::default().fg(text_color),
         ));
         if !task.owner.is_empty() {
@@ -888,13 +909,13 @@ fn draw_task_tray(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(theme::ASH),
     ));
 
-    let mut lines = vec![top_line, pill_line];
+    // Breathing line above the tray so it doesn't collide with content above
+    let mut lines = vec![Line::from(""), top_line, pill_line];
 
-    // Progress bar (2+ tasks)
+    // Progress bar (2+ tasks) — scribe-line style: heavy ━ for done, light ─ for remaining.
+    // Ratio already shown in the title so the bar is purely visual.
     if total >= 2 {
-        let ratio_display = format!("{}/{}", completed, total);
-        let ratio_w = ratio_display.len();
-        let bar_w = inner_w.saturating_sub(ratio_w + 2);
+        let bar_w = inner_w;
         let filled = if total > 0 {
             (completed * bar_w) / total
         } else {
@@ -905,24 +926,16 @@ fn draw_task_tray(frame: &mut Frame, app: &App, area: Rect) {
         let mut progress_spans = vec![Span::styled("\u{2502} ", Style::default().fg(theme::ASH))];
         if filled > 0 {
             progress_spans.push(Span::styled(
-                "\u{25b0}".repeat(filled),
+                "\u{2501}".repeat(filled),
                 Style::default().fg(theme::SODIUM),
             ));
         }
         if empty > 0 {
             progress_spans.push(Span::styled(
-                "\u{25b1}".repeat(empty),
+                "\u{2500}".repeat(empty),
                 Style::default().fg(theme::ASH),
             ));
         }
-        let pad = inner_w.saturating_sub(filled + empty + ratio_w);
-        if pad > 0 {
-            progress_spans.push(Span::styled(" ".repeat(pad), Style::default()));
-        }
-        progress_spans.push(Span::styled(
-            ratio_display,
-            Style::default().fg(theme::LICHEN),
-        ));
 
         lines.push(Line::from(progress_spans));
     }
@@ -996,29 +1009,32 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let input = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::TOP | Borders::BOTTOM)
-            .border_style(theme::input_border()),
-    );
+    // Position cursor accounting for visual wrapping and queue lines
+    let clamped_cursor = app.cursor_pos.min(app.input.len());
+    let (vis_row, vis_col) = input_cursor_position(&app.input, clamped_cursor, area.width as usize);
+    let extra_offset = queue_len; // lines rendered above input text
+    let cursor_abs_row = extra_offset + vis_row; // absolute row in the rendered content
+    let content_h = area.height.saturating_sub(2) as usize; // inside borders
+
+    // Compute scroll offset to keep the cursor visible
+    let scroll_offset = if content_h > 0 && cursor_abs_row >= content_h {
+        cursor_abs_row - content_h + 1
+    } else {
+        0
+    };
+
+    let input = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::TOP | Borders::BOTTOM)
+                .border_style(theme::input_border()),
+        )
+        .scroll((scroll_offset as u16, 0));
     frame.render_widget(input, area);
 
-    // Position cursor accounting for visual wrapping and queue lines
-    let (vis_row, vis_col) = input_cursor_position(&app.input, app.cursor_pos, area.width as usize);
-    let extra_offset = queue_len as u16; // lines rendered above input text
-
-    // Scroll: if cursor is past the visible content area, scroll the paragraph
-    let content_h = area.height.saturating_sub(2) as usize; // inside borders
-    if vis_row + (extra_offset as usize) < content_h {
-        let cursor_x = area.x + vis_col as u16;
-        let cursor_y = area.y + 1 + extra_offset + vis_row as u16;
-        frame.set_cursor_position((cursor_x, cursor_y));
-    } else {
-        // Cursor beyond visible area — place at bottom-right as indicator
-        let cursor_x = area.x + vis_col as u16;
-        let cursor_y = area.y + area.height.saturating_sub(2);
-        frame.set_cursor_position((cursor_x, cursor_y));
-    }
+    let cursor_x = area.x + vis_col as u16;
+    let cursor_y = area.y + 1 + (cursor_abs_row - scroll_offset) as u16;
+    frame.set_cursor_position((cursor_x, cursor_y));
 }
 
 fn draw_help_bar(frame: &mut Frame, app: &App, area: Rect) {

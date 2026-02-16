@@ -156,8 +156,6 @@ pub enum AgentEvent {
 
 /// Timeout for waiting on LLM streaming chunks.
 const LLM_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-/// Abort LLM response if it exceeds this length (likely degenerate output).
-const LLM_MAX_RESPONSE_CHARS: usize = 50_000;
 /// Max retries for rate-limited or empty LLM responses.
 const LLM_MAX_RETRIES: usize = 3;
 /// Delays between retries (exponential backoff).
@@ -189,10 +187,6 @@ impl Agent {
             config,
             store,
         }
-    }
-
-    pub fn agent_id(&self) -> &str {
-        &self.agent_id
     }
 
     /// Snapshot the Python session (dill + scratch files).
@@ -299,42 +293,69 @@ impl Agent {
                 return (msgs, iteration);
             }
 
-            if max_steps_final {
-                self.store.mark_agent_done(&self.agent_id);
-                emit!(AgentEvent::Done);
-                return (msgs, iteration);
-            }
-
-            // Rolling window: collapse old turns out of the prompt
-            const HISTORY_WINDOW: usize = 6;
-            // Remove any previous history note
+            // Rolling window: collapse old turns, keeping recent context under 40%
+            // of max_context_chars. Always preserve all User messages.
             msgs.retain(|m| m.id != "history_note");
-            // Keep first msg (user request) + last HISTORY_WINDOW pairs
-            if msgs.len() > 1 + HISTORY_WINDOW * 2 {
-                let keep_start = 1;
-                let remove_end = msgs.len() - HISTORY_WINDOW * 2;
-                let collapsed_count = (remove_end - keep_start) / 2;
-                msgs.drain(keep_start..remove_end);
-                let note = format!(
-                    "[{} earlier turns collapsed into `_history` (accessible in your REPL). \
-                     Use `_history.search(\"pattern\")` to find past results, \
-                     `_history[i]` for a specific turn, \
-                     `_history.summary()` for an overview.]",
-                    collapsed_count
-                );
-                msgs.insert(
-                    keep_start,
-                    Message {
-                        id: "history_note".to_string(),
-                        role: MessageRole::System,
-                        parts: vec![Part {
-                            id: "history_note.p0".to_string(),
-                            kind: PartKind::Text,
-                            content: note,
-                            prune_state: PruneState::Intact,
-                        }],
-                    },
-                );
+            {
+                let budget = self.config.max_context_chars * 40 / 100;
+                // Walk backwards from end, accumulating char counts.
+                // Find the split point where the tail fits within budget.
+                // Never prune User messages — they always stay.
+                let mut tail_chars = 0usize;
+                let mut keep_from = msgs.len(); // index: keep msgs[keep_from..]
+                for i in (1..msgs.len()).rev() {
+                    let cost = msgs[i].char_count();
+                    if tail_chars + cost > budget {
+                        break;
+                    }
+                    tail_chars += cost;
+                    keep_from = i;
+                }
+                // Collect User messages from the pruned region [1..keep_from)
+                // so they're preserved in the context.
+                let mut preserved_user_msgs: Vec<Message> = Vec::new();
+                if keep_from > 1 {
+                    for msg in &msgs[1..keep_from] {
+                        if msg.role == MessageRole::User {
+                            preserved_user_msgs.push(msg.clone());
+                        }
+                    }
+                }
+                // Count collapsed turns (assistant+system pairs, minus preserved users)
+                let collapsed_count = if keep_from > 1 {
+                    (keep_from - 1 - preserved_user_msgs.len()) / 2
+                } else {
+                    0
+                };
+                if collapsed_count > 0 {
+                    // Drain the pruned region
+                    msgs.drain(1..keep_from);
+                    // Re-insert preserved user messages, then the history note
+                    let note = format!(
+                        "[{} earlier turns collapsed — their data is in `_history`.\n \
+                         Use `_history.user_messages()` to see what the user asked, \
+                         `_history.search(\"pattern\")` to find past results, \
+                         `_history[i]` for a specific turn.]",
+                        collapsed_count
+                    );
+                    msgs.insert(
+                        1,
+                        Message {
+                            id: "history_note".to_string(),
+                            role: MessageRole::System,
+                            parts: vec![Part {
+                                id: "history_note.p0".to_string(),
+                                kind: PartKind::Text,
+                                content: note,
+                                prune_state: PruneState::Intact,
+                            }],
+                        },
+                    );
+                    // Insert preserved user messages right after the history note
+                    for (idx, user_msg) in preserved_user_msgs.into_iter().enumerate() {
+                        msgs.insert(2 + idx, user_msg);
+                    }
+                }
             }
 
             let chat_msgs = messages_to_chat(&msgs);
@@ -386,7 +407,9 @@ impl Agent {
 
             // Execution state for incremental execution
             let mut acc = ExecAccumulator::new();
-            let mut stop_marker_code: Option<String> = None;
+            let mut response = String::new();
+            let mut exec_pos = 0usize;
+            let mut stop_marker_hit = false;
 
             // LLM call with retry on transient API errors
             let full_text = 'llm_retry: {
@@ -470,8 +493,6 @@ impl Agent {
 
                     // Stream LLM tokens with incremental execution
                     let mut stream_error = None;
-                    let mut prev_len = 0usize;
-                    let mut line_buffer = String::new();
                     loop {
                         if cancel.is_cancelled() {
                             self.session.clear_message_sender();
@@ -495,39 +516,40 @@ impl Agent {
                                 break;
                             }
                             Ok(Some(Ok(partial))) => {
-                                if partial.len() > prev_len {
-                                    let delta = &partial[prev_len..];
+                                if partial.len() > response.len() {
+                                    let delta = &partial[response.len()..];
                                     emit!(AgentEvent::TextDelta {
                                         content: delta.to_string(),
                                     });
 
-                                    line_buffer.push_str(delta);
+                                    response.push_str(delta);
 
                                     // Stop marker: execute accumulated code, break to new iteration
-                                    if let Some(turn_pos) = find_stop_marker(&line_buffer) {
-                                        let before = line_buffer[..turn_pos].to_string();
-                                        line_buffer.clear();
-                                        stop_marker_code = Some(before.clone());
-                                        if !before.trim().is_empty() && !acc.had_failure {
+                                    let pending = &response[exec_pos..];
+                                    if let Some(turn_pos) = find_stop_marker(pending) {
+                                        let code = &pending[..turn_pos];
+                                        if !code.trim().is_empty() && !acc.had_failure {
                                             execute_and_collect(
                                                 &mut self.session,
-                                                &before,
+                                                code,
                                                 &mut acc,
                                                 &event_tx,
                                             )
                                             .await;
                                         }
+                                        exec_pos += turn_pos;
+                                        stop_marker_hit = true;
                                         break;
                                     }
 
                                     // Incremental execution on complete statements
                                     if delta.contains('\n') && !acc.had_failure {
                                         loop {
-                                            let boundaries =
-                                                find_candidate_boundaries(&line_buffer);
+                                            let pending = &response[exec_pos..];
+                                            let boundaries = find_candidate_boundaries(pending);
                                             let mut executed_any = false;
                                             for &pos in boundaries.iter().rev() {
-                                                let prefix = &line_buffer[..pos];
+                                                let prefix = &pending[..pos];
                                                 if prefix.trim().is_empty() {
                                                     continue;
                                                 }
@@ -536,15 +558,14 @@ impl Agent {
                                                     .check_complete(prefix)
                                                     .unwrap_or(false)
                                                 {
-                                                    let ready = line_buffer[..pos].to_string();
-                                                    line_buffer = line_buffer[pos..].to_string();
                                                     execute_and_collect(
                                                         &mut self.session,
-                                                        &ready,
+                                                        prefix,
                                                         &mut acc,
                                                         &event_tx,
                                                     )
                                                     .await;
+                                                    exec_pos += pos;
                                                     executed_any = true;
                                                     break; // re-scan remaining buffer
                                                 }
@@ -554,24 +575,6 @@ impl Agent {
                                             }
                                         }
                                     }
-
-                                    prev_len = partial.len();
-                                }
-                                if prev_len > LLM_MAX_RESPONSE_CHARS {
-                                    tracing::warn!(
-                                        "LLM response exceeded {} chars, aborting",
-                                        LLM_MAX_RESPONSE_CHARS
-                                    );
-                                    self.session.clear_message_sender();
-                                    self.session.clear_prompt_sender();
-                                    emit!(AgentEvent::Error {
-                                        message: format!(
-                                            "Response exceeded {} chars — likely degenerate output, aborting",
-                                            LLM_MAX_RESPONSE_CHARS
-                                        ),
-                                    });
-                                    emit!(AgentEvent::Done);
-                                    return (msgs, iteration);
                                 }
                             }
                             Ok(Some(Err(e))) => {
@@ -582,9 +585,9 @@ impl Agent {
                     }
 
                     // Stop marker hit — drop stream, log usage
-                    if stop_marker_code.is_some() {
+                    if stop_marker_hit {
                         drop(call);
-                        let code = stop_marker_code.as_deref().unwrap_or("");
+                        let code = &response[..exec_pos];
                         emit!(AgentEvent::LlmResponse {
                             iteration,
                             content: code.to_string(),
@@ -616,7 +619,7 @@ impl Agent {
                                     err
                                 ),
                             });
-                            break 'llm_retry String::new();
+                            break 'llm_retry response.clone();
                         }
                         if is_retryable(&err) && attempt < LLM_MAX_RETRIES {
                             last_error = Some(err);
@@ -631,24 +634,16 @@ impl Agent {
                         return (msgs, iteration);
                     }
 
-                    let text = match call.get_final_response().await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            let msg = format!("{}", e);
-                            if is_retryable(&msg) && attempt < LLM_MAX_RETRIES {
-                                last_error = Some(msg);
-                                continue;
-                            }
-                            emit!(AgentEvent::Error {
-                                message: format!("LLM error: {}", e),
-                            });
-                            break 'llm_retry String::new();
-                        }
+                    // Finalize the BAML stream (for collector/usage tracking).
+                    // We ignore the return value — response is our source of truth.
+                    match call.get_final_response().await {
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("get_final_response: {}", e),
                     };
 
                     emit!(AgentEvent::LlmResponse {
                         iteration,
-                        content: text.clone(),
+                        content: response.clone(),
                         duration_ms: llm_start.elapsed().as_millis() as u64,
                     });
 
@@ -656,20 +651,21 @@ impl Agent {
                         &collector,
                         &mut cumulative_usage,
                         iteration,
-                        &text,
+                        &response,
                         &self.config,
                         &self.agent_id,
                         &event_tx,
                     )
                     .await;
 
-                    // Execute remaining buffer
-                    if !line_buffer.trim().is_empty() && !acc.had_failure {
-                        execute_and_collect(&mut self.session, &line_buffer, &mut acc, &event_tx)
+                    // Execute remaining un-executed code
+                    let remaining = &response[exec_pos..];
+                    if !remaining.trim().is_empty() && !acc.had_failure {
+                        execute_and_collect(&mut self.session, remaining, &mut acc, &event_tx)
                             .await;
                     }
 
-                    break 'llm_retry text;
+                    break 'llm_retry response.clone();
                 }
 
                 // All retries exhausted
@@ -691,7 +687,7 @@ impl Agent {
             let _ = drain_handle.await;
             let _ = prompt_drain_handle.await;
 
-            let executed_text = stop_marker_code.unwrap_or(full_text);
+            let executed_text = full_text;
 
             // Check for empty response with no execution
             if executed_text.trim().is_empty()
@@ -713,7 +709,7 @@ impl Agent {
                 tool_images.push(new_image_from_base64(&b64, Some(&img.mime)));
             }
 
-            // respond() = stop signal
+            // done() = stop signal
             if !acc.final_response.is_empty() {
                 emit!(AgentEvent::Message {
                     text: acc.final_response.clone(),
@@ -750,8 +746,22 @@ impl Agent {
                         })
                     })
                     .collect();
+                // Find the most recent user message for this turn
+                let user_msg = msgs
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == MessageRole::User)
+                    .map(|m| {
+                        m.parts
+                            .iter()
+                            .map(|p| p.content.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default();
                 let turn_json = serde_json::json!({
                     "index": iteration,
+                    "user_message": user_msg,
                     "code": executed_text,
                     "output": acc.combined_output,
                     "error": acc.exec_error,
@@ -849,6 +859,12 @@ impl Agent {
             }
 
             iteration += 1;
+            // Agent had its grace turn after the turn-limit message — force return
+            if max_steps_final {
+                self.store.mark_agent_done(&self.agent_id);
+                emit!(AgentEvent::Done);
+                return (msgs, iteration);
+            }
             if let Some(max) = self.config.max_turns
                 && iteration >= run_offset + max
             {
@@ -860,11 +876,11 @@ impl Agent {
                         id: format!("{}.p0", sys_id),
                         kind: PartKind::Text,
                         content: format!(
-                            "Turn limit reached ({max}). You MUST call respond() now with:\n\
+                            "Turn limit reached ({max}). You MUST call done() now with:\n\
                                 1. Summary of what you accomplished\n\
                                 2. List of remaining tasks not yet completed\n\
                                 3. Recommended next steps\n\
-                                Do NOT make any more tool calls. Call respond() immediately."
+                                Do NOT make any more tool calls. Call done() immediately."
                         ),
                         prune_state: PruneState::Intact,
                     }],
@@ -896,11 +912,6 @@ impl Agent {
             cumulative_usage.output_tokens,
             cumulative_usage.cached_input_tokens,
         );
-    }
-
-    /// Get the inner session (for pooling, snapshot, etc.)
-    pub fn into_session(self) -> Session {
-        self.session
     }
 }
 

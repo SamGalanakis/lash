@@ -16,7 +16,7 @@ jobs:
             os: ubuntu-latest
             cross: true
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14
           - target: aarch64-apple-darwin
             os: macos-14
 
@@ -37,13 +37,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y zstd libreadline-dev libexpat1-dev libzstd-dev \
             uuid-dev libsqlite3-dev libncursesw5-dev libffi-dev liblzma-dev \
-            libbz2-dev libmpdec-dev
+            libbz2-dev libmpdecimal-dev protobuf-compiler
 
       - name: Install system dependencies (Linux cross)
         if: matrix.cross
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Install protobuf (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
 
       - name: Install baml-cli
         run: cargo install baml-cli

@@ -11,9 +11,30 @@ import types
 import typing
 import asyncio
 import uuid
+import warnings
 from enum import StrEnum
 
 import dill
+
+# Suppress SyntaxWarnings from LLM-generated code (e.g. unrecognized escape
+# sequences like "\|"). These warnings write directly to stderr via C-level
+# fprintf and corrupt the TUI's alternate screen. We must redirect the actual
+# fd 2 to /dev/null around parse/compile calls since Python-level
+# warnings.filterwarnings is bypassed by the C tokenizer.
+warnings.filterwarnings("ignore", category=SyntaxWarning)
+
+_devnull_fd = os.open(os.devnull, os.O_WRONLY)
+
+def _mute_stderr():
+    """Redirect fd 2 to /dev/null, return saved fd."""
+    saved = os.dup(2)
+    os.dup2(_devnull_fd, 2)
+    return saved
+
+def _unmute_stderr(saved):
+    """Restore fd 2 from saved fd."""
+    os.dup2(saved, 2)
+    os.close(saved)
 
 
 # ─── Turn History ───
@@ -67,10 +88,11 @@ class ToolCall:
 
 
 class Turn:
-    __slots__ = ("index", "code", "output", "error", "tool_calls", "files_read", "files_written")
+    __slots__ = ("index", "user_message", "code", "output", "error", "tool_calls", "files_read", "files_written")
 
-    def __init__(self, index, code, output, error, tool_calls, files_read, files_written):
+    def __init__(self, index, user_message, code, output, error, tool_calls, files_read, files_written):
         self.index = index
+        self.user_message = user_message
         self.code = code
         self.output = output
         self.error = error
@@ -106,6 +128,16 @@ class TurnHistory:
         n = len(self._turns)
         files = len(self.files_modified())
         return f"TurnHistory({n} turns, {files} files touched)"
+
+    def user_messages(self):
+        """All unique user messages across turns (what the user asked)."""
+        seen = set()
+        out = []
+        for t in self._turns:
+            if t.user_message and t.user_message not in seen:
+                seen.add(t.user_message)
+                out.append(t.user_message)
+        return out
 
     def search(self, pattern):
         """Regex search over code+output of all turns."""
@@ -146,7 +178,10 @@ class TurnHistory:
         errs = len(self.errors())
         fr = self.files_read()
         fm = self.files_modified()
+        um = self.user_messages()
         lines = [f"{n} turns, {tc} tool calls, {errs} errors"]
+        if um:
+            lines.append(f"User asked: {' | '.join(um)}")
         if fr:
             lines.append(f"Files read: {', '.join(fr[:10])}" + (f" (+{len(fr)-10} more)" if len(fr) > 10 else ""))
         if fm:
@@ -184,6 +219,7 @@ class TurnHistory:
                     files_written.append(path)
         turn = Turn(
             index=data.get("index", len(self._turns)),
+            user_message=data.get("user_message", ""),
             code=data.get("code", ""),
             output=data.get("output", ""),
             error=data.get("error"),
@@ -255,8 +291,8 @@ def _format_value(value):
         text = text[:_MAX_OUTPUT_LEN] + f"\n... [truncated, {len(text)} chars total]"
     return text
 
-def _respond(value):
-    """Send a final response to the user. Ends the turn."""
+def _done(value):
+    """End the turn with a final result."""
     text = _format_value(value)
     if text is None:
         text = ""
@@ -287,39 +323,39 @@ async def _ask(question, options=None):
     return result
 
 
-class BashHandle:
-    """Handle to a running bash process (PTY-backed).
+class ShellHandle:
+    """Handle to a running shell process.
 
-    Returned by bash(command=...). Provides:
+    Returned by shell(command=...). Provides:
       .result(timeout=None) — wait for exit, return output
       .write(text)         — send stdin input
       .output()            — read accumulated output (non-blocking)
-      .kill()              — send SIGTERM
+      .kill()              — kill the process group
     """
     def __init__(self, id):
         self.id = id
 
     async def result(self, timeout=None):
         """Wait for the process to exit and return its full output."""
-        return await _call("bash_result", {"id": self.id, "timeout": timeout})
+        return await _call("shell_result", {"id": self.id, "timeout": timeout})
 
     async def write(self, text):
         """Send input to the process's stdin."""
-        return await _call("bash_write", {"id": self.id, "input": text})
+        return await _call("shell_write", {"id": self.id, "input": text})
 
     async def output(self):
         """Read accumulated output so far (non-blocking)."""
-        return await _call("bash_output", {"id": self.id})
+        return await _call("shell_output", {"id": self.id})
 
     async def kill(self):
-        """Send SIGTERM to the process."""
-        return await _call("bash_kill", {"id": self.id})
+        """Kill the process group."""
+        return await _call("shell_kill", {"id": self.id})
 
     def __repr__(self):
-        return f"BashHandle(id='{self.id}')"
+        return f"ShellHandle(id='{self.id}')"
 
     def __str__(self):
-        return f"BashHandle({self.id})"
+        return f"ShellHandle({self.id})"
 
 
 class Task:
@@ -369,21 +405,39 @@ class Task:
             lines.append(f"  blocks: {', '.join(self.blocks)}")
         return "\n".join(lines)
 
+    def _refresh(self, other):
+        """Update self from another Task instance (returned by server)."""
+        self.id = other.id
+        self.subject = other.subject
+        self.description = other.description
+        self.status = other.status
+        self.priority = other.priority
+        self.active_form = other.active_form
+        self.owner = other.owner
+        self.blocks = other.blocks
+        self.blocked_by = other.blocked_by
+        self.metadata = other.metadata
+        return self
+
     async def claim(self):
         """Claim this task for the current agent."""
-        return await _call("claim_task", {"id": self.id, "owner": _ns.get("__agent_id__", "")})
+        result = await _call("claim_task", {"id": self.id, "owner": _ns.get("__agent_id__", "")})
+        return self._refresh(result)
 
     async def start(self):
         """Set status to in_progress."""
-        return await _call("update_task", {"id": self.id, "status": "in_progress"})
+        result = await _call("update_task", {"id": self.id, "status": "in_progress"})
+        return self._refresh(result)
 
     async def done(self):
         """Set status to completed."""
-        return await _call("update_task", {"id": self.id, "status": "completed"})
+        result = await _call("update_task", {"id": self.id, "status": "completed"})
+        return self._refresh(result)
 
     async def cancel(self):
         """Set status to cancelled."""
-        return await _call("update_task", {"id": self.id, "status": "cancelled"})
+        result = await _call("update_task", {"id": self.id, "status": "cancelled"})
+        return self._refresh(result)
 
     async def delete(self):
         """Permanently remove this task."""
@@ -391,16 +445,19 @@ class Task:
 
     async def block(self, *ids):
         """Mark task IDs that this task blocks."""
-        return await _call("update_task", {"id": self.id, "add_blocks": list(ids)})
+        result = await _call("update_task", {"id": self.id, "add_blocks": list(ids)})
+        return self._refresh(result)
 
     async def wait_on(self, *ids):
         """Mark task IDs that block this task."""
-        return await _call("update_task", {"id": self.id, "add_blocked_by": list(ids)})
+        result = await _call("update_task", {"id": self.id, "add_blocked_by": list(ids)})
+        return self._refresh(result)
 
     async def update(self, **kw):
-        """General update — pass any updatable fields as keyword args."""
+        """General update -- pass any updatable fields as keyword args."""
         kw["id"] = self.id
-        return await _call("update_task", kw)
+        result = await _call("update_task", kw)
+        return self._refresh(result)
 
 
 class SkillSummary:
@@ -493,9 +550,9 @@ async def _call(name, params):
     result = json.loads(result_json)
     if result["success"]:
         value = json.loads(result["result"]) if result["result"] else None
-        # Wrap bash handles automatically
-        if isinstance(value, dict) and value.get("__handle__") == "bash":
-            return BashHandle(value["id"])
+        # Wrap shell handles automatically
+        if isinstance(value, dict) and value.get("__handle__") == "shell":
+            return ShellHandle(value["id"])
         # Wrap typed objects
         if isinstance(value, dict) and "__type__" in value:
             t = value["__type__"]
@@ -661,7 +718,7 @@ def _register_tools(tools_json, agent_id=""):
 
     _ns["_history"] = TurnHistory()
     _ns.update({
-        "json": json, "print": print, "respond": _respond, "say": _say, "observe": _observe,
+        "json": json, "print": print, "done": _done, "say": _say, "observe": _observe,
         "asyncio": asyncio, "list_tools": _list_tools, "reset_repl": _reset_repl, "ask": _ask,
         "Task": Task, "Skill": Skill, "SkillSummary": SkillSummary, "ToolError": ToolError,
         "TurnHistory": TurnHistory, "Turn": Turn, "ToolCall": ToolCall, "ToolName": ToolName,
@@ -675,11 +732,11 @@ _ASYNC_FLAG = ast.PyCF_ALLOW_TOP_LEVEL_AWAIT
 _async_tool_names = set()
 
 
-# Async method names on wrapper objects (Task, BashHandle, Skill, etc.)
+# Async method names on wrapper objects (Task, ShellHandle, Skill, etc.)
 _async_method_names = {
     # Task
     "claim", "start", "done", "cancel", "delete", "block", "wait_on", "update",
-    # BashHandle
+    # ShellHandle
     "result", "write", "output", "kill",
     # SkillSummary
     "load",
@@ -757,6 +814,8 @@ async def _handle_exec(exec_id, code):
     sys.displayhook = _displayhook
     error = None
 
+    # Mute fd 2 during parse/compile to suppress C-level SyntaxWarnings
+    _saved_fd = _mute_stderr()
     try:
         tree = ast.parse(code)
     except SyntaxError:
@@ -773,13 +832,18 @@ async def _handle_exec(exec_id, code):
                 mod = ast.Interactive(body=[node])
                 ast.fix_missing_locations(mod)
                 co = compile(mod, "<repl>", "single", flags=_ASYNC_FLAG)
+                _unmute_stderr(_saved_fd)
+                _saved_fd = None
                 if co.co_flags & inspect.CO_COROUTINE:
                     await types.FunctionType(co, _ns)()
                 else:
                     exec(co, _ns)
+                _saved_fd = _mute_stderr()
             except Exception:
                 error = traceback.format_exc()
                 break
+    if _saved_fd is not None:
+        _unmute_stderr(_saved_fd)
 
     sys.stdout, sys.stderr = old_stdout, old_stderr
     sys.displayhook = old_displayhook
@@ -796,7 +860,7 @@ async def _handle_exec(exec_id, code):
 
 def _handle_snapshot(snap_id):
     """Serialize the REPL namespace using dill."""
-    skip = {"json", "asyncio", "dill", "print", "respond", "say", "observe", "list_tools", "reset_repl", "ask"}
+    skip = {"json", "asyncio", "dill", "print", "done", "say", "observe", "list_tools", "reset_repl", "ask"}
     skip.update(t["name"] for t in _tool_defs)
 
     data = {}
@@ -822,3 +886,15 @@ def _handle_reset(reset_id):
     """Reset the REPL namespace via the protocol."""
     _reset_repl()
     _send({"type": "reset_result", "id": reset_id})
+
+
+def _check_complete(code):
+    """Check if code is syntactically complete, suppressing warnings."""
+    saved = _mute_stderr()
+    try:
+        ast.parse(code)
+        return True
+    except SyntaxError:
+        return False
+    finally:
+        _unmute_stderr(saved)

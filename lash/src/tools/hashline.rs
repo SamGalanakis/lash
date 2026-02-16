@@ -3,8 +3,13 @@ use std::fmt::Write;
 /// Compute a 2-char hex hash for a line.
 /// xxHash32 of whitespace-stripped content, mod 256.
 pub fn compute_line_hash(line: &str) -> String {
-    let stripped: String = line.chars().filter(|c| !c.is_whitespace()).collect();
-    let hash = xxhash_rust::xxh32::xxh32(stripped.as_bytes(), 0);
+    let mut hasher = xxhash_rust::xxh32::Xxh32::new(0);
+    for &b in line.as_bytes() {
+        if !b.is_ascii_whitespace() {
+            hasher.update(&[b]);
+        }
+    }
+    let hash = hasher.digest();
     format!("{:02x}", hash % 256)
 }
 

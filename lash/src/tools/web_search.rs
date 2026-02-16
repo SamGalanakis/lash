@@ -88,14 +88,14 @@ impl ToolProvider for WebSearch {
 
                     ToolResult::ok(result)
                 }
-                Err(e) => ToolResult::err(json!(format!("Failed to parse response: {e}"))),
+                Err(e) => ToolResult::err_fmt(format_args!("Failed to parse response: {e}")),
             },
             Ok(r) => {
                 let status = r.status();
                 let body = r.text().await.unwrap_or_default();
-                ToolResult::err(json!(format!("Tavily API error ({status}): {body}")))
+                ToolResult::err_fmt(format_args!("Tavily API error ({status}): {body}"))
             }
-            Err(e) => ToolResult::err(json!(format!("Request failed: {e}"))),
+            Err(e) => ToolResult::err_fmt(format_args!("Request failed: {e}")),
         }
     }
 }

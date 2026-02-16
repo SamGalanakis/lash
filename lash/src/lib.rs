@@ -19,7 +19,6 @@ pub mod agent;
 pub(crate) mod baml_client;
 pub mod embedded;
 pub mod instructions;
-pub mod manager;
 pub mod model_info;
 pub mod oauth;
 pub mod provider;
@@ -33,7 +32,6 @@ pub use agent::{
     Agent, AgentConfig, AgentEvent, Message, MessageRole, Part, PartKind, PruneState, TokenUsage,
 };
 pub use instructions::InstructionLoader;
-pub use manager::SessionManager;
 pub use provider::{LashConfig, Provider};
 pub use session::{ExecResponse, Session, SessionConfig, SessionError, UserPrompt};
 pub use store::{AgentState, Store, TaskEntry};
@@ -184,6 +182,9 @@ impl ToolResult {
             result,
             images: vec![],
         }
+    }
+    pub fn err_fmt(msg: impl std::fmt::Display) -> Self {
+        Self::err(serde_json::json!(msg.to_string()))
     }
     pub fn with_images(success: bool, result: serde_json::Value, images: Vec<ToolImage>) -> Self {
         Self {

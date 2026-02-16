@@ -32,3 +32,22 @@ pub use tasks::TaskStore;
 pub use view_message::ViewMessage;
 pub use web_search::WebSearch;
 pub use write_file::WriteFile;
+
+use crate::ToolResult;
+
+/// Extract a required non-empty string arg, or return ToolResult::err.
+pub(crate) fn require_str<'a>(
+    args: &'a serde_json::Value,
+    key: &str,
+) -> Result<&'a str, ToolResult> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ToolResult::err_fmt(format_args!("Missing required parameter: {key}")))
+}
+
+/// Read a file to string, or return ToolResult::err.
+pub(crate) fn read_to_string(path: &std::path::Path) -> Result<String, ToolResult> {
+    std::fs::read_to_string(path)
+        .map_err(|e| ToolResult::err_fmt(format_args!("Failed to read {}: {e}", path.display())))
+}

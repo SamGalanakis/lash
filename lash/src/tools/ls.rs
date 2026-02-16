@@ -4,19 +4,8 @@ use std::path::Path;
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
 /// List directory tree structure.
+#[derive(Default)]
 pub struct Ls;
-
-impl Ls {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for Ls {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 const MAX_ENTRIES: usize = 500;
 
@@ -56,7 +45,7 @@ impl ToolProvider for Ls {
 
         let base = Path::new(base_dir);
         if !base.is_dir() {
-            return ToolResult::err(json!(format!("Not a directory: {}", base_dir)));
+            return ToolResult::err_fmt(format_args!("Not a directory: {base_dir}"));
         }
 
         let mut builder = ignore::WalkBuilder::new(base);

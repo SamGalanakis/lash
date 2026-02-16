@@ -102,13 +102,13 @@ impl Provider {
                 ("api_key".into(), serde_json::json!(api_key)),
                 ("model".into(), serde_json::json!(model)),
                 ("temperature".into(), serde_json::json!(0)),
-                ("max_tokens".into(), serde_json::json!(16384)),
+                ("max_tokens".into(), serde_json::json!(32768)),
             ]),
             Provider::Claude { access_token, .. } => HashMap::from([
                 ("api_key".into(), serde_json::json!("noop")),
                 ("model".into(), serde_json::json!(model)),
                 ("temperature".into(), serde_json::json!(0)),
-                ("max_tokens".into(), serde_json::json!(16384)),
+                ("max_tokens".into(), serde_json::json!(32768)),
                 (
                     "headers".into(),
                     serde_json::json!({
@@ -138,7 +138,7 @@ impl Provider {
                     ("api_key".into(), serde_json::json!("noop")),
                     ("model".into(), serde_json::json!(model)),
                     ("temperature".into(), serde_json::json!(0)),
-                    ("max_tokens".into(), serde_json::json!(16384)),
+                    ("max_tokens".into(), serde_json::json!(32768)),
                     ("headers".into(), headers),
                 ]);
                 if let Some(effort) = reasoning_effort {

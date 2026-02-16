@@ -7,6 +7,19 @@ use crate::command;
 use crate::markdown;
 use crate::skill::SkillRegistry;
 
+/// Find the byte offset within `line` that corresponds to a given display column.
+/// If the target column exceeds the line's display width, returns line.len().
+fn byte_pos_at_display_col(line: &str, target_col: usize) -> usize {
+    let mut col = 0;
+    for (byte_idx, ch) in line.char_indices() {
+        if col >= target_col {
+            return byte_idx;
+        }
+        col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+    }
+    line.len()
+}
+
 #[derive(Clone, Debug)]
 pub struct TaskSnapshot {
     pub id: String,
@@ -685,14 +698,14 @@ impl App {
         self.invalidate_height_cache();
     }
 
-    /// Height of the persistent task tray: 0/3/4 lines.
+    /// Height of the persistent task tray: 0/4/5 lines (includes 1-line pad above).
     pub fn task_tray_height(&self) -> u16 {
         if self.task_tray.is_empty() {
             0
         } else if self.task_tray.len() == 1 {
-            3 // top border + pills + bottom border
+            4 // pad + top border + pills + bottom border
         } else {
-            4 // top border + pills + progress bar + bottom border
+            5 // pad + top border + pills + progress bar + bottom border
         }
     }
 
@@ -816,25 +829,27 @@ impl App {
     /// Move cursor up one line within multi-line input.
     fn move_cursor_up_line(&mut self) {
         let before = &self.input[..self.cursor_pos];
-        // Find the start of current line
         let cur_line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let col = self.cursor_pos - cur_line_start;
-        // Find the start of the previous line
         if cur_line_start == 0 {
             return;
         }
+        // Use display width for column preservation
+        let cur_text = &self.input[cur_line_start..self.cursor_pos];
+        let display_col = unicode_width::UnicodeWidthStr::width(cur_text);
+        // Find the previous line
         let prev_content = &self.input[..cur_line_start - 1]; // before the \n
         let prev_line_start = prev_content.rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let prev_line_len = cur_line_start - 1 - prev_line_start;
-        self.cursor_pos = prev_line_start + col.min(prev_line_len);
+        let prev_line = &self.input[prev_line_start..cur_line_start - 1];
+        self.cursor_pos = byte_pos_at_display_col(prev_line, display_col) + prev_line_start;
     }
 
     /// Move cursor down one line within multi-line input.
     fn move_cursor_down_line(&mut self) {
         let before = &self.input[..self.cursor_pos];
         let cur_line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let col = self.cursor_pos - cur_line_start;
-        // Find the end of current line (position of \n)
+        let cur_text = &self.input[cur_line_start..self.cursor_pos];
+        let display_col = unicode_width::UnicodeWidthStr::width(cur_text);
+        // Find the next line
         let after = &self.input[self.cursor_pos..];
         let newline_offset = match after.find('\n') {
             Some(i) => i,
@@ -842,8 +857,11 @@ impl App {
         };
         let next_line_start = self.cursor_pos + newline_offset + 1;
         let next_after = &self.input[next_line_start..];
-        let next_line_len = next_after.find('\n').unwrap_or(next_after.len());
-        self.cursor_pos = next_line_start + col.min(next_line_len);
+        let next_line = match next_after.find('\n') {
+            Some(end) => &next_after[..end],
+            None => next_after,
+        };
+        self.cursor_pos = byte_pos_at_display_col(next_line, display_col) + next_line_start;
     }
 
     /// Insert a character at cursor position.
