@@ -230,6 +230,89 @@ class TurnHistory:
         self._turns.append(turn)
 
 
+
+# ─── Agent Memory ───
+
+class MemEntry:
+    __slots__ = ("key", "description", "value", "turn")
+
+    def __init__(self, key, description, value, turn):
+        self.key = key
+        self.description = description
+        self.value = value
+        self.turn = turn
+
+    def __repr__(self):
+        return f"MemEntry({self.key!r}, turn={self.turn})"
+
+
+class Mem:
+    """Persistent key-value memory for the agent. Values are stringified on store."""
+
+    def __init__(self):
+        self._store = {}  # key -> MemEntry
+        self._current_turn = 0
+
+    def _set_turn(self, turn):
+        """Called by the runtime to track the current turn number."""
+        self._current_turn = turn
+
+    def set(self, key, description, value=None):
+        """Store a value. The value is stringified via str(). Updates turn to current."""
+        self._store[key] = MemEntry(
+            key=key,
+            description=str(description),
+            value=str(value) if value is not None else str(description),
+            turn=self._current_turn,
+        )
+
+    def get(self, key):
+        """Get the stored value string for a key, or None."""
+        entry = self._store.get(key)
+        return entry.value if entry else None
+
+    def entry(self, key):
+        """Get the full MemEntry for a key, or None."""
+        return self._store.get(key)
+
+    def delete(self, key):
+        """Remove a key."""
+        self._store.pop(key, None)
+
+    def all(self):
+        """List all keys with descriptions and turn numbers."""
+        if not self._store:
+            return "(empty)"
+        lines = []
+        for key, e in self._store.items():
+            lines.append(f"  [{e.turn}] {key}: {e.description}")
+        return "\n".join(lines)
+
+    def search(self, pattern):
+        """Regex search over keys, descriptions, and values. Returns matching entries."""
+        rx = re.compile(pattern, re.IGNORECASE)
+        results = []
+        for key, e in self._store.items():
+            haystack = f"{key}\n{e.description}\n{e.value}"
+            if rx.search(haystack):
+                results.append(e)
+        return results
+
+    def since(self, turn):
+        """Get all entries set/updated at or after the given turn."""
+        return [e for e in self._store.values() if e.turn >= turn]
+
+    def recent(self, n=10):
+        """Get entries from the last n turns."""
+        cutoff = max(0, self._current_turn - n)
+        return self.since(cutoff)
+
+    def __repr__(self):
+        return self.all()
+
+    def __len__(self):
+        return len(self._store)
+
 # _rust_bridge is injected by the Rust runtime before any functions are called.
 # It provides:
 #   send_message(json_str) -> None
@@ -291,7 +374,7 @@ def _format_value(value):
         text = text[:_MAX_OUTPUT_LEN] + f"\n... [truncated, {len(text)} chars total]"
     return text
 
-def _done(value):
+def _done(value=""):
     """End the turn with a final result."""
     text = _format_value(value)
     if text is None:
@@ -707,11 +790,13 @@ def _register_tools(tools_json, agent_id=""):
     _ns["claim_task"] = _claim_task
 
     _ns["_history"] = TurnHistory()
+    _ns["_mem"] = Mem()
     _ns.update({
         "json": json, "print": print, "done": _done,
         "asyncio": asyncio, "list_tools": _list_tools, "reset_repl": _reset_repl, "ask": _ask,
         "Task": Task, "Skill": Skill, "SkillSummary": SkillSummary, "ToolError": ToolError,
         "TurnHistory": TurnHistory, "Turn": Turn, "ToolCall": ToolCall, "ToolName": ToolName,
+        "Mem": Mem, "MemEntry": MemEntry,
     })
 
 

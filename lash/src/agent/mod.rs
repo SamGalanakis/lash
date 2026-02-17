@@ -57,8 +57,8 @@ pub struct AgentConfig {
     pub model: String,
     /// LLM provider (Claude OAuth or OpenRouter)
     pub provider: Provider,
-    /// Maximum total character budget for context truncation
-    pub max_context_chars: usize,
+    /// Maximum input tokens for the model's context window
+    pub max_context_tokens: usize,
     /// When true, use SubAgentStep prompt instead of CodeActStep
     pub sub_agent: bool,
     /// Optional reasoning effort level (e.g. "medium", "high") for Codex
@@ -81,7 +81,7 @@ impl Default for AgentConfig {
                 api_key: String::new(),
                 base_url: "https://openrouter.ai/api/v1".to_string(),
             },
-            max_context_chars: 400_000,
+            max_context_tokens: 200_000,
             sub_agent: false,
             reasoning_effort: None,
             max_turns: None,
@@ -279,11 +279,13 @@ impl Agent {
         // Create collector for token tracking
         let collector = crate::baml_client::new_collector(&self.agent_id);
         let mut cumulative_usage = TokenUsage::default();
+        let mut last_input_tokens: usize = 0;
 
         let mut msgs = messages;
         let mut iteration: usize = run_offset;
         let mut tool_images: Vec<Image> = Vec::new();
         let mut max_steps_final = false;
+        let mut has_history = false;
 
         loop {
             if cancel.is_cancelled() {
@@ -293,23 +295,31 @@ impl Agent {
                 return (msgs, iteration);
             }
 
-            // Rolling window: collapse old turns, keeping recent context under 40%
-            // of max_context_chars. Always preserve all User messages.
+            // Rolling window: when context exceeds 40% of the model's token limit,
+            // collapse old turns to make room. Always preserve all User messages.
+            // Uses actual input_tokens from the last API call for accurate measurement,
+            // with char-based estimation (~4 chars/token) as proportional weights.
             msgs.retain(|m| m.id != "history_note");
             {
-                let budget = self.config.max_context_chars * 40 / 100;
-                // Walk backwards from end, accumulating char counts.
-                // Find the split point where the tail fits within budget.
-                // Never prune User messages — they always stay.
-                let mut tail_chars = 0usize;
-                let mut keep_from = msgs.len(); // index: keep msgs[keep_from..]
-                for i in (1..msgs.len()).rev() {
-                    let cost = msgs[i].char_count();
-                    if tail_chars + cost > budget {
-                        break;
+                let token_budget = self.config.max_context_tokens * 40 / 100;
+                let needs_pruning = last_input_tokens > token_budget;
+
+                let mut keep_from = msgs.len();
+                if needs_pruning {
+                    // Estimate how many chars to keep: scale by (budget / actual) ratio
+                    let total_chars: usize = msgs.iter().map(|m| m.char_count()).sum();
+                    let target_chars = total_chars * token_budget / last_input_tokens.max(1);
+
+                    // Walk backwards, accumulating char counts as proportional weights
+                    let mut tail_chars = 0usize;
+                    for i in (1..msgs.len()).rev() {
+                        let cost = msgs[i].char_count();
+                        if tail_chars + cost > target_chars {
+                            break;
+                        }
+                        tail_chars += cost;
+                        keep_from = i;
                     }
-                    tail_chars += cost;
-                    keep_from = i;
                 }
                 // Collect User messages from the pruned region [1..keep_from)
                 // so they're preserved in the context.
@@ -328,14 +338,16 @@ impl Agent {
                     0
                 };
                 if collapsed_count > 0 {
+                    has_history = true;
                     // Drain the pruned region
                     msgs.drain(1..keep_from);
                     // Re-insert preserved user messages, then the history note
                     let note = format!(
-                        "[{} earlier turns collapsed — their data is in `_history`.\n \
-                         Use `_history.user_messages()` to see what the user asked, \
-                         `_history.search(\"pattern\")` to find past results, \
-                         `_history[i]` for a specific turn.]",
+                        "[{} earlier turns dropped from context (not summarized). \
+                         Use `_history` to access them at full fidelity:\n \
+                         `_history.user_messages()` — what the user asked\n \
+                         `_history.search(\"pattern\")` — find past results\n \
+                         `_history[i]` — specific turn]",
                         collapsed_count
                     );
                     msgs.insert(
@@ -466,6 +478,7 @@ impl Agent {
                                 &all_images,
                                 include_soul,
                                 self.config.headless,
+                                has_history,
                             )
                     } else {
                         B.CodeActStep
@@ -480,6 +493,7 @@ impl Agent {
                                 &all_images,
                                 include_soul,
                                 self.config.headless,
+                                has_history,
                             )
                     } {
                         Ok(c) => c,
@@ -637,7 +651,7 @@ impl Agent {
                         duration_ms: llm_start.elapsed().as_millis() as u64,
                     });
 
-                    collect_usage(
+                    last_input_tokens = collect_usage(
                         &collector,
                         &mut cumulative_usage,
                         iteration,
@@ -792,7 +806,10 @@ impl Agent {
                     .to_string()
                     .replace('\\', "\\\\")
                     .replace('\'', "\\'");
-                let inject_code = format!("_history._add_turn('{}')", json_str);
+                let inject_code = format!(
+                    "_history._add_turn('{}'); _mem._set_turn({})",
+                    json_str, iteration
+                );
                 let _ = self.session.run_code(&inject_code).await;
             }
 
@@ -971,6 +988,7 @@ fn log_llm_debug(
 
 /// Read token usage from the collector, emit a TokenUsage event, and log debug info.
 /// Called after both stop-marker and normal LLM completion paths.
+/// Returns the input_tokens from this call (the actual context size seen by the API).
 async fn collect_usage(
     collector: &baml::Collector,
     cumulative_usage: &mut TokenUsage,
@@ -979,7 +997,7 @@ async fn collect_usage(
     config: &AgentConfig,
     agent_id: &str,
     event_tx: &mpsc::Sender<AgentEvent>,
-) {
+) -> usize {
     if let Some(log) = collector.last() {
         let u = log.usage();
         let usage = TokenUsage {
@@ -987,6 +1005,7 @@ async fn collect_usage(
             output_tokens: u.output_tokens(),
             cached_input_tokens: u.cached_input_tokens().unwrap_or(0),
         };
+        let this_input = usage.input_tokens as usize;
         cumulative_usage.add(&usage);
         send_event(
             event_tx,
@@ -1010,6 +1029,9 @@ async fn collect_usage(
             request_body,
             response_text,
         );
+        this_input
+    } else {
+        0
     }
 }
 

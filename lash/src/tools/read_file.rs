@@ -31,7 +31,7 @@ impl ToolProvider for ReadFile {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "read_file".into(),
-            description: "Read a file. Text files return hashline-prefixed content. Image files (png, jpg, gif, webp, bmp) are read for visual inspection. Use `ls` for directories.".into(),
+            description: "Read a file (default: up to 2000 lines). Text files return hashline-prefixed content. Image files (png, jpg, gif, webp, bmp) are read for visual inspection. Use `ls` for directories.".into(),
             params: vec![
                 ToolParam::typed("path", "str"),
                 ToolParam {
@@ -43,7 +43,7 @@ impl ToolProvider for ReadFile {
                 ToolParam {
                     name: "limit".into(),
                     r#type: "int".into(),
-                    description: "Maximum number of lines to read (default 2000)".into(),
+                    description: "Max lines to read (default 2000 — omit for whole-file reads, set only when needed)".into(),
                     required: false,
                 },
             ],

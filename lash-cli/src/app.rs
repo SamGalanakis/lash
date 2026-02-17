@@ -612,10 +612,30 @@ impl App {
     /// at the top of the viewport so the same content stays visible after
     /// code blocks change height.
     pub fn toggle_code_expand(&mut self) {
-        // Determine anchor before toggling
-        let anchor = if self.follow_output || self.height_cache_width == 0 {
+        // When following output (at bottom), just toggle and stay at bottom
+        if self.follow_output {
+            self.code_expanded = !self.code_expanded;
+            for block in &mut self.blocks {
+                if let DisplayBlock::CodeBlock { expanded, .. } = block {
+                    *expanded = self.code_expanded;
+                }
+            }
+            self.invalidate_height_cache();
+            self.scroll_offset = usize::MAX;
+            return;
+        }
+
+        // Ensure the height cache is fresh so we can compute the anchor
+        if self.height_cache_width > 0 {
+            let w = self.height_cache_width;
+            let vh = self.height_cache_vh;
+            self.ensure_height_cache(w, vh);
+        }
+
+        // Determine anchor: which block is at the top of the viewport?
+        let anchor = if self.height_cache_width == 0 || self.height_cache.is_empty() {
             None
-        } else if !self.height_cache.is_empty() {
+        } else {
             let cache = &self.height_cache;
             let idx = cache.partition_point(|&cum| cum <= self.scroll_offset);
             if idx >= self.blocks.len() {
@@ -625,8 +645,6 @@ impl App {
                 let skip = self.scroll_offset - block_start;
                 Some((idx, skip))
             }
-        } else {
-            None
         };
 
         // Toggle expansion state
@@ -1604,6 +1622,241 @@ mod tests {
     fn display_block_splash_height() {
         let block = DisplayBlock::Splash;
         assert_eq!(block.height(false, 80, 24), 24);
+    }
+
+    #[test]
+    fn toggle_code_expand_preserves_scroll_position() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        // Remove the Splash block
+        app.blocks.clear();
+
+        // Add a mix of blocks: prose, code, prose, code, prose
+        app.blocks.push(DisplayBlock::UserInput("Message 1".into()));
+        app.blocks.push(DisplayBlock::AssistantText(
+            "Response 1 - a short reply".into(),
+        ));
+        app.blocks.push(DisplayBlock::CodeBlock {
+            code: "let x = 1;\nlet y = 2;\nlet z = 3;\nprintln!();\nlet a = 4;\nlet b = 5;".into(),
+            expanded: false,
+            continuation: false,
+        });
+        app.blocks.push(DisplayBlock::ToolCall {
+            name: "read_file".into(),
+            success: true,
+            duration_ms: 50,
+            continuation: false,
+        });
+        app.blocks.push(DisplayBlock::AssistantText(
+            "Response 2 - another reply that is a bit longer".into(),
+        ));
+        app.blocks.push(DisplayBlock::UserInput("Message 2".into()));
+        app.blocks
+            .push(DisplayBlock::AssistantText("Response 3".into()));
+        app.blocks.push(DisplayBlock::CodeBlock {
+            code: "fn main() {\n    println!(\"hello\");\n}".into(),
+            expanded: false,
+            continuation: false,
+        });
+        app.blocks.push(DisplayBlock::AssistantText(
+            "Final response with some text".into(),
+        ));
+
+        let width = 80;
+        let vh = 24;
+
+        // Build the height cache (collapsed)
+        app.ensure_height_cache_pub(width, vh);
+
+        // Verify we have blocks and cache
+        assert!(
+            !app.height_cache.is_empty(),
+            "height cache should be populated"
+        );
+
+        // Simulate scrolling up: place scroll at the start of block 4 (AssistantText "Response 2")
+        // First, find where block 4 starts
+        let cache = app.height_cache_snapshot().to_vec();
+        let block4_start = cache[3]; // cumulative height after first 4 blocks (0-indexed)
+        app.scroll_offset = block4_start;
+        app.follow_output = false;
+
+        // Toggle to expanded
+        app.toggle_code_expand();
+
+        let new_cache = app.height_cache_snapshot().to_vec();
+        let new_block4_start = new_cache[3];
+
+        // The scroll should now point to the same block (block 4)
+        // which starts at new_block4_start in the expanded layout
+        assert_eq!(
+            app.scroll_offset, new_block4_start,
+            "scroll should track block 4 start after expanding"
+        );
+
+        // Toggle back to collapsed
+        app.toggle_code_expand();
+
+        let final_cache = app.height_cache_snapshot().to_vec();
+        let final_block4_start = final_cache[3];
+
+        assert_eq!(
+            app.scroll_offset, final_block4_start,
+            "scroll should track block 4 start after collapsing back"
+        );
+    }
+
+    #[test]
+    fn toggle_code_expand_preserves_scroll_with_splash() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        // App starts with Splash at index 0 - keep it!
+
+        // Add blocks after Splash
+        app.blocks.push(DisplayBlock::UserInput("Message 1".into()));
+        app.blocks.push(DisplayBlock::AssistantText(
+            "Response 1 - a short reply".into(),
+        ));
+        app.blocks.push(DisplayBlock::CodeBlock {
+            code: "let x = 1;\nlet y = 2;\nlet z = 3;\nprintln!();\nlet a = 4;\nlet b = 5;".into(),
+            expanded: false,
+            continuation: false,
+        });
+        app.blocks.push(DisplayBlock::ToolCall {
+            name: "read_file".into(),
+            success: true,
+            duration_ms: 50,
+            continuation: false,
+        });
+        app.blocks.push(DisplayBlock::AssistantText(
+            "Response 2 - another reply".into(),
+        ));
+        app.blocks.push(DisplayBlock::UserInput("Message 2".into()));
+        app.blocks
+            .push(DisplayBlock::AssistantText("Response 3".into()));
+
+        let width = 80;
+        let vh = 24;
+
+        // Build the height cache
+        app.ensure_height_cache_pub(width, vh);
+        let cache = app.height_cache_snapshot().to_vec();
+
+        // Scroll to block 5 (AssistantText "Response 2", index 5 with Splash at 0)
+        let block5_start = cache[4]; // after Splash + UserInput + AssistantText + CodeBlock + ToolCall
+        app.scroll_offset = block5_start;
+        app.follow_output = false;
+
+        // Toggle to expanded
+        app.toggle_code_expand();
+
+        let new_cache = app.height_cache_snapshot().to_vec();
+        let new_block5_start = new_cache[4];
+
+        assert_eq!(
+            app.scroll_offset, new_block5_start,
+            "scroll should track block 5 start after expanding (with Splash)"
+        );
+
+        // Toggle back
+        app.toggle_code_expand();
+        let final_cache = app.height_cache_snapshot().to_vec();
+        let final_block5_start = final_cache[4];
+
+        assert_eq!(
+            app.scroll_offset, final_block5_start,
+            "scroll should track block 5 start after collapsing (with Splash)"
+        );
+    }
+
+    #[test]
+    fn toggle_code_expand_follow_output_stays_at_bottom() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        app.blocks.clear();
+
+        app.blocks.push(DisplayBlock::UserInput("Message 1".into()));
+        app.blocks
+            .push(DisplayBlock::AssistantText("Response 1".into()));
+        app.blocks.push(DisplayBlock::CodeBlock {
+            code: "line1\nline2\nline3\nline4\nline5".into(),
+            expanded: false,
+            continuation: false,
+        });
+        app.blocks
+            .push(DisplayBlock::AssistantText("Final response".into()));
+
+        let width = 80;
+        let vh = 24;
+
+        // Simulate being at the bottom (follow_output = true)
+        app.follow_output = true;
+        app.scroll_offset = usize::MAX;
+        app.ensure_height_cache_pub(width, vh);
+
+        // Toggle to expanded
+        app.toggle_code_expand();
+
+        // scroll_offset should be usize::MAX (stay at bottom)
+        assert_eq!(
+            app.scroll_offset,
+            usize::MAX,
+            "should stay at bottom after expanding"
+        );
+        assert!(app.follow_output, "follow_output should remain true");
+
+        // Toggle back to collapsed
+        app.toggle_code_expand();
+        assert_eq!(
+            app.scroll_offset,
+            usize::MAX,
+            "should stay at bottom after collapsing"
+        );
+        assert!(app.follow_output, "follow_output should remain true");
+    }
+
+    #[test]
+    fn toggle_code_expand_stale_cache() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        app.blocks.clear();
+
+        app.blocks.push(DisplayBlock::UserInput("Message 1".into()));
+        app.blocks
+            .push(DisplayBlock::AssistantText("Response 1".into()));
+        app.blocks.push(DisplayBlock::CodeBlock {
+            code: "line1\nline2\nline3".into(),
+            expanded: false,
+            continuation: false,
+        });
+        app.blocks
+            .push(DisplayBlock::AssistantText("Response 2".into()));
+
+        let width = 80;
+        let vh = 24;
+
+        // Build cache, then scroll to block 3 (Response 2)
+        app.ensure_height_cache_pub(width, vh);
+        let cache = app.height_cache_snapshot().to_vec();
+        let block3_start = cache[2]; // after UserInput + AssistantText + CodeBlock
+        app.scroll_offset = block3_start;
+        app.follow_output = false;
+
+        // Invalidate cache (simulates agent event arriving between frames)
+        app.invalidate_height_cache();
+        assert!(
+            app.height_cache_snapshot().is_empty(),
+            "cache should be empty"
+        );
+
+        // Toggle - should still anchor correctly despite stale cache
+        app.toggle_code_expand();
+
+        // Rebuild cache to check where block 3 is now
+        app.ensure_height_cache_pub(width, vh);
+        let new_cache = app.height_cache_snapshot().to_vec();
+        let new_block3_start = new_cache[2];
+
+        assert_eq!(
+            app.scroll_offset, new_block3_start,
+            "scroll should track block 3 even with stale cache"
+        );
     }
 }
 

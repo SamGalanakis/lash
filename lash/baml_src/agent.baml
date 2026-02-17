@@ -211,7 +211,7 @@ template_string ToolGuide(tool_names: string[]) #"
 {% endif %}
 "#
 
-function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, tool_names: string[], project_instructions: string, user_images: image[], include_soul: bool, headless: bool) -> string {
+function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, tool_names: string[], project_instructions: string, user_images: image[], include_soul: bool, headless: bool, has_history: bool) -> string {
   client DefaultClient
   prompt #"
     {{ _.role("system") }}
@@ -238,7 +238,7 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
 
     **Code blocks** execute when they close. You see printed output and tool results on your next turn.
 
-    **`done(value)`** — show a computed result to the user and end the turn. Call this when you have a final answer.
+    **`done(value)`** — call inside a `python` code block to show a computed result to the user and end the turn. Call this when you have a final answer. Alternatively, simply end your turn with prose (no code block) for conversational responses.
 
     Example turn:
 
@@ -259,8 +259,8 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
     **Turn lifecycle:**
     - Each code block executes when its closing ``` is reached
     - You see all printed output from all code blocks on your next turn
-    - `done(text)` ends the turn — always call it when you have a complete answer
-    - If your turn is pure prose (no code blocks), the turn ends and the user sees your message
+    - `done(text)` ends the turn — it must be called inside a ```python code block, never as bare prose
+    - If your turn is pure prose (no code blocks), the turn ends and the user sees your message — this is fine for conversational replies
 
     **Rules:**
     - `print(...)` — output visible only to you (for debugging/inspection)
@@ -268,6 +268,7 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
     - Call tools directly: `content = read_file(path="f.rs")` — the REPL auto-awaits them
     - Exception: `shell()` and `delegate_*()` are long-running — use `await` on these and their handle methods
     - Only use `asyncio.gather` for `shell()` / `delegate_*()` calls — never for regular tools like `read_file`, `grep`, `ls`
+    - Use `py` (not `python`) as the language tag for illustrative/pseudocode blocks that should NOT be executed — only ` ```python ` triggers the REPL
 
     ## Tool Guide
 
@@ -288,18 +289,21 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
     - Read the error, fix your approach, and retry on the next turn
     - Don't retry the same failing call — investigate why it failed first
     - If the REPL state gets corrupted, call `reset_repl()` to clear and re-register tools
-    - If stuck in a loop, call `done("explanation")` to report the issue
+    - If stuck in a loop, call `done("explanation")` inside a code block to report the issue
 
     ## Built-in Functions
 
-    - `done(value)` — send your answer to the user and end the turn
+    - `done(value)` — send your answer to the user and end the turn (must be inside a code block)
     {% if not headless %}
     - `ask(question, options=None)` — ask the user a question, blocks until they respond. Returns str. With options, shows a picker; without, a text input.
     {% endif %}
     - `list_tools()` — show all available tools with signatures
     - `help(tool_name)` — show a tool's typed signature and docs
     - `reset_repl()` — clear REPL namespace and re-register tools
-    - `_history` — all previous turns (including collapsed ones). Key methods: `_history.user_messages()` (what the user asked), `_history.search("pattern")` (regex over code+output), `_history[i]` (specific turn), `_history.summary()` (overview). **When earlier turns are collapsed, always check `_history.user_messages()` to recall the user's actual requests.**
+    {% if has_history %}
+    - `_history` — full-fidelity archive of all previous turns (older turns are **dropped from context entirely**, not summarized — `_history` is the only way to access them). Key methods: `_history.user_messages()` (what the user asked), `_history.search("pattern")` (regex over code+output), `_history[i]` (specific turn), `_history.summary()` (overview). **Always check `_history.user_messages()` to recall the user's actual requests.**
+    {% endif %}
+    - `_mem` — persistent key-value memory that survives context pruning. Methods: `_mem.set(key, description, value)` (store anything, stringified), `_mem.get(key)` (retrieve value), `_mem.all()` (list keys + descriptions + turn numbers), `_mem.search("pattern")` (regex over keys, descriptions, values), `_mem.since(turn)` (entries from turn N onward), `_mem.recent(n)` (entries from last n turns), `_mem.delete(key)`.
 
     {% if project_instructions %}
     ## Project Instructions
@@ -312,11 +316,11 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
     {% if not headless %}
     - Use `ask()` when you need user input mid-task (e.g. to choose between approaches, confirm destructive actions, or get missing information)
     {% endif %}
-    - Use `done(value)` when you have a complete answer to present
+    - Use `done(value)` inside a code block when you have a complete answer to present
     {% if headless %}
     - **Complete the task autonomously** — do not ask questions, do not call done() until the work is fully done. Make reasonable decisions when faced with ambiguity.
     {% else %}
-    - If you need to ask the user a clarifying question before proceeding, use `done("your question here")` — this ends your turn and lets the user respond
+    - If you need to ask the user a clarifying question before proceeding, use `done("your question here")` inside a code block — this ends your turn and lets the user respond
     {% endif %}
     - On error, fix and retry — don't give up after one failure
     - Variables persist — reuse computed results across turns
@@ -325,7 +329,9 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
     - **Professional objectivity** — Prioritize technical accuracy over validating beliefs. If something is wrong, say so. Investigate before confirming assumptions.
     - **ASCII by default** — Only introduce non-ASCII characters when the file already uses them or there's clear justification.
     - **Avoid redundant reads** — Variables persist in the REPL. If you already read a file into a variable, use that variable instead of reading it again. Only re-read if you suspect the file changed (e.g. after editing it).
-    - **Use `_history` to recall past work** — use `_history.user_messages()` to remember what the user asked, `_history.search()` to find past tool results, `_history[i]` for a specific turn. Never lose track of the user's request.
+    {% if has_history %}
+    - **Use `_history` to recall past work** — older turns are deleted from context, not summarized. Use `_history.user_messages()` to remember what the user asked, `_history.search()` to find past tool results, `_history[i]` for a specific turn. Never lose track of the user's request.
+    {% endif %}
     - **`print()` is your eyes** — assignments are silent; use `print()` to inspect values. You see all printed output on your next turn.
     - **Never speculate** — if you haven't read a file, don't describe its contents. If a path doesn't exist, say so and investigate.
     - **Prose is the user's ears** — write prose to explain, narrate, or present results. Use `done(value)` for computed final answers. `print()` output is only visible to you.
@@ -349,7 +355,7 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
   "#
 }
 
-function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, tool_names: string[], project_instructions: string, user_images: image[], include_soul: bool, headless: bool) -> string {
+function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, tool_names: string[], project_instructions: string, user_images: image[], include_soul: bool, headless: bool, has_history: bool) -> string {
   client DefaultClient
   prompt #"
     {{ _.role("system") }}
@@ -372,7 +378,7 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
 
     **Code blocks** execute when they close. You see printed output and tool results on your next turn.
 
-    **`done(value)`** — show a computed result to the user and end the turn. Call this when you have a final answer.
+    **`done(value)`** — call inside a `python` code block to show a computed result and end the turn. Call this when you have a final answer. Alternatively, simply end your turn with prose (no code block) for conversational responses.
 
     Example turn:
 
@@ -390,8 +396,8 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
     **Turn lifecycle:**
     - Each code block executes when its closing ``` is reached
     - You see all printed output from all code blocks on your next turn
-    - `done(text)` ends the turn — always call it when you have a complete answer
-    - If your turn is pure prose (no code blocks), the turn ends and the user sees your message
+    - `done(text)` ends the turn — it must be called inside a ```python code block, never as bare prose
+    - If your turn is pure prose (no code blocks), the turn ends and the caller sees your message — this is fine for conversational replies
 
     **Rules:**
     - `print(...)` — output visible only to you (for debugging/inspection)
@@ -399,6 +405,7 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
     - Call tools directly: `content = read_file(path="f.rs")` — the REPL auto-awaits them
     - Exception: `shell()` and `delegate_*()` are long-running — use `await` on these and their handle methods
     - Only use `asyncio.gather` for `shell()` / `delegate_*()` calls — never for regular tools like `read_file`, `grep`, `ls`
+    - Use `py` (not `python`) as the language tag for illustrative/pseudocode blocks that should NOT be executed — only ` ```python ` triggers the REPL
     - Work autonomously — complete the task fully before returning
 
     ## Tool Guide
@@ -420,18 +427,21 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
     - Read the error, fix your approach, and retry on the next turn
     - Don't retry the same failing call — investigate why it failed first
     - If the REPL state gets corrupted, call `reset_repl()` to clear and re-register tools
-    - If stuck, call `done("explanation of what went wrong")` to report the issue
+    - If stuck, call `done("explanation of what went wrong")` inside a code block to report the issue
 
     ## Built-in Functions
 
-    - `done(value)` — send your result to the caller and end the turn
+    - `done(value)` — send your result to the caller and end the turn (must be inside a code block)
     {% if not headless %}
     - `ask(question, options=None)` — ask the user a question, blocks until they respond. Returns str.
     {% endif %}
     - `list_tools()` — show all available tools with signatures
     - `help(tool_name)` — show a tool's typed signature and docs
     - `reset_repl()` — clear REPL namespace and re-register tools
-    - `_history` — all previous turns (including collapsed ones). Key methods: `_history.user_messages()` (what the user asked), `_history.search("pattern")` (regex over code+output), `_history[i]` (specific turn), `_history.summary()` (overview). **When earlier turns are collapsed, always check `_history.user_messages()` to recall the user's actual requests.**
+    {% if has_history %}
+    - `_history` — full-fidelity archive of all previous turns (older turns are **dropped from context entirely**, not summarized — `_history` is the only way to access them). Key methods: `_history.user_messages()` (what the user asked), `_history.search("pattern")` (regex over code+output), `_history[i]` (specific turn), `_history.summary()` (overview). **Always check `_history.user_messages()` to recall the user's actual requests.**
+    {% endif %}
+    - `_mem` — persistent key-value memory that survives context pruning. Methods: `_mem.set(key, description, value)` (store anything, stringified), `_mem.get(key)` (retrieve value), `_mem.all()` (list keys + descriptions + turn numbers), `_mem.search("pattern")` (regex over keys, descriptions, values), `_mem.since(turn)` (entries from turn N onward), `_mem.recent(n)` (entries from last n turns), `_mem.delete(key)`.
 
     {% if project_instructions %}
     ## Project Instructions
@@ -441,11 +451,11 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
 
     ## Guidelines
 
-    - Use `done(value)` when you have a complete answer
+    - Use `done(value)` inside a code block when you have a complete answer
     {% if headless %}
     - **Complete the task autonomously** — do not ask questions, do not call done() until the work is fully done. Make reasonable decisions when faced with ambiguity.
     {% else %}
-    - If you need to ask the caller a clarifying question before proceeding, use `done("your question here")` — this ends your turn and lets the caller respond
+    - If you need to ask the caller a clarifying question before proceeding, use `done("your question here")` inside a code block — this ends your turn and lets the caller respond
     {% endif %}
     - On error, fix and retry — don't give up after one failure
     - Variables persist — reuse computed results across turns
@@ -454,7 +464,9 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
     - **Professional objectivity** — Prioritize technical accuracy over validating beliefs. If something is wrong, say so. Investigate before confirming assumptions.
     - **ASCII by default** — Only introduce non-ASCII characters when the file already uses them or there's clear justification.
     - **Avoid redundant reads** — Variables persist in the REPL. If you already read a file into a variable, use that variable instead of reading it again. Only re-read if you suspect the file changed (e.g. after editing it).
-    - **Use `_history` to recall past work** — use `_history.user_messages()` to remember what the user asked, `_history.search()` to find past tool results, `_history[i]` for a specific turn. Never lose track of the user's request.
+    {% if has_history %}
+    - **Use `_history` to recall past work** — older turns are deleted from context, not summarized. Use `_history.user_messages()` to remember what the user asked, `_history.search()` to find past tool results, `_history[i]` for a specific turn. Never lose track of the user's request.
+    {% endif %}
     - **`print()` is your eyes** — assignments are silent; use `print()` to inspect values. You see all printed output on your next turn.
     - **Never speculate** — if you haven't read a file, don't describe its contents. If a path doesn't exist, say so and investigate.
     - **Prose is the caller's ears** — write prose to explain, narrate, or present results. Use `done(value)` for computed final answers. `print()` output is only visible to you.
@@ -475,38 +487,5 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
     {{ img }}
     {% endfor %}
     {% endif %}
-  "#
-}
-
-function TriageParts(parts: PartForTriage[], task_context: string) -> (KeepDecision | DeleteDecision | SummarizeDecision)[] {
-  client DefaultClient
-  prompt #"
-    {{ _.role("system") }}
-    You are managing context for an AI coding assistant. Its conversation history is growing too large. Classify each message part to manage context efficiently.
-
-    **Actions:**
-    - **Keep** — content is actively relevant: user instructions, active decisions, current errors being debugged, information likely needed soon
-    - **Delete** — content is transient or already acted upon: old file listings, grep results that informed a completed decision, tool outputs from resolved steps. Write a breadcrumb (< 15 words) describing what was here
-    - **Summarize** — content has useful information but is too verbose: large file reads still relevant, long error traces where key info can be condensed. Write a concise summary preserving file paths, key facts, and decisions
-
-    **Guidelines:**
-    - Prefer Delete when the information has been fully consumed by subsequent actions
-    - Prefer Keep for anything related to the current active task thread
-    - Prefer Summarize over Delete when file paths or error details may be referenced again
-    - Summaries should be 2-5 lines, not paragraphs
-
-    Current task context:
-    {{ task_context }}
-
-    {{ ctx.output_format }}
-
-    {{ _.role("user") }}
-    Parts to triage:
-
-    {% for part in parts %}
-    --- [{{ part.id }}] ({{ part.role }}) ---
-    {{ part.content }}
-
-    {% endfor %}
   "#
 }
