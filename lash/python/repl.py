@@ -492,14 +492,9 @@ class Task:
         self.metadata = other.metadata
         return self
 
-    async def claim(self):
-        """Claim this task for the current agent."""
-        result = await _call("claim_task", {"id": self.id, "owner": _ns.get("__agent_id__", "")})
-        return self._refresh(result)
-
     async def start(self):
-        """Set status to in_progress."""
-        result = await _call("update_task", {"id": self.id, "status": "in_progress"})
+        """Claim this task and set status to in_progress."""
+        result = await _call("claim_task", {"id": self.id, "owner": _ns.get("__agent_id__", "")})
         return self._refresh(result)
 
     async def done(self):

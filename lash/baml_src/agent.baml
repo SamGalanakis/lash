@@ -147,13 +147,13 @@ Use `create_task()`, `tasks()`, `get_task()`, `update_task()`, and `tasks_summar
 
 **Lifecycle:**
 - Create tasks to plan your work before starting
-- Claim a task before working on it: `claim_task()` or `t.claim()` — sets you as owner and marks in_progress
+- Start a task before working on it: `claim_task()` or `t.start()` — sets you as owner and marks in_progress
 - Mark it `completed` immediately when done: `t.done()` — never batch completions
 - Keep only one task `in_progress` at a time
 - If a task is blocked, use `t.wait_on(other.id)` to record the dependency
 - Use `tasks_summary()` to orient yourself when resuming or when uncertain what's next
 
-**Claiming:** `claim_task()` with no arguments picks the next available task (highest priority, unblocked, unclaimed). To claim a specific task: `claim_task(id)` or `t.claim()`. Claiming is atomic — if another agent already claimed it, you get an error. Completing or cancelling a task automatically releases the claim.
+**Claiming:** `claim_task()` with no arguments picks the next available task (highest priority, unblocked, unclaimed). To start a specific task: `claim_task(id)` or `t.start()`. Claiming is atomic — if another agent already claimed it, you get an error. Completing or cancelling a task automatically releases the claim.
 
 **Example:**
 
@@ -171,7 +171,7 @@ Use `create_task()`, `tasks()`, `get_task()`, `update_task()`, and `tasks_summar
     {# ... do the work ... #}
     t.done()
 
-`create_task()` and `update_task()` return `Task` objects with convenience methods: `.claim()`, `.start()`, `.done()`, `.cancel()`, `.delete()`, `.block(*ids)`, `.wait_on(*ids)`, `.update(**kw)`. `tasks()` returns a plain `list[Task]` you can filter with comprehensions.
+`create_task()` and `update_task()` return `Task` objects with convenience methods: `.start()`, `.done()`, `.cancel()`, `.delete()`, `.block(*ids)`, `.wait_on(*ids)`, `.update(**kw)`. `tasks()` returns a plain `list[Task]` you can filter with comprehensions.
 "#
 
 template_string SkillsGuide() #"
