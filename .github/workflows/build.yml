@@ -59,6 +59,15 @@ jobs:
       - name: Fetch python-standalone
         run: ./scripts/fetch-python.sh ${{ matrix.target }}
 
+      - name: Normalize macOS python libs
+        if: runner.os == 'macOS'
+        run: |
+          ls -l target/python-standalone/python/install/lib/libpython* || true
+          cp -f target/python-standalone/python/install/lib/libpython3.14d.a target/python-standalone/python/install/lib/libpython3.14.a || true
+          cp -f target/python-standalone/python/install/lib/libpython3.14d.dylib target/python-standalone/python/install/lib/libpython3.14.dylib || true
+          ls -l target/python-standalone/python/install/lib/libpython* || true
+          cat target/python-standalone/pyo3-config.txt
+
       - name: Build
         env:
           PYO3_CONFIG_FILE: ${{ github.workspace }}/target/python-standalone/pyo3-config.txt

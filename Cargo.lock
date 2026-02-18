@@ -156,8 +156,6 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 [[package]]
 name = "baml"
 version = "0.218.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ff893d77d574072813bbb2f1d5538d44e89bc9ab7d5fcfc3d953ddfffa39e9f"
 dependencies = [
  "async-channel",
  "baml-macros",
