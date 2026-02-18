@@ -68,6 +68,12 @@ if [ -d "$BUILD_LIB_DIR" ]; then
     cp -n "$BUILD_LIB_DIR"/*.a "$INSTALL_DIR/lib/" 2>/dev/null || true
 fi
 
+# PBS ships libedit.a but pyo3 static link lines may request -lreadline.
+# Provide a local alias so linking works consistently across targets.
+if [ -f "$INSTALL_DIR/lib/libedit.a" ] && [ ! -f "$INSTALL_DIR/lib/libreadline.a" ]; then
+    cp "$INSTALL_DIR/lib/libedit.a" "$INSTALL_DIR/lib/libreadline.a"
+fi
+
 # Install dill (skip for cross-compilation where we can't execute the binary)
 HOST_TRIPLE="$(rustc -vV | sed -n 's/host: //p')"
 if [ "$TARGET" = "$HOST_TRIPLE" ]; then
