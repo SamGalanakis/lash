@@ -74,6 +74,17 @@ if [ -f "$INSTALL_DIR/lib/libedit.a" ] && [ ! -f "$INSTALL_DIR/lib/libreadline.a
     cp "$INSTALL_DIR/lib/libedit.a" "$INSTALL_DIR/lib/libreadline.a"
 fi
 
+# Some debug-full macOS builds ship libpython with a "d" suffix while pyo3
+# still asks for python3.14. Provide compatibility aliases.
+if [ "$PBS_FLAVOR" = "debug-full" ]; then
+    if [ -f "$INSTALL_DIR/lib/libpython${PYTHON_MAJOR_MINOR}d.a" ] && [ ! -f "$INSTALL_DIR/lib/libpython${PYTHON_MAJOR_MINOR}.a" ]; then
+        cp "$INSTALL_DIR/lib/libpython${PYTHON_MAJOR_MINOR}d.a" "$INSTALL_DIR/lib/libpython${PYTHON_MAJOR_MINOR}.a"
+    fi
+    if [ -f "$INSTALL_DIR/lib/libpython${PYTHON_MAJOR_MINOR}d.dylib" ] && [ ! -f "$INSTALL_DIR/lib/libpython${PYTHON_MAJOR_MINOR}.dylib" ]; then
+        cp "$INSTALL_DIR/lib/libpython${PYTHON_MAJOR_MINOR}d.dylib" "$INSTALL_DIR/lib/libpython${PYTHON_MAJOR_MINOR}.dylib"
+    fi
+fi
+
 # Install dill (skip for cross-compilation where we can't execute the binary)
 HOST_TRIPLE="$(rustc -vV | sed -n 's/host: //p')"
 if [ "$TARGET" = "$HOST_TRIPLE" ]; then

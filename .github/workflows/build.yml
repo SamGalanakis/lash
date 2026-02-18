@@ -54,7 +54,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: target/python-standalone
-          key: python-standalone-${{ matrix.target }}-3.14.3+20260211-v5
+          key: python-standalone-${{ matrix.target }}-3.14.3+20260211-v6
 
       - name: Fetch python-standalone
         run: ./scripts/fetch-python.sh ${{ matrix.target }}
