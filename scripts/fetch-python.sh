@@ -87,6 +87,11 @@ fi
 
 # Generate pyo3-config.txt
 LIB_DIR="${INSTALL_DIR}/lib"
+LIB_NAME="python${PYTHON_MAJOR_MINOR}"
+if [ "$PBS_FLAVOR" = "debug-full" ]; then
+    LIB_NAME="python${PYTHON_MAJOR_MINOR}d"
+fi
+
 case "$TARGET" in
     *x86_64*|*aarch64*) POINTER_WIDTH=64 ;;
     *) POINTER_WIDTH=32 ;;
@@ -96,7 +101,7 @@ cat > "${DEST}/pyo3-config.txt" <<EOF
 implementation=CPython
 version=${PYTHON_MAJOR_MINOR}
 shared=false
-lib_name=python${PYTHON_MAJOR_MINOR}
+lib_name=${LIB_NAME}
 lib_dir=${PWD}/${LIB_DIR}
 pointer_width=${POINTER_WIDTH}
 build_flags=
