@@ -106,6 +106,11 @@ if [ "$PBS_FLAVOR" = "debug-full" ]; then
     BUILD_FLAGS="Py_DEBUG"
     SHARED="true"
 fi
+# aarch64 linux pgo+lto static libpython contains LLVM bitcode objects, which
+# don't link via the GCC cross-linker used in CI. Use shared libpython there.
+if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then
+    SHARED="true"
+fi
 
 case "$TARGET" in
     *x86_64*|*aarch64*) POINTER_WIDTH=64 ;;
