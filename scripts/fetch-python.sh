@@ -100,9 +100,11 @@ fi
 LIB_DIR="${INSTALL_DIR}/lib"
 LIB_NAME="python${PYTHON_MAJOR_MINOR}"
 BUILD_FLAGS=""
+SHARED="false"
 if [ "$PBS_FLAVOR" = "debug-full" ]; then
     LIB_NAME="python${PYTHON_MAJOR_MINOR}d"
     BUILD_FLAGS="Py_DEBUG"
+    SHARED="true"
 fi
 
 case "$TARGET" in
@@ -113,7 +115,7 @@ esac
 cat > "${DEST}/pyo3-config.txt" <<EOF
 implementation=CPython
 version=${PYTHON_MAJOR_MINOR}
-shared=false
+shared=${SHARED}
 lib_name=${LIB_NAME}
 lib_dir=${PWD}/${LIB_DIR}
 pointer_width=${POINTER_WIDTH}
