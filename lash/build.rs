@@ -237,10 +237,14 @@ fn generate_pyo3_config(install_dir: &Path, config_path: &Path, target: &str) {
 
     // Fall back between static/dylib if the requested artifact is unavailable.
     let static_lib = lib_dir.join(format!("lib{lib_name}.a"));
-    let dylib = lib_dir.join(format!("lib{lib_name}.dylib"));
-    if shared && !dylib.exists() && static_lib.exists() {
+    let shared_lib = if target.contains("apple") {
+        lib_dir.join(format!("lib{lib_name}.dylib"))
+    } else {
+        lib_dir.join(format!("lib{lib_name}.so"))
+    };
+    if shared && !shared_lib.exists() && static_lib.exists() {
         shared = false;
-    } else if !shared && !static_lib.exists() && dylib.exists() {
+    } else if !shared && !static_lib.exists() && shared_lib.exists() {
         shared = true;
     }
 
