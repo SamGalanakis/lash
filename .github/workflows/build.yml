@@ -54,7 +54,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: target/python-standalone
-          key: python-standalone-${{ matrix.target }}-3.14.3+20260211-v7
+          key: python-standalone-${{ matrix.target }}-3.14.3+20260211-v8
 
       - name: Fetch python-standalone
         run: ./scripts/fetch-python.sh ${{ matrix.target }}
@@ -63,8 +63,8 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           ls -l target/python-standalone/python/install/lib/libpython* || true
-          cp -f target/python-standalone/python/install/lib/libpython3.14d.a target/python-standalone/python/install/lib/libpython3.14.a || true
-          cp -f target/python-standalone/python/install/lib/libpython3.14d.dylib target/python-standalone/python/install/lib/libpython3.14.dylib || true
+          ln -sf libpython3.14d.a target/python-standalone/python/install/lib/libpython3.14.a || true
+          ln -sf libpython3.14d.dylib target/python-standalone/python/install/lib/libpython3.14.dylib || true
           ls -l target/python-standalone/python/install/lib/libpython* || true
           cat target/python-standalone/pyo3-config.txt
 
