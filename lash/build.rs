@@ -105,9 +105,7 @@ fn ensure_python_standalone(python_dir: &Path, target: &str) -> PathBuf {
 
     // Map Rust target triple to PBS triple
     let pbs_triple = map_target_triple(target);
-    let filename = format!(
-        "cpython-{PYTHON_VERSION}+{PBS_RELEASE}-{pbs_triple}-{flavor}.tar.zst"
-    );
+    let filename = format!("cpython-{PYTHON_VERSION}+{PBS_RELEASE}-{pbs_triple}-{flavor}.tar.zst");
     let url = format!(
         "https://github.com/astral-sh/python-build-standalone/releases/download/{PBS_RELEASE}/{filename}"
     );

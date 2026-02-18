@@ -6,12 +6,14 @@ use super::require_str;
 
 /// Fetch a URL and return its content as text.
 pub struct FetchUrl {
+    api_key: String,
     client: reqwest::Client,
 }
 
 impl FetchUrl {
-    pub fn new(_api_key: impl AsRef<str>) -> Self {
+    pub fn new(api_key: impl Into<String>) -> Self {
         Self {
+            api_key: api_key.into(),
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -31,7 +33,7 @@ impl ToolProvider for FetchUrl {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "fetch_url".into(),
-            description: "Fetch a URL and return its text content (truncated at 100KB).".into(),
+            description: "Extract a webpage URL via Tavily and return text content.".into(),
             params: vec![ToolParam::typed("url", "str")],
             returns: "str".into(),
             hidden: false,
@@ -44,28 +46,48 @@ impl ToolProvider for FetchUrl {
             Err(e) => return e,
         };
 
-        let resp = self.client.get(url).send().await;
+        if self.api_key.trim().is_empty() {
+            return ToolResult::err(json!("Tavily API key is required for fetch_url"));
+        }
+
+        let body = json!({
+            "api_key": self.api_key,
+            "urls": [url],
+        });
+
+        let resp = self
+            .client
+            .post("https://api.tavily.com/extract")
+            .json(&body)
+            .send()
+            .await;
 
         match resp {
-            Ok(r) if r.status().is_success() => {
-                // Cap response body to avoid blowing up context
-                const MAX_BYTES: usize = 100_000;
-                match r.bytes().await {
-                    Ok(bytes) => {
-                        let mut text =
-                            String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_BYTES)])
-                                .to_string();
-                        if bytes.len() > MAX_BYTES {
-                            text.push_str("\n[truncated]");
-                        }
-                        ToolResult::ok(json!(text))
+            Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+                Ok(data) => {
+                    let content = data
+                        .get("results")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|v| {
+                            v.get("raw_content")
+                                .and_then(|s| s.as_str())
+                                .or_else(|| v.get("content").and_then(|s| s.as_str()))
+                        })
+                        .unwrap_or_default();
+
+                    if content.is_empty() {
+                        return ToolResult::err(json!("No content returned from Tavily extract"));
                     }
-                    Err(e) => ToolResult::err_fmt(format_args!("Failed to read body: {e}")),
+
+                    ToolResult::ok(json!(content))
                 }
-            }
+                Err(e) => ToolResult::err_fmt(format_args!("Failed to parse response: {e}")),
+            },
             Ok(r) => {
                 let status = r.status();
-                ToolResult::err_fmt(format_args!("HTTP {status}"))
+                let body = r.text().await.unwrap_or_default();
+                ToolResult::err_fmt(format_args!("Tavily API error ({status}): {body}"))
             }
             Err(e) => ToolResult::err_fmt(format_args!("Request failed: {e}")),
         }
