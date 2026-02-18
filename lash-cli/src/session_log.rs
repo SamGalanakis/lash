@@ -1,15 +1,14 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use lash::TokenUsage;
-use lash::agent::{ChatMsg, Message};
+use lash_core::TokenUsage;
+use lash_core::agent::{Message, MessageRole, Part, PartKind, PruneState};
 
 use crate::app::DisplayBlock;
 
 pub struct SessionInfo {
     pub filename: String,
     pub session_id: String,
-    pub model: String,
     pub message_count: usize,
     pub first_message: String,
     pub modified: SystemTime,
@@ -81,12 +80,6 @@ pub fn list_sessions() -> Vec<SessionInfo> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let model = val
-            .get("model")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
         // Scan for first user_input and count messages
         let mut message_count = 0;
         let mut first_message = String::new();
@@ -114,7 +107,6 @@ pub fn list_sessions() -> Vec<SessionInfo> {
         sessions.push(SessionInfo {
             filename,
             session_id,
-            model,
             message_count,
             first_message,
             modified,
@@ -126,14 +118,12 @@ pub fn list_sessions() -> Vec<SessionInfo> {
 }
 
 /// Load a session JSONL file, reconstructing display blocks and structured messages.
-/// Converts legacy ChatMsg-based events into the new Message format.
 pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)> {
     let path = sessions_dir().join(filename);
     let content = std::fs::read_to_string(&path).ok()?;
 
-    let mut chat_msgs = Vec::new();
+    let mut messages = Vec::new();
     let mut blocks = Vec::new();
-    let mut pending_text = String::new();
     let mut sub_agent_count: usize = 0;
 
     for line in content.lines() {
@@ -152,28 +142,24 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                chat_msgs.push(ChatMsg {
-                    role: "user".to_string(),
-                    content: text.clone(),
+                let msg_id = format!("m{}", messages.len());
+                messages.push(Message {
+                    id: msg_id.clone(),
+                    role: MessageRole::User,
+                    parts: vec![Part {
+                        id: format!("{msg_id}.p0"),
+                        kind: PartKind::Text,
+                        content: text.clone(),
+                        prune_state: PruneState::Intact,
+                    }],
                 });
                 blocks.push(DisplayBlock::UserInput(text));
             }
-            "text_delta" => {
-                if let Some(c) = val.get("content").and_then(|v| v.as_str()) {
-                    pending_text.push_str(c);
-                }
-            }
-            "llm_request" => {
-                // New iteration — discard buffered text from previous iteration
-                pending_text.clear();
-            }
+            "text_delta" | "llm_request" | "done" => {}
             "code_block" => {
-                // Discard buffered text (intermediate thinking with code fences)
-                pending_text.clear();
                 if let Some(code) = val.get("code").and_then(|v| v.as_str()) {
                     blocks.push(DisplayBlock::CodeBlock {
                         code: code.to_string(),
-                        expanded: false,
                         continuation: false,
                     });
                 }
@@ -208,17 +194,19 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
                 }
             }
             "llm_response" => {
-                // Reconstruct assistant message for chat history
                 if let Some(c) = val.get("content").and_then(|v| v.as_str()) {
-                    chat_msgs.push(ChatMsg {
-                        role: "assistant".to_string(),
-                        content: c.to_string(),
+                    let msg_id = format!("m{}", messages.len());
+                    messages.push(Message {
+                        id: msg_id.clone(),
+                        role: MessageRole::Assistant,
+                        parts: vec![Part {
+                            id: format!("{msg_id}.p0"),
+                            kind: PartKind::Prose,
+                            content: c.to_string(),
+                            prune_state: PruneState::Intact,
+                        }],
                     });
                 }
-            }
-            "done" => {
-                // Discard buffered text (code/comments only, no user-visible content)
-                pending_text.clear();
             }
             "sub_agent_done" => {
                 sub_agent_count += 1;
@@ -286,9 +274,6 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
             }
         }
     }
-
-    // Convert legacy ChatMsgs to structured Messages
-    let messages = lash::agent::messages_from_chat(&chat_msgs);
 
     Some((messages, blocks))
 }

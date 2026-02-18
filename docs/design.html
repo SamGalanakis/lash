@@ -26,6 +26,9 @@
     --chalk-dim:   #7a7a70;
     --chalk-mid:   #c8c4b8;
 
+    /* ── Double bar ── */
+    --ghost-bar: rgb(50, 40, 24);
+
     /* ── Semantic ── */
     --bg:          var(--form);
     --bg-raised:   var(--form-raised);
@@ -603,16 +606,16 @@
   .terminal-examples {
     display: flex;
     flex-direction: column;
-    gap: 32px;
+    gap: 20px;
   }
 
   .terminal-window {
     background: var(--form-deep);
     border: 1px solid var(--ash);
-    padding: 32px;
+    padding: 24px;
     font-family: var(--font-mono);
     font-size: 13px;
-    line-height: 2;
+    line-height: 1.45;
     position: relative;
   }
   .terminal-window::before {
@@ -642,11 +645,21 @@
   .t-bold { color: var(--chalk); font-weight: 500; }
   .t-separator { color: var(--ash); }
   .t-user-bar { color: var(--sodium); }
+  .t-ghost-bar { color: var(--ghost-bar); }
   .t-user-text { color: var(--chalk-mid); }
   .t-assistant { color: var(--chalk); }
-  .t-code-chrome { color: var(--ash); }
+  .t-code-chrome { color: var(--ash-mid); }
   .t-code { color: var(--chalk-dim); }
   .t-tool { color: var(--ash-text); }
+  .t-rule { color: var(--ash); }
+
+  /* Line-level rendering for conversation mocks */
+  .t-line {
+    white-space: pre;
+    line-height: 1.8;
+  }
+  .t-user-line {
+  }
 
   .terminal-label {
     font-family: var(--font-system);
@@ -1045,6 +1058,12 @@
           <span class="color-scale-use">Cards, elevated surfaces</span>
         </div>
         <div class="color-scale-row">
+          <div class="color-scale-chip" style="background:rgb(50,40,24)"></div>
+          <span class="color-scale-name">ghost-bar</span>
+          <span class="color-scale-val">rgb(50,40,24)</span>
+          <span class="color-scale-use">Assistant bar (ghost amber)</span>
+        </div>
+        <div class="color-scale-row">
           <div class="color-scale-chip" style="background:#1f1e1c"></div>
           <span class="color-scale-name">border-faint</span>
           <span class="color-scale-val">#1f1e1c</span>
@@ -1190,13 +1209,9 @@
         </div>
         <div class="type-sample-mono">
           <span class="tm-prompt">&#x2590;</span> fix the auth timeout in login.rs<br>
-          <br>
-          I'll look at the auth flow and fix the timeout.<br>
-          <br>
-          <span style="color:var(--ash-mid)">&#x25b6; python (3 lines)</span><br>
-          <span class="tm-ok">&nbsp; + edit_file</span> <span style="color:var(--ash)">login.rs &middot; 0.2s</span><br>
-          <br>
-          Done. Timeout increased to 30s.
+          <span style="color:var(--ghost-bar)">&#x2590;</span> I'll look at the auth flow and fix the timeout.<br>
+          <span style="color:var(--ash-mid)">&#x25b6; code 3L &middot; + edit_file &middot; 0.2s</span><br>
+          <span style="color:var(--ghost-bar)">&#x2590;</span> Done. Timeout increased to 30s.
         </div>
       </div>
     </div>
@@ -1243,56 +1258,43 @@
     <div class="section-header">
       <span class="section-number">04</span>
       <span class="section-title">Terminal</span>
-      <span class="section-desc">The terminal is where lash lives. User messages get a sodium accent bar. Assistant prose flows left-aligned. Clean separation through whitespace.</span>
+      <span class="section-desc">Double Bar: both user and assistant lines share a <code>&#x2590;&nbsp;</code> prefix at column&nbsp;0. User bar is bright sodium; assistant bar is a ghost &mdash; very faint warm amber. Bar brightness alone separates the two voices. Tool/code at column&nbsp;0, no bar.</span>
     </div>
     <div class="terminal-examples">
       <div>
         <div class="terminal-label">Conversation</div>
         <div class="terminal-window">
-          <span class="t-user-bar">&#x2590;</span> <span class="t-user-text">fix the auth timeout in login.rs</span><br>
-          <br>
-          <span class="t-assistant">I'll look at the auth flow in login.rs.</span><br>
-          <br>
-          <span class="t-code-chrome">&#x25b6; python (3 lines)</span><br>
-          <span class="t-tool">&nbsp; + read_file</span> <span class="t-dim">login.rs &middot; 0.1s</span><br>
-          <br>
-          <span class="t-assistant">The timeout is hardcoded to 5s on line 42. I'll increase</span><br>
-          <span class="t-assistant">it to 30s and add a config option.</span><br>
-          <br>
-          <span class="t-code-chrome">&#x25b6; python (8 lines)</span><br>
-          <span class="t-tool">&nbsp; + edit_file</span> <span class="t-dim">login.rs &middot; 0.2s</span><br>
-          <br>
-          <span class="t-ok">&nbsp; done</span> <span class="t-out">2 tool calls &middot; 1.2k tokens</span><br>
-          <br>
-          <span class="t-user-bar">&#x2590;</span> <span class="t-user-text">run the tests</span><br>
-          <br>
-          <span class="t-assistant">Running the test suite now.</span><br>
-          <br>
-          <span class="t-code-chrome">&#x25b6; python (1 line)</span><br>
-          <span class="t-tool">&nbsp; + shell</span> <span class="t-dim">cargo test &middot; 4.3s</span><br>
-          <br>
-          <span class="t-assistant">All 47 tests pass.</span><br>
-          <br>
-          <span class="t-prompt">&#x276f;</span> <span style="opacity:0.3">_</span>
+          <div class="t-line"><span class="t-user-bar">&#x2590;</span> <span class="t-user-text">fix the auth timeout in login.rs</span></div>
+          <div class="t-line"><span class="t-ghost-bar">&#x2590;</span> <span class="t-assistant">I'll look at the auth flow in login.rs.</span></div>
+          <div class="t-line"><span class="t-code-chrome">&#x25b6; code 3L &middot; + read_file &middot; 0.1s</span></div>
+          <div class="t-line"><span class="t-ghost-bar">&#x2590;</span> <span class="t-assistant">The timeout is hardcoded to 5s on line 42. I'll</span></div>
+          <div class="t-line"><span class="t-ghost-bar">&#x2590;</span> <span class="t-assistant">increase it to 30s and add a config option.</span></div>
+          <div class="t-line"><span class="t-code-chrome">&#x25b6; code 8L &middot; + edit_file &middot; 0.2s</span></div>
+          <div class="t-line">&nbsp;</div>
+          <div class="t-line"><span class="t-user-bar">&#x2590;</span> <span class="t-user-text">run the tests</span></div>
+          <div class="t-line"><span class="t-ghost-bar">&#x2590;</span> <span class="t-assistant">Running the test suite now.</span></div>
+          <div class="t-line"><span class="t-code-chrome">&#x25b6; code 1L &middot; + shell &middot; cargo test &middot; 4.3s</span></div>
+          <div class="t-line"><span class="t-ghost-bar">&#x2590;</span> <span class="t-assistant">All 47 tests pass.</span></div>
+          <div class="t-line"><span class="t-prompt">&#x276f;</span> <span style="opacity:0.3">_</span></div>
         </div>
       </div>
     </div>
 
     <div class="terminal-tokens">
       <div class="terminal-token">
-        <div class="terminal-token-name">User accent</div>
-        <div class="terminal-token-sample"><span style="color:var(--sodium); font-family:var(--font-mono)">&#x2590;</span> <span style="color:var(--chalk-mid); font-family:var(--font-mono)">fix the timeout</span></div>
-        <div class="terminal-token-note">Sodium half-block marks user messages. Left edge accent.</div>
+        <div class="terminal-token-name">User bar</div>
+        <div class="terminal-token-sample" style="font-family:var(--font-mono)"><span style="color:var(--sodium)">&#x2590;</span> <span style="color:var(--chalk-mid)">fix the timeout</span></div>
+        <div class="terminal-token-note">Sodium <code style="font-size:10px">&#x2590;&nbsp;</code> prefix (2&nbsp;cols). Bright amber bar marks user voice. No background.</div>
       </div>
       <div class="terminal-token">
-        <div class="terminal-token-name">Assistant</div>
-        <div class="terminal-token-sample" style="color:var(--chalk); font-family:var(--font-mono)">I'll fix that now.</div>
-        <div class="terminal-token-note">Full chalk. Assistant prose, left-aligned.</div>
+        <div class="terminal-token-name">Assistant bar</div>
+        <div class="terminal-token-sample" style="font-family:var(--font-mono)"><span style="color:var(--ghost-bar)">&#x2590;</span> <span style="color:var(--chalk)">I'll fix that now.</span></div>
+        <div class="terminal-token-note">Ghost bar <code style="font-size:10px">&#x2590;&nbsp;</code> prefix (2&nbsp;cols). Very faint warm amber &mdash; like a guide line partially erased. Same column as user bar.</div>
       </div>
       <div class="terminal-token">
         <div class="terminal-token-name">Code block</div>
-        <div class="terminal-token-sample" style="color:var(--ash-mid); font-family:var(--font-mono)">&#x25b6; python (3 lines)</div>
-        <div class="terminal-token-note">Ash-mid. Collapsed code blocks, expandable.</div>
+        <div class="terminal-token-sample" style="color:var(--ash-mid); font-family:var(--font-mono)">&#x25b6; code 3L</div>
+        <div class="terminal-token-note">Ash-mid. Column 0. Compact code summary, no prefix.</div>
       </div>
       <div class="terminal-token">
         <div class="terminal-token-name">Tool call</div>
@@ -1312,7 +1314,7 @@
       <div class="terminal-token">
         <div class="terminal-token-name">Turn boundary</div>
         <div class="terminal-token-sample" style="font-family:var(--font-mono)">&nbsp;</div>
-        <div class="terminal-token-note">Whitespace only. No decorative separators between turns.</div>
+        <div class="terminal-token-note">Blank line before each user message. Separates turns visually without heavy chrome.</div>
       </div>
       <div class="terminal-token">
         <div class="terminal-token-name">Emphasis</div>
@@ -1383,11 +1385,11 @@
         <div class="element-card-note">1px height, gradient from sodium to transparent. Like a chalk line snapped on a surface. Used under logos and as section dividers. Opacity: 0.5.</div>
       </div>
       <div class="element-card">
-        <div class="element-card-title">User Accent</div>
+        <div class="element-card-title">Double Bar</div>
         <div class="element-card-demo">
-          <div style="font-family:var(--font-mono); font-size:13px"><span style="color:var(--sodium)">&#x2590;</span> <span style="color:var(--chalk-mid)">fix the auth timeout</span></div>
+          <div style="font-family:var(--font-mono); font-size:13px"><div><span style="color:var(--sodium)">&#x2590;</span> <span style="color:var(--chalk-mid)">fix the auth timeout</span></div><div><span style="color:var(--ghost-bar)">&#x2590;</span> <span style="color:var(--chalk)">I'll look at the auth flow.</span></div></div>
         </div>
-        <div class="element-card-note">Sodium half-block (&#x2590;) at left edge of user messages. Distinguishes user input from assistant prose without heavy decoration. Whitespace handles turn boundaries.</div>
+        <div class="element-card-note">Both voices share a <code>&#x2590;&nbsp;</code> prefix at column&nbsp;0. User bar is bright sodium; assistant bar is a ghost (very faint warm amber). Bar brightness alone separates voices. No backgrounds needed.</div>
       </div>
       <div class="element-card">
         <div class="element-card-title">Slash Mark</div>

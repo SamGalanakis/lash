@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -18,6 +19,53 @@ pub struct InstructionLoader {
     /// Last seen modified time for context-aware instruction files.
     /// Files are reloaded when mtime changes.
     loaded_context: Mutex<HashMap<PathBuf, Option<SystemTime>>>,
+}
+
+/// Host-provided instruction source for system + context-aware instructions.
+pub trait InstructionSource: Send + Sync {
+    /// Static/system instructions included every turn.
+    fn system_instructions(&self) -> String;
+    /// Additional instructions discovered from file reads in the current turn.
+    fn context_instructions_for_reads(&self, read_paths: &[String]) -> String;
+}
+
+/// Filesystem-backed instruction source (current lash behavior).
+pub struct FsInstructionSource {
+    loader: Arc<InstructionLoader>,
+}
+
+impl FsInstructionSource {
+    pub fn new() -> Self {
+        Self {
+            loader: Arc::new(InstructionLoader::new()),
+        }
+    }
+}
+
+impl Default for FsInstructionSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl InstructionSource for FsInstructionSource {
+    fn system_instructions(&self) -> String {
+        self.loader.system_instructions().to_string()
+    }
+
+    fn context_instructions_for_reads(&self, read_paths: &[String]) -> String {
+        let mut chunks = Vec::new();
+        let mut seen = HashSet::new();
+        for path in read_paths {
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            if let Some(text) = self.loader.resolve(path) {
+                chunks.push(text);
+            }
+        }
+        chunks.join("\n\n")
+    }
 }
 
 impl Default for InstructionLoader {

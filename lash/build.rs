@@ -370,13 +370,6 @@ fn generate_model_info() {
                         // Full qualified name: provider/model_id
                         let full_id = format!("{}/{}", provider, model_id);
                         arms.push(format!("        {:?} => Some({}),", full_id, context_limit));
-                        // For anthropic provider, also add bare model name alias
-                        if provider == "anthropic" {
-                            arms.push(format!(
-                                "        {:?} => Some({}),",
-                                model_id, context_limit
-                            ));
-                        }
                     }
                 }
             }
@@ -386,11 +379,8 @@ fn generate_model_info() {
     // If no arms from download, use hard-coded fallback
     if arms.is_empty() {
         arms = vec![
-            r#"        "claude-opus-4-6" => Some(200000),"#.to_string(),
             r#"        "anthropic/claude-opus-4-6" => Some(200000),"#.to_string(),
-            r#"        "claude-sonnet-4-5-20250929" => Some(200000),"#.to_string(),
             r#"        "anthropic/claude-sonnet-4-5-20250929" => Some(200000),"#.to_string(),
-            r#"        "claude-haiku-4-5-20251001" => Some(200000),"#.to_string(),
             r#"        "anthropic/claude-haiku-4-5-20251001" => Some(200000),"#.to_string(),
             r#"        "gpt-4o" => Some(128000),"#.to_string(),
             r#"        "openai/gpt-4o" => Some(128000),"#.to_string(),

@@ -1,15 +1,13 @@
 use std::path::PathBuf;
 
 /// A skill loaded from a markdown file with YAML frontmatter.
-#[allow(dead_code)]
 pub struct Skill {
     pub name: String,
     pub description: String,
-    pub content: String,
 }
 
 impl Skill {
-    /// Parse a skill from a markdown file (SKILL.md or legacy .md).
+    /// Parse a skill from a SKILL.md markdown file.
     /// Name is optional in frontmatter — caller fills from directory name.
     fn parse(path: &std::path::Path) -> Option<Self> {
         let text = std::fs::read_to_string(path).ok()?;
@@ -24,9 +22,6 @@ impl Skill {
         let after_open = &text[3..];
         let close_idx = after_open.find("\n---")?;
         let frontmatter = &after_open[..close_idx];
-        let body_start = 3 + close_idx + 4; // skip "---" + "\n---"
-        let content = text[body_start..].trim().to_string();
-
         let mut name = String::new();
         let mut description = None;
 
@@ -51,7 +46,6 @@ impl Skill {
         Some(Skill {
             name,
             description: description.unwrap_or_default(),
-            content,
         })
     }
 }

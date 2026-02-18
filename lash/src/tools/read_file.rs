@@ -26,7 +26,7 @@ impl ToolProvider for ReadFile {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "read_file".into(),
-            description: "Read a file (default: up to 2000 lines). Text files return hashline-prefixed content. Image files (png, jpg, gif, webp, bmp) are read for visual inspection. Use `ls` for directories.".into(),
+            description: "Read a file (default: up to 2000 lines). Text files return hashline-prefixed content. PDF files are extracted to text. Image files (png, jpg, gif, webp, bmp) are read for visual inspection. Use `ls` for directories.".into(),
             params: vec![
                 ToolParam::typed("path", "str"),
                 ToolParam {
@@ -90,6 +90,16 @@ fn execute_read_file_sync(path_str: &str, offset: usize, limit: usize) -> ToolRe
     // Image files — return as visual attachment
     if let Some(mime) = image_mime(path) {
         return read_image(path, path_str, mime);
+    }
+
+    // PDF files — extract text via pdf-extract (pure Rust)
+    if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("pdf"))
+        .unwrap_or(false)
+    {
+        return read_pdf(path, path_str, offset, limit);
     }
 
     // Binary detection
@@ -218,6 +228,63 @@ fn read_image(path: &Path, path_str: &str, mime: &str) -> ToolResult {
     };
 
     ToolResult::with_images(true, json!(format!("[Image: {}]", label)), vec![image])
+}
+
+/// Extract text from a PDF file using the pdf-extract crate (pure Rust).
+fn read_pdf(path: &Path, path_str: &str, offset: usize, limit: usize) -> ToolResult {
+    let pdf_bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => return ToolResult::err_fmt(format_args!("Failed to read PDF: {e}")),
+    };
+
+    let file_size_kb = pdf_bytes.len() / 1024;
+
+    let text = match pdf_extract::extract_text_from_mem(&pdf_bytes) {
+        Ok(t) => t,
+        Err(e) => {
+            return ToolResult::err_fmt(format_args!(
+                "Failed to extract text from PDF {path_str}: {e}"
+            ));
+        }
+    };
+
+    let all_lines: Vec<&str> = text.lines().collect();
+    let total_lines = all_lines.len();
+    let start_idx = (offset - 1).min(total_lines);
+    let end_idx = (start_idx + limit).min(total_lines);
+    let selected = &all_lines[start_idx..end_idx];
+
+    let truncated: String = selected
+        .iter()
+        .map(|line| {
+            if line.len() > MAX_LINE_LEN {
+                format!("{}...", &line[..MAX_LINE_LEN])
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut formatted = hashline::format_hashlines(&truncated, offset);
+
+    let header = format!(
+        "[PDF: {} ({}KB, {} lines extracted)]\n",
+        path_str, file_size_kb, total_lines
+    );
+    formatted.insert_str(0, &header);
+
+    if end_idx < total_lines {
+        formatted.push_str(&format!(
+            "\n[Showing lines {}-{} of {}. Use offset={} to continue.]",
+            offset,
+            offset + selected.len() - 1,
+            total_lines,
+            end_idx + 1,
+        ));
+    }
+
+    ToolResult::ok(json!(formatted))
 }
 
 /// Extract width x height from image headers (zero deps).

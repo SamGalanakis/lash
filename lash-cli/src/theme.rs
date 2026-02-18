@@ -4,6 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 pub const FORM: Color = Color::Rgb(14, 13, 11);
 pub const FORM_DEEP: Color = Color::Rgb(8, 8, 7);
 pub const FORM_RAISED: Color = Color::Rgb(20, 20, 18);
+pub const GHOST_BAR: Color = Color::Rgb(50, 40, 24);
 
 // ── Ash: structural greys ──────────────────────────────────────────
 pub const ASH: Color = Color::Rgb(42, 42, 40);
@@ -37,6 +38,11 @@ pub fn user_input() -> Style {
     Style::default().fg(CHALK_MID)
 }
 
+/// Assistant ghost bar (very dim warm amber)
+pub fn assistant_bar() -> Style {
+    Style::default().fg(GHOST_BAR)
+}
+
 /// Assistant prose in the history
 pub fn assistant_text() -> Style {
     Style::default().fg(CHALK)
@@ -45,11 +51,6 @@ pub fn assistant_text() -> Style {
 /// System/progress messages
 pub fn system_output() -> Style {
     Style::default().fg(ASH_TEXT)
-}
-
-/// Tool call success (lichen green)
-pub fn success() -> Style {
-    Style::default().fg(LICHEN)
 }
 
 /// Error text
@@ -72,17 +73,7 @@ pub fn code_scribe() -> Style {
     Style::default().fg(Color::Rgb(100, 72, 28))
 }
 
-/// Streaming code preview content (not yet executed) — one step dimmer than code_content
-pub fn code_streaming() -> Style {
-    Style::new().fg(Color::Rgb(90, 90, 80)) // ASH_TEXT
-}
-
-/// Streaming code preview chrome (│) — subtler than normal code chrome
-pub fn code_streaming_chrome() -> Style {
-    Style::new().fg(Color::Rgb(31, 30, 28)) // BORDER_FAINT
-}
-
-/// Code block header (▶ python, ▼ python)
+/// Code block header (▶ code, ▼ code)
 pub fn code_header() -> Style {
     Style::default().fg(ASH_MID)
 }
@@ -112,16 +103,6 @@ pub fn input_border() -> Style {
     Style::default().fg(ASH)
 }
 
-/// "waiting for agent..." text
-pub fn waiting() -> Style {
-    Style::default().fg(ASH_MID)
-}
-
-/// Spinner character
-pub fn spinner() -> Style {
-    Style::default().fg(SODIUM)
-}
-
 /// "lash" title in status bar
 pub fn app_title() -> Style {
     Style::default().fg(SODIUM).add_modifier(Modifier::BOLD)
@@ -134,11 +115,6 @@ pub fn model_name() -> Style {
 
 /// Status bar separator ( · )
 pub fn status_separator() -> Style {
-    Style::default().fg(ASH_MID)
-}
-
-/// Status text next to spinner
-pub fn status_text() -> Style {
     Style::default().fg(ASH_MID)
 }
 
@@ -155,11 +131,6 @@ pub fn history_bg() -> Style {
 /// System message text (e.g. /help output)
 pub fn system_message() -> Style {
     Style::default().fg(ASH_TEXT)
-}
-
-/// Scroll mode indicator in status bar
-pub fn scroll_indicator() -> Style {
-    Style::default().fg(SODIUM).add_modifier(Modifier::BOLD)
 }
 
 /// Markdown heading (bold + sodium)

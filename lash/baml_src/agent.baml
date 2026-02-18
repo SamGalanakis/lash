@@ -161,6 +161,23 @@ Use `create_task()`, `tasks()`, `get_task()`, `update_task()`, and `tasks_summar
 `create_task()` and `update_task()` return `Task` objects with convenience methods: `.start()`, `.done()`, `.cancel()`, `.delete()`, `.block(*ids)`, `.wait_on(*ids)`, `.update(**kw)`. `tasks()` returns a plain `list[Task]` you can filter with comprehensions.
 "#
 
+template_string PlanGuide() #"
+## Plan Mode
+
+Use `enter_plan_mode()` when a task benefits from exploration before execution.
+
+**When to use:** Multi-file changes, unfamiliar codebases, tasks with multiple approaches, complex refactors.
+**Skip for:** Simple fixes, single-file changes, clear instructions.
+
+**Workflow:**
+1. `plan_file = enter_plan_mode()` — returns plan file path, enters plan mode
+2. Explore: read_file, glob, grep to understand patterns and architecture
+3. Write your plan to plan_file using write_file
+4. `exit_plan_mode()` — shows plan to user for approval
+   - Approved → context resets, you execute with a clean window + plan inlined
+   - Rejected → user may provide feedback, continue planning
+"#
+
 template_string SkillsGuide() #"
 ## Skills
 
@@ -198,11 +215,13 @@ template_string ToolGuide(tool_names: string[]) #"
 {% endif %}
 "#
 
-function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, tool_names: string[], project_instructions: string, user_images: image[], include_soul: bool, headless: bool, has_history: bool) -> string {
+function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, tool_names: string[], project_instructions: string, user_images: image[], include_soul: bool, headless: bool, has_history: bool, preamble: string, soul: string) -> string {
   client DefaultClient
   prompt #"
     {{ _.role("system") }}
-    {% if headless %}
+    {% if preamble %}
+    {{ preamble }}
+    {% elif headless %}
     You are an AI coding agent running in non-interactive (headless) mode. Complete the task fully and call `done()` with your result. There is no user to interact with — do not ask questions or wait for input.
     {% else %}
     You are an AI coding assistant operating in a persistent Python REPL with tool access.
@@ -213,7 +232,9 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
 
     {{ context }}
 
-    {% if include_soul %}
+    {% if soul %}
+    {{ soul }}
+    {% elif include_soul %}
     {{ Soul() }}
     {% endif %}
 
@@ -255,6 +276,9 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
     Tools are Python functions available as globals. Call them directly — the REPL handles async for you.
 
     {{ ToolGuide(tool_names) }}
+    {% if not headless %}
+    {{ PlanGuide() }}
+    {% endif %}
 
     ## Available Tools
 
@@ -284,7 +308,6 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
     - `_history` — full-fidelity archive of all previous turns (older turns are **dropped from context entirely**, not summarized — `_history` is the only way to access them). Key methods: `_history.user_messages()` (what the user asked), `_history.search("pattern")` (regex over code+output), `_history[i]` (specific turn), `_history.summary()` (overview). **Always check `_history.user_messages()` to recall the user's actual requests.**
     {% endif %}
     - `_mem` — persistent key-value memory that survives context pruning. Methods: `_mem.set(key, description, value)` (store anything, stringified), `_mem.get(key)` (retrieve value), `_mem.all()` (list keys + descriptions + turn numbers), `_mem.search("pattern")` (regex over keys, descriptions, values), `_mem.since(turn)` (entries from turn N onward), `_mem.recent(n)` (entries from last n turns), `_mem.delete(key)`.
-
     {% if project_instructions %}
     ## Project Instructions
 
@@ -335,18 +358,24 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
   "#
 }
 
-function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, tool_names: string[], project_instructions: string, user_images: image[], include_soul: bool, headless: bool, has_history: bool) -> string {
+function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, tool_names: string[], project_instructions: string, user_images: image[], include_soul: bool, headless: bool, has_history: bool, preamble: string, soul: string) -> string {
   client DefaultClient
   prompt #"
     {{ _.role("system") }}
+    {% if preamble %}
+    {{ preamble }}
+    {% else %}
     You are a sub-agent working on a specific task. You have a persistent Python REPL and tool access.
     You are a sub-agent inside **lash**, a terminal-based AI coding agent. You have a persistent Python REPL and tool access. Complete your assigned task and return results via `done()`.
+    {% endif %}
 
     ## Environment
 
     {{ context }}
 
-    {% if include_soul %}
+    {% if soul %}
+    {{ soul }}
+    {% elif include_soul %}
     {{ Soul() }}
     {% endif %}
 
@@ -418,7 +447,7 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
     - `_history` — full-fidelity archive of all previous turns (older turns are **dropped from context entirely**, not summarized — `_history` is the only way to access them). Key methods: `_history.user_messages()` (what the user asked), `_history.search("pattern")` (regex over code+output), `_history[i]` (specific turn), `_history.summary()` (overview). **Always check `_history.user_messages()` to recall the user's actual requests.**
     {% endif %}
     - `_mem` — persistent key-value memory that survives context pruning. Methods: `_mem.set(key, description, value)` (store anything, stringified), `_mem.get(key)` (retrieve value), `_mem.all()` (list keys + descriptions + turn numbers), `_mem.search("pattern")` (regex over keys, descriptions, values), `_mem.since(turn)` (entries from turn N onward), `_mem.recent(n)` (entries from last n turns), `_mem.delete(key)`.
-
+    - `_history` and `_mem` may contain data inherited from the parent agent. Use `_history.search("pattern")`, `_history.summary()`, `_mem.search("pattern")`, `_mem.all()` to access the parent's accumulated knowledge without needing it repeated in your prompt.
     {% if project_instructions %}
     ## Project Instructions
 

@@ -1,8 +1,7 @@
-use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use lash::{AgentEvent, Store, TokenUsage};
+use lash_core::{AgentEvent, Store, TokenUsage};
 
 use crate::command;
 use crate::markdown;
@@ -61,15 +60,12 @@ pub enum SuggestionKind {
 }
 
 /// A renderable block in the scrollable history.
-#[allow(dead_code)]
 pub enum DisplayBlock {
     UserInput(String),
     AssistantText(String),
     CodeBlock {
         code: String,
-        expanded: bool,
         /// If true, this block is a continuation of a prior code-block group.
-        /// In collapsed mode it is hidden; the group leader shows total lines.
         continuation: bool,
     },
     ToolCall {
@@ -103,10 +99,6 @@ pub enum DisplayBlock {
         success: bool,
         /// Whether this is the last in a consecutive sequence (uses └─ instead of ├─).
         is_last: bool,
-    },
-    /// Live task list (bordered inline display).
-    TaskList {
-        tasks: Vec<TaskSnapshot>,
     },
     Splash,
 }
@@ -177,45 +169,46 @@ fn normalize_stream_text(text: &str) -> String {
 impl DisplayBlock {
     /// Number of visual lines this block takes when rendered at `width` columns.
     /// `viewport_height` is needed for Splash centering; pass 0 for non-Splash blocks.
-    pub fn height(&self, code_expanded: bool, width: usize, viewport_height: usize) -> usize {
+    ///
+    /// `expand_level`: 0 = ghost fold, 1 = compact plus, 2 = full.
+    pub fn height(&self, expand_level: u8, width: usize, viewport_height: usize) -> usize {
         match self {
             DisplayBlock::UserInput(s) => {
-                // Left-aligned with "\u{2590} " prefix (2 chars) + 1 slack + blank line
-                wrapped_text_height(s, width, 3) + 1
+                // Left-aligned with "\u{2590} " prefix (2 chars) + 1 slack
+                wrapped_text_height(s, width, 3)
             }
-            DisplayBlock::AssistantText(s) => markdown::markdown_height(s, width),
+            DisplayBlock::AssistantText(s) => markdown::markdown_height(s, width.saturating_sub(2)),
             DisplayBlock::CodeBlock {
-                code,
-                expanded,
-                continuation,
+                code, continuation, ..
             } => {
-                let show = if code_expanded { *expanded } else { false };
-                if show {
-                    // "│ " prefix (2 chars) on code lines
+                if expand_level >= 2 {
+                    // Full: show actual code lines
                     wrapped_text_height(code, width, 2)
-                } else if *continuation {
-                    0 // hidden in collapsed mode — leader shows total
                 } else {
-                    1 // collapsed single line
+                    // Level 0 and 1: code blocks hidden
+                    let _ = continuation;
+                    0
                 }
             }
-            DisplayBlock::ToolCall { .. } => {
-                if code_expanded {
-                    1
-                } else {
-                    0
+            DisplayBlock::ToolCall { continuation, .. } => {
+                match expand_level {
+                    0 => {
+                        // Ghost fold: first in group = 1 (summary line), continuation = 0 (absorbed)
+                        if *continuation { 0 } else { 1 }
+                    }
+                    _ => 1, // Level 1 and 2: individual tool call lines
                 }
             }
             DisplayBlock::CodeOutput { output, error } => {
                 let mut h = 0;
-                if code_expanded && !output.is_empty() {
+                if expand_level >= 2 && !output.is_empty() {
                     h += wrapped_text_height(output, width, 2);
                 }
                 if let Some(err) = error {
-                    if code_expanded {
+                    if expand_level >= 2 {
                         h += wrapped_text_height(err, width, 2);
                     } else {
-                        h += 1; // collapsed error summary
+                        h += 1; // error summary at levels 0 and 1
                     }
                 }
                 h
@@ -228,18 +221,14 @@ impl DisplayBlock {
                 if let Some(err) = error {
                     h += wrapped_text_height(err, width, 2);
                 }
-                h += 1; // bottom border
                 h
             }
             DisplayBlock::Error(msg) => wrapped_line_height(&format!("Error: {}", msg), width),
-            DisplayBlock::SystemMessage(s) => wrapped_text_height(s, width, 0) + 1, // +1 blank after
+            DisplayBlock::SystemMessage(s) => wrapped_text_height(s, width, 0),
             DisplayBlock::SubAgentResult { .. } => 2, // task line + status line
             DisplayBlock::PlanContent(s) => {
                 // borders (2) + title line is part of top border + markdown content height
                 2 + markdown::markdown_height(s, width.saturating_sub(2))
-            }
-            DisplayBlock::TaskList { tasks } => {
-                2 + tasks.len() // top border + tasks + bottom border
             }
             DisplayBlock::Splash => {
                 // Splash fills the entire viewport (centered content + top/bottom padding)
@@ -254,7 +243,7 @@ pub struct App {
     pub input: String,
     pub cursor_pos: usize,
     pub scroll_offset: usize,
-    pub code_expanded: bool,
+    pub expand_level: u8,
     pub running: bool,
     pub model: String,
     pub iteration: usize,
@@ -291,14 +280,17 @@ pub struct App {
     pub pending_images: Vec<Vec<u8>>,
     /// Live streaming output lines from tool execution (e.g. bash).
     pub streaming_output: Vec<String>,
+    /// Whether to render live `tool_output` chunks in history.
+    /// Default: off (prevents arbitrary log chatter from polluting TUI).
+    pub show_live_tool_output: bool,
     /// Loaded skills registry.
     pub skills: SkillRegistry,
     /// Skill picker: list of (name, description) when browsing skills.
     pub skill_picker: Vec<(String, String)>,
     /// Currently selected skill index.
     pub skill_picker_idx: usize,
-    /// Messages queued while agent is running, sent sequentially on completion.
-    pub message_queue: VecDeque<String>,
+    /// Message queued while agent is running, sent on completion.
+    pub queued_message: Option<String>,
     /// Active agent prompt (ask() dialog).
     pub prompt: Option<PromptState>,
     /// Whether the terminal window is currently focused.
@@ -327,11 +319,13 @@ pub struct App {
     pub task_all_done_at: Option<std::time::Instant>,
     /// Active delegate sub-agent: (name, task description, started_at).
     pub active_delegate: Option<(String, String, std::time::Instant)>,
+    /// Set when exit_plan_mode is approved — triggers soft context reset on next turn.
+    pub plan_approved: bool,
 }
 
 impl App {
     pub fn new(model: String, session_name: String, store: Option<Arc<Store>>) -> Self {
-        let context_window = lash::model_info::context_window(&model);
+        let context_window = lash_core::model_info::context_window(&model);
         let cwd = {
             let home = std::env::var("HOME").unwrap_or_default();
             let dir = std::env::current_dir()
@@ -348,7 +342,7 @@ impl App {
             input: String::new(),
             cursor_pos: 0,
             scroll_offset: 0,
-            code_expanded: false,
+            expand_level: 0,
             running: false,
             model,
             iteration: 0,
@@ -369,10 +363,17 @@ impl App {
             height_cache_vh: 0,
             pending_images: Vec::new(),
             streaming_output: Vec::new(),
+            show_live_tool_output: matches!(
+                std::env::var("LASH_SHOW_TOOL_OUTPUT")
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "1" | "true" | "yes" | "on"
+            ),
             skills: SkillRegistry::load(),
             skill_picker: Vec::new(),
             skill_picker_idx: 0,
-            message_queue: VecDeque::new(),
+            queued_message: None,
             prompt: None,
             focused: true,
             token_usage: TokenUsage::default(),
@@ -387,6 +388,7 @@ impl App {
             task_tray: Vec::new(),
             task_all_done_at: None,
             active_delegate: None,
+            plan_approved: false,
         }
     }
 
@@ -415,7 +417,7 @@ impl App {
 
     /// Check whether a new CodeBlock belongs to an existing code-block group.
     /// Returns `true` if there is a prior CodeBlock with only ToolCall /
-    /// CodeOutput / TaskList blocks between it and the end (no user-facing
+    /// CodeOutput blocks between it and the end (no user-facing
     /// boundary like AssistantText, Error, UserInput, etc.).
     fn is_code_continuation(&self) -> bool {
         for block in self.blocks.iter().rev() {
@@ -433,11 +435,13 @@ impl App {
         match event {
             AgentEvent::TextDelta { content } => {
                 self.pending_text.push_str(&content);
-                self.pending_text = normalize_stream_text(&self.pending_text);
+                // Don't normalize here — stripping trailing newlines between
+                // deltas breaks code fences (```python\n + # comment → ```python# comment).
+                // Normalization happens at flush points (CodeBlock, Done).
                 self.scroll_to_bottom();
             }
             AgentEvent::CodeBlock { code } => {
-                self.status_text = Some("python".into());
+                self.status_text = Some("code".into());
                 let flushed = normalize_stream_text(&self.pending_text);
                 if !flushed.is_empty() {
                     self.blocks.push(DisplayBlock::AssistantText(flushed));
@@ -449,7 +453,6 @@ impl App {
                     let continuation = self.is_code_continuation();
                     self.blocks.push(DisplayBlock::CodeBlock {
                         code: trimmed.to_string(),
-                        expanded: self.code_expanded,
                         continuation,
                     });
                     self.invalidate_height_cache();
@@ -509,12 +512,25 @@ impl App {
                     }
                     self.scroll_to_bottom();
                 } else if kind == "tool_output" {
-                    self.streaming_output.push(text);
-                    self.scroll_to_bottom();
+                    // Explicit policy:
+                    // - live tool output is opt-in via env var
+                    // - only shell-family tool calls can stream text to the TUI
+                    let shell_streaming_active = matches!(
+                        self.status_text.as_deref(),
+                        Some("shell_result") | Some("shell") | Some("shell_output")
+                    );
+                    if self.show_live_tool_output && shell_streaming_active {
+                        self.streaming_output.push(text);
+                        self.scroll_to_bottom();
+                    }
+                } else if kind == "final" {
+                    if !text.trim().is_empty() {
+                        self.blocks.push(DisplayBlock::AssistantText(text));
+                        self.invalidate_height_cache();
+                        self.scroll_to_bottom();
+                    }
                 } else {
-                    self.blocks.push(DisplayBlock::AssistantText(text));
-                    self.invalidate_height_cache();
-                    self.scroll_to_bottom();
+                    // Unknown message kinds are intentionally dropped.
                 }
             }
             AgentEvent::LlmRequest { iteration, .. } => {
@@ -578,21 +594,18 @@ impl App {
         }
     }
 
+    /// Set (or replace) the queued message.
     pub fn queue_message(&mut self, msg: String) {
-        self.message_queue.push_back(msg);
+        self.queued_message = Some(msg);
     }
 
-    pub fn dequeue_message(&mut self) -> Option<String> {
-        self.message_queue.pop_front()
+    /// Take the queued message, clearing it.
+    pub fn take_queued_message(&mut self) -> Option<String> {
+        self.queued_message.take()
     }
 
-    /// Pop last queued message back to editor for editing/removal.
-    pub fn unqueue_last(&mut self) -> Option<String> {
-        self.message_queue.pop_back()
-    }
-
-    pub fn queue_count(&self) -> usize {
-        self.message_queue.len()
+    pub fn has_queued_message(&self) -> bool {
+        self.queued_message.is_some()
     }
 
     /// Reset conversation to initial splash screen.
@@ -604,7 +617,7 @@ impl App {
         self.status_text = None;
         self.pending_images.clear();
         self.streaming_output.clear();
-        self.message_queue.clear();
+        self.queued_message = None;
         self.task_tray.clear();
         self.active_delegate = None;
         self.token_usage = TokenUsage::default();
@@ -641,20 +654,27 @@ impl App {
         path
     }
 
-    /// Toggle code block expansion with scroll anchoring.
+    /// Toggle expand level 0↔1 (ghost fold ↔ compact plus) with scroll anchoring.
+    pub fn cycle_expand(&mut self) {
+        let new_level = if self.expand_level == 0 { 1 } else { 0 };
+        self.set_expand_level(new_level);
+    }
+
+    /// Toggle to/from level 2 (full). If not at 2, set 2; if at 2, set 1.
+    pub fn toggle_full_expand(&mut self) {
+        let new_level = if self.expand_level != 2 { 2 } else { 1 };
+        self.set_expand_level(new_level);
+    }
+
+    /// Set the expand level with scroll anchoring.
     ///
     /// When the user is scrolled to a specific position, we anchor to the block
     /// at the top of the viewport so the same content stays visible after
-    /// code blocks change height.
-    pub fn toggle_code_expand(&mut self) {
-        // When following output (at bottom), just toggle and stay at bottom
+    /// blocks change height.
+    pub fn set_expand_level(&mut self, level: u8) {
+        // When following output (at bottom), just set and stay at bottom
         if self.follow_output {
-            self.code_expanded = !self.code_expanded;
-            for block in &mut self.blocks {
-                if let DisplayBlock::CodeBlock { expanded, .. } = block {
-                    *expanded = self.code_expanded;
-                }
-            }
+            self.expand_level = level;
             self.invalidate_height_cache();
             self.scroll_offset = usize::MAX;
             return;
@@ -682,13 +702,8 @@ impl App {
             }
         };
 
-        // Toggle expansion state
-        self.code_expanded = !self.code_expanded;
-        for block in &mut self.blocks {
-            if let DisplayBlock::CodeBlock { expanded, .. } = block {
-                *expanded = self.code_expanded;
-            }
-        }
+        // Set new level
+        self.expand_level = level;
         self.invalidate_height_cache();
 
         // Restore scroll to keep the anchor block visible
@@ -740,7 +755,12 @@ impl App {
                     id: t.id.clone(),
                     label,
                     status: t.status.clone(),
-                    owner: t.owner.clone(),
+                    // "root" is the primary agent identity; showing it adds noise.
+                    owner: if t.owner == "root" {
+                        String::new()
+                    } else {
+                        t.owner.clone()
+                    },
                     is_blocked,
                 }
             })
@@ -873,8 +893,25 @@ impl App {
         self.height_cache.clear();
         self.height_cache.reserve(self.blocks.len());
         let mut cumulative: usize = 0;
-        for block in &self.blocks {
-            cumulative += block.height(self.code_expanded, width, viewport_height);
+        for (i, block) in self.blocks.iter().enumerate() {
+            // Blank line before UserInput to separate turns (matches render_block)
+            if i > 0
+                && matches!(block, DisplayBlock::UserInput(_))
+                && !matches!(self.blocks[i - 1], DisplayBlock::Splash)
+            {
+                cumulative += 1;
+            }
+            // Blank line before AssistantText (matches render_block breathing line)
+            if i > 0
+                && matches!(block, DisplayBlock::AssistantText(_))
+                && !matches!(
+                    self.blocks[i - 1],
+                    DisplayBlock::AssistantText(_) | DisplayBlock::Splash
+                )
+            {
+                cumulative += 1;
+            }
+            cumulative += block.height(self.expand_level, width, viewport_height);
             self.height_cache.push(cumulative);
         }
     }
@@ -1630,70 +1667,82 @@ mod tests {
             duration_ms: 50,
             continuation: false,
         };
-        assert_eq!(block.height(false, 80, 0), 0);
+        // Level 0: first in group = 1 (ghost fold summary)
+        assert_eq!(block.height(0, 80, 0), 1);
+        // Level 1: individual line
+        assert_eq!(block.height(1, 80, 0), 1);
+        // Level 2: individual line
+        assert_eq!(block.height(2, 80, 0), 1);
+
         let cont = DisplayBlock::ToolCall {
             name: "read_file".into(),
             success: true,
             duration_ms: 50,
             continuation: true,
         };
-        assert_eq!(cont.height(false, 80, 0), 0); // hidden when collapsed
-        assert_eq!(cont.height(true, 80, 0), 1); // visible when expanded
+        assert_eq!(cont.height(0, 80, 0), 0); // absorbed into ghost fold
+        assert_eq!(cont.height(1, 80, 0), 1); // visible at level 1
+        assert_eq!(cont.height(2, 80, 0), 1); // visible at level 2
     }
 
     #[test]
-    fn text_delta_normalization_is_applied_incrementally() {
+    fn text_delta_accumulates_raw() {
         let mut app = App::new("test-model".into(), "test".into(), None);
         app.handle_agent_event(AgentEvent::TextDelta {
             content: "\n\nfirst\n".into(),
         });
-        assert_eq!(app.pending_text, "first");
+        // Raw accumulation — no normalization until flush
+        assert_eq!(app.pending_text, "\n\nfirst\n");
 
         app.handle_agent_event(AgentEvent::TextDelta {
             content: "\n\n\nsecond\n".into(),
         });
-        assert_eq!(app.pending_text, "first\n\nsecond");
+        assert_eq!(app.pending_text, "\n\nfirst\n\n\n\nsecond\n");
+    }
+
+    #[test]
+    fn text_delta_code_fence_preserved() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: "text\n\n```python\n".into(),
+        });
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: "# comment\n".into(),
+        });
+        // The newline between ```python and # comment must be preserved
+        assert!(app.pending_text.contains("```python\n# comment"));
+    }
+
+    #[test]
+    fn final_message_event_is_rendered() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        app.handle_agent_event(AgentEvent::Message {
+            text: "final output".into(),
+            kind: "final".into(),
+        });
+        assert!(matches!(
+            app.blocks.last(),
+            Some(DisplayBlock::AssistantText(text)) if text == "final output"
+        ));
     }
 
     #[test]
     fn display_block_error_height() {
         let block = DisplayBlock::Error("short error".into());
-        assert_eq!(block.height(false, 80, 0), 1);
+        assert_eq!(block.height(0, 80, 0), 1);
     }
 
     #[test]
     fn display_block_user_input_height() {
-        // "hello" with 2-char prefix = 1 line + 1 blank after = 2
+        // "hello" with 2-char prefix = 1 line
         let block = DisplayBlock::UserInput("hello".into());
-        assert_eq!(block.height(false, 80, 0), 2);
-    }
-
-    #[test]
-    fn display_block_task_list_height() {
-        let tasks = vec![
-            TaskSnapshot {
-                id: "01".into(),
-                label: "A".into(),
-                status: "pending".into(),
-                owner: String::new(),
-                is_blocked: false,
-            },
-            TaskSnapshot {
-                id: "02".into(),
-                label: "B".into(),
-                status: "pending".into(),
-                owner: String::new(),
-                is_blocked: false,
-            },
-        ];
-        let block = DisplayBlock::TaskList { tasks };
-        assert_eq!(block.height(false, 80, 0), 4); // top border + 2 tasks + bottom border
+        assert_eq!(block.height(0, 80, 0), 1);
     }
 
     #[test]
     fn display_block_splash_height() {
         let block = DisplayBlock::Splash;
-        assert_eq!(block.height(false, 80, 24), 24);
+        assert_eq!(block.height(0, 80, 24), 24);
     }
 
     #[test]
@@ -1709,7 +1758,6 @@ mod tests {
         ));
         app.blocks.push(DisplayBlock::CodeBlock {
             code: "let x = 1;\nlet y = 2;\nlet z = 3;\nprintln!();\nlet a = 4;\nlet b = 5;".into(),
-            expanded: false,
             continuation: false,
         });
         app.blocks.push(DisplayBlock::ToolCall {
@@ -1726,7 +1774,6 @@ mod tests {
             .push(DisplayBlock::AssistantText("Response 3".into()));
         app.blocks.push(DisplayBlock::CodeBlock {
             code: "fn main() {\n    println!(\"hello\");\n}".into(),
-            expanded: false,
             continuation: false,
         });
         app.blocks.push(DisplayBlock::AssistantText(
@@ -1736,7 +1783,7 @@ mod tests {
         let width = 80;
         let vh = 24;
 
-        // Build the height cache (collapsed)
+        // Build the height cache (level 0 = ghost fold)
         app.ensure_height_cache_pub(width, vh);
 
         // Verify we have blocks and cache
@@ -1752,28 +1799,29 @@ mod tests {
         app.scroll_offset = block4_start;
         app.follow_output = false;
 
-        // Toggle to expanded
-        app.toggle_code_expand();
+        // Cycle to level 1 (compact plus)
+        app.cycle_expand();
+        assert_eq!(app.expand_level, 1);
 
         let new_cache = app.height_cache_snapshot().to_vec();
         let new_block4_start = new_cache[3];
 
         // The scroll should now point to the same block (block 4)
-        // which starts at new_block4_start in the expanded layout
         assert_eq!(
             app.scroll_offset, new_block4_start,
-            "scroll should track block 4 start after expanding"
+            "scroll should track block 4 start after expanding to level 1"
         );
 
-        // Toggle back to collapsed
-        app.toggle_code_expand();
+        // Cycle back to level 0
+        app.cycle_expand();
+        assert_eq!(app.expand_level, 0);
 
         let final_cache = app.height_cache_snapshot().to_vec();
         let final_block4_start = final_cache[3];
 
         assert_eq!(
             app.scroll_offset, final_block4_start,
-            "scroll should track block 4 start after collapsing back"
+            "scroll should track block 4 start after collapsing back to level 0"
         );
     }
 
@@ -1789,7 +1837,6 @@ mod tests {
         ));
         app.blocks.push(DisplayBlock::CodeBlock {
             code: "let x = 1;\nlet y = 2;\nlet z = 3;\nprintln!();\nlet a = 4;\nlet b = 5;".into(),
-            expanded: false,
             continuation: false,
         });
         app.blocks.push(DisplayBlock::ToolCall {
@@ -1817,8 +1864,8 @@ mod tests {
         app.scroll_offset = block5_start;
         app.follow_output = false;
 
-        // Toggle to expanded
-        app.toggle_code_expand();
+        // Cycle to level 1
+        app.cycle_expand();
 
         let new_cache = app.height_cache_snapshot().to_vec();
         let new_block5_start = new_cache[4];
@@ -1828,8 +1875,8 @@ mod tests {
             "scroll should track block 5 start after expanding (with Splash)"
         );
 
-        // Toggle back
-        app.toggle_code_expand();
+        // Cycle back to level 0
+        app.cycle_expand();
         let final_cache = app.height_cache_snapshot().to_vec();
         let final_block5_start = final_cache[4];
 
@@ -1849,7 +1896,6 @@ mod tests {
             .push(DisplayBlock::AssistantText("Response 1".into()));
         app.blocks.push(DisplayBlock::CodeBlock {
             code: "line1\nline2\nline3\nline4\nline5".into(),
-            expanded: false,
             continuation: false,
         });
         app.blocks
@@ -1863,8 +1909,8 @@ mod tests {
         app.scroll_offset = usize::MAX;
         app.ensure_height_cache_pub(width, vh);
 
-        // Toggle to expanded
-        app.toggle_code_expand();
+        // Cycle to level 1
+        app.cycle_expand();
 
         // scroll_offset should be usize::MAX (stay at bottom)
         assert_eq!(
@@ -1874,8 +1920,8 @@ mod tests {
         );
         assert!(app.follow_output, "follow_output should remain true");
 
-        // Toggle back to collapsed
-        app.toggle_code_expand();
+        // Cycle back to level 0
+        app.cycle_expand();
         assert_eq!(
             app.scroll_offset,
             usize::MAX,
@@ -1894,7 +1940,6 @@ mod tests {
             .push(DisplayBlock::AssistantText("Response 1".into()));
         app.blocks.push(DisplayBlock::CodeBlock {
             code: "line1\nline2\nline3".into(),
-            expanded: false,
             continuation: false,
         });
         app.blocks
@@ -1917,8 +1962,8 @@ mod tests {
             "cache should be empty"
         );
 
-        // Toggle - should still anchor correctly despite stale cache
-        app.toggle_code_expand();
+        // Cycle - should still anchor correctly despite stale cache
+        app.cycle_expand();
 
         // Rebuild cache to check where block 3 is now
         app.ensure_height_cache_pub(width, vh);

@@ -18,7 +18,7 @@ impl ToolProvider for Grep {
         vec![ToolDefinition {
             name: "grep".into(),
             description:
-                "Search file contents for a regex pattern. Returns matching lines with file paths and line numbers (limit 100)."
+                "Search file contents for a regex pattern (Rust regex syntax: use | for alternation, not \\|). Returns matching lines with file paths and line numbers (limit 100)."
                     .into(),
             params: vec![
                 ToolParam::typed("pattern", "str"),

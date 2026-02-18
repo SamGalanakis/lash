@@ -2,11 +2,9 @@ mod app;
 mod command;
 mod event;
 mod markdown;
-#[allow(dead_code)]
 mod session_log;
 mod setup;
 mod skill;
-#[allow(dead_code)]
 mod theme;
 mod ui;
 mod util;
@@ -18,14 +16,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use clap::Parser;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
-use lash::agent::{Message, MessageRole, Part, PartKind, PruneState};
-use lash::provider::LashConfig;
-use lash::tools::{
-    CompositeTools, DelegateDeep, DelegateSearch, DelegateTask, DiffFile, EditFile, FetchUrl,
-    FindReplace, Glob, Grep, Ls, ReadFile, Shell, SkillStore, TaskStore, ViewMessage, WebSearch,
-    WriteFile,
+use lash_core::agent::{Message, MessageRole, Part, PartKind, PruneState};
+use lash_core::provider::{LashConfig, Provider};
+use lash_core::tools::{
+    AgentCall, CompositeTools, DiffFile, EditFile, FetchUrl, FindReplace, Glob, Grep, Ls, PlanMode,
+    ReadFile, Shell, SkillStore, TaskStore, ViewMessage, WebSearch, WriteFile,
 };
-use lash::*;
+use lash_core::*;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -68,9 +65,8 @@ struct Args {
     print_prompt: Option<String>,
 }
 
-#[allow(dead_code)]
 struct SessionLogger {
-    file: std::fs::File,
+    file: std::io::BufWriter<std::fs::File>,
     session_id: String,
     session_name: String,
 }
@@ -84,7 +80,7 @@ impl SessionLogger {
         let now = chrono::Local::now();
         let filename = format!("{}.jsonl", now.format("%Y%m%d_%H%M%S"));
         let path = dir.join(&filename);
-        let file = std::fs::File::create(&path)?;
+        let file = std::io::BufWriter::new(std::fs::File::create(&path)?);
         let session_id = uuid::Uuid::new_v4().to_string();
         let session_name = generate_session_name(&dir);
 
@@ -109,7 +105,6 @@ impl SessionLogger {
         use std::io::Write;
         serde_json::to_writer(&mut self.file, value)?;
         self.file.write_all(b"\n")?;
-        self.file.flush()?;
         Ok(())
     }
 
@@ -234,7 +229,7 @@ async fn main() -> anyhow::Result<()> {
                     base_url: args.base_url.clone(),
                 },
                 tavily_api_key: args.tavily_api_key.clone(),
-                delegate_models: None,
+                agent_models: None,
             }
         } else if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
             // ANTHROPIC_API_KEY env var → use as direct Claude bearer token
@@ -245,7 +240,7 @@ async fn main() -> anyhow::Result<()> {
                     expires_at: u64::MAX,
                 },
                 tavily_api_key: args.tavily_api_key.clone(),
-                delegate_models: None,
+                agent_models: None,
             }
         } else {
             setup::run_setup().await?
@@ -315,6 +310,7 @@ async fn main() -> anyhow::Result<()> {
         .add(Glob)
         .add(Grep)
         .add(Ls)
+        .add(PlanMode::new())
         .add(ViewMessage::new(Arc::clone(&store)))
         .add_arc(Arc::clone(&task_store) as Arc<dyn ToolProvider>);
     if let Some(ref key) = lash_config.tavily_api_key {
@@ -339,43 +335,20 @@ async fn main() -> anyhow::Result<()> {
     let tools: Arc<dyn ToolProvider> = Arc::new(
         CompositeTools::new()
             .add_arc(Arc::clone(&tools_with_skills))
-            .add(DelegateSearch::new(
-                Arc::clone(&base_tools),
-                &config,
-                lash_config.delegate_models.clone(),
-                Arc::clone(&store),
-                root_cancel.clone(),
-                "root".to_string(),
-            ))
-            .add(DelegateTask::new(
+            .add(AgentCall::new(
                 Arc::clone(&tools_with_skills),
                 &config,
-                lash_config.delegate_models.clone(),
-                Arc::clone(&store),
+                lash_config.agent_models.clone(),
                 root_cancel.clone(),
-                "root".to_string(),
-            ))
-            .add(DelegateDeep::new(
-                Arc::clone(&tools_with_skills),
-                &config,
-                lash_config.delegate_models.clone(),
-                Arc::clone(&store),
-                root_cancel.clone(),
-                "root".to_string(),
             )),
     );
     let session = Session::new(tools, "root").await?;
 
-    let agent = Agent::new(
-        session,
-        config,
-        Arc::clone(&store),
-        Some("root".to_string()),
-    );
+    let agent = Agent::new(session, config, Some("root".to_string()));
 
     // ── Headless mode: skip TUI, run agent, print to stdout ──
     if let Some(prompt) = args.print_prompt {
-        return run_headless(agent, prompt, Arc::clone(&store)).await;
+        return run_headless(agent, prompt).await;
     }
 
     let mut logger = SessionLogger::new(&model)?;
@@ -420,6 +393,7 @@ async fn main() -> anyhow::Result<()> {
         agent,
         &mut logger,
         &args,
+        lash_config.provider.clone(),
         model,
         session_name,
         Arc::clone(&store),
@@ -446,81 +420,78 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Run the agent headlessly: send prompt, consume events, print final response to stdout.
-async fn run_headless(mut agent: Agent, prompt: String, _store: Arc<Store>) -> anyhow::Result<()> {
-    let prompt = transform_at_references(&prompt);
+async fn run_headless(agent: Agent, prompt: String) -> anyhow::Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    let history = vec![Message {
-        id: "m0".to_string(),
-        role: MessageRole::User,
-        parts: vec![Part {
-            id: "m0.p0".to_string(),
-            kind: PartKind::Text,
-            content: prompt,
-            prune_state: PruneState::Intact,
-        }],
-    }];
+    struct HeadlessSink {
+        had_error: AtomicBool,
+    }
 
-    let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
-    let cancel = CancellationToken::new();
-
-    // Spawn agent run
-    let (return_tx, return_rx) = tokio::sync::oneshot::channel::<AgentRunResult>();
-    let msgs = history.clone();
-    tokio::spawn(async move {
-        let (new_history, final_turn) = agent.run(msgs, Vec::new(), event_tx, cancel, 0).await;
-        let _ = return_tx.send(AgentRunResult {
-            agent,
-            history: new_history,
-            turn: final_turn,
-        });
-    });
-
-    let mut exit_code = 0i32;
-
-    // Consume events
-    while let Some(event) = event_rx.recv().await {
-        match event {
-            AgentEvent::Message { text, kind } => {
-                if kind == "final" {
-                    println!("{}", text);
+    #[async_trait::async_trait]
+    impl EventSink for HeadlessSink {
+        async fn emit(&self, event: AgentEvent) {
+            match event {
+                AgentEvent::Error { message } => {
+                    eprintln!("error: {}", message);
+                    self.had_error.store(true, Ordering::Relaxed);
                 }
+                AgentEvent::Prompt { response_tx, .. } => {
+                    // No human available in headless mode.
+                    let _ = response_tx.send(String::new());
+                }
+                _ => {}
             }
-            AgentEvent::ToolCall { .. } => {}
-            AgentEvent::Error { message } => {
-                eprintln!("error: {}", message);
-                exit_code = 1;
-            }
-            AgentEvent::Prompt { response_tx, .. } => {
-                // No human available — send empty string
-                let _ = response_tx.send(String::new());
-            }
-            AgentEvent::Done => break,
-            // Ignore streaming deltas, code blocks, token usage, etc.
-            _ => {}
         }
     }
 
-    // Wait for agent task to finish
-    let _ = return_rx.await;
+    let prompt = transform_at_references(&prompt);
+    let mut runtime = RuntimeEngine::from_agent(agent, AgentStateEnvelope::default());
+    let sink = HeadlessSink {
+        had_error: AtomicBool::new(false),
+    };
+    let result = runtime
+        .run_turn(
+            TurnInput {
+                user_message: prompt,
+                images_png: Vec::new(),
+                mode: Some(RunMode::Normal),
+                plan_file: None,
+            },
+            &sink,
+            CancellationToken::new(),
+        )
+        .await;
 
-    if exit_code != 0 {
-        std::process::exit(exit_code);
+    if let Some(text) = result.final_message {
+        println!("{}", text);
+    }
+    if sink.had_error.load(Ordering::Relaxed) {
+        std::process::exit(1);
     }
     Ok(())
 }
 
-/// Returned by the spawned agent task so we can reclaim ownership.
-struct AgentRunResult {
-    agent: Agent,
-    history: Vec<Message>,
-    turn: usize,
+/// Returned by the spawned runtime task so we can reclaim ownership.
+struct RuntimeRunResult {
+    runtime: RuntimeEngine,
+    result: TurnResult,
+}
+
+struct AppEventSink {
+    tx: mpsc::UnboundedSender<AppEvent>,
+}
+
+#[async_trait::async_trait]
+impl EventSink for AppEventSink {
+    async fn emit(&self, event: AgentEvent) {
+        let _ = self.tx.send(AppEvent::Agent(event));
+    }
 }
 
 /// Build the controls text shown by /controls.
 fn controls_text() -> String {
     [
         "Controls:",
-        "  Shift+Tab          Toggle plan mode",
         "  Esc                Cancel agent (while running)",
         "  Enter              Queue message (while running)",
         "  Backspace          Unqueue last (while running)",
@@ -530,7 +501,8 @@ fn controls_text() -> String {
         "  Ctrl+V             Paste image (or text fallback)",
         "  Ctrl+Shift+V       Paste text only",
         "  Ctrl+Y             Copy last response to clipboard",
-        "  Ctrl+O             Toggle code block expansion",
+        "  Ctrl+O             Cycle tool expansion (ghost ↔ compact)",
+        "  Ctrl+Shift+O       Full expansion (code + stdout)",
         "  Up / Down          Input history",
         "  Shift+Drag         Select text (terminal native)",
         "  Ctrl+C             Quit",
@@ -568,7 +540,6 @@ fn help_text(skills: &skill::SkillRegistry) -> String {
     lines.extend([
         String::new(),
         "Shortcuts:".to_string(),
-        "  Shift+Tab          Toggle plan mode".to_string(),
         "  Esc                Cancel agent (while running)".to_string(),
         "  Ctrl+U / Ctrl+D    Scroll half-page up / down".to_string(),
         "  PgUp / PgDn        Scroll page up / down".to_string(),
@@ -576,7 +547,8 @@ fn help_text(skills: &skill::SkillRegistry) -> String {
         "  Ctrl+V             Paste image (or text fallback)".to_string(),
         "  Ctrl+Shift+V       Paste text only".to_string(),
         "  Ctrl+Y             Copy last response to clipboard".to_string(),
-        "  Ctrl+O             Toggle code block expansion".to_string(),
+        "  Ctrl+O             Cycle tool expansion (ghost \u{2194} compact)".to_string(),
+        "  Ctrl+Shift+O       Full expansion (code + stdout)".to_string(),
         "  Shift+Drag         Select text (terminal native)".to_string(),
         "  Up/Down            Input history".to_string(),
         "  Ctrl+C             Quit".to_string(),
@@ -585,20 +557,26 @@ fn help_text(skills: &skill::SkillRegistry) -> String {
     lines.join("\n")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_app(
     mut terminal: DefaultTerminal,
     agent: Agent,
     logger: &mut SessionLogger,
     _args: &Args,
+    provider: Provider,
     model: String,
     session_name: String,
     store: Arc<Store>,
 ) -> anyhow::Result<()> {
     let mut app = App::new(model, session_name, Some(store));
+    app.context_window = provider.context_window(&app.model);
     app.load_history();
     let mut history: Vec<Message> = Vec::new();
     let mut turn_counter: usize = 0;
-    let mut agent = Some(agent);
+    let mut runtime = Some(RuntimeEngine::from_agent(
+        agent,
+        AgentStateEnvelope::default(),
+    ));
 
     // Cancellation token for interrupting a running agent
     let mut cancel_token: Option<CancellationToken> = None;
@@ -654,39 +632,40 @@ async fn run_app(
         }
     });
 
-    // Oneshot for receiving agent back after a run completes
-    let mut agent_return_rx: Option<tokio::sync::oneshot::Receiver<AgentRunResult>> = None;
+    // Oneshot for receiving runtime back after a run completes
+    let mut runtime_return_rx: Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>> = None;
 
     loop {
-        // Check if agent run completed — reclaim agent + updated history
-        if let Some(ref mut rx) = agent_return_rx {
+        // Check if runtime turn completed — reclaim runtime + updated history
+        if let Some(ref mut rx) = runtime_return_rx {
             match rx.try_recv() {
-                Ok(result) => {
-                    agent = Some(result.agent);
-                    history = result.history;
-                    turn_counter = result.turn;
-                    agent_return_rx = None;
+                Ok(done) => {
+                    runtime = Some(done.runtime);
+                    history = done.result.state.messages.clone();
+                    turn_counter = done.result.state.iteration;
+                    app.token_usage = done.result.state.token_usage.clone();
+                    runtime_return_rx = None;
                     cancel_token = None;
 
-                    // Auto-drain: if there are queued messages, send the next one
-                    if let Some(queued_input) = app.dequeue_message() {
+                    // Auto-drain: send queued message
+                    if let Some(queued) = app.take_queued_message() {
                         send_user_message(
-                            queued_input,
+                            queued,
+                            None,
                             Vec::new(),
                             &mut app,
                             logger,
+                            &mut runtime,
                             &mut history,
-                            &mut agent,
-                            &mut agent_return_rx,
+                            &mut runtime_return_rx,
                             &mut cancel_token,
                             &app_tx,
-                            turn_counter,
                         );
                     }
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
                     app.running = false;
-                    agent_return_rx = None;
+                    runtime_return_rx = None;
                     cancel_token = None;
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
@@ -733,9 +712,19 @@ async fn run_app(
                     break;
                 }
 
-                // CTRL+O: toggle code expand (works in all modes)
+                // CTRL+SHIFT+O: toggle full expand (level ↔ 2)
+                // Must check before CTRL+O since uppercase 'O' implies shift
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.modifiers.contains(KeyModifiers::SHIFT)
+                    && key.code == KeyCode::Char('O')
+                {
+                    app.toggle_full_expand();
+                    continue;
+                }
+
+                // CTRL+O: cycle expand (0↔1)
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o') {
-                    app.toggle_code_expand();
+                    app.cycle_expand();
                     continue;
                 }
 
@@ -871,10 +860,21 @@ async fn run_app(
                                         restore_agent_state(
                                             &filename,
                                             &mut history,
-                                            &mut agent,
+                                            &mut runtime,
                                             &mut app,
                                         )
                                         .await;
+                                        if let Some(rt) = runtime.as_mut() {
+                                            rt.set_state(AgentStateEnvelope {
+                                                agent_id: "root".to_string(),
+                                                messages: history.clone(),
+                                                iteration: turn_counter,
+                                                token_usage: app.token_usage.clone(),
+                                                task_state: None,
+                                                subagent_state: None,
+                                                repl_snapshot: None,
+                                            });
+                                        }
 
                                         app.invalidate_height_cache();
                                         app.scroll_to_bottom();
@@ -916,32 +916,6 @@ async fn run_app(
                         }
                         _ => {}
                     }
-                    continue;
-                }
-
-                // Shift+Tab: toggle plan mode (not in prompt/picker)
-                if key.code == KeyCode::BackTab {
-                    app.mode = match app.mode {
-                        app::Mode::Normal => app::Mode::Plan,
-                        app::Mode::Plan => app::Mode::Normal,
-                    };
-                    let mode_label = match app.mode {
-                        app::Mode::Normal => "Switched to normal mode".to_string(),
-                        app::Mode::Plan => {
-                            let path = app.ensure_plan_file();
-                            // Show relative path if possible
-                            let display = std::env::current_dir()
-                                .ok()
-                                .and_then(|cwd| {
-                                    path.strip_prefix(&cwd).ok().map(|p| p.to_path_buf())
-                                })
-                                .unwrap_or_else(|| path.clone());
-                            format!("Switched to plan mode \u{2014} {}", display.display())
-                        }
-                    };
-                    app.blocks.push(DisplayBlock::SystemMessage(mode_label));
-                    app.invalidate_height_cache();
-                    app.scroll_to_bottom();
                     continue;
                 }
 
@@ -1046,16 +1020,26 @@ async fn run_app(
                                 command::Command::Clear => {
                                     app.clear();
                                     history.clear();
-                                    if let Some(ag) = agent.as_mut() {
-                                        let _ = ag.reset_session().await;
+                                    turn_counter = 0;
+                                    app.token_usage = TokenUsage::default();
+                                    if let Some(rt) = runtime.as_mut() {
+                                        let _ = rt.reset_session().await;
+                                        rt.set_state(AgentStateEnvelope {
+                                            agent_id: "root".to_string(),
+                                            messages: history.clone(),
+                                            iteration: turn_counter,
+                                            token_usage: app.token_usage.clone(),
+                                            task_state: None,
+                                            subagent_state: None,
+                                            repl_snapshot: None,
+                                        });
                                     }
                                 }
                                 command::Command::Model(new_model) => {
-                                    if let Some(ag) = agent.as_mut() {
-                                        ag.set_model(new_model.clone());
+                                    if let Some(rt) = runtime.as_mut() {
+                                        rt.set_model(new_model.clone());
                                     }
-                                    app.context_window =
-                                        lash::model_info::context_window(&new_model);
+                                    app.context_window = provider.context_window(&new_model);
                                     app.model = new_model;
                                 }
                                 command::Command::ChangeProvider => {
@@ -1110,10 +1094,21 @@ async fn run_app(
                                                 restore_agent_state(
                                                     &filename,
                                                     &mut history,
-                                                    &mut agent,
+                                                    &mut runtime,
                                                     &mut app,
                                                 )
                                                 .await;
+                                                if let Some(rt) = runtime.as_mut() {
+                                                    rt.set_state(AgentStateEnvelope {
+                                                        agent_id: "root".to_string(),
+                                                        messages: history.clone(),
+                                                        iteration: turn_counter,
+                                                        token_usage: app.token_usage.clone(),
+                                                        task_state: None,
+                                                        subagent_state: None,
+                                                        repl_snapshot: None,
+                                                    });
+                                                }
 
                                                 app.invalidate_height_cache();
                                                 app.scroll_to_bottom();
@@ -1169,62 +1164,20 @@ async fn run_app(
                                             Some(a) => format!("[SKILL:{}] {}", name, a),
                                             None => format!("[SKILL:{}]", name),
                                         };
-
-                                        // Reuse send_user_message — display shows original input,
-                                        // but we send [SKILL:name] as the user message content
-                                        app.blocks.push(DisplayBlock::UserInput(input.clone()));
-                                        app.invalidate_height_cache();
-                                        app.scroll_to_bottom();
-                                        app.running = true;
-                                        app.iteration = 0;
-
-                                        logger.log_user_input(&input);
-
-                                        let usr_id = format!("m{}", history.len());
-                                        history.push(Message {
-                                            id: usr_id.clone(),
-                                            role: MessageRole::User,
-                                            parts: vec![Part {
-                                                id: format!("{}.p0", usr_id),
-                                                kind: PartKind::Text,
-                                                content: user_msg,
-                                                prune_state: PruneState::Intact,
-                                            }],
-                                        });
-
-                                        let (event_tx, mut event_rx) =
-                                            mpsc::channel::<AgentEvent>(100);
-                                        let fwd_tx = app_tx.clone();
-                                        tokio::spawn(async move {
-                                            while let Some(ev) = event_rx.recv().await {
-                                                if fwd_tx.send(AppEvent::Agent(ev)).is_err() {
-                                                    break;
-                                                }
-                                            }
-                                        });
-
-                                        let mut ag = agent
-                                            .take()
-                                            .expect("agent should be available when not running");
-                                        let msgs = history.clone();
-                                        let (return_tx, return_rx) =
-                                            tokio::sync::oneshot::channel();
-                                        agent_return_rx = Some(return_rx);
-
-                                        let cancel = CancellationToken::new();
-                                        cancel_token = Some(cancel.clone());
-
-                                        let offset = turn_counter;
-                                        tokio::spawn(async move {
-                                            let (new_history, final_turn) = ag
-                                                .run(msgs, Vec::new(), event_tx, cancel, offset)
-                                                .await;
-                                            let _ = return_tx.send(AgentRunResult {
-                                                agent: ag,
-                                                history: new_history,
-                                                turn: final_turn,
-                                            });
-                                        });
+                                        // Display original slash command input in UI, but send
+                                        // SKILL marker payload to the runtime turn.
+                                        send_user_message(
+                                            input.clone(),
+                                            Some(user_msg),
+                                            Vec::new(),
+                                            &mut app,
+                                            logger,
+                                            &mut runtime,
+                                            &mut history,
+                                            &mut runtime_return_rx,
+                                            &mut cancel_token,
+                                            &app_tx,
+                                        );
                                     }
                                 }
                             }
@@ -1240,21 +1193,21 @@ async fn run_app(
                         let images = app.take_images();
                         send_user_message(
                             input,
+                            None,
                             images,
                             &mut app,
                             logger,
+                            &mut runtime,
                             &mut history,
-                            &mut agent,
-                            &mut agent_return_rx,
+                            &mut runtime_return_rx,
                             &mut cancel_token,
                             &app_tx,
-                            turn_counter,
                         );
                     }
                     KeyCode::Backspace => {
-                        if app.input.is_empty() && app.queue_count() > 0 {
-                            // Pop last queued message back to editor
-                            if let Some(msg) = app.unqueue_last() {
+                        if app.input.is_empty() && app.has_queued_message() {
+                            // Pop queued message back to editor
+                            if let Some(msg) = app.take_queued_message() {
                                 app.input = msg;
                                 app.cursor_pos = app.input.len();
                             }
@@ -1339,6 +1292,28 @@ async fn run_app(
                         response_tx,
                     });
                 } else {
+                    // Detect plan mode tool calls
+                    if let AgentEvent::ToolCall {
+                        ref name,
+                        success,
+                        ref result,
+                        ..
+                    } = event
+                        && name == "enter_plan_mode"
+                        && success
+                        && let Some(pf) = result.get("plan_file").and_then(|v| v.as_str())
+                    {
+                        app.mode = app::Mode::Plan;
+                        app.plan_file = Some(PathBuf::from(pf));
+                    }
+                    // Detect plan approval from final message
+                    if let AgentEvent::Message { ref text, ref kind } = event
+                        && kind == "final"
+                        && text.starts_with("Plan approved")
+                    {
+                        app.plan_approved = true;
+                    }
+
                     let is_done = matches!(event, AgentEvent::Done);
                     logger.log_event(&event);
                     app.handle_agent_event(event);
@@ -1378,116 +1353,78 @@ async fn run_app(
     Ok(())
 }
 
-/// Send a user message to the agent: push display block, transform refs, log, update history, spawn agent run.
+/// Send a user message to the runtime: push display block, transform refs, log, and spawn turn run.
 #[allow(clippy::too_many_arguments)]
 fn send_user_message(
-    input: String,
+    display_input: String,
+    model_input: Option<String>,
     images: Vec<Vec<u8>>,
     app: &mut App,
     logger: &mut SessionLogger,
+    runtime: &mut Option<RuntimeEngine>,
     history: &mut Vec<Message>,
-    agent: &mut Option<Agent>,
-    agent_return_rx: &mut Option<tokio::sync::oneshot::Receiver<AgentRunResult>>,
+    runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
     cancel_token: &mut Option<CancellationToken>,
     app_tx: &mpsc::UnboundedSender<AppEvent>,
-    turn_counter: usize,
 ) {
-    app.blocks.push(DisplayBlock::UserInput(input.clone()));
+    // Soft-reset on plan approval: drain LLM message context, keep REPL state
+    if app.plan_approved {
+        app.plan_approved = false;
+        app.mode = app::Mode::Normal;
+        if let Some(rt) = runtime {
+            let mut state = rt.export_state();
+            state.messages.clear();
+            rt.set_state(state);
+        }
+        history.clear();
+    }
+
+    let default_model_input = display_input.clone();
+    app.blocks.push(DisplayBlock::UserInput(display_input));
     app.invalidate_height_cache();
     app.scroll_to_bottom();
     app.running = true;
     app.iteration = 0;
 
-    let input = transform_at_references(&input);
+    let user_message = model_input.unwrap_or(default_model_input);
+    let user_message = transform_at_references(&user_message);
+    logger.log_user_input(&user_message);
 
-    logger.log_user_input(&input);
-
-    // Inject plan mode system message before the user message
-    if app.mode == app::Mode::Plan {
-        let plan_path = app.ensure_plan_file();
-        let sys_id = format!("m{}", history.len());
-        history.push(Message {
-            id: sys_id.clone(),
-            role: MessageRole::System,
-            parts: vec![Part {
-                id: format!("{}.p0", sys_id),
-                kind: PartKind::Text,
-                content: format!(
-                    "## Plan Mode\n\n\
-                    You are in PLAN mode. Think, explore, and design \u{2014} do NOT execute changes.\n\n\
-                    **Rules:**\n\
-                    - READ-ONLY: Do not modify project files or run destructive commands\n\
-                    - You MAY use: read_file, glob, grep, ls, web_search, fetch_url, delegate_task\n\
-                    - You MUST NOT use: edit_file, find_replace, write_file (except the plan file), or shell with write commands\n\
-                    - Exception: Write your plan to `{}` using write_file\n\n\
-                    **Workflow:**\n\
-                    1. Understand the request \u{2014} ask clarifying questions using message(kind=\"final\")\n\
-                    2. Explore the codebase \u{2014} read files, search for patterns, understand architecture\n\
-                    3. Design your approach \u{2014} consider tradeoffs, identify risks\n\
-                    4. Write a clear, step-by-step plan to the plan file\n\n\
-                    When the user switches back to normal mode, you will execute the plan.",
-                    plan_path.display()
-                ),
-                prune_state: PruneState::Intact,
-            }],
-        });
-    } else if app.mode == app::Mode::Normal && app.plan_file.is_some() {
-        let sys_id = format!("m{}", history.len());
-        history.push(Message {
-            id: sys_id.clone(),
-            role: MessageRole::System,
-            parts: vec![Part {
-                id: format!("{}.p0", sys_id),
-                kind: PartKind::Text,
-                content: format!(
-                    "You are back in normal mode. You may now execute changes.\n\
-                    Plan file: {}",
-                    app.plan_file.as_ref().unwrap().display()
-                ),
-                prune_state: PruneState::Intact,
-            }],
-        });
-    }
-
-    let usr_id = format!("m{}", history.len());
-    history.push(Message {
-        id: usr_id.clone(),
-        role: MessageRole::User,
-        parts: vec![Part {
-            id: format!("{}.p0", usr_id),
-            kind: PartKind::Text,
-            content: input,
-            prune_state: PruneState::Intact,
-        }],
-    });
-
-    let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
-    let fwd_tx = app_tx.clone();
-    tokio::spawn(async move {
-        while let Some(ev) = event_rx.recv().await {
-            if fwd_tx.send(AppEvent::Agent(ev)).is_err() {
-                break;
-            }
-        }
-    });
-
-    let mut ag = agent
+    let mut rt = runtime
         .take()
-        .expect("agent should be available when not running");
-    let msgs = history.clone();
+        .expect("runtime should be available when not running");
     let (return_tx, return_rx) = tokio::sync::oneshot::channel();
-    *agent_return_rx = Some(return_rx);
+    *runtime_return_rx = Some(return_rx);
 
     let cancel = CancellationToken::new();
     *cancel_token = Some(cancel.clone());
 
-    let offset = turn_counter;
+    let sink_tx = app_tx.clone();
+    let mode = match app.mode {
+        app::Mode::Normal => RunMode::Normal,
+        app::Mode::Plan => RunMode::Plan,
+    };
+    let plan_file = match app.mode {
+        app::Mode::Plan => Some(app.ensure_plan_file().display().to_string()),
+        app::Mode::Normal => app.plan_file.as_ref().map(|p| p.display().to_string()),
+    };
     tokio::spawn(async move {
-        let (new_history, final_turn) = ag.run(msgs, images, event_tx, cancel, offset).await;
-        let _ = return_tx.send(AgentRunResult {
-            agent: ag,
-            history: new_history,
-            turn: final_turn,
+        let sink = AppEventSink { tx: sink_tx };
+        let result = rt
+            .run_turn(
+                TurnInput {
+                    user_message,
+                    images_png: images,
+                    mode: Some(mode),
+                    plan_file,
+                },
+                &sink,
+                cancel,
+            )
+            .await;
+        let _ = return_tx.send(RuntimeRunResult {
+            runtime: rt,
+            result,
         });
     });
 }
@@ -1497,7 +1434,7 @@ fn send_user_message(
 async fn restore_agent_state(
     jsonl_filename: &str,
     history: &mut Vec<Message>,
-    agent: &mut Option<Agent>,
+    runtime: &mut Option<RuntimeEngine>,
     app: &mut App,
 ) {
     // Derive .db path from .jsonl filename (same stem)
@@ -1535,7 +1472,7 @@ async fn restore_agent_state(
     if let Some(state) = resume_store.load_agent_state("root") {
         // Restore token counts from DB
         if state.input_tokens > 0 || state.output_tokens > 0 {
-            app.token_usage = lash::TokenUsage {
+            app.token_usage = lash_core::TokenUsage {
                 input_tokens: state.input_tokens,
                 output_tokens: state.output_tokens,
                 cached_input_tokens: state.cached_input_tokens,
@@ -1544,8 +1481,8 @@ async fn restore_agent_state(
 
         if let Some(ref dill_blob) = state.dill_blob {
             // Try to restore REPL state
-            if let Some(ag) = agent.as_mut() {
-                match ag.restore(dill_blob).await {
+            if let Some(rt) = runtime.as_mut() {
+                match rt.restore_repl(dill_blob).await {
                     Ok(()) => {
                         app.blocks.push(DisplayBlock::SystemMessage(
                             "REPL state restored from snapshot.".to_string(),

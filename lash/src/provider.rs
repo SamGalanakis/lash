@@ -9,9 +9,9 @@ fn default_base_url() -> String {
     "https://openrouter.ai/api/v1".to_string()
 }
 
-/// User-overridable model names for delegate_task tiers.
+/// User-overridable model names for agent_call intelligence tiers.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct DelegateModels {
+pub struct AgentModels {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quick: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -27,7 +27,7 @@ pub struct LashConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tavily_api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub delegate_models: Option<DelegateModels>,
+    pub agent_models: Option<AgentModels>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -70,9 +70,9 @@ impl Provider {
         }
     }
 
-    /// Built-in model for a delegate tier. Returns (model_name, optional_reasoning_effort).
+    /// Built-in model for an agent intelligence tier. Returns (model_name, optional_reasoning_effort).
     /// For "thorough" on OpenRouter, returns None (caller should inherit parent model).
-    pub fn default_delegate_model(&self, tier: &str) -> Option<(&str, Option<&str>)> {
+    pub fn default_agent_model(&self, tier: &str) -> Option<(&str, Option<&str>)> {
         match (self, tier) {
             (Provider::Claude { .. }, "quick") => Some(("claude-haiku-4-5", None)),
             (Provider::Claude { .. }, "balanced") => Some(("claude-sonnet-4-5", None)),
@@ -103,6 +103,9 @@ impl Provider {
                 ("model".into(), serde_json::json!(model)),
                 ("temperature".into(), serde_json::json!(0)),
                 ("max_tokens".into(), serde_json::json!(32768)),
+                // Disable BAML's wall-clock request timeout (default 5min).
+                // We handle per-chunk streaming timeouts ourselves.
+                ("http".into(), serde_json::json!({"request_timeout_ms": 0})),
             ]),
             Provider::Claude { access_token, .. } => HashMap::from([
                 ("api_key".into(), serde_json::json!("noop")),
@@ -117,6 +120,7 @@ impl Provider {
                         "x-api-key": "",
                     }),
                 ),
+                ("http".into(), serde_json::json!({"request_timeout_ms": 0})),
             ]),
             Provider::Codex {
                 access_token,
@@ -140,6 +144,7 @@ impl Provider {
                     ("temperature".into(), serde_json::json!(0)),
                     ("max_tokens".into(), serde_json::json!(32768)),
                     ("headers".into(), headers),
+                    ("http".into(), serde_json::json!({"request_timeout_ms": 0})),
                 ]);
                 if let Some(effort) = reasoning_effort {
                     opts.insert("reasoning".into(), serde_json::json!({"effort": effort}));
@@ -158,6 +163,32 @@ impl Provider {
                 .to_string(),
             Provider::OpenRouter { .. } | Provider::Codex { .. } => model.to_string(),
         }
+    }
+
+    /// Canonical model ID to use for context-window lookup.
+    pub fn context_lookup_model(&self, model: &str) -> String {
+        match self {
+            Provider::Claude { .. } => {
+                if model.contains('/') {
+                    model.to_string()
+                } else {
+                    format!("anthropic/{model}")
+                }
+            }
+            Provider::OpenRouter { .. } | Provider::Codex { .. } => model.to_string(),
+        }
+    }
+
+    /// Context window for a model under this provider.
+    pub fn context_window(&self, model: &str) -> Option<u64> {
+        let lookup = self.context_lookup_model(model);
+        crate::model_info::context_window(&lookup).or_else(|| {
+            if lookup != model {
+                crate::model_info::context_window(model)
+            } else {
+                None
+            }
+        })
     }
 
     /// Refresh OAuth tokens if needed. No-op for OpenRouter.
@@ -254,7 +285,7 @@ pub fn save_provider(provider: &Provider) -> Result<(), std::io::Error> {
     let mut config = LashConfig::load().unwrap_or_else(|| LashConfig {
         provider: provider.clone(),
         tavily_api_key: None,
-        delegate_models: None,
+        agent_models: None,
     });
     config.provider = provider.clone();
     config.save()
@@ -303,46 +334,46 @@ mod tests {
     }
 
     #[test]
-    fn default_delegate_model_claude() {
+    fn default_agent_model_claude() {
         let p = claude();
         assert_eq!(
-            p.default_delegate_model("quick"),
+            p.default_agent_model("quick"),
             Some(("claude-haiku-4-5", None))
         );
         assert_eq!(
-            p.default_delegate_model("balanced"),
+            p.default_agent_model("balanced"),
             Some(("claude-sonnet-4-5", None))
         );
         assert_eq!(
-            p.default_delegate_model("thorough"),
+            p.default_agent_model("thorough"),
             Some(("claude-opus-4-6", None))
         );
     }
 
     #[test]
-    fn default_delegate_model_openrouter() {
+    fn default_agent_model_openrouter() {
         let p = openrouter();
-        assert!(p.default_delegate_model("quick").is_some());
-        assert!(p.default_delegate_model("balanced").is_some());
-        assert!(p.default_delegate_model("thorough").is_none()); // inherit parent
+        assert!(p.default_agent_model("quick").is_some());
+        assert!(p.default_agent_model("balanced").is_some());
+        assert!(p.default_agent_model("thorough").is_none()); // inherit parent
     }
 
     #[test]
-    fn default_delegate_model_codex() {
+    fn default_agent_model_codex() {
         let p = codex();
-        let (m, re) = p.default_delegate_model("balanced").unwrap();
+        let (m, re) = p.default_agent_model("balanced").unwrap();
         assert_eq!(m, "gpt-5.3-codex");
         assert_eq!(re, Some("medium"));
-        let (m, re) = p.default_delegate_model("thorough").unwrap();
+        let (m, re) = p.default_agent_model("thorough").unwrap();
         assert_eq!(m, "gpt-5.3-codex");
         assert_eq!(re, Some("high"));
     }
 
     #[test]
-    fn default_delegate_model_unknown_tier() {
-        assert!(claude().default_delegate_model("unknown").is_none());
-        assert!(openrouter().default_delegate_model("").is_none());
-        assert!(codex().default_delegate_model("extreme").is_none());
+    fn default_agent_model_unknown_tier() {
+        assert!(claude().default_agent_model("unknown").is_none());
+        assert!(openrouter().default_agent_model("").is_none());
+        assert!(codex().default_agent_model("extreme").is_none());
     }
 
     #[test]
@@ -368,6 +399,19 @@ mod tests {
     fn resolve_model_codex_passthrough() {
         let p = codex();
         assert_eq!(p.resolve_model("gpt-5.1-codex"), "gpt-5.1-codex");
+    }
+
+    #[test]
+    fn context_lookup_model_claude_adds_prefix() {
+        let p = claude();
+        assert_eq!(
+            p.context_lookup_model("claude-opus-4-6"),
+            "anthropic/claude-opus-4-6"
+        );
+        assert_eq!(
+            p.context_lookup_model("anthropic/claude-opus-4-6"),
+            "anthropic/claude-opus-4-6"
+        );
     }
 
     #[test]

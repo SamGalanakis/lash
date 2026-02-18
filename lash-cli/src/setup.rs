@@ -1,6 +1,6 @@
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use lash::oauth;
-use lash::provider::{LashConfig, Provider};
+use lash_core::oauth;
+use lash_core::provider::{LashConfig, Provider};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -361,7 +361,7 @@ async fn run_setup_inner(terminal: &mut ratatui::DefaultTerminal) -> anyhow::Res
     let config = LashConfig {
         provider: provider.expect("provider must be set before Done"),
         tavily_api_key: tavily_key,
-        delegate_models: None,
+        agent_models: None,
     };
     Ok(config)
 }

@@ -48,9 +48,7 @@ pub(crate) async fn execute_and_collect(
                     },
                 )
                 .await;
-                if (tc.tool == "delegate_task"
-                    || tc.tool == "delegate_search"
-                    || tc.tool == "delegate_deep")
+                if tc.tool == "agent_result"
                     && let Some(sub) = tc.result.get("_sub_agent")
                 {
                     let task = sub

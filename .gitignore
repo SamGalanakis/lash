@@ -9,3 +9,8 @@ bench/
 test.txt
 __pycache__/
 *.pyc
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/

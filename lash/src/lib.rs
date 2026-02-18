@@ -23,6 +23,7 @@ pub mod model_info;
 pub mod oauth;
 pub mod provider;
 pub mod python_home;
+pub mod runtime;
 pub mod session;
 pub mod store;
 pub mod tools;
@@ -31,8 +32,12 @@ pub mod tools;
 pub use agent::{
     Agent, AgentConfig, AgentEvent, Message, MessageRole, Part, PartKind, PruneState, TokenUsage,
 };
-pub use instructions::InstructionLoader;
+pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
 pub use provider::{LashConfig, Provider};
+pub use runtime::{
+    AgentStateEnvelope, EventSink, NoopEventSink, RunMode, RuntimeConfig, RuntimeEngine, TurnInput,
+    TurnResult,
+};
 pub use session::{ExecResponse, Session, SessionError, UserPrompt};
 pub use store::{AgentState, Store, TaskEntry};
 

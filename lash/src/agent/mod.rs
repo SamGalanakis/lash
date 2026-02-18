@@ -13,13 +13,11 @@ use crate::baml_client::ClientRegistry;
 use crate::baml_client::async_client::B;
 use crate::baml_client::new_image_from_base64;
 pub use crate::baml_client::types::{ChatMsg, Image};
+use crate::instructions::{FsInstructionSource, InstructionSource};
 use crate::provider::Provider;
 use crate::session::Session;
-use crate::store::Store;
 
-pub use message::{
-    Message, MessageRole, Part, PartKind, PruneState, messages_from_chat, messages_to_chat,
-};
+pub use message::{Message, MessageRole, Part, PartKind, PruneState, messages_to_chat};
 
 use exec::{ExecAccumulator, execute_and_collect};
 
@@ -72,6 +70,13 @@ pub struct AgentConfig {
     pub llm_log_path: Option<PathBuf>,
     /// When true, use headless prompt (no ask(), no TUI references).
     pub headless: bool,
+    /// Custom preamble (identity/role). If None, uses the default lash preamble.
+    pub preamble: Option<String>,
+    /// Custom soul (personality principles). If None, uses the default Soul.
+    /// Set to Some("") to disable soul entirely.
+    pub soul: Option<String>,
+    /// Host-provided instruction source (filesystem by default).
+    pub instruction_source: Arc<dyn InstructionSource>,
 }
 
 impl Default for AgentConfig {
@@ -89,6 +94,9 @@ impl Default for AgentConfig {
             include_soul: false,
             llm_log_path: None,
             headless: false,
+            preamble: None,
+            soul: None,
+            instruction_source: Arc::new(FsInstructionSource::new()),
         }
     }
 }
@@ -171,22 +179,15 @@ pub struct Agent {
     agent_id: String,
     session: Session,
     config: AgentConfig,
-    store: Arc<Store>,
 }
 
 impl Agent {
-    pub fn new(
-        session: Session,
-        config: AgentConfig,
-        store: Arc<Store>,
-        agent_id: Option<String>,
-    ) -> Self {
+    pub fn new(session: Session, config: AgentConfig, agent_id: Option<String>) -> Self {
         let agent_id = agent_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         Self {
             agent_id,
             session,
             config,
-            store,
         }
     }
 
@@ -264,8 +265,8 @@ impl Agent {
         let tool_list = ToolDefinition::format_tool_docs(&visible);
         let context = build_context();
         let tool_names: Vec<String> = visible.iter().map(|t| t.name.clone()).collect();
-        let instruction_loader = crate::instructions::InstructionLoader::new();
-        let project_instructions = instruction_loader.system_instructions().to_string();
+        let instruction_source = Arc::clone(&self.config.instruction_source);
+        let project_instructions = instruction_source.system_instructions();
 
         // Convert raw PNG bytes to BAML images
         use base64::Engine;
@@ -285,7 +286,12 @@ impl Agent {
         let max_context = self
             .config
             .max_context_tokens
-            .or_else(|| crate::model_info::context_window(&self.config.model).map(|v| v as usize))
+            .or_else(|| {
+                self.config
+                    .provider
+                    .context_window(&self.config.model)
+                    .map(|v| v as usize)
+            })
             .unwrap_or_else(|| {
                 eprintln!(
                     "Warning: unknown context window for model '{}', defaulting to 200k",
@@ -303,19 +309,17 @@ impl Agent {
 
         loop {
             if cancel.is_cancelled() {
-                self.snapshot_to_store(None, &msgs, iteration, &cumulative_usage)
-                    .await;
                 emit!(AgentEvent::Done);
                 return (msgs, iteration);
             }
 
-            // Rolling window: when context exceeds 40% of the model's token limit,
+            // Rolling window: when context exceeds 60% of the model's token limit,
             // collapse old turns to make room. Always preserve all User messages.
             // Uses actual input_tokens from the last API call for accurate measurement,
             // with char-based estimation (~4 chars/token) as proportional weights.
             msgs.retain(|m| m.id != "history_note");
             {
-                let token_budget = max_context * 40 / 100;
+                let token_budget = max_context * 60 / 100;
                 let needs_pruning = last_input_tokens > token_budget;
 
                 // `keep_from` is the start index of the retained tail.
@@ -415,8 +419,16 @@ impl Agent {
             let event_tx_clone = event_tx.clone();
             let drain_handle = tokio::spawn(async move {
                 while let Some(sandbox_msg) = msg_rx.recv().await {
-                    if sandbox_msg.kind == "final" {
-                        continue;
+                    // Explicit allowlist for sandbox message kinds rendered in the TUI.
+                    // Unknown kinds are dropped by default so random tool/runtime chatter
+                    // never leaks into user-visible output.
+                    match sandbox_msg.kind.as_str() {
+                        "final" => continue,
+                        "tool_output" => {}
+                        other => {
+                            tracing::debug!("dropping unsupported sandbox message kind: {other}");
+                            continue;
+                        }
                     }
                     if !event_tx_clone.is_closed() {
                         let _ = event_tx_clone
@@ -496,6 +508,8 @@ impl Agent {
                     } else {
                         true
                     };
+                    let preamble = self.config.preamble.clone().unwrap_or_default();
+                    let soul = self.config.soul.clone().unwrap_or_default();
                     let mut call = match if self.config.sub_agent {
                         B.SubAgentStep
                             .with_client_registry(&cr)
@@ -510,6 +524,8 @@ impl Agent {
                                 include_soul,
                                 self.config.headless,
                                 has_history,
+                                &preamble,
+                                &soul,
                             )
                     } else {
                         B.CodeActStep
@@ -525,6 +541,8 @@ impl Agent {
                                 include_soul,
                                 self.config.headless,
                                 has_history,
+                                &preamble,
+                                &soul,
                             )
                     } {
                         Ok(c) => c,
@@ -557,8 +575,6 @@ impl Agent {
                                 &event_tx,
                             )
                             .await;
-                            self.snapshot_to_store(None, &msgs, iteration, &cumulative_usage)
-                                .await;
                             emit!(AgentEvent::Done);
                             return (msgs, iteration);
                         }
@@ -842,7 +858,6 @@ impl Agent {
                     role: MessageRole::Assistant,
                     parts: asst_parts,
                 });
-                self.store.mark_agent_done(&self.agent_id);
                 emit!(AgentEvent::Done);
                 return (msgs, iteration);
             }
@@ -909,7 +924,6 @@ impl Agent {
                         role: MessageRole::Assistant,
                         parts: asst_parts,
                     });
-                    self.store.mark_agent_done(&self.agent_id);
                     emit!(AgentEvent::Done);
                     return (msgs, iteration);
                 }
@@ -978,7 +992,7 @@ impl Agent {
 
                 // Inject any newly discovered context-aware instructions from file reads.
                 let context_text =
-                    resolve_context_instructions(&instruction_loader, &acc.tool_calls);
+                    resolve_context_instructions(instruction_source.as_ref(), &acc.tool_calls);
                 if !context_text.is_empty() {
                     let instruction_id = format!("m{}", msgs.len());
                     msgs.push(Message {
@@ -997,7 +1011,6 @@ impl Agent {
             iteration += 1;
             // Agent had its grace turn after the turn-limit message — force return
             if max_steps_final {
-                self.store.mark_agent_done(&self.agent_id);
                 emit!(AgentEvent::Done);
                 return (msgs, iteration);
             }
@@ -1024,30 +1037,6 @@ impl Agent {
                 max_steps_final = true;
             }
         }
-    }
-
-    /// Snapshot agent state to the Store on cancellation.
-    async fn snapshot_to_store(
-        &mut self,
-        parent_id: Option<&str>,
-        msgs: &[Message],
-        iteration: usize,
-        cumulative_usage: &TokenUsage,
-    ) {
-        let dill_blob = self.snapshot().await;
-        let msgs_json = serde_json::to_string(msgs).unwrap_or_else(|_| "[]".to_string());
-        self.store.save_agent_state(
-            &self.agent_id,
-            parent_id,
-            "active",
-            &msgs_json,
-            iteration as i64,
-            "{}",
-            dill_blob.as_deref(),
-            cumulative_usage.input_tokens,
-            cumulative_usage.output_tokens,
-            cumulative_usage.cached_input_tokens,
-        );
     }
 }
 
@@ -1236,26 +1225,17 @@ fn build_assistant_parts(msg_id: &str, prose_parts: &[String], code_parts: &[Str
 /// Resolve and aggregate context-aware instructions discovered during this turn.
 /// We currently trigger this on successful `read_file` tool calls with a `path` argument.
 fn resolve_context_instructions(
-    loader: &crate::instructions::InstructionLoader,
+    source: &dyn InstructionSource,
     tool_calls: &[crate::ToolCallRecord],
 ) -> String {
-    let mut chunks = Vec::new();
     let mut seen_paths = HashSet::new();
-
-    for tc in tool_calls {
-        if !tc.success || tc.tool != "read_file" {
-            continue;
-        }
-        let Some(path) = tc.args.get("path").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if path.is_empty() || !seen_paths.insert(path.to_string()) {
-            continue;
-        }
-        if let Some(text) = loader.resolve(path) {
-            chunks.push(text);
-        }
-    }
-
-    chunks.join("\n\n")
+    let read_paths: Vec<String> = tool_calls
+        .iter()
+        .filter(|tc| tc.success && tc.tool == "read_file")
+        .filter_map(|tc| tc.args.get("path").and_then(|v| v.as_str()))
+        .filter(|p| !p.is_empty())
+        .filter(|p| seen_paths.insert((*p).to_string()))
+        .map(str::to_string)
+        .collect();
+    source.context_instructions_for_reads(&read_paths)
 }

@@ -1,5 +1,5 @@
 use crossterm::event::Event as TermEvent;
-use lash::AgentEvent;
+use lash_core::AgentEvent;
 
 /// Unified event type for the main loop.
 pub enum AppEvent {

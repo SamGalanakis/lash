@@ -107,8 +107,6 @@ impl Store {
         let conn = Connection::open(path)?;
         apply_pragmas(&conn)?;
         conn.execute_batch(SCHEMA)?;
-        // Migration: add owner column if missing
-        let _ = conn.execute_batch("ALTER TABLE tasks ADD COLUMN owner TEXT NOT NULL DEFAULT ''");
         Ok(Self {
             conn: Mutex::new(conn),
         })

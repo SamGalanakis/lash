@@ -51,15 +51,20 @@ class ToolName(StrEnum):
     SHELL = "shell"
     WEB_SEARCH = "web_search"
     FETCH_URL = "fetch_url"
-    DELEGATE_TASK = "delegate_task"
-    DELEGATE_SEARCH = "delegate_search"
-    DELEGATE_DEEP = "delegate_deep"
+    AGENT_CALL = "agent_call"
     TASKS = "tasks"
     SKILLS = "skills"
     HASHLINE = "hashline"
     OTHER = "other"
 
 _TOOL_NAME_MAP = {v.value: v for v in ToolName}
+
+
+class Intelligence(StrEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
 
 # Tools whose "path" arg counts as a file read
 _READ_TOOLS = {ToolName.READ_FILE, ToolName.GLOB, ToolName.GREP}
@@ -115,6 +120,7 @@ class Turn:
 
 
 class TurnHistory:
+    _MAX_TURNS = 2000
     def __init__(self):
         self._turns = []
 
@@ -232,9 +238,42 @@ class TurnHistory:
             files_written=files_written,
         )
         self._turns.append(turn)
+        if len(self._turns) > self._MAX_TURNS:
+            self._turns = self._turns[-self._MAX_TURNS:]
 
+    def _serialize(self):
+        """Serialize all turns to a JSON string for passing to sub-agents."""
+        turns = []
+        for t in self._turns:
+            turns.append({
+                "index": t.index,
+                "user_message": t.user_message,
+                "prose": t.prose,
+                "code": t.code,
+                "output": t.output,
+                "error": t.error,
+                "tool_calls": [
+                    {
+                        "tool": tc.tool.value,
+                        "args": tc.args,
+                        "result": tc.result,
+                        "success": tc.success,
+                        "duration_ms": tc.duration_ms,
+                    }
+                    for tc in t.tool_calls
+                ],
+            })
+        return json.dumps(turns)
 
-
+    def _load(self, data):
+        """Load turns from a list of dicts or JSON string (used to inherit parent agent state)."""
+        if isinstance(data, str):
+            data = json.loads(data)
+        # Only load the most recent turns to respect the cap
+        if len(data) > self._MAX_TURNS:
+            data = data[-self._MAX_TURNS:]
+        for t_data in data:
+            self._add_turn(json.dumps(t_data))
 # ─── Agent Memory ───
 
 class MemEntry:
@@ -319,6 +358,31 @@ class Mem:
     def __len__(self):
         return len(self._store)
 
+
+    def _serialize(self):
+        """Serialize all entries to a JSON string for passing to sub-agents."""
+        entries = []
+        for key, e in self._store.items():
+            entries.append({
+                "key": e.key,
+                "description": e.description,
+                "value": e.value,
+                "turn": e.turn,
+            })
+        return json.dumps(entries)
+
+    def _load(self, data):
+        """Load entries from a list of dicts or JSON string (used to inherit parent agent state)."""
+        if isinstance(data, str):
+            data = json.loads(data)
+        entries = data
+        for e in entries:
+            self._store[e["key"]] = MemEntry(
+                key=e["key"],
+                description=e["description"],
+                value=e["value"],
+                turn=e["turn"],
+            )
 # _rust_bridge is injected by the Rust runtime before any functions are called.
 # It provides:
 #   send_message(json_str) -> None
@@ -436,6 +500,51 @@ class ShellHandle:
     def __str__(self):
         return f"ShellHandle({self.id})"
 
+
+
+class AgentHandle:
+    """Handle to a running sub-agent.
+
+    Returned by agent_call(prompt=..., intelligence=...). Provides:
+      .result(timeout=None) -- wait for completion, return result
+      .output()             -- read accumulated output (non-blocking)
+      .kill()               -- cancel the sub-agent
+    """
+    def __init__(self, id, schema_cls=None):
+        self.id = id
+        self._schema_cls = schema_cls
+
+    async def result(self, timeout=None):
+        """Wait for the sub-agent to finish and return its result.
+
+        If a schema was provided, returns a hydrated Pydantic model instance.
+        Otherwise returns a dict with "result" and "context" keys.
+        """
+        raw = await _call("agent_result", {"id": self.id, "timeout": timeout})
+        if self._schema_cls is not None and hasattr(self._schema_cls, "model_validate"):
+            val = raw.get("result", "") if isinstance(raw, dict) else raw
+            if isinstance(val, str):
+                try:
+                    val = json.loads(val)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if isinstance(val, dict):
+                return self._schema_cls.model_validate(val)
+        return raw
+
+    async def output(self):
+        """Read accumulated output so far (non-blocking)."""
+        return await _call("agent_output", {"id": self.id})
+
+    async def kill(self):
+        """Cancel the sub-agent."""
+        return await _call("agent_kill", {"id": self.id})
+
+    def __repr__(self):
+        return f"AgentHandle(id='{self.id}')"
+
+    def __str__(self):
+        return f"AgentHandle({self.id})"
 
 class Task:
     """A task in the task management system.
@@ -627,6 +736,9 @@ async def _call(name, params):
         # Wrap shell handles automatically
         if isinstance(value, dict) and value.get("__handle__") == "shell":
             return ShellHandle(value["id"])
+        # Wrap agent handles automatically
+        if isinstance(value, dict) and value.get("__handle__") == "agent":
+            return AgentHandle(value["id"])
         # Wrap typed objects
         if isinstance(value, dict) and "__type__" in value:
             t = value["__type__"]
@@ -790,14 +902,89 @@ def _register_tools(tools_json, agent_id=""):
     _claim_task.__qualname__ = "claim_task"
     _ns["claim_task"] = _claim_task
 
+    # Override agent_call: handle schema serialization and return AgentHandle
+    async def _agent_call(prompt, intelligence, schema=None, **kw):
+        """Spawn a sub-agent to perform a task. Returns an AgentHandle.
+
+        Args:
+            prompt: The task description for the sub-agent.
+            intelligence: "low", "medium", or "high".
+            schema: Optional Pydantic BaseModel class. If provided, calling
+                handle.result() will return a hydrated model instance.
+
+        Returns:
+            AgentHandle with .result(), .output(), .kill() methods.
+        """
+        params = {"prompt": prompt, "intelligence": str(intelligence)}
+        params.update(kw)
+
+        # Pass parent _mem and _history to sub-agent (serialized as JSON)
+        _hist = _ns.get("_history")
+        _memo = _ns.get("_mem")
+        if _hist is not None and len(_hist) > 0:
+            params["_parent_history"] = _hist._serialize()
+        if _memo is not None and len(_memo) > 0:
+            params["_parent_mem"] = _memo._serialize()
+
+        # If schema is a Pydantic model class, extract JSON schema and stash the class
+        _schema_cls = None
+        if schema is not None:
+            if hasattr(schema, "model_json_schema"):
+                _schema_cls = schema
+                params["schema"] = json.dumps(schema.model_json_schema())
+            elif isinstance(schema, str):
+                params["schema"] = schema
+            elif isinstance(schema, dict):
+                params["schema"] = json.dumps(schema)
+
+        handle = await _call("agent_call", params)
+
+        # _call returns an AgentHandle via __handle__ detection; attach schema_cls
+        if isinstance(handle, AgentHandle) and _schema_cls is not None:
+            handle._schema_cls = _schema_cls
+        return handle
+
+    _agent_call.__name__ = "agent_call"
+    _agent_call.__qualname__ = "agent_call"
+    _ns["agent_call"] = _agent_call
+
+    # Plan mode wrappers — call Rust tools + orchestrate approval flow
+    async def _enter_plan_mode():
+        """Enter plan mode. Returns the plan file path."""
+        result = await _call("enter_plan_mode", {})
+        plan_file = result.get("plan_file", "")
+        print(f"[Plan mode — write your plan to: {plan_file}]")
+        return plan_file
+
+    async def _exit_plan_mode():
+        """Present plan to user for approval. On approval, calls done() to end turn."""
+        result = await _call("exit_plan_mode", {})
+        plan = result.get("plan_content", "")
+        preview = plan[:2000] + ("..." if len(plan) > 2000 else "")
+        response = await _ask(
+            f"Plan ready for review:\n\n{preview}\n\nHow would you like to proceed?",
+            ["Execute plan", "Edit plan", "Reject"]
+        )
+        if response.startswith("1."):
+            _done("Plan approved — executing.")
+        return response
+
+    _enter_plan_mode.__name__ = "enter_plan_mode"
+    _enter_plan_mode.__qualname__ = "enter_plan_mode"
+    _exit_plan_mode.__name__ = "exit_plan_mode"
+    _exit_plan_mode.__qualname__ = "exit_plan_mode"
+    _async_tool_names.add("enter_plan_mode")
+    _async_tool_names.add("exit_plan_mode")
+
     _ns["_history"] = TurnHistory()
     _ns["_mem"] = Mem()
     _ns.update({
         "json": json, "print": print, "done": _done,
         "asyncio": asyncio, "list_tools": _list_tools, "reset_repl": _reset_repl, "ask": _ask,
+        "enter_plan_mode": _enter_plan_mode, "exit_plan_mode": _exit_plan_mode,
         "Task": Task, "Skill": Skill, "SkillSummary": SkillSummary, "ToolError": ToolError,
         "TurnHistory": TurnHistory, "Turn": Turn, "ToolCall": ToolCall, "ToolName": ToolName,
-        "Mem": Mem, "MemEntry": MemEntry,
+        "Intelligence": Intelligence, "Mem": Mem, "MemEntry": MemEntry,
     })
 
 

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::{ProgressSender, ToolDefinition, ToolProvider, ToolResult};
@@ -108,53 +108,6 @@ impl ToolProvider for CompositeTools {
     }
 }
 
-/// Wraps a `ToolProvider` and only exposes tools whose names are in the allow set.
-#[allow(dead_code)]
-pub struct FilteredTools {
-    inner: Arc<dyn ToolProvider>,
-    allowed: HashSet<String>,
-}
-
-impl FilteredTools {
-    #[allow(dead_code)]
-    pub fn new(inner: Arc<dyn ToolProvider>, allowed: &[&str]) -> Self {
-        Self {
-            inner,
-            allowed: allowed.iter().map(|s| s.to_string()).collect(),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl ToolProvider for FilteredTools {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        self.inner
-            .definitions()
-            .into_iter()
-            .filter(|d| self.allowed.contains(&d.name))
-            .collect()
-    }
-
-    async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
-        if !self.allowed.contains(name) {
-            return ToolResult::err_fmt(format_args!("Unknown tool: {name}"));
-        }
-        self.inner.execute(name, args).await
-    }
-
-    async fn execute_streaming(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        progress: Option<&ProgressSender>,
-    ) -> ToolResult {
-        if !self.allowed.contains(name) {
-            return ToolResult::err_fmt(format_args!("Unknown tool: {name}"));
-        }
-        self.inner.execute_streaming(name, args, progress).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,32 +178,5 @@ mod tests {
         let tools = CompositeTools::new().add(MockProviderA);
         let r = tools.execute("nonexistent", &serde_json::json!({})).await;
         assert!(!r.success);
-    }
-
-    // ── FilteredTools ──
-
-    #[tokio::test]
-    async fn filtered_definitions() {
-        let inner = Arc::new(CompositeTools::new().add(MockProviderA).add(MockProviderB));
-        let filtered = FilteredTools::new(inner, &["tool_a"]);
-        let defs = filtered.definitions();
-        assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "tool_a");
-    }
-
-    #[tokio::test]
-    async fn filtered_blocks_disallowed() {
-        let inner = Arc::new(CompositeTools::new().add(MockProviderA).add(MockProviderB));
-        let filtered = FilteredTools::new(inner, &["tool_a"]);
-        let r = filtered.execute("tool_b", &serde_json::json!({})).await;
-        assert!(!r.success);
-    }
-
-    #[tokio::test]
-    async fn filtered_allows_allowed() {
-        let inner = Arc::new(CompositeTools::new().add(MockProviderA).add(MockProviderB));
-        let filtered = FilteredTools::new(inner, &["tool_b"]);
-        let r = filtered.execute("tool_b", &serde_json::json!({})).await;
-        assert!(r.success);
     }
 }

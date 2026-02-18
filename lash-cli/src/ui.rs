@@ -21,13 +21,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let image_h = if app.pending_images.is_empty() { 0 } else { 1 };
     let task_tray_h = app.task_tray_height(frame.area().width);
 
-    // Dynamic input height: account for visual wrapping, not just newline count.
-    // Inner width = frame width minus 2 (border chars are 0 since TOP/BOTTOM only, but
-    // the "/ " prefix eats 2 columns).
-    let inner_w = frame.area().width as usize; // full rendering width; prefix handled by wrap_line
-    let visual_lines = input_visual_lines(&app.input, inner_w);
-    let queue_lines = app.queue_count() as u16;
-    let input_h = (visual_lines as u16 + 2 + queue_lines).min(12); // +2 for borders, max 12 for queue room
+    let queued_h: u16 = if app.has_queued_message() { 1 } else { 0 };
+
+    // Dynamic input height: depends on whether agent prompt is active.
+    let input_h = if app.has_prompt() {
+        prompt_height(app, frame.area().width)
+    } else {
+        // Inner width = frame width; prefix handled by wrap_line
+        let inner_w = frame.area().width as usize;
+        let visual_lines = input_visual_lines(&app.input, inner_w);
+        (visual_lines as u16 + 2).min(12)
+    };
 
     let chunks = Layout::vertical([
         Constraint::Length(1),           // [0] status bar
@@ -35,7 +39,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Constraint::Length(strike_h),    // [2] strike zone (only when running)
         Constraint::Length(image_h),     // [3] image attachment badges
         Constraint::Length(task_tray_h), // [4] task tray
-        Constraint::Length(input_h),     // [5] input (dynamic height)
+        Constraint::Length(queued_h),    // [5] queued message bar
+        Constraint::Length(input_h),     // [6] input (dynamic height)
     ])
     .split(frame.area());
 
@@ -46,11 +51,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     draw_image_badges(frame, app, chunks[3]);
     draw_task_tray(frame, app, chunks[4]);
-    draw_input(frame, app, chunks[5]);
-    draw_suggestions(frame, app, chunks[5]);
+    draw_queued_message(frame, app, chunks[5]);
+    if app.has_prompt() {
+        draw_prompt(frame, app, chunks[6]);
+    } else {
+        draw_input(frame, app, chunks[6]);
+        draw_suggestions(frame, app, chunks[6]);
+    }
     draw_session_picker(frame, app, chunks[1]); // overlay on history area
     draw_skill_picker(frame, app, chunks[1]); // overlay on history area
-    draw_prompt(frame, app, chunks[1]); // overlay on history area
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -241,7 +250,7 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
         render_block(
             &app.blocks,
             idx,
-            app.code_expanded,
+            app.expand_level,
             &mut lines,
             viewport_width,
             viewport_height,
@@ -251,11 +260,18 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // Render live streaming LLM text (pending_text accumulates TextDelta events)
+    // Render live streaming LLM text (pending_text accumulates TextDelta events).
+    // Use a uniform 2-space indent on every line — no marker or empty-line
+    // special-casing — so that re-rendering partial markdown each frame
+    // produces a stable line count (avoids flicker / vertical oscillation).
+    // The ■ marker appears once the text is committed as an AssistantText block.
     if !app.pending_text.is_empty() && lines.len() < viewport_height + skip_lines {
-        let rendered = markdown::render_markdown(&app.pending_text, viewport_width);
+        let rendered =
+            markdown::render_markdown(&app.pending_text, viewport_width.saturating_sub(2));
         for line in rendered {
-            lines.push(line);
+            let mut spans = vec![Span::raw("  ")];
+            spans.extend(line.spans);
+            lines.push(Line::from(spans));
             if lines.len() >= viewport_height + skip_lines {
                 break;
             }
@@ -364,17 +380,35 @@ fn truncate_to_display_width(text: &str, max_width: usize) -> String {
     out
 }
 
-fn build_collapsed_tool_summary(blocks: &[DisplayBlock], idx: usize) -> Option<(String, bool)> {
+/// Build a ghost fold summary for a group of tool calls starting at `idx`.
+/// `idx` should point to the first (non-continuation) ToolCall in a group.
+/// Scans forward through contiguous ToolCall/CodeBlock/CodeOutput blocks,
+/// collecting tool names and durations.
+/// Returns `(summary_string, any_failed)`.
+fn build_ghost_fold_summary(blocks: &[DisplayBlock], idx: usize) -> (String, bool) {
     let mut groups: Vec<(String, usize)> = Vec::new();
     let mut total_ms = 0u64;
     let mut any_failed = false;
 
+    // Include the block at idx itself
+    if let DisplayBlock::ToolCall {
+        name,
+        success,
+        duration_ms,
+        ..
+    } = &blocks[idx]
+    {
+        total_ms += *duration_ms;
+        if !*success {
+            any_failed = true;
+        }
+        groups.push((name.clone(), 1));
+    }
+
+    // Scan forward from idx+1
     for b in &blocks[idx + 1..] {
         match b {
-            DisplayBlock::CodeBlock {
-                continuation: true, ..
-            }
-            | DisplayBlock::CodeOutput { .. } => continue,
+            DisplayBlock::CodeBlock { .. } | DisplayBlock::CodeOutput { .. } => continue,
             DisplayBlock::ToolCall {
                 name,
                 success,
@@ -397,35 +431,32 @@ fn build_collapsed_tool_summary(blocks: &[DisplayBlock], idx: usize) -> Option<(
         }
     }
 
-    if groups.is_empty() {
-        return None;
-    }
-
+    let total_tools: usize = groups.iter().map(|(_, c)| c).sum();
     let group_text = groups
         .iter()
         .map(|(name, count)| {
             if *count > 1 {
-                format!("{}×{}", name, count)
+                format!("{}\u{00d7}{}", name, count)
             } else {
                 name.clone()
             }
         })
         .collect::<Vec<_>>()
         .join(", ");
-    let icon = if any_failed { "x" } else { "+" };
     let summary = format!(
-        "[{}] {} ({})",
-        icon,
+        "\u{203a} {} tool{} \u{b7} {} \u{b7} {}",
+        total_tools,
+        if total_tools != 1 { "s" } else { "" },
         group_text,
         crate::util::format_duration_ms(total_ms)
     );
-    Some((summary, any_failed))
+    (summary, any_failed)
 }
 
 fn render_block<'a>(
     blocks: &'a [DisplayBlock],
     idx: usize,
-    code_expanded_global: bool,
+    expand_level: u8,
     lines: &mut Vec<Line<'a>>,
     viewport_width: usize,
     viewport_height: usize,
@@ -433,29 +464,44 @@ fn render_block<'a>(
     let block = &blocks[idx];
     match block {
         DisplayBlock::UserInput(text) => {
-            // Left-aligned user input with sodium accent bar on every visual line.
-            // We manually wrap so every visual line gets the bar prefix.
-            let prefix_w = 2; // "\u{2590} " is 2 columns
-            let cap = viewport_width.saturating_sub(prefix_w + 1);
+            // Blank line before user input to separate turns (skip for first block / after Splash)
+            if idx > 0 && !matches!(blocks[idx - 1], DisplayBlock::Splash) {
+                lines.push(Line::from(""));
+            }
+            // Circle marker on first line only, continuation lines get 2-space indent.
+            let marker_style = Style::default().fg(theme::SODIUM);
+            let text_style = theme::user_input();
+            let prefix_w = 2; // "● " or "  " is 2 columns
+            let cap = viewport_width.saturating_sub(prefix_w);
+            let mut is_first = true;
+
             for line in text.lines() {
                 if cap == 0 || line.is_empty() {
+                    let prefix = if is_first {
+                        Span::styled("\u{25CF} ", marker_style)
+                    } else {
+                        Span::raw("  ")
+                    };
+                    is_first = false;
                     lines.push(Line::from(vec![
-                        Span::styled("\u{2590} ", Style::default().fg(theme::SODIUM)),
-                        Span::styled(line.to_string(), theme::user_input()),
+                        prefix,
+                        Span::styled(line.to_string(), text_style),
                     ]));
                 } else {
-                    // Character-level wrap: every segment gets `cap` columns
                     let mut seg_start = 0;
                     let mut col = 0;
                     for (byte_idx, ch) in line.char_indices() {
                         let w = UnicodeWidthChar::width(ch).unwrap_or(0);
                         if col + w > cap && col > 0 {
+                            let prefix = if is_first {
+                                Span::styled("\u{25CF} ", marker_style)
+                            } else {
+                                Span::raw("  ")
+                            };
+                            is_first = false;
                             lines.push(Line::from(vec![
-                                Span::styled("\u{2590} ", Style::default().fg(theme::SODIUM)),
-                                Span::styled(
-                                    line[seg_start..byte_idx].to_string(),
-                                    theme::user_input(),
-                                ),
+                                prefix,
+                                Span::styled(line[seg_start..byte_idx].to_string(), text_style),
                             ]));
                             seg_start = byte_idx;
                             col = w;
@@ -463,69 +509,62 @@ fn render_block<'a>(
                             col += w;
                         }
                     }
-                    // Final segment
+                    let prefix = if is_first {
+                        Span::styled("\u{25CF} ", marker_style)
+                    } else {
+                        Span::raw("  ")
+                    };
+                    is_first = false;
                     lines.push(Line::from(vec![
-                        Span::styled("\u{2590} ", Style::default().fg(theme::SODIUM)),
-                        Span::styled(line[seg_start..].to_string(), theme::user_input()),
+                        prefix,
+                        Span::styled(line[seg_start..].to_string(), text_style),
                     ]));
                 }
             }
-            lines.push(Line::from(""));
         }
         DisplayBlock::AssistantText(text) => {
-            let rendered = markdown::render_markdown(text, viewport_width);
-            lines.extend(rendered);
+            // Breathing line before assistant response (separates from user turn / tool blocks)
+            if idx > 0
+                && !matches!(
+                    blocks[idx - 1],
+                    DisplayBlock::AssistantText(_) | DisplayBlock::Splash
+                )
+            {
+                lines.push(Line::from(""));
+            }
+            // Square marker on the first non-empty line, plain indent on others,
+            // empty lines pass through with no prefix.
+            let prefix_w = 2; // "■ " or "  " is 2 columns
+            let rendered = markdown::render_markdown(text, viewport_width.saturating_sub(prefix_w));
+            let mut marker_placed = false;
+            for line in rendered {
+                let is_empty = line.spans.iter().all(|s| s.content.trim().is_empty());
+                if is_empty {
+                    lines.push(Line::from(""));
+                } else if !marker_placed {
+                    marker_placed = true;
+                    let mut spans = vec![Span::styled("\u{25A0} ", theme::assistant_bar())];
+                    spans.extend(line.spans);
+                    lines.push(Line::from(spans));
+                } else {
+                    let mut spans = vec![Span::raw("  ")];
+                    spans.extend(line.spans);
+                    lines.push(Line::from(spans));
+                }
+            }
         }
-        DisplayBlock::CodeBlock {
-            code,
-            expanded,
-            continuation,
-        } => {
-            let show = code_expanded_global && *expanded;
-            if show {
-                // Expanded: render every block's own code, even continuations
+        DisplayBlock::CodeBlock { code, continuation } => {
+            if expand_level >= 2 {
+                // Full: render code with scribe border
                 for line in code.lines() {
                     lines.push(Line::from(vec![
                         Span::styled("\u{2502} ", theme::code_scribe()),
                         Span::styled(line, theme::code_content()),
                     ]));
                 }
-            } else if *continuation {
-                // Collapsed continuation: hidden (height 0)
-            } else {
-                // Collapsed group leader: show total lines across group
-                let mut total_lines = code.lines().count();
-                for b in &blocks[idx + 1..] {
-                    match b {
-                        DisplayBlock::CodeBlock {
-                            code: c,
-                            continuation: true,
-                            ..
-                        } => {
-                            total_lines += c.lines().count();
-                        }
-                        DisplayBlock::ToolCall { .. } | DisplayBlock::CodeOutput { .. } => continue,
-                        _ => break,
-                    }
-                }
-                let mut header = format!("\u{25b6} python ({} lines)", total_lines);
-                let mut has_tool_failure = false;
-                if let Some((tool_summary, any_failed)) = build_collapsed_tool_summary(blocks, idx)
-                {
-                    header.push_str(" \u{00b7} ");
-                    header.push_str(&tool_summary);
-                    has_tool_failure = any_failed;
-                }
-                let header = truncate_to_display_width(&header, viewport_width);
-                lines.push(Line::from(Span::styled(
-                    header,
-                    if has_tool_failure {
-                        theme::tool_failure()
-                    } else {
-                        theme::code_header()
-                    },
-                )));
             }
+            // Level 0 and 1: code blocks are hidden (height 0)
+            let _ = continuation;
         }
         DisplayBlock::ToolCall {
             name,
@@ -533,29 +572,46 @@ fn render_block<'a>(
             duration_ms,
             continuation,
         } => {
-            if code_expanded_global {
-                // Expanded: individual tool call lines
-                let icon = if *success { "+" } else { "x" };
-                let style = if *success {
-                    theme::tool_success()
-                } else {
-                    theme::tool_failure()
-                };
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "  [{}] {} ({})",
-                        icon,
-                        name,
-                        crate::util::format_duration_ms(*duration_ms)
-                    ),
-                    style,
-                )));
+            match expand_level {
+                0 => {
+                    if *continuation {
+                        // Absorbed into the ghost fold summary — hidden
+                    } else {
+                        // Ghost fold: build summary scanning forward
+                        let (summary, any_failed) = build_ghost_fold_summary(blocks, idx);
+                        let summary = truncate_to_display_width(&summary, viewport_width);
+                        lines.push(Line::from(Span::styled(
+                            summary,
+                            if any_failed {
+                                theme::tool_failure()
+                            } else {
+                                theme::code_header()
+                            },
+                        )));
+                    }
+                }
+                _ => {
+                    // Level 1 and 2: individual tool call lines
+                    let icon = if *success { "+" } else { "\u{00d7}" };
+                    let style = if *success {
+                        theme::tool_success()
+                    } else {
+                        theme::tool_failure()
+                    };
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "{} {} \u{b7} {}",
+                            icon,
+                            name,
+                            crate::util::format_duration_ms(*duration_ms)
+                        ),
+                        style,
+                    )));
+                }
             }
-            let _ = continuation;
-            // Collapsed mode: tool calls are summarized on the code header line.
         }
         DisplayBlock::CodeOutput { output, error } => {
-            if code_expanded_global && !output.is_empty() {
+            if expand_level >= 2 && !output.is_empty() {
                 for line in output.lines() {
                     lines.push(Line::from(vec![
                         Span::styled("\u{2502} ", theme::code_chrome()),
@@ -564,7 +620,7 @@ fn render_block<'a>(
                 }
             }
             if let Some(err) = error {
-                if code_expanded_global {
+                if expand_level >= 2 {
                     for line in err.lines() {
                         lines.push(Line::from(vec![
                             Span::styled("\u{2502} ", theme::code_chrome()),
@@ -572,7 +628,7 @@ fn render_block<'a>(
                         ]));
                     }
                 } else {
-                    // Collapsed: show first meaningful line only
+                    // Level 0 and 1: show first meaningful error line only
                     let summary = err
                         .lines()
                         .find(|l| {
@@ -582,7 +638,7 @@ fn render_block<'a>(
                         })
                         .unwrap_or(err.lines().next().unwrap_or("error"));
                     lines.push(Line::from(Span::styled(
-                        format!("  \u{2716} {}", summary.trim()),
+                        format!("\u{2716} {}", summary.trim()),
                         theme::error(),
                     )));
                 }
@@ -613,10 +669,6 @@ fn render_block<'a>(
                     ]));
                 }
             }
-            lines.push(Line::from(Span::styled(
-                "\u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
-                theme::code_chrome(),
-            )));
         }
         DisplayBlock::Error(msg) => {
             lines.push(Line::from(Span::styled(
@@ -628,15 +680,14 @@ fn render_block<'a>(
             for line in text.lines() {
                 lines.push(Line::from(Span::styled(line, theme::system_message())));
             }
-            lines.push(Line::from(""));
         }
         DisplayBlock::SubAgentResult {
             task,
             usage,
             tool_calls,
+            iterations,
             success,
             is_last,
-            ..
         } => {
             let connector = if *is_last {
                 "\u{2514}\u{2500}"
@@ -647,7 +698,8 @@ fn render_block<'a>(
 
             // Truncate task to fit: connector(2) + space(1) + task + sep(3) + stats(~30)
             let stats_str = format!(
-                " \u{b7} {} tool uses \u{b7} {} tokens",
+                " \u{b7} {} turns \u{b7} {} tool uses \u{b7} {} tokens",
+                iterations,
                 tool_calls,
                 crate::app::format_tokens(usage.total()),
             );
@@ -675,9 +727,6 @@ fn render_block<'a>(
                 Span::styled(status_connector, Style::default().fg(theme::ASH)),
                 Span::styled(status_label, status_style),
             ]));
-        }
-        DisplayBlock::TaskList { tasks } => {
-            render_task_list(tasks, lines, viewport_width);
         }
         DisplayBlock::PlanContent(content) => {
             render_plan_block(content, lines, viewport_width);
@@ -728,104 +777,6 @@ fn render_block<'a>(
             }
         }
     }
-}
-
-/// Render the task list as a bordered block with status markers and owner.
-fn render_task_list<'a>(
-    tasks: &'a [TaskSnapshot],
-    lines: &mut Vec<Line<'a>>,
-    viewport_width: usize,
-) {
-    let title = " TASKS ";
-    let border_w = viewport_width.saturating_sub(2);
-    let title_len = title.len();
-    let rule_after = border_w.saturating_sub(title_len + 1);
-
-    // Top border: ┌─ TASKS ────────────────────────┐
-    lines.push(Line::from(vec![
-        Span::styled("\u{250c}\u{2500}", Style::default().fg(theme::ASH)),
-        Span::styled(
-            title.to_string(),
-            Style::default()
-                .fg(theme::SODIUM)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!(
-                "{}\u{2510}",
-                "\u{2500}".repeat(rule_after.saturating_sub(1))
-            ),
-            Style::default().fg(theme::ASH),
-        ),
-    ]));
-
-    // Inner width for content (inside borders + padding)
-    let inner_w = viewport_width.saturating_sub(4); // │ + space + content + │
-
-    for task in tasks {
-        let (marker, marker_color, text_color) = match task.status.as_str() {
-            "in_progress" => ("\u{25c6}", theme::SODIUM, theme::SODIUM), // ◆
-            "pending" if task.is_blocked => ("\u{25cb}", theme::ASH, theme::ASH_TEXT), // ○
-            "pending" => ("\u{25cb}", theme::ASH_MID, theme::CHALK_DIM), // ○
-            "completed" => ("\u{2713}", theme::LICHEN, theme::ASH_TEXT), // ✓
-            "cancelled" => ("\u{2717}", theme::ASH, theme::ASH),         // ✗
-            _ => ("\u{25cb}", theme::ASH_MID, theme::CHALK_DIM),
-        };
-
-        // Build the label with optional (blocked) suffix
-        let label = if task.is_blocked && task.status == "pending" {
-            format!("{} (blocked)", task.label)
-        } else {
-            task.label.clone()
-        };
-
-        // Calculate space for label: inner_w - marker(1) - space(1) - owner_space
-        let owner_width = if task.owner.is_empty() {
-            0
-        } else {
-            task.owner.len() + 2
-        }; // 2 spaces padding
-        let label_max = inner_w.saturating_sub(2 + owner_width);
-        let label_display: String = label.chars().take(label_max).collect();
-        let label_truncated = label.chars().count() > label_max;
-        let label_final = if label_truncated {
-            format!(
-                "{}\u{2026}",
-                &label_display[..label_display.len().saturating_sub(1)]
-            )
-        } else {
-            label_display
-        };
-
-        let mut spans = vec![
-            Span::styled("\u{2502} ", Style::default().fg(theme::ASH)),
-            Span::styled(marker, Style::default().fg(marker_color)),
-            Span::styled(" ", Style::default()),
-            Span::styled(label_final.clone(), Style::default().fg(text_color)),
-        ];
-
-        // Right-align owner if present
-        if !task.owner.is_empty() {
-            let used = 2 + 1 + 1 + UnicodeWidthStr::width(label_final.as_str()); // "│ " + marker + space + label
-            let pad = inner_w.saturating_sub(used + owner_width);
-            if pad > 0 || inner_w > used + owner_width {
-                spans.push(Span::styled(" ".repeat(pad + 2), Style::default()));
-                spans.push(Span::styled(
-                    task.owner.as_str(),
-                    Style::default().fg(theme::ASH_MID),
-                ));
-            }
-        }
-
-        lines.push(Line::from(spans));
-    }
-
-    // Bottom border: └──────────────────────────────┘
-    let bottom_fill = viewport_width.saturating_sub(2);
-    lines.push(Line::from(Span::styled(
-        format!("\u{2514}{}\u{2518}", "\u{2500}".repeat(bottom_fill)),
-        Style::default().fg(theme::ASH),
-    )));
 }
 
 /// Render plan content as a bordered block with markdown inside.
@@ -1040,9 +991,14 @@ fn draw_task_tray(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .filter(|t| t.status == "completed" || t.status == "cancelled")
         .count();
-    let ratio_str = format!("{}/{}", completed, total);
+    let remaining = total - completed;
+    let ratio_str = if remaining == 0 {
+        format!("{} done", total)
+    } else {
+        format!("{} left \u{b7} {} done", remaining, completed)
+    };
 
-    // Top border: ┌─ TASKS ─ 2/5 ──────────────────────┐
+    // Top border: ┌─ TASKS ─ 3 left · 6 done ──────────┐
     let title = format!(" TASKS \u{2500} {} ", ratio_str);
     let title_w = UnicodeWidthStr::width(title.as_str());
     let fill_w = width.saturating_sub(3 + title_w); // ┌─ + title + ┐
@@ -1060,7 +1016,7 @@ fn draw_task_tray(frame: &mut Frame, app: &App, area: Rect) {
     ]);
 
     // Build pills for non-completed tasks
-    let active_tasks: Vec<&crate::app::TaskSnapshot> = app
+    let active_tasks: Vec<&TaskSnapshot> = app
         .task_tray
         .iter()
         .filter(|t| t.status != "completed" && t.status != "cancelled")
@@ -1069,7 +1025,7 @@ fn draw_task_tray(frame: &mut Frame, app: &App, area: Rect) {
     let inner_w = width.saturating_sub(4); // "│ " + content + " │"
     let two_col = active_tasks.len() >= 4 && inner_w >= TASK_TRAY_TWO_COL_MIN_INNER_WIDTH;
 
-    let format_task_cell = |task: &crate::app::TaskSnapshot, cell_w: usize| -> (String, Style) {
+    let format_task_cell = |task: &TaskSnapshot, cell_w: usize| -> (String, Style) {
         let (marker, marker_color, text_color) = match task.status.as_str() {
             "in_progress" => ("\u{25c6}", theme::SODIUM, theme::SODIUM),
             "pending" if task.is_blocked => ("\u{25cb}", theme::ASH, theme::ASH_TEXT),
@@ -1201,38 +1157,41 @@ fn draw_task_tray(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
+/// Draw the queued message bar (1 line above the input, shown while agent is running).
+fn draw_queued_message(frame: &mut Frame, app: &App, area: Rect) {
+    let msg = match &app.queued_message {
+        Some(m) => m,
+        None => return,
+    };
+    if area.height == 0 {
+        return;
+    }
+
+    let max_w = area.width.saturating_sub(6) as usize; // " ┆ " prefix + padding
+    let collapsed: String = msg
+        .chars()
+        .map(|c| if c == '\n' { ' ' } else { c })
+        .collect();
+    let truncated: String = collapsed.chars().take(max_w).collect();
+    let display = if collapsed.chars().count() > max_w {
+        format!("{}\u{2026}", truncated)
+    } else {
+        truncated
+    };
+
+    let line = Line::from(vec![
+        Span::styled(" \u{2506} ", Style::default().fg(theme::ASH)),
+        Span::styled(display, Style::default().fg(theme::CHALK_DIM)),
+        Span::styled("  \u{232b}", Style::default().fg(theme::ASH)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(line).style(Style::default().bg(theme::FORM_RAISED)),
+        area,
+    );
+}
+
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines = Vec::new();
-
-    // Render queued messages above the prompt
-    let queue_len = app.message_queue.len();
-    if queue_len > 0 {
-        let max_msg_w = area.width.saturating_sub(6) as usize; // "  N. " prefix width
-        for (i, msg) in app.message_queue.iter().enumerate() {
-            let num = i + 1;
-            let is_last = i == queue_len - 1;
-            // Collapse newlines to spaces and truncate
-            let collapsed: String = msg
-                .chars()
-                .map(|c| if c == '\n' { ' ' } else { c })
-                .collect();
-            let truncated: String = collapsed.chars().take(max_msg_w).collect();
-            let display = if collapsed.chars().count() > max_msg_w {
-                format!("{}\u{2026}", truncated)
-            } else {
-                truncated
-            };
-            let content_style = if is_last {
-                theme::CHALK_MID
-            } else {
-                theme::CHALK_DIM
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {}. ", num), Style::default().fg(theme::ASH_MID)),
-                Span::styled(display, Style::default().fg(content_style)),
-            ]));
-        }
-    }
 
     // Multi-line input rendering with manual character-level wrapping.
     // We pre-wrap each logical line using wrap_line() so that rendering and
@@ -1264,11 +1223,10 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // Position cursor accounting for visual wrapping and queue lines
+    // Position cursor accounting for visual wrapping
     let clamped_cursor = app.cursor_pos.min(app.input.len());
     let (vis_row, vis_col) = input_cursor_position(&app.input, clamped_cursor, area.width as usize);
-    let extra_offset = queue_len; // lines rendered above input text
-    let cursor_abs_row = extra_offset + vis_row; // absolute row in the rendered content
+    let cursor_abs_row = vis_row;
     let content_h = area.height.saturating_sub(2) as usize; // inside borders
 
     // Compute scroll offset to keep the cursor visible
@@ -1560,86 +1518,78 @@ fn draw_skill_picker(frame: &mut Frame, app: &App, history_area: Rect) {
     frame.render_widget(paragraph, popup_area);
 }
 
-/// Draw the agent prompt dialog (ask()) centered in the history area.
-fn draw_prompt(frame: &mut Frame, app: &App, history_area: Rect) {
+/// Calculate the height needed for the inline prompt area.
+fn prompt_height(app: &App, frame_width: u16) -> u16 {
+    let prompt = match &app.prompt {
+        Some(p) => p,
+        None => return 3, // fallback
+    };
+
+    let has_options = !prompt.options.is_empty();
+    let inner_w = frame_width.saturating_sub(2) as usize; // border padding
+
+    // Question lines via markdown rendering
+    let q_lines = if prompt.question.is_empty() {
+        1
+    } else {
+        markdown::markdown_height(&prompt.question, inner_w)
+    };
+
+    let option_count = if has_options {
+        prompt.options.len() + 1 // +1 for "Other"
+    } else {
+        0
+    };
+
+    let extra_h: u16 = if prompt.editing_extra || !has_options {
+        1 // single input line
+    } else {
+        0
+    };
+
+    let content_h = q_lines as u16
+        + if option_count > 0 || extra_h > 0 { 1 } else { 0 } // blank after question (only if more content follows)
+        + option_count as u16
+        + extra_h
+        + 1; // help bar
+    let max_h = 20u16; // cap height
+    (content_h + 2).min(max_h) // +2 for borders
+}
+
+/// Draw the agent prompt inline in the input area (replaces normal input).
+fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
     let prompt = match &app.prompt {
         Some(p) => p,
         None => return,
     };
 
     let has_options = !prompt.options.is_empty();
-    let option_count = if has_options {
-        prompt.options.len() + 1
-    } else {
-        0
-    }; // +1 for "Other"
-
-    // Count question lines (manual wrapping)
-    let inner_w = 46usize; // 50 - 4 (borders + padding)
-    let q_lines = if prompt.question.is_empty() {
-        1
-    } else {
-        prompt.question.chars().count().div_ceil(inner_w)
-    };
-
-    // Calculate content height
-    let extra_h: u16 = if prompt.editing_extra || !has_options {
-        3
-    } else {
-        0
-    };
-    let content_h = 1 // top padding
-        + q_lines as u16 // question
-        + 1 // blank after question
-        + option_count as u16
-        + if has_options && extra_h == 0 { 1 } else { 0 } // blank after options (only if no extra area)
-        + extra_h
-        + 1 // blank before help
-        + 1; // help bar
-    let height = (content_h + 2).min(history_area.height); // +2 for borders
-    let width = 50u16.min(history_area.width.saturating_sub(4));
-
-    // Center in history area
-    let x = history_area.x + (history_area.width.saturating_sub(width)) / 2;
-    let y = history_area.y + (history_area.height.saturating_sub(height)) / 2;
-    let popup_area = Rect::new(x, y, width, height);
-
-    // Clear and fill background explicitly
-    frame.render_widget(Clear, popup_area);
+    let inner_w = area.width.saturating_sub(2) as usize;
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // Top padding
-    lines.push(Line::from(""));
-
-    // Question text (wrap manually)
-    let q_chars: Vec<char> = prompt.question.chars().collect();
-    if q_chars.is_empty() {
-        lines.push(Line::from(""));
-    } else {
-        let mut start = 0;
-        while start < q_chars.len() {
-            let end = (start + inner_w).min(q_chars.len());
-            let chunk: String = q_chars[start..end].iter().collect();
-            lines.push(Line::from(Span::styled(
-                format!("  {}", chunk),
-                Style::default()
-                    .fg(theme::CHALK)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            start = end;
+    // Question text via markdown rendering
+    if !prompt.question.is_empty() {
+        let md_lines = markdown::render_markdown(&prompt.question, inner_w);
+        // Prefix each line with a left margin
+        for md_line in md_lines {
+            let mut prefixed = vec![Span::styled(" ", Style::default())];
+            prefixed.extend(md_line.spans);
+            lines.push(Line::from(prefixed));
         }
     }
 
-    lines.push(Line::from("")); // blank after question
+    // Blank separator before options/input
+    lines.push(Line::from(""));
 
     // Option list
     if has_options {
         for (i, opt) in prompt.options.iter().enumerate() {
             let selected = i == prompt.selected_idx;
             let marker = if selected { "\u{203a}" } else { " " };
+            let max_opt_w = inner_w.saturating_sub(6); // " › 1. " prefix
             let label = format!("{}. {}", i + 1, opt);
-            let truncated: String = label.chars().take(inner_w.saturating_sub(3)).collect();
+            let truncated: String = label.chars().take(max_opt_w).collect();
 
             if selected {
                 lines.push(Line::from(vec![
@@ -1686,46 +1636,25 @@ fn draw_prompt(frame: &mut Frame, app: &App, history_area: Rect) {
                 Style::default().fg(theme::CHALK_DIM),
             )));
         }
-
-        if extra_h == 0 {
-            lines.push(Line::from("")); // blank after options
-        }
     }
 
-    // Extra text input area (shown when Shift+Tab active, or always for freeform)
+    // Text input line (shown when editing extra or freeform)
     if prompt.editing_extra || !has_options {
-        let label = if has_options {
-            " Extra context "
-        } else {
-            " Your answer "
-        };
-        let rule_w = inner_w.saturating_sub(label.chars().count() + 3);
-        lines.push(Line::from(Span::styled(
-            format!("  \u{250c}{}\u{2500}{}", label, "\u{2500}".repeat(rule_w)),
-            Style::default().fg(theme::ASH_MID),
-        )));
-        let text_display: String = prompt
-            .extra_text
-            .chars()
-            .take(inner_w.saturating_sub(4))
-            .collect();
+        let label = if has_options { "context" } else { "answer" };
+        let text_w = inner_w.saturating_sub(4); // " ❯ " prefix
+        let text_display: String = prompt.extra_text.chars().take(text_w).collect();
         lines.push(Line::from(vec![
-            Span::styled("  \u{2502} ", Style::default().fg(theme::ASH_MID)),
+            Span::styled(format!(" {} ", theme::PROMPT_CHAR), theme::prompt()),
             Span::styled(text_display, Style::default().fg(theme::CHALK)),
             Span::styled("\u{2588}", Style::default().fg(theme::SODIUM)),
+            Span::styled(format!("  {}", label), Style::default().fg(theme::ASH)),
         ]));
-        lines.push(Line::from(Span::styled(
-            format!("  \u{2514}{}", "\u{2500}".repeat(inner_w.saturating_sub(2))),
-            Style::default().fg(theme::ASH_MID),
-        )));
     }
-
-    lines.push(Line::from("")); // blank before help
 
     // Help bar
     let help = if has_options {
         Line::from(vec![
-            Span::styled("  \u{2191}\u{2193}", theme::help_key()),
+            Span::styled(" \u{2191}\u{2193}", theme::help_key()),
             Span::styled(" select  ", theme::help_desc()),
             Span::styled("\u{23ce}", theme::help_key()),
             Span::styled(" submit  ", theme::help_desc()),
@@ -1736,13 +1665,20 @@ fn draw_prompt(frame: &mut Frame, app: &App, history_area: Rect) {
         ])
     } else {
         Line::from(vec![
-            Span::styled("  \u{23ce}", theme::help_key()),
+            Span::styled(" \u{23ce}", theme::help_key()),
             Span::styled(" submit  ", theme::help_desc()),
             Span::styled("Esc", theme::help_key()),
             Span::styled(" cancel", theme::help_desc()),
         ])
     };
     lines.push(help);
+
+    let content_h = area.height.saturating_sub(2) as usize;
+    let scroll_offset = if lines.len() > content_h {
+        lines.len() - content_h
+    } else {
+        0
+    };
 
     let title = " Agent Question ";
     let block = Block::default()
@@ -1752,12 +1688,13 @@ fn draw_prompt(frame: &mut Frame, app: &App, history_area: Rect) {
                 .fg(theme::SODIUM)
                 .add_modifier(Modifier::BOLD),
         ))
-        .borders(Borders::ALL)
+        .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::default().fg(theme::ASH_LIGHT));
     let paragraph = Paragraph::new(lines)
         .block(block)
-        .style(Style::default().bg(theme::FORM_DEEP));
-    frame.render_widget(paragraph, popup_area);
+        .style(Style::default().bg(theme::FORM_DEEP))
+        .scroll((scroll_offset as u16, 0));
+    frame.render_widget(paragraph, area);
 }
 
 /// Wrap a single logical line into visual line segments, returning byte-offset ranges.
