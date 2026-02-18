@@ -142,8 +142,3 @@ pub fn heading() -> Style {
 pub fn inline_code() -> Style {
     Style::default().fg(SODIUM)
 }
-
-/// Image attachment badge
-pub fn image_attachment() -> Style {
-    Style::default().fg(SODIUM)
-}

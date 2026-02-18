@@ -13,17 +13,29 @@ DEST="${2:-target/python-standalone}"
 
 # Map target to PBS variant
 case "$TARGET" in
-    x86_64-apple-darwin)   PBS_TRIPLE="x86_64-apple-darwin" ;;
-    aarch64-apple-darwin)  PBS_TRIPLE="aarch64-apple-darwin" ;;
-    x86_64-unknown-linux-gnu)  PBS_TRIPLE="x86_64-unknown-linux-gnu" ;;
-    aarch64-unknown-linux-gnu) PBS_TRIPLE="aarch64-unknown-linux-gnu" ;;
+    x86_64-apple-darwin)
+        PBS_TRIPLE="x86_64-apple-darwin"
+        PBS_FLAVOR="debug-full"
+        ;;
+    aarch64-apple-darwin)
+        PBS_TRIPLE="aarch64-apple-darwin"
+        PBS_FLAVOR="debug-full"
+        ;;
+    x86_64-unknown-linux-gnu)
+        PBS_TRIPLE="x86_64-unknown-linux-gnu"
+        PBS_FLAVOR="pgo+lto-full"
+        ;;
+    aarch64-unknown-linux-gnu)
+        PBS_TRIPLE="aarch64-unknown-linux-gnu"
+        PBS_FLAVOR="pgo+lto-full"
+        ;;
     *) echo "Unsupported target: $TARGET"; exit 1 ;;
 esac
 
-FILENAME="cpython-${PYTHON_VERSION}+${PBS_RELEASE}-${PBS_TRIPLE}-pgo+lto-full.tar.zst"
+FILENAME="cpython-${PYTHON_VERSION}+${PBS_RELEASE}-${PBS_TRIPLE}-${PBS_FLAVOR}.tar.zst"
 URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE}/${FILENAME}"
 MARKER="${DEST}/.version"
-EXPECTED="${PYTHON_VERSION}+${PBS_RELEASE}"
+EXPECTED="${PYTHON_VERSION}+${PBS_RELEASE}+${PBS_FLAVOR}"
 
 # Check cache
 if [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$EXPECTED" ]; then

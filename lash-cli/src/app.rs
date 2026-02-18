@@ -177,7 +177,9 @@ impl DisplayBlock {
                 // Left-aligned with "\u{2590} " prefix (2 chars) + 1 slack
                 wrapped_text_height(s, width, 3)
             }
-            DisplayBlock::AssistantText(s) => markdown::markdown_height(s, width.saturating_sub(2)),
+            DisplayBlock::AssistantText(s) => {
+                markdown::markdown_height_compact(s, width.saturating_sub(2))
+            }
             DisplayBlock::CodeBlock {
                 code, continuation, ..
             } => {
@@ -923,7 +925,8 @@ impl App {
         let pending_height = if self.pending_text.is_empty() {
             0
         } else {
-            crate::markdown::markdown_height(&self.pending_text, width)
+            // Streaming assistant text is rendered with a 2-column left prefix in ui.rs.
+            crate::markdown::markdown_height_compact(&self.pending_text, width.saturating_sub(2))
         };
         // Include live streaming output lines
         let streaming_height = self.streaming_output.len();

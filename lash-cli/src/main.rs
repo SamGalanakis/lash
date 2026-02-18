@@ -498,7 +498,7 @@ fn controls_text() -> String {
         "  Ctrl+U / Ctrl+D    Scroll half-page up / down",
         "  PgUp / PgDn        Scroll page up / down",
         "  Shift+Enter        Insert newline",
-        "  Ctrl+V             Paste image (or text fallback)",
+        "  Ctrl+V             Paste image as inline [Image #n]",
         "  Ctrl+Shift+V       Paste text only",
         "  Ctrl+Y             Copy last response to clipboard",
         "  Ctrl+O             Cycle tool expansion (ghost ↔ compact)",
@@ -544,7 +544,7 @@ fn help_text(skills: &skill::SkillRegistry) -> String {
         "  Ctrl+U / Ctrl+D    Scroll half-page up / down".to_string(),
         "  PgUp / PgDn        Scroll page up / down".to_string(),
         "  Shift+Enter        Insert newline".to_string(),
-        "  Ctrl+V             Paste image (or text fallback)".to_string(),
+        "  Ctrl+V             Paste image as inline [Image #n]".to_string(),
         "  Ctrl+Shift+V       Paste text only".to_string(),
         "  Ctrl+Y             Copy last response to clipboard".to_string(),
         "  Ctrl+O             Cycle tool expansion (ghost \u{2194} compact)".to_string(),
@@ -676,9 +676,7 @@ async fn run_app(
         if app.dirty {
             // Pre-compute height cache before immutable borrow in draw
             let size = terminal.size()?;
-            let overhead: u16 =
-                (if app.running { 5 } else { 4 }) + app.task_tray_height(size.width);
-            let vh = size.height.saturating_sub(overhead) as usize;
+            let vh = ui::history_viewport_height(&app, size.width, size.height);
             let vw = size.width as usize;
             app.ensure_height_cache_pub(vw, vh);
             // Clamp scroll_offset (especially for scroll_to_bottom's usize::MAX)
@@ -767,6 +765,9 @@ async fn run_app(
                         });
                         if let Some(png_bytes) = got_image {
                             app.pending_images.push(png_bytes);
+                            let marker = format!("[Image #{}]", app.pending_images.len());
+                            insert_inline_marker(&mut app, &marker);
+                            app.update_suggestions();
                         }
                     }
                     continue;
@@ -793,9 +794,7 @@ async fn run_app(
                 // ── Always-on scroll keys (work in all states) ──
                 {
                     let size = terminal.size()?;
-                    let overhead: u16 =
-                        (if app.running { 5 } else { 4 }) + app.task_tray_height(size.width);
-                    let vh = size.height.saturating_sub(overhead) as usize;
+                    let vh = ui::history_viewport_height(&app, size.width, size.height);
                     let vw = size.width as usize;
                     let half_page = vh / 2;
 
@@ -1240,9 +1239,7 @@ async fn run_app(
                     MouseEventKind::ScrollUp => app.scroll_up(3),
                     MouseEventKind::ScrollDown => {
                         let size = terminal.size()?;
-                        let overhead: u16 =
-                            (if app.running { 5 } else { 4 }) + app.task_tray_height(size.width);
-                        let vh = size.height.saturating_sub(overhead) as usize;
+                        let vh = ui::history_viewport_height(&app, size.width, size.height);
                         let vw = size.width as usize;
                         app.scroll_down(3, vh, vw);
                     }
@@ -1619,6 +1616,32 @@ fn transform_at_references(input: &str) -> String {
     result
 }
 
+/// Insert an inline attachment marker like `[Image #1]` at the current cursor,
+/// adding surrounding spaces when needed so it reads naturally in the input.
+fn insert_inline_marker(app: &mut App, marker: &str) {
+    let needs_leading_space = app.cursor_pos > 0
+        && app.input[..app.cursor_pos]
+            .chars()
+            .next_back()
+            .is_some_and(|c| !c.is_whitespace());
+
+    let needs_trailing_space = app.cursor_pos < app.input.len()
+        && app.input[app.cursor_pos..]
+            .chars()
+            .next()
+            .is_some_and(|c| !c.is_whitespace());
+
+    if needs_leading_space {
+        app.insert_char(' ');
+    }
+    for ch in marker.chars() {
+        app.insert_char(ch);
+    }
+    if needs_trailing_space {
+        app.insert_char(' ');
+    }
+}
+
 /// Send a desktop notification that the agent finished.
 fn notify_done() {
     // Ensure the icon exists in ~/.lash/
@@ -1752,5 +1775,28 @@ fn copy_last_response(app: &App) {
         && let Ok(mut clipboard) = arboard::Clipboard::new()
     {
         let _ = clipboard.set_text(text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_inline_marker_adds_spaces_when_touching_text() {
+        let mut app = App::new("model".into(), "session".into(), None);
+        app.input = "hello world".into();
+        app.cursor_pos = 5;
+        insert_inline_marker(&mut app, "[Image #1]");
+        assert_eq!(app.input, "hello [Image #1] world");
+    }
+
+    #[test]
+    fn insert_inline_marker_keeps_existing_spacing() {
+        let mut app = App::new("model".into(), "session".into(), None);
+        app.input = "hello ".into();
+        app.cursor_pos = app.input.len();
+        insert_inline_marker(&mut app, "[Image #1]");
+        assert_eq!(app.input, "hello [Image #1]");
     }
 }

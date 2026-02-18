@@ -13,34 +13,43 @@ use crate::app::{
 use crate::markdown;
 use crate::theme;
 
+fn input_height(app: &App, frame_width: u16) -> u16 {
+    if app.has_prompt() {
+        prompt_height(app, frame_width)
+    } else {
+        // Inner width = frame width; prefix handled by wrap_line
+        let inner_w = frame_width as usize;
+        let visual_lines = input_visual_lines(&app.input, inner_w);
+        (visual_lines as u16 + 2).min(12)
+    }
+}
+
+/// Exact history viewport height based on the same layout math used in draw().
+pub fn history_viewport_height(app: &App, frame_width: u16, frame_height: u16) -> usize {
+    let strike_h = if app.running { 1 } else { 0 };
+    let task_tray_h = app.task_tray_height(frame_width);
+    let queued_h: u16 = if app.has_queued_message() { 1 } else { 0 };
+    let input_h = input_height(app, frame_width);
+    let overhead = 1 + strike_h + task_tray_h + queued_h + input_h;
+    frame_height.saturating_sub(overhead) as usize
+}
+
 pub fn draw(frame: &mut Frame, app: &App) {
     // Paint entire frame with FORM bg so no terminal background bleeds through
     frame.render_widget(Block::default().style(theme::history_bg()), frame.area());
 
     let strike_h = if app.running { 1 } else { 0 };
-    let image_h = if app.pending_images.is_empty() { 0 } else { 1 };
     let task_tray_h = app.task_tray_height(frame.area().width);
-
     let queued_h: u16 = if app.has_queued_message() { 1 } else { 0 };
-
-    // Dynamic input height: depends on whether agent prompt is active.
-    let input_h = if app.has_prompt() {
-        prompt_height(app, frame.area().width)
-    } else {
-        // Inner width = frame width; prefix handled by wrap_line
-        let inner_w = frame.area().width as usize;
-        let visual_lines = input_visual_lines(&app.input, inner_w);
-        (visual_lines as u16 + 2).min(12)
-    };
+    let input_h = input_height(app, frame.area().width);
 
     let chunks = Layout::vertical([
         Constraint::Length(1),           // [0] status bar
         Constraint::Min(3),              // [1] history
         Constraint::Length(strike_h),    // [2] strike zone (only when running)
-        Constraint::Length(image_h),     // [3] image attachment badges
-        Constraint::Length(task_tray_h), // [4] task tray
-        Constraint::Length(queued_h),    // [5] queued message bar
-        Constraint::Length(input_h),     // [6] input (dynamic height)
+        Constraint::Length(task_tray_h), // [3] task tray
+        Constraint::Length(queued_h),    // [4] queued message bar
+        Constraint::Length(input_h),     // [5] input (dynamic height)
     ])
     .split(frame.area());
 
@@ -49,14 +58,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.running {
         draw_strike_zone(frame, app, chunks[2]);
     }
-    draw_image_badges(frame, app, chunks[3]);
-    draw_task_tray(frame, app, chunks[4]);
-    draw_queued_message(frame, app, chunks[5]);
+    draw_task_tray(frame, app, chunks[3]);
+    draw_queued_message(frame, app, chunks[4]);
     if app.has_prompt() {
-        draw_prompt(frame, app, chunks[6]);
+        draw_prompt(frame, app, chunks[5]);
     } else {
-        draw_input(frame, app, chunks[6]);
-        draw_suggestions(frame, app, chunks[6]);
+        draw_input(frame, app, chunks[5]);
+        draw_suggestions(frame, app, chunks[5]);
     }
     draw_session_picker(frame, app, chunks[1]); // overlay on history area
     draw_skill_picker(frame, app, chunks[1]); // overlay on history area
@@ -267,7 +275,7 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
     // The ■ marker appears once the text is committed as an AssistantText block.
     if !app.pending_text.is_empty() && lines.len() < viewport_height + skip_lines {
         let rendered =
-            markdown::render_markdown(&app.pending_text, viewport_width.saturating_sub(2));
+            markdown::render_markdown_compact(&app.pending_text, viewport_width.saturating_sub(2));
         for line in rendered {
             let mut spans = vec![Span::raw("  ")];
             spans.extend(line.spans);
@@ -312,7 +320,7 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
             .iter()
             .map(|line| {
                 let w = line.width();
-                if w == 0 {
+                if viewport_width == 0 || w == 0 {
                     1
                 } else {
                     w.div_ceil(viewport_width)
@@ -523,6 +531,12 @@ fn render_block<'a>(
             }
         }
         DisplayBlock::AssistantText(text) => {
+            let prefix_w = 2; // "■ " or "  " is 2 columns
+            let rendered =
+                markdown::render_markdown_compact(text, viewport_width.saturating_sub(prefix_w));
+            if rendered.is_empty() {
+                return;
+            }
             // Breathing line before assistant response (separates from user turn / tool blocks)
             if idx > 0
                 && !matches!(
@@ -534,8 +548,6 @@ fn render_block<'a>(
             }
             // Square marker on the first non-empty line, plain indent on others,
             // empty lines pass through with no prefix.
-            let prefix_w = 2; // "■ " or "  " is 2 columns
-            let rendered = markdown::render_markdown(text, viewport_width.saturating_sub(prefix_w));
             let mut marker_placed = false;
             for line in rendered {
                 let is_empty = line.spans.iter().all(|s| s.content.trim().is_empty());
@@ -946,35 +958,6 @@ fn draw_strike_zone(frame: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
-    let paragraph = Paragraph::new(Line::from(spans)).style(theme::history_bg());
-    frame.render_widget(paragraph, area);
-}
-
-fn draw_image_badges(frame: &mut Frame, app: &App, area: Rect) {
-    if app.pending_images.is_empty() {
-        return;
-    }
-
-    let badges: Vec<Span> = app
-        .pending_images
-        .iter()
-        .enumerate()
-        .flat_map(|(i, _)| {
-            let mut spans = Vec::new();
-            if i > 0 {
-                spans.push(Span::raw("  "));
-            }
-            spans.push(Span::styled(
-                format!(" \u{1F5BC} Image {} ", i + 1),
-                theme::image_attachment(),
-            ));
-            spans
-        })
-        .collect();
-
-    // Left padding to align with the prompt character
-    let mut spans = vec![Span::raw("  ")];
-    spans.extend(badges);
     let paragraph = Paragraph::new(Line::from(spans)).style(theme::history_bg());
     frame.render_widget(paragraph, area);
 }
@@ -1775,6 +1758,7 @@ fn input_cursor_position(input: &str, cursor_pos: usize, full_width: usize) -> (
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::App;
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
@@ -1804,5 +1788,31 @@ mod tests {
             assert!(text.starts_with("\u{2502} "), "missing left plan border");
             assert!(text.ends_with(" \u{2502}"), "missing right plan border");
         }
+    }
+
+    #[test]
+    fn history_viewport_height_respects_dynamic_input_and_trays() {
+        let mut app = App::new("model".into(), "session".into(), None);
+        app.blocks.clear(); // avoid splash-specific influence on expectations
+        app.input = "line1\nline2\nline3".into();
+        app.queued_message = Some("queued".into());
+        app.task_tray.push(crate::app::TaskSnapshot {
+            id: "t1".into(),
+            label: "Task".into(),
+            status: "pending".into(),
+            owner: String::new(),
+            is_blocked: false,
+        });
+
+        let fw = 100u16;
+        let fh = 40u16;
+        let expected_overhead = 1u16 // status bar
+            + if app.running { 1 } else { 0 }
+            + app.task_tray_height(fw)
+            + 1u16 // queued bar
+            + input_height(&app, fw);
+
+        let got = history_viewport_height(&app, fw, fh);
+        assert_eq!(got, fh.saturating_sub(expected_overhead) as usize);
     }
 }

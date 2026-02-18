@@ -51,6 +51,41 @@ pub fn render_markdown(text: &str, max_width: usize) -> Vec<Line<'static>> {
     renderer.lines
 }
 
+fn is_blank_line(line: &Line<'_>) -> bool {
+    line.spans.iter().all(|s| s.content.trim().is_empty())
+}
+
+/// Normalize rendered markdown lines for chat-style blocks:
+/// - trim leading/trailing blank lines
+/// - collapse multiple blank lines to a single blank line
+pub fn compact_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(lines.len());
+    let mut prev_blank = true;
+
+    for line in lines {
+        let blank = is_blank_line(&line);
+        if blank {
+            if !prev_blank {
+                out.push(Line::from(""));
+            }
+        } else {
+            out.push(line);
+        }
+        prev_blank = blank;
+    }
+
+    while out.last().is_some_and(is_blank_line) {
+        out.pop();
+    }
+
+    out
+}
+
+/// Render markdown and apply chat-style line compaction.
+pub fn render_markdown_compact(text: &str, max_width: usize) -> Vec<Line<'static>> {
+    compact_lines(render_markdown(text, max_width))
+}
+
 struct MdRenderer {
     lines: Vec<Line<'static>>,
     spans: Vec<Span<'static>>,
@@ -404,6 +439,24 @@ pub fn markdown_height(text: &str, width: usize) -> usize {
         .max(1)
 }
 
+/// Count visual height after chat-style compaction.
+pub fn markdown_height_compact(text: &str, width: usize) -> usize {
+    if text.trim().is_empty() {
+        return 0;
+    }
+    let lines = render_markdown_compact(text, width);
+    if width == 0 {
+        return lines.len();
+    }
+    lines
+        .iter()
+        .map(|line| {
+            let w = line.width();
+            if w == 0 { 1 } else { w.div_ceil(width) }
+        })
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,5 +609,40 @@ mod tests {
         let h_narrow = markdown_height("a long line of text", 5);
         let h_wide = markdown_height("a long line of text", 200);
         assert!(h_narrow > h_wide);
+    }
+
+    #[test]
+    fn compact_lines_trims_outer_blank_rows() {
+        let lines = vec![
+            Line::from(""),
+            Line::from("hi"),
+            Line::from(""),
+            Line::from(""),
+        ];
+        let compact = compact_lines(lines);
+        assert_eq!(compact.len(), 1);
+        let text: String = compact[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(text, "hi");
+    }
+
+    #[test]
+    fn compact_lines_collapses_blank_runs() {
+        let lines = vec![
+            Line::from("a"),
+            Line::from(""),
+            Line::from(""),
+            Line::from("b"),
+        ];
+        let compact = compact_lines(lines);
+        assert_eq!(compact.len(), 3);
+        let text: Vec<String> = compact
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(text, vec!["a".to_string(), "".to_string(), "b".to_string()]);
     }
 }
