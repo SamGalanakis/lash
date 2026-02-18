@@ -88,8 +88,10 @@ fi
 # Generate pyo3-config.txt
 LIB_DIR="${INSTALL_DIR}/lib"
 LIB_NAME="python${PYTHON_MAJOR_MINOR}"
+BUILD_FLAGS=""
 if [ "$PBS_FLAVOR" = "debug-full" ]; then
     LIB_NAME="python${PYTHON_MAJOR_MINOR}d"
+    BUILD_FLAGS="Py_DEBUG"
 fi
 
 case "$TARGET" in
@@ -104,7 +106,7 @@ shared=false
 lib_name=${LIB_NAME}
 lib_dir=${PWD}/${LIB_DIR}
 pointer_width=${POINTER_WIDTH}
-build_flags=
+build_flags=${BUILD_FLAGS}
 suppress_build_script_link_lines=false
 EOF
 
