@@ -63,6 +63,7 @@ jobs:
         env:
           PYO3_CONFIG_FILE: ${{ github.workspace }}/target/python-standalone/pyo3-config.txt
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          RUSTFLAGS: -L native=${{ github.workspace }}/target/python-standalone/python/install/lib
         run: cargo build --release -p lash-cli --target ${{ matrix.target }}
 
       - name: Upload artifact
