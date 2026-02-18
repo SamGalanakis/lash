@@ -35,9 +35,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y zstd libreadline-dev libexpat1-dev libzstd-dev \
-            uuid-dev libsqlite3-dev libncursesw5-dev libffi-dev liblzma-dev \
-            libbz2-dev libmpdec-dev protobuf-compiler
+          sudo apt-get install -y zstd protobuf-compiler
 
       - name: Install system dependencies (Linux cross)
         if: matrix.cross
@@ -45,9 +43,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      - name: Install protobuf (macOS)
+      - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install protobuf zstd xz readline
+        run: brew install protobuf
 
       - name: Install baml-cli
         run: cargo install baml-cli
@@ -65,6 +63,7 @@ jobs:
         env:
           PYO3_CONFIG_FILE: ${{ github.workspace }}/target/python-standalone/pyo3-config.txt
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          LIBRARY_PATH: ${{ github.workspace }}/target/python-standalone/python/build/lib
         run: cargo build --release -p lash-cli --target ${{ matrix.target }}
 
       - name: Upload artifact
