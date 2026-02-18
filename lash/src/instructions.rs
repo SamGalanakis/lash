@@ -1,6 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::SystemTime;
 
 /// Loads project instruction files (AGENTS.md, CLAUDE.md) with deduplication.
 ///
@@ -14,8 +15,9 @@ pub struct InstructionLoader {
     system_paths: HashSet<PathBuf>,
     /// Project root boundary (cwd at construction time).
     project_root: PathBuf,
-    /// Context-aware paths already loaded (dedup across file reads).
-    loaded_context: Mutex<HashSet<PathBuf>>,
+    /// Last seen modified time for context-aware instruction files.
+    /// Files are reloaded when mtime changes.
+    loaded_context: Mutex<HashMap<PathBuf, Option<SystemTime>>>,
 }
 
 impl Default for InstructionLoader {
@@ -56,7 +58,7 @@ impl InstructionLoader {
             system_text: parts.join("\n\n"),
             system_paths,
             project_root,
-            loaded_context: Mutex::new(HashSet::new()),
+            loaded_context: Mutex::new(HashMap::new()),
         }
     }
 
@@ -88,11 +90,15 @@ impl InstructionLoader {
                 // Skip if already in system instructions
                 if !self.system_paths.contains(&path) {
                     let mut loaded = self.loaded_context.lock().unwrap();
-                    // Skip if already loaded via a previous context-aware resolve
-                    if !loaded.contains(&path)
-                        && let Some(text) = load_with_prefix(&path)
-                    {
-                        loaded.insert(path);
+                    let current_mtime = std::fs::metadata(&path)
+                        .ok()
+                        .and_then(|m| m.modified().ok());
+                    let unchanged = loaded
+                        .get(&path)
+                        .is_some_and(|last_seen| *last_seen == current_mtime);
+
+                    if !unchanged && let Some(text) = load_with_prefix(&path) {
+                        loaded.insert(path, current_mtime);
                         parts.push(text);
                     }
                 }
@@ -201,7 +207,7 @@ mod tests {
             system_text: String::new(),
             system_paths: HashSet::new(),
             project_root: dir.path().to_path_buf(),
-            loaded_context: Mutex::new(HashSet::new()),
+            loaded_context: Mutex::new(HashMap::new()),
         };
 
         let file = sub.join("code.rs");
@@ -221,7 +227,7 @@ mod tests {
             system_text: String::new(),
             system_paths: HashSet::new(),
             project_root: dir.path().to_path_buf(),
-            loaded_context: Mutex::new(HashSet::new()),
+            loaded_context: Mutex::new(HashMap::new()),
         };
 
         let file = sub.join("code.rs");
@@ -232,13 +238,41 @@ mod tests {
     }
 
     #[test]
+    fn resolve_reloads_when_file_changes() {
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let instructions = sub.join("AGENTS.md");
+        std::fs::write(&instructions, "v1 instructions").unwrap();
+
+        let loader = InstructionLoader {
+            system_text: String::new(),
+            system_paths: HashSet::new(),
+            project_root: dir.path().to_path_buf(),
+            loaded_context: Mutex::new(HashMap::new()),
+        };
+
+        let file = sub.join("code.rs");
+        let r1 = loader.resolve(file.to_str().unwrap());
+        assert!(r1.is_some());
+        assert!(r1.unwrap().contains("v1 instructions"));
+
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::fs::write(&instructions, "v2 instructions").unwrap();
+
+        let r2 = loader.resolve(file.to_str().unwrap());
+        assert!(r2.is_some());
+        assert!(r2.unwrap().contains("v2 instructions"));
+    }
+
+    #[test]
     fn resolve_outside_project_root() {
         let dir = TempDir::new().unwrap();
         let loader = InstructionLoader {
             system_text: String::new(),
             system_paths: HashSet::new(),
             project_root: dir.path().to_path_buf(),
-            loaded_context: Mutex::new(HashSet::new()),
+            loaded_context: Mutex::new(HashMap::new()),
         };
         assert!(loader.resolve("/tmp/outside/file.rs").is_none());
     }

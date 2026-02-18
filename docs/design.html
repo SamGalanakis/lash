@@ -641,6 +641,12 @@
   .t-dim { color: var(--ash); }
   .t-bold { color: var(--chalk); font-weight: 500; }
   .t-separator { color: var(--ash); }
+  .t-user-bar { color: var(--sodium); }
+  .t-user-text { color: var(--chalk-mid); }
+  .t-assistant { color: var(--chalk); }
+  .t-code-chrome { color: var(--ash); }
+  .t-code { color: var(--chalk-dim); }
+  .t-tool { color: var(--ash-text); }
 
   .terminal-label {
     font-family: var(--font-system);
@@ -1183,15 +1189,14 @@
           <div class="type-meta-usage">Terminal output, code snippets, CLI interface. The daily driver. Where the actual work happens.</div>
         </div>
         <div class="type-sample-mono">
-          <span class="tm-prompt">/</span> lash delegate --plan<br>
-          &nbsp; [PLAN] decomposing scope<br>
-          &nbsp; [EXEC] 3 agents dispatched<br>
-          <span class="tm-ok">&nbsp; done</span> converged in 2 rounds<br>
+          <span class="tm-prompt">&#x2590;</span> fix the auth timeout in login.rs<br>
           <br>
-          <span class="tm-prompt">/</span> lash test --all<br>
-          &nbsp; running 47 tests<br>
-          <span class="tm-err">&nbsp; FAIL test_auth: timeout</span><br>
-          &nbsp; 46 passed, <span class="tm-err">1 failed</span>
+          I'll look at the auth flow and fix the timeout.<br>
+          <br>
+          <span style="color:var(--ash-mid)">&#x25b6; python (3 lines)</span><br>
+          <span class="tm-ok">&nbsp; + edit_file</span> <span style="color:var(--ash)">login.rs &middot; 0.2s</span><br>
+          <br>
+          Done. Timeout increased to 30s.
         </div>
       </div>
     </div>
@@ -1238,59 +1243,61 @@
     <div class="section-header">
       <span class="section-number">04</span>
       <span class="section-title">Terminal</span>
-      <span class="section-desc">The terminal is where lash lives. Formwork seams, cut corners, dot separators. The / prompt is the brand touchpoint.</span>
+      <span class="section-desc">The terminal is where lash lives. User messages get a sodium accent bar. Assistant prose flows left-aligned. Clean separation through whitespace.</span>
     </div>
     <div class="terminal-examples">
       <div>
-        <div class="terminal-label">Standard session</div>
+        <div class="terminal-label">Conversation</div>
         <div class="terminal-window">
-          <span class="t-prompt">/</span> <span class="t-cmd">lash init</span><br>
-          <span class="t-out">&nbsp; workspace ready</span><br>
+          <span class="t-user-bar">&#x2590;</span> <span class="t-user-text">fix the auth timeout in login.rs</span><br>
           <br>
-          <span class="t-prompt">/</span> <span class="t-cmd">lash run</span> <span class="t-flag">deploy.yaml</span><br>
-          <span class="t-out">&nbsp; scanning 14 dependencies</span><br>
-          <span class="t-out">&nbsp; resolving task graph</span><br>
-          <span class="t-separator">&nbsp; &middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;</span><br>
-          <span class="t-ok">&nbsp; done</span> <span class="t-out">14/14 &mdash; 0.3s</span><br>
+          <span class="t-assistant">I'll look at the auth flow in login.rs.</span><br>
           <br>
-          <span class="t-prompt">/</span> <span class="t-cmd">lash delegate</span> <span class="t-flag">--plan</span><br>
-          <span class="t-out">&nbsp; [PLAN] decomposing scope</span><br>
-          <span class="t-out">&nbsp; [EXEC] 3 agents dispatched</span><br>
-          <span class="t-out">&nbsp; [agent.0] analyzing</span><br>
-          <span class="t-out">&nbsp; [agent.1] researching</span><br>
-          <span class="t-out">&nbsp; [agent.2] drafting</span><br>
-          <span class="t-separator">&nbsp; &middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;</span><br>
-          <span class="t-ok">&nbsp; done</span> <span class="t-out">converged in 2 rounds</span><br>
+          <span class="t-code-chrome">&#x25b6; python (3 lines)</span><br>
+          <span class="t-tool">&nbsp; + read_file</span> <span class="t-dim">login.rs &middot; 0.1s</span><br>
           <br>
-          <span class="t-prompt">/</span> <span class="t-cmd">lash test</span> <span class="t-flag">--all</span><br>
-          <span class="t-out">&nbsp; running 47 tests</span><br>
-          <span class="t-err">&nbsp; FAIL test_auth_flow: timeout after 5s</span><br>
-          <span class="t-out">&nbsp; 46 passed, </span><span class="t-err">1 failed</span><br>
-          <span class="t-prompt">/</span> <span style="opacity:0.3">_</span>
+          <span class="t-assistant">The timeout is hardcoded to 5s on line 42. I'll increase</span><br>
+          <span class="t-assistant">it to 30s and add a config option.</span><br>
+          <br>
+          <span class="t-code-chrome">&#x25b6; python (8 lines)</span><br>
+          <span class="t-tool">&nbsp; + edit_file</span> <span class="t-dim">login.rs &middot; 0.2s</span><br>
+          <br>
+          <span class="t-ok">&nbsp; done</span> <span class="t-out">2 tool calls &middot; 1.2k tokens</span><br>
+          <br>
+          <span class="t-user-bar">&#x2590;</span> <span class="t-user-text">run the tests</span><br>
+          <br>
+          <span class="t-assistant">Running the test suite now.</span><br>
+          <br>
+          <span class="t-code-chrome">&#x25b6; python (1 line)</span><br>
+          <span class="t-tool">&nbsp; + shell</span> <span class="t-dim">cargo test &middot; 4.3s</span><br>
+          <br>
+          <span class="t-assistant">All 47 tests pass.</span><br>
+          <br>
+          <span class="t-prompt">&#x276f;</span> <span style="opacity:0.3">_</span>
         </div>
       </div>
     </div>
 
     <div class="terminal-tokens">
       <div class="terminal-token">
-        <div class="terminal-token-name">Prompt</div>
-        <div class="terminal-token-sample"><span style="color:var(--sodium); font-family:var(--font-mono); font-weight:700">/</span></div>
-        <div class="terminal-token-note">Sodium. The forward slash. Always bold.</div>
+        <div class="terminal-token-name">User accent</div>
+        <div class="terminal-token-sample"><span style="color:var(--sodium); font-family:var(--font-mono)">&#x2590;</span> <span style="color:var(--chalk-mid); font-family:var(--font-mono)">fix the timeout</span></div>
+        <div class="terminal-token-note">Sodium half-block marks user messages. Left edge accent.</div>
       </div>
       <div class="terminal-token">
-        <div class="terminal-token-name">Input</div>
-        <div class="terminal-token-sample" style="color:var(--chalk-mid); font-family:var(--font-mono)">lash run</div>
-        <div class="terminal-token-note">Chalk-mid. User-typed commands.</div>
+        <div class="terminal-token-name">Assistant</div>
+        <div class="terminal-token-sample" style="color:var(--chalk); font-family:var(--font-mono)">I'll fix that now.</div>
+        <div class="terminal-token-note">Full chalk. Assistant prose, left-aligned.</div>
       </div>
       <div class="terminal-token">
-        <div class="terminal-token-name">Flags</div>
-        <div class="terminal-token-sample" style="color:var(--sodium); opacity:0.7; font-family:var(--font-mono)">--plan</div>
-        <div class="terminal-token-note">Sodium at 70%. Distinguishes flags from commands.</div>
+        <div class="terminal-token-name">Code block</div>
+        <div class="terminal-token-sample" style="color:var(--ash-mid); font-family:var(--font-mono)">&#x25b6; python (3 lines)</div>
+        <div class="terminal-token-note">Ash-mid. Collapsed code blocks, expandable.</div>
       </div>
       <div class="terminal-token">
-        <div class="terminal-token-name">Output</div>
-        <div class="terminal-token-sample" style="color:var(--ash-mid); font-family:var(--font-mono)">scanning dependencies</div>
-        <div class="terminal-token-note">Ash-mid. Recedes behind input.</div>
+        <div class="terminal-token-name">Tool call</div>
+        <div class="terminal-token-sample" style="color:var(--ash-text); font-family:var(--font-mono)">+ read_file <span style="color:var(--ash)">login.rs &middot; 0.1s</span></div>
+        <div class="terminal-token-note">Ash-text name, ash metadata. Recedes behind prose.</div>
       </div>
       <div class="terminal-token">
         <div class="terminal-token-name">Success</div>
@@ -1303,9 +1310,9 @@
         <div class="terminal-token-note">Muted red. Not alarm, just attention.</div>
       </div>
       <div class="terminal-token">
-        <div class="terminal-token-name">Separator</div>
-        <div class="terminal-token-sample" style="color:var(--ash); font-family:var(--font-mono)">&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;</div>
-        <div class="terminal-token-note">Ash. Dot separators between phases.</div>
+        <div class="terminal-token-name">Turn boundary</div>
+        <div class="terminal-token-sample" style="font-family:var(--font-mono)">&nbsp;</div>
+        <div class="terminal-token-note">Whitespace only. No decorative separators between turns.</div>
       </div>
       <div class="terminal-token">
         <div class="terminal-token-name">Emphasis</div>
@@ -1313,9 +1320,9 @@
         <div class="terminal-token-note">Full chalk. Rare, meaningful moments.</div>
       </div>
       <div class="terminal-token">
-        <div class="terminal-token-name">Phase label</div>
-        <div class="terminal-token-sample" style="color:var(--ash-mid); font-family:var(--font-mono)">[PLAN]</div>
-        <div class="terminal-token-note">Bracketed, ash-mid. Agent/phase tags.</div>
+        <div class="terminal-token-name">Input prompt</div>
+        <div class="terminal-token-sample" style="color:var(--sodium); font-family:var(--font-mono); font-weight:700">&#x276f;</div>
+        <div class="terminal-token-note">Sodium bold. The input cursor prompt at the bottom.</div>
       </div>
     </div>
   </section>
@@ -1376,11 +1383,11 @@
         <div class="element-card-note">1px height, gradient from sodium to transparent. Like a chalk line snapped on a surface. Used under logos and as section dividers. Opacity: 0.5.</div>
       </div>
       <div class="element-card">
-        <div class="element-card-title">Dot Separator</div>
+        <div class="element-card-title">User Accent</div>
         <div class="element-card-demo">
-          <div class="demo-dots">&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;&middot;</div>
+          <div style="font-family:var(--font-mono); font-size:13px"><span style="color:var(--sodium)">&#x2590;</span> <span style="color:var(--chalk-mid)">fix the auth timeout</span></div>
         </div>
-        <div class="element-card-note">Middle dots in var(--ash). Used in terminal output between phases. Replaces dashes or blank lines. Feels like a construction progress marker.</div>
+        <div class="element-card-note">Sodium half-block (&#x2590;) at left edge of user messages. Distinguishes user input from assistant prose without heavy decoration. Whitespace handles turn boundaries.</div>
       </div>
       <div class="element-card">
         <div class="element-card-title">Slash Mark</div>

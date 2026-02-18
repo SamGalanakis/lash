@@ -64,7 +64,7 @@ mod tests {
     #[tokio::test]
     async fn test_write_new_file() {
         let dir = TempDir::new().unwrap();
-        let tool = WriteFile::default();
+        let tool = WriteFile;
         let path = dir.path().join("test.txt");
         let result = tool
             .execute(
@@ -79,7 +79,7 @@ mod tests {
     #[tokio::test]
     async fn test_write_nested_path() {
         let dir = TempDir::new().unwrap();
-        let tool = WriteFile::default();
+        let tool = WriteFile;
         let path = dir.path().join("a/b/c/test.txt");
         let result = tool
             .execute(
@@ -94,7 +94,7 @@ mod tests {
     #[tokio::test]
     async fn test_overwrite_file() {
         let dir = TempDir::new().unwrap();
-        let tool = WriteFile::default();
+        let tool = WriteFile;
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "old content").unwrap();
         let result = tool
@@ -109,7 +109,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_path() {
-        let tool = WriteFile::default();
+        let tool = WriteFile;
         let result = tool
             .execute("write_file", &json!({"content": "hello"}))
             .await;

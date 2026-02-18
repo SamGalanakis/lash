@@ -51,3 +51,35 @@ pub(crate) fn read_to_string(path: &std::path::Path) -> Result<String, ToolResul
     std::fs::read_to_string(path)
         .map_err(|e| ToolResult::err_fmt(format_args!("Failed to read {}: {e}", path.display())))
 }
+
+/// Run blocking filesystem work off the async runtime.
+pub(crate) async fn run_blocking<F>(f: F) -> ToolResult
+where
+    F: FnOnce() -> ToolResult + Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(result) => result,
+        Err(e) => ToolResult::err_fmt(format_args!("blocking task failed: {e}")),
+    }
+}
+
+/// Generate a compact unified diff between old and new content.
+/// Truncates to `max_lines` lines if the diff is too long.
+pub(crate) fn compact_diff(old: &str, new: &str, path: &str, max_lines: usize) -> String {
+    let diff = similar::TextDiff::from_lines(old, new);
+    let unified = diff
+        .unified_diff()
+        .header(&format!("a/{path}"), &format!("b/{path}"))
+        .to_string();
+    if unified.is_empty() {
+        return String::new();
+    }
+    let lines: Vec<&str> = unified.lines().collect();
+    if lines.len() <= max_lines {
+        unified
+    } else {
+        let mut truncated: String = lines[..max_lines].join("\n");
+        truncated.push_str(&format!("\n... ({} more lines)", lines.len() - max_lines));
+        truncated
+    }
+}

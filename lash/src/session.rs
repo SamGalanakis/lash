@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::json;
@@ -29,15 +29,6 @@ pub enum SessionError {
     Protocol(String),
 }
 
-/// Configuration for a Python REPL session.
-#[derive(Default)]
-pub struct SessionConfig {
-    /// Working directory for the session.
-    pub working_dir: Option<PathBuf>,
-    /// Extra environment variables.
-    pub env: HashMap<String, String>,
-}
-
 pub struct Session {
     runtime: PythonRuntime,
     tools: Arc<dyn ToolProvider>,
@@ -50,11 +41,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub async fn new(
-        tools: Arc<dyn ToolProvider>,
-        _config: SessionConfig,
-        agent_id: &str,
-    ) -> Result<Self, SessionError> {
+    pub async fn new(tools: Arc<dyn ToolProvider>, agent_id: &str) -> Result<Self, SessionError> {
         let scratch_dir = tempfile::TempDir::new()?;
 
         // Start the embedded Python runtime

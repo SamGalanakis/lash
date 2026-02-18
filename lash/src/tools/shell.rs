@@ -424,24 +424,36 @@ impl ToolProvider for Shell {
                 }
             }
             "shell_result" => {
-                let id = args.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                let id = match require_str(args, "id") {
+                    Ok(s) => s,
+                    Err(e) => return e,
+                };
                 let timeout = args.get("timeout").and_then(|v| v.as_f64());
                 self.shell_result(id, timeout, None).await
             }
             "shell_output" => {
-                let id = args.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                let id = match require_str(args, "id") {
+                    Ok(s) => s,
+                    Err(e) => return e,
+                };
                 self.shell_output(id)
             }
             "shell_write" => {
-                let id = args.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-                let input = args
-                    .get("input")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
+                let id = match require_str(args, "id") {
+                    Ok(s) => s,
+                    Err(e) => return e,
+                };
+                let input = match require_str(args, "input") {
+                    Ok(s) => s,
+                    Err(e) => return e,
+                };
                 self.shell_write(id, input).await
             }
             "shell_kill" => {
-                let id = args.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                let id = match require_str(args, "id") {
+                    Ok(s) => s,
+                    Err(e) => return e,
+                };
                 self.shell_kill(id).await
             }
             _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
@@ -455,7 +467,10 @@ impl ToolProvider for Shell {
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
         if name == "shell_result" {
-            let id = args.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            let id = match require_str(args, "id") {
+                Ok(s) => s,
+                Err(e) => return e,
+            };
             let timeout = args.get("timeout").and_then(|v| v.as_f64());
             self.shell_result(id, timeout, progress).await
         } else {

@@ -33,7 +33,7 @@ pub use agent::{
 };
 pub use instructions::InstructionLoader;
 pub use provider::{LashConfig, Provider};
-pub use session::{ExecResponse, Session, SessionConfig, SessionError, UserPrompt};
+pub use session::{ExecResponse, Session, SessionError, UserPrompt};
 pub use store::{AgentState, Store, TaskEntry};
 
 /// A message sent from the sandbox to the host during execution.

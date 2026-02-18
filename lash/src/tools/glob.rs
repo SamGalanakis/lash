@@ -40,8 +40,13 @@ impl ToolProvider for Glob {
         let base_dir = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         let base = Path::new(base_dir);
+        if !base.exists() {
+            return ToolResult::err_fmt(format_args!("Path does not exist: {base_dir}"));
+        }
         if !base.is_dir() {
-            return ToolResult::err_fmt(format_args!("Not a directory: {base_dir}"));
+            return ToolResult::err_fmt(format_args!(
+                "{base_dir} is a file, not a directory. Pass the parent directory as path and use the pattern to match files."
+            ));
         }
 
         // Build the glob matcher
@@ -117,7 +122,7 @@ mod tests {
         std::fs::write(dir.path().join("a.rs"), "").unwrap();
         std::fs::write(dir.path().join("b.rs"), "").unwrap();
         std::fs::write(dir.path().join("c.txt"), "").unwrap();
-        let tool = Glob::default();
+        let tool = Glob;
         let result = tool
             .execute(
                 "glob",
@@ -135,7 +140,7 @@ mod tests {
     async fn test_glob_no_matches() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
-        let tool = Glob::default();
+        let tool = Glob;
         let result = tool
             .execute(
                 "glob",
@@ -151,7 +156,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("sub/deep")).unwrap();
         std::fs::write(dir.path().join("sub/deep/file.rs"), "").unwrap();
-        let tool = Glob::default();
+        let tool = Glob;
         let result = tool
             .execute(
                 "glob",

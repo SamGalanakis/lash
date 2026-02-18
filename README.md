@@ -82,6 +82,7 @@ Lash loads project instructions automatically:
 
 - **Global**: `~/.lash/AGENT.md`
 - **Project**: `AGENTS.md` or `CLAUDE.md` found by walking up from the working directory
+- **Context-aware**: when `read_file` opens a file, lash resolves additional nearest `AGENTS.md`/`CLAUDE.md` files on that path and injects newly discovered instruction text into subsequent turns
 
 ### Skills
 

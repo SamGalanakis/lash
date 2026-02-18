@@ -1,7 +1,8 @@
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
 /// SQLite-backed store for archive (pruned message content) and tasks.
@@ -95,6 +96,10 @@ pub struct AgentState {
     pub output_tokens: i64,
     pub cached_input_tokens: i64,
 }
+
+type DependencyMap = HashMap<String, Vec<String>>;
+type ActiveBlockedSet = HashSet<String>;
+type DependencyMaps = (DependencyMap, DependencyMap, ActiveBlockedSet);
 
 impl Store {
     /// Open (or create) a SQLite database at `path`.
@@ -234,24 +239,15 @@ impl Store {
         blocked_filter: Option<bool>,
     ) -> Vec<TaskEntry> {
         let conn = self.conn.lock().unwrap();
-        let mut query = "SELECT id, subject, description, status, priority, active_form, owner, metadata FROM tasks".to_string();
-        let mut conditions = Vec::new();
-        if let Some(s) = status_filter {
-            conditions.push(format!("status = '{}'", s.replace('\'', "''")));
-        }
-        if !conditions.is_empty() {
-            query.push_str(" WHERE ");
-            query.push_str(&conditions.join(" AND "));
-        }
-        query.push_str(" ORDER BY id");
-
-        let mut stmt = match conn.prepare(&query) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-
-        let rows: Vec<TaskEntryRow> = stmt
-            .query_map([], |row| {
+        let rows: Vec<TaskEntryRow> = if let Some(status) = status_filter {
+            let mut stmt = match conn.prepare(
+                "SELECT id, subject, description, status, priority, active_form, owner, metadata
+                 FROM tasks WHERE status = ?1 ORDER BY id",
+            ) {
+                Ok(s) => s,
+                Err(_) => return Vec::new(),
+            };
+            stmt.query_map(params![status], |row| {
                 Ok(TaskEntryRow {
                     id: row.get(0)?,
                     subject: row.get(1)?,
@@ -265,13 +261,40 @@ impl Store {
             })
             .ok()
             .map(|iter| iter.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default();
+            .unwrap_or_default()
+        } else {
+            let mut stmt = match conn.prepare(
+                "SELECT id, subject, description, status, priority, active_form, owner, metadata
+                 FROM tasks ORDER BY id",
+            ) {
+                Ok(s) => s,
+                Err(_) => return Vec::new(),
+            };
+            stmt.query_map([], |row| {
+                Ok(TaskEntryRow {
+                    id: row.get(0)?,
+                    subject: row.get(1)?,
+                    description: row.get(2)?,
+                    status: row.get(3)?,
+                    priority: row.get(4)?,
+                    active_form: row.get(5)?,
+                    owner: row.get(6)?,
+                    metadata_str: row.get(7)?,
+                })
+            })
+            .ok()
+            .map(|iter| iter.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+        };
+
+        let (blocks_map, blocked_by_map, actively_blocked) =
+            self.load_dependency_maps_locked(&conn);
 
         let mut result = Vec::new();
         for entry in rows {
-            let blocks = self.get_blocks_locked(&conn, &entry.id);
-            let blocked_by = self.get_blocked_by_locked(&conn, &entry.id);
-            let is_blocked = self.is_blocked_locked(&conn, &entry.id);
+            let blocks = blocks_map.get(&entry.id).cloned().unwrap_or_default();
+            let blocked_by = blocked_by_map.get(&entry.id).cloned().unwrap_or_default();
+            let is_blocked = actively_blocked.contains(&entry.id);
 
             if let Some(want_blocked) = blocked_filter
                 && want_blocked != is_blocked
@@ -387,54 +410,81 @@ impl Store {
     /// If `id` is None, auto-picks the next claimable task (highest priority, unblocked, unclaimed pending).
     /// Returns Ok(TaskEntry) on success, Err(message) on failure.
     pub fn claim_task(&self, id: Option<&str>, owner: &str) -> Result<TaskEntry, String> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| format!("failed to start claim transaction: {e}"))?;
+
         let resolved_id = match id {
             Some(i) => i.to_string(),
             None => {
-                // Auto-pick: highest priority pending task that is unclaimed and unblocked
-                let conn = self.conn.lock().unwrap();
-                let picked = self.next_claimable_locked(&conn);
-                drop(conn);
+                // Auto-pick under an immediate transaction so selection+claim are atomic.
+                let picked: Option<String> = tx
+                    .query_row(
+                        "SELECT t.id
+                         FROM tasks t
+                         WHERE t.status = 'pending'
+                           AND t.owner = ''
+                           AND NOT EXISTS (
+                               SELECT 1
+                               FROM task_deps d
+                               JOIN tasks b ON b.id = d.blocker_id
+                               WHERE d.blocked_id = t.id
+                                 AND b.status NOT IN ('completed', 'cancelled')
+                           )
+                         ORDER BY
+                           CASE t.priority
+                               WHEN 'high' THEN 0
+                               WHEN 'medium' THEN 1
+                               WHEN 'low' THEN 2
+                               ELSE 3
+                           END,
+                           t.id
+                         LIMIT 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|e| format!("failed to select claimable task: {e}"))?;
                 match picked {
-                    Some(i) => i,
+                    Some(v) => v,
                     None => return Err("no claimable tasks".into()),
                 }
             }
         };
 
-        let conn = self.conn.lock().unwrap();
-
-        // Fetch current task state
-        let row = conn.query_row(
-            "SELECT status, owner FROM tasks WHERE id = ?1",
-            params![resolved_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        );
+        let row: Option<(String, String)> = tx
+            .query_row(
+                "SELECT status, owner FROM tasks WHERE id = ?1",
+                params![&resolved_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|e| format!("failed to inspect task state: {e}"))?;
         let (status, current_owner) = match row {
-            Ok(r) => r,
-            Err(_) => return Err(format!("task not found: {}", resolved_id)),
+            Some(v) => v,
+            None => return Err(format!("task not found: {}", resolved_id)),
         };
 
-        // Already completed/cancelled
         if status == "completed" || status == "cancelled" {
             return Err(format!("task is {}, cannot claim", status));
         }
-
-        // Already claimed by different owner
         if !current_owner.is_empty() && current_owner != owner {
             return Err(format!("already claimed by {}", current_owner));
         }
 
-        // Check blocked by incomplete deps
         let blockers: Vec<String> = {
-            let mut stmt = conn
+            let mut stmt = tx
                 .prepare(
-                    "SELECT d.blocker_id FROM task_deps d
-                 JOIN tasks t ON t.id = d.blocker_id
-                 WHERE d.blocked_id = ?1 AND t.status NOT IN ('completed', 'cancelled')",
+                    "SELECT d.blocker_id
+                     FROM task_deps d
+                     JOIN tasks t ON t.id = d.blocker_id
+                     WHERE d.blocked_id = ?1
+                       AND t.status NOT IN ('completed', 'cancelled')",
                 )
-                .unwrap();
+                .map_err(|e| format!("failed to inspect blockers: {e}"))?;
             stmt.query_map(params![&resolved_id], |row| row.get(0))
-                .unwrap()
+                .map_err(|e| format!("failed to inspect blockers: {e}"))?
                 .filter_map(|r| r.ok())
                 .collect()
         };
@@ -442,16 +492,25 @@ impl Store {
             return Err(format!("blocked by: {}", blockers.join(", ")));
         }
 
-        // Idempotent: already claimed by same owner
-        // Set owner and status
-        conn.execute(
-            "UPDATE tasks SET owner = ?1, status = 'in_progress' WHERE id = ?2",
-            params![owner, resolved_id],
-        )
-        .unwrap();
+        let changed = tx
+            .execute(
+                "UPDATE tasks
+                 SET owner = ?1, status = 'in_progress'
+                 WHERE id = ?2
+                   AND status NOT IN ('completed', 'cancelled')
+                   AND (owner = '' OR owner = ?1)",
+                params![owner, &resolved_id],
+            )
+            .map_err(|e| format!("failed to claim task: {e}"))?;
+        if changed == 0 {
+            return Err(format!("failed to claim task: {}", resolved_id));
+        }
 
+        tx.commit()
+            .map_err(|e| format!("failed to commit claim: {e}"))?;
         drop(conn);
-        Ok(self.get_task(&resolved_id).unwrap())
+        self.get_task(&resolved_id)
+            .ok_or_else(|| format!("task not found: {}", resolved_id))
     }
 
     /// Delete a task and clean up its dependency edges.
@@ -701,28 +760,59 @@ impl Store {
 
     // ─── Internal helpers (require caller to already hold the lock) ───
 
-    /// Find the next claimable task: pending, unclaimed, unblocked, highest priority first, then by ID.
-    fn next_claimable_locked(&self, conn: &Connection) -> Option<String> {
-        // Get all pending unclaimed tasks, ordered by priority (high > medium > low) then ID
-        let mut stmt = conn
-            .prepare(
-                "SELECT id FROM tasks
-             WHERE status = 'pending' AND owner = ''
-             ORDER BY
-                 CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END,
-                 id",
-            )
-            .ok()?;
-        let candidates: Vec<String> = stmt
-            .query_map([], |row| row.get(0))
-            .ok()?
-            .filter_map(|r| r.ok())
-            .collect();
+    /// Build dependency maps in one pass:
+    /// - blocks_map: blocker_id -> [blocked_id]
+    /// - blocked_by_map: blocked_id -> [blocker_id]
+    /// - actively_blocked: blocked task ids that currently have unfinished blockers
+    fn load_dependency_maps_locked(&self, conn: &Connection) -> DependencyMaps {
+        let mut blocks_map: DependencyMap = HashMap::new();
+        let mut blocked_by_map: DependencyMap = HashMap::new();
+        let mut actively_blocked: ActiveBlockedSet = HashSet::new();
 
-        // Return first candidate that is not blocked
-        candidates
-            .into_iter()
-            .find(|id| !self.is_blocked_locked(conn, id))
+        let mut stmt = match conn.prepare(
+            "SELECT d.blocker_id, d.blocked_id, t.status
+             FROM task_deps d
+             JOIN tasks t ON t.id = d.blocker_id
+             ORDER BY d.blocker_id, d.blocked_id",
+        ) {
+            Ok(s) => s,
+            Err(_) => return (blocks_map, blocked_by_map, actively_blocked),
+        };
+
+        let rows = match stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        }) {
+            Ok(r) => r,
+            Err(_) => return (blocks_map, blocked_by_map, actively_blocked),
+        };
+
+        for (blocker, blocked, blocker_status) in rows.flatten() {
+            blocks_map
+                .entry(blocker.clone())
+                .or_default()
+                .push(blocked.clone());
+            blocked_by_map
+                .entry(blocked.clone())
+                .or_default()
+                .push(blocker);
+
+            if blocker_status != "completed" && blocker_status != "cancelled" {
+                actively_blocked.insert(blocked);
+            }
+        }
+
+        for values in blocks_map.values_mut() {
+            values.sort();
+        }
+        for values in blocked_by_map.values_mut() {
+            values.sort();
+        }
+
+        (blocks_map, blocked_by_map, actively_blocked)
     }
 
     /// Tasks that `id` blocks (id is the blocker).
@@ -760,6 +850,18 @@ impl Store {
         )
         .is_ok()
     }
+}
+
+/// Internal row type for reading from SQLite before adding dep info.
+struct TaskEntryRow {
+    id: String,
+    subject: String,
+    description: String,
+    status: String,
+    priority: String,
+    active_form: String,
+    owner: String,
+    metadata_str: String,
 }
 
 #[cfg(test)]
@@ -1016,16 +1118,4 @@ mod tests {
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].agent_id, "ag1");
     }
-}
-
-/// Internal row type for reading from SQLite before adding dep info.
-struct TaskEntryRow {
-    id: String,
-    subject: String,
-    description: String,
-    status: String,
-    priority: String,
-    active_form: String,
-    owner: String,
-    metadata_str: String,
 }

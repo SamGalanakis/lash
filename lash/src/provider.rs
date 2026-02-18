@@ -208,27 +208,12 @@ impl LashConfig {
         PathBuf::from(home).join(".lash").join("config.json")
     }
 
-    /// Load from ~/.lash/config.json (falls back to legacy provider.json)
+    /// Load from ~/.lash/config.json.
     pub fn load() -> Option<Self> {
         let path = Self::config_path();
         if let Ok(data) = std::fs::read_to_string(&path)
             && let Ok(config) = serde_json::from_str(&data)
         {
-            return Some(config);
-        }
-
-        // Migrate legacy provider.json
-        let legacy = path.with_file_name("provider.json");
-        if let Ok(data) = std::fs::read_to_string(&legacy)
-            && let Ok(provider) = serde_json::from_str::<Provider>(&data)
-        {
-            let config = LashConfig {
-                provider,
-                tavily_api_key: None,
-                delegate_models: None,
-            };
-            let _ = config.save();
-            let _ = std::fs::remove_file(&legacy);
             return Some(config);
         }
 
@@ -259,13 +244,20 @@ impl LashConfig {
         if path.exists() {
             std::fs::remove_file(&path)?;
         }
-        // Also clean up legacy file
-        let legacy = path.with_file_name("provider.json");
-        if legacy.exists() {
-            std::fs::remove_file(&legacy)?;
-        }
         Ok(())
     }
+}
+
+/// Save just the provider portion (preserves other config fields like API keys).
+/// Used by the agent loop after token refresh.
+pub fn save_provider(provider: &Provider) -> Result<(), std::io::Error> {
+    let mut config = LashConfig::load().unwrap_or_else(|| LashConfig {
+        provider: provider.clone(),
+        tavily_api_key: None,
+        delegate_models: None,
+    });
+    config.provider = provider.clone();
+    config.save()
 }
 
 #[cfg(test)]
@@ -401,16 +393,4 @@ mod tests {
         let opts = codex().baml_options("gpt-5.1-codex", None);
         assert!(!opts.contains_key("reasoning"));
     }
-}
-
-/// Save just the provider portion (preserves other config fields like API keys).
-/// Used by the agent loop after token refresh.
-pub fn save_provider(provider: &Provider) -> Result<(), std::io::Error> {
-    let mut config = LashConfig::load().unwrap_or_else(|| LashConfig {
-        provider: provider.clone(),
-        tavily_api_key: None,
-        delegate_models: None,
-    });
-    config.provider = provider.clone();
-    config.save()
 }

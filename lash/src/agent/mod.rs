@@ -1,6 +1,7 @@
 mod exec;
 pub mod message;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -57,8 +58,8 @@ pub struct AgentConfig {
     pub model: String,
     /// LLM provider (Claude OAuth or OpenRouter)
     pub provider: Provider,
-    /// Maximum input tokens for the model's context window
-    pub max_context_tokens: usize,
+    /// Override for context window size (tokens). If None, looked up from model_info.
+    pub max_context_tokens: Option<usize>,
     /// When true, use SubAgentStep prompt instead of CodeActStep
     pub sub_agent: bool,
     /// Optional reasoning effort level (e.g. "medium", "high") for Codex
@@ -81,7 +82,7 @@ impl Default for AgentConfig {
                 api_key: String::new(),
                 base_url: "https://openrouter.ai/api/v1".to_string(),
             },
-            max_context_tokens: 200_000,
+            max_context_tokens: None,
             sub_agent: false,
             reasoning_effort: None,
             max_turns: None,
@@ -263,8 +264,8 @@ impl Agent {
         let tool_list = ToolDefinition::format_tool_docs(&visible);
         let context = build_context();
         let tool_names: Vec<String> = visible.iter().map(|t| t.name.clone()).collect();
-        let loader = crate::instructions::InstructionLoader::new();
-        let project_instructions = loader.system_instructions().to_string();
+        let instruction_loader = crate::instructions::InstructionLoader::new();
+        let project_instructions = instruction_loader.system_instructions().to_string();
 
         // Convert raw PNG bytes to BAML images
         use base64::Engine;
@@ -281,11 +282,24 @@ impl Agent {
         let mut cumulative_usage = TokenUsage::default();
         let mut last_input_tokens: usize = 0;
 
+        let max_context = self
+            .config
+            .max_context_tokens
+            .or_else(|| crate::model_info::context_window(&self.config.model).map(|v| v as usize))
+            .unwrap_or_else(|| {
+                eprintln!(
+                    "Warning: unknown context window for model '{}', defaulting to 200k",
+                    self.config.model
+                );
+                200_000
+            });
+
         let mut msgs = messages;
         let mut iteration: usize = run_offset;
         let mut tool_images: Vec<Image> = Vec::new();
         let mut max_steps_final = false;
         let mut has_history = false;
+        let session_start = std::time::Instant::now();
 
         loop {
             if cancel.is_cancelled() {
@@ -301,11 +315,15 @@ impl Agent {
             // with char-based estimation (~4 chars/token) as proportional weights.
             msgs.retain(|m| m.id != "history_note");
             {
-                let token_budget = self.config.max_context_tokens * 40 / 100;
+                let token_budget = max_context * 40 / 100;
                 let needs_pruning = last_input_tokens > token_budget;
 
-                let mut keep_from = msgs.len();
+                // `keep_from` is the start index of the retained tail.
+                // Default to 1 (= keep everything after the initial system message).
+                // If we are not pruning this turn, [1..keep_from) is empty and no collapse happens.
+                let mut keep_from = 1usize;
                 if needs_pruning {
+                    keep_from = msgs.len();
                     // Estimate how many chars to keep: scale by (budget / actual) ratio
                     let total_chars: usize = msgs.iter().map(|m| m.char_count()).sum();
                     let target_chars = total_chars * token_budget / last_input_tokens.max(1);
@@ -342,13 +360,25 @@ impl Agent {
                     // Drain the pruned region
                     msgs.drain(1..keep_from);
                     // Re-insert preserved user messages, then the history note
+                    let elapsed = session_start.elapsed();
+                    let elapsed_str = if elapsed.as_secs() >= 3600 {
+                        format!(
+                            "{}h {}m",
+                            elapsed.as_secs() / 3600,
+                            (elapsed.as_secs() % 3600) / 60
+                        )
+                    } else if elapsed.as_secs() >= 60 {
+                        format!("{}m {}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
+                    } else {
+                        format!("{}s", elapsed.as_secs())
+                    };
                     let note = format!(
-                        "[{} earlier turns dropped from context (not summarized). \
+                        "[Turn {}, {} elapsed. {} earlier turn(s) dropped from context (not summarized). \
                          Use `_history` to access them at full fidelity:\n \
-                         `_history.user_messages()` — what the user asked\n \
-                         `_history.search(\"pattern\")` — find past results\n \
-                         `_history[i]` — specific turn]",
-                        collapsed_count
+                         `_history.user_messages()` -- what the user asked\n \
+                         `_history.search(\"pattern\")` -- find past results\n \
+                         `_history[i]` -- specific turn]",
+                        iteration, elapsed_str, collapsed_count
                     );
                     msgs.insert(
                         1,
@@ -427,6 +457,7 @@ impl Agent {
             let mut current_prose = String::new();
             let mut current_code = String::new();
             let mut last_line_start = 0usize; // byte offset of current incomplete line
+            let mut code_executed = false;
 
             // LLM call with retry on transient API errors
             let full_text = 'llm_retry: {
@@ -516,6 +547,16 @@ impl Agent {
                         if cancel.is_cancelled() {
                             self.session.clear_message_sender();
                             self.session.clear_prompt_sender();
+                            let _ = collect_usage(
+                                &collector,
+                                &mut cumulative_usage,
+                                iteration,
+                                &response,
+                                &self.config,
+                                &self.agent_id,
+                                &event_tx,
+                            )
+                            .await;
                             self.snapshot_to_store(None, &msgs, iteration, &cumulative_usage)
                                 .await;
                             emit!(AgentEvent::Done);
@@ -525,6 +566,16 @@ impl Agent {
                             Err(_timeout) => {
                                 self.session.clear_message_sender();
                                 self.session.clear_prompt_sender();
+                                let _ = collect_usage(
+                                    &collector,
+                                    &mut cumulative_usage,
+                                    iteration,
+                                    &response,
+                                    &self.config,
+                                    &self.agent_id,
+                                    &event_tx,
+                                )
+                                .await;
                                 emit!(AgentEvent::Error {
                                     message: "LLM response timed out".to_string(),
                                 });
@@ -548,12 +599,7 @@ impl Agent {
                                         if !in_code_fence {
                                             // Check for opening fence
                                             let trimmed = line.trim();
-                                            if trimmed == "```python"
-                                                || trimmed == "```py"
-                                                || trimmed == "```Python"
-                                                || trimmed.starts_with("```python ")
-                                                || trimmed.starts_with("```py ")
-                                            {
+                                            if trimmed == "<code>" {
                                                 // Flush accumulated prose
                                                 let prose = current_prose.trim().to_string();
                                                 if !prose.is_empty() {
@@ -575,7 +621,7 @@ impl Agent {
                                         } else {
                                             // Inside code fence
                                             let trimmed = line.trim();
-                                            if trimmed == "```" || trimmed == "``` " {
+                                            if trimmed == "</code>" {
                                                 // Closing fence — execute the code block
                                                 in_code_fence = false;
                                                 let code = current_code.clone();
@@ -593,6 +639,8 @@ impl Agent {
                                                         )
                                                         .await;
                                                     }
+                                                    code_executed = true;
+                                                    break; // break line-processing loop
                                                 }
                                                 current_code.clear();
                                             } else {
@@ -604,6 +652,9 @@ impl Agent {
                                             }
                                         }
                                     }
+                                    if code_executed {
+                                        break; // break stream loop
+                                    }
                                 }
                             }
                             Ok(Some(Err(e))) => {
@@ -611,6 +662,16 @@ impl Agent {
                                 break;
                             }
                         }
+                    }
+
+                    // Code block detected mid-stream: drop stream, feed results back
+                    if code_executed {
+                        emit!(AgentEvent::LlmResponse {
+                            iteration,
+                            content: response.clone(),
+                            duration_ms: llm_start.elapsed().as_millis() as u64,
+                        });
+                        break 'llm_retry response.clone();
                     }
 
                     if let Some(err) = stream_error {
@@ -632,6 +693,16 @@ impl Agent {
                         }
                         self.session.clear_message_sender();
                         self.session.clear_prompt_sender();
+                        let _ = collect_usage(
+                            &collector,
+                            &mut cumulative_usage,
+                            iteration,
+                            &response,
+                            &self.config,
+                            &self.agent_id,
+                            &event_tx,
+                        )
+                        .await;
                         emit!(AgentEvent::Error {
                             message: format!("LLM error: {}", err),
                         });
@@ -650,17 +721,6 @@ impl Agent {
                         content: response.clone(),
                         duration_ms: llm_start.elapsed().as_millis() as u64,
                     });
-
-                    last_input_tokens = collect_usage(
-                        &collector,
-                        &mut cumulative_usage,
-                        iteration,
-                        &response,
-                        &self.config,
-                        &self.agent_id,
-                        &event_tx,
-                    )
-                    .await;
 
                     // Handle any remaining content after stream ends
                     // If we were in a code fence (unclosed), execute remaining code
@@ -725,6 +785,27 @@ impl Agent {
             let _ = drain_handle.await;
             let _ = prompt_drain_handle.await;
 
+            // Collect token usage for all paths that exit the retry block
+            // (normal completion, stream error with partial exec, retries exhausted)
+            last_input_tokens = collect_usage(
+                &collector,
+                &mut cumulative_usage,
+                iteration,
+                &full_text,
+                &self.config,
+                &self.agent_id,
+                &event_tx,
+            )
+            .await;
+
+            // For mid-stream break: flush any remaining prose
+            if code_executed {
+                let remaining_prose = current_prose.trim().to_string();
+                if !remaining_prose.is_empty() {
+                    prose_parts.push(remaining_prose);
+                }
+            }
+
             let executed_text = full_text;
             let has_code = !code_parts.is_empty();
 
@@ -766,8 +847,8 @@ impl Agent {
                 return (msgs, iteration);
             }
 
-            // Inject turn data into _history
-            {
+            // Inject turn data into _history (skip for mid-stream code breaks)
+            if !code_executed {
                 let tool_calls_json: Vec<serde_json::Value> = acc
                     .tool_calls
                     .iter()
@@ -797,7 +878,8 @@ impl Agent {
                 let turn_json = serde_json::json!({
                     "index": iteration,
                     "user_message": user_msg,
-                    "code": executed_text,
+                    "prose": prose_parts.join("\n\n"),
+                    "code": code_parts.join("\n"),
                     "output": acc.combined_output,
                     "error": acc.exec_error,
                     "tool_calls": tool_calls_json,
@@ -893,6 +975,23 @@ impl Agent {
                     role: MessageRole::System,
                     parts: feedback_parts,
                 });
+
+                // Inject any newly discovered context-aware instructions from file reads.
+                let context_text =
+                    resolve_context_instructions(&instruction_loader, &acc.tool_calls);
+                if !context_text.is_empty() {
+                    let instruction_id = format!("m{}", msgs.len());
+                    msgs.push(Message {
+                        id: instruction_id.clone(),
+                        role: MessageRole::System,
+                        parts: vec![Part {
+                            id: format!("{}.p0", instruction_id),
+                            kind: PartKind::Text,
+                            content: context_text,
+                            prune_state: PruneState::Intact,
+                        }],
+                    });
+                }
             }
 
             iteration += 1;
@@ -1132,4 +1231,31 @@ fn build_assistant_parts(msg_id: &str, prose_parts: &[String], code_parts: &[Str
     }
 
     parts
+}
+
+/// Resolve and aggregate context-aware instructions discovered during this turn.
+/// We currently trigger this on successful `read_file` tool calls with a `path` argument.
+fn resolve_context_instructions(
+    loader: &crate::instructions::InstructionLoader,
+    tool_calls: &[crate::ToolCallRecord],
+) -> String {
+    let mut chunks = Vec::new();
+    let mut seen_paths = HashSet::new();
+
+    for tc in tool_calls {
+        if !tc.success || tc.tool != "read_file" {
+            continue;
+        }
+        let Some(path) = tc.args.get("path").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if path.is_empty() || !seen_paths.insert(path.to_string()) {
+            continue;
+        }
+        if let Some(text) = loader.resolve(path) {
+            chunks.push(text);
+        }
+    }
+
+    chunks.join("\n\n")
 }

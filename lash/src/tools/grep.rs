@@ -120,7 +120,7 @@ impl ToolProvider for Grep {
     }
 }
 
-fn format_matches(matches: &[serde_json::Value]) -> String {
+fn format_matches(matches: &[serde_json::Value]) -> Vec<String> {
     matches
         .iter()
         .map(|m| {
@@ -131,8 +131,7 @@ fn format_matches(matches: &[serde_json::Value]) -> String {
                 m["content"].as_str().unwrap_or(""),
             )
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect()
 }
 
 fn search_file(path: &Path, re: &regex::Regex) -> Vec<serde_json::Value> {
@@ -173,7 +172,7 @@ mod tests {
             "hello world\nfoo bar\nhello again",
         )
         .unwrap();
-        let tool = Grep::default();
+        let tool = Grep;
         let result = tool
             .execute(
                 "grep",
@@ -181,17 +180,18 @@ mod tests {
             )
             .await;
         assert!(result.success);
-        let text = result.result.as_str().unwrap();
-        assert!(text.contains("hello world"));
-        assert!(text.contains("hello again"));
-        assert!(!text.contains("foo bar"));
+        let arr = result.result.as_array().unwrap();
+        let text: Vec<&str> = arr.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(text.iter().any(|l| l.contains("hello world")));
+        assert!(text.iter().any(|l| l.contains("hello again")));
+        assert!(!text.iter().any(|l| l.contains("foo bar")));
     }
 
     #[tokio::test]
     async fn test_grep_no_matches() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("test.txt"), "hello world").unwrap();
-        let tool = Grep::default();
+        let tool = Grep;
         let result = tool
             .execute(
                 "grep",
@@ -199,7 +199,7 @@ mod tests {
             )
             .await;
         assert!(result.success);
-        assert!(result.result.as_str().unwrap().is_empty());
+        assert!(result.result.as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -207,7 +207,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.rs");
         std::fs::write(&path, "fn main() {\n    println!(\"hello\");\n}").unwrap();
-        let tool = Grep::default();
+        let tool = Grep;
         let result = tool
             .execute(
                 "grep",
@@ -215,6 +215,7 @@ mod tests {
             )
             .await;
         assert!(result.success);
-        assert!(result.result.as_str().unwrap().contains("println"));
+        let arr = result.result.as_array().unwrap();
+        assert!(arr.iter().any(|v| v.as_str().unwrap().contains("println")));
     }
 }

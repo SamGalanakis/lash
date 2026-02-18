@@ -88,11 +88,12 @@ class ToolCall:
 
 
 class Turn:
-    __slots__ = ("index", "user_message", "code", "output", "error", "tool_calls", "files_read", "files_written")
+    __slots__ = ("index", "user_message", "prose", "code", "output", "error", "tool_calls", "files_read", "files_written")
 
-    def __init__(self, index, user_message, code, output, error, tool_calls, files_read, files_written):
+    def __init__(self, index, user_message, prose, code, output, error, tool_calls, files_read, files_written):
         self.index = index
         self.user_message = user_message
+        self.prose = prose
         self.code = code
         self.output = output
         self.error = error
@@ -107,8 +108,10 @@ class Turn:
             out_str = f"{out_len / 1024:.1f}k output"
         else:
             out_str = f"{out_len} output"
+        prose_len = len(self.prose)
+        prose_str = f", {prose_len}ch prose" if prose_len else ""
         sym = "\u2717" if self.error else "\u2713"
-        return f"Turn(#{self.index}: {tc} tool calls, {out_str}, {sym})"
+        return f"Turn(#{self.index}: {tc} tool calls, {out_str}{prose_str}, {sym})"
 
 
 class TurnHistory:
@@ -140,9 +143,9 @@ class TurnHistory:
         return out
 
     def search(self, pattern):
-        """Regex search over code+output of all turns."""
+        """Regex search over prose+code+output of all turns."""
         rx = re.compile(pattern, re.IGNORECASE)
-        return [t for t in self._turns if rx.search(t.code) or rx.search(t.output)]
+        return [t for t in self._turns if rx.search(t.prose) or rx.search(t.code) or rx.search(t.output)]
 
     def tool_calls(self, tool=None):
         """All tool calls, optionally filtered by tool name."""
@@ -220,6 +223,7 @@ class TurnHistory:
         turn = Turn(
             index=data.get("index", len(self._turns)),
             user_message=data.get("user_message", ""),
+            prose=data.get("prose", ""),
             code=data.get("code", ""),
             output=data.get("output", ""),
             error=data.get("error"),
@@ -265,6 +269,7 @@ class Mem:
             value=str(value) if value is not None else str(description),
             turn=self._current_turn,
         )
+        return _Awaitable()
 
     def get(self, key):
         """Get the stored value string for a key, or None."""
@@ -278,6 +283,7 @@ class Mem:
     def delete(self, key):
         """Remove a key."""
         self._store.pop(key, None)
+        return _Awaitable()
 
     def all(self):
         """List all keys with descriptions and turn numbers."""

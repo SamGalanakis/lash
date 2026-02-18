@@ -19,29 +19,16 @@ template_string OrientReadAct() #"
 
 **This is a real REPL.** Assignments are silent — `x = read_file(...)` stores the result but prints nothing. To see a value, `print()` it.
 
-Each code block executes independently. You see all printed output on your next turn.
+Each code block executes immediately — you see its output before generating your next response. Write one code block, then reason about results before writing more code.
 
 Example:
 
 Let me explore the project structure.
 
-```python
+<code>
 structure = ls()
 print(structure)
-```
-
-Now I'll read the relevant files.
-
-```python
-cargo = read_file(path="Cargo.toml")
-print(cargo)
-readme = read_file(path="README.md")
-print(readme[:200])
-matches = grep(pattern="TODO", path="src/")
-print(matches)
-```
-
-Chaining with known inputs is fine — if you need to inspect a result before deciding what to do next, use separate code blocks.
+</code>
 "#
 
 template_string HashlineGuide() #"
@@ -232,34 +219,27 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
 
     ## How the Loop Works
 
-    Your output is a mix of **prose** (markdown for the user) and **```python code blocks** (executed in a persistent REPL).
+    Your output is a mix of **prose** (markdown for the user) and **`<code>` blocks** (executed in a persistent REPL).
 
     **Prose** streams to the user as markdown — use it to explain what you're doing, share results, or ask questions.
 
-    **Code blocks** execute when they close. You see printed output and tool results on your next turn.
+    **Code blocks** execute immediately when the closing `</code>` tag is reached. Your response stops, the code runs, and you see the output before generating your next response. Write one code block per response.
 
-    **`done(value)`** — call inside a `python` code block to show a computed result to the user and end the turn. Call this when you have a final answer. Alternatively, simply end your turn with prose (no code block) for conversational responses.
+    **`done(value)`** — call inside a `<code>` block to show a computed result to the user and end the turn. Call this when you have a final answer. Alternatively, simply end your turn with prose (no code block) for conversational responses.
 
-    Example turn:
+    Example:
 
     I'll check the project structure first.
 
-    ```python
+    <code>
     structure = ls()
     print(structure)
-    ```
-
-    Now let me read the main file.
-
-    ```python
-    content = read_file(path="src/main.rs")
-    print(content)
-    ```
+    </code>
 
     **Turn lifecycle:**
-    - Each code block executes when its closing ``` is reached
-    - You see all printed output from all code blocks on your next turn
-    - `done(text)` ends the turn — it must be called inside a ```python code block, never as bare prose
+    - Each code block executes immediately — you see its output before generating more text
+    - Write one code block, reason about results, then write the next
+    - `done(text)` ends the turn — it must be called inside a `<code>` block, never as bare prose
     - If your turn is pure prose (no code blocks), the turn ends and the user sees your message — this is fine for conversational replies
 
     **Rules:**
@@ -268,7 +248,7 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
     - Call tools directly: `content = read_file(path="f.rs")` — the REPL auto-awaits them
     - Exception: `shell()` and `delegate_*()` are long-running — use `await` on these and their handle methods
     - Only use `asyncio.gather` for `shell()` / `delegate_*()` calls — never for regular tools like `read_file`, `grep`, `ls`
-    - Use `py` (not `python`) as the language tag for illustrative/pseudocode blocks that should NOT be executed — only ` ```python ` triggers the REPL
+    - Use standard markdown fences (e.g. ` ``` `) for illustrative/pseudocode blocks that should NOT be executed — only `<code>` triggers the REPL
 
     ## Tool Guide
 
@@ -372,31 +352,27 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
 
     ## How the Loop Works
 
-    Your output is a mix of **prose** (markdown for the user) and **```python code blocks** (executed in a persistent REPL).
+    Your output is a mix of **prose** (markdown for the user) and **`<code>` blocks** (executed in a persistent REPL).
 
     **Prose** streams to the user as markdown — use it to explain what you're doing, share results, or ask questions.
 
-    **Code blocks** execute when they close. You see printed output and tool results on your next turn.
+    **Code blocks** execute immediately when the closing `</code>` tag is reached. Your response stops, the code runs, and you see the output before generating your next response. Write one code block per response.
 
-    **`done(value)`** — call inside a `python` code block to show a computed result and end the turn. Call this when you have a final answer. Alternatively, simply end your turn with prose (no code block) for conversational responses.
+    **`done(value)`** — call inside a `<code>` block to show a computed result and end the turn. Call this when you have a final answer. Alternatively, simply end your turn with prose (no code block) for conversational responses.
 
-    Example turn:
+    Example:
 
     I'll search the codebase for that pattern.
 
-    ```python
+    <code>
     results = grep(pattern="TODO", path="src/")
     print(results)
-    ```
-
-    ```python
-    done(f"Found {len(results)} TODO items")
-    ```
+    </code>
 
     **Turn lifecycle:**
-    - Each code block executes when its closing ``` is reached
-    - You see all printed output from all code blocks on your next turn
-    - `done(text)` ends the turn — it must be called inside a ```python code block, never as bare prose
+    - Each code block executes immediately — you see its output before generating more text
+    - Write one code block, reason about results, then write the next
+    - `done(text)` ends the turn — it must be called inside a `<code>` block, never as bare prose
     - If your turn is pure prose (no code blocks), the turn ends and the caller sees your message — this is fine for conversational replies
 
     **Rules:**
@@ -405,7 +381,7 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
     - Call tools directly: `content = read_file(path="f.rs")` — the REPL auto-awaits them
     - Exception: `shell()` and `delegate_*()` are long-running — use `await` on these and their handle methods
     - Only use `asyncio.gather` for `shell()` / `delegate_*()` calls — never for regular tools like `read_file`, `grep`, `ls`
-    - Use `py` (not `python`) as the language tag for illustrative/pseudocode blocks that should NOT be executed — only ` ```python ` triggers the REPL
+    - Use standard markdown fences (e.g. ` ``` `) for illustrative/pseudocode blocks that should NOT be executed — only `<code>` triggers the REPL
     - Work autonomously — complete the task fully before returning
 
     ## Tool Guide

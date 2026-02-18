@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
 use super::hashline::{self, HashlineEdit};
-use super::{read_to_string, require_str};
+use super::{compact_diff, read_to_string, require_str, run_blocking};
 
 /// Hashline-aware file editing tool.
 #[derive(Default)]
@@ -38,18 +38,7 @@ impl ToolProvider for EditFile {
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
         let path_str = match require_str(args, "path") {
-            Ok(s) => s,
-            Err(e) => return e,
-        };
-
-        let path = Path::new(path_str);
-
-        if !path.exists() {
-            return ToolResult::err_fmt(format_args!("File does not exist: {path_str}"));
-        }
-
-        let content = match read_to_string(path) {
-            Ok(c) => c,
+            Ok(s) => s.to_string(),
             Err(e) => return e,
         };
 
@@ -61,6 +50,7 @@ impl ToolProvider for EditFile {
                 ));
             }
         };
+        let edits_count = edits_json.len();
 
         let edits = match parse_edits(edits_json) {
             Ok(e) => e,
@@ -69,21 +59,38 @@ impl ToolProvider for EditFile {
             }
         };
 
-        match hashline::apply_hashline_edits(&content, edits) {
-            Ok(new_content) => {
-                if let Err(e) = std::fs::write(path, &new_content) {
-                    return ToolResult::err_fmt(format_args!("Failed to write file: {e}"));
-                }
-                let new_lines = new_content.lines().count();
-                ToolResult::ok(json!(format!(
-                    "Applied {} edit(s) to {} ({} lines)",
-                    edits_json.len(),
-                    path_str,
-                    new_lines,
-                )))
+        run_blocking(move || {
+            let path = Path::new(&path_str);
+            if !path.exists() {
+                return ToolResult::err_fmt(format_args!("File does not exist: {path_str}"));
             }
-            Err(msg) => ToolResult::err(json!(msg)),
-        }
+
+            let content = match read_to_string(path) {
+                Ok(c) => c,
+                Err(e) => return e,
+            };
+
+            match hashline::apply_hashline_edits(&content, edits) {
+                Ok(new_content) => {
+                    if let Err(e) = std::fs::write(path, &new_content) {
+                        return ToolResult::err_fmt(format_args!("Failed to write file: {e}"));
+                    }
+                    let new_lines = new_content.lines().count();
+                    let mut msg = format!(
+                        "Applied {} edit(s) to {} ({} lines)",
+                        edits_count, path_str, new_lines,
+                    );
+                    let diff = compact_diff(&content, &new_content, &path_str, 50);
+                    if !diff.is_empty() {
+                        msg.push_str("\n\n");
+                        msg.push_str(&diff);
+                    }
+                    ToolResult::ok(json!(msg))
+                }
+                Err(msg) => ToolResult::err(json!(msg)),
+            }
+        })
+        .await
     }
 }
 
@@ -186,7 +193,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "line1\nline2\nline3\n").unwrap();
         let hash = hashline::compute_line_hash("line2");
-        let tool = EditFile::default();
+        let tool = EditFile;
         let result = tool
             .execute("edit_file", &json!({
                 "path": path.to_str().unwrap(),
@@ -206,7 +213,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "line1\nline2\nline3").unwrap();
         let hash = hashline::compute_line_hash("line1");
-        let tool = EditFile::default();
+        let tool = EditFile;
         let result = tool
             .execute("edit_file", &json!({
                 "path": path.to_str().unwrap(),
@@ -227,7 +234,7 @@ mod tests {
         std::fs::write(&path, "a\nb\nc\nd\ne").unwrap();
         let hash_b = hashline::compute_line_hash("b");
         let hash_d = hashline::compute_line_hash("d");
-        let tool = EditFile::default();
+        let tool = EditFile;
         let result = tool
             .execute(
                 "edit_file",
@@ -250,7 +257,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "line1\nline2\nline3").unwrap();
-        let tool = EditFile::default();
+        let tool = EditFile;
         let result = tool
             .execute(
                 "edit_file",

@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::{ToolDefinition, ToolParam, ToolResult};
 
-use super::{read_to_string, require_str};
+use super::{compact_diff, read_to_string, require_str};
 
 /// Simple text find-and-replace tool (no anchors needed).
 #[derive(Default)]
@@ -97,7 +97,13 @@ impl crate::ToolProvider for FindReplace {
             format!("{} replacements", count)
         };
 
-        ToolResult::ok(json!(format!("{} made in {}", label, path_str)))
+        let mut msg = format!("{} made in {}", label, path_str);
+        let diff = compact_diff(&content, &new_content, path_str, 50);
+        if !diff.is_empty() {
+            msg.push_str("\n\n");
+            msg.push_str(&diff);
+        }
+        ToolResult::ok(json!(msg))
     }
 }
 
@@ -113,7 +119,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "foo bar foo baz").unwrap();
-        let tool = FindReplace::default();
+        let tool = FindReplace;
         let result = tool
             .execute(
                 "find_replace",
@@ -133,7 +139,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "foo bar foo baz foo").unwrap();
-        let tool = FindReplace::default();
+        let tool = FindReplace;
         let result = tool
             .execute(
                 "find_replace",
@@ -159,7 +165,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
-        let tool = FindReplace::default();
+        let tool = FindReplace;
         let result = tool
             .execute(
                 "find_replace",

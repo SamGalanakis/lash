@@ -28,7 +28,11 @@ pub enum OAuthError {
 
 /// Generate a PKCE code verifier and challenge pair.
 pub fn generate_pkce() -> (String, String) {
-    let verifier_bytes: Vec<u8> = (0..32).map(|_| rand_byte()).collect();
+    // PKCE verifier must come from a cryptographically secure RNG.
+    // UUID v4 generation uses OS entropy; two UUIDs provide 32 random bytes.
+    let mut verifier_bytes = Vec::with_capacity(32);
+    verifier_bytes.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+    verifier_bytes.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
     let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&verifier_bytes);
 
     let mut hasher = Sha256::new();
@@ -418,19 +422,4 @@ fn urlencoded(s: &str) -> String {
         .replace(' ', "%20")
         .replace(':', "%3A")
         .replace('/', "%2F")
-}
-
-/// Simple pseudo-random byte using thread-based entropy.
-fn rand_byte() -> u8 {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    let s = RandomState::new();
-    let mut h = s.build_hasher();
-    h.write_u64(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64,
-    );
-    h.finish() as u8
 }

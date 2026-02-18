@@ -7,8 +7,8 @@ use tokio_util::sync::CancellationToken;
 use crate::provider::DelegateModels;
 use crate::{
     Agent, AgentConfig, AgentEvent, Message, MessageRole, Part, PartKind, ProgressSender,
-    PruneState, SandboxMessage, Session, SessionConfig, Store, ToolDefinition, ToolParam,
-    ToolProvider, ToolResult,
+    PruneState, SandboxMessage, Session, Store, ToolDefinition, ToolParam, ToolProvider,
+    ToolResult,
 };
 
 /// Delegate tier determines model choice and turn limits.
@@ -141,13 +141,7 @@ impl DelegateInner {
         let agent_id = uuid::Uuid::new_v4().to_string();
 
         // Create a new session with the base tools (no delegate tools)
-        let session = match Session::new(
-            Arc::clone(&self.tools),
-            SessionConfig::default(),
-            &agent_id,
-        )
-        .await
-        {
+        let session = match Session::new(Arc::clone(&self.tools), &agent_id).await {
             Ok(s) => s,
             Err(e) => {
                 return ToolResult::err_fmt(format_args!(

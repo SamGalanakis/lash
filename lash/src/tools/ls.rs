@@ -117,7 +117,7 @@ mod tests {
         std::fs::write(dir.path().join("file.txt"), "").unwrap();
         std::fs::create_dir(dir.path().join("subdir")).unwrap();
         std::fs::write(dir.path().join("subdir/nested.rs"), "").unwrap();
-        let tool = Ls::default();
+        let tool = Ls;
         let result = tool
             .execute("ls", &json!({"path": dir.path().to_str().unwrap()}))
             .await;
@@ -131,7 +131,7 @@ mod tests {
     #[tokio::test]
     async fn test_ls_empty_dir() {
         let dir = TempDir::new().unwrap();
-        let tool = Ls::default();
+        let tool = Ls;
         let result = tool
             .execute("ls", &json!({"path": dir.path().to_str().unwrap()}))
             .await;
@@ -144,7 +144,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("file.txt");
         std::fs::write(&path, "").unwrap();
-        let tool = Ls::default();
+        let tool = Ls;
         let result = tool
             .execute("ls", &json!({"path": path.to_str().unwrap()}))
             .await;

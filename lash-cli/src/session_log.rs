@@ -8,6 +8,7 @@ use crate::app::DisplayBlock;
 
 pub struct SessionInfo {
     pub filename: String,
+    pub session_id: String,
     pub model: String,
     pub message_count: usize,
     pub first_message: String,
@@ -75,6 +76,11 @@ pub fn list_sessions() -> Vec<SessionInfo> {
         if val.get("parent_session_id").is_some_and(|v| !v.is_null()) {
             continue;
         }
+        let session_id = val
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let model = val
             .get("model")
             .and_then(|v| v.as_str())
@@ -107,6 +113,7 @@ pub fn list_sessions() -> Vec<SessionInfo> {
 
         sessions.push(SessionInfo {
             filename,
+            session_id,
             model,
             message_count,
             first_message,

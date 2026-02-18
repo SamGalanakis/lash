@@ -5,7 +5,9 @@ use serde_json::json;
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
 use super::read_to_string;
+use super::run_blocking;
 
+#[derive(Clone)]
 pub struct SkillStore {
     skill_dirs: Vec<PathBuf>, // [~/.lash/skills, .lash/skills] — later overrides earlier
 }
@@ -263,11 +265,15 @@ impl ToolProvider for SkillStore {
     }
 
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
-        match name {
-            "skills" => self.execute_skills(),
-            "load_skill" => self.execute_load_skill(args),
-            "read_skill_file" => self.execute_read_skill_file(args),
-            _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
-        }
+        let store = self.clone();
+        let name = name.to_string();
+        let args = args.clone();
+        run_blocking(move || match name.as_str() {
+            "skills" => store.execute_skills(),
+            "load_skill" => store.execute_load_skill(&args),
+            "read_skill_file" => store.execute_read_skill_file(&args),
+            _ => ToolResult::err_fmt(format_args!("Unknown tool: {}", name)),
+        })
+        .await
     }
 }

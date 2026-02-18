@@ -73,22 +73,22 @@ impl Message {
                 .map(|p| {
                     let rendered = p.render();
                     match p.kind {
-                        PartKind::Code => format!("```python\n{}\n```", rendered),
-                        PartKind::Output => format!("Output:\n```\n{}\n```", rendered),
-                        PartKind::Error => format!("Error:\n```\n{}\n```", rendered),
+                        PartKind::Code => format!("<code>\n{}\n</code>", rendered),
+                        PartKind::Output => format!("<output>\n{}\n</output>", rendered),
+                        PartKind::Error => format!("<error>\n{}\n</error>", rendered),
                         PartKind::Text | PartKind::Prose => rendered,
                     }
                 })
                 .collect::<Vec<_>>()
                 .join("\n\n")
         } else if self.role == MessageRole::Assistant {
-            // Assistant messages: prose renders as-is, code wrapped in ```python fences
+            // Assistant messages: prose renders as-is, code wrapped in <code> tags
             self.parts
                 .iter()
                 .map(|p| {
                     let rendered = p.render();
                     match p.kind {
-                        PartKind::Code => format!("```python\n{}\n```", rendered),
+                        PartKind::Code => format!("<code>\n{}\n</code>", rendered),
                         PartKind::Prose | PartKind::Text => rendered,
                         _ => rendered,
                     }
@@ -124,7 +124,7 @@ impl Message {
 
         if role == MessageRole::System {
             let mut parts = Vec::new();
-            let sections = parse_markdown_sections(&msg.content);
+            let sections = parse_sections(&msg.content);
             for (idx, (kind, text)) in sections.into_iter().enumerate() {
                 parts.push(Part {
                     id: format!("{}.p{}", id, idx),
@@ -188,80 +188,77 @@ impl Message {
     }
 }
 
-/// Parse markdown fenced code block format:
-///   ```python ... ``` → Code
-///   Output:\n``` ... ``` → Output
-///   Error:\n``` ... ``` → Error
-///   bare text → Text
-fn parse_markdown_sections(content: &str) -> Vec<(PartKind, String)> {
+/// Parse XML-tagged sections in system/feedback messages:
+///   <code>...</code> -> Code
+///   <output>...</output> -> Output
+///   <error>...</error> -> Error
+///   bare text -> Text
+fn parse_sections(content: &str) -> Vec<(PartKind, String)> {
     let mut sections = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
 
     while i < lines.len() {
-        let line = lines[i];
+        let trimmed = lines[i].trim();
 
-        if line == "```python" {
-            // Code block
+        if trimmed == "<code>" {
             i += 1;
             let mut code = String::new();
-            while i < lines.len() && lines[i] != "```" {
+            while i < lines.len() && lines[i].trim() != "</code>" {
                 if !code.is_empty() {
                     code.push('\n');
                 }
                 code.push_str(lines[i]);
                 i += 1;
             }
-            i += 1; // skip closing ```
+            i += 1; // skip </code>
             if !code.is_empty() {
                 sections.push((PartKind::Code, code));
             }
-        } else if line == "Output:" && i + 1 < lines.len() && lines[i + 1] == "```" {
-            // Output block
-            i += 2; // skip "Output:" and opening ```
+        } else if trimmed == "<output>" {
+            i += 1;
             let mut output = String::new();
-            while i < lines.len() && lines[i] != "```" {
+            while i < lines.len() && lines[i].trim() != "</output>" {
                 if !output.is_empty() {
                     output.push('\n');
                 }
                 output.push_str(lines[i]);
                 i += 1;
             }
-            i += 1; // skip closing ```
+            i += 1; // skip </output>
             if !output.is_empty() {
                 sections.push((PartKind::Output, output));
             }
-        } else if line == "Error:" && i + 1 < lines.len() && lines[i + 1] == "```" {
-            // Error block
-            i += 2;
+        } else if trimmed == "<error>" {
+            i += 1;
             let mut error = String::new();
-            while i < lines.len() && lines[i] != "```" {
+            while i < lines.len() && lines[i].trim() != "</error>" {
                 if !error.is_empty() {
                     error.push('\n');
                 }
                 error.push_str(lines[i]);
                 i += 1;
             }
-            i += 1; // skip closing ```
+            i += 1; // skip </error>
             if !error.is_empty() {
                 sections.push((PartKind::Error, error));
             }
-        } else if !line.trim().is_empty() {
+        } else if !trimmed.is_empty() {
             // Plain text
-            let mut text = String::from(line);
+            let mut text = String::from(lines[i]);
             i += 1;
-            while i < lines.len()
-                && !lines[i].starts_with("```")
-                && lines[i] != "Output:"
-                && lines[i] != "Error:"
-            {
+            while i < lines.len() {
+                let next = lines[i].trim();
+                if next == "<code>" || next == "<output>" || next == "<error>" {
+                    break;
+                }
                 text.push('\n');
                 text.push_str(lines[i]);
                 i += 1;
             }
-            let trimmed = text.trim().to_string();
-            if !trimmed.is_empty() {
-                sections.push((PartKind::Text, trimmed));
+            let trimmed_text = text.trim().to_string();
+            if !trimmed_text.is_empty() {
+                sections.push((PartKind::Text, trimmed_text));
             }
         } else {
             i += 1;
@@ -278,41 +275,28 @@ fn parse_assistant_sections(content: &str) -> Vec<(PartKind, String)> {
     let mut i = 0;
 
     while i < lines.len() {
-        let line = lines[i];
-        let trimmed = line.trim();
+        let trimmed = lines[i].trim();
 
-        // Check for opening code fence
-        if trimmed == "```python"
-            || trimmed == "```py"
-            || trimmed == "```Python"
-            || trimmed.starts_with("```python ")
-            || trimmed.starts_with("```py ")
-        {
+        if trimmed == "<code>" {
             i += 1;
             let mut code = String::new();
-            while i < lines.len() && lines[i].trim() != "```" {
+            while i < lines.len() && lines[i].trim() != "</code>" {
                 if !code.is_empty() {
                     code.push('\n');
                 }
                 code.push_str(lines[i]);
                 i += 1;
             }
-            i += 1; // skip closing ```
+            i += 1; // skip </code>
             if !code.is_empty() {
                 sections.push((PartKind::Code, code));
             }
         } else if !trimmed.is_empty() {
             // Prose text
-            let mut text = String::from(line);
+            let mut text = String::from(lines[i]);
             i += 1;
             while i < lines.len() {
-                let next_trimmed = lines[i].trim();
-                if next_trimmed == "```python"
-                    || next_trimmed == "```py"
-                    || next_trimmed == "```Python"
-                    || next_trimmed.starts_with("```python ")
-                    || next_trimmed.starts_with("```py ")
-                {
+                if lines[i].trim() == "<code>" {
                     break;
                 }
                 text.push('\n');

@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -28,6 +29,8 @@ pub struct TaskSnapshot {
     pub owner: String,
     pub is_blocked: bool,
 }
+
+pub const TASK_TRAY_TWO_COL_MIN_INNER_WIDTH: usize = 88;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Mode {
@@ -132,14 +135,53 @@ fn wrapped_text_height(text: &str, width: usize, prefix_chars: usize) -> usize {
     h
 }
 
+/// Normalize streaming assistant text for display:
+/// - drop leading/trailing blank lines
+/// - collapse consecutive blank lines to a single blank line
+fn normalize_stream_text(text: &str) -> String {
+    let mut out = String::new();
+    let mut started = false;
+    let mut prev_blank = false;
+
+    for line in text.split('\n') {
+        let is_blank = line.trim().is_empty();
+        if !started {
+            if is_blank {
+                continue;
+            }
+            out.push_str(line);
+            started = true;
+            prev_blank = false;
+            continue;
+        }
+
+        if is_blank {
+            if !prev_blank {
+                out.push('\n');
+                prev_blank = true;
+            }
+        } else {
+            out.push('\n');
+            out.push_str(line);
+            prev_blank = false;
+        }
+    }
+
+    while out.ends_with('\n') {
+        out.pop();
+    }
+
+    out
+}
+
 impl DisplayBlock {
     /// Number of visual lines this block takes when rendered at `width` columns.
     /// `viewport_height` is needed for Splash centering; pass 0 for non-Splash blocks.
     pub fn height(&self, code_expanded: bool, width: usize, viewport_height: usize) -> usize {
         match self {
             DisplayBlock::UserInput(s) => {
-                // Each line has "/ " prefix (2 chars)
-                wrapped_text_height(s, width, 2) + 1 // +1 blank line after
+                // Left-aligned with "\u{2590} " prefix (2 chars) + 1 slack + blank line
+                wrapped_text_height(s, width, 3) + 1
             }
             DisplayBlock::AssistantText(s) => markdown::markdown_height(s, width),
             DisplayBlock::CodeBlock {
@@ -157,11 +199,11 @@ impl DisplayBlock {
                     1 // collapsed single line
                 }
             }
-            DisplayBlock::ToolCall { continuation, .. } => {
-                if !code_expanded && *continuation {
-                    0 // hidden — group leader shows summary
-                } else {
+            DisplayBlock::ToolCall { .. } => {
+                if code_expanded {
                     1
+                } else {
+                    0
                 }
             }
             DisplayBlock::CodeOutput { output, error } => {
@@ -256,7 +298,7 @@ pub struct App {
     /// Currently selected skill index.
     pub skill_picker_idx: usize,
     /// Messages queued while agent is running, sent sequentially on completion.
-    pub message_queue: Vec<String>,
+    pub message_queue: VecDeque<String>,
     /// Active agent prompt (ask() dialog).
     pub prompt: Option<PromptState>,
     /// Whether the terminal window is currently focused.
@@ -330,7 +372,7 @@ impl App {
             skills: SkillRegistry::load(),
             skill_picker: Vec::new(),
             skill_picker_idx: 0,
-            message_queue: Vec::new(),
+            message_queue: VecDeque::new(),
             prompt: None,
             focused: true,
             token_usage: TokenUsage::default(),
@@ -391,17 +433,17 @@ impl App {
         match event {
             AgentEvent::TextDelta { content } => {
                 self.pending_text.push_str(&content);
+                self.pending_text = normalize_stream_text(&self.pending_text);
                 self.scroll_to_bottom();
             }
             AgentEvent::CodeBlock { code } => {
-                if !self.pending_text.trim().is_empty() {
-                    self.blocks.push(DisplayBlock::AssistantText(std::mem::take(
-                        &mut self.pending_text,
-                    )));
+                self.status_text = Some("python".into());
+                let flushed = normalize_stream_text(&self.pending_text);
+                if !flushed.is_empty() {
+                    self.blocks.push(DisplayBlock::AssistantText(flushed));
                     self.invalidate_height_cache();
-                } else {
-                    self.pending_text.clear();
                 }
+                self.pending_text.clear();
                 let trimmed = code.trim_matches('\n');
                 if !trimmed.is_empty() {
                     let continuation = self.is_code_continuation();
@@ -420,6 +462,7 @@ impl App {
                 duration_ms,
                 ..
             } => {
+                self.status_text = Some(name.clone());
                 self.streaming_output.clear();
                 if name.starts_with("delegate_") {
                     self.active_delegate = None;
@@ -479,14 +522,12 @@ impl App {
                 self.iteration = iteration + 1;
             }
             AgentEvent::Done => {
-                if !self.pending_text.trim().is_empty() {
-                    self.blocks.push(DisplayBlock::AssistantText(std::mem::take(
-                        &mut self.pending_text,
-                    )));
+                let flushed = normalize_stream_text(&self.pending_text);
+                if !flushed.is_empty() {
+                    self.blocks.push(DisplayBlock::AssistantText(flushed));
                     self.invalidate_height_cache();
-                } else {
-                    self.pending_text.clear();
                 }
+                self.pending_text.clear();
                 self.running = false;
                 self.status_text = None;
                 self.streaming_output.clear();
@@ -498,10 +539,8 @@ impl App {
                 self.invalidate_height_cache();
                 self.scroll_to_bottom();
             }
-            AgentEvent::TokenUsage {
-                usage, cumulative, ..
-            } => {
-                self.token_usage = cumulative;
+            AgentEvent::TokenUsage { usage, .. } => {
+                self.token_usage.add(&usage);
                 self.last_input_tokens = usage.input_tokens;
             }
             AgentEvent::SubAgentDone {
@@ -540,20 +579,16 @@ impl App {
     }
 
     pub fn queue_message(&mut self, msg: String) {
-        self.message_queue.push(msg);
+        self.message_queue.push_back(msg);
     }
 
     pub fn dequeue_message(&mut self) -> Option<String> {
-        if self.message_queue.is_empty() {
-            None
-        } else {
-            Some(self.message_queue.remove(0))
-        }
+        self.message_queue.pop_front()
     }
 
     /// Pop last queued message back to editor for editing/removal.
     pub fn unqueue_last(&mut self) -> Option<String> {
-        self.message_queue.pop()
+        self.message_queue.pop_back()
     }
 
     pub fn queue_count(&self) -> usize {
@@ -763,7 +798,7 @@ impl App {
     }
 
     /// Height of the persistent task tray (0 when empty, dynamic based on width).
-    /// Includes 1-line pad above, top/bottom borders, pill rows, and optional progress bar.
+    /// Includes 1-line pad above, top/bottom borders, task rows, and optional progress bar.
     pub fn task_tray_height(&self, width: u16) -> u16 {
         if self.task_tray.is_empty() {
             return 0;
@@ -775,41 +810,21 @@ impl App {
             .filter(|t| t.status != "completed" && t.status != "cancelled")
             .collect();
 
-        let pill_rows = if active.is_empty() {
+        let task_rows = if active.is_empty() {
             1 // "all completed" row
         } else {
-            let inner_w = (width as usize).saturating_sub(2); // "│ " prefix
-            let max_rows = 3usize;
-            let mut rows = 1usize;
-            let mut row_used = 0usize;
-
-            for task in &active {
-                let owner_w = if task.owner.is_empty() {
-                    0
-                } else {
-                    2 + unicode_width::UnicodeWidthStr::width(task.owner.as_str())
-                };
-                let pill_w =
-                    1 + 1 + unicode_width::UnicodeWidthStr::width(task.label.as_str()) + owner_w;
-                let gap = if row_used == 0 { 0 } else { 3 };
-
-                if row_used > 0 && row_used + gap + pill_w > inner_w {
-                    if rows >= max_rows {
-                        break;
-                    }
-                    rows += 1;
-                    row_used = pill_w.min(inner_w);
-                } else {
-                    row_used += gap + pill_w;
-                }
+            let inner_w = (width as usize).saturating_sub(4); // "│ " + content + " │"
+            let two_col = active.len() >= 4 && inner_w >= TASK_TRAY_TWO_COL_MIN_INNER_WIDTH;
+            if two_col {
+                active.len().div_ceil(2)
+            } else {
+                active.len()
             }
-
-            rows
         };
 
         let has_progress = self.task_tray.len() >= 2;
-        // 1 (pad) + 1 (top border) + pill_rows + (1 if progress bar) + 1 (bottom border)
-        1 + 1 + pill_rows as u16 + u16::from(has_progress) + 1
+        // 1 (pad) + 1 (top border) + task_rows + (1 if progress bar) + 1 (bottom border)
+        1 + 1 + task_rows as u16 + u16::from(has_progress) + 1
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
@@ -867,11 +882,17 @@ impl App {
     pub fn total_content_height(&mut self, width: usize, viewport_height: usize) -> usize {
         self.ensure_height_cache(width, viewport_height);
         let block_height = self.height_cache.last().copied().unwrap_or(0);
+        // Include live streaming LLM text
+        let pending_height = if self.pending_text.is_empty() {
+            0
+        } else {
+            crate::markdown::markdown_height(&self.pending_text, width)
+        };
         // Include live streaming output lines
         let streaming_height = self.streaming_output.len();
         // Include active delegate indicator line
         let delegate_height = if self.active_delegate.is_some() { 1 } else { 0 };
-        block_height + streaming_height + delegate_height
+        block_height + pending_height + streaming_height + delegate_height
     }
 
     /// Which line (0-indexed) the cursor is on in multi-line input.
@@ -1479,6 +1500,31 @@ fn find_git_root(start: &std::path::Path) -> Option<PathBuf> {
     }
 }
 
+/// Generate a readable slug like "swift-falcon" from small word lists.
+fn generate_plan_slug() -> String {
+    const ADJECTIVES: &[&str] = &[
+        "swift", "bold", "calm", "dark", "keen", "warm", "cool", "fair", "deep", "wild", "soft",
+        "pure", "vast", "slim", "rare", "firm", "lean", "rich", "true", "wise", "fast", "safe",
+        "full", "neat", "open", "flat", "pale", "dry", "raw", "new",
+    ];
+    const NOUNS: &[&str] = &[
+        "falcon", "ember", "coral", "prism", "ridge", "cedar", "bloom", "frost", "stone", "grain",
+        "drift", "spark", "forge", "shade", "crest", "brook", "flint", "moss", "peak", "dust",
+        "glow", "wave", "pine", "iron", "salt", "bone", "mist", "clay", "sage", "arch",
+    ];
+
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    std::time::SystemTime::now().hash(&mut hasher);
+    std::process::id().hash(&mut hasher);
+    let h = hasher.finish();
+
+    let adj = ADJECTIVES[(h as usize) % ADJECTIVES.len()];
+    let noun = NOUNS[((h >> 16) as usize) % NOUNS.len()];
+    format!("{}-{}", adj, noun)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1541,6 +1587,18 @@ mod tests {
         assert_eq!(wrapped_text_height("hello", 6, 2), 2);
     }
 
+    #[test]
+    fn normalize_stream_text_collapses_blank_runs() {
+        let raw = "\n\nline one\n\n\nline two\n\n";
+        assert_eq!(normalize_stream_text(raw), "line one\n\nline two");
+    }
+
+    #[test]
+    fn normalize_stream_text_handles_whitespace_only_lines() {
+        let raw = " \n\t\nhello\n   \n\t \nworld\n";
+        assert_eq!(normalize_stream_text(raw), "hello\n\nworld");
+    }
+
     // ── format_tokens ──
 
     #[test]
@@ -1572,7 +1630,7 @@ mod tests {
             duration_ms: 50,
             continuation: false,
         };
-        assert_eq!(block.height(false, 80, 0), 1);
+        assert_eq!(block.height(false, 80, 0), 0);
         let cont = DisplayBlock::ToolCall {
             name: "read_file".into(),
             success: true,
@@ -1581,6 +1639,20 @@ mod tests {
         };
         assert_eq!(cont.height(false, 80, 0), 0); // hidden when collapsed
         assert_eq!(cont.height(true, 80, 0), 1); // visible when expanded
+    }
+
+    #[test]
+    fn text_delta_normalization_is_applied_incrementally() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: "\n\nfirst\n".into(),
+        });
+        assert_eq!(app.pending_text, "first");
+
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: "\n\n\nsecond\n".into(),
+        });
+        assert_eq!(app.pending_text, "first\n\nsecond");
     }
 
     #[test]
@@ -1858,29 +1930,4 @@ mod tests {
             "scroll should track block 3 even with stale cache"
         );
     }
-}
-
-/// Generate a readable slug like "swift-falcon" from small word lists.
-fn generate_plan_slug() -> String {
-    const ADJECTIVES: &[&str] = &[
-        "swift", "bold", "calm", "dark", "keen", "warm", "cool", "fair", "deep", "wild", "soft",
-        "pure", "vast", "slim", "rare", "firm", "lean", "rich", "true", "wise", "fast", "safe",
-        "full", "neat", "open", "flat", "pale", "dry", "raw", "new",
-    ];
-    const NOUNS: &[&str] = &[
-        "falcon", "ember", "coral", "prism", "ridge", "cedar", "bloom", "frost", "stone", "grain",
-        "drift", "spark", "forge", "shade", "crest", "brook", "flint", "moss", "peak", "dust",
-        "glow", "wave", "pine", "iron", "salt", "bone", "mist", "clay", "sage", "arch",
-    ];
-
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    std::time::SystemTime::now().hash(&mut hasher);
-    std::process::id().hash(&mut hasher);
-    let h = hasher.finish();
-
-    let adj = ADJECTIVES[(h as usize) % ADJECTIVES.len()];
-    let noun = NOUNS[((h >> 16) as usize) % NOUNS.len()];
-    format!("{}-{}", adj, noun)
 }

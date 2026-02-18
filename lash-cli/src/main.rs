@@ -304,11 +304,10 @@ async fn main() -> anyhow::Result<()> {
     let store = Arc::new(Store::open(&db_path).expect("Failed to open session database"));
 
     let task_store: Arc<TaskStore> = Arc::new(TaskStore::new(Arc::clone(&store)));
-    let instruction_loader = Arc::new(lash::InstructionLoader::new());
 
     let mut base = CompositeTools::new()
         .add(Shell::new())
-        .add(ReadFile::new(Arc::clone(&instruction_loader)))
+        .add(ReadFile::new())
         .add(WriteFile)
         .add(EditFile)
         .add(DiffFile)
@@ -365,7 +364,7 @@ async fn main() -> anyhow::Result<()> {
                 "root".to_string(),
             )),
     );
-    let session = Session::new(tools, SessionConfig::default(), "root").await?;
+    let session = Session::new(tools, "root").await?;
 
     let agent = Agent::new(
         session,
@@ -1130,6 +1129,7 @@ async fn run_app(
                                     } else {
                                         // No arg — open session picker
                                         let mut sessions = session_log::list_sessions();
+                                        sessions.retain(|s| s.session_id != logger.session_id);
                                         if sessions.is_empty() {
                                             app.blocks.push(DisplayBlock::SystemMessage(
                                                 "No sessions found.".to_string(),

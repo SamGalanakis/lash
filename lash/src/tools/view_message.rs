@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::store::Store;
+use crate::tools::require_str;
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
 /// Tool that retrieves original content of pruned/summarized message parts by archive hash.
@@ -27,10 +28,10 @@ impl ToolProvider for ViewMessage {
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
-        let hash = args["hash"].as_str().unwrap_or("");
-        if hash.is_empty() {
-            return ToolResult::err(serde_json::json!("Missing 'hash' argument"));
-        }
+        let hash = match require_str(args, "hash") {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
         match self.store.get_archive(hash) {
             Some(content) => ToolResult::ok(serde_json::json!(content)),
             None => ToolResult::err(serde_json::json!("No archived content for hash")),

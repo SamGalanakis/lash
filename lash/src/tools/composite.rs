@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::{ProgressSender, ToolDefinition, ToolProvider, ToolResult};
@@ -13,23 +13,39 @@ use crate::{ProgressSender, ToolDefinition, ToolProvider, ToolResult};
 /// ```
 pub struct CompositeTools {
     providers: Vec<Box<dyn ToolProvider>>,
+    tool_index: HashMap<String, usize>,
+    definitions_cache: Vec<ToolDefinition>,
 }
 
 impl CompositeTools {
     pub fn new() -> Self {
         Self {
             providers: Vec::new(),
+            tool_index: HashMap::new(),
+            definitions_cache: Vec::new(),
         }
     }
 
     #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, provider: impl ToolProvider) -> Self {
+        let defs = provider.definitions();
+        let idx = self.providers.len();
+        for def in &defs {
+            self.tool_index.entry(def.name.clone()).or_insert(idx);
+        }
+        self.definitions_cache.extend(defs);
         self.providers.push(Box::new(provider));
         self
     }
 
     /// Add an `Arc<dyn ToolProvider>` (e.g. to share a tool set with sub-agents).
     pub fn add_arc(mut self, provider: Arc<dyn ToolProvider>) -> Self {
+        let defs = provider.definitions();
+        let idx = self.providers.len();
+        for def in &defs {
+            self.tool_index.entry(def.name.clone()).or_insert(idx);
+        }
+        self.definitions_cache.extend(defs);
         self.providers.push(Box::new(ArcToolProvider(provider)));
         self
     }
@@ -65,17 +81,14 @@ impl Default for CompositeTools {
 #[async_trait::async_trait]
 impl ToolProvider for CompositeTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        self.providers
-            .iter()
-            .flat_map(|p| p.definitions())
-            .collect()
+        self.definitions_cache.clone()
     }
 
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
-        for provider in &self.providers {
-            if provider.definitions().iter().any(|d| d.name == name) {
-                return provider.execute(name, args).await;
-            }
+        if let Some(idx) = self.tool_index.get(name)
+            && let Some(provider) = self.providers.get(*idx)
+        {
+            return provider.execute(name, args).await;
         }
         ToolResult::err_fmt(format_args!("Unknown tool: {name}"))
     }
@@ -86,10 +99,10 @@ impl ToolProvider for CompositeTools {
         args: &serde_json::Value,
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
-        for provider in &self.providers {
-            if provider.definitions().iter().any(|d| d.name == name) {
-                return provider.execute_streaming(name, args, progress).await;
-            }
+        if let Some(idx) = self.tool_index.get(name)
+            && let Some(provider) = self.providers.get(*idx)
+        {
+            return provider.execute_streaming(name, args, progress).await;
         }
         ToolResult::err_fmt(format_args!("Unknown tool: {name}"))
     }

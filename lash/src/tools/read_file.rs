@@ -1,23 +1,18 @@
 use serde_json::json;
 use std::path::Path;
-use std::sync::Arc;
 
-use crate::{InstructionLoader, ToolDefinition, ToolImage, ToolParam, ToolProvider, ToolResult};
+use crate::{ToolDefinition, ToolImage, ToolParam, ToolProvider, ToolResult};
 
 use super::hashline;
-use super::{read_to_string, require_str};
+use super::{read_to_string, require_str, run_blocking};
 
 /// Read files with hashline-prefixed output. Supports images natively.
 #[derive(Default)]
-pub struct ReadFile {
-    _instructions: Option<Arc<InstructionLoader>>,
-}
+pub struct ReadFile;
 
 impl ReadFile {
-    pub fn new(instructions: Arc<InstructionLoader>) -> Self {
-        Self {
-            _instructions: Some(instructions),
-        }
+    pub fn new() -> Self {
+        Self
     }
 }
 
@@ -54,50 +49,7 @@ impl ToolProvider for ReadFile {
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
         let path_str = match require_str(args, "path") {
-            Ok(s) => s,
-            Err(e) => return e,
-        };
-
-        let path = Path::new(path_str);
-
-        if !path.exists() {
-            return ToolResult::err_fmt(format_args!("Path does not exist: {path_str}"));
-        }
-
-        // Directory — still works but nudges toward ls
-        if path.is_dir() {
-            let mut result = list_directory(path).await;
-            if result.success
-                && let serde_json::Value::String(ref mut s) = result.result
-            {
-                s.insert_str(0, "(Hint: use `ls` for directory listings.)\n");
-            }
-            return result;
-        }
-
-        // Image files — return as visual attachment
-        if let Some(mime) = image_mime(path) {
-            return read_image(path, path_str, mime);
-        }
-
-        // Binary detection
-        if is_likely_binary(path) {
-            return ToolResult::err_fmt(format_args!("Binary file detected: {path_str}"));
-        }
-
-        // Check file size before reading
-        let file_size = match std::fs::metadata(path) {
-            Ok(m) => m.len(),
-            Err(e) => return ToolResult::err_fmt(format_args!("Failed to stat file: {e}")),
-        };
-        if file_size > MAX_TEXT_BYTES {
-            return ToolResult::err_fmt(format_args!(
-                "File too large ({file_size} bytes, max {MAX_TEXT_BYTES}). Use offset and limit parameters to read in chunks."
-            ));
-        }
-
-        let content = match read_to_string(path) {
-            Ok(c) => c,
+            Ok(s) => s.to_string(),
             Err(e) => return e,
         };
 
@@ -114,44 +66,90 @@ impl ToolProvider for ReadFile {
             .map(|v| v as usize)
             .unwrap_or(DEFAULT_LIMIT);
 
-        let all_lines: Vec<&str> = content.lines().collect();
-        let total_lines = all_lines.len();
-
-        // offset is 1-based
-        let start_idx = (offset - 1).min(total_lines);
-        let end_idx = (start_idx + limit).min(total_lines);
-        let selected: Vec<&str> = all_lines[start_idx..end_idx].to_vec();
-
-        // Truncate long lines and format with hashlines
-        let truncated_content: String = selected
-            .iter()
-            .map(|line| {
-                if line.len() > MAX_LINE_LEN {
-                    format!("{}...", &line[..MAX_LINE_LEN])
-                } else {
-                    line.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let mut formatted = hashline::format_hashlines(&truncated_content, offset);
-
-        if end_idx < total_lines {
-            formatted.push_str(&format!(
-                "\n[Showing lines {}-{} of {}. Use offset={} to continue.]",
-                offset,
-                offset + selected.len() - 1,
-                total_lines,
-                end_idx + 1,
-            ));
-        }
-
-        ToolResult::ok(json!(formatted))
+        run_blocking(move || execute_read_file_sync(&path_str, offset, limit)).await
     }
 }
 
-async fn list_directory(path: &Path) -> ToolResult {
+fn execute_read_file_sync(path_str: &str, offset: usize, limit: usize) -> ToolResult {
+    let path = Path::new(path_str);
+    if !path.exists() {
+        return ToolResult::err_fmt(format_args!("Path does not exist: {path_str}"));
+    }
+
+    // Directory — still works but nudges toward ls
+    if path.is_dir() {
+        let mut result = list_directory(path);
+        if result.success
+            && let serde_json::Value::String(ref mut s) = result.result
+        {
+            s.insert_str(0, "(Hint: use `ls` for directory listings.)\n");
+        }
+        return result;
+    }
+
+    // Image files — return as visual attachment
+    if let Some(mime) = image_mime(path) {
+        return read_image(path, path_str, mime);
+    }
+
+    // Binary detection
+    if is_likely_binary(path) {
+        return ToolResult::err_fmt(format_args!("Binary file detected: {path_str}"));
+    }
+
+    // Check file size before reading
+    let file_size = match std::fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(e) => return ToolResult::err_fmt(format_args!("Failed to stat file: {e}")),
+    };
+    if file_size > MAX_TEXT_BYTES {
+        return ToolResult::err_fmt(format_args!(
+            "File too large ({file_size} bytes, max {MAX_TEXT_BYTES}). Use offset and limit parameters to read in chunks."
+        ));
+    }
+
+    let content = match read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+
+    let all_lines: Vec<&str> = content.lines().collect();
+    let total_lines = all_lines.len();
+
+    // offset is 1-based
+    let start_idx = (offset - 1).min(total_lines);
+    let end_idx = (start_idx + limit).min(total_lines);
+    let selected: Vec<&str> = all_lines[start_idx..end_idx].to_vec();
+
+    // Truncate long lines and format with hashlines
+    let truncated_content: String = selected
+        .iter()
+        .map(|line| {
+            if line.len() > MAX_LINE_LEN {
+                format!("{}...", &line[..MAX_LINE_LEN])
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut formatted = hashline::format_hashlines(&truncated_content, offset);
+
+    if end_idx < total_lines {
+        formatted.push_str(&format!(
+            "\n[Showing lines {}-{} of {}. Use offset={} to continue.]",
+            offset,
+            offset + selected.len() - 1,
+            total_lines,
+            end_idx + 1,
+        ));
+    }
+
+    ToolResult::ok(json!(formatted))
+}
+
+fn list_directory(path: &Path) -> ToolResult {
     match std::fs::read_dir(path) {
         Ok(entries) => {
             let mut items: Vec<String> = Vec::new();
@@ -303,7 +301,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "line1\nline2\nline3").unwrap();
-        let tool = ReadFile::default();
+        let tool = ReadFile;
         let result = tool
             .execute("read_file", &json!({"path": path.to_str().unwrap()}))
             .await;
@@ -319,7 +317,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "line1\nline2\nline3\nline4\nline5").unwrap();
-        let tool = ReadFile::default();
+        let tool = ReadFile;
         let result = tool
             .execute(
                 "read_file",
@@ -336,7 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_nonexistent() {
-        let tool = ReadFile::default();
+        let tool = ReadFile;
         let result = tool
             .execute(
                 "read_file",

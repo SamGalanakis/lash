@@ -388,6 +388,22 @@ impl MdRenderer {
     }
 }
 
+/// Count the visual height of rendered markdown, accounting for line wrapping at `width`.
+pub fn markdown_height(text: &str, width: usize) -> usize {
+    let lines = render_markdown(text, width);
+    if width == 0 {
+        return lines.len();
+    }
+    lines
+        .iter()
+        .map(|line| {
+            let w = line.width();
+            if w == 0 { 1 } else { w.div_ceil(width) }
+        })
+        .sum::<usize>()
+        .max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,7 +439,7 @@ mod tests {
     fn render_plain_text() {
         let lines = render_markdown("hello world", 80);
         // Plain text → paragraph with text + blank line after
-        assert!(lines.len() >= 1);
+        assert!(!lines.is_empty());
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("hello world"));
     }
@@ -541,20 +557,4 @@ mod tests {
         let h_wide = markdown_height("a long line of text", 200);
         assert!(h_narrow > h_wide);
     }
-}
-
-/// Count the visual height of rendered markdown, accounting for line wrapping at `width`.
-pub fn markdown_height(text: &str, width: usize) -> usize {
-    let lines = render_markdown(text, width);
-    if width == 0 {
-        return lines.len();
-    }
-    lines
-        .iter()
-        .map(|line| {
-            let w = line.width();
-            if w == 0 { 1 } else { w.div_ceil(width) }
-        })
-        .sum::<usize>()
-        .max(1)
 }
