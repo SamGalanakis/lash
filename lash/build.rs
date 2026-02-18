@@ -26,8 +26,13 @@ fn main() {
     // 1. Ensure python-standalone is downloaded and extracted
     let install_dir = ensure_python_standalone(&python_dir, &target);
 
-    // 2. Install dill into the stdlib
-    install_dill(&install_dir);
+    // 2. Install dill into the stdlib when the target binary can be executed.
+    let host = std::env::var("HOST").unwrap_or_default();
+    if target == host {
+        install_dill(&install_dir);
+    } else {
+        eprintln!("Cross-compiling for {target} (host: {host}), skipping dill install");
+    }
 
     // 3. Generate pyo3-config.txt
     // PYO3_CONFIG_FILE must be set as a real env var for pyo3-ffi's build script.
@@ -86,8 +91,9 @@ fn main() {
 fn ensure_python_standalone(python_dir: &Path, target: &str) -> PathBuf {
     let install_dir = python_dir.join("python").join("install");
     let marker = python_dir.join(".version");
+    let flavor = pbs_flavor(target);
 
-    let expected_version = format!("{PYTHON_VERSION}+{PBS_RELEASE}");
+    let expected_version = format!("{PYTHON_VERSION}+{PBS_RELEASE}+{flavor}");
     if marker.exists()
         && let Ok(v) = std::fs::read_to_string(&marker)
         && v.trim() == expected_version
@@ -100,7 +106,7 @@ fn ensure_python_standalone(python_dir: &Path, target: &str) -> PathBuf {
     // Map Rust target triple to PBS triple
     let pbs_triple = map_target_triple(target);
     let filename = format!(
-        "cpython-{PYTHON_VERSION}+{PBS_RELEASE}-{pbs_triple}-freethreaded+pgo+lto-full.tar.zst"
+        "cpython-{PYTHON_VERSION}+{PBS_RELEASE}-{pbs_triple}-{flavor}.tar.zst"
     );
     let url = format!(
         "https://github.com/astral-sh/python-build-standalone/releases/download/{PBS_RELEASE}/{filename}"
@@ -208,23 +214,60 @@ fn generate_pyo3_config(install_dir: &Path, config_path: &Path, target: &str) {
         "32"
     };
 
+    let (mut shared, mut lib_name, mut build_flags) = default_python_link_settings(target);
+
+    // If CI/user already supplied PYO3_CONFIG_FILE, keep our manual link directive aligned
+    // with whatever PyO3 is using.
+    if let Ok(pyo3_config_path) = std::env::var("PYO3_CONFIG_FILE")
+        && let Ok(existing_config) = std::fs::read_to_string(&pyo3_config_path)
+    {
+        for line in existing_config.lines() {
+            if let Some(v) = line.strip_prefix("shared=") {
+                shared = v.trim() == "true";
+            } else if let Some(v) = line.strip_prefix("lib_name=") {
+                let v = v.trim();
+                if !v.is_empty() {
+                    lib_name = v.to_owned();
+                }
+            } else if let Some(v) = line.strip_prefix("build_flags=") {
+                build_flags = v.trim().to_owned();
+            }
+        }
+    }
+
+    // Fall back between static/dylib if the requested artifact is unavailable.
+    let static_lib = lib_dir.join(format!("lib{lib_name}.a"));
+    let dylib = lib_dir.join(format!("lib{lib_name}.dylib"));
+    if shared && !dylib.exists() && static_lib.exists() {
+        shared = false;
+    } else if !shared && !static_lib.exists() && dylib.exists() {
+        shared = true;
+    }
+
     let config = format!(
         "implementation=CPython\n\
          version={PYTHON_MAJOR_MINOR}\n\
-         shared=false\n\
-         lib_name=python{PYTHON_MAJOR_MINOR}\n\
+         shared={shared}\n\
+         lib_name={lib_name}\n\
          lib_dir={lib_dir}\n\
          pointer_width={pointer_width}\n\
-         build_flags=Py_GIL_DISABLED\n\
+         build_flags={build_flags}\n\
          suppress_build_script_link_lines=true\n",
+        shared = shared,
+        lib_name = lib_name,
         lib_dir = lib_dir.display(),
+        build_flags = build_flags,
     );
 
     // We link libpython ourselves with --whole-archive so that all CPython
     // symbols (PyCapsule_New, etc.) are included — ctypes.pythonapi needs them
     // exported from the binary.
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    println!("cargo:rustc-link-lib=static:+whole-archive=python{PYTHON_MAJOR_MINOR}");
+    if shared {
+        println!("cargo:rustc-link-lib={lib_name}");
+    } else {
+        println!("cargo:rustc-link-lib=static:+whole-archive={lib_name}");
+    }
 
     // Also set the include dir via env var for PyO3
     println!(
@@ -315,6 +358,33 @@ fn map_target_triple(target: &str) -> &str {
             eprintln!("Warning: unmapped target triple '{target}', using as-is for PBS download");
             target
         }
+    }
+}
+
+fn pbs_flavor(target: &str) -> &str {
+    match target {
+        "x86_64-apple-darwin" | "aarch64-apple-darwin" => "debug-full",
+        "x86_64-unknown-linux-gnu" | "aarch64-unknown-linux-gnu" => "pgo+lto-full",
+        _ => {
+            eprintln!("Warning: unmapped target triple '{target}', defaulting PBS flavor");
+            "pgo+lto-full"
+        }
+    }
+}
+
+fn default_python_link_settings(target: &str) -> (bool, String, String) {
+    if pbs_flavor(target) == "debug-full" {
+        (
+            true,
+            format!("python{PYTHON_MAJOR_MINOR}d"),
+            "Py_DEBUG".to_owned(),
+        )
+    } else {
+        (
+            false,
+            format!("python{PYTHON_MAJOR_MINOR}"),
+            "Py_GIL_DISABLED".to_owned(),
+        )
     }
 }
 
