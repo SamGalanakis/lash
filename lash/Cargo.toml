@@ -3,6 +3,13 @@ name = "lash-core"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Keep core portable by default. Opt into storage/runtime extras explicitly.
+default = []
+sqlite-store = ["dep:rusqlite"]
+# Convenience umbrella for first-party consumers (e.g. lash-cli).
+full = ["sqlite-store"]
+
 [dependencies]
 tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
 serde = { version = "1", features = ["derive"] }
@@ -21,7 +28,7 @@ ignore = "0.4"
 tokio-util = { version = "0.7", features = ["rt"] }
 base64 = "0.22"
 sha2 = "0.10"
-rusqlite = { version = "0.33", features = ["bundled"] }
+rusqlite = { version = "0.33", features = ["bundled"], optional = true }
 pty-process = { version = "0.4", features = ["async"] }
 pyo3 = { version = "0.28" }
 dirs = "6"

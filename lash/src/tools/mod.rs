@@ -12,7 +12,9 @@ mod plan_mode;
 mod read_file;
 mod shell;
 mod skills;
+#[cfg(feature = "sqlite-store")]
 mod tasks;
+#[cfg(feature = "sqlite-store")]
 mod view_message;
 mod web_search;
 mod write_file;
@@ -30,7 +32,9 @@ pub use plan_mode::PlanMode;
 pub use read_file::ReadFile;
 pub use shell::Shell;
 pub use skills::SkillStore;
+#[cfg(feature = "sqlite-store")]
 pub use tasks::TaskStore;
+#[cfg(feature = "sqlite-store")]
 pub use view_message::ViewMessage;
 pub use web_search::WebSearch;
 pub use write_file::WriteFile;

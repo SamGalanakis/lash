@@ -25,6 +25,7 @@ pub mod provider;
 pub mod python_home;
 pub mod runtime;
 pub mod session;
+#[cfg(feature = "sqlite-store")]
 pub mod store;
 pub mod tools;
 
@@ -39,6 +40,7 @@ pub use runtime::{
     TurnResult,
 };
 pub use session::{ExecResponse, Session, SessionError, UserPrompt};
+#[cfg(feature = "sqlite-store")]
 pub use store::{AgentState, Store, TaskEntry};
 
 /// A message sent from the sandbox to the host during execution.
