@@ -46,12 +46,25 @@ tar xf "${DEST}/python.tar" -C "$DEST"
 rm -f "${DEST}/${FILENAME}" "${DEST}/python.tar"
 
 INSTALL_DIR="${DEST}/python/install"
+BUILD_LIB_DIR="${DEST}/python/build/lib"
 SITE_PACKAGES="${INSTALL_DIR}/lib/python${PYTHON_MAJOR_MINOR}/site-packages"
 
-# Install dill
-if [ ! -d "${SITE_PACKAGES}/dill" ]; then
-    echo "Installing dill..."
-    "${INSTALL_DIR}/bin/python3" -m pip install --target "$SITE_PACKAGES" --no-deps --quiet dill
+# Copy bundled static libs (mpdec, zstd, readline, etc.) into install/lib
+# so the linker finds them via the -L path pyo3 already sets
+if [ -d "$BUILD_LIB_DIR" ]; then
+    echo "Copying bundled static libs into install/lib..."
+    cp -n "$BUILD_LIB_DIR"/*.a "$INSTALL_DIR/lib/" 2>/dev/null || true
+fi
+
+# Install dill (skip for cross-compilation where we can't execute the binary)
+HOST_TRIPLE="$(rustc -vV | sed -n 's/host: //p')"
+if [ "$TARGET" = "$HOST_TRIPLE" ]; then
+    if [ ! -d "${SITE_PACKAGES}/dill" ]; then
+        echo "Installing dill..."
+        "${INSTALL_DIR}/bin/python3" -m pip install --target "$SITE_PACKAGES" --no-deps --quiet dill
+    fi
+else
+    echo "Cross-compiling for $TARGET (host: $HOST_TRIPLE), skipping dill install"
 fi
 
 # Generate pyo3-config.txt

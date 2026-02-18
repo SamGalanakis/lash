@@ -54,7 +54,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: target/python-standalone
-          key: python-standalone-${{ matrix.target }}-3.14.3+20260211
+          key: python-standalone-${{ matrix.target }}-3.14.3+20260211-v2
 
       - name: Fetch python-standalone
         run: ./scripts/fetch-python.sh ${{ matrix.target }}
@@ -63,7 +63,6 @@ jobs:
         env:
           PYO3_CONFIG_FILE: ${{ github.workspace }}/target/python-standalone/pyo3-config.txt
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          LIBRARY_PATH: ${{ github.workspace }}/target/python-standalone/python/build/lib
         run: cargo build --release -p lash-cli --target ${{ matrix.target }}
 
       - name: Upload artifact
