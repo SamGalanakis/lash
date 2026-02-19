@@ -3,7 +3,6 @@
 .env
 .env.*
 !.env.example
-lash/src/baml_client/
 jobs/
 bench/
 test.txt
