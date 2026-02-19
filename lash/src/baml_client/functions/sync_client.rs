@@ -5,7 +5,10 @@
 
 //! Synchronous BAML client with function-object pattern.
 
-use crate::baml_client::{runtime::{get_runtime, FunctionOptions}, stream_types, types};
+use crate::baml_client::{
+    runtime::{FunctionOptions, get_runtime},
+    stream_types, types,
+};
 use baml::{BamlEncode, BamlError, StreamingCall};
 
 // =============================================================================
@@ -105,13 +108,9 @@ macro_rules! baml_function_sync {
 // Generate function structs
 // =============================================================================
 
-
-
 baml_function_sync!(CodeActStep(messages: &[types::ChatMsg], tool_list: impl AsRef<str> + BamlEncode, context: impl AsRef<str> + BamlEncode, tool_names: &[String], project_instructions: impl AsRef<str> + BamlEncode, user_images: &[types::Image], include_soul: bool, headless: bool, has_history: bool, preamble: impl AsRef<str> + BamlEncode, soul: impl AsRef<str> + BamlEncode, ) -> (String, String));
 
-
 baml_function_sync!(SubAgentStep(messages: &[types::ChatMsg], tool_list: impl AsRef<str> + BamlEncode, context: impl AsRef<str> + BamlEncode, tool_names: &[String], project_instructions: impl AsRef<str> + BamlEncode, user_images: &[types::Image], include_soul: bool, headless: bool, has_history: bool, preamble: impl AsRef<str> + BamlEncode, soul: impl AsRef<str> + BamlEncode, ) -> (String, String));
-
 
 // =============================================================================
 // Client Struct
@@ -120,22 +119,20 @@ baml_function_sync!(SubAgentStep(messages: &[types::ChatMsg], tool_list: impl As
 #[derive(Clone)]
 pub struct BamlSyncClient {
     options: FunctionOptions,
-    
+
     pub CodeActStep: CodeActStep,
-    
+
     pub SubAgentStep: SubAgentStep,
-    
 }
 
 impl BamlSyncClient {
     pub const fn new() -> Self {
         Self {
             options: FunctionOptions::new(),
-            
+
             CodeActStep: CodeActStep::new(),
-            
+
             SubAgentStep: SubAgentStep::new(),
-            
         }
     }
 
@@ -143,11 +140,14 @@ impl BamlSyncClient {
     pub fn with_options(&self, options: FunctionOptions) -> Self {
         Self {
             options: options.clone(),
-            
-            CodeActStep: CodeActStep { options: options.clone() },
-            
-            SubAgentStep: SubAgentStep { options: options.clone() },
-            
+
+            CodeActStep: CodeActStep {
+                options: options.clone(),
+            },
+
+            SubAgentStep: SubAgentStep {
+                options: options.clone(),
+            },
         }
     }
 }

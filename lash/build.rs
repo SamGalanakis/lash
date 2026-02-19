@@ -265,6 +265,17 @@ fn generate_pyo3_config(install_dir: &Path, config_path: &Path, target: &str) {
     // symbols (PyCapsule_New, etc.) are included — ctypes.pythonapi needs them
     // exported from the binary.
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    // python-build-standalone keeps some static dependency libs (e.g. libmpdec.a)
+    // under python/build/lib rather than install/lib.
+    if let Some(python_root) = install_dir.parent() {
+        let pbs_build_lib_dir = python_root.join("build").join("lib");
+        if pbs_build_lib_dir.exists() {
+            println!(
+                "cargo:rustc-link-search=native={}",
+                pbs_build_lib_dir.display()
+            );
+        }
+    }
     if shared {
         println!("cargo:rustc-link-lib={lib_name}");
     } else {

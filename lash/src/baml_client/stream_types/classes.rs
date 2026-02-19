@@ -3,40 +3,25 @@
 //
 // Learn more at https://docs.boundaryml.com
 
-
 //! Generated streaming class types.
 //!
 //! These types are used during streaming to hold partial results.
 //! Field types are already wrapped appropriately (Option, StreamState, etc.)
 
-use baml::BamlDecode;
-use crate::baml_client::types;
 use super::*;
-
-
-
-
+use crate::baml_client::types;
+use baml::BamlDecode;
 
 #[derive(Debug, Clone, Default, BamlDecode)]
 
 pub struct ChatMsg {
-
-
-
     pub role: Option<String>,
 
-
-
     pub content: Option<String>,
-
-
 }
-
-
 
 impl AsRef<ChatMsg> for ChatMsg {
     fn as_ref(&self) -> &ChatMsg {
         self
     }
 }
-

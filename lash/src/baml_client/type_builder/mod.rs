@@ -50,20 +50,18 @@ impl TypeBuilder {
     // Schema Class Accessors (1:1 with schema class names)
     // =========================================================================
 
-
     /// Access the `ChatMsg` class builder.
     pub fn ChatMsg(&self) -> ChatMsgClassBuilder {
         ChatMsgClassBuilder::new(
-            self.inner.get_class("ChatMsg")
-                .expect("class ChatMsg is defined in schema")
+            self.inner
+                .get_class("ChatMsg")
+                .expect("class ChatMsg is defined in schema"),
         )
     }
-
 
     // =========================================================================
     // Schema Enum Accessors (1:1 with schema enum names)
     // =========================================================================
-
 
     // =========================================================================
     // Primitive Types (all infallible)

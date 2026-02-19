@@ -8,20 +8,17 @@
 //! Full implementation coming in Phase 6.
 
 mod classes;
-mod unions;
 mod type_aliases;
+mod unions;
 
 pub use classes::*;
-pub use unions::*;
 pub use type_aliases::*;
+pub use unions::*;
 
 /// Streaming variants of types (all fields Optional).
 #[derive(Debug, Clone)]
 pub enum StreamTypes {
-
     ChatMsg(ChatMsg),
-
-
 }
 
 impl baml::KnownTypes for StreamTypes {
@@ -31,11 +28,7 @@ impl baml::KnownTypes for StreamTypes {
 
     fn type_name(&self) -> &'static str {
         match self {
-
             StreamTypes::ChatMsg(_) => "ChatMsg",
-
-
-
         }
     }
 }

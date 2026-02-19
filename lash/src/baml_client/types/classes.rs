@@ -3,35 +3,21 @@
 //
 // Learn more at https://docs.boundaryml.com
 
-
 //! Generated class types.
 
-use baml::{BamlEncode, BamlDecode};
 use super::*;
-
-
-
+use baml::{BamlDecode, BamlEncode};
 
 #[derive(Debug, Clone, Default, BamlEncode, BamlDecode)]
 
 pub struct ChatMsg {
-
-
-
     pub role: String,
 
-
-
     pub content: String,
-
-
 }
-
-
 
 impl AsRef<ChatMsg> for ChatMsg {
     fn as_ref(&self) -> &ChatMsg {
         self
     }
 }
-

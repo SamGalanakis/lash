@@ -5,7 +5,6 @@
 
 //! Generated class builder wrappers for type-safe field access.
 
-
 /// Wrapper for the `ChatMsg` class builder.
 ///
 /// Provides type-safe method access to fields defined in the schema.
@@ -28,28 +27,26 @@ impl ChatMsgClassBuilder {
 
     /// Get the class as a type definition.
     pub fn r#type(&self) -> baml::TypeDef {
-        self.inner.as_type()
+        self.inner
+            .as_type()
             .expect("ChatMsg is statically defined in .baml and should always have a type")
     }
-
 
     // =========================================================================
     // Field Accessors (1:1 with schema field names)
     // =========================================================================
 
-
     /// Access the `role` field builder.
     pub fn property_role(&self) -> baml::ClassPropertyBuilder {
-        self.inner.get_property("role")
+        self.inner
+            .get_property("role")
             .expect("ChatMsg.role is statically defined in .baml and should always be present")
     }
 
-
     /// Access the `content` field builder.
     pub fn property_content(&self) -> baml::ClassPropertyBuilder {
-        self.inner.get_property("content")
+        self.inner
+            .get_property("content")
             .expect("ChatMsg.content is statically defined in .baml and should always be present")
     }
-
 }
-
