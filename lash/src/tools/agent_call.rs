@@ -29,29 +29,64 @@ impl Tier {
             _ => None,
         }
     }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Tier::Low => "quick",
+            Tier::Medium => "balanced",
+            Tier::High => "thorough",
+        }
+    }
 }
 
-fn pick_model(config: &AgentConfig, models: &Option<AgentModels>, tier: &Tier) -> String {
+fn pick_model_and_reasoning(
+    config: &AgentConfig,
+    models: &Option<AgentModels>,
+    tier: &Tier,
+) -> (String, Option<String>) {
     if let Some(m) = models {
         match tier {
             Tier::Low => {
                 if let Some(ref q) = m.quick {
-                    return q.clone();
+                    let effort = config
+                        .provider
+                        .reasoning_effort_for_model(q)
+                        .map(str::to_string);
+                    return (q.clone(), effort);
                 }
             }
             Tier::Medium => {
                 if let Some(ref b) = m.balanced {
-                    return b.clone();
+                    let effort = config
+                        .provider
+                        .reasoning_effort_for_model(b)
+                        .map(str::to_string);
+                    return (b.clone(), effort);
                 }
             }
             Tier::High => {
                 if let Some(ref t) = m.thorough {
-                    return t.clone();
+                    let effort = config
+                        .provider
+                        .reasoning_effort_for_model(t)
+                        .map(str::to_string);
+                    return (t.clone(), effort);
                 }
             }
         }
     }
-    config.model.clone()
+
+    if let Some((model, effort)) = config.provider.default_agent_model(tier.as_str()) {
+        return (model.to_string(), effort.map(str::to_string));
+    }
+
+    let model = config.model.clone();
+    let effort = config
+        .provider
+        .reasoning_effort_for_model(&model)
+        .map(str::to_string)
+        .or_else(|| config.reasoning_effort.clone());
+    (model, effort)
 }
 
 /// A running sub-agent managed by AgentCall.
@@ -93,9 +128,11 @@ impl AgentCall {
     }
 
     fn build_agent_config(&self, tier: &Tier) -> AgentConfig {
-        let model = pick_model(&self.config, &self.agent_models, tier);
+        let (model, reasoning_effort) =
+            pick_model_and_reasoning(&self.config, &self.agent_models, tier);
         AgentConfig {
             model,
+            reasoning_effort,
             provider: self.config.provider.clone(),
             sub_agent: true,
             include_soul: matches!(tier, Tier::High),
@@ -573,5 +610,59 @@ impl ToolProvider for AgentCall {
         } else {
             self.execute(name, args).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::Provider;
+
+    fn codex_provider() -> Provider {
+        Provider::Codex {
+            access_token: "tok".into(),
+            refresh_token: "ref".into(),
+            expires_at: u64::MAX,
+            account_id: Some("acct".into()),
+        }
+    }
+
+    #[test]
+    fn codex_uses_explicit_tier_models_when_no_overrides() {
+        let config = AgentConfig {
+            model: "custom-parent-model".to_string(),
+            provider: codex_provider(),
+            ..Default::default()
+        };
+
+        let (m_low, r_low) = pick_model_and_reasoning(&config, &None, &Tier::Low);
+        assert_eq!(m_low, "gpt-5.3-codex-spark");
+        assert_eq!(r_low, None);
+
+        let (m_mid, r_mid) = pick_model_and_reasoning(&config, &None, &Tier::Medium);
+        assert_eq!(m_mid, "gpt-5.3-codex");
+        assert_eq!(r_mid.as_deref(), Some("medium"));
+
+        let (m_high, r_high) = pick_model_and_reasoning(&config, &None, &Tier::High);
+        assert_eq!(m_high, "gpt-5.3-codex");
+        assert_eq!(r_high.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn override_model_keeps_override_and_inferrs_reasoning() {
+        let config = AgentConfig {
+            model: "custom-parent-model".to_string(),
+            provider: codex_provider(),
+            ..Default::default()
+        };
+        let models = Some(AgentModels {
+            quick: None,
+            balanced: None,
+            thorough: Some("gpt-5.3-codex".to_string()),
+        });
+
+        let (m, r) = pick_model_and_reasoning(&config, &models, &Tier::High);
+        assert_eq!(m, "gpt-5.3-codex");
+        assert_eq!(r.as_deref(), Some("high"));
     }
 }

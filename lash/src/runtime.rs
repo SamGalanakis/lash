@@ -206,6 +206,13 @@ impl RuntimeEngine {
         }
     }
 
+    /// Update reasoning effort on the underlying agent.
+    pub fn set_reasoning_effort(&mut self, reasoning_effort: Option<String>) {
+        if let Some(agent) = self.agent.as_mut() {
+            agent.set_reasoning_effort(reasoning_effort);
+        }
+    }
+
     /// Update provider on the underlying agent.
     pub fn set_provider(&mut self, provider: Provider) {
         if let Some(agent) = self.agent.as_mut() {

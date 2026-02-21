@@ -62,10 +62,18 @@ impl Provider {
     /// Default model for this provider.
     pub fn default_model(&self) -> &str {
         match self {
-            Provider::OpenRouter { .. } => "anthropic/claude-opus-4.6",
-            Provider::Claude { .. } => "claude-opus-4-6",
-            Provider::Codex { .. } => "gpt-5.1-codex",
+            Provider::OpenRouter { .. } => "anthropic/claude-sonnet-4.6",
+            Provider::Claude { .. } => "claude-sonnet-4-6",
+            Provider::Codex { .. } => "gpt-5.3-codex",
             Provider::GoogleOAuth { .. } => "gemini-3.1-pro-preview",
+        }
+    }
+
+    /// Recommended reasoning effort for a specific model on this provider.
+    pub fn reasoning_effort_for_model(&self, model: &str) -> Option<&str> {
+        match self {
+            Provider::Codex { .. } if model == "gpt-5.3-codex" => Some("high"),
+            _ => None,
         }
     }
 
@@ -80,18 +88,19 @@ impl Provider {
     }
 
     /// Built-in model for an agent intelligence tier. Returns (model_name, optional_reasoning_effort).
-    /// For "thorough" on OpenRouter, returns None (caller should inherit parent model).
     pub fn default_agent_model(&self, tier: &str) -> Option<(&str, Option<&str>)> {
         match (self, tier) {
             (Provider::Claude { .. }, "quick") => Some(("claude-haiku-4-5", None)),
-            (Provider::Claude { .. }, "balanced") => Some(("claude-sonnet-4-5", None)),
-            (Provider::Claude { .. }, "thorough") => Some(("claude-opus-4-6", None)),
+            (Provider::Claude { .. }, "balanced") => Some(("claude-sonnet-4-6", None)),
+            (Provider::Claude { .. }, "thorough") => Some(("claude-sonnet-4-6", None)),
 
             (Provider::OpenRouter { .. }, "quick") => Some(("minimax/minimax-m2.5", None)),
             (Provider::OpenRouter { .. }, "balanced") => Some(("z-ai/glm-5", None)),
-            (Provider::OpenRouter { .. }, "thorough") => None, // inherit parent
+            (Provider::OpenRouter { .. }, "thorough") => {
+                Some(("anthropic/claude-sonnet-4.6", None))
+            }
 
-            (Provider::Codex { .. }, "quick") => Some(("gpt-5.1-codex-mini", None)),
+            (Provider::Codex { .. }, "quick") => Some(("gpt-5.3-codex-spark", None)),
             (Provider::Codex { .. }, "balanced") => Some(("gpt-5.3-codex", Some("medium"))),
             (Provider::Codex { .. }, "thorough") => Some(("gpt-5.3-codex", Some("high"))),
 
@@ -141,7 +150,6 @@ impl Provider {
                 ..
             } => {
                 let mut headers = serde_json::json!({
-                    "authorization": format!("Bearer {}", access_token),
                     "originator": "lash",
                 });
                 if let Some(id) = account_id {
@@ -152,10 +160,13 @@ impl Provider {
                         "base_url".into(),
                         serde_json::json!("https://chatgpt.com/backend-api/codex"),
                     ),
-                    ("api_key".into(), serde_json::json!("noop")),
+                    ("api_key".into(), serde_json::json!(access_token)),
                     ("model".into(), serde_json::json!(model)),
-                    ("temperature".into(), serde_json::json!(0)),
-                    ("max_tokens".into(), serde_json::json!(32768)),
+                    // ChatGPT Codex endpoint expects explicit streaming semantics.
+                    ("stream".into(), serde_json::json!(true)),
+                    ("store".into(), serde_json::json!(false)),
+                    // Required by ChatGPT Codex backend even when system content is present in input.
+                    ("instructions".into(), serde_json::json!("")),
                     ("headers".into(), headers),
                     ("http".into(), serde_json::json!({"request_timeout_ms": 0})),
                 ]);
@@ -216,6 +227,13 @@ impl Provider {
                     format!("anthropic/{model}")
                 }
             }
+            Provider::Codex { .. } => {
+                if model.contains('/') {
+                    model.to_string()
+                } else {
+                    format!("openai/{model}")
+                }
+            }
             Provider::GoogleOAuth { .. } => {
                 if model.contains('/') {
                     model.to_string()
@@ -223,7 +241,7 @@ impl Provider {
                     format!("google/{model}")
                 }
             }
-            Provider::OpenRouter { .. } | Provider::Codex { .. } => model.to_string(),
+            Provider::OpenRouter { .. } => model.to_string(),
         }
     }
 
@@ -392,10 +410,23 @@ mod tests {
 
     #[test]
     fn default_model() {
-        assert_eq!(openrouter().default_model(), "anthropic/claude-opus-4.6");
-        assert_eq!(claude().default_model(), "claude-opus-4-6");
-        assert_eq!(codex().default_model(), "gpt-5.1-codex");
+        assert_eq!(openrouter().default_model(), "anthropic/claude-sonnet-4.6");
+        assert_eq!(claude().default_model(), "claude-sonnet-4-6");
+        assert_eq!(codex().default_model(), "gpt-5.3-codex");
         assert_eq!(google_oauth().default_model(), "gemini-3.1-pro-preview");
+    }
+
+    #[test]
+    fn reasoning_effort_for_model() {
+        assert_eq!(
+            codex().reasoning_effort_for_model("gpt-5.3-codex"),
+            Some("high")
+        );
+        assert_eq!(codex().reasoning_effort_for_model("gpt-5.1-codex"), None);
+        assert_eq!(
+            openrouter().reasoning_effort_for_model("anthropic/claude-sonnet-4.6"),
+            None
+        );
     }
 
     #[test]
@@ -415,11 +446,11 @@ mod tests {
         );
         assert_eq!(
             p.default_agent_model("balanced"),
-            Some(("claude-sonnet-4-5", None))
+            Some(("claude-sonnet-4-6", None))
         );
         assert_eq!(
             p.default_agent_model("thorough"),
-            Some(("claude-opus-4-6", None))
+            Some(("claude-sonnet-4-6", None))
         );
     }
 
@@ -428,12 +459,15 @@ mod tests {
         let p = openrouter();
         assert!(p.default_agent_model("quick").is_some());
         assert!(p.default_agent_model("balanced").is_some());
-        assert!(p.default_agent_model("thorough").is_none()); // inherit parent
+        assert!(p.default_agent_model("thorough").is_some());
     }
 
     #[test]
     fn default_agent_model_codex() {
         let p = codex();
+        let (m, re) = p.default_agent_model("quick").unwrap();
+        assert_eq!(m, "gpt-5.3-codex-spark");
+        assert_eq!(re, None);
         let (m, re) = p.default_agent_model("balanced").unwrap();
         assert_eq!(m, "gpt-5.3-codex");
         assert_eq!(re, Some("medium"));
@@ -454,18 +488,18 @@ mod tests {
     fn resolve_model_claude_strips_prefix() {
         let p = claude();
         assert_eq!(
-            p.resolve_model("anthropic/claude-sonnet-4-5"),
-            "claude-sonnet-4-5"
+            p.resolve_model("anthropic/claude-sonnet-4-6"),
+            "claude-sonnet-4-6"
         );
-        assert_eq!(p.resolve_model("claude-opus-4-6"), "claude-opus-4-6");
+        assert_eq!(p.resolve_model("claude-sonnet-4-6"), "claude-sonnet-4-6");
     }
 
     #[test]
     fn resolve_model_openrouter_passthrough() {
         let p = openrouter();
         assert_eq!(
-            p.resolve_model("anthropic/claude-opus-4.6"),
-            "anthropic/claude-opus-4.6"
+            p.resolve_model("anthropic/claude-sonnet-4.6"),
+            "anthropic/claude-sonnet-4.6"
         );
     }
 
@@ -511,6 +545,19 @@ mod tests {
     }
 
     #[test]
+    fn context_lookup_model_codex_adds_prefix() {
+        let p = codex();
+        assert_eq!(
+            p.context_lookup_model("gpt-5.3-codex"),
+            "openai/gpt-5.3-codex"
+        );
+        assert_eq!(
+            p.context_lookup_model("openai/gpt-5.3-codex"),
+            "openai/gpt-5.3-codex"
+        );
+    }
+
+    #[test]
     fn baml_options_keys() {
         let opts = openrouter().baml_options("test-model", None);
         assert!(opts.contains_key("base_url"));
@@ -526,12 +573,18 @@ mod tests {
         let opts = codex().baml_options("gpt-5.3-codex", Some("high"));
         assert!(opts.contains_key("reasoning"));
         assert_eq!(opts["reasoning"]["effort"], serde_json::json!("high"));
+        assert_eq!(opts["stream"], serde_json::json!(true));
+        assert_eq!(opts["store"], serde_json::json!(false));
+        assert_eq!(opts["instructions"], serde_json::json!(""));
     }
 
     #[test]
     fn baml_options_codex_no_reasoning() {
         let opts = codex().baml_options("gpt-5.1-codex", None);
         assert!(!opts.contains_key("reasoning"));
+        assert_eq!(opts["stream"], serde_json::json!(true));
+        assert_eq!(opts["store"], serde_json::json!(false));
+        assert_eq!(opts["instructions"], serde_json::json!(""));
     }
 
     #[test]

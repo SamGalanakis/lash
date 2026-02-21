@@ -52,7 +52,7 @@ impl TokenUsage {
 /// Configuration for the agent loop.
 #[derive(Clone)]
 pub struct AgentConfig {
-    /// Model identifier (e.g. "anthropic/claude-sonnet-4-5")
+    /// Model identifier (e.g. "anthropic/claude-sonnet-4.6")
     pub model: String,
     /// LLM provider (OpenRouter, Claude OAuth, Codex, or Google OAuth)
     pub provider: Provider,
@@ -82,7 +82,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            model: "anthropic/claude-sonnet-4-5".to_string(),
+            model: "anthropic/claude-sonnet-4.6".to_string(),
             provider: Provider::OpenRouter {
                 api_key: String::new(),
                 base_url: "https://openrouter.ai/api/v1".to_string(),
@@ -213,6 +213,10 @@ impl Agent {
 
     pub fn set_provider(&mut self, provider: Provider) {
         self.config.provider = provider;
+    }
+
+    pub fn set_reasoning_effort(&mut self, reasoning_effort: Option<String>) {
+        self.config.reasoning_effort = reasoning_effort;
     }
 
     /// Reset the underlying Python session (clear namespace).
@@ -556,8 +560,12 @@ impl Agent {
                                 last_error = Some(msg);
                                 continue;
                             }
+                            let err = sanitize_llm_error(&msg);
+                            let http = last_http_call_summary(&collector)
+                                .map(|s| format!("\n{}", s))
+                                .unwrap_or_default();
                             emit!(AgentEvent::Error {
-                                message: format!("LLM error: {}", e),
+                                message: format!("LLM error: {}{}", err, http),
                             });
                             break 'llm_retry String::new();
                         }
@@ -723,8 +731,12 @@ impl Agent {
                             &event_tx,
                         )
                         .await;
+                        let err = sanitize_llm_error(&err);
+                        let http = last_http_call_summary(&collector)
+                            .map(|s| format!("\n{}", s))
+                            .unwrap_or_default();
                         emit!(AgentEvent::Error {
-                            message: format!("LLM error: {}", err),
+                            message: format!("LLM error: {}{}", err, http),
                         });
                         emit!(AgentEvent::Done);
                         return (msgs, iteration);
@@ -1075,6 +1087,35 @@ fn log_llm_debug(
     {
         use std::io::Write;
         let _ = writeln!(f, "{}", entry);
+    }
+}
+
+/// Best-effort HTTP call summary from the latest selected LLM call.
+/// Excludes sensitive headers/body; intended for transport debugging.
+fn last_http_call_summary(collector: &baml::Collector) -> Option<String> {
+    let log = collector.last()?;
+    let call = log.selected_call()?;
+    let req = call.http_request()?;
+    let method = req.method();
+    let url = req.url();
+    Some(format!("HTTP {} {}", method, url))
+}
+
+/// Trim noisy transport payloads (e.g. HTML error pages) from provider error strings.
+fn sanitize_llm_error(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if let Some(idx) = lower.find("<html") {
+        let head = trimmed[..idx]
+            .trim_end_matches(|c: char| c == ',' || c.is_whitespace())
+            .trim();
+        if head.is_empty() {
+            "request failed (HTML error body omitted)".to_string()
+        } else {
+            format!("{head} [HTML body omitted]")
+        }
+    } else {
+        trimmed.to_string()
     }
 }
 

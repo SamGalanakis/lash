@@ -310,6 +310,10 @@ async fn main() -> anyhow::Result<()> {
     let config = AgentConfig {
         model: model.clone(),
         provider: lash_config.provider.clone(),
+        reasoning_effort: lash_config
+            .provider
+            .reasoning_effort_for_model(&model)
+            .map(str::to_string),
         llm_log_path,
         headless,
         preamble: headless.then(|| HEADLESS_PREAMBLE.to_string()),
@@ -1082,6 +1086,11 @@ async fn run_app(
                                 command::Command::Model(new_model) => {
                                     if let Some(rt) = runtime.as_mut() {
                                         rt.set_model(new_model.clone());
+                                        rt.set_reasoning_effort(
+                                            provider
+                                                .reasoning_effort_for_model(&new_model)
+                                                .map(str::to_string),
+                                        );
                                     }
                                     app.context_window = provider.context_window(&new_model);
                                     app.model = new_model;
@@ -1130,6 +1139,11 @@ async fn run_app(
                                             if let Some(rt) = runtime.as_mut() {
                                                 rt.set_provider(provider.clone());
                                                 rt.set_model(new_model.clone());
+                                                rt.set_reasoning_effort(
+                                                    provider
+                                                        .reasoning_effort_for_model(&new_model)
+                                                        .map(str::to_string),
+                                                );
                                             }
                                             app.context_window =
                                                 provider.context_window(&new_model);
