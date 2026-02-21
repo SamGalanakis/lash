@@ -7,6 +7,15 @@ const AUTH_URL: &str = "https://claude.ai/oauth/authorize";
 const REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
 const SCOPES: &str = "org:create_api_key user:profile user:inference";
 
+// ── Google OAuth (Gemini API via OAuth bearer) ────────────────────
+
+const GOOGLE_CLIENT_ID_ENV: &str = "LASH_GOOGLE_CLIENT_ID";
+const GOOGLE_CLIENT_SECRET_ENV: &str = "LASH_GOOGLE_CLIENT_SECRET";
+const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+const GOOGLE_REDIRECT_URI: &str = "https://codeassist.google.com/authcode";
+const GOOGLE_SCOPES: &str = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/generative-language.retriever";
+
 #[derive(Debug)]
 pub struct OAuthTokens {
     pub access_token: String,
@@ -54,6 +63,21 @@ pub fn authorize_url(challenge: &str, verifier: &str) -> String {
         urlencoded(SCOPES),
         challenge,
         verifier,
+    )
+}
+
+/// Build the Google OAuth authorization URL for manual code entry.
+pub fn google_authorize_url(challenge: &str) -> String {
+    let state = uuid::Uuid::new_v4().to_string();
+    let client_id = google_client_id().unwrap_or_default();
+    format!(
+        "{}?client_id={}&response_type=code&redirect_uri={}&scope={}&access_type=offline&prompt=consent&code_challenge={}&code_challenge_method=S256&state={}",
+        GOOGLE_AUTH_URL,
+        client_id,
+        urlencoded(GOOGLE_REDIRECT_URI),
+        urlencoded(GOOGLE_SCOPES),
+        challenge,
+        state,
     )
 }
 
@@ -133,6 +157,83 @@ pub async fn refresh_tokens(refresh: &str) -> Result<OAuthTokens, OAuthError> {
     })
 }
 
+/// Exchange a Google OAuth authorization code for tokens.
+/// Accepts either a raw code or a full redirect URL that contains `code=...`.
+pub async fn google_exchange_code(code: &str, verifier: &str) -> Result<OAuthTokens, OAuthError> {
+    let (client_id, client_secret) = google_client_credentials()?;
+    let auth_code = extract_google_auth_code(code);
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(GOOGLE_TOKEN_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(url_form_encode(&[
+            ("grant_type", "authorization_code"),
+            ("code", auth_code.as_str()),
+            ("redirect_uri", GOOGLE_REDIRECT_URI),
+            ("client_id", client_id.as_str()),
+            ("client_secret", client_secret.as_str()),
+            ("code_verifier", verifier),
+        ]))
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await?;
+
+    if !status.is_success() {
+        let err = body["error_description"]
+            .as_str()
+            .or(body["error"].as_str())
+            .unwrap_or("token exchange failed");
+        return Err(OAuthError::TokenExchange(err.to_string()));
+    }
+
+    parse_token_response(&body)
+}
+
+/// Refresh Google OAuth tokens.
+pub async fn google_refresh_tokens(refresh: &str) -> Result<OAuthTokens, OAuthError> {
+    let (client_id, client_secret) = google_client_credentials()?;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(GOOGLE_TOKEN_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(url_form_encode(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh),
+            ("client_id", client_id.as_str()),
+            ("client_secret", client_secret.as_str()),
+        ]))
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await?;
+
+    if !status.is_success() {
+        let err = body["error_description"]
+            .as_str()
+            .or(body["error"].as_str())
+            .unwrap_or("token refresh failed");
+        return Err(OAuthError::TokenExchange(err.to_string()));
+    }
+
+    let now = now_secs();
+    let expires_in = body["expires_in"].as_u64().unwrap_or(3600);
+
+    Ok(OAuthTokens {
+        access_token: body["access_token"]
+            .as_str()
+            .ok_or_else(|| OAuthError::TokenExchange("missing access_token".into()))?
+            .to_string(),
+        refresh_token: body["refresh_token"]
+            .as_str()
+            .unwrap_or(refresh)
+            .to_string(),
+        expires_at: now + expires_in,
+    })
+}
+
 fn parse_token_response(body: &serde_json::Value) -> Result<OAuthTokens, OAuthError> {
     let now = now_secs();
     let expires_in = body["expires_in"].as_u64().unwrap_or(3600);
@@ -148,6 +249,101 @@ fn parse_token_response(body: &serde_json::Value) -> Result<OAuthTokens, OAuthEr
             .to_string(),
         expires_at: now + expires_in,
     })
+}
+
+fn google_client_id() -> Option<String> {
+    std::env::var(GOOGLE_CLIENT_ID_ENV)
+        .ok()
+        .filter(|v| !v.is_empty())
+}
+
+fn google_client_secret() -> Option<String> {
+    std::env::var(GOOGLE_CLIENT_SECRET_ENV)
+        .ok()
+        .filter(|v| !v.is_empty())
+}
+
+fn google_client_credentials() -> Result<(String, String), OAuthError> {
+    let client_id = google_client_id().ok_or_else(|| {
+        OAuthError::TokenExchange(format!("Missing env var: {}", GOOGLE_CLIENT_ID_ENV))
+    })?;
+    let client_secret = google_client_secret().ok_or_else(|| {
+        OAuthError::TokenExchange(format!("Missing env var: {}", GOOGLE_CLIENT_SECRET_ENV))
+    })?;
+    Ok((client_id, client_secret))
+}
+
+fn extract_google_auth_code(input: &str) -> String {
+    let trimmed = input.trim();
+    if let Some(code) = extract_query_param(trimmed, "code") {
+        return code;
+    }
+    if let Some(pos) = trimmed.find("code=") {
+        let rest = &trimmed[pos + 5..];
+        let end = rest
+            .char_indices()
+            .find_map(|(i, ch)| (ch == '&' || ch == '#').then_some(i))
+            .unwrap_or(rest.len());
+        return percent_decode(&rest[..end]);
+    }
+    trimmed.to_string()
+}
+
+fn extract_query_param(url_or_query: &str, key: &str) -> Option<String> {
+    let query = if let Some(idx) = url_or_query.find('?') {
+        &url_or_query[idx + 1..]
+    } else {
+        url_or_query
+    };
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let mut parts = pair.splitn(2, '=');
+        let k = parts.next().unwrap_or("");
+        let v = parts.next().unwrap_or("");
+        if k == key {
+            return Some(percent_decode(v));
+        }
+    }
+    None
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                if let (Some(hi), Some(lo)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
+                    out.push((hi << 4) | lo);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(10 + (b - b'a')),
+        b'A'..=b'F' => Some(10 + (b - b'A')),
+        _ => None,
+    }
 }
 
 // ── Codex (OpenAI) device-code OAuth ─────────────────────────────

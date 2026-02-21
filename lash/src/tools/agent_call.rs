@@ -145,14 +145,15 @@ impl AgentCall {
         let handle_id = uuid::Uuid::new_v4().to_string();
 
         // Create a new session with the base tools (no agent_call tools)
-        let mut session = match Session::new(Arc::clone(&self.tools), &agent_id).await {
-            Ok(s) => s,
-            Err(e) => {
-                return ToolResult::err_fmt(format_args!(
-                    "Failed to create sub-agent session: {e}"
-                ));
-            }
-        };
+        let mut session =
+            match Session::new(Arc::clone(&self.tools), &agent_id, self.config.headless).await {
+                Ok(s) => s,
+                Err(e) => {
+                    return ToolResult::err_fmt(format_args!(
+                        "Failed to create sub-agent session: {e}"
+                    ));
+                }
+            };
 
         // If a schema is provided, inject the model class and a validating done() wrapper
         if let Some(ref schema_str) = schema {

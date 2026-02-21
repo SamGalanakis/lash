@@ -392,6 +392,7 @@ _rust_bridge = None
 # --- Persistent REPL namespace ---
 _ns = {}
 _tools_initialized = False
+_headless = False
 
 # --- Tool call resolution ---
 _pending_calls = {}  # id -> asyncio.Future
@@ -457,6 +458,8 @@ def _done(value=""):
 
 async def _ask(question, options=None):
     """Ask the user a question. Blocks until they respond."""
+    if _headless:
+        raise RuntimeError("ask() is unavailable in headless mode")
     payload = json.dumps({"question": str(question), "options": options})
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, _rust_bridge.ask_user, payload)
@@ -805,19 +808,22 @@ def _reset_repl():
     global _tools_initialized
     # Preserve the stored tool definitions
     saved_defs = json.dumps(_tool_defs)
+    saved_agent_id = _ns.get("__agent_id__", "")
+    saved_headless = _headless
     _ns.clear()
     _tools_initialized = False
-    _register_tools(saved_defs)
+    _register_tools(saved_defs, saved_agent_id, saved_headless)
     print("REPL reset: namespace cleared, tools re-registered.")
     return _Awaitable("REPL reset complete")
 
 
-def _register_tools(tools_json, agent_id=""):
+def _register_tools(tools_json, agent_id="", headless=False):
     """Register tool wrappers from JSON tool definitions."""
-    global _tools_initialized, _tool_defs
+    global _tools_initialized, _tool_defs, _headless
     if _tools_initialized:
         return
     _tools_initialized = True
+    _headless = bool(headless)
     _ns["__agent_id__"] = agent_id
     _tool_defs = json.loads(tools_json)
     for tool in _tool_defs:
@@ -888,7 +894,8 @@ def _register_tools(tools_json, agent_id=""):
         if not tool.get("hidden", False):
             _ns[name] = make_fn(name, desc, param_info, returns)
     _async_tool_names.update(name for name in (t["name"] for t in _tool_defs))
-    _async_tool_names.add("ask")
+    if not _headless:
+        _async_tool_names.add("ask")
 
     # Override claim_task: auto-fill owner from __agent_id__, id is optional
     async def _claim_task(id=None):
@@ -957,9 +964,14 @@ def _register_tools(tools_json, agent_id=""):
         return plan_file
 
     async def _exit_plan_mode():
-        """Present plan to user for approval. On approval, calls done() to end turn."""
+        """Exit plan mode. Interactive sessions ask for approval; headless proceeds autonomously."""
         result = await _call("exit_plan_mode", {})
         plan = result.get("plan_content", "")
+        if _headless:
+            if plan:
+                print("[Plan mode exited in headless mode — continue autonomously.]")
+                return "Plan finalized in headless mode. Continue executing autonomously."
+            return "Plan file is empty. Continue planning autonomously."
         preview = plan[:2000] + ("..." if len(plan) > 2000 else "")
         response = await _ask(
             f"Plan ready for review:\n\n{preview}\n\nHow would you like to proceed?",
@@ -978,14 +990,17 @@ def _register_tools(tools_json, agent_id=""):
 
     _ns["_history"] = TurnHistory()
     _ns["_mem"] = Mem()
-    _ns.update({
+    bindings = {
         "json": json, "print": print, "done": _done,
-        "asyncio": asyncio, "list_tools": _list_tools, "reset_repl": _reset_repl, "ask": _ask,
+        "asyncio": asyncio, "list_tools": _list_tools, "reset_repl": _reset_repl,
         "enter_plan_mode": _enter_plan_mode, "exit_plan_mode": _exit_plan_mode,
         "Task": Task, "Skill": Skill, "SkillSummary": SkillSummary, "ToolError": ToolError,
         "TurnHistory": TurnHistory, "Turn": Turn, "ToolCall": ToolCall, "ToolName": ToolName,
         "Intelligence": Intelligence, "Mem": Mem, "MemEntry": MemEntry,
-    })
+    }
+    if not _headless:
+        bindings["ask"] = _ask
+    _ns.update(bindings)
 
 
 # Flag that lets exec/eval accept top-level `await` (CPython 3.10+).

@@ -22,6 +22,7 @@ enum SetupStep {
         cursor: usize,
         error: Option<String>,
         verifier: Option<String>,
+        mode: CredentialMode,
     },
     CodexDeviceAuth {
         user_code: String,
@@ -34,6 +35,13 @@ enum SetupStep {
         cursor: usize,
     },
     Done,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CredentialMode {
+    ClaudeOAuth,
+    GoogleOAuth,
+    OpenRouterKey,
 }
 
 struct SetupApp {
@@ -156,7 +164,7 @@ async fn run_setup_inner(terminal: &mut ratatui::DefaultTerminal) -> anyhow::Res
                     *selected = selected.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    *selected = (*selected + 1).min(2);
+                    *selected = (*selected + 1).min(3);
                 }
                 KeyCode::Enter => {
                     let sel = *selected;
@@ -171,6 +179,7 @@ async fn run_setup_inner(terminal: &mut ratatui::DefaultTerminal) -> anyhow::Res
                                 cursor: 0,
                                 error: None,
                                 verifier: Some(verifier),
+                                mode: CredentialMode::ClaudeOAuth,
                             };
                         }
                         1 => {
@@ -195,6 +204,33 @@ async fn run_setup_inner(terminal: &mut ratatui::DefaultTerminal) -> anyhow::Res
                                 }
                             }
                         }
+                        2 => {
+                            // Google OAuth
+                            let (verifier, challenge) = oauth::generate_pkce();
+                            let url = oauth::google_authorize_url(&challenge);
+                            if url.contains("client_id=&") {
+                                app.step = SetupStep::InputCredential {
+                                    input: String::new(),
+                                    cursor: 0,
+                                    error: Some(
+                                        "Set LASH_GOOGLE_CLIENT_ID and \
+LASH_GOOGLE_CLIENT_SECRET, then retry."
+                                            .into(),
+                                    ),
+                                    verifier: Some(verifier),
+                                    mode: CredentialMode::GoogleOAuth,
+                                };
+                                continue;
+                            }
+                            let _ = open_browser(&url);
+                            app.step = SetupStep::InputCredential {
+                                input: String::new(),
+                                cursor: 0,
+                                error: None,
+                                verifier: Some(verifier),
+                                mode: CredentialMode::GoogleOAuth,
+                            };
+                        }
                         _ => {
                             // OpenRouter
                             app.step = SetupStep::InputCredential {
@@ -202,6 +238,7 @@ async fn run_setup_inner(terminal: &mut ratatui::DefaultTerminal) -> anyhow::Res
                                 cursor: 0,
                                 error: None,
                                 verifier: None,
+                                mode: CredentialMode::OpenRouterKey,
                             };
                         }
                     }
@@ -214,6 +251,7 @@ async fn run_setup_inner(terminal: &mut ratatui::DefaultTerminal) -> anyhow::Res
                 cursor,
                 error,
                 verifier,
+                mode,
             } => match key.code {
                 KeyCode::Esc => {
                     app.step = SetupStep::SelectProvider { selected: 0 };
@@ -256,40 +294,86 @@ async fn run_setup_inner(terminal: &mut ratatui::DefaultTerminal) -> anyhow::Res
                     let val = input.trim().to_string();
                     if val.is_empty() {
                         *error = Some("Cannot be empty".into());
-                    } else if verifier.is_some() {
-                        // Claude OAuth exchange
-                        let v = verifier.take().unwrap();
-                        match oauth::exchange_code(&val, &v).await {
-                            Ok(tokens) => {
-                                provider = Some(Provider::Claude {
-                                    access_token: tokens.access_token,
-                                    refresh_token: tokens.refresh_token,
-                                    expires_at: tokens.expires_at,
+                    } else {
+                        match mode {
+                            CredentialMode::OpenRouterKey => {
+                                provider = Some(Provider::OpenRouter {
+                                    api_key: val,
+                                    base_url: "https://openrouter.ai/api/v1".into(),
                                 });
                                 app.step = SetupStep::InputTavily {
                                     input: String::new(),
                                     cursor: 0,
                                 };
                             }
-                            Err(e) => {
-                                *error = Some(format!("{}", e));
-                                // Re-generate PKCE for retry
-                                let (new_v, challenge) = oauth::generate_pkce();
-                                let url = oauth::authorize_url(&challenge, &new_v);
-                                let _ = open_browser(&url);
-                                *verifier = Some(new_v);
+                            CredentialMode::ClaudeOAuth => {
+                                let Some(v) = verifier.take() else {
+                                    *error =
+                                        Some("Missing auth state; press Esc and retry.".into());
+                                    continue;
+                                };
+                                match oauth::exchange_code(&val, &v).await {
+                                    Ok(tokens) => {
+                                        provider = Some(Provider::Claude {
+                                            access_token: tokens.access_token,
+                                            refresh_token: tokens.refresh_token,
+                                            expires_at: tokens.expires_at,
+                                        });
+                                        app.step = SetupStep::InputTavily {
+                                            input: String::new(),
+                                            cursor: 0,
+                                        };
+                                    }
+                                    Err(e) => {
+                                        *error = Some(format!("{}", e));
+                                        let (new_v, challenge) = oauth::generate_pkce();
+                                        let url = oauth::authorize_url(&challenge, &new_v);
+                                        let _ = open_browser(&url);
+                                        *verifier = Some(new_v);
+                                    }
+                                }
+                            }
+                            CredentialMode::GoogleOAuth => {
+                                let Some(v) = verifier.take() else {
+                                    *error =
+                                        Some("Missing auth state; press Esc and retry.".into());
+                                    continue;
+                                };
+                                match oauth::google_exchange_code(&val, &v).await {
+                                    Ok(tokens) => {
+                                        provider = Some(Provider::GoogleOAuth {
+                                            access_token: tokens.access_token,
+                                            refresh_token: tokens.refresh_token,
+                                            expires_at: tokens.expires_at,
+                                            project_id: std::env::var("GOOGLE_CLOUD_PROJECT")
+                                                .ok()
+                                                .or_else(|| {
+                                                    std::env::var("GOOGLE_CLOUD_PROJECT_ID").ok()
+                                                }),
+                                        });
+                                        app.step = SetupStep::InputTavily {
+                                            input: String::new(),
+                                            cursor: 0,
+                                        };
+                                    }
+                                    Err(e) => {
+                                        *error = Some(format!("{}", e));
+                                        let (new_v, challenge) = oauth::generate_pkce();
+                                        let url = oauth::google_authorize_url(&challenge);
+                                        if url.contains("client_id=&") {
+                                            *error = Some(
+                                                "Set LASH_GOOGLE_CLIENT_ID and \
+LASH_GOOGLE_CLIENT_SECRET, then retry."
+                                                    .into(),
+                                            );
+                                            continue;
+                                        }
+                                        let _ = open_browser(&url);
+                                        *verifier = Some(new_v);
+                                    }
+                                }
                             }
                         }
-                    } else {
-                        // OpenRouter API key
-                        provider = Some(Provider::OpenRouter {
-                            api_key: val,
-                            base_url: "https://openrouter.ai/api/v1".into(),
-                        });
-                        app.step = SetupStep::InputTavily {
-                            input: String::new(),
-                            cursor: 0,
-                        };
                     }
                 }
                 _ => {}
@@ -378,7 +462,7 @@ fn draw_setup(frame: &mut Frame, app: &SetupApp) {
     let logo_height = 8; // 5 logo + 1 trailing slash + 1 scribe + 1 tagline
 
     let step_height: u16 = match &app.step {
-        SetupStep::SelectProvider { .. } => 9, // blank + label + blank + 3 options + blank + help + pad
+        SetupStep::SelectProvider { .. } => 10, // blank + label + blank + 4 options + blank + help + pad
         SetupStep::InputCredential { error, .. } => {
             if error.is_some() {
                 10
@@ -413,15 +497,9 @@ fn draw_setup(frame: &mut Frame, app: &SetupApp) {
             input,
             cursor,
             error,
-            verifier,
-        } => draw_credential_input(
-            frame,
-            chunks[2],
-            input,
-            *cursor,
-            error.as_deref(),
-            verifier.is_some(),
-        ),
+            mode,
+            ..
+        } => draw_credential_input(frame, chunks[2], input, *cursor, error.as_deref(), *mode),
         SetupStep::CodexDeviceAuth {
             user_code, error, ..
         } => draw_codex_device_auth(frame, chunks[2], user_code, error.as_deref(), app.tick),
@@ -480,12 +558,13 @@ fn draw_logo(frame: &mut Frame, area: Rect) {
 }
 
 fn draw_provider_select(frame: &mut Frame, area: Rect, selected: usize) {
-    let cx = center_pad(area.width as usize, 40);
+    let cx = center_pad(area.width as usize, 46);
     let pad = " ".repeat(cx);
 
     let options = [
         ("Claude", "Max/Pro subscription"),
         ("Codex", "ChatGPT Plus/Pro/Team"),
+        ("Google OAuth", "Gemini via OAuth bearer"),
         ("OpenRouter", "API key"),
     ];
 
@@ -544,7 +623,7 @@ fn draw_credential_input(
     input: &str,
     cursor: usize,
     error: Option<&str>,
-    is_claude: bool,
+    mode: CredentialMode,
 ) {
     let box_width = 42usize;
     let cx = center_pad(area.width as usize, box_width);
@@ -554,28 +633,43 @@ fn draw_credential_input(
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));
 
-    if is_claude {
-        lines.push(Line::from(Span::styled(
-            format!("{}Authenticating with Claude...", pad),
-            Style::default().fg(theme::ASH_TEXT),
-        )));
-        lines.push(Line::from(Span::styled(
-            format!("{}Browser opened \u{2014} paste the code below.", pad),
-            Style::default().fg(theme::ASH_TEXT),
-        )));
-    } else {
-        lines.push(Line::from(Span::styled(
-            format!("{}Enter your OpenRouter API key.", pad),
-            Style::default().fg(theme::ASH_TEXT),
-        )));
-        lines.push(Line::from(""));
+    match mode {
+        CredentialMode::ClaudeOAuth => {
+            lines.push(Line::from(Span::styled(
+                format!("{}Authenticating with Claude...", pad),
+                Style::default().fg(theme::ASH_TEXT),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!("{}Browser opened \u{2014} paste the code below.", pad),
+                Style::default().fg(theme::ASH_TEXT),
+            )));
+        }
+        CredentialMode::GoogleOAuth => {
+            lines.push(Line::from(Span::styled(
+                format!("{}Authenticating with Google...", pad),
+                Style::default().fg(theme::ASH_TEXT),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{}Browser opened \u{2014} paste code (or callback URL) below.",
+                    pad
+                ),
+                Style::default().fg(theme::ASH_TEXT),
+            )));
+        }
+        CredentialMode::OpenRouterKey => {
+            lines.push(Line::from(Span::styled(
+                format!("{}Enter your OpenRouter API key.", pad),
+                Style::default().fg(theme::ASH_TEXT),
+            )));
+            lines.push(Line::from(""));
+        }
     }
 
     // Label
-    let label = if is_claude {
-        "Authorization code"
-    } else {
-        "API key"
+    let label = match mode {
+        CredentialMode::OpenRouterKey => "API key",
+        CredentialMode::ClaudeOAuth | CredentialMode::GoogleOAuth => "Authorization code",
     };
 
     // Input box

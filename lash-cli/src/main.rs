@@ -30,6 +30,12 @@ use tokio_util::sync::CancellationToken;
 use app::{App, DisplayBlock};
 use event::AppEvent;
 
+const HEADLESS_PREAMBLE: &str = "You are an autonomous AI coding agent running in non-interactive mode.\n\
+Complete the task end-to-end without asking the user for input.\n\
+The `ask()` function is unavailable in headless mode.\n\
+Plan mode is available: use `enter_plan_mode()` and `exit_plan_mode()` to structure complex work, then continue execution autonomously.\n\
+Return a final result with done() when the task is complete.";
+
 #[derive(Parser)]
 struct Args {
     /// OpenRouter API key (optional — use --provider to configure interactively)
@@ -40,7 +46,7 @@ struct Args {
     #[arg(long, env = "TAVILY_API_KEY")]
     tavily_api_key: Option<String>,
 
-    /// Model name (defaults per provider: claude-opus-4-6 for Claude, anthropic/claude-opus-4.6 for OpenRouter)
+    /// Model name (defaults per provider: Claude/Codex/OpenRouter/Google OAuth)
     #[arg(long)]
     model: Option<String>,
 
@@ -280,11 +286,13 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let headless = args.print_prompt.is_some();
     let config = AgentConfig {
         model: model.clone(),
         provider: lash_config.provider.clone(),
         llm_log_path,
-        headless: args.print_prompt.is_some(),
+        headless,
+        preamble: headless.then(|| HEADLESS_PREAMBLE.to_string()),
         ..Default::default()
     };
 
@@ -311,8 +319,11 @@ async fn main() -> anyhow::Result<()> {
         .add(Grep)
         .add(Ls)
         .add(PlanMode::new())
-        .add(ViewMessage::new(Arc::clone(&store)))
         .add_arc(Arc::clone(&task_store) as Arc<dyn ToolProvider>);
+    // Headless runs are single-turn and autonomous; skip context archive lookups.
+    if !headless {
+        base = base.add(ViewMessage::new(Arc::clone(&store)));
+    }
     if let Some(ref key) = lash_config.tavily_api_key {
         base = base.add(WebSearch::new(key)).add(FetchUrl::new(key));
     }
@@ -342,7 +353,7 @@ async fn main() -> anyhow::Result<()> {
                 root_cancel.clone(),
             )),
     );
-    let session = Session::new(tools, "root").await?;
+    let session = Session::new(tools, "root", headless).await?;
 
     let agent = Agent::new(session, config, Some("root".to_string()));
 

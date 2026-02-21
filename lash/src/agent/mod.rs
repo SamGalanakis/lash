@@ -54,7 +54,7 @@ impl TokenUsage {
 pub struct AgentConfig {
     /// Model identifier (e.g. "anthropic/claude-sonnet-4-5")
     pub model: String,
-    /// LLM provider (Claude OAuth or OpenRouter)
+    /// LLM provider (OpenRouter, Claude OAuth, Codex, or Google OAuth)
     pub provider: Provider,
     /// Override for context window size (tokens). If None, looked up from model_info.
     pub max_context_tokens: Option<usize>,

@@ -151,7 +151,7 @@ impl RuntimeEngine {
         if state.agent_id.is_empty() {
             state.agent_id = "root".to_string();
         }
-        let session = Session::new(tools, &state.agent_id).await?;
+        let session = Session::new(tools, &state.agent_id, config.headless).await?;
         let mut agent = Agent::new(session, config.into(), Some(state.agent_id.clone()));
         if let Some(snapshot) = state.repl_snapshot.clone() {
             agent.restore(&snapshot).await?;

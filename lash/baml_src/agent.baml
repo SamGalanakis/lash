@@ -178,6 +178,18 @@ Use `enter_plan_mode()` when a task benefits from exploration before execution.
    - Rejected → user may provide feedback, continue planning
 "#
 
+template_string HeadlessPlanGuide() #"
+## Plan Mode (Headless)
+
+Plan mode is available in headless runs, but there is no interactive approval step.
+
+**Workflow:**
+1. `plan_file = enter_plan_mode()` — create/select a plan file
+2. Explore and design using read-only tools as needed
+3. Write the plan to `plan_file`
+4. `exit_plan_mode()` — finalize planning and continue autonomously
+"#
+
 template_string SkillsGuide() #"
 ## Skills
 
@@ -242,7 +254,11 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
 
     Your output is a mix of **prose** (markdown for the user) and **`<code>` blocks** (executed in a persistent REPL).
 
+    {% if headless %}
+    **Prose** is for concise status and final summaries. There is no live user interaction in this run.
+    {% else %}
     **Prose** streams to the user as markdown — use it to explain what you're doing, share results, or ask questions.
+    {% endif %}
 
     **Code blocks** execute immediately when the closing `</code>` tag is reached. Your response stops, the code runs, and you see the output before generating your next response. Write one code block per response.
 
@@ -276,7 +292,9 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
     Tools are Python functions available as globals. Call them directly — the REPL handles async for you.
 
     {{ ToolGuide(tool_names) }}
-    {% if not headless %}
+    {% if headless %}
+    {{ HeadlessPlanGuide() }}
+    {% else %}
     {{ PlanGuide() }}
     {% endif %}
 
@@ -300,6 +318,8 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
     - `done(value)` — send your answer to the user and end the turn (must be inside a code block)
     {% if not headless %}
     - `ask(question, options=None)` — ask the user a question, blocks until they respond. Returns str. With options, shows a picker; without, a text input.
+    {% else %}
+    - `ask(...)` is unavailable in headless mode
     {% endif %}
     - `list_tools()` — show all available tools with signatures
     - `help(tool_name)` — show a tool's typed signature and docs

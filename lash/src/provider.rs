@@ -49,6 +49,13 @@ pub enum Provider {
         expires_at: u64,
         account_id: Option<String>,
     },
+    GoogleOAuth {
+        access_token: String,
+        refresh_token: String,
+        expires_at: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
+    },
 }
 
 impl Provider {
@@ -58,6 +65,7 @@ impl Provider {
             Provider::OpenRouter { .. } => "anthropic/claude-opus-4.6",
             Provider::Claude { .. } => "claude-opus-4-6",
             Provider::Codex { .. } => "gpt-5.1-codex",
+            Provider::GoogleOAuth { .. } => "gemini-3.1-pro-preview",
         }
     }
 
@@ -67,6 +75,7 @@ impl Provider {
             Provider::OpenRouter { .. } => "openai-generic",
             Provider::Claude { .. } => "anthropic",
             Provider::Codex { .. } => "openai-responses",
+            Provider::GoogleOAuth { .. } => "openai-generic",
         }
     }
 
@@ -85,6 +94,10 @@ impl Provider {
             (Provider::Codex { .. }, "quick") => Some(("gpt-5.1-codex-mini", None)),
             (Provider::Codex { .. }, "balanced") => Some(("gpt-5.3-codex", Some("medium"))),
             (Provider::Codex { .. }, "thorough") => Some(("gpt-5.3-codex", Some("high"))),
+
+            (Provider::GoogleOAuth { .. }, "quick") => Some(("gemini-3-flash-preview", None)),
+            (Provider::GoogleOAuth { .. }, "balanced") => Some(("gemini-3.1-pro-preview", None)),
+            (Provider::GoogleOAuth { .. }, "thorough") => Some(("gemini-3.1-pro-preview", None)),
 
             _ => None,
         }
@@ -151,6 +164,32 @@ impl Provider {
                 }
                 opts
             }
+            Provider::GoogleOAuth {
+                access_token,
+                project_id,
+                ..
+            } => {
+                let mut headers = serde_json::json!({
+                    "authorization": format!("Bearer {}", access_token),
+                });
+                if let Some(project) = project_id {
+                    headers["x-goog-user-project"] = serde_json::json!(project);
+                }
+                HashMap::from([
+                    (
+                        "base_url".into(),
+                        serde_json::json!(
+                            "https://generativelanguage.googleapis.com/v1beta/openai"
+                        ),
+                    ),
+                    ("api_key".into(), serde_json::json!("noop")),
+                    ("model".into(), serde_json::json!(model)),
+                    ("temperature".into(), serde_json::json!(0)),
+                    ("max_tokens".into(), serde_json::json!(32768)),
+                    ("headers".into(), headers),
+                    ("http".into(), serde_json::json!({"request_timeout_ms": 0})),
+                ])
+            }
         }
     }
 
@@ -161,7 +200,9 @@ impl Provider {
                 .strip_prefix("anthropic/")
                 .unwrap_or(model)
                 .to_string(),
-            Provider::OpenRouter { .. } | Provider::Codex { .. } => model.to_string(),
+            Provider::OpenRouter { .. } | Provider::Codex { .. } | Provider::GoogleOAuth { .. } => {
+                model.to_string()
+            }
         }
     }
 
@@ -173,6 +214,13 @@ impl Provider {
                     model.to_string()
                 } else {
                     format!("anthropic/{model}")
+                }
+            }
+            Provider::GoogleOAuth { .. } => {
+                if model.contains('/') {
+                    model.to_string()
+                } else {
+                    format!("google/{model}")
                 }
             }
             Provider::OpenRouter { .. } | Provider::Codex { .. } => model.to_string(),
@@ -221,6 +269,20 @@ impl Provider {
             } => {
                 if now + 300 >= *expires_at {
                     let tokens = oauth::codex_refresh_tokens(refresh_token).await?;
+                    *access_token = tokens.access_token;
+                    *refresh_token = tokens.refresh_token;
+                    *expires_at = tokens.expires_at;
+                    return Ok(true);
+                }
+            }
+            Provider::GoogleOAuth {
+                access_token,
+                refresh_token,
+                expires_at,
+                ..
+            } => {
+                if now + 300 >= *expires_at {
+                    let tokens = oauth::google_refresh_tokens(refresh_token).await?;
                     *access_token = tokens.access_token;
                     *refresh_token = tokens.refresh_token;
                     *expires_at = tokens.expires_at;
@@ -319,11 +381,21 @@ mod tests {
         }
     }
 
+    fn google_oauth() -> Provider {
+        Provider::GoogleOAuth {
+            access_token: "tok".into(),
+            refresh_token: "ref".into(),
+            expires_at: u64::MAX,
+            project_id: Some("test-proj".into()),
+        }
+    }
+
     #[test]
     fn default_model() {
         assert_eq!(openrouter().default_model(), "anthropic/claude-opus-4.6");
         assert_eq!(claude().default_model(), "claude-opus-4-6");
         assert_eq!(codex().default_model(), "gpt-5.1-codex");
+        assert_eq!(google_oauth().default_model(), "gemini-3.1-pro-preview");
     }
 
     #[test]
@@ -331,6 +403,7 @@ mod tests {
         assert_eq!(openrouter().baml_provider(), "openai-generic");
         assert_eq!(claude().baml_provider(), "anthropic");
         assert_eq!(codex().baml_provider(), "openai-responses");
+        assert_eq!(google_oauth().baml_provider(), "openai-generic");
     }
 
     #[test]
@@ -374,6 +447,7 @@ mod tests {
         assert!(claude().default_agent_model("unknown").is_none());
         assert!(openrouter().default_agent_model("").is_none());
         assert!(codex().default_agent_model("extreme").is_none());
+        assert!(google_oauth().default_agent_model("extreme").is_none());
     }
 
     #[test]
@@ -402,6 +476,15 @@ mod tests {
     }
 
     #[test]
+    fn resolve_model_google_passthrough() {
+        let p = google_oauth();
+        assert_eq!(
+            p.resolve_model("gemini-3.1-pro-preview"),
+            "gemini-3.1-pro-preview"
+        );
+    }
+
+    #[test]
     fn context_lookup_model_claude_adds_prefix() {
         let p = claude();
         assert_eq!(
@@ -411,6 +494,19 @@ mod tests {
         assert_eq!(
             p.context_lookup_model("anthropic/claude-opus-4-6"),
             "anthropic/claude-opus-4-6"
+        );
+    }
+
+    #[test]
+    fn context_lookup_model_google_adds_prefix() {
+        let p = google_oauth();
+        assert_eq!(
+            p.context_lookup_model("gemini-3.1-pro-preview"),
+            "google/gemini-3.1-pro-preview"
+        );
+        assert_eq!(
+            p.context_lookup_model("google/gemini-3.1-pro-preview"),
+            "google/gemini-3.1-pro-preview"
         );
     }
 
@@ -436,5 +532,36 @@ mod tests {
     fn baml_options_codex_no_reasoning() {
         let opts = codex().baml_options("gpt-5.1-codex", None);
         assert!(!opts.contains_key("reasoning"));
+    }
+
+    #[test]
+    fn baml_options_google_oauth_has_openai_base_url() {
+        let opts = google_oauth().baml_options("gemini-3.1-pro-preview", None);
+        assert_eq!(
+            opts["base_url"],
+            serde_json::json!("https://generativelanguage.googleapis.com/v1beta/openai")
+        );
+        assert_eq!(opts["model"], serde_json::json!("gemini-3.1-pro-preview"));
+        assert_eq!(
+            opts["headers"]["x-goog-user-project"],
+            serde_json::json!("test-proj")
+        );
+    }
+
+    #[test]
+    fn default_agent_model_google_oauth_tiers() {
+        let p = google_oauth();
+        assert_eq!(
+            p.default_agent_model("quick"),
+            Some(("gemini-3-flash-preview", None))
+        );
+        assert_eq!(
+            p.default_agent_model("balanced"),
+            Some(("gemini-3.1-pro-preview", None))
+        );
+        assert_eq!(
+            p.default_agent_model("thorough"),
+            Some(("gemini-3.1-pro-preview", None))
+        );
     }
 }

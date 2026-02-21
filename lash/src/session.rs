@@ -41,7 +41,11 @@ pub struct Session {
 }
 
 impl Session {
-    pub async fn new(tools: Arc<dyn ToolProvider>, agent_id: &str) -> Result<Self, SessionError> {
+    pub async fn new(
+        tools: Arc<dyn ToolProvider>,
+        agent_id: &str,
+        headless: bool,
+    ) -> Result<Self, SessionError> {
         let scratch_dir = tempfile::TempDir::new()?;
 
         // Start the embedded Python runtime
@@ -64,6 +68,7 @@ impl Session {
         session.runtime.send(PythonRequest::Init {
             tools_json,
             agent_id: agent_id.to_string(),
+            headless,
         })?;
 
         // Wait for ready
