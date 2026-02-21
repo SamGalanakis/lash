@@ -14,6 +14,10 @@ pub struct ChatMsg {
     pub role: String,
 
     pub content: String,
+
+    pub kind: String,
+
+    pub image_idx: i64,
 }
 
 impl AsRef<ChatMsg> for ChatMsg {

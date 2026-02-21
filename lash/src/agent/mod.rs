@@ -211,6 +211,10 @@ impl Agent {
         self.config.model = model;
     }
 
+    pub fn set_provider(&mut self, provider: Provider) {
+        self.config.provider = provider;
+    }
+
     /// Reset the underlying Python session (clear namespace).
     pub async fn reset_session(&mut self) -> Result<(), crate::SessionError> {
         self.session.reset().await

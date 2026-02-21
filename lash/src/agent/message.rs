@@ -1,5 +1,7 @@
 pub use crate::baml_client::types::ChatMsg;
 
+pub const IMAGE_REF_PREFIX: &str = "__LASH_IMAGE_IDX:";
+
 // ─── Structured message types for context-aware pruning ───
 
 /// A structured message with typed parts for context management.
@@ -110,6 +112,8 @@ impl Message {
             }
             .to_string(),
             content,
+            kind: "text".to_string(),
+            image_idx: -1,
         }
     }
 
@@ -121,5 +125,39 @@ impl Message {
 
 /// Convert Vec<Message> to Vec<ChatMsg> (for LLM calls).
 pub fn messages_to_chat(msgs: &[Message]) -> Vec<ChatMsg> {
-    msgs.iter().map(|m| m.to_chat_msg()).collect()
+    let mut out: Vec<ChatMsg> = Vec::new();
+    for msg in msgs {
+        if msg.role != MessageRole::User {
+            out.push(msg.to_chat_msg());
+            continue;
+        }
+
+        if msg.parts.is_empty() {
+            out.push(msg.to_chat_msg());
+            continue;
+        }
+
+        for part in &msg.parts {
+            let rendered = part.render();
+            if let Some(idx_str) = rendered.strip_prefix(IMAGE_REF_PREFIX)
+                && let Ok(idx) = idx_str.parse::<i64>()
+            {
+                out.push(ChatMsg {
+                    role: "user".to_string(),
+                    content: String::new(),
+                    kind: "image".to_string(),
+                    image_idx: idx,
+                });
+                continue;
+            }
+
+            out.push(ChatMsg {
+                role: "user".to_string(),
+                content: rendered,
+                kind: "text".to_string(),
+                image_idx: -1,
+            });
+        }
+    }
+    out
 }

@@ -366,15 +366,12 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
     {% else %}
     {{ _.role("user") }}
     {% endif %}
+    {% if msg.kind == "image" and msg.image_idx >= 0 %}
+    {{ user_images[msg.image_idx] }}
+    {% else %}
     {{ msg.content }}
-    {% endfor %}
-    {% if user_images | length > 0 %}
-    {{ _.role("user") }}
-    [Attached images:]
-    {% for img in user_images %}
-    {{ img }}
-    {% endfor %}
     {% endif %}
+    {% endfor %}
   "#
 }
 
@@ -503,14 +500,11 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
     {% else %}
     {{ _.role("user") }}
     {% endif %}
+    {% if msg.kind == "image" and msg.image_idx >= 0 %}
+    {{ user_images[msg.image_idx] }}
+    {% else %}
     {{ msg.content }}
-    {% endfor %}
-    {% if user_images | length > 0 %}
-    {{ _.role("user") }}
-    [Attached images:]
-    {% for img in user_images %}
-    {{ img }}
-    {% endfor %}
     {% endif %}
+    {% endfor %}
   "#
 }

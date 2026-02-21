@@ -5,7 +5,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/clear", "Reset conversation"),
     ("/controls", "Show keyboard shortcuts"),
     ("/model", "Switch LLM model"),
-    ("/provider", "Change LLM provider"),
+    ("/provider", "Open provider setup (in-app)"),
+    ("/login", "Sign in or reconfigure provider"),
     ("/logout", "Remove stored credentials"),
     ("/resume", "Resume a previous session"),
     ("/skills", "Browse loaded skills"),
@@ -32,7 +33,7 @@ pub enum Command {
     Controls,
     /// Switch LLM model
     Model(String),
-    /// Show message to restart with --provider
+    /// Show provider status and switch instructions
     ChangeProvider,
     /// Remove stored credentials
     Logout,
@@ -67,7 +68,7 @@ pub fn parse(input: &str, skills: &SkillRegistry) -> Option<Command> {
         "model" => arg
             .filter(|a| !a.is_empty())
             .map(|a| Command::Model(a.to_string())),
-        "provider" => Some(Command::ChangeProvider),
+        "provider" | "login" => Some(Command::ChangeProvider),
         "logout" => Some(Command::Logout),
         "help" | "?" => Some(Command::Help),
         "exit" | "quit" => Some(Command::Exit),
@@ -84,5 +85,23 @@ pub fn parse(input: &str, skills: &SkillRegistry) -> Option<Command> {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_provider_and_login_aliases() {
+        let skills = SkillRegistry::load();
+        assert!(matches!(
+            parse("/provider", &skills),
+            Some(Command::ChangeProvider)
+        ));
+        assert!(matches!(
+            parse("/login", &skills),
+            Some(Command::ChangeProvider)
+        ));
     }
 }

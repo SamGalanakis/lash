@@ -49,4 +49,18 @@ impl ChatMsgClassBuilder {
             .get_property("content")
             .expect("ChatMsg.content is statically defined in .baml and should always be present")
     }
+
+    /// Access the `kind` field builder.
+    pub fn property_kind(&self) -> baml::ClassPropertyBuilder {
+        self.inner
+            .get_property("kind")
+            .expect("ChatMsg.kind is statically defined in .baml and should always be present")
+    }
+
+    /// Access the `image_idx` field builder.
+    pub fn property_image_idx(&self) -> baml::ClassPropertyBuilder {
+        self.inner
+            .get_property("image_idx")
+            .expect("ChatMsg.image_idx is statically defined in .baml and should always be present")
+    }
 }

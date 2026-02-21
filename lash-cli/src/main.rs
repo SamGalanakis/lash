@@ -9,6 +9,7 @@ mod theme;
 mod ui;
 mod util;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -146,6 +147,25 @@ fn cleanup_terminal() {
         SetCursorStyle::DefaultUserShape
     );
     ratatui::restore();
+}
+
+fn configure_terminal_ui(no_mouse: bool) -> anyhow::Result<()> {
+    crossterm::execute!(
+        std::io::stdout(),
+        crossterm::style::Print("\x1b]11;rgb:0e/0d/0b\x1b\\"),
+        SetCursorStyle::SteadyBar
+    )?;
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::PushKeyboardEnhancementFlags(
+            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        )
+    );
+    if !no_mouse {
+        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+    }
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableFocusChange)?;
+    Ok(())
 }
 
 #[tokio::main]
@@ -374,29 +394,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize terminal
     let terminal = ratatui::init();
 
-    // Set terminal background to match FORM so padding areas blend seamlessly (OSC 11)
-    // Set cursor to bar (pipe) style for cleaner text editing feel
-    crossterm::execute!(
-        std::io::stdout(),
-        crossterm::style::Print("\x1b]11;rgb:0e/0d/0b\x1b\\"),
-        SetCursorStyle::SteadyBar
-    )?;
-
-    // Enable kitty keyboard protocol so Shift+Enter is distinguishable from Enter
-    let _ = crossterm::execute!(
-        std::io::stdout(),
-        crossterm::event::PushKeyboardEnhancementFlags(
-            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-        )
-    );
-
-    // Enable mouse capture by default (scroll wheel works always)
-    if !args.no_mouse {
-        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
-    }
-
-    // Enable focus change tracking for gating desktop notifications
-    crossterm::execute!(std::io::stdout(), crossterm::event::EnableFocusChange)?;
+    configure_terminal_ui(args.no_mouse)?;
 
     let session_name = logger.session_name.clone();
     let result = run_app(
@@ -455,7 +453,7 @@ async fn run_headless(agent: Agent, prompt: String) -> anyhow::Result<()> {
         }
     }
 
-    let prompt = transform_at_references(&prompt);
+    let (items, image_blobs) = build_items_from_editor_input(&prompt, Vec::new());
     let mut runtime = RuntimeEngine::from_agent(agent, AgentStateEnvelope::default());
     let sink = HeadlessSink {
         had_error: AtomicBool::new(false),
@@ -463,8 +461,8 @@ async fn run_headless(agent: Agent, prompt: String) -> anyhow::Result<()> {
     let result = runtime
         .run_turn(
             TurnInput {
-                user_message: prompt,
-                images_png: Vec::new(),
+                items,
+                image_blobs,
                 mode: Some(RunMode::Normal),
                 plan_file: None,
             },
@@ -521,13 +519,37 @@ fn controls_text() -> String {
     .join("\n")
 }
 
+fn provider_label(provider: &Provider) -> &'static str {
+    match provider {
+        Provider::OpenRouter { .. } => "OpenRouter (API key)",
+        Provider::Claude { .. } => "Claude OAuth",
+        Provider::Codex { .. } => "OpenAI Codex OAuth",
+        Provider::GoogleOAuth { .. } => "Google OAuth (Gemini)",
+    }
+}
+
+fn push_system_message(app: &mut App, msg: impl Into<String>) {
+    let msg = msg.into();
+    let duplicate = matches!(
+        app.blocks.last(),
+        Some(DisplayBlock::SystemMessage(existing)) if existing == &msg
+    );
+    if duplicate {
+        return;
+    }
+    app.blocks.push(DisplayBlock::SystemMessage(msg));
+    app.invalidate_height_cache();
+    app.scroll_to_bottom();
+}
+
 /// Build the help text shown by /help.
 fn help_text(skills: &skill::SkillRegistry) -> String {
     let mut lines = vec![
         "Commands:".to_string(),
         "  /clear, /new       Reset conversation".to_string(),
         "  /model <name>      Switch LLM model".to_string(),
-        "  /provider          Change LLM provider".to_string(),
+        "  /provider          Open provider setup (in-app)".to_string(),
+        "  /login             Sign in or reconfigure provider".to_string(),
         "  /logout            Remove stored credentials".to_string(),
         "  /resume [name]     Browse or load a previous session".to_string(),
         "  /skills            Browse loaded skills".to_string(),
@@ -573,8 +595,8 @@ async fn run_app(
     mut terminal: DefaultTerminal,
     agent: Agent,
     logger: &mut SessionLogger,
-    _args: &Args,
-    provider: Provider,
+    args: &Args,
+    mut provider: Provider,
     model: String,
     session_name: String,
     store: Arc<Store>,
@@ -595,14 +617,20 @@ async fn run_app(
     // Unified event channel
     let (app_tx, mut app_rx) = mpsc::unbounded_channel::<AppEvent>();
 
-    // Stop flag for the event reader thread
+    // Stop/pause flags for terminal event pumps.
     let stop = Arc::new(AtomicBool::new(false));
+    let paused = Arc::new(AtomicBool::new(false));
 
     // Spawn terminal event reader using poll() with timeout so it can stop
     let term_tx = app_tx.clone();
     let stop_reader = Arc::clone(&stop);
+    let paused_reader = Arc::clone(&paused);
     tokio::task::spawn_blocking(move || {
         while !stop_reader.load(Ordering::Relaxed) {
+            if paused_reader.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                continue;
+            }
             // Poll with 50ms timeout so we can check the stop flag
             if crossterm::event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
                 match crossterm::event::read() {
@@ -620,12 +648,16 @@ async fn run_app(
     // Tick timer for spinner animation
     let tick_tx = app_tx.clone();
     let stop_tick = Arc::clone(&stop);
+    let paused_tick = Arc::clone(&paused);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
         loop {
             interval.tick().await;
             if stop_tick.load(Ordering::Relaxed) {
                 break;
+            }
+            if paused_tick.load(Ordering::Relaxed) {
+                continue;
             }
             if tick_tx.send(AppEvent::Tick).is_err() {
                 break;
@@ -660,10 +692,12 @@ async fn run_app(
 
                     // Auto-drain: send queued message
                     if let Some(queued) = app.take_queued_message() {
+                        let (items, image_blobs) =
+                            build_items_from_editor_input(&queued, Vec::new());
                         send_user_message(
                             queued,
-                            None,
-                            Vec::new(),
+                            items,
+                            image_blobs,
                             &mut app,
                             logger,
                             &mut runtime,
@@ -1053,41 +1087,99 @@ async fn run_app(
                                     app.model = new_model;
                                 }
                                 command::Command::ChangeProvider => {
-                                    app.blocks.push(DisplayBlock::SystemMessage(
-                                        "Restart lash with `--provider` to change providers."
-                                            .to_string(),
-                                    ));
-                                    app.invalidate_height_cache();
-                                    app.scroll_to_bottom();
-                                }
-                                command::Command::Logout => {
-                                    match LashConfig::clear() {
-                                        Ok(()) => {
-                                            app.blocks.push(DisplayBlock::SystemMessage(
-                                                "Credentials removed.".to_string(),
-                                            ));
+                                    paused.store(true, Ordering::Relaxed);
+                                    let _ = crossterm::execute!(
+                                        std::io::stdout(),
+                                        crossterm::event::DisableFocusChange
+                                    );
+                                    if !args.no_mouse {
+                                        let _ = crossterm::execute!(
+                                            std::io::stdout(),
+                                            crossterm::event::DisableMouseCapture
+                                        );
+                                    }
+                                    cleanup_terminal();
+                                    let setup_result = setup::run_setup().await;
+                                    terminal = ratatui::init();
+                                    configure_terminal_ui(args.no_mouse)?;
+                                    paused.store(false, Ordering::Relaxed);
+
+                                    match setup_result {
+                                        Ok(mut new_cfg) => {
+                                            if let Err(e) = new_cfg.provider.ensure_fresh().await {
+                                                push_system_message(
+                                                    &mut app,
+                                                    format!(
+                                                        "Provider setup completed, but token refresh failed: {}",
+                                                        e
+                                                    ),
+                                                );
+                                                continue;
+                                            }
+                                            if let Err(e) = new_cfg.save() {
+                                                push_system_message(
+                                                    &mut app,
+                                                    format!(
+                                                        "Provider updated, but saving config failed: {}",
+                                                        e
+                                                    ),
+                                                );
+                                            }
+                                            provider = new_cfg.provider.clone();
+                                            let new_model = provider.default_model().to_string();
+                                            if let Some(rt) = runtime.as_mut() {
+                                                rt.set_provider(provider.clone());
+                                                rt.set_model(new_model.clone());
+                                            }
+                                            app.context_window =
+                                                provider.context_window(&new_model);
+                                            app.model = new_model.clone();
+                                            push_system_message(
+                                                &mut app,
+                                                format!(
+                                                    "Provider updated: {}\nModel set to default: `{}`",
+                                                    provider_label(&provider),
+                                                    new_model
+                                                ),
+                                            );
                                         }
                                         Err(e) => {
-                                            app.blocks.push(DisplayBlock::SystemMessage(format!(
-                                                "Failed to remove credentials: {}",
-                                                e
-                                            )));
+                                            let msg = e.to_string();
+                                            if msg.contains("Setup cancelled") {
+                                                push_system_message(
+                                                    &mut app,
+                                                    "Provider setup cancelled. Current provider unchanged.",
+                                                );
+                                            } else {
+                                                push_system_message(
+                                                    &mut app,
+                                                    format!(
+                                                        "Provider setup failed: {}. Current provider unchanged.",
+                                                        msg
+                                                    ),
+                                                );
+                                            }
                                         }
                                     }
-                                    app.invalidate_height_cache();
-                                    app.scroll_to_bottom();
                                 }
+                                command::Command::Logout => match LashConfig::clear() {
+                                    Ok(()) => push_system_message(
+                                        &mut app,
+                                        "Credentials removed from disk.\n\n\
+This running session may continue using in-memory credentials.\n\
+Use `/provider` or `/login` to sign in again without restarting.",
+                                    ),
+                                    Err(e) => push_system_message(
+                                        &mut app,
+                                        format!("Failed to remove credentials: {}", e),
+                                    ),
+                                },
                                 command::Command::Controls => {
-                                    app.blocks
-                                        .push(DisplayBlock::SystemMessage(controls_text()));
-                                    app.invalidate_height_cache();
-                                    app.scroll_to_bottom();
+                                    push_system_message(&mut app, controls_text());
                                 }
                                 command::Command::Help => {
-                                    app.blocks
-                                        .push(DisplayBlock::SystemMessage(help_text(&app.skills)));
-                                    app.invalidate_height_cache();
-                                    app.scroll_to_bottom();
+                                    let help = help_text(&app.skills);
+                                    push_system_message(&mut app, help);
                                 }
                                 command::Command::Resume(name) => {
                                     if let Some(filename) = name {
@@ -1170,16 +1262,13 @@ async fn run_app(
                                 }
                                 command::Command::Skill(name, args) => {
                                     if app.skills.get(&name).is_some() {
-                                        let user_msg = match args {
-                                            Some(a) => format!("[SKILL:{}] {}", name, a),
-                                            None => format!("[SKILL:{}]", name),
-                                        };
                                         // Display original slash command input in UI, but send
-                                        // SKILL marker payload to the runtime turn.
+                                        // structured SKILL payload to the runtime turn.
+                                        let skill_item = InputItem::SkillRef { name, args };
                                         send_user_message(
                                             input.clone(),
-                                            Some(user_msg),
-                                            Vec::new(),
+                                            vec![skill_item],
+                                            HashMap::new(),
                                             &mut app,
                                             logger,
                                             &mut runtime,
@@ -1201,10 +1290,11 @@ async fn run_app(
 
                         // Regular user message — send to agent
                         let images = app.take_images();
+                        let (items, image_blobs) = build_items_from_editor_input(&input, images);
                         send_user_message(
                             input,
-                            None,
-                            images,
+                            items,
+                            image_blobs,
                             &mut app,
                             logger,
                             &mut runtime,
@@ -1365,8 +1455,8 @@ async fn run_app(
 #[allow(clippy::too_many_arguments)]
 fn send_user_message(
     display_input: String,
-    model_input: Option<String>,
-    images: Vec<Vec<u8>>,
+    turn_items: Vec<InputItem>,
+    image_blobs: HashMap<String, Vec<u8>>,
     app: &mut App,
     logger: &mut SessionLogger,
     runtime: &mut Option<RuntimeEngine>,
@@ -1394,9 +1484,7 @@ fn send_user_message(
     app.running = true;
     app.iteration = 0;
 
-    let user_message = model_input.unwrap_or(default_model_input);
-    let user_message = transform_at_references(&user_message);
-    logger.log_user_input(&user_message);
+    logger.log_user_input(&default_model_input);
 
     let mut rt = runtime
         .take()
@@ -1421,8 +1509,8 @@ fn send_user_message(
         let result = rt
             .run_turn(
                 TurnInput {
-                    user_message,
-                    images_png: images,
+                    items: turn_items,
+                    image_blobs,
                     mode: Some(mode),
                     plan_file,
                 },
@@ -1578,17 +1666,42 @@ async fn restore_agent_state(
     }
 }
 
-/// Transform `@path` tokens in user input to `[file: /abs/path]` or `[directory: /abs/path]`.
-/// Rules: `@` must be at start of input or preceded by whitespace.
-/// The token runs until whitespace or end of string.
-/// Non-existent paths are left as-is.
-fn transform_at_references(input: &str) -> String {
+/// Build structured turn items from editor input:
+/// - `@path` becomes `FileRef` or `DirRef` when resolvable
+/// - `[Image #n]` binds to pasted image `n` from this turn's image list
+/// - plain text remains `Text`
+fn build_items_from_editor_input(
+    input: &str,
+    images: Vec<Vec<u8>>,
+) -> (Vec<InputItem>, HashMap<String, Vec<u8>>) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut result = String::with_capacity(input.len());
+    let mut items: Vec<InputItem> = Vec::new();
+    let mut image_blobs: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut image_slots: Vec<Option<(String, Vec<u8>)>> = images
+        .into_iter()
+        .enumerate()
+        .map(|(i, bytes)| (format!("img-{}", i + 1), bytes))
+        .map(Some)
+        .collect();
+
+    let mut text_buf = String::with_capacity(input.len());
     let mut i = 0;
     let bytes = input.as_bytes();
 
     while i < bytes.len() {
+        if let Some((next_i, img_idx)) = parse_image_marker_at(input, i)
+            && let Some(slot) = image_slots
+                .get_mut(img_idx.saturating_sub(1))
+                .and_then(Option::take)
+        {
+            push_text_item(&mut items, &mut text_buf);
+            let (id, data) = slot;
+            image_blobs.insert(id.clone(), data);
+            items.push(InputItem::ImageRef { id });
+            i = next_i;
+            continue;
+        }
+
         if bytes[i] == b'@' {
             // Check: must be at start or preceded by whitespace
             let at_start = i == 0 || bytes[i - 1].is_ascii_whitespace();
@@ -1607,24 +1720,79 @@ fn transform_at_references(input: &str) -> String {
                         cwd.join(token)
                     };
                     if path.is_file() {
-                        result.push_str(&format!("[file: {}]", path.display()));
+                        push_text_item(&mut items, &mut text_buf);
+                        items.push(InputItem::FileRef {
+                            path: path.display().to_string(),
+                        });
                         i = token_end;
                         continue;
                     } else if path.is_dir() {
-                        // Strip trailing slash for display
-                        let display = path.to_string_lossy();
-                        let display = display.trim_end_matches('/');
-                        result.push_str(&format!("[directory: {}]", display));
+                        push_text_item(&mut items, &mut text_buf);
+                        items.push(InputItem::DirRef {
+                            path: path.display().to_string(),
+                        });
                         i = token_end;
                         continue;
                     }
                 }
             }
         }
-        result.push(input[i..].chars().next().unwrap());
-        i += input[i..].chars().next().unwrap().len_utf8();
+        let ch = input[i..].chars().next().unwrap();
+        text_buf.push(ch);
+        i += ch.len_utf8();
     }
-    result
+
+    push_text_item(&mut items, &mut text_buf);
+
+    // Preserve any pasted images even if their inline markers were removed.
+    for slot in image_slots.into_iter().flatten() {
+        let (id, data) = slot;
+        image_blobs.insert(id.clone(), data);
+        items.push(InputItem::ImageRef { id });
+    }
+
+    (items, image_blobs)
+}
+
+fn push_text_item(items: &mut Vec<InputItem>, text: &mut String) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(InputItem::Text { text: prev }) = items.last_mut() {
+        prev.push_str(text);
+        text.clear();
+        return;
+    }
+    items.push(InputItem::Text {
+        text: std::mem::take(text),
+    });
+}
+
+fn parse_image_marker_at(input: &str, start: usize) -> Option<(usize, usize)> {
+    let rest = &input[start..];
+    let prefix = "[Image #";
+    if !rest.starts_with(prefix) {
+        return None;
+    }
+    let after = &rest[prefix.len()..];
+    let digits_len = after
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .map(char::len_utf8)
+        .sum::<usize>();
+    if digits_len == 0 {
+        return None;
+    }
+    let digits = &after[..digits_len];
+    let remaining = &after[digits_len..];
+    if !remaining.starts_with(']') {
+        return None;
+    }
+    let idx = digits.parse::<usize>().ok()?;
+    if idx == 0 {
+        return None;
+    }
+    Some((start + prefix.len() + digits_len + 1, idx))
 }
 
 /// Insert an inline attachment marker like `[Image #1]` at the current cursor,
@@ -1809,5 +1977,45 @@ mod tests {
         app.cursor_pos = app.input.len();
         insert_inline_marker(&mut app, "[Image #1]");
         assert_eq!(app.input, "hello [Image #1]");
+    }
+
+    #[test]
+    fn parse_image_marker_rejects_zero_index() {
+        assert_eq!(parse_image_marker_at("[Image #0]", 0), None);
+    }
+
+    #[test]
+    fn build_items_preserves_interleaving_for_images_and_paths() {
+        let unique = format!(
+            "lash-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        );
+        let tmp_path = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&tmp_path).expect("mkdir temp test dir");
+        let file_path = tmp_path.join("a.txt");
+        std::fs::write(&file_path, "x").expect("write temp file");
+        let original_cwd = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&tmp_path).expect("chdir");
+        let (items, image_blobs) =
+            build_items_from_editor_input("before [Image #1] @a.txt after", vec![vec![1, 2, 3]]);
+        std::env::set_current_dir(original_cwd).expect("restore cwd");
+        let _ = std::fs::remove_dir_all(&tmp_path);
+
+        let kinds: Vec<&'static str> = items
+            .iter()
+            .map(|item| match item {
+                InputItem::Text { .. } => "text",
+                InputItem::ImageRef { .. } => "image",
+                InputItem::FileRef { .. } => "file",
+                InputItem::DirRef { .. } => "dir",
+                InputItem::SkillRef { .. } => "skill",
+            })
+            .collect();
+        assert_eq!(kinds, vec!["text", "image", "text", "file", "text"]);
+        assert_eq!(image_blobs.len(), 1);
     }
 }

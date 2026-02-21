@@ -36,8 +36,8 @@ pub use agent::{
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
 pub use provider::{LashConfig, Provider};
 pub use runtime::{
-    AgentStateEnvelope, EventSink, NoopEventSink, RunMode, RuntimeConfig, RuntimeEngine, TurnInput,
-    TurnResult,
+    AgentStateEnvelope, EventSink, InputItem, NoopEventSink, RunMode, RuntimeConfig, RuntimeEngine,
+    TurnInput, TurnResult,
 };
 pub use session::{ExecResponse, Session, SessionError, UserPrompt};
 #[cfg(feature = "sqlite-store")]

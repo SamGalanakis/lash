@@ -18,6 +18,10 @@ pub struct ChatMsg {
     pub role: Option<String>,
 
     pub content: Option<String>,
+
+    pub kind: Option<String>,
+
+    pub image_idx: Option<i64>,
 }
 
 impl AsRef<ChatMsg> for ChatMsg {

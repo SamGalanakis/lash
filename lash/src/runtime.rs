@@ -1,9 +1,11 @@
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::agent::message::IMAGE_REF_PREFIX;
 use crate::agent::{
     Agent, AgentConfig, AgentEvent, Message, MessageRole, Part, PartKind, PruneState, TokenUsage,
 };
@@ -20,14 +22,31 @@ pub enum RunMode {
 
 /// Host-provided per-turn input.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InputItem {
+    Text { text: String },
+    FileRef { path: String },
+    DirRef { path: String },
+    ImageRef { id: String },
+    SkillRef { name: String, args: Option<String> },
+}
+
+/// Host-provided per-turn input.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TurnInput {
-    pub user_message: String,
+    pub items: Vec<InputItem>,
     #[serde(default)]
-    pub images_png: Vec<Vec<u8>>,
+    pub image_blobs: HashMap<String, Vec<u8>>,
     #[serde(default)]
     pub mode: Option<RunMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_file: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+enum NormalizedItem {
+    Text(String),
+    Image(Vec<u8>),
 }
 
 /// Serializable host-owned session envelope.
@@ -187,6 +206,13 @@ impl RuntimeEngine {
         }
     }
 
+    /// Update provider on the underlying agent.
+    pub fn set_provider(&mut self, provider: Provider) {
+        if let Some(agent) = self.agent.as_mut() {
+            agent.set_provider(provider);
+        }
+    }
+
     /// Reset the REPL session on the underlying agent.
     pub async fn reset_session(&mut self) -> Result<(), SessionError> {
         let Some(agent) = self.agent.as_mut() else {
@@ -232,6 +258,19 @@ impl RuntimeEngine {
         events: &dyn EventSink,
         cancel: CancellationToken,
     ) -> TurnResult {
+        let normalized = match normalize_input_items(&input.items, &input.image_blobs) {
+            Ok(items) => items,
+            Err(e) => {
+                events.emit(AgentEvent::Error { message: e }).await;
+                events.emit(AgentEvent::Done).await;
+                return TurnResult {
+                    state: self.state.clone(),
+                    final_message: None,
+                    done: true,
+                };
+            }
+        };
+
         let mut messages = self.state.messages.clone();
         let mode = input.mode.unwrap_or(RunMode::Normal);
         let plan_file = input
@@ -248,7 +287,7 @@ impl RuntimeEngine {
                 - You MUST NOT use: edit_file, find_replace, write_file (except the plan file), or shell with write commands\n\
                 - Exception: Write your plan to `{}` using write_file\n\n\
                 **Workflow:**\n\
-                1. Understand the request — ask clarifying questions using message(kind=\"final\")\n\
+                1. Understand the request and note key assumptions\n\
                 2. Explore the codebase — read files, search for patterns, understand architecture\n\
                 3. Design your approach — consider tradeoffs, identify risks\n\
                 4. Write a clear, step-by-step plan to the plan file\n\n\
@@ -291,18 +330,48 @@ impl RuntimeEngine {
         }
 
         let user_id = format!("m{}", messages.len());
+        let mut user_parts: Vec<Part> = Vec::new();
+        let mut user_images_png: Vec<Vec<u8>> = Vec::new();
+        for item in normalized {
+            match item {
+                NormalizedItem::Text(text) => {
+                    if text.is_empty() {
+                        continue;
+                    }
+                    user_parts.push(Part {
+                        id: format!("{}.p{}", user_id, user_parts.len()),
+                        kind: PartKind::Text,
+                        content: text,
+                        prune_state: PruneState::Intact,
+                    });
+                }
+                NormalizedItem::Image(bytes) => {
+                    let image_idx = user_images_png.len();
+                    user_images_png.push(bytes);
+                    user_parts.push(Part {
+                        id: format!("{}.p{}", user_id, user_parts.len()),
+                        kind: PartKind::Text,
+                        content: format!("{IMAGE_REF_PREFIX}{image_idx}"),
+                        prune_state: PruneState::Intact,
+                    });
+                }
+            }
+        }
+        if user_parts.is_empty() {
+            user_parts.push(Part {
+                id: format!("{}.p0", user_id),
+                kind: PartKind::Text,
+                content: String::new(),
+                prune_state: PruneState::Intact,
+            });
+        }
         messages.push(Message {
             id: user_id.clone(),
             role: MessageRole::User,
-            parts: vec![Part {
-                id: format!("{}.p0", user_id),
-                kind: PartKind::Text,
-                content: input.user_message,
-                prune_state: PruneState::Intact,
-            }],
+            parts: user_parts,
         });
 
-        self.run_prepared_turn(messages, input.images_png, events, cancel)
+        self.run_prepared_turn(messages, user_images_png, events, cancel)
             .await
     }
 
@@ -369,4 +438,97 @@ impl RuntimeEngine {
             done,
         }
     }
+}
+
+fn normalize_input_items(
+    items: &[InputItem],
+    image_blobs: &HashMap<String, Vec<u8>>,
+) -> Result<Vec<NormalizedItem>, String> {
+    let mut out: Vec<NormalizedItem> = Vec::new();
+    for item in items {
+        match item {
+            InputItem::Text { text } => push_text(&mut out, text.clone()),
+            InputItem::FileRef { path } => {
+                let abs = resolve_existing_path(path, true)?;
+                push_text(&mut out, format!("[file: {}]", abs.display()));
+            }
+            InputItem::DirRef { path } => {
+                let abs = resolve_existing_path(path, false)?;
+                push_text(
+                    &mut out,
+                    format!(
+                        "[directory: {}]",
+                        abs.to_string_lossy().trim_end_matches('/')
+                    ),
+                );
+            }
+            InputItem::ImageRef { id } => {
+                if id.is_empty() {
+                    return Err("Invalid image_ref: id cannot be empty".to_string());
+                }
+                let Some(blob) = image_blobs.get(id) else {
+                    return Err(format!("Invalid image_ref: missing blob for id '{id}'"));
+                };
+                out.push(NormalizedItem::Image(blob.clone()));
+            }
+            InputItem::SkillRef { name, args } => {
+                if name.is_empty() {
+                    return Err("Invalid skill_ref: name cannot be empty".to_string());
+                }
+                let mut marker = format!("[SKILL:{name}]");
+                if let Some(args) = args.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    marker.push(' ');
+                    marker.push_str(args);
+                }
+                push_text(&mut out, marker);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn push_text(out: &mut Vec<NormalizedItem>, text: String) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(NormalizedItem::Text(last)) = out.last_mut() {
+        last.push_str(&text);
+    } else {
+        out.push(NormalizedItem::Text(text));
+    }
+}
+
+fn resolve_existing_path(path: &str, expect_file: bool) -> Result<PathBuf, String> {
+    if path.is_empty() {
+        return Err("Path reference cannot be empty".to_string());
+    }
+    let p = Path::new(path);
+    let candidate = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("Failed to resolve current directory: {e}"))?
+            .join(p)
+    };
+    if !candidate.exists() {
+        return Err(format!(
+            "Referenced path does not exist: {}",
+            candidate.display()
+        ));
+    }
+    if expect_file && !candidate.is_file() {
+        return Err(format!(
+            "Referenced path is not a file: {}",
+            candidate.display()
+        ));
+    }
+    if !expect_file && !candidate.is_dir() {
+        return Err(format!(
+            "Referenced path is not a directory: {}",
+            candidate.display()
+        ));
+    }
+    candidate
+        .canonicalize()
+        .map_err(|e| format!("Failed to canonicalize {}: {e}", candidate.display()))
 }
