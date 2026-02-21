@@ -106,9 +106,16 @@ pub struct ToolDefinition {
         skip_serializing_if = "String::is_empty"
     )]
     pub returns: String,
+    /// Short usage examples for discovery UIs / REPL browsing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<String>,
     /// Hidden tools are callable via `_call()` but don't appear in the REPL namespace or agent prompt.
     #[serde(default)]
     pub hidden: bool,
+    /// Whether this tool should be injected into the LLM system prompt.
+    /// Non-injected tools remain callable via discovery/meta helpers.
+    #[serde(default)]
+    pub inject_into_prompt: bool,
 }
 
 impl ToolDefinition {
@@ -233,7 +240,9 @@ mod tests {
             description: String::new(),
             params: vec![ToolParam::typed("x", "int"), ToolParam::typed("y", "str")],
             returns: "bool".into(),
+            examples: vec![],
             hidden: false,
+            inject_into_prompt: true,
         };
         assert_eq!(td.signature(), "foo(x: int, y: str) -> bool");
     }
@@ -245,7 +254,9 @@ mod tests {
             description: String::new(),
             params: vec![ToolParam::optional("limit", "int")],
             returns: "list".into(),
+            examples: vec![],
             hidden: false,
+            inject_into_prompt: true,
         };
         assert_eq!(td.signature(), "bar(limit: int = None) -> list");
     }
@@ -257,7 +268,9 @@ mod tests {
             description: String::new(),
             params: vec![],
             returns: "None".into(),
+            examples: vec![],
             hidden: false,
+            inject_into_prompt: true,
         };
         assert_eq!(td.signature(), "noop() -> None");
     }
@@ -269,7 +282,9 @@ mod tests {
             description: String::new(),
             params: vec![],
             returns: String::new(),
+            examples: vec![],
             hidden: false,
+            inject_into_prompt: true,
         };
         assert_eq!(td.signature(), "f() -> any");
     }
@@ -288,7 +303,9 @@ mod tests {
                 required: true,
             }],
             returns: "str".into(),
+            examples: vec![],
             hidden: false,
+            inject_into_prompt: true,
         }];
         let docs = ToolDefinition::format_tool_docs(&tools);
         assert!(docs.contains("- `read(path: str) -> str`"));

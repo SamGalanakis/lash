@@ -34,7 +34,9 @@ impl ToolProvider for WebSearch {
                 },
             ],
             returns: "list".into(),
+            examples: vec![],
             hidden: false,
+            inject_into_prompt: false,
         }]
     }
 

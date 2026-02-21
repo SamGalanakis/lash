@@ -257,6 +257,25 @@ impl Provider {
         })
     }
 
+    /// Validate model syntax and local catalog availability for this provider.
+    pub fn validate_model(&self, model: &str) -> Result<(), String> {
+        let m = model.trim();
+        if m.is_empty() {
+            return Err("model cannot be empty".to_string());
+        }
+        if m.contains(char::is_whitespace) {
+            return Err("model cannot contain whitespace".to_string());
+        }
+        let allow_unknown = std::env::var("LASH_ALLOW_UNKNOWN_MODELS").ok().as_deref() == Some("1");
+        if self.context_window(m).is_none() && !allow_unknown {
+            return Err(format!(
+                "model `{}` is not in local catalog for this provider (set LASH_ALLOW_UNKNOWN_MODELS=1 to bypass)",
+                m
+            ));
+        }
+        Ok(())
+    }
+
     /// Refresh OAuth tokens if needed. No-op for OpenRouter.
     /// Returns `true` if tokens were updated (caller should persist).
     pub async fn ensure_fresh(&mut self) -> Result<bool, OAuthError> {
@@ -615,6 +634,29 @@ mod tests {
         assert_eq!(
             p.default_agent_model("thorough"),
             Some(("gemini-3.1-pro-preview", None))
+        );
+    }
+
+    #[test]
+    fn validate_model_rejects_empty_and_whitespace() {
+        let p = codex();
+        assert!(p.validate_model("").is_err());
+        assert!(p.validate_model("   ").is_err());
+        assert!(p.validate_model("gpt 5.3").is_err());
+    }
+
+    #[test]
+    fn validate_model_accepts_known_default_model() {
+        let p = codex();
+        assert!(p.validate_model(p.default_model()).is_ok());
+    }
+
+    #[test]
+    fn validate_model_rejects_unknown_model() {
+        let p = openrouter();
+        assert!(
+            p.validate_model("this-model-does-not-exist-xyz-123")
+                .is_err()
         );
     }
 }

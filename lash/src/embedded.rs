@@ -144,7 +144,7 @@ impl RustBridge {
 
     /// Called by Python to invoke a tool. Blocks until the tool result is ready.
     /// We detach from Python so other threads can call Python::attach().
-    fn call_tool(
+    fn invoke_tool(
         &self,
         py: Python<'_>,
         call_id: String,

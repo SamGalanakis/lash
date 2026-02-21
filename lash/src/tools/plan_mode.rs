@@ -48,14 +48,18 @@ impl ToolProvider for PlanMode {
                     .into(),
                 params: vec![],
                 returns: "dict".into(),
+                examples: vec![],
                 hidden: true,
+                inject_into_prompt: false,
             },
             ToolDefinition {
                 name: "exit_plan_mode".into(),
                 description: "Exit plan mode. Returns plan content for user approval.".into(),
                 params: vec![],
                 returns: "dict".into(),
+                examples: vec![],
                 hidden: true,
+                inject_into_prompt: false,
             },
         ]
     }

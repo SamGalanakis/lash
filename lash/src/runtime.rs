@@ -64,6 +64,8 @@ pub struct AgentStateEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_state: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_manifest: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repl_snapshot: Option<Vec<u8>>,
 }
 
@@ -76,6 +78,7 @@ impl Default for AgentStateEnvelope {
             token_usage: TokenUsage::default(),
             task_state: None,
             subagent_state: None,
+            replay_manifest: None,
             repl_snapshot: None,
         }
     }
@@ -268,7 +271,17 @@ impl RuntimeEngine {
         let normalized = match normalize_input_items(&input.items, &input.image_blobs) {
             Ok(items) => items,
             Err(e) => {
-                events.emit(AgentEvent::Error { message: e }).await;
+                events
+                    .emit(AgentEvent::Error {
+                        message: e.clone(),
+                        envelope: Some(crate::agent::ErrorEnvelope {
+                            kind: "input_validation".to_string(),
+                            code: Some("invalid_turn_input".to_string()),
+                            user_message: e,
+                            raw: None,
+                        }),
+                    })
+                    .await;
                 events.emit(AgentEvent::Done).await;
                 return TurnResult {
                     state: self.state.clone(),
@@ -313,7 +326,7 @@ impl RuntimeEngine {
                         **Plan file:** `{}`\n\n\
                         ---\n{}\n---\n\n\
                         **Available context:**\n\
-                        - `_history.search(\"pattern\")` — search planning exploration\n\
+                        - `_history.find(\"query\", mode=\"hybrid\")` — search planning exploration\n\
                         - `_history.user_messages()` — original user requests\n\
                         - `_mem` — persistent memory (fully preserved)\n\n\
                         Execute the plan step by step.",

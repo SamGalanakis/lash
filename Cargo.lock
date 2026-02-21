@@ -1290,6 +1290,7 @@ dependencies = [
  "rand",
  "ratatui",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-util",
  "tracing",

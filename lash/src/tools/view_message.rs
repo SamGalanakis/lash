@@ -23,7 +23,9 @@ impl ToolProvider for ViewMessage {
             description: "Retrieve the original content of a pruned or summarized message part by its archive hash.".into(),
             params: vec![ToolParam::typed("hash", "str")],
             returns: "str".into(),
+            examples: vec![],
             hidden: false,
+            inject_into_prompt: false,
         }]
     }
 

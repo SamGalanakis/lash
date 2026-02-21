@@ -371,7 +371,9 @@ impl ToolProvider for Shell {
                 ),
                 params: vec![ToolParam::typed("command", "str")],
                 returns: "ShellHandle".into(),
+                examples: vec![],
                 hidden: false,
+                inject_into_prompt: true,
             },
             ToolDefinition {
                 name: "shell_result".into(),
@@ -381,7 +383,9 @@ impl ToolProvider for Shell {
                     ToolParam::optional("timeout", "float"),
                 ],
                 returns: "str".into(),
+                examples: vec![],
                 hidden: true,
+                inject_into_prompt: false,
             },
             ToolDefinition {
                 name: "shell_output".into(),
@@ -389,7 +393,9 @@ impl ToolProvider for Shell {
                     .into(),
                 params: vec![ToolParam::typed("id", "str")],
                 returns: "str".into(),
+                examples: vec![],
                 hidden: true,
+                inject_into_prompt: false,
             },
             ToolDefinition {
                 name: "shell_write".into(),
@@ -399,14 +405,18 @@ impl ToolProvider for Shell {
                     ToolParam::typed("input", "str"),
                 ],
                 returns: "None".into(),
+                examples: vec![],
                 hidden: true,
+                inject_into_prompt: false,
             },
             ToolDefinition {
                 name: "shell_kill".into(),
                 description: "Send SIGTERM to a running shell process.".into(),
                 params: vec![ToolParam::typed("id", "str")],
                 returns: "None".into(),
+                examples: vec![],
                 hidden: true,
+                inject_into_prompt: false,
             },
         ]
     }

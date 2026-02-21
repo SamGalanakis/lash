@@ -20,7 +20,9 @@ impl ToolProvider for WriteFile {
                 ToolParam::typed("content", "str"),
             ],
             returns: "str".into(),
+            examples: vec![],
             hidden: false,
+            inject_into_prompt: true,
         }]
     }
 

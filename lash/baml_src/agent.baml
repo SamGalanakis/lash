@@ -118,6 +118,22 @@ template_string DelegationGuide() #"
 Sub-agents share the same working directory — there is no filesystem isolation. Avoid parallel delegates that edit the same files.
 "#
 
+template_string AgentCallGuide() #"
+**Sub-agent recall pattern (`agent_call`)**: Root and medium/high-capability agents should prefer a cheap low-intelligence sub-agent to mine `_history` / `_mem` before deep work.
+
+Use this when you need targeted prior context quickly:
+
+    handle = agent_call(
+        prompt="Scan _history and _mem for prior decisions about auth migration. Return 5 concise bullets with file paths when available.",
+        intelligence="low"
+    )
+    recall = await handle.result()
+    summary = recall.get("result", "")
+    print(summary)
+
+Then continue using `summary` instead of manually spelunking the full history.
+"#
+
 template_string TasksGuide() #"
 ## Task Management
 
@@ -219,6 +235,9 @@ template_string ToolGuide(tool_names: string[]) #"
 {% if "delegate_task" in tool_names %}
 {{ DelegationGuide() }}
 {% endif %}
+{% if "agent_call" in tool_names %}
+{{ AgentCallGuide() }}
+{% endif %}
 {% if "create_task" in tool_names %}
 {{ TasksGuide() }}
 {% endif %}
@@ -282,14 +301,15 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
     **Rules:**
     - `print(...)` — output visible only to you (for debugging/inspection)
     - Variables persist between turns and across code blocks within a turn (REPL semantics)
-    - Call tools directly: `content = read_file(path="f.rs")` — the REPL auto-awaits them
+    - Prompt-injected tools are available as globals (e.g. `read_file(...)`)
+    - All visible tools are available under `T` (e.g. `T.read_file(...)`)
     - Exception: `shell()` and `delegate_*()` are long-running — use `await` on these and their handle methods
     - Only use `asyncio.gather` for `shell()` / `delegate_*()` calls — never for regular tools like `read_file`, `grep`, `ls`
     - Use standard markdown fences (e.g. ` ``` `) for illustrative/pseudocode blocks that should NOT be executed — only `<code>` triggers the REPL
 
     ## Tool Guide
 
-    Tools are Python functions available as globals. Call them directly — the REPL handles async for you.
+    Tools are callable via globals (prompt-injected subset) and via `T.<tool>(...)` (full visible set).
 
     {{ ToolGuide(tool_names) }}
     {% if headless %}
@@ -302,7 +322,7 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
 
     {{ tool_list }}
 
-    Call `list_tools()` for a formatted list at runtime, or `help(tool_name)` for details.
+    Use `list_tools()` / `find_tools("auth", mode="hybrid")` to discover tools at runtime. Use `help(tool_name)` or `help(T.tool_name)` for details.
 
     ## Error Recovery
 
@@ -321,13 +341,17 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
     {% else %}
     - `ask(...)` is unavailable in headless mode
     {% endif %}
-    - `list_tools()` — show all available tools with signatures
+    - `list_tools(query=None, include_hidden=False, injected_only=None)` — return discovered tools with metadata; also prints a compact index
+    - `find_tools(query, mode="hybrid", regex=None, limit=10, include_hidden=False, injected_only=None)` — hybrid/literal/regex tool lookup
+    - `find_history(query, mode="hybrid", regex=None, limit=10, fields=None, since_turn=None)` — ranked lookup over `_history`
+    - `find_mem(query, mode="hybrid", regex=None, limit=10, keys=None)` — ranked lookup over `_mem`
+    - `T` — tool namespace object; call tools as `T.read_file(...)`, and discovery helpers as `T.list_tools(...)` / `T.find_tools(...)` / `T.find_history(...)` / `T.find_mem(...)`
     - `help(tool_name)` — show a tool's typed signature and docs
     - `reset_repl()` — clear REPL namespace and re-register tools
     {% if has_history %}
-    - `_history` — full-fidelity archive of all previous turns (older turns are **dropped from context entirely**, not summarized — `_history` is the only way to access them). Key methods: `_history.user_messages()` (what the user asked), `_history.search("pattern")` (regex over code+output), `_history[i]` (specific turn), `_history.summary()` (overview). **Always check `_history.user_messages()` to recall the user's actual requests.**
+    - `_history` — full-fidelity archive of all previous turns (older turns are **dropped from context entirely**, not summarized — `_history` is the only way to access them). Key methods: `_history.user_messages()` (what the user asked), `_history.find("query", mode="hybrid")` (ranked lookup over turns), `_history[i]` (specific turn), `_history.summary()` (overview). **Always check `_history.user_messages()` to recall the user's actual requests.**
     {% endif %}
-    - `_mem` — persistent key-value memory that survives context pruning. Methods: `_mem.set(key, description, value)` (store anything, stringified), `_mem.get(key)` (retrieve value), `_mem.all()` (list keys + descriptions + turn numbers), `_mem.search("pattern")` (regex over keys, descriptions, values), `_mem.since(turn)` (entries from turn N onward), `_mem.recent(n)` (entries from last n turns), `_mem.delete(key)`.
+    - `_mem` — persistent key-value memory that survives context pruning. Methods: `_mem.set(key, description, value)` (store anything, stringified), `_mem.get(key)` (retrieve value), `_mem.all()` (list keys + descriptions + turn numbers), `_mem.find("query", mode="hybrid")` (ranked lookup over keys/descriptions/values), `_mem.since(turn)` (entries from turn N onward), `_mem.recent(n)` (entries from last n turns), `_mem.delete(key)`.
     {% if project_instructions %}
     ## Project Instructions
 
@@ -353,7 +377,7 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
     - **ASCII by default** — Only introduce non-ASCII characters when the file already uses them or there's clear justification.
     - **Avoid redundant reads** — Variables persist in the REPL. If you already read a file into a variable, use that variable instead of reading it again. Only re-read if you suspect the file changed (e.g. after editing it).
     {% if has_history %}
-    - **Use `_history` to recall past work** — older turns are deleted from context, not summarized. Use `_history.user_messages()` to remember what the user asked, `_history.search()` to find past tool results, `_history[i]` for a specific turn. Never lose track of the user's request.
+    - **Use `_history` to recall past work** — older turns are deleted from context, not summarized. Use `_history.user_messages()` to remember what the user asked, `_history.find("query", mode="hybrid")` to find past tool results, `_history[i]` for a specific turn. Never lose track of the user's request.
     {% endif %}
     - **`print()` is your eyes** — assignments are silent; use `print()` to inspect values. You see all printed output on your next turn.
     - **Never speculate** — if you haven't read a file, don't describe its contents. If a path doesn't exist, say so and investigate.
@@ -424,7 +448,8 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
     **Rules:**
     - `print(...)` — output visible only to you (for debugging/inspection)
     - Variables persist between turns and across code blocks within a turn (REPL semantics)
-    - Call tools directly: `content = read_file(path="f.rs")` — the REPL auto-awaits them
+    - Prompt-injected tools are available as globals (e.g. `read_file(...)`)
+    - All visible tools are available under `T` (e.g. `T.read_file(...)`)
     - Exception: `shell()` and `delegate_*()` are long-running — use `await` on these and their handle methods
     - Only use `asyncio.gather` for `shell()` / `delegate_*()` calls — never for regular tools like `read_file`, `grep`, `ls`
     - Use standard markdown fences (e.g. ` ``` `) for illustrative/pseudocode blocks that should NOT be executed — only `<code>` triggers the REPL
@@ -432,7 +457,7 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
 
     ## Tool Guide
 
-    Tools are Python functions available as globals. Call them directly — the REPL handles async for you.
+    Tools are callable via globals (prompt-injected subset) and via `T.<tool>(...)` (full visible set).
 
     {{ ToolGuide(tool_names) }}
 
@@ -440,7 +465,7 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
 
     {{ tool_list }}
 
-    Call `list_tools()` for a formatted list at runtime, or `help(tool_name)` for details.
+    Use `list_tools()` / `find_tools("auth", mode="hybrid")` to discover tools at runtime. Use `help(tool_name)` or `help(T.tool_name)` for details.
 
     ## Error Recovery
 
@@ -457,14 +482,18 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
     {% if not headless %}
     - `ask(question, options=None)` — ask the user a question, blocks until they respond. Returns str.
     {% endif %}
-    - `list_tools()` — show all available tools with signatures
+    - `list_tools(query=None, include_hidden=False, injected_only=None)` — return discovered tools with metadata; also prints a compact index
+    - `find_tools(query, mode="hybrid", regex=None, limit=10, include_hidden=False, injected_only=None)` — hybrid/literal/regex tool lookup
+    - `find_history(query, mode="hybrid", regex=None, limit=10, fields=None, since_turn=None)` — ranked lookup over `_history`
+    - `find_mem(query, mode="hybrid", regex=None, limit=10, keys=None)` — ranked lookup over `_mem`
+    - `T` — tool namespace object; call tools as `T.read_file(...)`, and discovery helpers as `T.list_tools(...)` / `T.find_tools(...)` / `T.find_history(...)` / `T.find_mem(...)`
     - `help(tool_name)` — show a tool's typed signature and docs
     - `reset_repl()` — clear REPL namespace and re-register tools
     {% if has_history %}
-    - `_history` — full-fidelity archive of all previous turns (older turns are **dropped from context entirely**, not summarized — `_history` is the only way to access them). Key methods: `_history.user_messages()` (what the user asked), `_history.search("pattern")` (regex over code+output), `_history[i]` (specific turn), `_history.summary()` (overview). **Always check `_history.user_messages()` to recall the user's actual requests.**
+    - `_history` — full-fidelity archive of all previous turns (older turns are **dropped from context entirely**, not summarized — `_history` is the only way to access them). Key methods: `_history.user_messages()` (what the user asked), `_history.find("query", mode="hybrid")` (ranked lookup over turns), `_history[i]` (specific turn), `_history.summary()` (overview). **Always check `_history.user_messages()` to recall the user's actual requests.**
     {% endif %}
-    - `_mem` — persistent key-value memory that survives context pruning. Methods: `_mem.set(key, description, value)` (store anything, stringified), `_mem.get(key)` (retrieve value), `_mem.all()` (list keys + descriptions + turn numbers), `_mem.search("pattern")` (regex over keys, descriptions, values), `_mem.since(turn)` (entries from turn N onward), `_mem.recent(n)` (entries from last n turns), `_mem.delete(key)`.
-    - `_history` and `_mem` may contain data inherited from the parent agent. Use `_history.search("pattern")`, `_history.summary()`, `_mem.search("pattern")`, `_mem.all()` to access the parent's accumulated knowledge without needing it repeated in your prompt.
+    - `_mem` — persistent key-value memory that survives context pruning. Methods: `_mem.set(key, description, value)` (store anything, stringified), `_mem.get(key)` (retrieve value), `_mem.all()` (list keys + descriptions + turn numbers), `_mem.find("query", mode="hybrid")` (ranked lookup over keys/descriptions/values), `_mem.since(turn)` (entries from turn N onward), `_mem.recent(n)` (entries from last n turns), `_mem.delete(key)`.
+    - `_history` and `_mem` may contain data inherited from the parent agent. Use `_history.find("query", mode="hybrid")`, `_history.summary()`, `_mem.find("query", mode="hybrid")`, `_mem.all()` to access the parent's accumulated knowledge without needing it repeated in your prompt.
     {% if project_instructions %}
     ## Project Instructions
 
@@ -487,7 +516,7 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
     - **ASCII by default** — Only introduce non-ASCII characters when the file already uses them or there's clear justification.
     - **Avoid redundant reads** — Variables persist in the REPL. If you already read a file into a variable, use that variable instead of reading it again. Only re-read if you suspect the file changed (e.g. after editing it).
     {% if has_history %}
-    - **Use `_history` to recall past work** — older turns are deleted from context, not summarized. Use `_history.user_messages()` to remember what the user asked, `_history.search()` to find past tool results, `_history[i]` for a specific turn. Never lose track of the user's request.
+    - **Use `_history` to recall past work** — older turns are deleted from context, not summarized. Use `_history.user_messages()` to remember what the user asked, `_history.find("query", mode="hybrid")` to find past tool results, `_history[i]` for a specific turn. Never lose track of the user's request.
     {% endif %}
     - **`print()` is your eyes** — assignments are silent; use `print()` to inspect values. You see all printed output on your next turn.
     - **Never speculate** — if you haven't read a file, don't describe its contents. If a path doesn't exist, say so and investigate.

@@ -101,6 +101,21 @@ impl Default for AgentConfig {
     }
 }
 
+/// Standardized error payload surfaced to hosts/UI.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ErrorEnvelope {
+    /// Broad category (e.g. llm_provider, token_refresh, runtime, input_validation).
+    pub kind: String,
+    /// Optional machine-friendly error code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// Human-friendly message safe to show in UI.
+    pub user_message: String,
+    /// Optional raw/source error text (possibly sanitized/truncated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
+}
+
 /// Events emitted during an agent run.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type")]
@@ -153,7 +168,11 @@ pub enum AgentEvent {
     #[serde(rename = "done")]
     Done,
     #[serde(rename = "error")]
-    Error { message: String },
+    Error {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        envelope: Option<ErrorEnvelope>,
+    },
     #[serde(rename = "prompt")]
     Prompt {
         question: String,
@@ -173,6 +192,38 @@ const LLM_RETRY_DELAYS: [std::time::Duration; 3] = [
     std::time::Duration::from_secs(5),
     std::time::Duration::from_secs(10),
 ];
+
+fn make_error_event(
+    kind: &str,
+    code: Option<&str>,
+    user_message: impl Into<String>,
+    raw: Option<String>,
+) -> AgentEvent {
+    let user_message = user_message.into();
+    AgentEvent::Error {
+        message: user_message.clone(),
+        envelope: Some(ErrorEnvelope {
+            kind: kind.to_string(),
+            code: code.map(str::to_string),
+            user_message,
+            raw: raw.map(|s| truncate_raw_error(s.trim())),
+        }),
+    }
+}
+
+fn truncate_raw_error(s: &str) -> String {
+    const MAX_RAW: usize = 4000;
+    if s.len() <= MAX_RAW {
+        return s.to_string();
+    }
+    let keep = MAX_RAW / 2;
+    let omitted = s.len() - MAX_RAW;
+    format!(
+        "{}\n\n... ({omitted} chars omitted) ...\n\n{}",
+        &s[..keep],
+        &s[s.len() - keep..]
+    )
+}
 
 /// CodeAct agent: LLM writes Python code, REPL executes, output feeds back.
 pub struct Agent {
@@ -246,9 +297,12 @@ impl Agent {
                 let _ = crate::provider::save_provider(&self.config.provider);
             }
             Err(e) => {
-                emit!(AgentEvent::Error {
-                    message: format!("Token refresh failed: {}", e),
-                });
+                emit!(make_error_event(
+                    "token_refresh",
+                    Some("refresh_failed"),
+                    format!("Token refresh failed: {}", e),
+                    Some(e.to_string()),
+                ));
                 emit!(AgentEvent::Done);
                 return (messages, run_offset);
             }
@@ -270,9 +324,21 @@ impl Agent {
         // Generate tool docs, context, and dynamic prompt sections
         let all_tools = self.session.tools().definitions();
         let visible: Vec<_> = all_tools.iter().filter(|t| !t.hidden).cloned().collect();
-        let tool_list = ToolDefinition::format_tool_docs(&visible);
+        let prompt_tools: Vec<_> = visible
+            .iter()
+            .filter(|t| t.inject_into_prompt)
+            .cloned()
+            .collect();
+        let mut tool_list = ToolDefinition::format_tool_docs(&prompt_tools);
+        let omitted_tool_count = visible.iter().filter(|t| !t.inject_into_prompt).count();
+        if omitted_tool_count > 0 {
+            let note = format!(
+                "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Use `list_tools()` / `find_tools(...)` to discover them, then call via `T.<tool>(...)`."
+            );
+            tool_list.push_str(&note);
+        }
         let context = build_context();
-        let tool_names: Vec<String> = visible.iter().map(|t| t.name.clone()).collect();
+        let tool_names: Vec<String> = prompt_tools.iter().map(|t| t.name.clone()).collect();
         let instruction_source = Arc::clone(&self.config.instruction_source);
         let project_instructions = instruction_source.system_instructions();
 
@@ -388,7 +454,7 @@ impl Agent {
                         "[Turn {}, {} elapsed. {} earlier turn(s) dropped from context (not summarized). \
                          Use `_history` to access them at full fidelity:\n \
                          `_history.user_messages()` -- what the user asked\n \
-                         `_history.search(\"pattern\")` -- find past results\n \
+                         `_history.find(\"query\", mode=\"hybrid\")` -- find past results\n \
                          `_history[i]` -- specific turn]",
                         iteration, elapsed_str, collapsed_count
                     );
@@ -491,14 +557,17 @@ impl Agent {
                             LLM_MAX_RETRIES + 1,
                             delay.as_secs()
                         );
-                        emit!(AgentEvent::Error {
-                            message: format!(
+                        emit!(make_error_event(
+                            "llm_provider",
+                            Some("retrying"),
+                            format!(
                                 "Retrying in {}s (attempt {}/{})...",
                                 delay.as_secs(),
                                 attempt + 1,
                                 LLM_MAX_RETRIES + 1,
                             ),
-                        });
+                            None,
+                        ));
                         tokio::time::sleep(delay).await;
                     }
 
@@ -560,12 +629,15 @@ impl Agent {
                                 last_error = Some(msg);
                                 continue;
                             }
-                            let err = sanitize_llm_error(&msg);
+                            let mut env = sanitize_llm_error(&msg);
                             let http = last_http_call_summary(&collector)
                                 .map(|s| format!("\n{}", s))
                                 .unwrap_or_default();
+                            let display = format!("LLM error: {}{}", env.user_message, http);
+                            env.user_message = display.clone();
                             emit!(AgentEvent::Error {
-                                message: format!("LLM error: {}{}", err, http),
+                                message: display,
+                                envelope: Some(env),
                             });
                             break 'llm_retry String::new();
                         }
@@ -604,9 +676,12 @@ impl Agent {
                                     &event_tx,
                                 )
                                 .await;
-                                emit!(AgentEvent::Error {
-                                    message: "LLM response timed out".to_string(),
-                                });
+                                emit!(make_error_event(
+                                    "llm_provider",
+                                    Some("timeout"),
+                                    "LLM response timed out",
+                                    None,
+                                ));
                                 emit!(AgentEvent::Done);
                                 return (msgs, iteration);
                             }
@@ -707,12 +782,12 @@ impl Agent {
                             || !acc.combined_output.is_empty()
                             || acc.had_failure
                         {
-                            emit!(AgentEvent::Error {
-                                message: format!(
-                                    "LLM stream error (after partial execution): {}",
-                                    err
-                                ),
-                            });
+                            emit!(make_error_event(
+                                "llm_provider",
+                                Some("stream_error_partial"),
+                                format!("LLM stream error (after partial execution): {}", err),
+                                Some(err),
+                            ));
                             break 'llm_retry response.clone();
                         }
                         if is_retryable(&err) && attempt < LLM_MAX_RETRIES {
@@ -731,12 +806,15 @@ impl Agent {
                             &event_tx,
                         )
                         .await;
-                        let err = sanitize_llm_error(&err);
+                        let mut env = sanitize_llm_error(&err);
                         let http = last_http_call_summary(&collector)
                             .map(|s| format!("\n{}", s))
                             .unwrap_or_default();
+                        let display = format!("LLM error: {}{}", env.user_message, http);
+                        env.user_message = display.clone();
                         emit!(AgentEvent::Error {
-                            message: format!("LLM error: {}{}", err, http),
+                            message: display,
+                            envelope: Some(env),
                         });
                         emit!(AgentEvent::Done);
                         return (msgs, iteration);
@@ -800,13 +878,12 @@ impl Agent {
 
                 // All retries exhausted
                 if let Some(err) = last_error {
-                    emit!(AgentEvent::Error {
-                        message: format!(
-                            "LLM failed after {} retries: {}",
-                            LLM_MAX_RETRIES + 1,
-                            err
-                        ),
-                    });
+                    emit!(make_error_event(
+                        "llm_provider",
+                        Some("retries_exhausted"),
+                        format!("LLM failed after {} retries: {}", LLM_MAX_RETRIES + 1, err),
+                        Some(err),
+                    ));
                 }
                 String::new()
             };
@@ -848,9 +925,12 @@ impl Agent {
                 && !acc.had_failure
             {
                 tracing::warn!("LLM returned empty response");
-                emit!(AgentEvent::Error {
-                    message: "I didn't get a response — please try again.".to_string()
-                });
+                emit!(make_error_event(
+                    "llm_provider",
+                    Some("empty_response"),
+                    "I didn't get a response — please try again.",
+                    None,
+                ));
                 emit!(AgentEvent::Done);
                 return (msgs, iteration);
             }
@@ -1101,11 +1181,11 @@ fn last_http_call_summary(collector: &baml::Collector) -> Option<String> {
     Some(format!("HTTP {} {}", method, url))
 }
 
-/// Trim noisy transport payloads (e.g. HTML error pages) from provider error strings.
-fn sanitize_llm_error(raw: &str) -> String {
+/// Trim noisy transport payloads and build a standardized provider-error envelope.
+fn sanitize_llm_error(raw: &str) -> ErrorEnvelope {
     let trimmed = raw.trim();
     let lower = trimmed.to_ascii_lowercase();
-    if let Some(idx) = lower.find("<html") {
+    let user_message = if let Some(idx) = lower.find("<html") {
         let head = trimmed[..idx]
             .trim_end_matches(|c: char| c == ',' || c.is_whitespace())
             .trim();
@@ -1116,7 +1196,43 @@ fn sanitize_llm_error(raw: &str) -> String {
         }
     } else {
         trimmed.to_string()
+    };
+    ErrorEnvelope {
+        kind: "llm_provider".to_string(),
+        code: infer_provider_error_code(&lower).map(str::to_string),
+        user_message,
+        raw: Some(truncate_raw_error(trimmed)),
     }
+}
+
+fn infer_provider_error_code(lower_msg: &str) -> Option<&'static str> {
+    if lower_msg.contains("timed out") || lower_msg.contains("timeout") {
+        return Some("timeout");
+    }
+    if lower_msg.contains("429") || lower_msg.contains("rate limit") {
+        return Some("rate_limited");
+    }
+    if lower_msg.contains("401") || lower_msg.contains("unauthorized") {
+        return Some("unauthorized");
+    }
+    if lower_msg.contains("403") || lower_msg.contains("forbidden") {
+        return Some("forbidden");
+    }
+    if lower_msg.contains("400") || lower_msg.contains("bad request") {
+        return Some("bad_request");
+    }
+    if lower_msg.contains("404") || lower_msg.contains("not found") {
+        return Some("not_found");
+    }
+    if lower_msg.contains("500")
+        || lower_msg.contains("502")
+        || lower_msg.contains("503")
+        || lower_msg.contains("504")
+        || lower_msg.contains("internal error")
+    {
+        return Some("server_error");
+    }
+    None
 }
 
 /// Read token usage from the collector, emit a TokenUsage event, and log debug info.

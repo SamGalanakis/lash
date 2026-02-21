@@ -43,7 +43,9 @@ impl crate::ToolProvider for FindReplace {
                 },
             ],
             returns: "str".into(),
-            hidden: false,
+            examples: vec![],
+                hidden: false,
+                inject_into_prompt: true,
         }]
     }
 

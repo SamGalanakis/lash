@@ -25,6 +25,7 @@ use lash_core::tools::{
 };
 use lash_core::*;
 use ratatui::DefaultTerminal;
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -287,10 +288,21 @@ async fn main() -> anyhow::Result<()> {
         lash_config.save()?;
     }
 
-    let model = args
+    let requested_model = args
         .model
         .clone()
         .unwrap_or_else(|| lash_config.provider.default_model().to_string());
+    let selection = parse_model_selection(&requested_model).map_err(anyhow::Error::msg)?;
+    validate_model_selection(&lash_config.provider, &selection, args.model.is_some())
+        .map_err(anyhow::Error::msg)?;
+    if args.model.is_none() && !model_known_in_catalog(&lash_config.provider, &selection.model) {
+        eprintln!(
+            "warning: model `{}` is not in local catalog for {}; continuing (default model)",
+            selection.model,
+            provider_label(&lash_config.provider)
+        );
+    }
+    let model = selection.model.clone();
 
     let llm_log_path = std::env::var("LASH_LOG").ok().and_then(|level| {
         let l = level.to_lowercase();
@@ -310,10 +322,12 @@ async fn main() -> anyhow::Result<()> {
     let config = AgentConfig {
         model: model.clone(),
         provider: lash_config.provider.clone(),
-        reasoning_effort: lash_config
-            .provider
-            .reasoning_effort_for_model(&model)
-            .map(str::to_string),
+        reasoning_effort: selection.reasoning_effort.clone().or_else(|| {
+            lash_config
+                .provider
+                .reasoning_effort_for_model(&model)
+                .map(str::to_string)
+        }),
         llm_log_path,
         headless,
         preamble: headless.then(|| HEADLESS_PREAMBLE.to_string()),
@@ -377,8 +391,11 @@ async fn main() -> anyhow::Result<()> {
                 root_cancel.clone(),
             )),
     );
+    let toolset_hash =
+        hash12(&serde_json::to_vec(&tools.definitions()).unwrap_or_else(|_| b"[]".to_vec()));
     let session = Session::new(tools, "root", headless).await?;
 
+    let initial_reasoning_effort = config.reasoning_effort.clone();
     let agent = Agent::new(session, config, Some("root".to_string()));
 
     // ── Headless mode: skip TUI, run agent, print to stdout ──
@@ -410,6 +427,8 @@ async fn main() -> anyhow::Result<()> {
         model,
         session_name,
         Arc::clone(&store),
+        toolset_hash,
+        initial_reasoning_effort,
     )
     .await;
 
@@ -444,7 +463,7 @@ async fn run_headless(agent: Agent, prompt: String) -> anyhow::Result<()> {
     impl EventSink for HeadlessSink {
         async fn emit(&self, event: AgentEvent) {
             match event {
-                AgentEvent::Error { message } => {
+                AgentEvent::Error { message, .. } => {
                     eprintln!("error: {}", message);
                     self.had_error.store(true, Ordering::Relaxed);
                 }
@@ -532,6 +551,173 @@ fn provider_label(provider: &Provider) -> &'static str {
     }
 }
 
+fn provider_id(provider: &Provider) -> &'static str {
+    match provider {
+        Provider::OpenRouter { .. } => "openrouter",
+        Provider::Claude { .. } => "claude",
+        Provider::Codex { .. } => "codex",
+        Provider::GoogleOAuth { .. } => "google_oauth",
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ModelSelection {
+    model: String,
+    reasoning_effort: Option<String>,
+}
+
+fn parse_model_selection(input: &str) -> Result<ModelSelection, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("Model cannot be empty.".to_string());
+    }
+
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    match parts.as_slice() {
+        [model] => Ok(ModelSelection {
+            model: (*model).to_string(),
+            reasoning_effort: None,
+        }),
+        [model, effort] => {
+            let e = effort.to_ascii_lowercase();
+            if matches!(e.as_str(), "low" | "medium" | "high") {
+                Ok(ModelSelection {
+                    model: (*model).to_string(),
+                    reasoning_effort: Some(e),
+                })
+            } else {
+                Err(
+                    "If you provide a second token it must be reasoning effort: low|medium|high."
+                        .to_string(),
+                )
+            }
+        }
+        _ => Err("Model input must be `<model>` or `<model> <effort>`.".to_string()),
+    }
+}
+
+fn model_known_in_catalog(provider: &Provider, model: &str) -> bool {
+    provider.context_window(model).is_some()
+}
+
+fn validate_model_selection(
+    provider: &Provider,
+    selection: &ModelSelection,
+    strict_catalog_check: bool,
+) -> Result<(), String> {
+    if selection.model.trim().is_empty() {
+        return Err("Model cannot be empty.".to_string());
+    }
+    if selection.model.contains(char::is_whitespace) {
+        return Err("Model names cannot contain spaces.".to_string());
+    }
+    if selection.reasoning_effort.is_some() && !matches!(provider, Provider::Codex { .. }) {
+        return Err(
+            "Reasoning suffix (low|medium|high) is only supported on Codex provider.".into(),
+        );
+    }
+    if strict_catalog_check
+        && !model_known_in_catalog(provider, &selection.model)
+        && std::env::var("LASH_ALLOW_UNKNOWN_MODELS").ok().as_deref() != Some("1")
+    {
+        return Err(format!(
+            "Model `{}` is not in the local catalog for {}. \
+Set `LASH_ALLOW_UNKNOWN_MODELS=1` to bypass this check.",
+            selection.model,
+            provider_label(provider),
+        ));
+    }
+    Ok(())
+}
+
+fn hash12(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    format!("{:x}", digest)[..12].to_string()
+}
+
+fn latest_user_prompt_hash(messages: &[Message]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|m| m.role == MessageRole::User)
+        .map(|m| {
+            let text = m
+                .parts
+                .iter()
+                .map(|p| p.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            hash12(text.as_bytes())
+        })
+}
+
+struct ReplayManifest {
+    version: u8,
+    saved_at: String,
+    provider: String,
+    configured_model: String,
+    resolved_model: String,
+    reasoning_effort: Option<String>,
+    toolset_hash: String,
+    prompt_hash: Option<String>,
+    snapshot_hash: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_root_agent_state(
+    store: &Store,
+    state: &mut AgentStateEnvelope,
+    provider: &Provider,
+    configured_model: &str,
+    reasoning_effort: Option<&str>,
+    toolset_hash: &str,
+    prompt_hash: Option<String>,
+    snapshot_hash: Option<String>,
+) {
+    let manifest = ReplayManifest {
+        version: 1,
+        saved_at: chrono::Utc::now().to_rfc3339(),
+        provider: provider_id(provider).to_string(),
+        configured_model: configured_model.to_string(),
+        resolved_model: provider.resolve_model(configured_model),
+        reasoning_effort: reasoning_effort.map(str::to_string),
+        toolset_hash: toolset_hash.to_string(),
+        prompt_hash,
+        snapshot_hash,
+    };
+    let manifest_json = serde_json::json!({
+        "version": manifest.version,
+        "saved_at": manifest.saved_at,
+        "provider": manifest.provider,
+        "configured_model": manifest.configured_model,
+        "resolved_model": manifest.resolved_model,
+        "reasoning_effort": manifest.reasoning_effort,
+        "toolset_hash": manifest.toolset_hash,
+        "prompt_hash": manifest.prompt_hash,
+        "snapshot_hash": manifest.snapshot_hash,
+    });
+    state.replay_manifest = Some(manifest_json.clone());
+    let config_json = serde_json::json!({
+        "manifest": manifest_json,
+        "task_state": state.task_state,
+        "subagent_state": state.subagent_state,
+    })
+    .to_string();
+    let messages_json = serde_json::to_string(&state.messages).unwrap_or_else(|_| "[]".to_string());
+    store.save_agent_state(
+        "root",
+        None,
+        "active",
+        &messages_json,
+        state.iteration as i64,
+        &config_json,
+        state.repl_snapshot.as_deref(),
+        state.token_usage.input_tokens,
+        state.token_usage.output_tokens,
+        state.token_usage.cached_input_tokens,
+    );
+}
+
 fn push_system_message(app: &mut App, msg: impl Into<String>) {
     let msg = msg.into();
     let duplicate = matches!(
@@ -604,9 +790,16 @@ async fn run_app(
     model: String,
     session_name: String,
     store: Arc<Store>,
+    toolset_hash: String,
+    initial_reasoning_effort: Option<String>,
 ) -> anyhow::Result<()> {
-    let mut app = App::new(model, session_name, Some(store));
+    let mut app = App::new(model, session_name, Some(store.clone()));
     app.context_window = provider.context_window(&app.model);
+    let mut current_reasoning_effort = initial_reasoning_effort.or_else(|| {
+        provider
+            .reasoning_effort_for_model(&app.model)
+            .map(str::to_string)
+    });
     app.load_history();
     let mut history: Vec<Message> = Vec::new();
     let mut turn_counter: usize = 0;
@@ -688,9 +881,47 @@ async fn run_app(
             match rx.try_recv() {
                 Ok(done) => {
                     runtime = Some(done.runtime);
-                    history = done.result.state.messages.clone();
-                    turn_counter = done.result.state.iteration;
-                    app.token_usage = done.result.state.token_usage.clone();
+                    let mut state = done.result.state;
+
+                    // Snapshot REPL after each completed turn so resume can restore exact state.
+                    let snapshot_hash = if let Some(rt) = runtime.as_mut() {
+                        match rt.snapshot_repl().await {
+                            Ok(blob) => {
+                                state = rt.export_state();
+                                Some(hash12(&blob))
+                            }
+                            Err(e) => {
+                                push_system_message(
+                                    &mut app,
+                                    format!(
+                                        "Warning: failed to snapshot REPL state for resume: {}",
+                                        e
+                                    ),
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    history = state.messages.clone();
+                    turn_counter = state.iteration;
+                    app.token_usage = state.token_usage.clone();
+
+                    persist_root_agent_state(
+                        &store,
+                        &mut state,
+                        &provider,
+                        &app.model,
+                        current_reasoning_effort.as_deref(),
+                        &toolset_hash,
+                        latest_user_prompt_hash(&history),
+                        snapshot_hash,
+                    );
+                    if let Some(rt) = runtime.as_mut() {
+                        rt.set_state(state.clone());
+                    }
                     runtime_return_rx = None;
                     cancel_token = None;
 
@@ -910,19 +1141,9 @@ async fn run_app(
                                             &mut history,
                                             &mut runtime,
                                             &mut app,
+                                            &mut turn_counter,
                                         )
                                         .await;
-                                        if let Some(rt) = runtime.as_mut() {
-                                            rt.set_state(AgentStateEnvelope {
-                                                agent_id: "root".to_string(),
-                                                messages: history.clone(),
-                                                iteration: turn_counter,
-                                                token_usage: app.token_usage.clone(),
-                                                task_state: None,
-                                                subagent_state: None,
-                                                repl_snapshot: None,
-                                            });
-                                        }
 
                                         app.invalidate_height_cache();
                                         app.scroll_to_bottom();
@@ -1079,21 +1300,44 @@ async fn run_app(
                                             token_usage: app.token_usage.clone(),
                                             task_state: None,
                                             subagent_state: None,
+                                            replay_manifest: None,
                                             repl_snapshot: None,
                                         });
                                     }
                                 }
                                 command::Command::Model(new_model) => {
-                                    if let Some(rt) = runtime.as_mut() {
-                                        rt.set_model(new_model.clone());
-                                        rt.set_reasoning_effort(
-                                            provider
-                                                .reasoning_effort_for_model(&new_model)
-                                                .map(str::to_string),
+                                    let selection = match parse_model_selection(&new_model) {
+                                        Ok(s) => s,
+                                        Err(e) => {
+                                            push_system_message(
+                                                &mut app,
+                                                format!("Invalid model input: {}", e),
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    if let Err(e) =
+                                        validate_model_selection(&provider, &selection, true)
+                                    {
+                                        push_system_message(
+                                            &mut app,
+                                            format!("Model rejected: {}", e),
                                         );
+                                        continue;
                                     }
-                                    app.context_window = provider.context_window(&new_model);
-                                    app.model = new_model;
+                                    let reasoning_effort =
+                                        selection.reasoning_effort.clone().or_else(|| {
+                                            provider
+                                                .reasoning_effort_for_model(&selection.model)
+                                                .map(str::to_string)
+                                        });
+                                    if let Some(rt) = runtime.as_mut() {
+                                        rt.set_model(selection.model.clone());
+                                        rt.set_reasoning_effort(reasoning_effort.clone());
+                                    }
+                                    current_reasoning_effort = reasoning_effort;
+                                    app.context_window = provider.context_window(&selection.model);
+                                    app.model = selection.model;
                                 }
                                 command::Command::ChangeProvider => {
                                     paused.store(true, Ordering::Relaxed);
@@ -1136,24 +1380,65 @@ async fn run_app(
                                             }
                                             provider = new_cfg.provider.clone();
                                             let new_model = provider.default_model().to_string();
-                                            if let Some(rt) = runtime.as_mut() {
-                                                rt.set_provider(provider.clone());
-                                                rt.set_model(new_model.clone());
-                                                rt.set_reasoning_effort(
-                                                    provider
-                                                        .reasoning_effort_for_model(&new_model)
-                                                        .map(str::to_string),
+                                            let selection = match parse_model_selection(&new_model)
+                                            {
+                                                Ok(s) => s,
+                                                Err(e) => {
+                                                    push_system_message(
+                                                        &mut app,
+                                                        format!(
+                                                            "Provider default model is invalid: {}",
+                                                            e
+                                                        ),
+                                                    );
+                                                    continue;
+                                                }
+                                            };
+                                            if let Err(e) = validate_model_selection(
+                                                &provider, &selection, false,
+                                            ) {
+                                                push_system_message(
+                                                    &mut app,
+                                                    format!(
+                                                        "Provider default model failed validation: {}",
+                                                        e
+                                                    ),
+                                                );
+                                                continue;
+                                            }
+                                            if !model_known_in_catalog(&provider, &selection.model)
+                                            {
+                                                push_system_message(
+                                                    &mut app,
+                                                    format!(
+                                                        "Warning: provider default model `{}` is not in local catalog; continuing.",
+                                                        selection.model
+                                                    ),
                                                 );
                                             }
+                                            let reasoning_effort =
+                                                selection.reasoning_effort.clone().or_else(|| {
+                                                    provider
+                                                        .reasoning_effort_for_model(
+                                                            &selection.model,
+                                                        )
+                                                        .map(str::to_string)
+                                                });
+                                            if let Some(rt) = runtime.as_mut() {
+                                                rt.set_provider(provider.clone());
+                                                rt.set_model(selection.model.clone());
+                                                rt.set_reasoning_effort(reasoning_effort.clone());
+                                            }
+                                            current_reasoning_effort = reasoning_effort;
                                             app.context_window =
-                                                provider.context_window(&new_model);
-                                            app.model = new_model.clone();
+                                                provider.context_window(&selection.model);
+                                            app.model = selection.model.clone();
                                             push_system_message(
                                                 &mut app,
                                                 format!(
                                                     "Provider updated: {}\nModel set to default: `{}`",
                                                     provider_label(&provider),
-                                                    new_model
+                                                    selection.model
                                                 ),
                                             );
                                         }
@@ -1212,19 +1497,9 @@ Use `/provider` or `/login` to sign in again without restarting.",
                                                     &mut history,
                                                     &mut runtime,
                                                     &mut app,
+                                                    &mut turn_counter,
                                                 )
                                                 .await;
-                                                if let Some(rt) = runtime.as_mut() {
-                                                    rt.set_state(AgentStateEnvelope {
-                                                        agent_id: "root".to_string(),
-                                                        messages: history.clone(),
-                                                        iteration: turn_counter,
-                                                        token_usage: app.token_usage.clone(),
-                                                        task_state: None,
-                                                        subagent_state: None,
-                                                        repl_snapshot: None,
-                                                    });
-                                                }
 
                                                 app.invalidate_height_cache();
                                                 app.scroll_to_bottom();
@@ -1546,6 +1821,7 @@ async fn restore_agent_state(
     history: &mut Vec<Message>,
     runtime: &mut Option<RuntimeEngine>,
     app: &mut App,
+    turn_counter: &mut usize,
 ) {
     // Derive .db path from .jsonl filename (same stem)
     let stem = jsonl_filename.trim_end_matches(".jsonl");
@@ -1580,6 +1856,7 @@ async fn restore_agent_state(
     };
 
     if let Some(state) = resume_store.load_agent_state("root") {
+        *turn_counter = state.iteration.max(0) as usize;
         // Restore token counts from DB
         if state.input_tokens > 0 || state.output_tokens > 0 {
             app.token_usage = lash_core::TokenUsage {
@@ -1663,6 +1940,23 @@ async fn restore_agent_state(
                 "{} interrupted sub-agent(s) noted in context.",
                 active_subs.len()
             )));
+        }
+
+        // Restore runtime envelope so replay metadata and token counters survive resume.
+        if let Some(rt) = runtime.as_mut() {
+            let replay_manifest = serde_json::from_str::<serde_json::Value>(&state.config_json)
+                .ok()
+                .and_then(|v| v.get("manifest").cloned());
+            rt.set_state(AgentStateEnvelope {
+                agent_id: "root".to_string(),
+                messages: history.clone(),
+                iteration: *turn_counter,
+                token_usage: app.token_usage.clone(),
+                task_state: None,
+                subagent_state: None,
+                replay_manifest,
+                repl_snapshot: state.dill_blob.clone(),
+            });
         }
     } else {
         // No root agent state in .db

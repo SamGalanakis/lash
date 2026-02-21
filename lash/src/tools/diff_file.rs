@@ -27,7 +27,9 @@ impl ToolProvider for DiffFile {
                 },
             ],
             returns: "str".into(),
+            examples: vec![],
             hidden: false,
+            inject_into_prompt: true,
         }]
     }
 

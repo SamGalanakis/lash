@@ -235,7 +235,9 @@ impl ToolProvider for SkillStore {
                     .into(),
                 params: vec![],
                 returns: "list[SkillSummary]".into(),
+                examples: vec![],
                 hidden: false,
+                inject_into_prompt: false,
             },
             ToolDefinition {
                 name: "load_skill".into(),
@@ -244,7 +246,9 @@ impl ToolProvider for SkillStore {
                         .into(),
                 params: vec![ToolParam::typed("name", "str")],
                 returns: "Skill".into(),
+                examples: vec![],
                 hidden: false,
+                inject_into_prompt: false,
             },
             ToolDefinition {
                 name: "read_skill_file".into(),
@@ -259,7 +263,9 @@ impl ToolProvider for SkillStore {
                     },
                 ],
                 returns: "str".into(),
+                examples: vec![],
                 hidden: false,
+                inject_into_prompt: false,
             },
         ]
     }

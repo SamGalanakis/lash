@@ -37,7 +37,9 @@ impl ToolProvider for Grep {
                 },
             ],
             returns: "list".into(),
-            hidden: false,
+            examples: vec![],
+                hidden: false,
+                inject_into_prompt: true,
         }]
     }
 

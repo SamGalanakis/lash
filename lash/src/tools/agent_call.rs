@@ -11,7 +11,7 @@ use crate::{
     PruneState, SandboxMessage, Session, ToolDefinition, ToolParam, ToolProvider, ToolResult,
 };
 
-use super::require_str;
+use super::{CompositeTools, require_str};
 
 /// Intelligence tier determines model choice, capabilities, and turn limits.
 enum Tier {
@@ -145,6 +145,26 @@ impl AgentCall {
         }
     }
 
+    /// Build the toolset for a spawned sub-agent:
+    /// - low: base tools only (no nested delegation)
+    /// - medium/high: base tools + agent_call for nested delegation
+    fn session_tools_for_tier(&self, tier: &Tier) -> Arc<dyn ToolProvider> {
+        if matches!(tier, Tier::Low) {
+            return Arc::clone(&self.tools);
+        }
+
+        Arc::new(
+            CompositeTools::new()
+                .add_arc(Arc::clone(&self.tools))
+                .add(AgentCall::new(
+                    Arc::clone(&self.tools),
+                    &self.config,
+                    self.agent_models.clone(),
+                    self.cancel.clone(),
+                )),
+        )
+    }
+
     /// Spawn a sub-agent in the background and return a handle ID.
     async fn spawn_agent(&self, args: &serde_json::Value) -> ToolResult {
         let prompt = args
@@ -181,16 +201,16 @@ impl AgentCall {
         let agent_id = uuid::Uuid::new_v4().to_string();
         let handle_id = uuid::Uuid::new_v4().to_string();
 
-        // Create a new session with the base tools (no agent_call tools)
-        let mut session =
-            match Session::new(Arc::clone(&self.tools), &agent_id, self.config.headless).await {
-                Ok(s) => s,
-                Err(e) => {
-                    return ToolResult::err_fmt(format_args!(
-                        "Failed to create sub-agent session: {e}"
-                    ));
-                }
-            };
+        // Create a new session with tier-specific tools.
+        let session_tools = self.session_tools_for_tier(&tier);
+        let mut session = match Session::new(session_tools, &agent_id, self.config.headless).await {
+            Ok(s) => s,
+            Err(e) => {
+                return ToolResult::err_fmt(format_args!(
+                    "Failed to create sub-agent session: {e}"
+                ));
+            }
+        };
 
         // If a schema is provided, inject the model class and a validating done() wrapper
         if let Some(ref schema_str) = schema {
@@ -536,7 +556,9 @@ impl ToolProvider for AgentCall {
                     ToolParam::optional("schema", "str"),
                 ],
                 returns: "AgentHandle".into(),
+                examples: vec![],
                 hidden: false,
+                inject_into_prompt: true,
             },
             ToolDefinition {
                 name: "agent_result".into(),
@@ -546,21 +568,27 @@ impl ToolProvider for AgentCall {
                     ToolParam::optional("timeout", "float"),
                 ],
                 returns: "dict".into(),
+                examples: vec![],
                 hidden: true,
+                inject_into_prompt: false,
             },
             ToolDefinition {
                 name: "agent_output".into(),
                 description: "Read accumulated output from a running sub-agent (non-blocking).".into(),
                 params: vec![ToolParam::typed("id", "str")],
                 returns: "str".into(),
+                examples: vec![],
                 hidden: true,
+                inject_into_prompt: false,
             },
             ToolDefinition {
                 name: "agent_kill".into(),
                 description: "Cancel a running sub-agent.".into(),
                 params: vec![ToolParam::typed("id", "str")],
                 returns: "None".into(),
+                examples: vec![],
                 hidden: true,
+                inject_into_prompt: false,
             },
         ]
     }
@@ -664,5 +692,72 @@ mod tests {
         let (m, r) = pick_model_and_reasoning(&config, &models, &Tier::High);
         assert_eq!(m, "gpt-5.3-codex");
         assert_eq!(r.as_deref(), Some("high"));
+    }
+
+    struct MockBaseTool;
+
+    #[async_trait::async_trait]
+    impl ToolProvider for MockBaseTool {
+        fn definitions(&self) -> Vec<ToolDefinition> {
+            vec![ToolDefinition {
+                name: "mock_base".into(),
+                description: "mock".into(),
+                params: vec![],
+                returns: "None".into(),
+                examples: vec![],
+                hidden: false,
+                inject_into_prompt: true,
+            }]
+        }
+
+        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
+            ToolResult::ok(serde_json::json!(null))
+        }
+    }
+
+    fn test_agent_call() -> AgentCall {
+        let config = AgentConfig {
+            model: "custom-parent-model".to_string(),
+            provider: codex_provider(),
+            ..Default::default()
+        };
+        AgentCall::new(
+            Arc::new(MockBaseTool),
+            &config,
+            None,
+            CancellationToken::new(),
+        )
+    }
+
+    #[test]
+    fn low_tier_subagent_tools_do_not_include_agent_call() {
+        let agent_call = test_agent_call();
+        let tools = agent_call.session_tools_for_tier(&Tier::Low);
+        let tool_names: Vec<String> = tools.definitions().into_iter().map(|d| d.name).collect();
+        assert!(!tool_names.iter().any(|n| n == "agent_call"));
+        assert!(tool_names.iter().any(|n| n == "mock_base"));
+    }
+
+    #[test]
+    fn medium_and_high_tier_subagent_tools_include_agent_call() {
+        let agent_call = test_agent_call();
+
+        let medium_tools = agent_call.session_tools_for_tier(&Tier::Medium);
+        let medium_names: Vec<String> = medium_tools
+            .definitions()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert!(medium_names.iter().any(|n| n == "agent_call"));
+        assert!(medium_names.iter().any(|n| n == "mock_base"));
+
+        let high_tools = agent_call.session_tools_for_tier(&Tier::High);
+        let high_names: Vec<String> = high_tools
+            .definitions()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert!(high_names.iter().any(|n| n == "agent_call"));
+        assert!(high_names.iter().any(|n| n == "mock_base"));
     }
 }

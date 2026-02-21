@@ -552,7 +552,7 @@ impl App {
                 self.active_delegate = None;
                 self.scroll_to_bottom();
             }
-            AgentEvent::Error { message } => {
+            AgentEvent::Error { message, .. } => {
                 self.blocks.push(DisplayBlock::Error(message));
                 self.invalidate_height_cache();
                 self.scroll_to_bottom();

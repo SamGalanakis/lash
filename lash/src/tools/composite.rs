@@ -123,7 +123,9 @@ mod tests {
                 description: "Tool A".into(),
                 params: vec![],
                 returns: "str".into(),
+                examples: vec![],
                 hidden: false,
+                inject_into_prompt: true,
             }]
         }
         async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
@@ -141,7 +143,9 @@ mod tests {
                 description: "Tool B".into(),
                 params: vec![ToolParam::typed("x", "int")],
                 returns: "int".into(),
+                examples: vec![],
                 hidden: false,
+                inject_into_prompt: true,
             }]
         }
         async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {

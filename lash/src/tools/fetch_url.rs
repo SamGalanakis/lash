@@ -36,7 +36,9 @@ impl ToolProvider for FetchUrl {
             description: "Extract a webpage URL via Tavily and return text content.".into(),
             params: vec![ToolParam::typed("url", "str")],
             returns: "str".into(),
+            examples: vec![],
             hidden: false,
+            inject_into_prompt: false,
         }]
     }
 
