@@ -123,25 +123,52 @@ impl Message {
     }
 }
 
+fn role_str(role: MessageRole) -> &'static str {
+    match role {
+        MessageRole::User => "user",
+        MessageRole::Assistant => "assistant",
+        MessageRole::System => "system",
+    }
+}
+
+fn render_part_for_chat(role: MessageRole, part: &Part) -> String {
+    let rendered = part.render();
+    match role {
+        MessageRole::System => match part.kind {
+            PartKind::Code => format!("<repl>\n{}\n</repl>", rendered),
+            PartKind::Output => format!("<output>\n{}\n</output>", rendered),
+            PartKind::Error => format!("<error>\n{}\n</error>", rendered),
+            PartKind::Text | PartKind::Prose => rendered,
+        },
+        MessageRole::Assistant => match part.kind {
+            PartKind::Code => format!("<repl>\n{}\n</repl>", rendered),
+            PartKind::Prose | PartKind::Text => rendered,
+            _ => rendered,
+        },
+        MessageRole::User => rendered,
+    }
+}
+
 /// Convert Vec<Message> to Vec<ChatMsg> (for LLM calls).
 pub fn messages_to_chat(msgs: &[Message]) -> Vec<ChatMsg> {
     let mut out: Vec<ChatMsg> = Vec::new();
     for msg in msgs {
-        if msg.role != MessageRole::User {
-            out.push(msg.to_chat_msg());
-            continue;
-        }
-
         if msg.parts.is_empty() {
-            out.push(msg.to_chat_msg());
+            out.push(ChatMsg {
+                role: role_str(msg.role).to_string(),
+                content: String::new(),
+                kind: "text".to_string(),
+                image_idx: -1,
+            });
             continue;
         }
 
         for part in &msg.parts {
-            let rendered = part.render();
+            let rendered = render_part_for_chat(msg.role, part);
             if let Some(idx_str) = rendered.strip_prefix(IMAGE_REF_PREFIX)
                 && let Ok(idx) = idx_str.parse::<i64>()
             {
+                // Route image payloads as user messages for broad provider compatibility.
                 out.push(ChatMsg {
                     role: "user".to_string(),
                     content: String::new(),
@@ -152,7 +179,7 @@ pub fn messages_to_chat(msgs: &[Message]) -> Vec<ChatMsg> {
             }
 
             out.push(ChatMsg {
-                role: "user".to_string(),
+                role: role_str(msg.role).to_string(),
                 content: rendered,
                 kind: "text".to_string(),
                 image_idx: -1,
@@ -160,4 +187,48 @@ pub fn messages_to_chat(msgs: &[Message]) -> Vec<ChatMsg> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn part(kind: PartKind, content: &str) -> Part {
+        Part {
+            id: "p0".to_string(),
+            kind,
+            content: content.to_string(),
+            prune_state: PruneState::Intact,
+        }
+    }
+
+    #[test]
+    fn messages_to_chat_preserves_system_output_wrapping() {
+        let msgs = vec![Message {
+            id: "m0".to_string(),
+            role: MessageRole::System,
+            parts: vec![part(PartKind::Output, "hello")],
+        }];
+
+        let out = messages_to_chat(&msgs);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].role, "system");
+        assert_eq!(out[0].kind, "text");
+        assert_eq!(out[0].content, "<output>\nhello\n</output>");
+    }
+
+    #[test]
+    fn messages_to_chat_turns_system_image_ref_into_image_message() {
+        let msgs = vec![Message {
+            id: "m0".to_string(),
+            role: MessageRole::System,
+            parts: vec![part(PartKind::Text, "__LASH_IMAGE_IDX:3")],
+        }];
+
+        let out = messages_to_chat(&msgs);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].role, "user");
+        assert_eq!(out[0].kind, "image");
+        assert_eq!(out[0].image_idx, 3);
+    }
 }

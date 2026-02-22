@@ -20,6 +20,7 @@ use crate::session::Session;
 pub use message::{Message, MessageRole, Part, PartKind, PruneState, messages_to_chat};
 
 use exec::{ExecAccumulator, execute_and_collect};
+use message::IMAGE_REF_PREFIX;
 
 /// Send an event to the channel if it's still open.
 pub(crate) async fn send_event(tx: &mpsc::Sender<AgentEvent>, event: AgentEvent) {
@@ -920,10 +921,14 @@ impl Agent {
                 return (msgs, iteration);
             }
 
-            // Convert tool images to BAML Image for the next LLM turn
-            for img in &acc.images {
+            // Convert tool images to BAML Image for the next LLM turn and
+            // remember their image indices so we can inject multimodal refs.
+            let mut next_tool_image_refs: Vec<(usize, String)> = Vec::new();
+            let base_image_idx = user_images.len();
+            for (i, img) in acc.images.iter().enumerate() {
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&img.data);
                 tool_images.push(new_image_from_base64(&b64, Some(&img.mime)));
+                next_tool_image_refs.push((base_image_idx + i, img.label.clone()));
             }
 
             // done() = stop signal
@@ -1049,6 +1054,22 @@ impl Agent {
                         content: format!("{}\nFix and retry.", err),
                         prune_state: PruneState::Intact,
                     });
+                }
+                if !next_tool_image_refs.is_empty() {
+                    for (idx, label) in &next_tool_image_refs {
+                        feedback_parts.push(Part {
+                            id: String::new(),
+                            kind: PartKind::Text,
+                            content: format!("[Tool image: {}]", label),
+                            prune_state: PruneState::Intact,
+                        });
+                        feedback_parts.push(Part {
+                            id: String::new(),
+                            kind: PartKind::Text,
+                            content: format!("{IMAGE_REF_PREFIX}{idx}"),
+                            prune_state: PruneState::Intact,
+                        });
+                    }
                 }
 
                 // Push assistant message with prose+code parts

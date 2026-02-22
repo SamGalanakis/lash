@@ -33,6 +33,11 @@ class LashAgent(BaseInstalledAgent):
             command=f"mkdir -p /installed-agent/libs {REMOTE_HOME}/.lash"
         )
 
+        # Optional host-provided libs are disabled by default because they may
+        # be ABI-incompatible with task images (e.g. older glibc in benchmark containers).
+        use_optional_libs = os.environ.get("LASH_BENCH_USE_OPTIONAL_LIBS") == "1"
+        self._use_optional_libs = use_optional_libs
+
         binary_path = Path(os.environ.get("LASH_BENCH_BINARY", str(DEFAULT_LASH_BINARY)))
         if not binary_path.exists():
             raise FileNotFoundError(
@@ -44,7 +49,7 @@ class LashAgent(BaseInstalledAgent):
             target_path="/installed-agent/lash",
         )
 
-        if OPTIONAL_LIBS_DIR.exists():
+        if use_optional_libs and OPTIONAL_LIBS_DIR.exists():
             for lib in OPTIONAL_LIBS_DIR.iterdir():
                 if lib.is_file():
                     await environment.upload_file(
@@ -67,9 +72,11 @@ class LashAgent(BaseInstalledAgent):
 
     def create_run_agent_commands(self, instruction: str) -> list[ExecInput]:
         env: dict[str, str] = {
-            "LD_LIBRARY_PATH": "/installed-agent/libs",
             "HOME": REMOTE_HOME,
         }
+
+        if getattr(self, "_use_optional_libs", False):
+            env["LD_LIBRARY_PATH"] = "/installed-agent/libs"
 
         for key in (
             "OPENROUTER_API_KEY",
@@ -77,6 +84,8 @@ class LashAgent(BaseInstalledAgent):
             "TAVILY_API_KEY",
             "LASH_LOG",
             "LASH_ALLOW_UNKNOWN_MODELS",
+            "LASH_PREAMBLE",
+            "LASH_SOUL",
         ):
             value = os.environ.get(key, "")
             if value:

@@ -71,6 +71,22 @@ struct Args {
     /// Run headlessly: execute prompt, print response to stdout, exit
     #[arg(short = 'p', long = "print")]
     print_prompt: Option<String>,
+
+    /// Override system prompt preamble (identity/role text)
+    #[arg(long, env = "LASH_PREAMBLE", conflicts_with = "preamble_file")]
+    preamble: Option<String>,
+
+    /// Read preamble override from file
+    #[arg(long, value_name = "PATH", conflicts_with = "preamble")]
+    preamble_file: Option<PathBuf>,
+
+    /// Override system prompt soul principles (pass empty string to disable)
+    #[arg(long, env = "LASH_SOUL", conflicts_with = "soul_file")]
+    soul: Option<String>,
+
+    /// Read soul override from file (empty file disables soul)
+    #[arg(long, value_name = "PATH", conflicts_with = "soul")]
+    soul_file: Option<PathBuf>,
 }
 
 struct SessionLogger {
@@ -228,6 +244,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let args = Args::parse();
+    let preamble_override = resolve_prompt_override(
+        args.preamble.clone(),
+        args.preamble_file.as_deref(),
+        "preamble",
+    )?;
+    let soul_override =
+        resolve_prompt_override(args.soul.clone(), args.soul_file.as_deref(), "soul")?;
 
     // Handle --reset before any TUI/provider setup
     if args.reset {
@@ -364,7 +387,8 @@ async fn main() -> anyhow::Result<()> {
         }),
         llm_log_path,
         headless,
-        preamble: headless.then(|| HEADLESS_PREAMBLE.to_string()),
+        preamble: preamble_override.or_else(|| headless.then(|| HEADLESS_PREAMBLE.to_string())),
+        soul: soul_override,
         ..Default::default()
     };
 
@@ -483,6 +507,23 @@ async fn main() -> anyhow::Result<()> {
     cleanup_terminal();
 
     result
+}
+
+fn resolve_prompt_override(
+    inline: Option<String>,
+    file: Option<&std::path::Path>,
+    label: &str,
+) -> anyhow::Result<Option<String>> {
+    if let Some(value) = inline {
+        return Ok(Some(value));
+    }
+    if let Some(path) = file {
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            anyhow::anyhow!("Failed to read {} file {}: {}", label, path.display(), e)
+        })?;
+        return Ok(Some(content));
+    }
+    Ok(None)
 }
 
 /// Run the agent headlessly: send prompt, consume events, print final response to stdout.
