@@ -183,13 +183,16 @@ impl DisplayBlock {
             DisplayBlock::CodeBlock {
                 code, continuation, ..
             } => {
-                if expand_level >= 2 {
-                    // Full: show actual code lines
-                    wrapped_text_height(code, width, 2)
-                } else {
-                    // Level 0 and 1: code blocks hidden
-                    let _ = continuation;
-                    0
+                match expand_level {
+                    0 => {
+                        // Ghost fold: first in group = 1 (summary line), continuation = 0.
+                        if *continuation { 0 } else { 1 }
+                    }
+                    1 => 1, // Compact: one summary line per code block.
+                    _ => {
+                        // Full: show actual code lines
+                        wrapped_text_height(code, width, 2)
+                    }
                 }
             }
             DisplayBlock::ToolCall { continuation, .. } => {
@@ -1681,6 +1684,28 @@ mod tests {
             name: "read_file".into(),
             success: true,
             duration_ms: 50,
+            continuation: true,
+        };
+        assert_eq!(cont.height(0, 80, 0), 0); // absorbed into ghost fold
+        assert_eq!(cont.height(1, 80, 0), 1); // visible at level 1
+        assert_eq!(cont.height(2, 80, 0), 1); // visible at level 2
+    }
+
+    #[test]
+    fn display_block_code_block_height() {
+        let block = DisplayBlock::CodeBlock {
+            code: "print('hi')".into(),
+            continuation: false,
+        };
+        // Level 0: first in group = 1 (ghost fold summary)
+        assert_eq!(block.height(0, 80, 0), 1);
+        // Level 1: compact summary line
+        assert_eq!(block.height(1, 80, 0), 1);
+        // Level 2: full code view
+        assert_eq!(block.height(2, 80, 0), 1);
+
+        let cont = DisplayBlock::CodeBlock {
+            code: "print('hi')".into(),
             continuation: true,
         };
         assert_eq!(cont.height(0, 80, 0), 0); // absorbed into ghost fold

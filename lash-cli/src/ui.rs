@@ -452,13 +452,40 @@ fn build_ghost_fold_summary(blocks: &[DisplayBlock], idx: usize) -> (String, boo
         .collect::<Vec<_>>()
         .join(", ");
     let summary = format!(
-        "\u{203a} {} tool{} \u{b7} {} \u{b7} {}",
+        "+ {} tool{} \u{b7} {} \u{b7} {}",
         total_tools,
         if total_tools != 1 { "s" } else { "" },
         group_text,
         crate::util::format_duration_ms(total_ms)
     );
     (summary, any_failed)
+}
+
+/// Build a ghost fold summary for a group of code blocks starting at `idx`.
+/// `idx` should point to the first (non-continuation) CodeBlock in a group.
+/// Scans forward through contiguous CodeBlock/ToolCall/CodeOutput blocks.
+fn build_code_fold_summary(blocks: &[DisplayBlock], idx: usize) -> String {
+    let mut block_count = 0usize;
+    let mut line_count = 0usize;
+
+    for b in &blocks[idx..] {
+        match b {
+            DisplayBlock::CodeBlock { code, .. } => {
+                block_count += 1;
+                line_count += code.lines().count().max(1);
+            }
+            DisplayBlock::ToolCall { .. } | DisplayBlock::CodeOutput { .. } => continue,
+            _ => break,
+        }
+    }
+
+    format!(
+        "\u{25b6} {} code block{} \u{b7} {} line{}",
+        block_count,
+        if block_count != 1 { "s" } else { "" },
+        line_count,
+        if line_count != 1 { "s" } else { "" }
+    )
 }
 
 fn render_block<'a>(
@@ -566,17 +593,38 @@ fn render_block<'a>(
             }
         }
         DisplayBlock::CodeBlock { code, continuation } => {
-            if expand_level >= 2 {
-                // Full: render code with scribe border
-                for line in code.lines() {
-                    lines.push(Line::from(vec![
-                        Span::styled("\u{2502} ", theme::code_scribe()),
-                        Span::styled(line, theme::code_content()),
-                    ]));
+            match expand_level {
+                0 => {
+                    if !*continuation {
+                        let summary = truncate_to_display_width(
+                            &build_code_fold_summary(blocks, idx),
+                            viewport_width,
+                        );
+                        lines.push(Line::from(Span::styled(summary, theme::code_header())));
+                    }
+                }
+                1 => {
+                    let line_count = code.lines().count().max(1);
+                    let summary = truncate_to_display_width(
+                        &format!(
+                            "\u{25b6} code \u{b7} {} line{}",
+                            line_count,
+                            if line_count != 1 { "s" } else { "" }
+                        ),
+                        viewport_width,
+                    );
+                    lines.push(Line::from(Span::styled(summary, theme::code_header())));
+                }
+                _ => {
+                    // Full: render code with scribe border
+                    for line in code.lines() {
+                        lines.push(Line::from(vec![
+                            Span::styled("\u{2502} ", theme::code_scribe()),
+                            Span::styled(line, theme::code_content()),
+                        ]));
+                    }
                 }
             }
-            // Level 0 and 1: code blocks are hidden (height 0)
-            let _ = continuation;
         }
         DisplayBlock::ToolCall {
             name,
@@ -597,7 +645,7 @@ fn render_block<'a>(
                             if any_failed {
                                 theme::tool_failure()
                             } else {
-                                theme::code_header()
+                                theme::tool_success()
                             },
                         )));
                     }

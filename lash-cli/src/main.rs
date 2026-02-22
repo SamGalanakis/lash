@@ -77,6 +77,7 @@ struct SessionLogger {
     file: std::io::BufWriter<std::fs::File>,
     session_id: String,
     session_name: String,
+    pending_turn: Vec<serde_json::Value>,
 }
 
 impl SessionLogger {
@@ -96,6 +97,7 @@ impl SessionLogger {
             file,
             session_id: session_id.clone(),
             session_name: session_name.clone(),
+            pending_turn: Vec::new(),
         };
         logger.write_json(&serde_json::json!({
             "type": "session_start",
@@ -105,6 +107,7 @@ impl SessionLogger {
             "model": model,
             "cwd": std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()),
         }))?;
+        logger.flush_file()?;
 
         Ok(logger)
     }
@@ -116,8 +119,30 @@ impl SessionLogger {
         Ok(())
     }
 
+    fn flush_file(&mut self) -> anyhow::Result<()> {
+        use std::io::Write;
+        self.file.flush()?;
+        Ok(())
+    }
+
+    fn flush_pending_turn(&mut self) {
+        if self.pending_turn.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_turn);
+        for value in pending {
+            let _ = self.write_json(&value);
+        }
+        let _ = self.flush_file();
+    }
+
     fn log_user_input(&mut self, input: &str) {
-        let _ = self.write_json(&serde_json::json!({
+        // If a previous turn never emitted `done`, discard the in-memory buffer
+        // to preserve the invariant that session logs append only completed turns.
+        if !self.pending_turn.is_empty() {
+            self.pending_turn.clear();
+        }
+        self.pending_turn.push(serde_json::json!({
             "type": "user_input",
             "ts": chrono::Local::now().to_rfc3339(),
             "content": input,
@@ -126,13 +151,22 @@ impl SessionLogger {
 
     fn log_event(&mut self, event: &AgentEvent) {
         let mut value = serde_json::to_value(event).unwrap_or_default();
+        let mut event_type = String::new();
         if let serde_json::Value::Object(ref mut map) = value {
             map.insert(
                 "ts".into(),
                 serde_json::Value::String(chrono::Local::now().to_rfc3339()),
             );
+            event_type = map
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
         }
-        let _ = self.write_json(&value);
+        self.pending_turn.push(value);
+        if event_type == "done" {
+            self.flush_pending_turn();
+        }
     }
 }
 

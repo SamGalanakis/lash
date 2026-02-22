@@ -75,7 +75,7 @@ impl Message {
                 .map(|p| {
                     let rendered = p.render();
                     match p.kind {
-                        PartKind::Code => format!("<code>\n{}\n</code>", rendered),
+                        PartKind::Code => format!("<repl>\n{}\n</repl>", rendered),
                         PartKind::Output => format!("<output>\n{}\n</output>", rendered),
                         PartKind::Error => format!("<error>\n{}\n</error>", rendered),
                         PartKind::Text | PartKind::Prose => rendered,
@@ -84,13 +84,13 @@ impl Message {
                 .collect::<Vec<_>>()
                 .join("\n\n")
         } else if self.role == MessageRole::Assistant {
-            // Assistant messages: prose renders as-is, code wrapped in <code> tags
+            // Assistant messages: prose renders as-is, code wrapped in <repl> tags
             self.parts
                 .iter()
                 .map(|p| {
                     let rendered = p.render();
                     match p.kind {
-                        PartKind::Code => format!("<code>\n{}\n</code>", rendered),
+                        PartKind::Code => format!("<repl>\n{}\n</repl>", rendered),
                         PartKind::Prose | PartKind::Text => rendered,
                         _ => rendered,
                     }

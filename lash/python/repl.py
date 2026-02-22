@@ -1115,20 +1115,18 @@ class ToolNamespace:
     def __repr__(self):
         return f"ToolNamespace({len(self._tool_names)} tools)"
 
-    def list_tools(self, query=None, include_hidden=False, injected_only=None):
+    def list_tools(self, query=None, injected_only=None, **_ignored):
         return _list_tools(
             query=query,
-            include_hidden=include_hidden,
             injected_only=injected_only,
         )
 
-    def find_tools(self, query, mode="hybrid", regex=None, limit=10, include_hidden=False, injected_only=None):
+    def find_tools(self, query, mode="hybrid", regex=None, limit=10, injected_only=None, **_ignored):
         return _find_tools(
             query=query,
             mode=mode,
             regex=regex,
             limit=limit,
-            include_hidden=include_hidden,
             injected_only=injected_only,
         )
 
@@ -1152,11 +1150,9 @@ class ToolNamespace:
         )
 
 
-def _select_tools(query=None, include_hidden=False, injected_only=None):
+def _select_tools(query=None, injected_only=None):
     selected = []
     for t in _tool_defs:
-        if not include_hidden and t.get("hidden", False):
-            continue
         if injected_only is True and not t.get("inject_into_prompt", False):
             continue
         if injected_only is False and t.get("inject_into_prompt", False):
@@ -1180,24 +1176,21 @@ def _print_tool_index(items):
         print(f"  {t.name}{score}{desc}")
 
 
-def _list_tools(query=None, include_hidden=False, injected_only=None):
+def _list_tools(query=None, injected_only=None, **_ignored):
     """Return tool metadata objects. Also prints a compact index."""
     items = _select_tools(
         query=query,
-        include_hidden=include_hidden,
         injected_only=injected_only,
     )
     _print_tool_index(items)
     return items
 
 
-def _find_tools(query, mode="hybrid", regex=None, limit=10, include_hidden=False, injected_only=None):
-    """Find tools using hybrid/literal/regex matching."""
+def _find_tools(query, mode="hybrid", regex=None, limit=10, injected_only=None, **_ignored):
+    """Find tools using hybrid/literal/regex matching across all tools."""
     limit = _coerce_limit(limit)
     candidates = []
     for t in _tool_defs:
-        if not include_hidden and t.get("hidden", False):
-            continue
         if injected_only is True and not t.get("inject_into_prompt", False):
             continue
         if injected_only is False and t.get("inject_into_prompt", False):

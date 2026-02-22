@@ -699,60 +699,34 @@ impl Agent {
                                         let line = response[last_line_start..line_end].to_string();
                                         last_line_start = line_end + 1;
 
-                                        if !in_code_fence {
-                                            // Check for opening fence
-                                            let trimmed = line.trim();
-                                            if trimmed == "<code>" {
-                                                // Flush accumulated prose
-                                                let prose = current_prose.trim().to_string();
-                                                if !prose.is_empty() {
-                                                    prose_parts.push(prose);
-                                                }
-                                                current_prose.clear();
-                                                in_code_fence = true;
-                                                current_code.clear();
-                                            } else {
-                                                // Prose line — emit as TextDelta
-                                                if !current_prose.is_empty() {
-                                                    current_prose.push('\n');
-                                                }
-                                                current_prose.push_str(&line);
-                                                emit!(AgentEvent::TextDelta {
-                                                    content: format!("{}\n", line),
-                                                });
+                                        let parsed = parse_fence_line(
+                                            &line,
+                                            &mut in_code_fence,
+                                            &mut current_prose,
+                                            &mut current_code,
+                                            &mut prose_parts,
+                                        );
+
+                                        if !parsed.prose_delta.is_empty() {
+                                            emit!(AgentEvent::TextDelta {
+                                                content: format!("{}\n", parsed.prose_delta),
+                                            });
+                                        }
+
+                                        if let Some(code) = parsed.code_to_execute {
+                                            code_parts.push(code.clone());
+                                            emit!(AgentEvent::CodeBlock { code: code.clone() });
+                                            if !acc.had_failure {
+                                                execute_and_collect(
+                                                    &mut self.session,
+                                                    &code,
+                                                    &mut acc,
+                                                    &event_tx,
+                                                )
+                                                .await;
                                             }
-                                        } else {
-                                            // Inside code fence
-                                            let trimmed = line.trim();
-                                            if trimmed == "</code>" {
-                                                // Closing fence — execute the code block
-                                                in_code_fence = false;
-                                                let code = current_code.clone();
-                                                if !code.trim().is_empty() {
-                                                    code_parts.push(code.clone());
-                                                    emit!(AgentEvent::CodeBlock {
-                                                        code: code.clone(),
-                                                    });
-                                                    if !acc.had_failure {
-                                                        execute_and_collect(
-                                                            &mut self.session,
-                                                            &code,
-                                                            &mut acc,
-                                                            &event_tx,
-                                                        )
-                                                        .await;
-                                                    }
-                                                    code_executed = true;
-                                                    break; // break line-processing loop
-                                                }
-                                                current_code.clear();
-                                            } else {
-                                                // Code line — accumulate (no TextDelta)
-                                                if !current_code.is_empty() {
-                                                    current_code.push('\n');
-                                                }
-                                                current_code.push_str(&line);
-                                            }
+                                            code_executed = true;
+                                            break; // break line-processing loop
                                         }
                                     }
                                     if code_executed {
@@ -832,8 +806,33 @@ impl Agent {
                         duration_ms: llm_start.elapsed().as_millis() as u64,
                     });
 
-                    // Handle any remaining content after stream ends
-                    // If we were in a code fence (unclosed), execute remaining code
+                    // Handle any remaining incomplete line after stream end.
+                    if last_line_start < response.len() {
+                        let trailing = &response[last_line_start..];
+                        let parsed = parse_fence_line(
+                            trailing,
+                            &mut in_code_fence,
+                            &mut current_prose,
+                            &mut current_code,
+                            &mut prose_parts,
+                        );
+                        if !parsed.prose_delta.is_empty() {
+                            emit!(AgentEvent::TextDelta {
+                                content: parsed.prose_delta,
+                            });
+                        }
+                        if let Some(code) = parsed.code_to_execute {
+                            code_parts.push(code.clone());
+                            emit!(AgentEvent::CodeBlock { code: code.clone() });
+                            if !acc.had_failure {
+                                execute_and_collect(&mut self.session, &code, &mut acc, &event_tx)
+                                    .await;
+                            }
+                            code_executed = true;
+                        }
+                    }
+
+                    // If we ended while still in an unclosed fence, run what we have.
                     if in_code_fence && !current_code.trim().is_empty() {
                         code_parts.push(current_code.clone());
                         emit!(AgentEvent::CodeBlock {
@@ -849,28 +848,14 @@ impl Agent {
                             .await;
                         }
                         current_code.clear();
-                        in_code_fence = false;
+                        code_executed = true;
                     }
 
-                    // Flush any remaining prose
+                    // Flush any remaining prose.
                     let remaining_prose = current_prose.trim().to_string();
                     if !remaining_prose.is_empty() {
                         prose_parts.push(remaining_prose);
-                    }
-                    // Also handle any trailing incomplete line as prose
-                    if last_line_start < response.len() && !in_code_fence {
-                        let trailing = response[last_line_start..].trim().to_string();
-                        if !trailing.is_empty() {
-                            emit!(AgentEvent::TextDelta {
-                                content: trailing.clone(),
-                            });
-                            if let Some(last) = prose_parts.last_mut() {
-                                last.push('\n');
-                                last.push_str(&trailing);
-                            } else {
-                                prose_parts.push(trailing);
-                            }
-                        }
+                        current_prose.clear();
                     }
 
                     break 'llm_retry response.clone();
@@ -1381,6 +1366,163 @@ fn build_assistant_parts(msg_id: &str, prose_parts: &[String], code_parts: &[Str
     }
 
     parts
+}
+
+struct FenceLineParse {
+    prose_delta: String,
+    code_to_execute: Option<String>,
+}
+
+fn append_line_segment(target: &mut String, segment: &str, line_started: &mut bool) {
+    if segment.is_empty() {
+        return;
+    }
+    if !*line_started {
+        if !target.is_empty() {
+            target.push('\n');
+        }
+        *line_started = true;
+    }
+    target.push_str(segment);
+}
+
+/// Parse one streamed line, accepting `<repl>` / `</repl>` tags inline as well as on
+/// standalone lines. Returns prose to emit as a text delta, and at most one code block
+/// to execute (we execute the first completed block, then return control to the model).
+fn parse_fence_line(
+    line: &str,
+    in_code_fence: &mut bool,
+    current_prose: &mut String,
+    current_code: &mut String,
+    prose_parts: &mut Vec<String>,
+) -> FenceLineParse {
+    const OPEN_TAG: &str = "<repl>";
+    const CLOSE_TAG: &str = "</repl>";
+
+    let mut out = FenceLineParse {
+        prose_delta: String::new(),
+        code_to_execute: None,
+    };
+
+    let mut remaining = line;
+    let mut prose_started_this_line = false;
+    let mut code_started_this_line = false;
+
+    loop {
+        if !*in_code_fence {
+            if let Some(idx) = remaining.find(OPEN_TAG) {
+                let before = &remaining[..idx];
+                append_line_segment(current_prose, before, &mut prose_started_this_line);
+                out.prose_delta.push_str(before);
+
+                // Opening fence: flush prose accumulated so far into prose parts.
+                let prose = current_prose.trim().to_string();
+                if !prose.is_empty() {
+                    prose_parts.push(prose);
+                }
+                current_prose.clear();
+                *in_code_fence = true;
+                current_code.clear();
+                code_started_this_line = false;
+                remaining = &remaining[idx + OPEN_TAG.len()..];
+                continue;
+            }
+
+            append_line_segment(current_prose, remaining, &mut prose_started_this_line);
+            out.prose_delta.push_str(remaining);
+            break;
+        }
+
+        if let Some(idx) = remaining.find(CLOSE_TAG) {
+            let before = &remaining[..idx];
+            append_line_segment(current_code, before, &mut code_started_this_line);
+            *in_code_fence = false;
+            let code = std::mem::take(current_code);
+            remaining = &remaining[idx + CLOSE_TAG.len()..];
+            code_started_this_line = false;
+            if !code.trim().is_empty() {
+                out.code_to_execute = Some(code);
+                return out;
+            }
+            continue;
+        }
+
+        append_line_segment(current_code, remaining, &mut code_started_this_line);
+        break;
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_fence_line;
+
+    #[test]
+    fn parses_inline_open_and_close_tags() {
+        let mut in_code_fence = false;
+        let mut current_prose = String::new();
+        let mut current_code = String::new();
+        let mut prose_parts = Vec::new();
+
+        let out = parse_fence_line(
+            "preface <repl>print('x')</repl>",
+            &mut in_code_fence,
+            &mut current_prose,
+            &mut current_code,
+            &mut prose_parts,
+        );
+
+        assert_eq!(out.prose_delta, "preface ");
+        assert_eq!(out.code_to_execute.as_deref(), Some("print('x')"));
+        assert_eq!(prose_parts, vec!["preface"]);
+        assert!(!in_code_fence);
+        assert!(current_prose.is_empty());
+        assert!(current_code.is_empty());
+    }
+
+    #[test]
+    fn parses_inline_open_tag_without_close() {
+        let mut in_code_fence = false;
+        let mut current_prose = String::new();
+        let mut current_code = String::new();
+        let mut prose_parts = Vec::new();
+
+        let out = parse_fence_line(
+            "note<repl>x = 1",
+            &mut in_code_fence,
+            &mut current_prose,
+            &mut current_code,
+            &mut prose_parts,
+        );
+
+        assert_eq!(out.prose_delta, "note");
+        assert!(out.code_to_execute.is_none());
+        assert_eq!(prose_parts, vec!["note"]);
+        assert!(in_code_fence);
+        assert_eq!(current_code, "x = 1");
+    }
+
+    #[test]
+    fn close_tag_executes_accumulated_multiline_code() {
+        let mut in_code_fence = true;
+        let mut current_prose = String::new();
+        let mut current_code = "x = 1".to_string();
+        let mut prose_parts = Vec::new();
+
+        let out = parse_fence_line(
+            "print(x)</repl> trailing text",
+            &mut in_code_fence,
+            &mut current_prose,
+            &mut current_code,
+            &mut prose_parts,
+        );
+
+        assert_eq!(out.code_to_execute.as_deref(), Some("x = 1\nprint(x)"));
+        assert!(out.prose_delta.is_empty());
+        assert!(!in_code_fence);
+        assert!(current_code.is_empty());
+    }
 }
 
 /// Resolve and aggregate context-aware instructions discovered during this turn.

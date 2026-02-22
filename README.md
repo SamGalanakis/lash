@@ -23,6 +23,19 @@ lash --provider                    # force provider setup flow
 lash --reset                       # delete ~/.lash and ~/.cache/lash, then exit
 ```
 
+## Terminal Bench
+
+Use `scripts/run-terminalbench.sh` to run Harbor + Terminal Bench 2 with the in-repo lash adapter.
+
+By default it runs `terminal-bench-sample@2.0`, builds a glibc-compatible binary in `target-bookworm/release/lash`, and uses your local `~/.lash/config.json` inside benchmark containers (so OAuth/OpenRouter config is reused).
+
+```bash
+scripts/run-terminalbench.sh --sample
+scripts/run-terminalbench.sh --full --task "git-*"
+scripts/run-terminalbench.sh --sample --task chess-best-move --model gpt-5.3-codex
+scripts/run-terminalbench.sh --sample --build-mode host   # use host binary instead
+```
+
 ## Slash Commands
 
 | Command | Description |

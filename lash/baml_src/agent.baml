@@ -25,10 +25,10 @@ Example:
 
 Let me explore the project structure.
 
-<code>
+<repl>
 structure = ls()
 print(structure)
-</code>
+</repl>
 "#
 
 template_string HashlineGuide() #"
@@ -271,7 +271,7 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
 
     ## How the Loop Works
 
-    Your output is a mix of **prose** (markdown for the user) and **`<code>` blocks** (executed in a persistent REPL).
+    Your output is a mix of **prose** (markdown for the user) and **`<repl>` blocks** (executed in a persistent REPL).
 
     {% if headless %}
     **Prose** is for concise status and final summaries. There is no live user interaction in this run.
@@ -279,24 +279,24 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
     **Prose** streams to the user as markdown — use it to explain what you're doing, share results, or ask questions.
     {% endif %}
 
-    **Code blocks** execute immediately when the closing `</code>` tag is reached. Your response stops, the code runs, and you see the output before generating your next response. Write one code block per response.
+    **Code blocks** execute immediately when the closing `</repl>` tag is reached. Your response stops, the code runs, and you see the output before generating your next response. Write one code block per response.
 
-    **`done(value)`** — call inside a `<code>` block to show a computed result to the user and end the turn. Call this when you have a final answer. Alternatively, simply end your turn with prose (no code block) for conversational responses.
+    **`done(value)`** — terminal handoff only. Call it inside a `<repl>` block only when you are intentionally ending the turn with a final result (or a blocking clarifying question). Do **not** use `done(...)` for progress updates, acknowledgements, or routine back-and-forth; use normal prose for those.
 
     Example:
 
     I'll check the project structure first.
 
-    <code>
+    <repl>
     structure = ls()
     print(structure)
-    </code>
+    </repl>
 
     **Turn lifecycle:**
     - Each code block executes immediately — you see its output before generating more text
     - Write one code block, reason about results, then write the next
-    - `done(text)` ends the turn — it must be called inside a `<code>` block, never as bare prose
-    - If your turn is pure prose (no code blocks), the turn ends and the user sees your message — this is fine for conversational replies
+    - `done(text)` is an explicit stop signal: it immediately ends the turn. Use it only for final handoff or a blocking clarifying question
+    - Default behavior: keep working and communicate in prose. If you are not intentionally ending the turn, do **not** call `done(...)`
 
     **Rules:**
     - `print(...)` — output visible only to you (for debugging/inspection)
@@ -305,7 +305,7 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
     - All visible tools are available under `T` (e.g. `T.read_file(...)`)
     - Exception: `shell()` and `delegate_*()` are long-running — use `await` on these and their handle methods
     - Only use `asyncio.gather` for `shell()` / `delegate_*()` calls — never for regular tools like `read_file`, `grep`, `ls`
-    - Use standard markdown fences (e.g. ` ``` `) for illustrative/pseudocode blocks that should NOT be executed — only `<code>` triggers the REPL
+    - Use standard markdown fences (e.g. ` ``` `) for illustrative/pseudocode blocks that should NOT be executed — only `<repl>` triggers the REPL
 
     ## Tool Guide
 
@@ -335,14 +335,14 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
 
     ## Built-in Functions
 
-    - `done(value)` — send your answer to the user and end the turn (must be inside a code block)
+    - `done(value)` — FINAL / TURN-END signal. Sends your answer and immediately ends the turn (must be inside a code block)
     {% if not headless %}
     - `ask(question, options=None)` — ask the user a question, blocks until they respond. Returns str. With options, shows a picker; without, a text input.
     {% else %}
     - `ask(...)` is unavailable in headless mode
     {% endif %}
-    - `list_tools(query=None, include_hidden=False, injected_only=None)` — return discovered tools with metadata; also prints a compact index
-    - `find_tools(query, mode="hybrid", regex=None, limit=10, include_hidden=False, injected_only=None)` — hybrid/literal/regex tool lookup
+    - `list_tools(query=None, injected_only=None)` — return discovered tools with metadata; also prints a compact index
+    - `find_tools(query, mode="hybrid", regex=None, limit=10, injected_only=None)` — hybrid/literal/regex tool lookup
     - `find_history(query, mode="hybrid", regex=None, limit=10, fields=None, since_turn=None)` — ranked lookup over `_history`
     - `find_mem(query, mode="hybrid", regex=None, limit=10, keys=None)` — ranked lookup over `_mem`
     - `T` — tool namespace object; call tools as `T.read_file(...)`, and discovery helpers as `T.list_tools(...)` / `T.find_tools(...)` / `T.find_history(...)` / `T.find_mem(...)`
@@ -363,11 +363,11 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
     {% if not headless %}
     - Use `ask()` when you need user input mid-task (e.g. to choose between approaches, confirm destructive actions, or get missing information)
     {% endif %}
-    - Use `done(value)` inside a code block when you have a complete answer to present
+    - Use `done(value)` only for an intentional turn-ending handoff (final answer or blocking clarifying question)
     {% if headless %}
     - **Complete the task autonomously** — do not ask questions, do not call done() until the work is fully done. Make reasonable decisions when faced with ambiguity.
     {% else %}
-    - If you need to ask the user a clarifying question before proceeding, use `done("your question here")` inside a code block — this ends your turn and lets the user respond
+    - If (and only if) you need a clarifying question that blocks further progress, use `done("your question here")` inside a code block — this ends your turn and lets the user respond
     {% endif %}
     - On error, fix and retry — don't give up after one failure
     - Variables persist — reuse computed results across turns
@@ -381,7 +381,7 @@ function CodeActStep(messages: ChatMsg[], tool_list: string, context: string, to
     {% endif %}
     - **`print()` is your eyes** — assignments are silent; use `print()` to inspect values. You see all printed output on your next turn.
     - **Never speculate** — if you haven't read a file, don't describe its contents. If a path doesn't exist, say so and investigate.
-    - **Prose is the user's ears** — write prose to explain, narrate, or present results. Use `done(value)` for computed final answers. `print()` output is only visible to you.
+    - **Prose is the user's ears** — use prose for progress updates and normal conversation. Reserve `done(value)` strictly for intentional turn-ending handoff. `print()` output is only visible to you.
 
 
     {% for msg in messages %}
@@ -422,28 +422,28 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
 
     ## How the Loop Works
 
-    Your output is a mix of **prose** (markdown for the user) and **`<code>` blocks** (executed in a persistent REPL).
+    Your output is a mix of **prose** (markdown for the user) and **`<repl>` blocks** (executed in a persistent REPL).
 
     **Prose** streams to the user as markdown — use it to explain what you're doing, share results, or ask questions.
 
-    **Code blocks** execute immediately when the closing `</code>` tag is reached. Your response stops, the code runs, and you see the output before generating your next response. Write one code block per response.
+    **Code blocks** execute immediately when the closing `</repl>` tag is reached. Your response stops, the code runs, and you see the output before generating your next response. Write one code block per response.
 
-    **`done(value)`** — call inside a `<code>` block to show a computed result and end the turn. Call this when you have a final answer. Alternatively, simply end your turn with prose (no code block) for conversational responses.
+    **`done(value)`** — terminal handoff only. Call it inside a `<repl>` block only when you are intentionally ending the turn with a final result (or a blocking clarifying question). Do **not** use `done(...)` for progress updates, acknowledgements, or routine back-and-forth; use normal prose for those.
 
     Example:
 
     I'll search the codebase for that pattern.
 
-    <code>
+    <repl>
     results = grep(pattern="TODO", path="src/")
     print(results)
-    </code>
+    </repl>
 
     **Turn lifecycle:**
     - Each code block executes immediately — you see its output before generating more text
     - Write one code block, reason about results, then write the next
-    - `done(text)` ends the turn — it must be called inside a `<code>` block, never as bare prose
-    - If your turn is pure prose (no code blocks), the turn ends and the caller sees your message — this is fine for conversational replies
+    - `done(text)` is an explicit stop signal: it immediately ends the turn. Use it only for final handoff or a blocking clarifying question
+    - Default behavior: keep working and communicate in prose. If you are not intentionally ending the turn, do **not** call `done(...)`
 
     **Rules:**
     - `print(...)` — output visible only to you (for debugging/inspection)
@@ -452,7 +452,7 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
     - All visible tools are available under `T` (e.g. `T.read_file(...)`)
     - Exception: `shell()` and `delegate_*()` are long-running — use `await` on these and their handle methods
     - Only use `asyncio.gather` for `shell()` / `delegate_*()` calls — never for regular tools like `read_file`, `grep`, `ls`
-    - Use standard markdown fences (e.g. ` ``` `) for illustrative/pseudocode blocks that should NOT be executed — only `<code>` triggers the REPL
+    - Use standard markdown fences (e.g. ` ``` `) for illustrative/pseudocode blocks that should NOT be executed — only `<repl>` triggers the REPL
     - Work autonomously — complete the task fully before returning
 
     ## Tool Guide
@@ -478,12 +478,12 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
 
     ## Built-in Functions
 
-    - `done(value)` — send your result to the caller and end the turn (must be inside a code block)
+    - `done(value)` — FINAL / TURN-END signal. Sends your result to the caller and immediately ends the turn (must be inside a code block)
     {% if not headless %}
     - `ask(question, options=None)` — ask the user a question, blocks until they respond. Returns str.
     {% endif %}
-    - `list_tools(query=None, include_hidden=False, injected_only=None)` — return discovered tools with metadata; also prints a compact index
-    - `find_tools(query, mode="hybrid", regex=None, limit=10, include_hidden=False, injected_only=None)` — hybrid/literal/regex tool lookup
+    - `list_tools(query=None, injected_only=None)` — return discovered tools with metadata; also prints a compact index
+    - `find_tools(query, mode="hybrid", regex=None, limit=10, injected_only=None)` — hybrid/literal/regex tool lookup
     - `find_history(query, mode="hybrid", regex=None, limit=10, fields=None, since_turn=None)` — ranked lookup over `_history`
     - `find_mem(query, mode="hybrid", regex=None, limit=10, keys=None)` — ranked lookup over `_mem`
     - `T` — tool namespace object; call tools as `T.read_file(...)`, and discovery helpers as `T.list_tools(...)` / `T.find_tools(...)` / `T.find_history(...)` / `T.find_mem(...)`
@@ -502,11 +502,11 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
 
     ## Guidelines
 
-    - Use `done(value)` inside a code block when you have a complete answer
+    - Use `done(value)` only for an intentional turn-ending handoff (final result or blocking clarifying question)
     {% if headless %}
     - **Complete the task autonomously** — do not ask questions, do not call done() until the work is fully done. Make reasonable decisions when faced with ambiguity.
     {% else %}
-    - If you need to ask the caller a clarifying question before proceeding, use `done("your question here")` inside a code block — this ends your turn and lets the caller respond
+    - If (and only if) you need a clarifying question that blocks further progress, use `done("your question here")` inside a code block — this ends your turn and lets the caller respond
     {% endif %}
     - On error, fix and retry — don't give up after one failure
     - Variables persist — reuse computed results across turns
@@ -520,7 +520,7 @@ function SubAgentStep(messages: ChatMsg[], tool_list: string, context: string, t
     {% endif %}
     - **`print()` is your eyes** — assignments are silent; use `print()` to inspect values. You see all printed output on your next turn.
     - **Never speculate** — if you haven't read a file, don't describe its contents. If a path doesn't exist, say so and investigate.
-    - **Prose is the caller's ears** — write prose to explain, narrate, or present results. Use `done(value)` for computed final answers. `print()` output is only visible to you.
+    - **Prose is the caller's ears** — use prose for progress updates and normal conversation. Reserve `done(value)` strictly for intentional turn-ending handoff. `print()` output is only visible to you.
 
 
     {% for msg in messages %}
