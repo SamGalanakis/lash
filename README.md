@@ -31,12 +31,20 @@ LASH_PYTHON_MODE=bundled ./dev.sh  # bundled python-build-standalone
 
 ```bash
 # System Python
-cargo build -p lash-cli --features python-system
+cargo xtask build --python system
 
-# Bundled Python (compile-time config)
+# Bundled Python (auto-bootstrap + auto-configure)
+cargo xtask build --python bundled
+```
+
+`cargo xtask build --python bundled` bootstraps standalone Python as needed and sets
+`PYO3_CONFIG_FILE` automatically for the build invocation.
+
+Manual bundled build (advanced/CI override):
+
+```bash
 ./scripts/fetch-python.sh
-PYO3_CONFIG_FILE=$PWD/target/python-standalone/pyo3-config.txt \
-  cargo build -p lash-cli --features python-bundled
+PYO3_CONFIG_FILE=$PWD/target/python-standalone/pyo3-config.txt cargo build -p lash-cli --features python-bundled
 ```
 
 `PYO3_CONFIG_FILE` only affects build/link time; it is not a runtime requirement.
