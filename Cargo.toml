@@ -1,5 +1,5 @@
 [workspace]
-members = ["lash", "lash-cli"]
+members = ["lash", "lash-cli", "xtask"]
 resolver = "3"
 
 [profile.release]
