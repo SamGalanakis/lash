@@ -41,12 +41,28 @@ fn main() {
     let stable_config = python_dir.join("pyo3-config.txt");
     let _ = std::fs::copy(&config_path, &stable_config);
 
-    if std::env::var("PYO3_CONFIG_FILE").is_err() {
-        eprintln!(
-            "NOTE: Set PYO3_CONFIG_FILE={} to use the standalone Python for static linking.",
-            stable_config.display()
-        );
-        eprintln!("      Without it, PyO3 will link to your system Python.");
+    // Verify that PYO3_CONFIG_FILE is set and points to a real file.
+    // Without it, pyo3-ffi's build script (which ran before ours) will have
+    // linked against the host Python instead of the bundled standalone.
+    match std::env::var("PYO3_CONFIG_FILE") {
+        Err(_) => {
+            panic!(
+                "\n\nPYO3_CONFIG_FILE is not set — PyO3 will link to your system Python \
+                 instead of the bundled standalone.\n\
+                 Fix: run  ./scripts/fetch-python.sh  first, then rebuild.\n\
+                 A .cargo/config.toml that sets PYO3_CONFIG_FILE should already exist; \
+                 if it was deleted, recreate it with:\n\n\
+                 [env]\n\
+                 PYO3_CONFIG_FILE = {{ value = \"target/python-standalone/pyo3-config.txt\", relative = true }}\n"
+            );
+        }
+        Ok(ref p) if !Path::new(p).exists() => {
+            panic!(
+                "\n\nPYO3_CONFIG_FILE is set to {p} but that file does not exist.\n\
+                 Run  ./scripts/fetch-python.sh  to bootstrap the standalone Python.\n"
+            );
+        }
+        Ok(_) => {}
     }
 
     // 4. Bundle stdlib as tar.gz
@@ -86,7 +102,7 @@ fn main() {
 fn ensure_python_standalone(python_dir: &Path, target: &str) -> PathBuf {
     let install_dir = python_dir.join("python").join("install");
     let marker = python_dir.join(".version");
-    let flavor = pbs_flavor(target);
+    let flavor = "pgo+lto-full";
 
     let expected_version = format!("{PYTHON_VERSION}+{PBS_RELEASE}+{flavor}");
     if marker.exists()
@@ -154,7 +170,7 @@ fn ensure_python_standalone(python_dir: &Path, target: &str) -> PathBuf {
         .flatten()
     {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.contains("libpython") && name.contains(".so") {
+        if name.contains("libpython") && (name.contains(".so") || name.contains(".dylib")) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -207,7 +223,9 @@ fn generate_pyo3_config(install_dir: &Path, config_path: &Path, target: &str) {
         "32"
     };
 
-    let (mut shared, mut lib_name, mut build_flags) = default_python_link_settings(target);
+    let mut shared = false;
+    let mut lib_name = format!("python{PYTHON_MAJOR_MINOR}");
+    let mut build_flags = String::new();
 
     // If CI/user already supplied PYO3_CONFIG_FILE, keep our manual link directive aligned
     // with whatever PyO3 is using.
@@ -366,33 +384,6 @@ fn map_target_triple(target: &str) -> &str {
             eprintln!("Warning: unmapped target triple '{target}', using as-is for PBS download");
             target
         }
-    }
-}
-
-fn pbs_flavor(target: &str) -> &str {
-    match target {
-        "x86_64-apple-darwin" | "aarch64-apple-darwin" => "debug-full",
-        "x86_64-unknown-linux-gnu" | "aarch64-unknown-linux-gnu" => "pgo+lto-full",
-        _ => {
-            eprintln!("Warning: unmapped target triple '{target}', defaulting PBS flavor");
-            "pgo+lto-full"
-        }
-    }
-}
-
-fn default_python_link_settings(target: &str) -> (bool, String, String) {
-    if pbs_flavor(target) == "debug-full" {
-        (
-            true,
-            format!("python{PYTHON_MAJOR_MINOR}d"),
-            "Py_DEBUG".to_owned(),
-        )
-    } else {
-        (
-            false,
-            format!("python{PYTHON_MAJOR_MINOR}"),
-            "Py_GIL_DISABLED".to_owned(),
-        )
     }
 }
 

@@ -11,24 +11,12 @@ PBS_RELEASE="20260211"
 TARGET="${1:-$(rustc -vV | sed -n 's/host: //p')}"
 DEST="${2:-target/python-standalone}"
 
-# Map target to PBS variant
+PBS_FLAVOR="pgo+lto-full"
 case "$TARGET" in
-    x86_64-apple-darwin)
-        PBS_TRIPLE="x86_64-apple-darwin"
-        PBS_FLAVOR="debug-full"
-        ;;
-    aarch64-apple-darwin)
-        PBS_TRIPLE="aarch64-apple-darwin"
-        PBS_FLAVOR="debug-full"
-        ;;
-    x86_64-unknown-linux-gnu)
-        PBS_TRIPLE="x86_64-unknown-linux-gnu"
-        PBS_FLAVOR="pgo+lto-full"
-        ;;
-    aarch64-unknown-linux-gnu)
-        PBS_TRIPLE="aarch64-unknown-linux-gnu"
-        PBS_FLAVOR="pgo+lto-full"
-        ;;
+    x86_64-apple-darwin)       PBS_TRIPLE="x86_64-apple-darwin" ;;
+    aarch64-apple-darwin)      PBS_TRIPLE="aarch64-apple-darwin" ;;
+    x86_64-unknown-linux-gnu)  PBS_TRIPLE="x86_64-unknown-linux-gnu" ;;
+    aarch64-unknown-linux-gnu) PBS_TRIPLE="aarch64-unknown-linux-gnu" ;;
     *) echo "Unsupported target: $TARGET"; exit 1 ;;
 esac
 
@@ -74,17 +62,6 @@ if [ -f "$INSTALL_DIR/lib/libedit.a" ] && [ ! -f "$INSTALL_DIR/lib/libreadline.a
     cp "$INSTALL_DIR/lib/libedit.a" "$INSTALL_DIR/lib/libreadline.a"
 fi
 
-# Some debug-full macOS builds ship libpython with a "d" suffix while pyo3
-# still asks for python3.14. Provide compatibility aliases.
-if [ "$PBS_FLAVOR" = "debug-full" ]; then
-    if [ -e "$INSTALL_DIR/lib/libpython${PYTHON_MAJOR_MINOR}d.a" ]; then
-        ln -sf "libpython${PYTHON_MAJOR_MINOR}d.a" "$INSTALL_DIR/lib/libpython${PYTHON_MAJOR_MINOR}.a"
-    fi
-    if [ -e "$INSTALL_DIR/lib/libpython${PYTHON_MAJOR_MINOR}d.dylib" ]; then
-        ln -sf "libpython${PYTHON_MAJOR_MINOR}d.dylib" "$INSTALL_DIR/lib/libpython${PYTHON_MAJOR_MINOR}.dylib"
-    fi
-fi
-
 # Install dill (skip for cross-compilation where we can't execute the binary)
 HOST_TRIPLE="$(rustc -vV | sed -n 's/host: //p')"
 if [ "$TARGET" = "$HOST_TRIPLE" ]; then
@@ -101,11 +78,6 @@ LIB_DIR="${INSTALL_DIR}/lib"
 LIB_NAME="python${PYTHON_MAJOR_MINOR}"
 BUILD_FLAGS=""
 SHARED="false"
-if [ "$PBS_FLAVOR" = "debug-full" ]; then
-    LIB_NAME="python${PYTHON_MAJOR_MINOR}d"
-    BUILD_FLAGS="Py_DEBUG"
-    SHARED="true"
-fi
 # aarch64 linux pgo+lto static libpython contains LLVM bitcode objects, which
 # don't link via the GCC cross-linker used in CI. Use shared libpython there.
 if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then

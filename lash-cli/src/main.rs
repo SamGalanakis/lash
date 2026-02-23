@@ -11,6 +11,15 @@ mod theme;
 mod ui;
 mod util;
 
+// macOS has no uuid_generate_time_safe (Linux-only, from util-linux libuuid).
+// Python's _uuid module references it; --whole-archive pulls in the reference.
+// Return -1 ("not safe") so Python falls back to its pure-Python uuid impl.
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn uuid_generate_time_safe(_out: *mut u8) -> i32 {
+    -1
+}
+
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
