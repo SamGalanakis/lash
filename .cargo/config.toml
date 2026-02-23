@@ -1,2 +1,0 @@
-[env]
-PYO3_CONFIG_FILE = { value = "target/python-standalone/pyo3-config.txt", relative = true }

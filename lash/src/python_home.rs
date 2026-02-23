@@ -1,13 +1,18 @@
 use std::path::PathBuf;
 
-const STDLIB_TAR_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stdlib.tar.gz"));
-const STDLIB_HASH: &str = env!("LASH_PYTHON_STDLIB_HASH");
+#[cfg(feature = "python-bundled")]
 const PYTHON_MAJOR_MINOR: &str = "3.14";
 
-/// Ensure the Python stdlib + dill are extracted to `~/.cache/lash/python-3.14/`.
+#[cfg(feature = "python-bundled")]
+const STDLIB_TAR_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stdlib.tar.gz"));
+#[cfg(feature = "python-bundled")]
+const STDLIB_HASH: &str = env!("LASH_PYTHON_STDLIB_HASH");
+
+/// Ensure the Python home backing files exist for the selected build mode.
 ///
-/// Returns the path to the `lib/` directory (parent of `python3.14/`).
-/// If the cache is already up-to-date (hash matches), this is a no-op.
+/// - `python-bundled`: extracts vendored stdlib + dill into `~/.cache/lash/python-3.14/`
+/// - `python-system`: returns `Unsupported` (no bundled stdlib is available)
+#[cfg(feature = "python-bundled")]
 pub fn ensure_python_home() -> Result<PathBuf, std::io::Error> {
     let cache_dir = dirs::cache_dir()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no cache dir"))?
@@ -44,7 +49,16 @@ pub fn ensure_python_home() -> Result<PathBuf, std::io::Error> {
     Ok(lib_dir)
 }
 
+#[cfg(not(feature = "python-bundled"))]
+pub fn ensure_python_home() -> Result<PathBuf, std::io::Error> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "python-bundled feature not enabled",
+    ))
+}
+
 /// Return the PYTHONHOME value (the directory containing `lib/python3.14/`).
+#[cfg(feature = "python-bundled")]
 pub fn python_home(lib_dir: &std::path::Path) -> PathBuf {
     // lib_dir is ~/.cache/lash/python-3.14/lib
     // PYTHONHOME should be ~/.cache/lash/python-3.14 (parent of lib/)

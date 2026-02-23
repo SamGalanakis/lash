@@ -6,8 +6,6 @@ use std::thread::JoinHandle;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
-use crate::python_home;
-
 const REPL_PY: &str = include_str!("../python/repl.py");
 
 static PYTHON_INIT: Once = Once::new();
@@ -15,15 +13,19 @@ static PYTHON_INIT: Once = Once::new();
 /// Initialize the Python interpreter exactly once (process-wide).
 /// With free-threaded Python 3.14t, there is no GIL — multiple threads
 /// can call `Python::attach()` concurrently after this.
-fn ensure_python_initialized(home_dir: &std::path::Path) {
+fn ensure_python_initialized(home_dir: Option<&std::path::Path>) {
     PYTHON_INIT.call_once(|| {
         unsafe {
-            std::env::set_var("PYTHONHOME", home_dir);
+            if let Some(home_dir) = home_dir {
+                std::env::set_var("PYTHONHOME", home_dir);
+            }
             std::env::set_var("PYTHONNOUSERSITE", "1");
         }
         Python::initialize();
         unsafe {
-            std::env::remove_var("PYTHONHOME");
+            if home_dir.is_some() {
+                std::env::remove_var("PYTHONHOME");
+            }
             std::env::remove_var("PYTHONNOUSERSITE");
         }
     });
@@ -240,13 +242,19 @@ impl PythonRuntime {
     pub fn start() -> Result<Self, std::io::Error> {
         tracing::info!("PythonRuntime::start() called");
 
-        // Extract stdlib to cache before starting the thread
-        let lib_dir = python_home::ensure_python_home()?;
-        let home_dir = python_home::python_home(&lib_dir);
+        #[cfg(feature = "python-bundled")]
+        let home_dir = {
+            // Extract vendored stdlib to cache before starting the thread.
+            let lib_dir = crate::python_home::ensure_python_home()?;
+            Some(crate::python_home::python_home(&lib_dir))
+        };
+
+        #[cfg(not(feature = "python-bundled"))]
+        let home_dir: Option<std::path::PathBuf> = None;
 
         // Initialize Python once (process-wide). With free-threaded 3.14t,
         // subsequent threads can call Python::attach() concurrently.
-        ensure_python_initialized(&home_dir);
+        ensure_python_initialized(home_dir.as_deref());
         tracing::info!("Python initialized, spawning thread");
 
         let (request_tx, request_rx) = std_mpsc::channel::<PythonRequest>();

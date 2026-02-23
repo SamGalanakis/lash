@@ -13,6 +13,51 @@ SCRIPT
 chmod +x ~/.local/bin/lash
 ```
 
+## Python Build Modes
+
+`lash`/`lash-core` support two PyO3 build modes:
+
+- `python-system` (default): link against host Python discovered by PyO3 (and provide `dill` in that Python env).
+- `python-bundled`: link against `python-build-standalone` and bundle stdlib+dill.
+
+### Local dev
+
+```bash
+./dev.sh                           # default: system Python
+LASH_PYTHON_MODE=bundled ./dev.sh  # bundled python-build-standalone
+```
+
+### Build commands
+
+```bash
+# System Python
+cargo build -p lash-cli --features python-system
+
+# Bundled Python (compile-time config)
+./scripts/fetch-python.sh
+PYO3_CONFIG_FILE=$PWD/target/python-standalone/pyo3-config.txt \
+  cargo build -p lash-cli --features python-bundled
+```
+
+`PYO3_CONFIG_FILE` only affects build/link time; it is not a runtime requirement.
+`python-system` mode expects `dill` to be importable at runtime (`python3 -m pip install dill`).
+
+### Downstream (`lash-core`) integration
+
+```toml
+[dependencies]
+lash-core = { path = "../lash", default-features = false, features = ["full", "python-system"] }
+```
+
+For bundled mode in downstream projects:
+
+```toml
+[dependencies]
+lash-core = { path = "../lash", default-features = false, features = ["full", "python-bundled"] }
+```
+
+Then bootstrap bundled Python and set `PYO3_CONFIG_FILE` before running Cargo (same as above).
+
 ## CLI Usage
 
 ```bash
