@@ -45,7 +45,7 @@ jobs:
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install protobuf
+        run: brew install protobuf llvm
 
       - name: Install baml-cli
         run: cargo install baml-cli
@@ -54,19 +54,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: target/python-standalone
-          key: python-standalone-${{ matrix.target }}-3.14.3+20260211-v9
+          key: python-standalone-${{ matrix.target }}-3.14.3+20260211-v12
 
       - name: Fetch python-standalone
         run: ./scripts/fetch-python.sh ${{ matrix.target }}
-
-      - name: Normalize macOS python libs
-        if: runner.os == 'macOS'
-        run: |
-          ls -l target/python-standalone/python/install/lib/libpython* || true
-          ln -sf libpython3.14d.a target/python-standalone/python/install/lib/libpython3.14.a || true
-          ln -sf libpython3.14d.dylib target/python-standalone/python/install/lib/libpython3.14.dylib || true
-          ls -l target/python-standalone/python/install/lib/libpython* || true
-          cat target/python-standalone/pyo3-config.txt
 
       - name: Build
         env:
