@@ -523,29 +523,34 @@ class ShellHandle:
     """Handle to a running shell process.
 
     Returned by shell(command=...). Provides:
-      .result(timeout=None) — wait for exit, return output
+      .wait(timeout=None)   — wait for exit, return output
       .write(text)         — send stdin input
-      .output()            — read accumulated output (non-blocking)
+      .read()              — read accumulated output (non-blocking)
       .kill()              — kill the process group
     """
     def __init__(self, id):
         self.id = id
 
-    async def result(self, timeout=None):
+    async def wait(self, timeout=None):
         """Wait for the process to exit and return its full output."""
-        return await _call("shell_result", {"id": self.id, "timeout": timeout})
+        return await _call("shell_wait", {"id": self.id, "timeout": timeout})
 
     async def write(self, text):
         """Send input to the process's stdin."""
         return await _call("shell_write", {"id": self.id, "input": text})
 
-    async def output(self):
+    async def read(self):
         """Read accumulated output so far (non-blocking)."""
-        return await _call("shell_output", {"id": self.id})
+        return await _call("shell_read", {"id": self.id})
 
     async def kill(self):
         """Kill the process group."""
         return await _call("shell_kill", {"id": self.id})
+
+    def __await__(self):
+        async def _return_self():
+            return self
+        return _return_self().__await__()
 
     def __repr__(self):
         return f"ShellHandle(id='{self.id}')"
@@ -928,7 +933,8 @@ _TYPE_MAP = {
 _tool_defs = []
 _capabilities = {
     "enabled_capabilities": [
-        "core",
+        "core_read",
+        "core_write",
         "shell",
         "tasks",
         "planning",
@@ -1300,18 +1306,28 @@ def _register_tools(tools_json, agent_id="", headless=False, capabilities=None):
             else:
                 param_info.append(p)
 
-        def make_fn(n, d, pinfo, ret):
+        def make_fn(n, d, pinfo, ret, sync_call=False):
             pnames = [p["name"] for p in pinfo]
-
-            async def fn(*args, **kw):
-                params = {}
-                for i, arg in enumerate(args):
-                    if isinstance(arg, dict):
-                        params.update(arg)
-                    elif i < len(pnames):
-                        params[pnames[i]] = arg
-                params.update(kw)
-                return await _call(n, params)
+            if sync_call:
+                def fn(*args, **kw):
+                    params = {}
+                    for i, arg in enumerate(args):
+                        if isinstance(arg, dict):
+                            params.update(arg)
+                        elif i < len(pnames):
+                            params[pnames[i]] = arg
+                    params.update(kw)
+                    return _call_sync(n, params)
+            else:
+                async def fn(*args, **kw):
+                    params = {}
+                    for i, arg in enumerate(args):
+                        if isinstance(arg, dict):
+                            params.update(arg)
+                        elif i < len(pnames):
+                            params[pnames[i]] = arg
+                    params.update(kw)
+                    return await _call(n, params)
 
             fn.__name__ = n
             fn.__qualname__ = n
@@ -1355,7 +1371,7 @@ def _register_tools(tools_json, agent_id="", headless=False, capabilities=None):
             if name == "agent_call":
                 # Wrapped specially below to support schema + parent state transfer.
                 continue
-            fn = make_fn(name, desc, param_info, returns)
+            fn = make_fn(name, desc, param_info, returns, sync_call=(name == "shell"))
             setattr(tools_mod, name, fn)
             exported_tools[name] = fn
             exported_names.append(name)
@@ -1501,6 +1517,7 @@ def _register_tools(tools_json, agent_id="", headless=False, capabilities=None):
     # Auto-await bare imported tools and tools.<name>(...) calls.
     _async_tool_names.clear()
     _async_tool_names.update(tools_mod.__all__)
+    _async_tool_names.discard("shell")
     if skills_enabled and has_skills_tool:
         _async_tool_names.add("search_skills")
     if not _headless:
@@ -1510,6 +1527,7 @@ def _register_tools(tools_json, agent_id="", headless=False, capabilities=None):
         _async_tool_names.add("exit_plan_mode")
     _async_method_names = set(_BASE_ASYNC_METHOD_NAMES)
     _async_method_names.update(tools_mod.__all__)
+    _async_method_names.discard("shell")
     _helper_binding_names = {
         "list_tools",
         "search_tools",
@@ -1543,7 +1561,7 @@ _BASE_ASYNC_METHOD_NAMES = {
     # Task
     "claim", "start", "done", "cancel", "delete", "block", "wait_on", "update",
     # ShellHandle
-    "result", "write", "output", "kill",
+    "wait", "read", "write", "kill",
     # SkillSummary
     "load",
     # Skill

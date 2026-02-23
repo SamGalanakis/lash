@@ -1,17 +1,18 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use serde_json::json;
 use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
+use crate::capabilities::{CapabilityId, tools_for_capability};
 use crate::provider::AgentModels;
 use crate::{
     Agent, AgentConfig, AgentEvent, Message, MessageRole, Part, PartKind, ProgressSender,
     PruneState, SandboxMessage, Session, ToolDefinition, ToolParam, ToolProvider, ToolResult,
 };
 
-use super::{CompositeTools, require_str};
+use super::{CompositeTools, FilteredTools, require_str};
 
 /// Intelligence tier determines model choice, capabilities, and turn limits.
 enum Tier {
@@ -130,8 +131,16 @@ impl AgentCall {
     fn build_agent_config(&self, tier: &Tier) -> AgentConfig {
         let (model, reasoning_effort) =
             pick_model_and_reasoning(&self.config, &self.agent_models, tier);
+        let capabilities = if matches!(tier, Tier::Low) {
+            self.config
+                .capabilities
+                .clone()
+                .disable(CapabilityId::CoreWrite)
+        } else {
+            self.config.capabilities.clone()
+        };
         AgentConfig {
-            capabilities: self.config.capabilities.clone(),
+            capabilities,
             model,
             reasoning_effort,
             provider: self.config.provider.clone(),
@@ -146,11 +155,29 @@ impl AgentCall {
     }
 
     /// Build the toolset for a spawned sub-agent:
-    /// - low: base tools only (no nested delegation)
+    /// - low: read-only base tools only (no nested delegation)
     /// - medium/high: base tools + agent_call for nested delegation
     fn session_tools_for_tier(&self, tier: &Tier) -> Arc<dyn ToolProvider> {
         if matches!(tier, Tier::Low) {
-            return Arc::clone(&self.tools);
+            let write_tools: std::collections::HashSet<&str> =
+                tools_for_capability(CapabilityId::CoreWrite)
+                    .iter()
+                    .copied()
+                    .collect();
+            let allowed: BTreeSet<String> = self
+                .tools
+                .definitions()
+                .into_iter()
+                .map(|d| d.name)
+                .filter(|name| !write_tools.contains(name.as_str()))
+                .filter(|name| {
+                    !matches!(
+                        name.as_str(),
+                        "agent_call" | "agent_result" | "agent_output" | "agent_kill"
+                    )
+                })
+                .collect();
+            return Arc::new(FilteredTools::new(Arc::clone(&self.tools), allowed));
         }
 
         Arc::new(
@@ -556,7 +583,7 @@ impl ToolProvider for AgentCall {
         vec![
             ToolDefinition {
                 name: "agent_call".into(),
-                description: r#"Spawn a sub-agent to perform a task. Returns an AgentHandle with .result(), .output(), .kill(). The sub-agent inherits your _mem and _history (read-only). Use await on .result() to get {"result": str, "context": [str]}."#.into(),
+                description: r#"Spawn a sub-agent to perform a task. Returns an AgentHandle with .result(), .output(), .kill(). Use intelligence="low" for fast read-only tasks (lookup/summarize), and medium/high for edits/refactors. Sub-agents inherit your _mem and _history (read-only). Use await on .result() to get {"result": str, "context": [str]}."#.into(),
                 params: vec![
                     ToolParam::typed("prompt", "str"),
                     ToolParam::typed("intelligence", "str"),
@@ -706,15 +733,35 @@ mod tests {
     #[async_trait::async_trait]
     impl ToolProvider for MockBaseTool {
         fn definitions(&self) -> Vec<ToolDefinition> {
-            vec![ToolDefinition {
-                name: "mock_base".into(),
-                description: "mock".into(),
-                params: vec![],
-                returns: "None".into(),
-                examples: vec![],
-                hidden: false,
-                inject_into_prompt: true,
-            }]
+            vec![
+                ToolDefinition {
+                    name: "mock_base".into(),
+                    description: "mock".into(),
+                    params: vec![],
+                    returns: "None".into(),
+                    examples: vec![],
+                    hidden: false,
+                    inject_into_prompt: true,
+                },
+                ToolDefinition {
+                    name: "read_file".into(),
+                    description: "mock read".into(),
+                    params: vec![],
+                    returns: "str".into(),
+                    examples: vec![],
+                    hidden: false,
+                    inject_into_prompt: true,
+                },
+                ToolDefinition {
+                    name: "write_file".into(),
+                    description: "mock write".into(),
+                    params: vec![],
+                    returns: "None".into(),
+                    examples: vec![],
+                    hidden: false,
+                    inject_into_prompt: true,
+                },
+            ]
         }
 
         async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
@@ -743,6 +790,8 @@ mod tests {
         let tool_names: Vec<String> = tools.definitions().into_iter().map(|d| d.name).collect();
         assert!(!tool_names.iter().any(|n| n == "agent_call"));
         assert!(tool_names.iter().any(|n| n == "mock_base"));
+        assert!(tool_names.iter().any(|n| n == "read_file"));
+        assert!(!tool_names.iter().any(|n| n == "write_file"));
     }
 
     #[test]
@@ -757,6 +806,7 @@ mod tests {
             .collect();
         assert!(medium_names.iter().any(|n| n == "agent_call"));
         assert!(medium_names.iter().any(|n| n == "mock_base"));
+        assert!(medium_names.iter().any(|n| n == "write_file"));
 
         let high_tools = agent_call.session_tools_for_tier(&Tier::High);
         let high_names: Vec<String> = high_tools
@@ -766,5 +816,15 @@ mod tests {
             .collect();
         assert!(high_names.iter().any(|n| n == "agent_call"));
         assert!(high_names.iter().any(|n| n == "mock_base"));
+        assert!(high_names.iter().any(|n| n == "write_file"));
+    }
+
+    #[test]
+    fn low_tier_subagent_config_is_read_only() {
+        let agent_call = test_agent_call();
+        let low = agent_call.build_agent_config(&Tier::Low);
+        let medium = agent_call.build_agent_config(&Tier::Medium);
+        assert!(!low.capabilities.enabled(CapabilityId::CoreWrite));
+        assert!(medium.capabilities.enabled(CapabilityId::CoreWrite));
     }
 }

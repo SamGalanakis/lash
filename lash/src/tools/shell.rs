@@ -188,7 +188,7 @@ impl Shell {
     }
 
     /// Wait for process exit, streaming progress. Returns final output.
-    async fn shell_result(
+    async fn shell_wait(
         &self,
         id: &str,
         timeout: Option<f64>,
@@ -283,7 +283,7 @@ impl Shell {
     }
 
     /// Drain accumulated output without waiting (non-blocking).
-    fn shell_output(&self, id: &str) -> ToolResult {
+    fn shell_read(&self, id: &str) -> ToolResult {
         let procs = self.processes.lock().unwrap();
         let proc = match procs.get(id) {
             Some(p) => p,
@@ -369,7 +369,7 @@ impl ToolProvider for Shell {
             ToolDefinition {
                 name: "shell".into(),
                 description: format!(
-                    "Run a command via {shell_name}. Returns a ShellHandle with .result(), .output(), .write(), .kill()."
+                    "Run a command via {shell_name}. Returns a ShellHandle with .wait(), .read(), .write(), .kill()."
                 ),
                 params: vec![ToolParam::typed("command", "str")],
                 returns: "ShellHandle".into(),
@@ -378,7 +378,7 @@ impl ToolProvider for Shell {
                 inject_into_prompt: true,
             },
             ToolDefinition {
-                name: "shell_result".into(),
+                name: "shell_wait".into(),
                 description: "Wait for a shell process to exit and return its output.".into(),
                 params: vec![
                     ToolParam::typed("id", "str"),
@@ -390,7 +390,7 @@ impl ToolProvider for Shell {
                 inject_into_prompt: false,
             },
             ToolDefinition {
-                name: "shell_output".into(),
+                name: "shell_read".into(),
                 description: "Read accumulated output from a running shell process (non-blocking)."
                     .into(),
                 params: vec![ToolParam::typed("id", "str")],
@@ -435,20 +435,20 @@ impl ToolProvider for Shell {
                     Err(e) => ToolResult::err_fmt(e),
                 }
             }
-            "shell_result" => {
+            "shell_wait" => {
                 let id = match require_str(args, "id") {
                     Ok(s) => s,
                     Err(e) => return e,
                 };
                 let timeout = args.get("timeout").and_then(|v| v.as_f64());
-                self.shell_result(id, timeout, None).await
+                self.shell_wait(id, timeout, None).await
             }
-            "shell_output" => {
+            "shell_read" => {
                 let id = match require_str(args, "id") {
                     Ok(s) => s,
                     Err(e) => return e,
                 };
-                self.shell_output(id)
+                self.shell_read(id)
             }
             "shell_write" => {
                 let id = match require_str(args, "id") {
@@ -478,13 +478,13 @@ impl ToolProvider for Shell {
         args: &serde_json::Value,
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
-        if name == "shell_result" {
+        if name == "shell_wait" {
             let id = match require_str(args, "id") {
                 Ok(s) => s,
                 Err(e) => return e,
             };
             let timeout = args.get("timeout").and_then(|v| v.as_f64());
-            self.shell_result(id, timeout, progress).await
+            self.shell_wait(id, timeout, progress).await
         } else {
             self.execute(name, args).await
         }
@@ -509,7 +509,7 @@ mod tests {
         let id = handle["id"].as_str().unwrap();
 
         let result = shell
-            .execute("shell_result", &json!({"id": id, "timeout": 5.0}))
+            .execute("shell_wait", &json!({"id": id, "timeout": 5.0}))
             .await;
         assert!(result.success);
         assert!(result.result.as_str().unwrap().contains("hello"));
@@ -522,7 +522,7 @@ mod tests {
         let id = handle.result["id"].as_str().unwrap();
 
         let result = shell
-            .execute("shell_result", &json!({"id": id, "timeout": 5.0}))
+            .execute("shell_wait", &json!({"id": id, "timeout": 5.0}))
             .await;
         assert!(!result.success);
         assert!(result.result.as_str().unwrap().contains("exit code: 1"));
@@ -537,7 +537,7 @@ mod tests {
         let id = handle.result["id"].as_str().unwrap();
 
         let result = shell
-            .execute("shell_result", &json!({"id": id, "timeout": 0.2}))
+            .execute("shell_wait", &json!({"id": id, "timeout": 0.2}))
             .await;
         assert!(!result.success);
         assert!(result.result.as_str().unwrap().contains("timed out"));
@@ -560,7 +560,7 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        let result = shell.execute("shell_output", &json!({"id": id})).await;
+        let result = shell.execute("shell_read", &json!({"id": id})).await;
         assert!(result.success);
         assert!(result.result.as_str().unwrap().contains("line1"));
 
@@ -581,7 +581,7 @@ mod tests {
         assert!(write_result.success);
 
         let result = shell
-            .execute("shell_result", &json!({"id": id, "timeout": 5.0}))
+            .execute("shell_wait", &json!({"id": id, "timeout": 5.0}))
             .await;
         assert!(result.success);
         assert!(result.result.as_str().unwrap().contains("got:hello"));
@@ -598,7 +598,7 @@ mod tests {
         let result = shell.execute("shell_kill", &json!({"id": id})).await;
         assert!(result.success);
 
-        let result = shell.execute("shell_result", &json!({"id": id})).await;
+        let result = shell.execute("shell_wait", &json!({"id": id})).await;
         assert!(!result.success);
     }
 
@@ -612,11 +612,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let result = shell
-            .execute_streaming(
-                "shell_result",
-                &json!({"id": id, "timeout": 5.0}),
-                Some(&tx),
-            )
+            .execute_streaming("shell_wait", &json!({"id": id, "timeout": 5.0}), Some(&tx))
             .await;
         assert!(result.success);
 
@@ -644,7 +640,7 @@ mod tests {
         let handle = shell.execute("shell", &json!({"command": "pwd"})).await;
         let id = handle.result["id"].as_str().unwrap();
         let result = shell
-            .execute("shell_result", &json!({"id": id, "timeout": 5.0}))
+            .execute("shell_wait", &json!({"id": id, "timeout": 5.0}))
             .await;
         assert!(result.success);
         assert!(result.result.as_str().unwrap().contains("/tmp"));
@@ -659,7 +655,7 @@ mod tests {
         let id = handle.result["id"].as_str().unwrap();
 
         // No timeout — should still return once process exits
-        let result = shell.execute("shell_result", &json!({"id": id})).await;
+        let result = shell.execute("shell_wait", &json!({"id": id})).await;
         assert!(result.success);
         assert!(result.result.as_str().unwrap().contains("done"));
     }

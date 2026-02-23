@@ -8,7 +8,8 @@ use crate::ToolDefinition;
 )]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityId {
-    Core,
+    CoreRead,
+    CoreWrite,
     Shell,
     Tasks,
     Planning,
@@ -23,7 +24,8 @@ pub enum CapabilityId {
 impl CapabilityId {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Core => "core",
+            Self::CoreRead => "core_read",
+            Self::CoreWrite => "core_write",
             Self::Shell => "shell",
             Self::Tasks => "tasks",
             Self::Planning => "planning",
@@ -87,21 +89,21 @@ pub struct CapabilityDefinition {
 
 pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
     CapabilityDefinition {
-        id: CapabilityId::Core,
-        name: "Core",
-        description: "Core file navigation/editing and tool discovery.",
+        id: CapabilityId::CoreRead,
+        name: "Core Read",
+        description: "Core file navigation and discovery.",
         prompt_section: None,
         helper_bindings: &[],
-        tools: &[
-            "read_file",
-            "write_file",
-            "edit_file",
-            "find_replace",
-            "glob",
-            "grep",
-            "ls",
-            "search_tools",
-        ],
+        tools: &["read_file", "glob", "grep", "ls", "search_tools"],
+        enabled_by_default: true,
+    },
+    CapabilityDefinition {
+        id: CapabilityId::CoreWrite,
+        name: "Core Write",
+        description: "Core file mutation tools.",
+        prompt_section: None,
+        helper_bindings: &[],
+        tools: &["write_file", "edit_file", "find_replace"],
         enabled_by_default: true,
     },
     CapabilityDefinition {
@@ -112,8 +114,8 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
         helper_bindings: &[],
         tools: &[
             "shell",
-            "shell_result",
-            "shell_output",
+            "shell_wait",
+            "shell_read",
             "shell_write",
             "shell_kill",
         ],
@@ -154,7 +156,7 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
         name: "Delegation",
         description: "Sub-agent orchestration via agent_call.",
         prompt_section: Some(
-            "## Delegation\n\nUse `agent_call` for scoped sub-tasks. Prefer low-intelligence delegates for lookup work, and avoid overlapping file edits across concurrent delegates.",
+            "## Delegation\n\nUse `agent_call` for scoped sub-tasks. Prefer low-intelligence delegates for read-only lookup/summarization work, and avoid overlapping file edits across concurrent delegates.",
         ),
         helper_bindings: &[],
         tools: &["agent_call", "agent_result", "agent_output", "agent_kill"],

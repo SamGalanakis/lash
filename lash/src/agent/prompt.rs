@@ -207,8 +207,20 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
         PromptSectionName::Identity => Some(match profile {
             PromptProfile::RootInteractive => "You are an AI coding assistant operating in a persistent Python REPL with tool access.\nYou power lash, a terminal-based coding agent. Understand the codebase, make changes, run commands, and report outcomes clearly.".to_string(),
             PromptProfile::RootHeadless => "You are an autonomous AI coding agent running in non-interactive mode.\nComplete the task end-to-end without asking for user input.".to_string(),
-            PromptProfile::SubAgentInteractive => "You are a sub-agent inside lash working on a delegated task.\nUse tools decisively and return results to the caller via done() when complete.".to_string(),
-            PromptProfile::SubAgentHeadless => "You are a headless sub-agent inside lash working on a delegated task.\nOperate autonomously and return final results via done() only when complete.".to_string(),
+            PromptProfile::SubAgentInteractive => {
+                if input.capabilities.enabled(CapabilityId::CoreWrite) {
+                    "You are a sub-agent inside lash working on a delegated task.\nUse tools decisively and return results to the caller via done() when complete.".to_string()
+                } else {
+                    "You are a read-only sub-agent inside lash working on a delegated task.\nFocus on lookup/summarization tasks and return results to the caller via done() when complete.".to_string()
+                }
+            }
+            PromptProfile::SubAgentHeadless => {
+                if input.capabilities.enabled(CapabilityId::CoreWrite) {
+                    "You are a headless sub-agent inside lash working on a delegated task.\nOperate autonomously and return final results via done() only when complete.".to_string()
+                } else {
+                    "You are a headless read-only sub-agent inside lash working on a delegated task.\nOperate autonomously on lookup/summarization tasks and return final results via done() only when complete.".to_string()
+                }
+            }
         }),
         PromptSectionName::Environment => Some(format!("## Environment\n\n{}", input.context)),
         PromptSectionName::Personality => {
@@ -238,7 +250,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
             }
         )),
         PromptSectionName::ToolAccess => Some(
-            "## Tool Access\n\n- All visible tools are available in the `tools` module (e.g. `tools.read_file(...)`)\n- `from tools import *` is applied automatically, so visible tools are callable as globals\n- If a tool name is overwritten, restore it with `from tools import <tool>` or `from tools import *`\n- Use `await` only for long-running calls (`shell(...)`, `delegate_*()`)\n- Use `asyncio.gather(...)` only for `shell(...)`/`delegate_*()` calls"
+            "## Tool Access\n\n- All visible tools are available in the `tools` module (e.g. `tools.read_file(...)`)\n- `from tools import *` is applied automatically, so visible tools are callable as globals\n- If a tool name is overwritten, restore it with `from tools import <tool>` or `from tools import *`\n- Use `await` only for long-running calls (`delegate_*()` and shell handle methods like `proc.wait()`)\n- Use `asyncio.gather(...)` only for `delegate_*()` and shell handle methods"
                 .to_string(),
         ),
         PromptSectionName::ToolGuides => {
@@ -299,9 +311,14 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
             }
         }
         PromptSectionName::Guidelines => Some(format!(
-            "## Guidelines\n\n- Bias toward concrete execution over planning chatter\n- For substantial scripts/workflows, create files and run them with host tooling\n- Use isolated environments only when required dependencies are missing\n- Avoid redundant file reads when values already exist in variables\n- Never speculate about files you have not read\n- Be concise and action-oriented\n{}\n{}",
+            "## Guidelines\n\n- Bias toward concrete execution over planning chatter\n- For substantial scripts/workflows, create files and run them with host tooling\n- Use isolated environments only when required dependencies are missing\n- Avoid redundant file reads when values already exist in variables\n- Never speculate about files you have not read\n- Be concise and action-oriented\n{}\n{}\n{}",
             if profile == PromptProfile::RootInteractive {
                 "- In interactive mode, when a concrete deliverable is requested, prefer completing it in the current response over reconnaissance-only steps"
+            } else {
+                ""
+            },
+            if !input.capabilities.enabled(CapabilityId::CoreWrite) {
+                "- This agent is read-only: do not modify files; focus on inspection, lookup, and summarization"
             } else {
                 ""
             },
@@ -457,7 +474,7 @@ fn tool_guides(
     }
     if tools.contains("shell") {
         chunks.push(
-            "**Shell handles**\n`proc = await shell(cmd)` then use `await proc.result()`, `await proc.output()`, `await proc.write(...)`, `await proc.kill()`."
+            "**Shell handles**\n`proc = shell(cmd)` then use `await proc.wait()`, `await proc.read()`, `await proc.write(...)`, `await proc.kill()`."
                 .to_string(),
         );
         chunks.push(
@@ -470,7 +487,7 @@ fn tool_guides(
         || tools.contains("delegate_search")
     {
         chunks.push(
-            "**Delegation tiers**\nUse low-cost delegates for lookup tasks, stronger delegates for edits/refactors. Avoid concurrent delegates editing the same file."
+            "**Delegation tiers**\nUse low-cost delegates for read-only lookup/summarization tasks, and stronger delegates for edits/refactors. Avoid concurrent delegates editing the same file."
                 .to_string(),
         );
     }
@@ -481,13 +498,13 @@ fn tool_guides(
             "Context recall pattern"
         };
         let recall_line = if history_enabled && memory_enabled {
-            "When prior context likely matters, use a low-intelligence `agent_call` to summarize relevant `_history`/`_mem` quickly, then continue execution."
+            "When prior context likely matters, use a low-intelligence (read-only) `agent_call` to summarize relevant `_history`/`_mem` quickly, then continue execution."
         } else if history_enabled {
-            "When prior context likely matters, use a low-intelligence `agent_call` to summarize relevant `_history` quickly, then continue execution."
+            "When prior context likely matters, use a low-intelligence (read-only) `agent_call` to summarize relevant `_history` quickly, then continue execution."
         } else if memory_enabled {
-            "When prior context likely matters, use a low-intelligence `agent_call` to summarize relevant `_mem` quickly, then continue execution."
+            "When prior context likely matters, use a low-intelligence (read-only) `agent_call` to summarize relevant `_mem` quickly, then continue execution."
         } else {
-            "When prior context likely matters, use a low-intelligence `agent_call` to summarize relevant context quickly, then continue execution."
+            "When prior context likely matters, use a low-intelligence (read-only) `agent_call` to summarize relevant context quickly, then continue execution."
         };
         chunks.push(
             format!(
@@ -620,5 +637,23 @@ mod tests {
         });
         assert!(!text.contains("search_skills("));
         assert!(!text.contains("## Skills"));
+    }
+
+    #[test]
+    fn subagent_prompt_mentions_read_only_when_core_write_disabled() {
+        let caps = AgentCapabilities::default().disable(CapabilityId::CoreWrite);
+        let text = compose_system_prompt(PromptComposeInput {
+            profile: PromptProfile::SubAgentInteractive,
+            context: "ctx",
+            tool_list: "tools",
+            tool_names: &[],
+            has_history: false,
+            capabilities: &caps,
+            include_soul: false,
+            project_instructions: "",
+            overrides: &[],
+        });
+        assert!(text.contains("read-only sub-agent"));
+        assert!(text.contains("This agent is read-only"));
     }
 }

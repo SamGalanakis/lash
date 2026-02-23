@@ -545,9 +545,9 @@ impl App {
                     }
                     let stream_active = matches!(
                         self.status_text.as_deref(),
-                        Some("shell_result")
+                        Some("shell_wait")
                             | Some("shell")
-                            | Some("shell_output")
+                            | Some("shell_read")
                             | Some("agent_call")
                             | Some("agent_result")
                     );
