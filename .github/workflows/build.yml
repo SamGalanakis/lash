@@ -47,9 +47,6 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install protobuf llvm
 
-      - name: Install baml-cli
-        run: cargo install baml-cli
-
       - name: Cache python-standalone
         uses: actions/cache@v4
         with:
