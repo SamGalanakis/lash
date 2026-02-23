@@ -440,6 +440,7 @@ _rust_bridge = None
 _ns = {}
 _tools_initialized = False
 _headless = False
+_owned_binding_names = set()
 
 # --- Tool call resolution ---
 _pending_calls = {}  # id -> asyncio.Future
@@ -1235,7 +1236,7 @@ def _reset_repl():
 
 def _register_tools(tools_json, agent_id="", headless=False, capabilities=None):
     """Register tool wrappers from JSON tool definitions."""
-    global _tools_initialized, _tool_defs, _headless, _async_method_names, _capabilities, _helper_binding_names
+    global _tools_initialized, _tool_defs, _headless, _async_method_names, _capabilities, _helper_binding_names, _owned_binding_names
     if _tools_initialized:
         return
     _headless = bool(headless)
@@ -1508,6 +1509,10 @@ def _register_tools(tools_json, agent_id="", headless=False, capabilities=None):
         names = ", ".join(collisions)
         raise RuntimeError(f"Tool name collision with reserved REPL names: {names}")
 
+    # Remove previously owned bindings before publishing new ones.
+    for owned in list(_owned_binding_names):
+        _ns.pop(owned, None)
+
     # Publish synthetic module and implicitly import all tools into globals.
     sys.modules["tools"] = tools_mod
     _ns.update(bindings)
@@ -1544,6 +1549,10 @@ def _register_tools(tools_json, agent_id="", headless=False, capabilities=None):
         _helper_binding_names.update({"enter_plan_mode", "exit_plan_mode"})
     if not _headless:
         _helper_binding_names.add("ask")
+
+    _owned_binding_names = set(bindings.keys())
+    _owned_binding_names.update(tools_mod.__all__)
+    _owned_binding_names.update({"__agent_id__", "__capabilities__"})
 
     _tools_initialized = True
 
@@ -1726,6 +1735,61 @@ def _handle_reset(reset_id):
     """Reset the REPL namespace via the protocol."""
     _reset_repl()
     _send({"type": "reset_result", "id": reset_id})
+
+
+def _handle_reconfigure(tools_json, capabilities_json, generation):
+    """Reconfigure tools/capabilities in-place while preserving user-defined namespace values."""
+    global _tools_initialized, _tool_defs, _capabilities, _helper_binding_names, _async_method_names, _owned_binding_names
+
+    # Snapshot current state so we can roll back on failure.
+    old_ns = dict(_ns)
+    old_tool_defs = list(_tool_defs)
+    old_capabilities = dict(_capabilities)
+    old_helper_binding_names = set(_helper_binding_names)
+    old_owned_binding_names = set(_owned_binding_names)
+    old_async_tool_names = set(_async_tool_names)
+    old_async_method_names = set(_async_method_names)
+    old_tools_initialized = _tools_initialized
+    old_headless = _headless
+    old_agent_id = _ns.get("__agent_id__", "")
+
+    # Preserve user-defined values and tool outputs, but not runtime-owned bindings.
+    preserved = {}
+    for key, value in _ns.items():
+        if key.startswith("__"):
+            continue
+        if key in old_owned_binding_names:
+            continue
+        preserved[key] = value
+
+    try:
+        _tools_initialized = False
+        _register_tools(tools_json, old_agent_id, old_headless, capabilities_json)
+
+        for key, value in preserved.items():
+            if key not in _owned_binding_names:
+                _ns[key] = value
+
+        _send({"type": "reconfigure_result", "generation": generation, "error": None})
+    except Exception:
+        # Roll back fully to preserve fail-closed semantics.
+        _ns.clear()
+        _ns.update(old_ns)
+        _tool_defs = old_tool_defs
+        _capabilities = old_capabilities
+        _helper_binding_names = old_helper_binding_names
+        _owned_binding_names = old_owned_binding_names
+        _async_tool_names.clear()
+        _async_tool_names.update(old_async_tool_names)
+        _async_method_names = set(old_async_method_names)
+        _tools_initialized = old_tools_initialized
+        _send(
+            {
+                "type": "reconfigure_result",
+                "generation": generation,
+                "error": traceback.format_exc(),
+            }
+        )
 
 
 def _check_complete(code):

@@ -1,7 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::str::FromStr;
-
-use crate::capabilities::{AgentCapabilities, CapabilityId, capability_def};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -146,10 +144,21 @@ pub struct PromptComposeInput<'a> {
     pub tool_list: &'a str,
     pub tool_names: &'a [String],
     pub has_history: bool,
-    pub capabilities: &'a AgentCapabilities,
+    pub enabled_capability_ids: &'a BTreeSet<String>,
+    pub helper_bindings: &'a BTreeSet<String>,
+    pub capability_prompt_sections: &'a [String],
+    pub can_write: bool,
     pub include_soul: bool,
     pub project_instructions: &'a str,
     pub overrides: &'a [PromptSectionOverride],
+}
+
+fn has_capability(input: &PromptComposeInput<'_>, id: &str) -> bool {
+    input.enabled_capability_ids.contains(id)
+}
+
+fn has_helper(input: &PromptComposeInput<'_>, helper: &str) -> bool {
+    input.helper_bindings.contains(helper)
 }
 
 pub fn compose_system_prompt(input: PromptComposeInput<'_>) -> String {
@@ -208,14 +217,14 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
             PromptProfile::RootInteractive => "You are an AI coding assistant operating in a persistent Python REPL with tool access.\nYou power lash, a terminal-based coding agent. Understand the codebase, make changes, run commands, and report outcomes clearly.".to_string(),
             PromptProfile::RootHeadless => "You are an autonomous AI coding agent running in non-interactive mode.\nComplete the task end-to-end without asking for user input.".to_string(),
             PromptProfile::SubAgentInteractive => {
-                if input.capabilities.enabled(CapabilityId::CoreWrite) {
+                if input.can_write {
                     "You are a sub-agent inside lash working on a delegated task.\nUse tools decisively and return results to the caller via done() when complete.".to_string()
                 } else {
                     "You are a read-only sub-agent inside lash working on a delegated task.\nFocus on lookup/summarization tasks and return results to the caller via done() when complete.".to_string()
                 }
             }
             PromptProfile::SubAgentHeadless => {
-                if input.capabilities.enabled(CapabilityId::CoreWrite) {
+                if input.can_write {
                     "You are a headless sub-agent inside lash working on a delegated task.\nOperate autonomously and return final results via done() only when complete.".to_string()
                 } else {
                     "You are a headless read-only sub-agent inside lash working on a delegated task.\nOperate autonomously on lookup/summarization tasks and return final results via done() only when complete.".to_string()
@@ -256,9 +265,10 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
         PromptSectionName::ToolGuides => {
             let guide = tool_guides(
                 input.tool_names,
-                input.capabilities.enabled(CapabilityId::History),
-                input.capabilities.enabled(CapabilityId::Memory),
-                input.capabilities.enabled(CapabilityId::Skills),
+                has_helper(input, "search_history") || has_capability(input, "history"),
+                has_helper(input, "search_mem") || has_capability(input, "memory"),
+                has_helper(input, "search_skills") || has_capability(input, "skills"),
+                input.capability_prompt_sections,
             );
             if guide.is_empty() {
                 None
@@ -277,11 +287,13 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
         PromptSectionName::Builtins => Some(builtins_section(
             profile,
             input.tool_names,
-            input.capabilities,
+            has_helper(input, "search_history") || has_capability(input, "history"),
+            has_helper(input, "search_mem") || has_capability(input, "memory"),
+            has_helper(input, "search_skills") || has_capability(input, "skills"),
         )),
         PromptSectionName::Memory => {
-            let history_enabled = input.capabilities.enabled(CapabilityId::History);
-            let memory_enabled = input.capabilities.enabled(CapabilityId::Memory);
+            let history_enabled = has_helper(input, "search_history") || has_capability(input, "history");
+            let memory_enabled = has_helper(input, "search_mem") || has_capability(input, "memory");
             if history_enabled || memory_enabled {
                 Some(memory_section(
                     input.has_history,
@@ -294,7 +306,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
             }
         }
         PromptSectionName::MemoryApi => {
-            if input.capabilities.enabled(CapabilityId::Memory) {
+            if has_helper(input, "search_mem") || has_capability(input, "memory") {
                 Some(memory_api_section())
             } else {
                 None
@@ -317,12 +329,12 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
             } else {
                 ""
             },
-            if !input.capabilities.enabled(CapabilityId::CoreWrite) {
+            if !input.can_write {
                 "- This agent is read-only: do not modify files; focus on inspection, lookup, and summarization"
             } else {
                 ""
             },
-            if !input.capabilities.enabled(CapabilityId::History) {
+            if !(has_helper(input, "search_history") || has_capability(input, "history")) {
                 ""
             } else if input.has_history {
                 "- Use `_history` and `_mem` only when prior-turn recall is actually needed"
@@ -336,11 +348,10 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
 fn builtins_section(
     profile: PromptProfile,
     tool_names: &[String],
-    capabilities: &AgentCapabilities,
+    history_enabled: bool,
+    memory_enabled: bool,
+    skills_enabled: bool,
 ) -> String {
-    let history_enabled = capabilities.enabled(CapabilityId::History);
-    let memory_enabled = capabilities.enabled(CapabilityId::Memory);
-    let skills_enabled = capabilities.enabled(CapabilityId::Skills);
     let has_skills_tool = tool_names
         .iter()
         .any(|name| name == "skills" || name == "load_skill");
@@ -441,6 +452,7 @@ fn tool_guides(
     history_enabled: bool,
     memory_enabled: bool,
     skills_enabled: bool,
+    dynamic_prompt_sections: &[String],
 ) -> String {
     let tools: HashSet<&str> = tool_names.iter().map(String::as_str).collect();
     let mut chunks = Vec::new();
@@ -520,17 +532,11 @@ fn tool_guides(
                 .to_string(),
         );
     }
-    // Capability-defined prompt guidance (single source of truth).
-    for id in [CapabilityId::Delegation, CapabilityId::Skills] {
-        if (id == CapabilityId::Skills && !skills_enabled)
-            || (id == CapabilityId::Delegation && !tools.contains("agent_call"))
-        {
-            continue;
-        }
-        if let Some(def) = capability_def(id)
-            && let Some(section) = def.prompt_section
-        {
-            chunks.push(section.to_string());
+    if tools.contains("agent_call") || skills_enabled {
+        for section in dynamic_prompt_sections {
+            if !section.trim().is_empty() {
+                chunks.push(section.clone());
+            }
         }
     }
     chunks.join("\n\n")
@@ -539,7 +545,37 @@ fn tool_guides(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capabilities::CapabilityId;
+    use crate::capabilities::{
+        AgentCapabilities, CapabilityId, capability_def, helper_bindings_for_capability,
+    };
+
+    fn ids_for(caps: &AgentCapabilities) -> BTreeSet<String> {
+        caps.enabled_capabilities
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect()
+    }
+
+    fn helpers_for(caps: &AgentCapabilities) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for id in &caps.enabled_capabilities {
+            for helper in helper_bindings_for_capability(*id) {
+                out.insert((*helper).to_string());
+            }
+        }
+        out
+    }
+
+    fn prompt_sections_for(caps: &AgentCapabilities) -> Vec<String> {
+        caps.enabled_capabilities
+            .iter()
+            .filter_map(|id| capability_def(*id).and_then(|d| d.prompt_section.map(str::to_string)))
+            .collect()
+    }
+
+    fn can_write(caps: &AgentCapabilities) -> bool {
+        caps.enabled(CapabilityId::CoreWrite)
+    }
 
     #[test]
     fn parses_prompt_section_names() {
@@ -574,7 +610,10 @@ mod tests {
             tool_list: "tools",
             tool_names: &[],
             has_history: false,
-            capabilities: &AgentCapabilities::default(),
+            enabled_capability_ids: &ids_for(&AgentCapabilities::default()),
+            helper_bindings: &helpers_for(&AgentCapabilities::default()),
+            capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            can_write: can_write(&AgentCapabilities::default()),
             include_soul: false,
             project_instructions: "",
             overrides: &overrides,
@@ -590,7 +629,10 @@ mod tests {
             tool_list: "tools",
             tool_names: &[],
             has_history: false,
-            capabilities: &AgentCapabilities::default(),
+            enabled_capability_ids: &ids_for(&AgentCapabilities::default()),
+            helper_bindings: &helpers_for(&AgentCapabilities::default()),
+            capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            can_write: can_write(&AgentCapabilities::default()),
             include_soul: false,
             project_instructions: "",
             overrides: &[],
@@ -612,7 +654,10 @@ mod tests {
             tool_list: "tools",
             tool_names: &[],
             has_history: false,
-            capabilities: &AgentCapabilities::default(),
+            enabled_capability_ids: &ids_for(&AgentCapabilities::default()),
+            helper_bindings: &helpers_for(&AgentCapabilities::default()),
+            capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            can_write: can_write(&AgentCapabilities::default()),
             include_soul: false,
             project_instructions: "",
             overrides: &overrides,
@@ -630,7 +675,10 @@ mod tests {
             tool_list: "tools",
             tool_names: &tools,
             has_history: false,
-            capabilities: &caps,
+            enabled_capability_ids: &ids_for(&caps),
+            helper_bindings: &helpers_for(&caps),
+            capability_prompt_sections: &prompt_sections_for(&caps),
+            can_write: can_write(&caps),
             include_soul: false,
             project_instructions: "",
             overrides: &[],
@@ -648,12 +696,39 @@ mod tests {
             tool_list: "tools",
             tool_names: &[],
             has_history: false,
-            capabilities: &caps,
+            enabled_capability_ids: &ids_for(&caps),
+            helper_bindings: &helpers_for(&caps),
+            capability_prompt_sections: &prompt_sections_for(&caps),
+            can_write: can_write(&caps),
             include_soul: false,
             project_instructions: "",
             overrides: &[],
         });
         assert!(text.contains("read-only sub-agent"));
         assert!(text.contains("This agent is read-only"));
+    }
+
+    #[test]
+    fn dynamic_capability_prompt_sections_are_included() {
+        let caps = AgentCapabilities::default();
+        let mut cap_ids = ids_for(&caps);
+        cap_ids.insert("custom_cap".to_string());
+        let sections = vec!["## Custom Capability\n\nCustom guidance.".to_string()];
+        let text = compose_system_prompt(PromptComposeInput {
+            profile: PromptProfile::RootInteractive,
+            context: "ctx",
+            tool_list: "tools",
+            tool_names: &["agent_call".to_string()],
+            has_history: false,
+            enabled_capability_ids: &cap_ids,
+            helper_bindings: &helpers_for(&caps),
+            capability_prompt_sections: &sections,
+            can_write: can_write(&caps),
+            include_soul: false,
+            project_instructions: "",
+            overrides: &[],
+        });
+        assert!(text.contains("## Custom Capability"));
+        assert!(text.contains("Custom guidance."));
     }
 }

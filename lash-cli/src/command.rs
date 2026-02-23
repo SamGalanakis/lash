@@ -11,6 +11,12 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/retry", "Replay the previous turn payload"),
     ("/resume", "Resume a previous session"),
     ("/skills", "Browse loaded skills"),
+    ("/tools", "Inspect or edit dynamic tools"),
+    ("/caps", "Inspect or edit dynamic capabilities"),
+    (
+        "/reconfigure",
+        "Apply or inspect pending runtime reconfigure",
+    ),
     ("/help", "Show commands and shortcuts"),
     ("/exit", "Quit"),
 ];
@@ -48,6 +54,12 @@ pub enum Command {
     Resume(Option<String>),
     /// Browse loaded skills
     Skills,
+    /// Dynamic tool commands (raw args)
+    Tools(Option<String>),
+    /// Dynamic capability commands (raw args)
+    Caps(Option<String>),
+    /// Reconfigure control commands (raw args)
+    Reconfigure(Option<String>),
     /// Invoke a skill (name, optional args)
     Skill(String, Option<String>),
 }
@@ -78,6 +90,9 @@ pub fn parse(input: &str, skills: &SkillRegistry) -> Option<Command> {
         "exit" | "quit" => Some(Command::Exit),
         "resume" | "continue" => Some(Command::Resume(arg.map(|a| a.to_string()))),
         "skills" => Some(Command::Skills),
+        "tools" => Some(Command::Tools(arg.map(|a| a.to_string()))),
+        "caps" => Some(Command::Caps(arg.map(|a| a.to_string()))),
+        "reconfigure" => Some(Command::Reconfigure(arg.map(|a| a.to_string()))),
         _ => {
             // Check skills
             if skills.get(cmd).is_some() {
@@ -108,5 +123,14 @@ mod tests {
             Some(Command::ChangeProvider)
         ));
         assert!(matches!(parse("/retry", &skills), Some(Command::Retry)));
+        assert!(matches!(parse("/tools", &skills), Some(Command::Tools(_))));
+        assert!(matches!(
+            parse("/caps enable web", &skills),
+            Some(Command::Caps(_))
+        ));
+        assert!(matches!(
+            parse("/reconfigure apply", &skills),
+            Some(Command::Reconfigure(_))
+        ));
     }
 }

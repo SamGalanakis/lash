@@ -236,6 +236,30 @@ impl RuntimeEngine {
         }
     }
 
+    /// Update the active prompt-facing capability set.
+    pub fn set_capabilities(&mut self, capabilities: AgentCapabilities) {
+        self.capabilities = capabilities.clone();
+        if let Some(agent) = self.agent.as_mut() {
+            agent.set_capabilities(capabilities);
+        }
+    }
+
+    /// Re-register the current tool/capability projection in the live Python session.
+    pub async fn reconfigure_session(
+        &mut self,
+        capabilities_json: String,
+        generation: u64,
+    ) -> Result<(), SessionError> {
+        let Some(agent) = self.agent.as_mut() else {
+            return Err(SessionError::Protocol(
+                "runtime agent not available".to_string(),
+            ));
+        };
+        agent
+            .reconfigure_session(capabilities_json, generation)
+            .await
+    }
+
     /// Reset the REPL session on the underlying agent.
     pub async fn reset_session(&mut self) -> Result<(), SessionError> {
         let Some(agent) = self.agent.as_mut() else {

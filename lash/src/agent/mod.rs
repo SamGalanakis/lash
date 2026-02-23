@@ -2,7 +2,7 @@ mod exec;
 pub mod message;
 mod prompt;
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::ToolDefinition;
-use crate::capabilities::{AgentCapabilities, CapabilityId};
+use crate::capabilities::AgentCapabilities;
 use crate::instructions::{FsInstructionSource, InstructionSource};
 use crate::llm::factory::adapter_for;
 use crate::llm::types::{LlmAttachment, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
@@ -278,6 +278,10 @@ impl Agent {
         self.config.reasoning_effort = reasoning_effort;
     }
 
+    pub fn set_capabilities(&mut self, capabilities: AgentCapabilities) {
+        self.config.capabilities = capabilities;
+    }
+
     pub fn capabilities(&self) -> AgentCapabilities {
         self.config.capabilities.clone()
     }
@@ -285,6 +289,16 @@ impl Agent {
     /// Reset the underlying Python session (clear namespace).
     pub async fn reset_session(&mut self) -> Result<(), crate::SessionError> {
         self.session.reset().await
+    }
+
+    pub async fn reconfigure_session(
+        &mut self,
+        capabilities_json: String,
+        generation: u64,
+    ) -> Result<(), crate::SessionError> {
+        self.session
+            .reconfigure(capabilities_json, generation)
+            .await
     }
 
     /// Run the agent loop with structured messages, emitting events.
@@ -345,6 +359,33 @@ impl Agent {
         }
         let base_context = build_context();
         let tool_names: Vec<String> = visible.iter().map(|t| t.name.clone()).collect();
+        let dynamic_projection = self.session.tools().dynamic_projection();
+        let enabled_capability_ids: BTreeSet<String> = dynamic_projection
+            .as_ref()
+            .map(|p| p.enabled_capabilities.clone())
+            .unwrap_or_else(|| {
+                self.config
+                    .capabilities
+                    .enabled_capabilities
+                    .iter()
+                    .map(|id| id.as_str().to_string())
+                    .collect()
+            });
+        let helper_bindings: BTreeSet<String> = dynamic_projection
+            .as_ref()
+            .map(|p| p.helper_bindings.clone())
+            .unwrap_or_default();
+        let capability_prompt_sections: Vec<String> = dynamic_projection
+            .as_ref()
+            .map(|p| p.prompt_sections.clone())
+            .unwrap_or_default();
+        let can_write = tool_names
+            .iter()
+            .any(|name| matches!(name.as_str(), "write_file" | "edit_file" | "find_replace"));
+        let history_enabled = helper_bindings.contains("search_history")
+            || enabled_capability_ids.contains("history");
+        let memory_enabled =
+            helper_bindings.contains("search_mem") || enabled_capability_ids.contains("memory");
         let instruction_source = Arc::clone(&self.config.instruction_source);
         let project_instructions = instruction_source.system_instructions();
 
@@ -405,8 +446,6 @@ impl Agent {
         let mut context_pruned_turns: usize = 0;
         let session_start = std::time::Instant::now();
         let mut headless_prose_only_streak: usize = 0;
-        let history_enabled = self.config.capabilities.enabled(CapabilityId::History);
-        let memory_enabled = self.config.capabilities.enabled(CapabilityId::Memory);
 
         loop {
             if cancel.is_cancelled() {
@@ -646,7 +685,10 @@ impl Agent {
                         tool_list: &tool_list,
                         tool_names: &tool_names,
                         has_history,
-                        capabilities: &self.config.capabilities,
+                        enabled_capability_ids: &enabled_capability_ids,
+                        helper_bindings: &helper_bindings,
+                        capability_prompt_sections: &capability_prompt_sections,
+                        can_write,
                         include_soul,
                         project_instructions: &project_instructions,
                         overrides: &self.config.prompt_overrides,

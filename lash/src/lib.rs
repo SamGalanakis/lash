@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod capabilities;
+pub mod dynamic;
 pub mod embedded;
 pub mod instructions;
 pub mod llm;
@@ -21,6 +22,12 @@ pub use agent::{
 pub use capabilities::{
     AgentCapabilities, CapabilityId, ResolvedFeatures, capability_def, capability_for_tool,
     default_enabled_capabilities, resolve_features,
+};
+pub use dynamic::{
+    CapabilityProfile, DynamicCapabilityDef, DynamicStateSnapshot, DynamicToolProvider,
+    DynamicToolSpec, InProcessToolExecutionAdapter, InProcessToolFuture, InProcessToolHandler,
+    ReconfigureError, ResolvedProjection, ToolExecutionAdapter, agent_capabilities_from_profile,
+    default_dynamic_capability_defs, profile_from_agent_capabilities, resolve_projection,
 };
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
 pub use provider::{LashConfig, Provider};
@@ -323,6 +330,24 @@ pub struct ToolCallRecord {
 #[async_trait::async_trait]
 pub trait ToolProvider: Send + Sync + 'static {
     fn definitions(&self) -> Vec<ToolDefinition>;
+    fn dynamic_projection(&self) -> Option<crate::dynamic::ResolvedProjection> {
+        None
+    }
+    fn dynamic_snapshot(&self) -> Option<crate::dynamic::DynamicStateSnapshot> {
+        None
+    }
+    fn fork_dynamic_with_snapshot(
+        &self,
+        _snapshot: crate::dynamic::DynamicStateSnapshot,
+    ) -> Option<std::sync::Arc<dyn ToolProvider>> {
+        None
+    }
+    fn dynamic_capabilities_payload_json(&self) -> Option<String> {
+        None
+    }
+    fn dynamic_generation(&self) -> Option<u64> {
+        None
+    }
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult;
 
     /// Execute with progress streaming. Default: delegates to execute().

@@ -14,6 +14,7 @@ mod shell;
 mod skills;
 #[cfg(feature = "sqlite-store")]
 mod state;
+mod switchable;
 #[cfg(feature = "sqlite-store")]
 mod tasks;
 #[cfg(feature = "sqlite-store")]
@@ -36,6 +37,7 @@ pub use shell::Shell;
 pub use skills::SkillStore;
 #[cfg(feature = "sqlite-store")]
 pub use state::StateStore;
+pub use switchable::SwitchableTools;
 #[cfg(feature = "sqlite-store")]
 pub use tasks::TaskStore;
 #[cfg(feature = "sqlite-store")]

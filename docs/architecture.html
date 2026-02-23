@@ -368,12 +368,12 @@
       <h1>lash Runtime Architecture</h1>
       <p>
         End-to-end map of how interactive TUI and headless/embedded frontends flow through the unified
-        runtime input interface, agent loop, Python REPL bridge, tool system, and provider-backed model execution.
+        runtime input interface, agent loop, dynamic tool/capability registry, Python REPL bridge, and provider-backed model execution.
       </p>
       <div class="kpis">
         <article class="kpi"><div class="k">Entry Surfaces</div><div class="v">3</div></article>
         <article class="kpi"><div class="k">Core Layers</div><div class="v">6</div></article>
-        <article class="kpi"><div class="k">Tool Discovery</div><div class="v">Injected + Dynamic</div></article>
+        <article class="kpi"><div class="k">Tool Runtime</div><div class="v">Dynamic + Transactional</div></article>
         <article class="kpi"><div class="k">State Model</div><div class="v">Envelope + Snapshot</div></article>
       </div>
     </section>
@@ -425,22 +425,23 @@
         <div class="tag" style="color:var(--warn)"><span class="dot"></span>Agent Core</div>
         <h2 class="title">Prompt Assembly + Iterative Loop</h2>
         <p class="desc">
-          Agent resolves provider/model, refreshes tokens, builds client registry, injects only tools with
+          Agent resolves provider/model, refreshes tokens, reads dynamic projection state from the active tool registry,
+          injects only tools with
           <code>inject_into_prompt=true</code>, and appends discovery guidance for omitted tools
           (<code>list_tools</code>/<code>search_tools</code>, <code>tools.&lt;tool&gt;</code>).
         </p>
         <div class="inner">
           <div class="cell">
             <h4>Prompt Tooling</h4>
-            <p>Visible tools split into prompt-injected subset + discoverable runtime subset.</p>
+            <p>Visible tools split into prompt-injected subset + discoverable runtime subset from the active generation.</p>
           </div>
           <div class="cell">
             <h4>Context Control</h4>
             <p>Rolling window + `_history` / `_mem` for long-running sessions and sub-agents.</p>
           </div>
           <div class="cell">
-            <h4>Mode Support</h4>
-            <p>Normal + plan-mode behavior with optional plan-file handoff.</p>
+            <h4>Capability Guidance</h4>
+            <p>Prompt helper bindings + capability prompt sections come from dynamic capability definitions.</p>
           </div>
         </div>
       </article>
@@ -449,8 +450,8 @@
         <div class="tag" style="color:var(--primary)"><span class="dot"></span>Execution Bridge</div>
         <h2 class="title">Session + Embedded Python REPL</h2>
         <p class="desc">
-          Session spins up embedded Python, registers tool definitions, and executes code blocks in a persistent namespace.
-          Tool invocations pass through Rust/Python bridge (`invoke_tool`) and can execute concurrently.
+          Session spins up embedded Python, registers tool definitions/capabilities, and executes code blocks in a persistent namespace.
+          Runtime reconfigure updates the same REPL between turns with atomic rollback semantics.
         </p>
         <div class="inner two">
           <div class="cell">
@@ -459,7 +460,7 @@
           </div>
           <div class="cell">
             <h4>State Durability</h4>
-            <p>Runtime keeps agent envelope + optional REPL snapshot blob for restore/resume.</p>
+            <p>Runtime keeps agent envelope + optional REPL snapshot blob for restore/resume; reconfigure never applies mid-turn.</p>
           </div>
         </div>
       </article>
@@ -468,8 +469,8 @@
         <div class="tag" style="color:var(--accent)"><span class="dot"></span>Tools + Delegation</div>
         <h2 class="title">Composite Tool Graph</h2>
         <p class="desc">
-          Base tools (file/shell/search/tasks/plan) are composed, then skill tools and `agent_call` are layered on top.
-          Sub-agent tiers map to provider-specific model defaults.
+          Static providers are wrapped by <code>DynamicToolProvider</code> (in-process adapter), then projected by dynamic
+          capability profiles. CLI can stage edits via <code>/tools</code> and <code>/caps</code>, with apply on next turn.
         </p>
         <div class="inner">
           <div class="cell">
@@ -477,12 +478,12 @@
             <p><code>read_file</code>, <code>edit_file</code>, <code>shell</code>, <code>glob</code>, <code>grep</code>, tasks, plan.</p>
           </div>
           <div class="cell">
-            <h4>Optional</h4>
-            <p>Web search/fetch when Tavily key exists; skill store from user/local skill dirs.</p>
+            <h4>Reconfigure</h4>
+            <p>All-or-nothing apply with generation checks; failures roll back and block turn dispatch.</p>
           </div>
           <div class="cell">
             <h4>Delegation</h4>
-            <p><code>agent_call</code> for low/medium/high tier sub-agents with shared working tree.</p>
+            <p><code>agent_call</code> forks parent dynamic state per sub-agent; low tier is filtered (no write/delegation tools).</p>
           </div>
         </div>
       </article>
@@ -512,9 +513,9 @@
         <h3>Primary Dataflow</h3>
         <div class="steps">
           <div class="step"><strong>1. Host Input</strong>Frontend emits ordered `TurnInput.items` + optional image blobs.</div>
-          <div class="step"><strong>2. Normalize</strong>Runtime validates refs and builds text/image stream for user message parts.</div>
-          <div class="step"><strong>3. Agent Step</strong>Prompt assembled with provider config + injected tool docs + omission note.</div>
-          <div class="step"><strong>4. REPL Exec</strong>Python executes code blocks; bridge dispatches tool calls through Rust.</div>
+          <div class="step"><strong>2. Normalize + Apply</strong>Runtime validates refs and applies pending dynamic reconfigure before turn start.</div>
+          <div class="step"><strong>3. Agent Step</strong>Prompt assembled from active tool/capability projection + injected tool docs.</div>
+          <div class="step"><strong>4. REPL Exec</strong>Python executes code blocks; bridge dispatches tool calls through dynamic adapter routing.</div>
           <div class="step"><strong>5. Output</strong>Events stream back; final answer + updated envelope returned to host.</div>
         </div>
       </article>
@@ -522,11 +523,13 @@
       <div class="legend">
         <span class="pill"><b>Prompt-visible</b> <code>inject_into_prompt=true</code></span>
         <span class="pill"><b>Discoverable</b> <code>list_tools</code> / <code>search_tools</code> / <code>tools.&lt;tool&gt;</code></span>
+        <span class="pill"><b>Reconfigure</b> <code>/tools</code> / <code>/caps</code> / <code>/reconfigure</code></span>
         <span class="pill"><b>Unified Items</b> <code>text + refs + image + skill</code></span>
       </div>
 
       <div class="note">
-        Architecture constraint: sub-agents share the same filesystem/worktree. Parallel branches should avoid editing the same files concurrently.
+        Architecture constraint: sub-agents share the same filesystem/worktree. Each sub-agent has an isolated fork
+        of parent dynamic tool/capability state, but parallel branches should still avoid editing the same files concurrently.
       </div>
     </section>
 
@@ -535,10 +538,11 @@
       <div class="ref-list">
         <div class="ref"><b>CLI Wiring</b><code>lash-cli/src/main.rs</code></div>
         <div class="ref"><b>Runtime API</b><code>lash/src/runtime.rs</code></div>
+        <div class="ref"><b>Dynamic Runtime</b><code>lash/src/dynamic.rs</code></div>
         <div class="ref"><b>Agent Loop</b><code>lash/src/agent/mod.rs</code></div>
         <div class="ref"><b>Session Bridge</b><code>lash/src/session.rs</code></div>
         <div class="ref"><b>Embedded Python</b><code>lash/src/embedded.rs</code> + <code>lash/python/repl.py</code></div>
-        <div class="ref"><b>Tool Model</b><code>lash/src/lib.rs</code> + <code>lash/src/tools/*</code></div>
+        <div class="ref"><b>Tool Model</b><code>lash/src/lib.rs</code> + <code>lash/src/tools/*</code> + <code>lash-cli/src/main.rs</code></div>
       </div>
     </section>
   </main>

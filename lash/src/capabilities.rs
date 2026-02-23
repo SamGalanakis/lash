@@ -37,6 +37,23 @@ impl CapabilityId {
             Self::Context => "context",
         }
     }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "core_read" => Some(Self::CoreRead),
+            "core_write" => Some(Self::CoreWrite),
+            "shell" => Some(Self::Shell),
+            "tasks" => Some(Self::Tasks),
+            "planning" => Some(Self::Planning),
+            "delegation" => Some(Self::Delegation),
+            "memory" => Some(Self::Memory),
+            "history" => Some(Self::History),
+            "skills" => Some(Self::Skills),
+            "web" => Some(Self::Web),
+            "context" => Some(Self::Context),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

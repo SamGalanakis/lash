@@ -277,6 +277,7 @@ impl Session {
                 }
                 PythonResponse::SnapshotResult { .. }
                 | PythonResponse::ResetResult { .. }
+                | PythonResponse::ReconfigureResult { .. }
                 | PythonResponse::CheckCompleteResult { .. } => {
                     return Err(SessionError::Protocol(
                         "unexpected response during exec".to_string(),
@@ -308,6 +309,44 @@ impl Session {
         loop {
             match self.runtime.recv()? {
                 PythonResponse::ResetResult { .. } => break,
+                _ => continue,
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Re-register the current tool definitions and capability payload in the live REPL.
+    /// This is intended for turn-boundary runtime reconfiguration.
+    pub async fn reconfigure(
+        &mut self,
+        capabilities_json: String,
+        generation: u64,
+    ) -> Result<(), SessionError> {
+        let defs = self.tools.definitions();
+        let tools_json = serde_json::to_string(&defs).unwrap_or_else(|_| "[]".to_string());
+        self.runtime.send(PythonRequest::Reconfigure {
+            tools_json,
+            capabilities_json,
+            generation,
+        })?;
+
+        loop {
+            match self.runtime.recv()? {
+                PythonResponse::ReconfigureResult {
+                    generation: got_generation,
+                    error,
+                } => {
+                    if got_generation != generation {
+                        return Err(SessionError::Protocol(format!(
+                            "reconfigure generation mismatch: expected {generation}, got {got_generation}"
+                        )));
+                    }
+                    if let Some(err) = error {
+                        return Err(SessionError::Protocol(format!("reconfigure failed: {err}")));
+                    }
+                    break;
+                }
                 _ => continue,
             }
         }

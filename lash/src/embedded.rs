@@ -53,6 +53,11 @@ pub enum PythonRequest {
     Reset {
         id: String,
     },
+    Reconfigure {
+        tools_json: String,
+        capabilities_json: String,
+        generation: u64,
+    },
     CheckComplete {
         code: String,
     },
@@ -83,6 +88,10 @@ pub enum PythonResponse {
     },
     ResetResult {
         id: String,
+    },
+    ReconfigureResult {
+        generation: u64,
+        error: Option<String>,
     },
     CheckCompleteResult {
         is_complete: bool,
@@ -131,6 +140,10 @@ impl RustBridge {
             },
             "reset_result" => PythonResponse::ResetResult {
                 id: msg["id"].as_str().unwrap_or("").to_string(),
+            },
+            "reconfigure_result" => PythonResponse::ReconfigureResult {
+                generation: msg["generation"].as_u64().unwrap_or_default(),
+                error: msg["error"].as_str().map(String::from),
             },
             "ready" => PythonResponse::Ready,
             other => {
@@ -388,6 +401,22 @@ fn python_thread_main(
                 PythonRequest::Reset { id } => {
                     if let Err(e) = repl.call_method1("_handle_reset", (&id,)) {
                         tracing::error!("_handle_reset failed: {e}");
+                    }
+                }
+                PythonRequest::Reconfigure {
+                    tools_json,
+                    capabilities_json,
+                    generation,
+                } => {
+                    if let Err(e) = repl.call_method1(
+                        "_handle_reconfigure",
+                        (&tools_json, &capabilities_json, generation),
+                    ) {
+                        tracing::error!("_handle_reconfigure failed: {e}");
+                        let _ = response_tx.send(PythonResponse::ReconfigureResult {
+                            generation,
+                            error: Some(format!("{e}")),
+                        });
                     }
                 }
                 PythonRequest::CheckComplete { code } => {

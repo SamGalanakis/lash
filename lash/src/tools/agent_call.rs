@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use serde_json::json;
@@ -8,8 +8,9 @@ use tokio_util::sync::CancellationToken;
 use crate::capabilities::{CapabilityId, tools_for_capability};
 use crate::provider::AgentModels;
 use crate::{
-    Agent, AgentConfig, AgentEvent, Message, MessageRole, Part, PartKind, ProgressSender,
-    PruneState, SandboxMessage, Session, ToolDefinition, ToolParam, ToolProvider, ToolResult,
+    Agent, AgentConfig, AgentEvent, DynamicStateSnapshot, Message, MessageRole, Part, PartKind,
+    ProgressSender, PruneState, SandboxMessage, Session, ToolDefinition, ToolParam, ToolProvider,
+    ToolResult,
 };
 
 use super::{CompositeTools, FilteredTools, require_str};
@@ -154,10 +155,54 @@ impl AgentCall {
         }
     }
 
+    fn low_tier_filtered_snapshot(
+        &self,
+        mut snapshot: DynamicStateSnapshot,
+    ) -> DynamicStateSnapshot {
+        // Default policy: no file mutation tools and no nested delegation in low tier.
+        let denied: HashSet<&str> = [
+            "write_file",
+            "edit_file",
+            "find_replace",
+            "agent_call",
+            "agent_result",
+            "agent_output",
+            "agent_kill",
+        ]
+        .into_iter()
+        .collect();
+
+        snapshot
+            .tools
+            .retain(|name, _| !denied.contains(name.as_str()));
+        snapshot
+            .profile
+            .enabled_tools
+            .retain(|name| !denied.contains(name.as_str()));
+        snapshot.profile.enabled_capabilities.remove("core_write");
+        snapshot.profile.enabled_capabilities.remove("delegation");
+        for def in snapshot.capability_defs.values_mut() {
+            def.tool_names
+                .retain(|name| !denied.contains(name.as_str()));
+        }
+        snapshot
+    }
+
     /// Build the toolset for a spawned sub-agent:
     /// - low: read-only base tools only (no nested delegation)
     /// - medium/high: base tools + agent_call for nested delegation
     fn session_tools_for_tier(&self, tier: &Tier) -> Arc<dyn ToolProvider> {
+        if let Some(snapshot) = self.tools.dynamic_snapshot() {
+            let snapshot = if matches!(tier, Tier::Low) {
+                self.low_tier_filtered_snapshot(snapshot)
+            } else {
+                snapshot
+            };
+            if let Some(fork) = self.tools.fork_dynamic_with_snapshot(snapshot) {
+                return fork;
+            }
+        }
+
         if matches!(tier, Tier::Low) {
             let write_tools: std::collections::HashSet<&str> =
                 tools_for_capability(CapabilityId::CoreWrite)
@@ -231,7 +276,7 @@ impl AgentCall {
         // Create a new session with tier-specific tools.
         let session_tools = self.session_tools_for_tier(&tier);
         let mut session = match Session::new(
-            session_tools,
+            Arc::clone(&session_tools),
             &agent_id,
             self.config.headless,
             agent_config.capabilities.clone(),
@@ -245,6 +290,19 @@ impl AgentCall {
                 ));
             }
         };
+
+        // Dynamic tool providers may carry capability IDs beyond the static enum.
+        // Re-register capability payload from the forked dynamic registry so Python
+        // helpers/prompt bindings reflect the actual child projection.
+        if let (Some(caps_json), Some(generation)) = (
+            session_tools.dynamic_capabilities_payload_json(),
+            session_tools.dynamic_generation(),
+        ) && let Err(e) = session.reconfigure(caps_json, generation).await
+        {
+            return ToolResult::err_fmt(format_args!(
+                "Failed to reconfigure sub-agent session: {e}"
+            ));
+        }
 
         // If a schema is provided, inject the model class and a validating done() wrapper
         if let Some(ref schema_str) = schema {

@@ -23,8 +23,8 @@ use lash_core::agent::{Message, MessageRole, Part, PartKind, PruneState};
 use lash_core::provider::{LashConfig, Provider};
 use lash_core::tools::{
     AgentCall, CompositeTools, EditFile, FetchUrl, FilteredTools, FindReplace, Glob, Grep, Ls,
-    PlanMode, ReadFile, Shell, SkillStore, StateStore, TaskStore, ViewMessage, WebSearch,
-    WriteFile,
+    PlanMode, ReadFile, Shell, SkillStore, StateStore, SwitchableTools, TaskStore, ViewMessage,
+    WebSearch, WriteFile,
 };
 use lash_core::*;
 use ratatui::DefaultTerminal;
@@ -440,10 +440,13 @@ async fn main() -> anyhow::Result<()> {
     base_all = base_all.add(SkillStore::new(skill_dirs));
     let all_base_tools: Arc<dyn ToolProvider> = Arc::new(base_all);
 
+    let agent_parent_tools: Arc<SwitchableTools> =
+        Arc::new(SwitchableTools::new(Arc::clone(&all_base_tools)));
+
     // Root cancel token — lives for the whole app lifetime, child tokens are created per run
     let root_cancel = CancellationToken::new();
     let probe_agent_call = AgentCall::new(
-        Arc::clone(&all_base_tools),
+        Arc::clone(&agent_parent_tools) as Arc<dyn ToolProvider>,
         &config,
         lash_config.agent_models.clone(),
         root_cancel.clone(),
@@ -462,6 +465,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&all_base_tools),
         base_allowed,
     ));
+    agent_parent_tools.swap(Arc::clone(&filtered_base));
 
     let agent_allowed: BTreeSet<String> = probe_agent_call
         .definitions()
@@ -473,7 +477,7 @@ async fn main() -> anyhow::Result<()> {
     let mut tools_comp = CompositeTools::new().add_arc(Arc::clone(&filtered_base));
     if !agent_allowed.is_empty() {
         let agent_call = AgentCall::new(
-            Arc::clone(&filtered_base),
+            Arc::clone(&agent_parent_tools) as Arc<dyn ToolProvider>,
             &config,
             lash_config.agent_models.clone(),
             root_cancel.clone(),
@@ -483,9 +487,24 @@ async fn main() -> anyhow::Result<()> {
         tools_comp = tools_comp.add_arc(filtered_agent);
     }
     let tools: Arc<dyn ToolProvider> = Arc::new(tools_comp);
-    let toolset_hash =
-        hash12(&serde_json::to_vec(&tools.definitions()).unwrap_or_else(|_| b"[]".to_vec()));
-    let session = Session::new(tools, "root", headless, config.capabilities.clone()).await?;
+    let dynamic_tools = Arc::new(DynamicToolProvider::from_tool_provider(
+        Arc::clone(&tools),
+        default_dynamic_capability_defs(),
+        profile_from_agent_capabilities(&config.capabilities),
+    )?);
+    let dynamic_tools_provider: Arc<dyn ToolProvider> = dynamic_tools.clone();
+    agent_parent_tools.swap(dynamic_tools_provider.clone());
+    let toolset_hash = hash12(
+        &serde_json::to_vec(&dynamic_tools_provider.definitions())
+            .unwrap_or_else(|_| b"[]".to_vec()),
+    );
+    let session = Session::new(
+        dynamic_tools_provider,
+        "root",
+        headless,
+        config.capabilities.clone(),
+    )
+    .await?;
 
     let initial_reasoning_effort = config.reasoning_effort.clone();
     let agent = Agent::new(session, config, Some("root".to_string()));
@@ -513,6 +532,7 @@ async fn main() -> anyhow::Result<()> {
     let result = run_app(
         terminal,
         agent,
+        Arc::clone(&dynamic_tools),
         &mut logger,
         &args,
         lash_config.provider.clone(),
@@ -842,6 +862,9 @@ fn help_text(skills: &skill::SkillRegistry) -> String {
         "  /retry             Replay the previous turn payload".to_string(),
         "  /resume [name]     Browse or load a previous session".to_string(),
         "  /skills            Browse loaded skills".to_string(),
+        "  /tools ...         Inspect/edit dynamic tools".to_string(),
+        "  /caps ...          Inspect/edit dynamic capabilities".to_string(),
+        "  /reconfigure ...   Apply/status/clear pending changes".to_string(),
         "  /help, /?          Show this help".to_string(),
         "  /exit, /quit       Quit".to_string(),
     ];
@@ -858,6 +881,21 @@ fn help_text(skills: &skill::SkillRegistry) -> String {
             lines.push(format!("  /{}{}", skill.name, desc));
         }
     }
+
+    lines.extend([
+        String::new(),
+        "Dynamic Runtime:".to_string(),
+        "  /tools".to_string(),
+        "  /tools add <name> <handler> [description]".to_string(),
+        "  /tools rm <name>".to_string(),
+        "  /tools update <name> key=value ...".to_string(),
+        "  /caps".to_string(),
+        "  /caps add <id> name=<n> tools=a,b helpers=h1,h2 prompt=<text>".to_string(),
+        "  /caps rm <id>".to_string(),
+        "  /caps enable <id> | /caps disable <id>".to_string(),
+        "  /caps tool-enable <tool> | /caps tool-disable <tool>".to_string(),
+        "  /reconfigure status|apply|clear".to_string(),
+    ]);
 
     lines.extend([
         String::new(),
@@ -883,13 +921,14 @@ fn help_text(skills: &skill::SkillRegistry) -> String {
 async fn run_app(
     mut terminal: DefaultTerminal,
     agent: Agent,
+    dynamic_tools: Arc<DynamicToolProvider>,
     logger: &mut SessionLogger,
     args: &Args,
     mut provider: Provider,
     model: String,
     session_name: String,
     store: Arc<Store>,
-    toolset_hash: String,
+    mut toolset_hash: String,
     initial_reasoning_effort: Option<String>,
 ) -> anyhow::Result<()> {
     let mut app = App::new(model, session_name, Some(store.clone()));
@@ -906,6 +945,8 @@ async fn run_app(
         agent,
         AgentStateEnvelope::default(),
     ));
+    let mut desired_dynamic = dynamic_tools.export_state();
+    let mut pending_reconfigure = false;
 
     // Cancellation token for interrupting a running agent
     let mut cancel_token: Option<CancellationToken> = None;
@@ -1038,6 +1079,28 @@ async fn run_app(
 
                     // Auto-drain: send queued message
                     if let Some(queued) = app.take_queued_message() {
+                        if let Err(e) = apply_pending_reconfigure(
+                            &dynamic_tools,
+                            &mut desired_dynamic,
+                            &mut pending_reconfigure,
+                            &mut runtime,
+                        )
+                        .await
+                        {
+                            push_system_message(
+                                &mut app,
+                                format!(
+                                    "Pending runtime reconfigure failed; queued message not sent: {}",
+                                    e
+                                ),
+                            );
+                            app.queue_message(queued);
+                            continue;
+                        }
+                        toolset_hash = hash12(
+                            &serde_json::to_vec(&dynamic_tools.definitions())
+                                .unwrap_or_else(|_| b"[]".to_vec()),
+                        );
                         let (items, image_blobs) =
                             build_items_from_editor_input(&queued, Vec::new());
                         let turn_input = make_turn_input(&mut app, items, image_blobs);
@@ -1593,6 +1656,27 @@ Use `/provider` or `/login` to sign in again without restarting.",
                                 },
                                 command::Command::Retry => {
                                     if let Some(previous) = last_turn.clone() {
+                                        if let Err(e) = apply_pending_reconfigure(
+                                            &dynamic_tools,
+                                            &mut desired_dynamic,
+                                            &mut pending_reconfigure,
+                                            &mut runtime,
+                                        )
+                                        .await
+                                        {
+                                            push_system_message(
+                                                &mut app,
+                                                format!(
+                                                    "Pending runtime reconfigure failed; retry blocked: {}",
+                                                    e
+                                                ),
+                                            );
+                                            continue;
+                                        }
+                                        toolset_hash = hash12(
+                                            &serde_json::to_vec(&dynamic_tools.definitions())
+                                                .unwrap_or_else(|_| b"[]".to_vec()),
+                                        );
                                         send_user_message(
                                             previous.display_input.clone(),
                                             previous.turn_input.clone(),
@@ -1668,6 +1752,398 @@ Use `/provider` or `/login` to sign in again without restarting.",
                                         }
                                     }
                                 }
+                                command::Command::Tools(raw) => {
+                                    let raw = raw.unwrap_or_default();
+                                    let raw_trim = raw.trim();
+                                    if raw_trim.is_empty() {
+                                        let active = dynamic_tools.export_state();
+                                        let mut lines = vec![
+                                            format!(
+                                                "Dynamic tools (generation {}):",
+                                                active.base_generation
+                                            ),
+                                            format!(
+                                                "Pending reconfigure: {}",
+                                                if pending_reconfigure { "yes" } else { "no" }
+                                            ),
+                                        ];
+                                        for (name, spec) in &desired_dynamic.tools {
+                                            let enabled = desired_dynamic
+                                                .profile
+                                                .enabled_tools
+                                                .contains(name);
+                                            lines.push(format!(
+                                                "  - {} [{}] adapter={}{}",
+                                                name,
+                                                spec.definition.returns,
+                                                spec.adapter_id,
+                                                if enabled { " (explicitly enabled)" } else { "" }
+                                            ));
+                                        }
+                                        if desired_dynamic.tools.is_empty() {
+                                            lines.push("  (none)".to_string());
+                                        }
+                                        push_system_message(&mut app, lines.join("\n"));
+                                        continue;
+                                    }
+
+                                    let mut parts = raw_trim.split_whitespace();
+                                    let sub = parts.next().unwrap_or_default();
+                                    match sub {
+                                        "add" => {
+                                            let mut add_parts = raw_trim.splitn(4, ' ');
+                                            let _ = add_parts.next();
+                                            let Some(name) = add_parts.next() else {
+                                                push_system_message(
+                                                    &mut app,
+                                                    "Usage: /tools add <name> <handler> [description]",
+                                                );
+                                                continue;
+                                            };
+                                            let Some(handler_id) = add_parts.next() else {
+                                                push_system_message(
+                                                    &mut app,
+                                                    "Usage: /tools add <name> <handler> [description]",
+                                                );
+                                                continue;
+                                            };
+                                            let description =
+                                                add_parts.next().map(|v| v.trim().to_string());
+                                            match register_builtin_tool(
+                                                &dynamic_tools,
+                                                name,
+                                                handler_id,
+                                                description,
+                                            ) {
+                                                Ok(def) => {
+                                                    desired_dynamic.tools.insert(
+                                                        name.to_string(),
+                                                        DynamicToolSpec {
+                                                            definition: def,
+                                                            adapter_id: "inprocess".to_string(),
+                                                        },
+                                                    );
+                                                    desired_dynamic
+                                                        .profile
+                                                        .enabled_tools
+                                                        .insert(name.to_string());
+                                                    pending_reconfigure = true;
+                                                    push_system_message(
+                                                        &mut app,
+                                                        format!(
+                                                            "Tool `{}` staged with handler `{}`. Apply with `/reconfigure apply` or send the next turn.",
+                                                            name, handler_id
+                                                        ),
+                                                    );
+                                                }
+                                                Err(e) => push_system_message(&mut app, e),
+                                            }
+                                        }
+                                        "rm" | "remove" => {
+                                            let Some(name) = parts.next() else {
+                                                push_system_message(
+                                                    &mut app,
+                                                    "Usage: /tools rm <name>",
+                                                );
+                                                continue;
+                                            };
+                                            if desired_dynamic.tools.remove(name).is_some() {
+                                                desired_dynamic.profile.enabled_tools.remove(name);
+                                                for cap in
+                                                    desired_dynamic.capability_defs.values_mut()
+                                                {
+                                                    cap.tool_names.remove(name);
+                                                }
+                                                pending_reconfigure = true;
+                                                push_system_message(
+                                                    &mut app,
+                                                    format!("Tool `{name}` staged for removal."),
+                                                );
+                                            } else {
+                                                push_system_message(
+                                                    &mut app,
+                                                    format!("Tool `{name}` not found."),
+                                                );
+                                            }
+                                        }
+                                        "update" => {
+                                            let mut update_parts = raw_trim.splitn(3, ' ');
+                                            let _ = update_parts.next();
+                                            let Some(name) = update_parts.next() else {
+                                                push_system_message(
+                                                    &mut app,
+                                                    "Usage: /tools update <name> key=value ...",
+                                                );
+                                                continue;
+                                            };
+                                            let kv_raw = update_parts.next().unwrap_or_default();
+                                            let kv = parse_kv_args(kv_raw);
+                                            let Some(spec) = desired_dynamic.tools.get_mut(name)
+                                            else {
+                                                push_system_message(
+                                                    &mut app,
+                                                    format!("Tool `{name}` not found."),
+                                                );
+                                                continue;
+                                            };
+                                            if let Some(desc) = kv.get("description") {
+                                                spec.definition.description = desc.clone();
+                                            }
+                                            if let Some(returns) = kv.get("returns") {
+                                                spec.definition.returns = returns.clone();
+                                            }
+                                            if let Some(hidden) = kv.get("hidden") {
+                                                spec.definition.hidden = hidden == "true";
+                                            }
+                                            if let Some(inject) = kv.get("inject_into_prompt") {
+                                                spec.definition.inject_into_prompt =
+                                                    inject == "true";
+                                            }
+                                            pending_reconfigure = true;
+                                            push_system_message(
+                                                &mut app,
+                                                format!("Tool `{name}` staged for update."),
+                                            );
+                                        }
+                                        _ => push_system_message(
+                                            &mut app,
+                                            "Unknown /tools subcommand. Try: add, rm, update",
+                                        ),
+                                    }
+                                }
+                                command::Command::Caps(raw) => {
+                                    let raw = raw.unwrap_or_default();
+                                    let raw_trim = raw.trim();
+                                    if raw_trim.is_empty() {
+                                        let mut lines = vec![
+                                            "Dynamic capabilities:".to_string(),
+                                            format!(
+                                                "Enabled ids: {}",
+                                                desired_dynamic
+                                                    .profile
+                                                    .enabled_capabilities
+                                                    .iter()
+                                                    .cloned()
+                                                    .collect::<Vec<_>>()
+                                                    .join(", ")
+                                            ),
+                                        ];
+                                        for (id, cap) in &desired_dynamic.capability_defs {
+                                            lines.push(format!(
+                                                "  - {} ({}) tools=[{}]",
+                                                id,
+                                                cap.name,
+                                                cap.tool_names
+                                                    .iter()
+                                                    .cloned()
+                                                    .collect::<Vec<_>>()
+                                                    .join(", ")
+                                            ));
+                                        }
+                                        push_system_message(&mut app, lines.join("\n"));
+                                        continue;
+                                    }
+
+                                    let mut parts = raw_trim.split_whitespace();
+                                    let sub = parts.next().unwrap_or_default();
+                                    match sub {
+                                        "add" => {
+                                            let mut add_parts = raw_trim.splitn(3, ' ');
+                                            let _ = add_parts.next();
+                                            let Some(id) = add_parts.next() else {
+                                                push_system_message(
+                                                    &mut app,
+                                                    "Usage: /caps add <id> name=<n> tools=a,b helpers=h1,h2 prompt=<text>",
+                                                );
+                                                continue;
+                                            };
+                                            let kv =
+                                                parse_kv_args(add_parts.next().unwrap_or_default());
+                                            let name = kv
+                                                .get("name")
+                                                .cloned()
+                                                .unwrap_or_else(|| id.to_string());
+                                            let tools = kv
+                                                .get("tools")
+                                                .map_or_else(BTreeSet::new, |v| parse_csv(v));
+                                            let helpers = kv
+                                                .get("helpers")
+                                                .map_or_else(BTreeSet::new, |v| parse_csv(v));
+                                            let prompt = kv.get("prompt").cloned();
+                                            desired_dynamic.capability_defs.insert(
+                                                id.to_string(),
+                                                DynamicCapabilityDef {
+                                                    id: id.to_string(),
+                                                    name,
+                                                    description: kv
+                                                        .get("description")
+                                                        .cloned()
+                                                        .unwrap_or_default(),
+                                                    prompt_section: prompt,
+                                                    helper_bindings: helpers,
+                                                    tool_names: tools,
+                                                    enabled_by_default: kv
+                                                        .get("enabled_by_default")
+                                                        .map(|v| v == "true")
+                                                        .unwrap_or(false),
+                                                },
+                                            );
+                                            pending_reconfigure = true;
+                                            push_system_message(
+                                                &mut app,
+                                                format!("Capability `{id}` staged."),
+                                            );
+                                        }
+                                        "rm" | "remove" => {
+                                            let Some(id) = parts.next() else {
+                                                push_system_message(
+                                                    &mut app,
+                                                    "Usage: /caps rm <id>",
+                                                );
+                                                continue;
+                                            };
+                                            desired_dynamic.capability_defs.remove(id);
+                                            desired_dynamic.profile.enabled_capabilities.remove(id);
+                                            pending_reconfigure = true;
+                                            push_system_message(
+                                                &mut app,
+                                                format!("Capability `{id}` staged for removal."),
+                                            );
+                                        }
+                                        "enable" => {
+                                            let Some(id) = parts.next() else {
+                                                push_system_message(
+                                                    &mut app,
+                                                    "Usage: /caps enable <id>",
+                                                );
+                                                continue;
+                                            };
+                                            desired_dynamic
+                                                .profile
+                                                .enabled_capabilities
+                                                .insert(id.to_string());
+                                            pending_reconfigure = true;
+                                            push_system_message(
+                                                &mut app,
+                                                format!("Capability `{id}` staged for enable."),
+                                            );
+                                        }
+                                        "disable" => {
+                                            let Some(id) = parts.next() else {
+                                                push_system_message(
+                                                    &mut app,
+                                                    "Usage: /caps disable <id>",
+                                                );
+                                                continue;
+                                            };
+                                            desired_dynamic.profile.enabled_capabilities.remove(id);
+                                            pending_reconfigure = true;
+                                            push_system_message(
+                                                &mut app,
+                                                format!("Capability `{id}` staged for disable."),
+                                            );
+                                        }
+                                        "tool-enable" => {
+                                            let Some(name) = parts.next() else {
+                                                push_system_message(
+                                                    &mut app,
+                                                    "Usage: /caps tool-enable <tool>",
+                                                );
+                                                continue;
+                                            };
+                                            desired_dynamic
+                                                .profile
+                                                .enabled_tools
+                                                .insert(name.to_string());
+                                            pending_reconfigure = true;
+                                            push_system_message(
+                                                &mut app,
+                                                format!(
+                                                    "Tool `{name}` staged as explicitly enabled."
+                                                ),
+                                            );
+                                        }
+                                        "tool-disable" => {
+                                            let Some(name) = parts.next() else {
+                                                push_system_message(
+                                                    &mut app,
+                                                    "Usage: /caps tool-disable <tool>",
+                                                );
+                                                continue;
+                                            };
+                                            desired_dynamic.profile.enabled_tools.remove(name);
+                                            pending_reconfigure = true;
+                                            push_system_message(
+                                                &mut app,
+                                                format!(
+                                                    "Tool `{name}` staged as explicitly disabled."
+                                                ),
+                                            );
+                                        }
+                                        _ => push_system_message(
+                                            &mut app,
+                                            "Unknown /caps subcommand. Try: add, rm, enable, disable, tool-enable, tool-disable",
+                                        ),
+                                    }
+                                }
+                                command::Command::Reconfigure(raw) => {
+                                    let action = raw.unwrap_or_else(|| "status".to_string());
+                                    match action.trim() {
+                                        "" | "status" => {
+                                            push_system_message(
+                                                &mut app,
+                                                format!(
+                                                    "Reconfigure status: pending={} current_generation={} base_generation={}",
+                                                    pending_reconfigure,
+                                                    dynamic_tools.generation(),
+                                                    desired_dynamic.base_generation
+                                                ),
+                                            );
+                                        }
+                                        "clear" => {
+                                            desired_dynamic = dynamic_tools.export_state();
+                                            pending_reconfigure = false;
+                                            push_system_message(
+                                                &mut app,
+                                                "Cleared pending dynamic runtime changes.",
+                                            );
+                                        }
+                                        "apply" => {
+                                            match apply_pending_reconfigure(
+                                                &dynamic_tools,
+                                                &mut desired_dynamic,
+                                                &mut pending_reconfigure,
+                                                &mut runtime,
+                                            )
+                                            .await
+                                            {
+                                                Ok(generation) => {
+                                                    toolset_hash = hash12(
+                                                        &serde_json::to_vec(
+                                                            &dynamic_tools.definitions(),
+                                                        )
+                                                        .unwrap_or_else(|_| b"[]".to_vec()),
+                                                    );
+                                                    push_system_message(
+                                                        &mut app,
+                                                        format!(
+                                                            "Dynamic runtime reconfigured successfully (generation {}).",
+                                                            generation
+                                                        ),
+                                                    )
+                                                }
+                                                Err(e) => push_system_message(
+                                                    &mut app,
+                                                    format!("Reconfigure failed: {e}"),
+                                                ),
+                                            }
+                                        }
+                                        _ => push_system_message(
+                                            &mut app,
+                                            "Unknown /reconfigure action. Try: status, apply, clear",
+                                        ),
+                                    }
+                                }
                                 command::Command::Skills => {
                                     let items: Vec<(String, String)> = app
                                         .skills
@@ -1690,6 +2166,27 @@ Use `/provider` or `/login` to sign in again without restarting.",
                                 }
                                 command::Command::Skill(name, args) => {
                                     if app.skills.get(&name).is_some() {
+                                        if let Err(e) = apply_pending_reconfigure(
+                                            &dynamic_tools,
+                                            &mut desired_dynamic,
+                                            &mut pending_reconfigure,
+                                            &mut runtime,
+                                        )
+                                        .await
+                                        {
+                                            push_system_message(
+                                                &mut app,
+                                                format!(
+                                                    "Pending runtime reconfigure failed; skill turn blocked: {}",
+                                                    e
+                                                ),
+                                            );
+                                            continue;
+                                        }
+                                        toolset_hash = hash12(
+                                            &serde_json::to_vec(&dynamic_tools.definitions())
+                                                .unwrap_or_else(|_| b"[]".to_vec()),
+                                        );
                                         // Display original slash command input in UI, but send
                                         // structured SKILL payload to the runtime turn.
                                         let skill_item = InputItem::SkillRef { name, args };
@@ -1726,6 +2223,27 @@ Use `/provider` or `/login` to sign in again without restarting.",
                         }
 
                         // Regular user message — send to agent
+                        if let Err(e) = apply_pending_reconfigure(
+                            &dynamic_tools,
+                            &mut desired_dynamic,
+                            &mut pending_reconfigure,
+                            &mut runtime,
+                        )
+                        .await
+                        {
+                            push_system_message(
+                                &mut app,
+                                format!(
+                                    "Pending runtime reconfigure failed; message not sent: {}",
+                                    e
+                                ),
+                            );
+                            continue;
+                        }
+                        toolset_hash = hash12(
+                            &serde_json::to_vec(&dynamic_tools.definitions())
+                                .unwrap_or_else(|_| b"[]".to_vec()),
+                        );
                         let images = app.take_images();
                         let (items, image_blobs) = build_items_from_editor_input(&input, images);
                         let turn_input = make_turn_input(&mut app, items, image_blobs);
@@ -1911,6 +2429,150 @@ fn make_turn_input(
         mode: Some(mode),
         plan_file,
     }
+}
+
+fn parse_kv_args(raw: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for token in raw.split_whitespace() {
+        if let Some((k, v)) = token.split_once('=') {
+            out.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    out
+}
+
+fn parse_csv(raw: &str) -> BTreeSet<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn register_builtin_tool(
+    dynamic_tools: &Arc<DynamicToolProvider>,
+    tool_name: &str,
+    handler_id: &str,
+    description_override: Option<String>,
+) -> Result<ToolDefinition, String> {
+    let adapter = dynamic_tools.inprocess_adapter();
+    let def = match handler_id {
+        "echo" => {
+            let handler: InProcessToolHandler = Arc::new(|args, _progress| {
+                Box::pin(async move {
+                    let text = args
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    ToolResult::ok(serde_json::json!(text))
+                })
+            });
+            let def = ToolDefinition {
+                name: tool_name.to_string(),
+                description: description_override
+                    .unwrap_or_else(|| "Echoes back the `text` argument.".to_string()),
+                params: vec![ToolParam::typed("text", "str")],
+                returns: "str".to_string(),
+                examples: vec![format!("{tool_name}(text=\"hello\")")],
+                hidden: false,
+                inject_into_prompt: false,
+            };
+            adapter.register_tool(def.clone(), handler);
+            def
+        }
+        "time" => {
+            let handler: InProcessToolHandler = Arc::new(|_args, _progress| {
+                Box::pin(async move {
+                    ToolResult::ok(serde_json::json!(chrono::Utc::now().to_rfc3339()))
+                })
+            });
+            let def = ToolDefinition {
+                name: tool_name.to_string(),
+                description: description_override
+                    .unwrap_or_else(|| "Returns the current UTC timestamp (RFC3339).".to_string()),
+                params: vec![],
+                returns: "str".to_string(),
+                examples: vec![format!("{tool_name}()")],
+                hidden: false,
+                inject_into_prompt: false,
+            };
+            adapter.register_tool(def.clone(), handler);
+            def
+        }
+        "uuid" => {
+            let handler: InProcessToolHandler = Arc::new(|_args, _progress| {
+                Box::pin(async move {
+                    ToolResult::ok(serde_json::json!(uuid::Uuid::new_v4().to_string()))
+                })
+            });
+            let def = ToolDefinition {
+                name: tool_name.to_string(),
+                description: description_override
+                    .unwrap_or_else(|| "Returns a random UUIDv4 string.".to_string()),
+                params: vec![],
+                returns: "str".to_string(),
+                examples: vec![format!("{tool_name}()")],
+                hidden: false,
+                inject_into_prompt: false,
+            };
+            adapter.register_tool(def.clone(), handler);
+            def
+        }
+        other => {
+            return Err(format!(
+                "Unknown handler `{other}`. Supported handlers: echo, time, uuid"
+            ));
+        }
+    };
+
+    Ok(def)
+}
+
+async fn apply_pending_reconfigure(
+    dynamic_tools: &Arc<DynamicToolProvider>,
+    desired_dynamic: &mut DynamicStateSnapshot,
+    pending_reconfigure: &mut bool,
+    runtime: &mut Option<RuntimeEngine>,
+) -> Result<u64, String> {
+    if !*pending_reconfigure {
+        return Ok(dynamic_tools.generation());
+    }
+
+    let previous = dynamic_tools.export_state();
+    let generation = match dynamic_tools.apply_state(desired_dynamic.clone()) {
+        Ok(g) => g,
+        Err(e) => {
+            desired_dynamic.base_generation = dynamic_tools.generation();
+            return Err(e.to_string());
+        }
+    };
+
+    let capabilities_json = dynamic_tools.capabilities_payload_json();
+    let prompt_caps = agent_capabilities_from_profile(&dynamic_tools.profile());
+    if let Some(rt) = runtime.as_mut() {
+        rt.set_capabilities(prompt_caps);
+        if let Err(e) = rt.reconfigure_session(capabilities_json, generation).await {
+            let mut rollback = previous.clone();
+            rollback.base_generation = dynamic_tools.generation();
+            let _ = dynamic_tools.apply_state(rollback);
+            rt.set_capabilities(agent_capabilities_from_profile(&dynamic_tools.profile()));
+            let _ = rt
+                .reconfigure_session(
+                    dynamic_tools.capabilities_payload_json(),
+                    dynamic_tools.generation(),
+                )
+                .await;
+            desired_dynamic.base_generation = dynamic_tools.generation();
+            return Err(format!(
+                "Failed to apply runtime reconfigure (state rolled back): {e}"
+            ));
+        }
+    }
+
+    *desired_dynamic = dynamic_tools.export_state();
+    *pending_reconfigure = false;
+    Ok(generation)
 }
 
 /// Send a user message to the runtime: push display block, log, and spawn turn run.
