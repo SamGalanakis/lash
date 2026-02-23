@@ -7,6 +7,11 @@ edition = "2024"
 # Keep core portable by default. Opt into storage/runtime extras explicitly.
 default = []
 sqlite-store = ["dep:rusqlite"]
+# Build modes for embedded Python (PyO3):
+# - python-system: link against system Python discovered by PyO3.
+# - python-bundled: use python-build-standalone + generated PYO3_CONFIG_FILE.
+python-system = []
+python-bundled = []
 # Convenience umbrella for first-party consumers (e.g. lash-cli).
 full = ["sqlite-store"]
 

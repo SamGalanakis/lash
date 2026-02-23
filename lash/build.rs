@@ -5,12 +5,54 @@ const PYTHON_VERSION: &str = "3.14.3";
 const PYTHON_MAJOR_MINOR: &str = "3.14";
 const PBS_RELEASE: &str = "20260211";
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum PythonBuildMode {
+    System,
+    Bundled,
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=python/repl.py");
+    println!("cargo:rerun-if-env-changed=PYO3_CONFIG_FILE");
 
     // ── Model info: download models.dev and generate context window lookup ──
     generate_model_info();
 
+    match resolve_python_build_mode() {
+        PythonBuildMode::System => configure_system_python_build(),
+        PythonBuildMode::Bundled => configure_bundled_python_build(),
+    }
+}
+
+fn resolve_python_build_mode() -> PythonBuildMode {
+    let bundled = std::env::var_os("CARGO_FEATURE_PYTHON_BUNDLED").is_some();
+    let system = std::env::var_os("CARGO_FEATURE_PYTHON_SYSTEM").is_some();
+
+    assert!(
+        !(bundled && system),
+        "Features 'python-system' and 'python-bundled' are mutually exclusive. Enable at most one."
+    );
+
+    if bundled {
+        PythonBuildMode::Bundled
+    } else {
+        // Default to system Python unless bundled mode is explicitly requested.
+        PythonBuildMode::System
+    }
+}
+
+fn configure_system_python_build() {
+    // System mode intentionally does not set any linker overrides or stdlib
+    // bundling env vars. PyO3 discovers and links against the host Python.
+    if std::env::var_os("PYO3_CONFIG_FILE").is_some() {
+        eprintln!(
+            "Warning: PYO3_CONFIG_FILE is set while building in python-system mode. \
+             This may force a non-system Python configuration."
+        );
+    }
+}
+
+fn configure_bundled_python_build() {
     // ── Python standalone: download, bundle, configure PyO3 ──
     let target = std::env::var("TARGET").unwrap();
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
@@ -49,11 +91,9 @@ fn main() {
             panic!(
                 "\n\nPYO3_CONFIG_FILE is not set — PyO3 will link to your system Python \
                  instead of the bundled standalone.\n\
-                 Fix: run  ./scripts/fetch-python.sh  first, then rebuild.\n\
-                 A .cargo/config.toml that sets PYO3_CONFIG_FILE should already exist; \
-                 if it was deleted, recreate it with:\n\n\
-                 [env]\n\
-                 PYO3_CONFIG_FILE = {{ value = \"target/python-standalone/pyo3-config.txt\", relative = true }}\n"
+                 Fix: run ./scripts/fetch-python.sh, then rebuild with:\n\
+                 PYO3_CONFIG_FILE=$PWD/target/python-standalone/pyo3-config.txt \\\n\
+                 cargo build -p lash-cli --features python-bundled\n"
             );
         }
         Ok(ref p) if !Path::new(p).exists() => {

@@ -5,7 +5,7 @@ on:
     branches: [main]
 
 jobs:
-  build:
+  build-bundled:
     strategy:
       fail-fast: false
       matrix:
@@ -56,15 +56,33 @@ jobs:
       - name: Fetch python-standalone
         run: ./scripts/fetch-python.sh ${{ matrix.target }}
 
-      - name: Build
+      - name: Build (python-bundled)
         env:
           PYO3_CONFIG_FILE: ${{ github.workspace }}/target/python-standalone/pyo3-config.txt
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           RUSTFLAGS: -L native=${{ github.workspace }}/target/python-standalone/python/install/lib
-        run: cargo build --release -p lash-cli --target ${{ matrix.target }}
+        run: cargo build --release -p lash-cli --features python-bundled --target ${{ matrix.target }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: lash-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/lash
+
+  build-system-smoke:
+    runs-on: ubuntu-latest
+    name: python-system (smoke)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libreadline-dev python3-dev
+
+      - name: Build (python-system)
+        run: cargo build --release -p lash-cli --features python-system
