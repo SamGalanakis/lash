@@ -230,17 +230,17 @@ impl GoogleCloudCodeAdapter {
 #[async_trait]
 impl LlmTransport for GoogleCloudCodeAdapter {
     fn default_root_model(&self) -> &'static str {
-        "gemini-3-pro-preview"
+        "gemini-3.1-pro-preview"
     }
 
     fn default_agent_model(&self, tier: &str) -> Option<ModelSelection> {
         match tier {
             "quick" => Some(ModelSelection {
-                model: "gemini-2.5-flash",
+                model: "gemini-3-flash-preview",
                 reasoning_effort: None,
             }),
             "balanced" | "thorough" => Some(ModelSelection {
-                model: "gemini-3-pro-preview",
+                model: "gemini-3.1-pro-preview",
                 reasoning_effort: None,
             }),
             _ => None,

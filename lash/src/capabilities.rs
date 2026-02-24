@@ -18,7 +18,6 @@ pub enum CapabilityId {
     History,
     Skills,
     Web,
-    Context,
 }
 
 impl CapabilityId {
@@ -34,7 +33,6 @@ impl CapabilityId {
             Self::History => "history",
             Self::Skills => "skills",
             Self::Web => "web",
-            Self::Context => "context",
         }
     }
 
@@ -50,7 +48,6 @@ impl CapabilityId {
             "history" => Some(Self::History),
             "skills" => Some(Self::Skills),
             "web" => Some(Self::Web),
-            "context" => Some(Self::Context),
             _ => None,
         }
     }
@@ -152,10 +149,6 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
             "update_task",
             "delete_task",
             "claim_task",
-            "add_blocks",
-            "remove_blocks",
-            "add_blocked_by",
-            "remove_blocked_by",
         ],
         enabled_by_default: true,
     },
@@ -232,15 +225,6 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
         prompt_section: None,
         helper_bindings: &[],
         tools: &["search_web", "fetch_url"],
-        enabled_by_default: true,
-    },
-    CapabilityDefinition {
-        id: CapabilityId::Context,
-        name: "Context",
-        description: "Archived context lookups.",
-        prompt_section: None,
-        helper_bindings: &[],
-        tools: &["view_message"],
         enabled_by_default: true,
     },
 ];

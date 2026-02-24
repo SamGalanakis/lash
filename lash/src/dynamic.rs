@@ -308,7 +308,7 @@ impl DynamicToolProvider {
     pub fn from_tool_provider(
         provider: Arc<dyn ToolProvider>,
         capability_defs: BTreeMap<String, DynamicCapabilityDef>,
-        profile: CapabilityProfile,
+        mut profile: CapabilityProfile,
     ) -> Result<Self, ReconfigureError> {
         let inprocess = Arc::new(InProcessToolExecutionAdapter::new("inprocess"));
 
@@ -344,6 +344,7 @@ impl DynamicToolProvider {
 
         let available: BTreeSet<String> = tools.keys().cloned().collect();
         let resolved = resolve_projection(&capability_defs, &profile, &available)?;
+        profile.enabled_capabilities = resolved.enabled_capabilities.clone();
 
         Ok(Self {
             adapters: Arc::new(RwLock::new(adapters)),
@@ -435,6 +436,8 @@ impl DynamicToolProvider {
 
         let available: BTreeSet<String> = next.tools.keys().cloned().collect();
         let resolved = resolve_projection(&next.capability_defs, &next.profile, &available)?;
+        let mut normalized_profile = next.profile.clone();
+        normalized_profile.enabled_capabilities = resolved.enabled_capabilities.clone();
 
         let mut state = self.state.write().expect("dynamic state lock poisoned");
         if state.generation != next.base_generation {
@@ -445,7 +448,7 @@ impl DynamicToolProvider {
         }
         state.tools = next.tools;
         state.capability_defs = next.capability_defs;
-        state.profile = next.profile;
+        state.profile = normalized_profile;
         state.resolved = resolved;
         state.generation += 1;
 
@@ -486,6 +489,8 @@ impl DynamicToolProvider {
         let available: BTreeSet<String> = snapshot.tools.keys().cloned().collect();
         let resolved =
             resolve_projection(&snapshot.capability_defs, &snapshot.profile, &available)?;
+        let mut profile = snapshot.profile;
+        profile.enabled_capabilities = resolved.enabled_capabilities.clone();
 
         let generation = snapshot.base_generation.max(1);
         Ok(Self {
@@ -495,7 +500,7 @@ impl DynamicToolProvider {
                 generation,
                 tools: snapshot.tools,
                 capability_defs: snapshot.capability_defs,
-                profile: snapshot.profile,
+                profile,
                 resolved,
             })),
         })
@@ -680,6 +685,38 @@ mod tests {
             },
             &BTreeSet::new(),
         );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_projection_rejects_capability_with_unavailable_pack_tools() {
+        let mut defs = BTreeMap::new();
+        defs.insert(
+            "planning".to_string(),
+            DynamicCapabilityDef {
+                id: "planning".to_string(),
+                name: "Planning".to_string(),
+                description: "Plan mode tools".to_string(),
+                prompt_section: Some("plan section".to_string()),
+                helper_bindings: BTreeSet::from([
+                    "enter_plan_mode".to_string(),
+                    "exit_plan_mode".to_string(),
+                ]),
+                tool_names: BTreeSet::from([
+                    "enter_plan_mode".to_string(),
+                    "exit_plan_mode".to_string(),
+                ]),
+                enabled_by_default: true,
+            },
+        );
+
+        let profile = CapabilityProfile {
+            enabled_capabilities: BTreeSet::from(["planning".to_string()]),
+            enabled_tools: BTreeSet::new(),
+        };
+        let available_tools = BTreeSet::new();
+
+        let result = resolve_projection(&defs, &profile, &available_tools);
         assert!(result.is_err());
     }
 }

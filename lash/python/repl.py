@@ -14,7 +14,11 @@ import uuid
 import warnings
 from enum import StrEnum
 
-import dill
+try:
+    import dill
+except ImportError:
+    # Fallback for environments where dill is unavailable.
+    import pickle as dill
 
 # Suppress SyntaxWarnings from LLM-generated code (e.g. unrecognized escape
 # sequences like "\|"). These warnings write directly to stderr via C-level

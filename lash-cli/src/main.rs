@@ -32,8 +32,8 @@ use lash_core::agent::{Message, MessageRole, Part, PartKind, PruneState};
 use lash_core::provider::{LashConfig, Provider};
 use lash_core::tools::{
     AgentCall, CompositeTools, EditFile, FetchUrl, FilteredTools, FindReplace, Glob, Grep, Ls,
-    PlanMode, ReadFile, Shell, SkillStore, StateStore, SwitchableTools, TaskStore, ViewMessage,
-    WebSearch, WriteFile,
+    PlanMode, ReadFile, Shell, SkillStore, StateStore, SwitchableTools, TaskStore, WebSearch,
+    WriteFile,
 };
 use lash_core::*;
 use ratatui::DefaultTerminal;
@@ -427,10 +427,8 @@ async fn main() -> anyhow::Result<()> {
         .add(FindReplace)
         .add(Glob)
         .add(Grep)
-        .add(Ls);
-    if !headless {
-        base_all = base_all.add(PlanMode::new());
-    }
+        .add(Ls)
+        .add(PlanMode::new());
     base_all = base_all.add_arc(Arc::clone(&task_store) as Arc<dyn ToolProvider>);
     base_all = base_all.add(StateStore::new(
         Arc::clone(&store),
@@ -439,13 +437,10 @@ async fn main() -> anyhow::Result<()> {
             PathBuf::from(".lash").join("skills"),
         ],
     ));
-    // Headless runs are single-turn and autonomous; skip context archive lookups.
-    if !headless {
-        base_all = base_all.add(ViewMessage::new(Arc::clone(&store)));
-    }
-    if let Some(key) = lash_config.tavily_api_key() {
-        base_all = base_all.add(WebSearch::new(key)).add(FetchUrl::new(key));
-    }
+    let tavily_key = lash_config.tavily_api_key().unwrap_or_default().to_string();
+    base_all = base_all
+        .add(WebSearch::new(tavily_key.clone()))
+        .add(FetchUrl::new(tavily_key));
     base_all = base_all.add(SkillStore::new(skill_dirs));
     let all_base_tools: Arc<dyn ToolProvider> = Arc::new(base_all);
 
@@ -2154,6 +2149,8 @@ Use `/provider` or `/login` to sign in again without restarting.",
                                     }
                                 }
                                 command::Command::Skills => {
+                                    // Refresh from disk so new/removed skills are picked up
+                                    app.skills = skill::SkillRegistry::load();
                                     let items: Vec<(String, String)> = app
                                         .skills
                                         .iter()
