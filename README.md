@@ -70,11 +70,45 @@ Then bootstrap bundled Python and set `PYO3_CONFIG_FILE` before running Cargo (s
 
 ```bash
 lash                               # start interactive TUI session
-lash "fix auth error handling"      # start with an initial prompt
-lash --print "summarize this repo"  # headless mode: run one prompt and print result
+lash -p "summarize this repo"      # headless mode: run one prompt and print result
+lash --print "summarize this repo"  # same, long form
+lash --model gpt-5.3-codex         # override model
+lash --no-mouse                    # disable mouse (re-enables terminal text selection)
 lash --provider                    # force provider setup flow
 lash --reset                       # delete ~/.lash and ~/.cache/lash, then exit
 ```
+
+## Prompt Customization
+
+Override system prompt sections at launch:
+
+```bash
+lash --prompt-replace "section=replacement text"
+lash --prompt-replace-file "section=path/to/file.md"
+lash --prompt-prepend "section=prepended text"
+lash --prompt-prepend-file "section=path/to/file.md"
+lash --prompt-append "section=appended text"
+lash --prompt-append-file "section=path/to/file.md"
+lash --prompt-disable "section"
+```
+
+## Skills
+
+Skills are modular directories that extend lash with specialized knowledge and workflows.
+
+Skill directories: `~/.lash/skills/` (global) and `.lash/skills/` (project-local, overrides global).
+
+Each skill is a directory containing a `SKILL.md` with YAML frontmatter (`name`, `description`) and a markdown body. Supporting files (scripts, references, templates) are included alongside.
+
+```
+~/.lash/skills/
+  my-skill/
+    SKILL.md          # required: frontmatter + instructions
+    scripts/foo.py    # optional supporting files
+    references/bar.md
+```
+
+Use `/skills` to browse, `/<skill-name>` to invoke, or `load_skill("name")` from the REPL.
 
 ## Terminal Bench
 
@@ -102,6 +136,9 @@ scripts/run-terminalbench.sh --sample --build-mode host   # use host binary inst
 | `/retry` | Replay the previous turn payload exactly |
 | `/resume [name]` | Browse/load previous sessions |
 | `/skills` | Browse loaded skills |
+| `/tools` | Inspect or edit dynamic tools |
+| `/caps` | Inspect or edit dynamic capabilities |
+| `/reconfigure` | Apply or inspect pending runtime reconfigure |
 | `/help`, `/?` | Show help |
 | `/exit`, `/quit` | Quit |
 

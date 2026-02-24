@@ -314,7 +314,7 @@ mod tests {
         assert_eq!(openrouter().default_model(), "anthropic/claude-sonnet-4.6");
         assert_eq!(claude().default_model(), "claude-opus-4-6");
         assert_eq!(codex().default_model(), "gpt-5.3-codex");
-        assert_eq!(google_oauth().default_model(), "gemini-3-pro-preview");
+        assert_eq!(google_oauth().default_model(), "gemini-3.1-pro-preview");
     }
 
     #[test]
@@ -455,15 +455,15 @@ mod tests {
         let p = google_oauth();
         assert_eq!(
             p.default_agent_model("quick"),
-            Some(("gemini-2.5-flash", None))
+            Some(("gemini-3-flash-preview", None))
         );
         assert_eq!(
             p.default_agent_model("balanced"),
-            Some(("gemini-3-pro-preview", None))
+            Some(("gemini-3.1-pro-preview", None))
         );
         assert_eq!(
             p.default_agent_model("thorough"),
-            Some(("gemini-3-pro-preview", None))
+            Some(("gemini-3.1-pro-preview", None))
         );
     }
 
