@@ -575,7 +575,7 @@ async fn run_headless(agent: Agent, prompt: String) -> anyhow::Result<()> {
         had_error: AtomicBool::new(false),
     };
     let result = runtime
-        .run_turn(
+        .stream_turn(
             TurnInput {
                 items,
                 image_blobs,
@@ -587,8 +587,16 @@ async fn run_headless(agent: Agent, prompt: String) -> anyhow::Result<()> {
         )
         .await;
 
-    if let Some(text) = result.final_message {
-        println!("{}", text);
+    match result {
+        Ok(turn) => {
+            if !turn.assistant_output.text.is_empty() {
+                println!("{}", turn.assistant_output.text);
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
     }
     if sink.had_error.load(Ordering::Relaxed) {
         std::process::exit(1);
@@ -599,7 +607,7 @@ async fn run_headless(agent: Agent, prompt: String) -> anyhow::Result<()> {
 /// Returned by the spawned runtime task so we can reclaim ownership.
 struct RuntimeRunResult {
     runtime: RuntimeEngine,
-    result: TurnResult,
+    result: AssembledTurn,
 }
 
 #[derive(Clone)]
@@ -1006,13 +1014,9 @@ async fn run_app(
                     let mut state = done.result.state;
                     tracing::info!(
                         iteration = state.iteration,
-                        done = done.result.done,
-                        final_message_chars = done
-                            .result
-                            .final_message
-                            .as_ref()
-                            .map(|s| s.len())
-                            .unwrap_or(0),
+                        status = ?done.result.status,
+                        reason = ?done.result.done_reason,
+                        assistant_chars = done.result.assistant_output.text.len(),
                         "runtime turn completed"
                     );
 
@@ -2611,7 +2615,25 @@ fn send_user_message(
     let sink_tx = app_tx.clone();
     tokio::spawn(async move {
         let sink = AppEventSink { tx: sink_tx };
-        let result = rt.run_turn(turn_input, &sink, cancel).await;
+        let result = match rt.stream_turn(turn_input, &sink, cancel).await {
+            Ok(turn) => turn,
+            Err(e) => AssembledTurn {
+                state: rt.export_state(),
+                status: TurnStatus::Failed,
+                assistant_output: AssistantOutput {
+                    text: String::new(),
+                },
+                done_reason: DoneReason::RuntimeError,
+                token_usage: TokenUsage::default(),
+                tool_calls: Vec::new(),
+                tool_outputs: Vec::new(),
+                errors: vec![TurnIssue {
+                    kind: "runtime".to_string(),
+                    code: Some(e.code),
+                    message: e.message,
+                }],
+            },
+        };
         let _ = return_tx.send(RuntimeRunResult {
             runtime: rt,
             result,

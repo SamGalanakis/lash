@@ -13,7 +13,7 @@ use crate::agent::{
 use crate::capabilities::AgentCapabilities;
 use crate::instructions::{FsInstructionSource, InstructionSource};
 use crate::provider::Provider;
-use crate::{CapabilityId, Session, SessionError, ToolProvider};
+use crate::{CapabilityId, Session, SessionError, ToolCallRecord, ToolProvider};
 
 /// Runtime execution mode for a turn.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -86,13 +86,130 @@ impl Default for AgentStateEnvelope {
     }
 }
 
-/// Output from a completed runtime turn.
+/// Canonical assistant output payload.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct TurnResult {
-    pub state: AgentStateEnvelope,
+pub struct AssistantOutput {
+    pub text: String,
+}
+
+/// Structured terminal status for a turn.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnStatus {
+    Completed,
+    Interrupted,
+    Failed,
+}
+
+/// Canonical reason a turn ended.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DoneReason {
+    ModelStop,
+    MaxTurns,
+    UserAbort,
+    ToolFailure,
+    RuntimeError,
+}
+
+/// Tool execution output observed during a turn.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ToolOutputRecord {
+    pub output: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub final_message: Option<String>,
-    pub done: bool,
+    pub error: Option<String>,
+}
+
+/// Structured issue surfaced during turn execution.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct TurnIssue {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    pub message: String,
+}
+
+/// Canonical assembled turn returned to hosts.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AssembledTurn {
+    pub state: AgentStateEnvelope,
+    pub status: TurnStatus,
+    pub assistant_output: AssistantOutput,
+    pub done_reason: DoneReason,
+    #[serde(default)]
+    pub token_usage: TokenUsage,
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCallRecord>,
+    #[serde(default)]
+    pub tool_outputs: Vec<ToolOutputRecord>,
+    #[serde(default)]
+    pub errors: Vec<TurnIssue>,
+}
+
+/// Runtime error for unexpected failures.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeError {
+    pub code: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for RuntimeError {}
+
+/// Host profile presets for runtime policies.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HostProfile {
+    #[default]
+    Interactive,
+    Headless,
+    Embedded,
+}
+
+/// Pluggable path resolver for file and directory references.
+pub trait PathResolver: Send + Sync {
+    fn resolve(&self, path: &str, expect_file: bool, base_dir: &Path) -> Result<PathBuf, String>;
+}
+
+/// Sanitization policy knobs.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SanitizerPolicy {
+    #[serde(default = "SanitizerPolicy::default_strip_repl_fragments")]
+    pub strip_repl_fragments: bool,
+}
+
+impl SanitizerPolicy {
+    fn default_strip_repl_fragments() -> bool {
+        true
+    }
+}
+
+impl Default for SanitizerPolicy {
+    fn default() -> Self {
+        Self {
+            strip_repl_fragments: true,
+        }
+    }
+}
+
+/// Termination policy knobs.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct TerminationPolicy {
+    #[serde(default)]
+    pub treat_missing_done_as_failure: bool,
+}
+
+impl Default for TerminationPolicy {
+    fn default() -> Self {
+        Self {
+            treat_missing_done_as_failure: true,
+        }
+    }
 }
 
 /// Host event sink for streaming runtime events.
@@ -109,6 +226,134 @@ impl EventSink for NoopEventSink {
     async fn emit(&self, _event: AgentEvent) {}
 }
 
+#[derive(Default)]
+struct TurnAssembler {
+    final_message: Option<String>,
+    text_deltas: String,
+    tool_calls: Vec<ToolCallRecord>,
+    tool_outputs: Vec<ToolOutputRecord>,
+    token_usage: TokenUsage,
+    issues: Vec<TurnIssue>,
+    saw_done: bool,
+    saw_tool_failure: bool,
+}
+
+impl TurnAssembler {
+    fn push(&mut self, event: &AgentEvent) {
+        match event {
+            AgentEvent::TextDelta { content } => {
+                self.text_deltas.push_str(content);
+            }
+            AgentEvent::ToolCall {
+                name,
+                args,
+                result,
+                success,
+                duration_ms,
+            } => {
+                self.tool_calls.push(ToolCallRecord {
+                    tool: name.clone(),
+                    args: args.clone(),
+                    result: result.clone(),
+                    success: *success,
+                    duration_ms: *duration_ms,
+                });
+                if !success {
+                    self.saw_tool_failure = true;
+                }
+            }
+            AgentEvent::CodeOutput { output, error } => {
+                if error.is_some() {
+                    self.saw_tool_failure = true;
+                }
+                self.tool_outputs.push(ToolOutputRecord {
+                    output: output.clone(),
+                    error: error.clone(),
+                });
+            }
+            AgentEvent::Message { text, kind } if kind == "final" => {
+                self.final_message = Some(text.clone());
+            }
+            AgentEvent::TokenUsage { cumulative, .. } => {
+                self.token_usage = cumulative.clone();
+            }
+            AgentEvent::Error { message, envelope } => {
+                let (kind, code) = if let Some(envelope) = envelope {
+                    (envelope.kind.clone(), envelope.code.clone())
+                } else {
+                    ("runtime".to_string(), None)
+                };
+                self.issues.push(TurnIssue {
+                    kind,
+                    code,
+                    message: message.clone(),
+                });
+            }
+            AgentEvent::Done => {
+                self.saw_done = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn finish(
+        self,
+        state: AgentStateEnvelope,
+        interrupted: bool,
+        force_runtime_error: Option<TurnIssue>,
+        sanitizer: &SanitizerPolicy,
+        termination: &TerminationPolicy,
+    ) -> AssembledTurn {
+        let mut issues = self.issues;
+        if let Some(issue) = force_runtime_error {
+            issues.push(issue);
+        }
+        let max_turn_reached = state.messages.iter().rev().take(8).any(|msg| {
+            msg.role == MessageRole::System
+                && msg
+                    .parts
+                    .iter()
+                    .any(|part| part.content.contains("Turn limit reached ("))
+        });
+
+        let assistant_output = if let Some(final_message) = self.final_message {
+            final_message
+        } else {
+            self.text_deltas.trim().to_string()
+        };
+        let assistant_output = sanitize_assistant_output(assistant_output, sanitizer);
+
+        let (status, done_reason) = if interrupted {
+            (TurnStatus::Interrupted, DoneReason::UserAbort)
+        } else if !self.saw_done && termination.treat_missing_done_as_failure {
+            (TurnStatus::Failed, DoneReason::RuntimeError)
+        } else if !issues.is_empty() {
+            if self.saw_tool_failure {
+                (TurnStatus::Failed, DoneReason::ToolFailure)
+            } else {
+                (TurnStatus::Failed, DoneReason::RuntimeError)
+            }
+        } else if max_turn_reached {
+            (TurnStatus::Completed, DoneReason::MaxTurns)
+        } else {
+            (TurnStatus::Completed, DoneReason::ModelStop)
+        };
+
+        AssembledTurn {
+            state,
+            status,
+            assistant_output: AssistantOutput {
+                text: assistant_output,
+            },
+            done_reason,
+            token_usage: self.token_usage,
+            tool_calls: self.tool_calls,
+            tool_outputs: self.tool_outputs,
+            errors: issues,
+        }
+    }
+}
+
 /// Runtime config used by embedders to construct an engine.
 #[derive(Clone)]
 pub struct RuntimeConfig {
@@ -119,7 +364,12 @@ pub struct RuntimeConfig {
     pub include_soul: bool,
     pub llm_log_path: Option<PathBuf>,
     pub headless: bool,
+    pub host_profile: HostProfile,
     pub prompt_overrides: Vec<PromptSectionOverride>,
+    pub base_dir: Option<PathBuf>,
+    pub path_resolver: Option<Arc<dyn PathResolver>>,
+    pub sanitizer: SanitizerPolicy,
+    pub termination: TerminationPolicy,
     pub instruction_source: Arc<dyn InstructionSource>,
 }
 
@@ -134,7 +384,16 @@ impl Default for RuntimeConfig {
             include_soul: cfg.include_soul,
             llm_log_path: cfg.llm_log_path,
             headless: cfg.headless,
+            host_profile: if cfg.headless {
+                HostProfile::Headless
+            } else {
+                HostProfile::Interactive
+            },
             prompt_overrides: cfg.prompt_overrides,
+            base_dir: None,
+            path_resolver: None,
+            sanitizer: SanitizerPolicy::default(),
+            termination: TerminationPolicy::default(),
             instruction_source: Arc::new(FsInstructionSource::new()),
         }
     }
@@ -142,6 +401,7 @@ impl Default for RuntimeConfig {
 
 impl From<RuntimeConfig> for AgentConfig {
     fn from(value: RuntimeConfig) -> Self {
+        let headless = value.headless || matches!(value.host_profile, HostProfile::Headless);
         Self {
             capabilities: value.capabilities,
             model: value.model,
@@ -152,7 +412,7 @@ impl From<RuntimeConfig> for AgentConfig {
             max_turns: None,
             include_soul: value.include_soul,
             llm_log_path: value.llm_log_path,
-            headless: value.headless,
+            headless,
             prompt_overrides: value.prompt_overrides,
             instruction_source: value.instruction_source,
         }
@@ -164,6 +424,11 @@ pub struct RuntimeEngine {
     agent: Option<Agent>,
     state: AgentStateEnvelope,
     capabilities: AgentCapabilities,
+    host_profile: HostProfile,
+    base_dir: PathBuf,
+    path_resolver: Option<Arc<dyn PathResolver>>,
+    sanitizer: SanitizerPolicy,
+    termination: TerminationPolicy,
 }
 
 impl RuntimeEngine {
@@ -174,6 +439,14 @@ impl RuntimeEngine {
         mut state: AgentStateEnvelope,
     ) -> Result<Self, SessionError> {
         let capabilities = config.capabilities.clone();
+        let host_profile = config.host_profile.clone();
+        let base_dir = config
+            .base_dir
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let path_resolver = config.path_resolver.clone();
+        let sanitizer = config.sanitizer.clone();
+        let termination = config.termination.clone();
         if state.agent_id.is_empty() {
             state.agent_id = "root".to_string();
         }
@@ -192,16 +465,27 @@ impl RuntimeEngine {
             agent: Some(agent),
             state,
             capabilities,
+            host_profile,
+            base_dir,
+            path_resolver,
+            sanitizer,
+            termination,
         })
     }
 
     /// Wrap an existing agent (used by CLI adapter migration).
     pub fn from_agent(agent: Agent, state: AgentStateEnvelope) -> Self {
         let capabilities = agent.capabilities();
+        let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Self {
             agent: Some(agent),
             state,
             capabilities,
+            host_profile: HostProfile::Interactive,
+            base_dir,
+            path_resolver: None,
+            sanitizer: SanitizerPolicy::default(),
+            termination: TerminationPolicy::default(),
         }
     }
 
@@ -299,37 +583,45 @@ impl RuntimeEngine {
     }
 
     /// Run a single turn and stream events to the host sink.
-    pub async fn run_turn(
+    pub async fn stream_turn(
         &mut self,
         input: TurnInput,
         events: &dyn EventSink,
         cancel: CancellationToken,
-    ) -> TurnResult {
-        let normalized = match normalize_input_items(&input.items, &input.image_blobs) {
+    ) -> Result<AssembledTurn, RuntimeError> {
+        let normalized = match self.normalize_input_items(&input.items, &input.image_blobs) {
             Ok(items) => items,
             Err(e) => {
-                events
-                    .emit(AgentEvent::Error {
-                        message: e.clone(),
-                        envelope: Some(crate::agent::ErrorEnvelope {
-                            kind: "input_validation".to_string(),
-                            code: Some("invalid_turn_input".to_string()),
-                            user_message: e,
-                            raw: None,
-                        }),
-                    })
-                    .await;
-                events.emit(AgentEvent::Done).await;
-                return TurnResult {
-                    state: self.state.clone(),
-                    final_message: None,
-                    done: true,
+                let mut assembler = TurnAssembler::default();
+                let error_event = AgentEvent::Error {
+                    message: e.clone(),
+                    envelope: Some(crate::agent::ErrorEnvelope {
+                        kind: "input_validation".to_string(),
+                        code: Some("invalid_turn_input".to_string()),
+                        user_message: e,
+                        raw: None,
+                    }),
                 };
+                assembler.push(&error_event);
+                events.emit(error_event).await;
+                assembler.push(&AgentEvent::Done);
+                events.emit(AgentEvent::Done).await;
+                return Ok(assembler.finish(
+                    self.state.clone(),
+                    false,
+                    None,
+                    &self.sanitizer,
+                    &self.termination,
+                ));
             }
         };
 
         let mut messages = self.state.messages.clone();
-        let mode = input.mode.unwrap_or(RunMode::Normal);
+        let mode = input.mode.unwrap_or(match self.host_profile {
+            HostProfile::Interactive | HostProfile::Headless | HostProfile::Embedded => {
+                RunMode::Normal
+            }
+        });
         let plan_file = input
             .plan_file
             .clone()
@@ -446,18 +738,28 @@ impl RuntimeEngine {
             parts: user_parts,
         });
 
-        self.run_prepared_turn(messages, user_images_png, events, cancel)
+        self.stream_prepared_turn(messages, user_images_png, events, cancel)
             .await
     }
 
+    /// Run a single turn and return only the assembled terminal result.
+    pub async fn run_turn_assembled(
+        &mut self,
+        input: TurnInput,
+        cancel: CancellationToken,
+    ) -> Result<AssembledTurn, RuntimeError> {
+        self.stream_turn(input, &NoopEventSink, cancel).await
+    }
+
     /// Run a turn using host-prepared message history.
-    pub async fn run_prepared_turn(
+    pub async fn stream_prepared_turn(
         &mut self,
         messages: Vec<Message>,
         images_png: Vec<Vec<u8>>,
         events: &dyn EventSink,
         cancel: CancellationToken,
-    ) -> TurnResult {
+    ) -> Result<AssembledTurn, RuntimeError> {
+        let cancel_state = cancel.clone();
         let mut agent = self
             .agent
             .take()
@@ -471,64 +773,78 @@ impl RuntimeEngine {
             (agent, new_messages, new_iteration)
         });
 
-        let mut final_message: Option<String> = None;
-        let mut done = false;
-        let mut usage = self.state.token_usage.clone();
+        let mut assembler = TurnAssembler::default();
         while let Some(event) = event_rx.recv().await {
-            match &event {
-                AgentEvent::Message { text, kind } if kind == "final" => {
-                    final_message = Some(text.clone());
-                }
-                AgentEvent::TokenUsage { cumulative, .. } => {
-                    usage = cumulative.clone();
-                }
-                AgentEvent::Done => {
-                    done = true;
-                }
-                _ => {}
-            }
+            assembler.push(&event);
             events.emit(event).await;
         }
 
         let (agent, new_messages, new_iteration) = match run_task.await {
             Ok(v) => v,
-            Err(_) => {
-                // Keep prior state on panic/join error.
-                return TurnResult {
-                    state: self.state.clone(),
-                    final_message: None,
-                    done: false,
+            Err(e) => {
+                let issue = TurnIssue {
+                    kind: "runtime".to_string(),
+                    code: Some("run_task_join_failed".to_string()),
+                    message: format!("Runtime turn task failed: {e}"),
                 };
+                return Ok(assembler.finish(
+                    self.state.clone(),
+                    cancel_state.is_cancelled(),
+                    Some(issue),
+                    &self.sanitizer,
+                    &self.termination,
+                ));
             }
         };
 
         self.agent = Some(agent);
         self.state.messages = new_messages;
         self.state.iteration = new_iteration;
-        self.state.token_usage = usage;
-
-        TurnResult {
-            state: self.state.clone(),
-            final_message,
-            done,
+        if assembler.token_usage.total() > 0 {
+            self.state.token_usage = assembler.token_usage.clone();
         }
+
+        Ok(assembler.finish(
+            self.state.clone(),
+            cancel_state.is_cancelled(),
+            None,
+            &self.sanitizer,
+            &self.termination,
+        ))
+    }
+}
+
+impl RuntimeEngine {
+    fn normalize_input_items(
+        &self,
+        items: &[InputItem],
+        image_blobs: &HashMap<String, Vec<u8>>,
+    ) -> Result<Vec<NormalizedItem>, String> {
+        normalize_input_items(
+            items,
+            image_blobs,
+            &self.base_dir,
+            self.path_resolver.as_deref(),
+        )
     }
 }
 
 fn normalize_input_items(
     items: &[InputItem],
     image_blobs: &HashMap<String, Vec<u8>>,
+    base_dir: &Path,
+    path_resolver: Option<&dyn PathResolver>,
 ) -> Result<Vec<NormalizedItem>, String> {
     let mut out: Vec<NormalizedItem> = Vec::new();
     for item in items {
         match item {
             InputItem::Text { text } => push_text(&mut out, text.clone()),
             InputItem::FileRef { path } => {
-                let abs = resolve_existing_path(path, true)?;
+                let abs = resolve_existing_path(path, true, base_dir, path_resolver)?;
                 push_text(&mut out, format!("[file: {}]", abs.display()));
             }
             InputItem::DirRef { path } => {
-                let abs = resolve_existing_path(path, false)?;
+                let abs = resolve_existing_path(path, false, base_dir, path_resolver)?;
                 push_text(
                     &mut out,
                     format!(
@@ -573,7 +889,15 @@ fn push_text(out: &mut Vec<NormalizedItem>, text: String) {
     }
 }
 
-fn resolve_existing_path(path: &str, expect_file: bool) -> Result<PathBuf, String> {
+fn resolve_existing_path(
+    path: &str,
+    expect_file: bool,
+    base_dir: &Path,
+    path_resolver: Option<&dyn PathResolver>,
+) -> Result<PathBuf, String> {
+    if let Some(resolver) = path_resolver {
+        return resolver.resolve(path, expect_file, base_dir);
+    }
     if path.is_empty() {
         return Err("Path reference cannot be empty".to_string());
     }
@@ -581,9 +905,7 @@ fn resolve_existing_path(path: &str, expect_file: bool) -> Result<PathBuf, Strin
     let candidate = if p.is_absolute() {
         p.to_path_buf()
     } else {
-        std::env::current_dir()
-            .map_err(|e| format!("Failed to resolve current directory: {e}"))?
-            .join(p)
+        base_dir.join(p)
     };
     if !candidate.exists() {
         return Err(format!(
@@ -606,4 +928,155 @@ fn resolve_existing_path(path: &str, expect_file: bool) -> Result<PathBuf, Strin
     candidate
         .canonicalize()
         .map_err(|e| format!("Failed to canonicalize {}: {e}", candidate.display()))
+}
+
+fn sanitize_assistant_output(text: String, policy: &SanitizerPolicy) -> String {
+    if !policy.strip_repl_fragments || text.is_empty() {
+        return text;
+    }
+    text.replace("<repl>", "")
+        .replace("</repl>", "")
+        .trim()
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_state() -> AgentStateEnvelope {
+        AgentStateEnvelope::default()
+    }
+
+    #[test]
+    fn assembler_prefers_final_message() {
+        let mut assembler = TurnAssembler::default();
+        assembler.push(&AgentEvent::TextDelta {
+            content: "stream".to_string(),
+        });
+        assembler.push(&AgentEvent::Message {
+            text: "final".to_string(),
+            kind: "final".to_string(),
+        });
+        assembler.push(&AgentEvent::Done);
+        let out = assembler.finish(
+            default_state(),
+            false,
+            None,
+            &SanitizerPolicy::default(),
+            &TerminationPolicy::default(),
+        );
+        assert_eq!(out.status, TurnStatus::Completed);
+        assert_eq!(out.done_reason, DoneReason::ModelStop);
+        assert_eq!(out.assistant_output.text, "final");
+    }
+
+    #[test]
+    fn assembler_marks_tool_failure() {
+        let mut assembler = TurnAssembler::default();
+        assembler.push(&AgentEvent::ToolCall {
+            name: "x".to_string(),
+            args: serde_json::json!({}),
+            result: serde_json::json!({"error": true}),
+            success: false,
+            duration_ms: 1,
+        });
+        assembler.push(&AgentEvent::Error {
+            message: "tool failed".to_string(),
+            envelope: None,
+        });
+        assembler.push(&AgentEvent::Done);
+        let out = assembler.finish(
+            default_state(),
+            false,
+            None,
+            &SanitizerPolicy::default(),
+            &TerminationPolicy::default(),
+        );
+        assert_eq!(out.status, TurnStatus::Failed);
+        assert_eq!(out.done_reason, DoneReason::ToolFailure);
+        assert_eq!(out.tool_calls.len(), 1);
+    }
+
+    #[test]
+    fn assembler_marks_missing_done_as_failure() {
+        let mut assembler = TurnAssembler::default();
+        assembler.push(&AgentEvent::TextDelta {
+            content: "partial".to_string(),
+        });
+        let out = assembler.finish(
+            default_state(),
+            false,
+            None,
+            &SanitizerPolicy::default(),
+            &TerminationPolicy::default(),
+        );
+        assert_eq!(out.status, TurnStatus::Failed);
+        assert_eq!(out.done_reason, DoneReason::RuntimeError);
+    }
+
+    #[test]
+    fn assembler_detects_max_turn_message() {
+        let mut state = default_state();
+        state.messages.push(Message {
+            id: "m0".to_string(),
+            role: MessageRole::System,
+            parts: vec![Part {
+                id: "m0.p0".to_string(),
+                kind: PartKind::Text,
+                content: "Turn limit reached (5).".to_string(),
+                prune_state: PruneState::Intact,
+            }],
+        });
+        let mut assembler = TurnAssembler::default();
+        assembler.push(&AgentEvent::Done);
+        let out = assembler.finish(
+            state,
+            false,
+            None,
+            &SanitizerPolicy::default(),
+            &TerminationPolicy::default(),
+        );
+        assert_eq!(out.status, TurnStatus::Completed);
+        assert_eq!(out.done_reason, DoneReason::MaxTurns);
+    }
+
+    #[test]
+    fn sanitizer_strips_repl_tags() {
+        let cleaned = sanitize_assistant_output(
+            "<repl>print('x')</repl> done".to_string(),
+            &SanitizerPolicy {
+                strip_repl_fragments: true,
+            },
+        );
+        assert_eq!(cleaned, "print('x') done");
+    }
+
+    #[test]
+    fn normalize_items_resolves_relative_paths_with_base_dir() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let file_path = tmp.path().join("a.txt");
+        std::fs::write(&file_path, "x").expect("write");
+        let dir_path = tmp.path().join("sub");
+        std::fs::create_dir_all(&dir_path).expect("mkdir");
+
+        let items = vec![
+            InputItem::FileRef {
+                path: "a.txt".to_string(),
+            },
+            InputItem::DirRef {
+                path: "sub".to_string(),
+            },
+        ];
+        let out =
+            normalize_input_items(&items, &HashMap::new(), tmp.path(), None).expect("normalized");
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            NormalizedItem::Text(text) => {
+                assert!(text.contains("[file:"));
+                assert!(text.contains("[directory:"));
+            }
+            _ => panic!("expected merged text item"),
+        }
+    }
 }

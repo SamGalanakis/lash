@@ -219,6 +219,31 @@ This preserves interleaving and intent, e.g. text -> image -> text -> file refer
 }
 ```
 
+### Runtime APIs
+
+`RuntimeEngine` exposes two first-class host APIs:
+
+- `stream_turn(input, sink, cancel)`:
+  - Streams raw `AgentEvent` values to an `EventSink`.
+  - Returns canonical `AssembledTurn` when the turn terminates.
+- `run_turn_assembled(input, cancel)`:
+  - Convenience path when the host only needs the terminal structured result.
+
+### Assembled turn contract
+
+`AssembledTurn` is the canonical terminal result:
+
+- `status`: `completed` | `interrupted` | `failed`
+- `done_reason`: `model_stop` | `max_turns` | `user_abort` | `tool_failure` | `runtime_error`
+- `assistant_output.text`: always present (may be empty)
+- `tool_calls`, `tool_outputs`, `errors`, `token_usage`, and updated `state`
+
+Host/runtime policy knobs are configured via `RuntimeConfig`:
+
+- `host_profile` (`interactive` / `headless` / `embedded`)
+- `base_dir` + optional custom `path_resolver`
+- `sanitizer` and `termination` policies
+
 ## Tool Exposure Model
 
 Tools define `inject_into_prompt: bool` (`lash/src/lib.rs`).
