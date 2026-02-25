@@ -201,6 +201,67 @@ const LLM_RETRY_DELAYS: [std::time::Duration; 3] = [
     std::time::Duration::from_secs(10),
 ];
 
+struct TurnTerminationPolicyState {
+    max_steps_final: bool,
+    headless_prose_only_streak: usize,
+}
+
+impl TurnTerminationPolicyState {
+    fn new() -> Self {
+        Self {
+            max_steps_final: false,
+            headless_prose_only_streak: 0,
+        }
+    }
+
+    fn record_pure_prose_step(&mut self, headless: bool) -> bool {
+        if !headless {
+            return false;
+        }
+        self.headless_prose_only_streak += 1;
+        self.headless_prose_only_streak >= 3
+    }
+
+    fn reset_pure_prose_streak(&mut self) {
+        self.headless_prose_only_streak = 0;
+    }
+
+    fn should_force_exit_after_grace_turn(&self) -> bool {
+        self.max_steps_final
+    }
+
+    fn maybe_schedule_turn_limit_final(
+        &mut self,
+        iteration: usize,
+        run_offset: usize,
+        max_turns: Option<usize>,
+        msgs: &mut Vec<Message>,
+    ) {
+        let Some(max) = max_turns else { return };
+        if iteration < run_offset + max {
+            return;
+        }
+        let sys_id = format!("m{}", msgs.len());
+        msgs.push(Message {
+            id: sys_id.clone(),
+            role: MessageRole::System,
+            parts: vec![Part {
+                id: format!("{}.p0", sys_id),
+                kind: PartKind::Text,
+                content: format!(
+                    "Turn limit reached ({max}). You MUST call done() now with:\n\
+                        1. Summary of what you accomplished\n\
+                        2. List of remaining tasks not yet completed\n\
+                        3. Recommended next steps\n\
+                        Do NOT make any more tool calls. Call done() immediately."
+                ),
+                prune_state: PruneState::Intact,
+            }],
+        });
+        self.max_steps_final = true;
+    }
+}
+
 fn make_error_event(
     kind: &str,
     code: Option<&str>,
@@ -441,11 +502,10 @@ impl Agent {
         let mut msgs = messages;
         let mut iteration: usize = run_offset;
         let mut tool_images: Vec<(String, Vec<u8>)> = Vec::new();
-        let mut max_steps_final = false;
+        let mut termination = TurnTerminationPolicyState::new();
         let mut has_history = false;
         let mut context_pruned_turns: usize = 0;
         let session_start = std::time::Instant::now();
-        let mut headless_prose_only_streak: usize = 0;
 
         loop {
             if cancel.is_cancelled() {
@@ -1242,7 +1302,6 @@ impl Agent {
                         parts: asst_parts,
                     });
                     if self.config.headless {
-                        headless_prose_only_streak += 1;
                         let sys_id = format!("m{}", msgs.len());
                         let guidance = "Headless mode requires execution via <repl>. \
 Prose-only output is not a valid step. Continue with concrete tool execution; call done(...) only from inside <repl> when fully complete.";
@@ -1256,7 +1315,7 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
                                 prune_state: PruneState::Intact,
                             }],
                         });
-                        if headless_prose_only_streak >= 3 {
+                        if termination.record_pure_prose_step(self.config.headless) {
                             emit!(make_error_event(
                                 "runtime",
                                 Some("headless_prose_only"),
@@ -1271,7 +1330,7 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
                     emit!(AgentEvent::Done);
                     return (msgs, iteration);
                 }
-                headless_prose_only_streak = 0;
+                termination.reset_pure_prose_streak();
 
                 // Build feedback: code blocks wrapped in fences, then output/error
                 let mut feedback_parts: Vec<Part> = Vec::new();
@@ -1371,32 +1430,16 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
 
             iteration += 1;
             // Agent had its grace turn after the turn-limit message — force return
-            if max_steps_final {
+            if termination.should_force_exit_after_grace_turn() {
                 emit!(AgentEvent::Done);
                 return (msgs, iteration);
             }
-            if let Some(max) = self.config.max_turns
-                && iteration >= run_offset + max
-            {
-                let sys_id = format!("m{}", msgs.len());
-                msgs.push(Message {
-                    id: sys_id.clone(),
-                    role: MessageRole::System,
-                    parts: vec![Part {
-                        id: format!("{}.p0", sys_id),
-                        kind: PartKind::Text,
-                        content: format!(
-                            "Turn limit reached ({max}). You MUST call done() now with:\n\
-                                1. Summary of what you accomplished\n\
-                                2. List of remaining tasks not yet completed\n\
-                                3. Recommended next steps\n\
-                                Do NOT make any more tool calls. Call done() immediately."
-                        ),
-                        prune_state: PruneState::Intact,
-                    }],
-                });
-                max_steps_final = true;
-            }
+            termination.maybe_schedule_turn_limit_final(
+                iteration,
+                run_offset,
+                self.config.max_turns,
+                &mut msgs,
+            );
         }
     }
 }

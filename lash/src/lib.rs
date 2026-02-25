@@ -61,8 +61,9 @@ pub use dynamic::{
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
 pub use provider::{LashConfig, Provider};
 pub use runtime::{
-    AgentStateEnvelope, EventSink, InputItem, NoopEventSink, RunMode, RuntimeConfig, RuntimeEngine,
-    TurnInput, TurnResult,
+    AgentStateEnvelope, AssembledTurn, AssistantOutput, DoneReason, EventSink, HostProfile,
+    InputItem, NoopEventSink, PathResolver, RunMode, RuntimeConfig, RuntimeEngine, RuntimeError,
+    SanitizerPolicy, TerminationPolicy, ToolOutputRecord, TurnInput, TurnIssue, TurnStatus,
 };
 pub use session::{ExecResponse, Session, SessionError, UserPrompt};
 #[cfg(feature = "sqlite-store")]
