@@ -206,8 +206,7 @@ impl LashConfig {
     }
 
     fn config_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        PathBuf::from(home).join(".lash").join("config.json")
+        crate::lash_home().join("config.json")
     }
 
     /// Load from ~/.lash/config.json.

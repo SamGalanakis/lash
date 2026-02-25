@@ -74,10 +74,7 @@ impl ToolProvider for PlanMode {
                     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                     let base = find_git_root(&cwd)
                         .map(|root| root.join(".lash"))
-                        .unwrap_or_else(|| {
-                            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-                            PathBuf::from(home).join(".lash")
-                        });
+                        .unwrap_or_else(crate::lash_home);
                     let plans_dir = base.join("plans");
                     let _ = std::fs::create_dir_all(&plans_dir);
 

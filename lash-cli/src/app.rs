@@ -696,10 +696,7 @@ impl App {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let base = find_git_root(&cwd)
             .map(|root| root.join(".lash"))
-            .unwrap_or_else(|| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-                PathBuf::from(home).join(".lash")
-            });
+            .unwrap_or_else(lash_core::lash_home);
         let plans_dir = base.join("plans");
         let _ = std::fs::create_dir_all(&plans_dir);
 
@@ -1153,10 +1150,9 @@ impl App {
         }
     }
 
-    /// Load input history from ~/.lash/history.
+    /// Load input history from $LASH_HOME/history.
     pub fn load_history(&mut self) {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        let path = PathBuf::from(home).join(".lash").join("history");
+        let path = lash_core::lash_home().join("history");
         if let Ok(content) = std::fs::read_to_string(&path) {
             self.input_history = content
                 .lines()
@@ -1166,10 +1162,9 @@ impl App {
         }
     }
 
-    /// Save input history to ~/.lash/history (last 500 entries).
+    /// Save input history to $LASH_HOME/history (last 500 entries).
     pub fn save_history(&self) {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        let dir = PathBuf::from(home).join(".lash");
+        let dir = lash_core::lash_home();
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("history");
         let start = self.input_history.len().saturating_sub(500);

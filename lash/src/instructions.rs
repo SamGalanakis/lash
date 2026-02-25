@@ -81,9 +81,9 @@ impl InstructionLoader {
         let mut system_paths = HashSet::new();
         let mut parts = Vec::new();
 
-        // 1. Global: ~/.lash/AGENT.md
-        if let Some(home) = dirs::home_dir() {
-            let global = home.join(".lash").join("AGENT.md");
+        // 1. Global: $LASH_HOME/AGENT.md
+        {
+            let global = crate::lash_home().join("AGENT.md");
             if let Some(text) = load_with_prefix(&global) {
                 system_paths.insert(global);
                 parts.push(text);

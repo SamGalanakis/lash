@@ -34,8 +34,7 @@ impl SessionInfo {
 }
 
 pub fn sessions_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".lash").join("sessions")
+    lash_core::lash_home().join("sessions")
 }
 
 /// List available session files, most recently modified first.

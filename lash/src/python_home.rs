@@ -14,10 +14,7 @@ const STDLIB_HASH: &str = env!("LASH_PYTHON_STDLIB_HASH");
 /// - `python-system`: returns `Unsupported` (no bundled stdlib is available)
 #[cfg(feature = "python-bundled")]
 pub fn ensure_python_home() -> Result<PathBuf, std::io::Error> {
-    let cache_dir = dirs::cache_dir()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no cache dir"))?
-        .join("lash")
-        .join(format!("python-{PYTHON_MAJOR_MINOR}"));
+    let cache_dir = crate::lash_cache_dir().join(format!("python-{PYTHON_MAJOR_MINOR}"));
 
     let lib_dir = cache_dir.join("lib");
     let version_file = cache_dir.join(".version");

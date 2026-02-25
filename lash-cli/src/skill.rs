@@ -62,8 +62,7 @@ impl SkillRegistry {
         let mut skills = Vec::new();
 
         // Global skills
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        let global_dir = PathBuf::from(home).join(".lash").join("skills");
+        let global_dir = lash_core::lash_home().join("skills");
         Self::load_dir(&global_dir, &mut skills);
 
         // Project-local skills (override global by name)

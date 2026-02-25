@@ -116,8 +116,7 @@ struct SessionLogger {
 
 impl SessionLogger {
     fn new(model: &str) -> anyhow::Result<Self> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        let dir = PathBuf::from(home).join(".lash").join("sessions");
+        let dir = lash_core::lash_home().join("sessions");
         std::fs::create_dir_all(&dir)?;
 
         let now = chrono::Local::now();
@@ -239,10 +238,9 @@ fn configure_terminal_ui(no_mouse: bool) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Set up file-based structured tracing (JSON logs at ~/.lash/lash.log)
+    // Set up file-based structured tracing (JSON logs at $LASH_HOME/lash.log)
     {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        let log_dir = PathBuf::from(&home).join(".lash");
+        let log_dir = lash_core::lash_home();
         std::fs::create_dir_all(&log_dir).ok();
         let log_file = std::fs::File::create(log_dir.join("lash.log"))?;
 
@@ -275,9 +273,8 @@ async fn main() -> anyhow::Result<()> {
         const BOLD: &str = "\x1b[1m";
         const RESET: &str = "\x1b[0m";
 
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        let lash_dir = PathBuf::from(&home).join(".lash");
-        let cache_dir = PathBuf::from(&home).join(".cache").join("lash");
+        let lash_dir = lash_core::lash_home();
+        let cache_dir = lash_core::lash_cache_dir();
 
         eprintln!();
         eprintln!("  {SODIUM}{BOLD}/ reset{RESET}");
@@ -373,8 +370,7 @@ async fn main() -> anyhow::Result<()> {
     let llm_log_path = std::env::var("LASH_LOG").ok().and_then(|level| {
         let l = level.to_lowercase();
         if l == "debug" || l == "trace" || l.contains("debug") || l.contains("trace") {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            let dir = PathBuf::from(home).join(".lash").join("sessions");
+            let dir = lash_core::lash_home().join("sessions");
             Some(dir.join(format!(
                 "{}.llm.jsonl",
                 chrono::Local::now().format("%Y%m%d_%H%M%S")
@@ -401,8 +397,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Build store (SQLite-backed archive + tasks)
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let sessions_dir = PathBuf::from(&home).join(".lash").join("sessions");
+    let sessions_dir = lash_core::lash_home().join("sessions");
     std::fs::create_dir_all(&sessions_dir)?;
     let db_path = sessions_dir.join(format!(
         "{}.db",
@@ -411,7 +406,7 @@ async fn main() -> anyhow::Result<()> {
     let store = Arc::new(Store::open(&db_path).expect("Failed to open session database"));
 
     let skill_dirs = vec![
-        PathBuf::from(&home).join(".lash").join("skills"),
+        lash_core::lash_home().join("skills"),
         PathBuf::from(".lash").join("skills"),
     ];
     let tavily_key = lash_config.tavily_api_key().unwrap_or_default().to_string();
@@ -2786,9 +2781,8 @@ async fn restore_agent_state(
 
 /// Send a desktop notification that the agent finished.
 fn notify_done() {
-    // Ensure the icon exists in ~/.lash/
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let icon_path = PathBuf::from(&home).join(".lash").join("icon.svg");
+    // Ensure the icon exists in $LASH_HOME
+    let icon_path = lash_core::lash_home().join("icon.svg");
     if !icon_path.exists() {
         let _ = std::fs::write(&icon_path, include_bytes!("../assets/icon.svg"));
     }
