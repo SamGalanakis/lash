@@ -89,7 +89,20 @@ impl Default for AgentStateEnvelope {
 /// Canonical assistant output payload.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AssistantOutput {
-    pub text: String,
+    pub safe_text: String,
+    pub raw_text: String,
+    pub state: OutputState,
+}
+
+/// Quality and usability of assembled terminal output.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputState {
+    Usable,
+    EmptyOutput,
+    TracebackOnly,
+    Sanitized,
+    RecoveredFromError,
 }
 
 /// Structured terminal status for a turn.
@@ -316,12 +329,13 @@ impl TurnAssembler {
                     .any(|part| part.content.contains("Turn limit reached ("))
         });
 
-        let assistant_output = if let Some(final_message) = self.final_message {
+        let raw_output = if let Some(final_message) = self.final_message {
             final_message
         } else {
             self.text_deltas.trim().to_string()
         };
-        let assistant_output = sanitize_assistant_output(assistant_output, sanitizer);
+        let safe_output = sanitize_assistant_output(raw_output.clone(), sanitizer);
+        let output_state = classify_output_state(&raw_output, &safe_output, &issues);
 
         let (status, done_reason) = if interrupted {
             (TurnStatus::Interrupted, DoneReason::UserAbort)
@@ -343,7 +357,9 @@ impl TurnAssembler {
             state,
             status,
             assistant_output: AssistantOutput {
-                text: assistant_output,
+                safe_text: safe_output,
+                raw_text: raw_output,
+                state: output_state,
             },
             done_reason,
             token_usage: self.token_usage,
@@ -940,6 +956,56 @@ fn sanitize_assistant_output(text: String, policy: &SanitizerPolicy) -> String {
         .to_string()
 }
 
+fn classify_output_state(raw_text: &str, safe_text: &str, issues: &[TurnIssue]) -> OutputState {
+    if safe_text.is_empty() && raw_text.is_empty() {
+        return OutputState::EmptyOutput;
+    }
+    if safe_text.is_empty() && contains_traceback_only(raw_text) {
+        return OutputState::TracebackOnly;
+    }
+    if !issues.is_empty() && !safe_text.is_empty() {
+        return OutputState::RecoveredFromError;
+    }
+    if safe_text != raw_text {
+        return OutputState::Sanitized;
+    }
+    OutputState::Usable
+}
+
+fn contains_traceback_only(raw_text: &str) -> bool {
+    if raw_text.is_empty() {
+        return false;
+    }
+    let has_traceback = raw_text.contains("Traceback (most recent call last)")
+        || raw_text.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("Runtime error:")
+                || trimmed.starts_with("NameError:")
+                || trimmed.starts_with("TypeError:")
+                || trimmed.starts_with("ValueError:")
+                || trimmed.starts_with("KeyError:")
+                || trimmed.starts_with("AttributeError:")
+                || trimmed.starts_with("SyntaxError:")
+                || trimmed.starts_with("ImportError:")
+                || trimmed.starts_with("ModuleNotFoundError:")
+        });
+    if !has_traceback {
+        return false;
+    }
+    // If no alphabetic prose besides traceback/exception formatting, treat as traceback-only.
+    !raw_text.lines().any(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("Traceback")
+            || trimmed.starts_with("File ")
+            || trimmed.starts_with("Runtime error:")
+        {
+            return false;
+        }
+        !trimmed.contains(':')
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -968,7 +1034,9 @@ mod tests {
         );
         assert_eq!(out.status, TurnStatus::Completed);
         assert_eq!(out.done_reason, DoneReason::ModelStop);
-        assert_eq!(out.assistant_output.text, "final");
+        assert_eq!(out.assistant_output.safe_text, "final");
+        assert_eq!(out.assistant_output.raw_text, "final");
+        assert_eq!(out.assistant_output.state, OutputState::Usable);
     }
 
     #[test]
@@ -1050,6 +1118,43 @@ mod tests {
             },
         );
         assert_eq!(cleaned, "print('x') done");
+    }
+
+    #[test]
+    fn output_state_empty_output() {
+        assert_eq!(classify_output_state("", "", &[]), OutputState::EmptyOutput);
+    }
+
+    #[test]
+    fn output_state_traceback_only() {
+        let raw = "Runtime error: Traceback (most recent call last):\nFile \"repl_1.py\", line 2, in <module>\nNameError: name 'now' is not defined";
+        assert_eq!(
+            classify_output_state(raw, "", &[]),
+            OutputState::TracebackOnly
+        );
+    }
+
+    #[test]
+    fn output_state_sanitized() {
+        let raw = "<repl>print('x')</repl> done";
+        let safe = "print('x') done";
+        assert_eq!(
+            classify_output_state(raw, safe, &[]),
+            OutputState::Sanitized
+        );
+    }
+
+    #[test]
+    fn output_state_recovered_from_error() {
+        let issues = vec![TurnIssue {
+            kind: "runtime".to_string(),
+            code: Some("example".to_string()),
+            message: "something failed".to_string(),
+        }];
+        assert_eq!(
+            classify_output_state("raw", "usable", &issues),
+            OutputState::RecoveredFromError
+        );
     }
 
     #[test]

@@ -589,8 +589,8 @@ async fn run_headless(agent: Agent, prompt: String) -> anyhow::Result<()> {
 
     match result {
         Ok(turn) => {
-            if !turn.assistant_output.text.is_empty() {
-                println!("{}", turn.assistant_output.text);
+            if !turn.assistant_output.safe_text.is_empty() {
+                println!("{}", turn.assistant_output.safe_text);
             }
         }
         Err(e) => {
@@ -606,6 +606,7 @@ async fn run_headless(agent: Agent, prompt: String) -> anyhow::Result<()> {
 
 /// Returned by the spawned runtime task so we can reclaim ownership.
 struct RuntimeRunResult {
+    stream_id: u64,
     runtime: RuntimeEngine,
     result: AssembledTurn,
 }
@@ -618,12 +619,16 @@ struct TurnReplayPayload {
 
 struct AppEventSink {
     tx: mpsc::UnboundedSender<AppEvent>,
+    stream_id: u64,
 }
 
 #[async_trait::async_trait]
 impl EventSink for AppEventSink {
     async fn emit(&self, event: AgentEvent) {
-        let _ = self.tx.send(AppEvent::Agent(event));
+        let _ = self.tx.send(AppEvent::Agent {
+            stream_id: self.stream_id,
+            event,
+        });
     }
 }
 
@@ -1004,6 +1009,8 @@ async fn run_app(
     // Oneshot for receiving runtime back after a run completes
     let mut runtime_return_rx: Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>> = None;
     let mut last_turn: Option<TurnReplayPayload> = None;
+    let mut active_stream_id: u64 = 0;
+    let mut pending_clear_after_return = false;
 
     loop {
         // Check if runtime turn completed — reclaim runtime + updated history
@@ -1011,12 +1018,27 @@ async fn run_app(
             match rx.try_recv() {
                 Ok(done) => {
                     runtime = Some(done.runtime);
+                    if done.stream_id != active_stream_id || pending_clear_after_return {
+                        if let Some(rt) = runtime.as_mut() {
+                            let _ = rt.reset_session().await;
+                            rt.set_state(AgentStateEnvelope::default());
+                        }
+                        history.clear();
+                        turn_counter = 0;
+                        app.token_usage = TokenUsage::default();
+                        app.running = false;
+                        runtime_return_rx = None;
+                        cancel_token = None;
+                        pending_clear_after_return = false;
+                        app.dirty = true;
+                        continue;
+                    }
                     let mut state = done.result.state;
                     tracing::info!(
                         iteration = state.iteration,
                         status = ?done.result.status,
                         reason = ?done.result.done_reason,
-                        assistant_chars = done.result.assistant_output.text.len(),
+                        assistant_chars = done.result.assistant_output.safe_text.len(),
                         "runtime turn completed"
                     );
 
@@ -1098,6 +1120,7 @@ async fn run_app(
                             &mut history,
                             &mut runtime_return_rx,
                             &mut cancel_token,
+                            &mut active_stream_id,
                             &app_tx,
                         );
                         last_turn = Some(TurnReplayPayload {
@@ -1385,6 +1408,13 @@ async fn run_app(
                             app.queue_message(input);
                             continue;
                         }
+                        if runtime.is_none() {
+                            push_system_message(
+                                &mut app,
+                                "Runtime is still finalizing the previous turn. Please retry in a moment.",
+                            );
+                            continue;
+                        }
 
                         // Shell escape: !command
                         if let Some(cmd_str) = input.strip_prefix('!') {
@@ -1455,6 +1485,7 @@ async fn run_app(
                                     turn_counter = 0;
                                     last_turn = None;
                                     app.token_usage = TokenUsage::default();
+                                    active_stream_id = active_stream_id.wrapping_add(1);
                                     if let Some(rt) = runtime.as_mut() {
                                         let _ = rt.reset_session().await;
                                         rt.set_state(AgentStateEnvelope {
@@ -1467,6 +1498,11 @@ async fn run_app(
                                             replay_manifest: None,
                                             repl_snapshot: None,
                                         });
+                                        pending_clear_after_return = false;
+                                    } else {
+                                        // Runtime is still being reclaimed from a just-finished
+                                        // turn; clear state as soon as it returns.
+                                        pending_clear_after_return = true;
                                     }
                                 }
                                 command::Command::Model(new_model) => {
@@ -1671,6 +1707,7 @@ Use `/provider` or `/login` to sign in again without restarting.",
                                             &mut history,
                                             &mut runtime_return_rx,
                                             &mut cancel_token,
+                                            &mut active_stream_id,
                                             &app_tx,
                                         );
                                     } else {
@@ -2192,6 +2229,7 @@ Use `/provider` or `/login` to sign in again without restarting.",
                                             &mut history,
                                             &mut runtime_return_rx,
                                             &mut cancel_token,
+                                            &mut active_stream_id,
                                             &app_tx,
                                         );
                                         last_turn = Some(TurnReplayPayload {
@@ -2243,6 +2281,7 @@ Use `/provider` or `/login` to sign in again without restarting.",
                             &mut history,
                             &mut runtime_return_rx,
                             &mut cancel_token,
+                            &mut active_stream_id,
                             &app_tx,
                         );
                         last_turn = Some(TurnReplayPayload {
@@ -2316,7 +2355,10 @@ Use `/provider` or `/login` to sign in again without restarting.",
                     app.maybe_dismiss_task_tray();
                 }
             }
-            AppEvent::Agent(event) => {
+            AppEvent::Agent { stream_id, event } => {
+                if stream_id != active_stream_id {
+                    continue;
+                }
                 app.dirty = true;
                 // Intercept Prompt events — set up dialog state instead of passing to handle_agent_event
                 if let AgentEvent::Prompt {
@@ -2573,6 +2615,7 @@ fn send_user_message(
     history: &mut Vec<Message>,
     runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
     cancel_token: &mut Option<CancellationToken>,
+    active_stream_id: &mut u64,
     app_tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
     // Soft-reset on plan approval: drain LLM message context, keep REPL state
@@ -2611,17 +2654,24 @@ fn send_user_message(
 
     let cancel = CancellationToken::new();
     *cancel_token = Some(cancel.clone());
+    *active_stream_id = active_stream_id.wrapping_add(1);
+    let stream_id = *active_stream_id;
 
     let sink_tx = app_tx.clone();
     tokio::spawn(async move {
-        let sink = AppEventSink { tx: sink_tx };
+        let sink = AppEventSink {
+            tx: sink_tx,
+            stream_id,
+        };
         let result = match rt.stream_turn(turn_input, &sink, cancel).await {
             Ok(turn) => turn,
             Err(e) => AssembledTurn {
                 state: rt.export_state(),
                 status: TurnStatus::Failed,
                 assistant_output: AssistantOutput {
-                    text: String::new(),
+                    safe_text: String::new(),
+                    raw_text: String::new(),
+                    state: OutputState::EmptyOutput,
                 },
                 done_reason: DoneReason::RuntimeError,
                 token_usage: TokenUsage::default(),
@@ -2635,6 +2685,7 @@ fn send_user_message(
             },
         };
         let _ = return_tx.send(RuntimeRunResult {
+            stream_id,
             runtime: rt,
             result,
         });

@@ -27,6 +27,51 @@ impl ExecAccumulator {
     }
 }
 
+fn extract_exec_error_summary(raw: &str) -> String {
+    let mut cleaned = raw.trim();
+    if let Some(rest) = cleaned.strip_prefix("Runtime error:") {
+        cleaned = rest.trim();
+    }
+
+    let lines: Vec<&str> = cleaned
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return "Execution failed".to_string();
+    }
+
+    // Prefer the terminal Python exception line (e.g. NameError: ...).
+    for line in lines.iter().rev() {
+        if line.starts_with("Traceback")
+            || line.starts_with("File ")
+            || line.starts_with("During handling of the above exception")
+        {
+            continue;
+        }
+        if line.contains(':') {
+            return (*line).to_string();
+        }
+    }
+
+    lines.last().unwrap_or(&"Execution failed").to_string()
+}
+
+fn format_exec_error_for_output(raw: &str) -> String {
+    if matches!(
+        std::env::var("LASH_VERBOSE_RUNTIME_ERRORS")
+            .ok()
+            .as_deref()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    ) {
+        return raw.trim().to_string();
+    }
+    extract_exec_error_summary(raw)
+}
+
 /// Execute a code block, emit events, and collect results into the accumulator.
 pub(crate) async fn execute_and_collect(
     session: &mut Session,
@@ -78,11 +123,12 @@ pub(crate) async fn execute_and_collect(
                 }
             }
             if !r.output.is_empty() || r.error.is_some() {
+                let normalized_error = r.error.as_deref().map(format_exec_error_for_output);
                 send_event(
                     event_tx,
                     AgentEvent::CodeOutput {
                         output: r.output.clone(),
-                        error: r.error.clone(),
+                        error: normalized_error,
                     },
                 )
                 .await;
@@ -96,22 +142,45 @@ pub(crate) async fn execute_and_collect(
             if !r.response.is_empty() {
                 acc.final_response = r.response;
             }
-            if r.error.is_some() {
-                acc.exec_error = r.error;
+            if let Some(raw_error) = r.error {
+                tracing::debug!("runtime execution error (raw): {}", raw_error);
+                acc.exec_error = Some(format_exec_error_for_output(&raw_error));
                 acc.had_failure = true;
             }
         }
         Err(e) => {
+            let raw_error = format!("{}", e);
+            tracing::debug!("runtime execution error (raw): {}", raw_error);
             send_event(
                 event_tx,
                 AgentEvent::CodeOutput {
                     output: String::new(),
-                    error: Some(format!("{}", e)),
+                    error: Some(format_exec_error_for_output(&raw_error)),
                 },
             )
             .await;
-            acc.exec_error = Some(format!("{}", e));
+            acc.exec_error = Some(format_exec_error_for_output(&raw_error));
             acc.had_failure = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_exec_error_summary;
+
+    #[test]
+    fn summarizes_python_traceback_to_exception_line() {
+        let raw = "Runtime error: Traceback (most recent call last):\n  File \"repl_1.py\", line 2, in <module>\nNameError: name 'now' is not defined";
+        assert_eq!(
+            extract_exec_error_summary(raw),
+            "NameError: name 'now' is not defined"
+        );
+    }
+
+    #[test]
+    fn keeps_single_line_error() {
+        let raw = "ValueError: bad input";
+        assert_eq!(extract_exec_error_summary(raw), "ValueError: bad input");
     }
 }

@@ -235,7 +235,9 @@ This preserves interleaving and intent, e.g. text -> image -> text -> file refer
 
 - `status`: `completed` | `interrupted` | `failed`
 - `done_reason`: `model_stop` | `max_turns` | `user_abort` | `tool_failure` | `runtime_error`
-- `assistant_output.text`: always present (may be empty)
+- `assistant_output.safe_text`: host-renderable output (always present, may be empty)
+- `assistant_output.raw_text`: unsanitized terminal output (always present, may be empty)
+- `assistant_output.state`: `usable` | `empty_output` | `traceback_only` | `sanitized` | `recovered_from_error`
 - `tool_calls`, `tool_outputs`, `errors`, `token_usage`, and updated `state`
 
 Host/runtime policy knobs are configured via `RuntimeConfig`:
@@ -243,6 +245,12 @@ Host/runtime policy knobs are configured via `RuntimeConfig`:
 - `host_profile` (`interactive` / `headless` / `embedded`)
 - `base_dir` + optional custom `path_resolver`
 - `sanitizer` and `termination` policies
+
+Integration invariants:
+
+- Keep one `RuntimeEngine` instance per active session.
+- Do not rebuild message history manually between turns while a runtime is alive.
+- Treat streamed `AgentEvent`s as preview/progress; render terminal user output from `AssembledTurn.assistant_output.safe_text`.
 
 ## Tool Exposure Model
 

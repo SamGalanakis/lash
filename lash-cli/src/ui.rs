@@ -681,6 +681,10 @@ fn render_block<'a>(
             }
             if let Some(err) = error {
                 if expand_level >= 2 {
+                    lines.push(Line::from(Span::styled(
+                        "\u{2716} Execution failed",
+                        theme::error(),
+                    )));
                     for line in err.lines() {
                         lines.push(Line::from(vec![
                             Span::styled("\u{2502} ", theme::code_chrome()),
@@ -698,7 +702,7 @@ fn render_block<'a>(
                         })
                         .unwrap_or(err.lines().next().unwrap_or("error"));
                     lines.push(Line::from(Span::styled(
-                        format!("\u{2716} {}", summary.trim()),
+                        format!("\u{2716} Execution failed: {}", summary.trim()),
                         theme::error(),
                     )));
                 }

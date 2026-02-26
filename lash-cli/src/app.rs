@@ -508,6 +508,9 @@ impl App {
                 self.scroll_to_bottom();
             }
             AgentEvent::CodeOutput { output, error } => {
+                if error.is_some() {
+                    self.status_text = Some("execution_failed".into());
+                }
                 if error.is_some() || !output.is_empty() {
                     self.blocks.push(DisplayBlock::CodeOutput { output, error });
                     self.invalidate_height_cache();
