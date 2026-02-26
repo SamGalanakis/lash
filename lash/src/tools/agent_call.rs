@@ -144,6 +144,7 @@ impl AgentCall {
             capabilities,
             model,
             reasoning_effort,
+            session_id: self.config.session_id.clone(),
             provider: self.config.provider.clone(),
             sub_agent: true,
             include_soul: matches!(tier, Tier::High),

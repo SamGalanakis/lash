@@ -115,7 +115,7 @@ struct SessionLogger {
 }
 
 impl SessionLogger {
-    fn new(model: &str) -> anyhow::Result<Self> {
+    fn new(model: &str, session_id: Option<String>) -> anyhow::Result<Self> {
         let dir = lash_core::lash_home().join("sessions");
         std::fs::create_dir_all(&dir)?;
 
@@ -123,7 +123,7 @@ impl SessionLogger {
         let filename = format!("{}.jsonl", now.format("%Y%m%d_%H%M%S"));
         let path = dir.join(&filename);
         let file = std::io::BufWriter::new(std::fs::File::create(&path)?);
-        let session_id = uuid::Uuid::new_v4().to_string();
+        let session_id = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let session_name = generate_session_name(&dir);
 
         let mut logger = Self {
@@ -381,6 +381,11 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let headless = args.print_prompt.is_some();
+    let run_session_id = if headless {
+        None
+    } else {
+        Some(uuid::Uuid::new_v4().to_string())
+    };
     let config = AgentConfig {
         model: model.clone(),
         provider: lash_config.provider.clone(),
@@ -390,6 +395,7 @@ async fn main() -> anyhow::Result<()> {
                 .reasoning_effort_for_model(&model)
                 .map(str::to_string)
         }),
+        session_id: run_session_id.clone(),
         llm_log_path,
         headless,
         prompt_overrides,
@@ -495,7 +501,7 @@ async fn main() -> anyhow::Result<()> {
         return run_headless(agent, prompt).await;
     }
 
-    let mut logger = SessionLogger::new(&model)?;
+    let mut logger = SessionLogger::new(&model, run_session_id)?;
 
     // Install panic hook that restores the terminal
     let default_hook = std::panic::take_hook();
@@ -591,6 +597,21 @@ async fn run_headless(agent: Agent, prompt: String) -> anyhow::Result<()> {
         Ok(turn) => {
             if !turn.assistant_output.safe_text.is_empty() {
                 println!("{}", turn.assistant_output.safe_text);
+            } else {
+                let raw = turn.assistant_output.raw_text.trim();
+                if raw.is_empty() {
+                    eprintln!("error: model returned no usable assistant output");
+                } else {
+                    let mut preview: String = raw.chars().take(64).collect();
+                    if raw.chars().count() > 64 {
+                        preview.push_str("...");
+                    }
+                    eprintln!(
+                        "error: model returned malformed assistant output: {}",
+                        preview
+                    );
+                }
+                std::process::exit(2);
             }
         }
         Err(e) => {
@@ -1041,6 +1062,32 @@ async fn run_app(
                         assistant_chars = done.result.assistant_output.safe_text.len(),
                         "runtime turn completed"
                     );
+                    let no_visible_output = matches!(done.result.status, TurnStatus::Completed)
+                        && done.result.assistant_output.safe_text.trim().is_empty()
+                        && done.result.tool_outputs.is_empty()
+                        && done.result.errors.is_empty();
+                    if no_visible_output {
+                        let raw = done.result.assistant_output.raw_text.trim();
+                        if raw.is_empty() {
+                            push_system_message(
+                                &mut app,
+                                "Model returned no usable output. Use `/retry` to replay the last turn.",
+                            );
+                        } else {
+                            let mut preview: String = raw.chars().take(48).collect();
+                            if raw.chars().count() > 48 {
+                                preview.push_str("...");
+                            }
+                            let preview = preview.replace('`', "'");
+                            push_system_message(
+                                &mut app,
+                                format!(
+                                    "Model returned malformed output (`{}`). Use `/retry` to replay the last turn.",
+                                    preview
+                                ),
+                            );
+                        }
+                    }
 
                     // Snapshot REPL after each completed turn so resume can restore exact state.
                     let snapshot_hash = if let Some(rt) = runtime.as_mut() {

@@ -1234,7 +1234,6 @@ def _reset_repl():
     _ns.clear()
     _tools_initialized = False
     _register_tools(saved_defs, saved_agent_id, saved_headless, saved_capabilities)
-    print("REPL reset: namespace cleared, tools re-registered.")
     return _Awaitable("REPL reset complete")
 
 

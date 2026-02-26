@@ -131,11 +131,12 @@ fn wrapped_text_height(text: &str, width: usize, prefix_chars: usize) -> usize {
 /// - drop leading/trailing blank lines
 /// - collapse consecutive blank lines to a single blank line
 fn normalize_stream_text(text: &str) -> String {
+    let sanitized = strip_repl_fragments(text);
     let mut out = String::new();
     let mut started = false;
     let mut prev_blank = false;
 
-    for line in text.split('\n') {
+    for line in sanitized.split('\n') {
         let is_blank = line.trim().is_empty();
         if !started {
             if is_blank {
@@ -164,6 +165,42 @@ fn normalize_stream_text(text: &str) -> String {
     }
 
     out
+}
+
+fn strip_repl_fragments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        let tail = &text[i..];
+        if let Some(consumed) = consume_repl_fragment_prefix(tail) {
+            i += consumed;
+            continue;
+        }
+        let mut chars = tail.chars();
+        let ch = chars.next().expect("tail is non-empty");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn consume_repl_fragment_prefix(text: &str) -> Option<usize> {
+    const PREFIXES: [&str; 2] = ["<repl", "</repl"];
+    for prefix in PREFIXES {
+        if !text.starts_with(prefix) {
+            continue;
+        }
+        let next = text.as_bytes().get(prefix.len()).copied();
+        let valid_suffix = next.is_none_or(|b| b == b'>' || b == b'/' || b.is_ascii_whitespace());
+        if !valid_suffix {
+            continue;
+        }
+        if let Some(end_idx) = text.find('>') {
+            return Some(end_idx + 1);
+        }
+        return Some(prefix.len());
+    }
+    None
 }
 
 /// Fast, coarse token estimate used only for live UI counters while streaming.
@@ -559,8 +596,9 @@ impl App {
                         self.scroll_to_bottom();
                     }
                 } else if kind == "final" {
-                    if !text.trim().is_empty() {
-                        self.blocks.push(DisplayBlock::AssistantText(text));
+                    let cleaned = normalize_stream_text(&text);
+                    if !cleaned.is_empty() {
+                        self.blocks.push(DisplayBlock::AssistantText(cleaned));
                         self.invalidate_height_cache();
                         self.scroll_to_bottom();
                     }
@@ -1693,6 +1731,18 @@ mod tests {
     fn normalize_stream_text_handles_whitespace_only_lines() {
         let raw = " \n\t\nhello\n   \n\t \nworld\n";
         assert_eq!(normalize_stream_text(raw), "hello\n\nworld");
+    }
+
+    #[test]
+    fn normalize_stream_text_strips_repl_fragments() {
+        let raw = "<repl>\nproc\n</repl>\n\nok";
+        assert_eq!(normalize_stream_text(raw), "proc\n\nok");
+    }
+
+    #[test]
+    fn normalize_stream_text_strips_dangling_repl_fragments() {
+        let raw = "<repl\nhello\n</repl";
+        assert_eq!(normalize_stream_text(raw), "hello");
     }
 
     // ── format_tokens ──

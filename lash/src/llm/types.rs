@@ -28,6 +28,7 @@ pub struct LlmRequest {
     pub messages: Vec<LlmMessage>,
     pub attachments: Vec<LlmAttachment>,
     pub reasoning_effort: Option<String>,
+    pub session_id: Option<String>,
     pub stream_events: Option<UnboundedSender<LlmStreamEvent>>,
 }
 

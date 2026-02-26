@@ -243,7 +243,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
             }
         }
         PromptSectionName::ExecutionContract => Some(format!(
-            "## Execution Contract\n\nYour output can include prose and `<repl>` blocks.\n- `<repl>` blocks execute immediately when `</repl>` is reached\n- Maximum one `<repl>` block per turn\n- After a `<repl>` block executes, lash continues in a new internal turn with the execution output\n- Do not emit additional `<repl>` blocks in the same response after one has closed\n- Use `<repl>` only when execution is needed; prose-only responses are valid when no execution is required\n- Variables persist across turns\n- `print(...)` output is model-visible only\n{}",
+            "## Execution Contract\n\nYour output can include prose and `<repl>` blocks.\n- `<repl>` blocks execute immediately when `</repl>` is reached\n- Maximum one `<repl>` block per turn\n- After a `<repl>` block executes, lash continues in a new internal turn with the execution output\n- Do not emit additional `<repl>` blocks in the same response after one has closed\n- Use `<repl>` only when execution is needed; prose-only responses are valid when no execution is required\n- For direct conversational requests (greetings, small talk, time/date, simple Q&A), respond in prose and do not open `<repl>`\n- Variables persist across turns\n- `print(...)` output is model-visible only\n{}",
             if profile.is_headless() {
                 "- In headless mode, prose-only turns are invalid; execute via `<repl>`"
             } else {

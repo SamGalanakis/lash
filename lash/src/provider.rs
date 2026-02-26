@@ -159,13 +159,16 @@ impl Provider {
                 access_token,
                 refresh_token,
                 expires_at,
-                ..
+                account_id,
             } => {
                 if now + 300 >= *expires_at {
                     let tokens = oauth::codex_refresh_tokens(refresh_token).await?;
                     *access_token = tokens.access_token;
                     *refresh_token = tokens.refresh_token;
                     *expires_at = tokens.expires_at;
+                    if let Some(new_account_id) = tokens.account_id {
+                        *account_id = Some(new_account_id);
+                    }
                     return Ok(true);
                 }
             }

@@ -376,6 +376,7 @@ pub struct RuntimeConfig {
     pub capabilities: AgentCapabilities,
     pub model: String,
     pub provider: Provider,
+    pub session_id: Option<String>,
     pub max_context_tokens: Option<usize>,
     pub include_soul: bool,
     pub llm_log_path: Option<PathBuf>,
@@ -396,6 +397,7 @@ impl Default for RuntimeConfig {
             capabilities: cfg.capabilities,
             model: cfg.model,
             provider: cfg.provider,
+            session_id: cfg.session_id,
             max_context_tokens: cfg.max_context_tokens,
             include_soul: cfg.include_soul,
             llm_log_path: cfg.llm_log_path,
@@ -422,6 +424,7 @@ impl From<RuntimeConfig> for AgentConfig {
             capabilities: value.capabilities,
             model: value.model,
             provider: value.provider,
+            session_id: value.session_id,
             max_context_tokens: value.max_context_tokens,
             sub_agent: false,
             reasoning_effort: None,
@@ -533,6 +536,13 @@ impl RuntimeEngine {
     pub fn set_provider(&mut self, provider: Provider) {
         if let Some(agent) = self.agent.as_mut() {
             agent.set_provider(provider);
+        }
+    }
+
+    /// Update session ID metadata on the underlying agent.
+    pub fn set_session_id(&mut self, session_id: Option<String>) {
+        if let Some(agent) = self.agent.as_mut() {
+            agent.set_session_id(session_id);
         }
     }
 
@@ -950,10 +960,49 @@ fn sanitize_assistant_output(text: String, policy: &SanitizerPolicy) -> String {
     if !policy.strip_repl_fragments || text.is_empty() {
         return text;
     }
-    text.replace("<repl>", "")
-        .replace("</repl>", "")
-        .trim()
-        .to_string()
+    let stripped = strip_repl_fragments(&text);
+    let normalized = stripped
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n");
+    normalized.trim().to_string()
+}
+
+fn strip_repl_fragments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        let tail = &text[i..];
+        if let Some(consumed) = consume_repl_fragment_prefix(tail) {
+            i += consumed;
+            continue;
+        }
+        let mut chars = tail.chars();
+        let ch = chars.next().expect("tail is non-empty");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn consume_repl_fragment_prefix(text: &str) -> Option<usize> {
+    const PREFIXES: [&str; 2] = ["<repl", "</repl"];
+    for prefix in PREFIXES {
+        if !text.starts_with(prefix) {
+            continue;
+        }
+        let next = text.as_bytes().get(prefix.len()).copied();
+        let valid_suffix = next.is_none_or(|b| b == b'>' || b == b'/' || b.is_ascii_whitespace());
+        if !valid_suffix {
+            continue;
+        }
+        if let Some(end_idx) = text.find('>') {
+            return Some(end_idx + 1);
+        }
+        return Some(prefix.len());
+    }
+    None
 }
 
 fn classify_output_state(raw_text: &str, safe_text: &str, issues: &[TurnIssue]) -> OutputState {
@@ -1118,6 +1167,17 @@ mod tests {
             },
         );
         assert_eq!(cleaned, "print('x') done");
+    }
+
+    #[test]
+    fn sanitizer_strips_dangling_repl_fragments() {
+        let cleaned = sanitize_assistant_output(
+            "status <repl\nstill here </repl".to_string(),
+            &SanitizerPolicy {
+                strip_repl_fragments: true,
+            },
+        );
+        assert_eq!(cleaned, "status\nstill here");
     }
 
     #[test]
