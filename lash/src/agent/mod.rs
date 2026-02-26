@@ -68,6 +68,8 @@ pub struct AgentConfig {
     pub sub_agent: bool,
     /// Optional reasoning effort level (e.g. "medium", "high") for Codex
     pub reasoning_effort: Option<String>,
+    /// Optional host session ID propagated to provider request metadata.
+    pub session_id: Option<String>,
     /// Optional turn limit. None = unlimited (default for root agent).
     pub max_turns: Option<usize>,
     /// When true, include Soul principles in the system prompt.
@@ -94,6 +96,7 @@ impl Default for AgentConfig {
             max_context_tokens: None,
             sub_agent: false,
             reasoning_effort: None,
+            session_id: None,
             max_turns: None,
             include_soul: false,
             llm_log_path: None,
@@ -294,6 +297,42 @@ fn truncate_raw_error(s: &str) -> String {
     )
 }
 
+fn is_malformed_assistant_output(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    if matches!(
+        trimmed,
+        "<" | "</" | "<repl" | "</repl" | "<repl>" | "</repl>"
+    ) {
+        return true;
+    }
+
+    // Broken or partial REPL tags should never be surfaced as final user text.
+    if (trimmed.starts_with("<repl") && !trimmed.contains("</repl>"))
+        || trimmed.starts_with("</repl")
+        || trimmed.ends_with("<repl")
+        || trimmed.ends_with("</repl")
+    {
+        return true;
+    }
+
+    // Catch short dangling tag-like fragments such as "<", "<re", "</r".
+    if trimmed.starts_with('<') && !trimmed.contains('>') && trimmed.len() <= 16 {
+        let looks_like_fragment = trimmed
+            .chars()
+            .skip(1)
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '/' || ch == '_' || ch == '-');
+        if looks_like_fragment {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// CodeAct agent: LLM writes Python code, REPL executes, output feeds back.
 pub struct Agent {
     agent_id: String,
@@ -337,6 +376,10 @@ impl Agent {
 
     pub fn set_reasoning_effort(&mut self, reasoning_effort: Option<String>) {
         self.config.reasoning_effort = reasoning_effort;
+    }
+
+    pub fn set_session_id(&mut self, session_id: Option<String>) {
+        self.config.session_id = session_id;
     }
 
     pub fn set_capabilities(&mut self, capabilities: AgentCapabilities) {
@@ -698,6 +741,7 @@ impl Agent {
             let mut last_line_start = 0usize; // byte offset of current incomplete line
             let mut code_executed = false;
             let mut direct_usage: Option<(TokenUsage, Option<String>, Option<String>)> = None;
+            let mut malformed_terminal_failure = false;
 
             // LLM call with retry on transient API errors
             let full_text = 'llm_retry: {
@@ -766,6 +810,7 @@ impl Agent {
                             })
                             .collect(),
                         reasoning_effort: self.config.reasoning_effort.clone(),
+                        session_id: self.config.session_id.clone(),
                         stream_events: None,
                     };
 
@@ -1130,6 +1175,43 @@ impl Agent {
                         response = llm_response.full_text.clone();
                     }
 
+                    if is_malformed_assistant_output(&response) {
+                        let preview = truncate_raw_error(response.trim());
+                        tracing::warn!(
+                            "LLM turn {} produced malformed assistant output on attempt {}/{}: {}",
+                            iteration,
+                            attempt + 1,
+                            LLM_MAX_RETRIES + 1,
+                            preview
+                        );
+                        if attempt < LLM_MAX_RETRIES {
+                            last_error = Some(
+                                "malformed assistant output from model (partial repl fragment)"
+                                    .to_string(),
+                            );
+                            // Retry with clean per-attempt parsing/execution state.
+                            acc = ExecAccumulator::new();
+                            response.clear();
+                            prose_parts.clear();
+                            code_parts.clear();
+                            in_code_fence = false;
+                            current_prose.clear();
+                            current_code.clear();
+                            last_line_start = 0;
+                            code_executed = false;
+                            continue;
+                        }
+
+                        emit!(make_error_event(
+                            "llm_provider",
+                            Some("malformed_output"),
+                            "Model returned malformed output. Use /retry to replay this turn.",
+                            Some(preview),
+                        ));
+                        malformed_terminal_failure = true;
+                        break 'llm_retry String::new();
+                    }
+
                     break 'llm_retry response.clone();
                 }
 
@@ -1190,6 +1272,11 @@ impl Agent {
 
             let executed_text = full_text;
             let has_code = !code_parts.is_empty();
+
+            if malformed_terminal_failure {
+                emit!(AgentEvent::Done);
+                return (msgs, iteration);
+            }
 
             // Check for empty response with no execution
             if executed_text.trim().is_empty()
@@ -1750,7 +1837,7 @@ fn parse_fence_line(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_fence_line;
+    use super::{is_malformed_assistant_output, parse_fence_line};
 
     #[test]
     fn parses_inline_open_and_close_tags() {
@@ -1869,6 +1956,21 @@ mod tests {
 
         assert_eq!(out.codes_to_execute, vec!["a = 1\n\nb = 2"]);
         assert!(!in_code_fence);
+    }
+
+    #[test]
+    fn malformed_output_detector_flags_partial_repl_fragments() {
+        assert!(is_malformed_assistant_output("<"));
+        assert!(is_malformed_assistant_output("<re"));
+        assert!(is_malformed_assistant_output("</r"));
+        assert!(is_malformed_assistant_output("<repl"));
+        assert!(is_malformed_assistant_output("</repl"));
+        assert!(is_malformed_assistant_output("<repl>"));
+        assert!(!is_malformed_assistant_output("All good here."));
+        assert!(!is_malformed_assistant_output("<tag>"));
+        assert!(!is_malformed_assistant_output(
+            "Use `<repl>` tags only when needed."
+        ));
     }
 }
 

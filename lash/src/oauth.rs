@@ -368,6 +368,15 @@ const CODEX_DEVICE_POLL_URL: &str = "https://auth.openai.com/api/accounts/device
 const CODEX_DEVICE_CALLBACK: &str = "https://auth.openai.com/deviceauth/callback";
 pub const CODEX_DEVICE_VERIFY_URL: &str = "https://auth.openai.com/codex/device";
 
+fn codex_user_agent() -> String {
+    format!(
+        "lash/{} ({}; {})",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
+}
+
 #[derive(Debug)]
 pub struct CodexDeviceCode {
     pub device_auth_id: String,
@@ -388,6 +397,7 @@ pub async fn codex_request_device_code() -> Result<CodexDeviceCode, OAuthError> 
     let client = reqwest::Client::new();
     let resp = client
         .post(CODEX_DEVICE_CODE_URL)
+        .header("User-Agent", codex_user_agent())
         .json(&serde_json::json!({ "client_id": CODEX_CLIENT_ID }))
         .send()
         .await?;
@@ -429,6 +439,7 @@ pub async fn codex_poll_device_auth(
     let client = reqwest::Client::new();
     let resp = client
         .post(CODEX_DEVICE_POLL_URL)
+        .header("User-Agent", codex_user_agent())
         .json(&serde_json::json!({
             "device_auth_id": device_auth_id,
             "user_code": user_code,
@@ -517,7 +528,7 @@ pub async fn codex_exchange_code(
 }
 
 /// Refresh Codex OAuth tokens. Uses form-urlencoded.
-pub async fn codex_refresh_tokens(refresh: &str) -> Result<OAuthTokens, OAuthError> {
+pub async fn codex_refresh_tokens(refresh: &str) -> Result<CodexOAuthTokens, OAuthError> {
     let client = reqwest::Client::new();
     let resp = client
         .post(CODEX_TOKEN_URL)
@@ -544,16 +555,24 @@ pub async fn codex_refresh_tokens(refresh: &str) -> Result<OAuthTokens, OAuthErr
     let now = now_secs();
     let expires_in = body["expires_in"].as_u64().unwrap_or(3600);
 
-    Ok(OAuthTokens {
-        access_token: body["access_token"]
-            .as_str()
-            .ok_or_else(|| OAuthError::TokenExchange("missing access_token".into()))?
-            .to_string(),
-        refresh_token: body["refresh_token"]
-            .as_str()
-            .unwrap_or(refresh)
-            .to_string(),
+    let access_token = body["access_token"]
+        .as_str()
+        .ok_or_else(|| OAuthError::TokenExchange("missing access_token".into()))?
+        .to_string();
+    let refresh_token = body["refresh_token"]
+        .as_str()
+        .unwrap_or(refresh)
+        .to_string();
+    let account_id = body["id_token"]
+        .as_str()
+        .and_then(extract_codex_account_id)
+        .or_else(|| extract_codex_account_id(&access_token));
+
+    Ok(CodexOAuthTokens {
+        access_token,
+        refresh_token,
         expires_at: now + expires_in,
+        account_id,
     })
 }
 

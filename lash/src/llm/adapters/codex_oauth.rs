@@ -342,9 +342,21 @@ impl LlmTransport for CodexOAuthAdapter {
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
             .header("originator", "lash")
+            .header(
+                "User-Agent",
+                format!(
+                    "lash/{} ({}; {})",
+                    env!("CARGO_PKG_VERSION"),
+                    std::env::consts::OS,
+                    std::env::consts::ARCH
+                ),
+            )
             .json(&body);
+        if let Some(session_id) = req.session_id.as_deref() {
+            http = http.header("session_id", session_id);
+        }
         if let Some(id) = account_id {
-            http = http.header("chatgpt-account-id", id);
+            http = http.header("ChatGPT-Account-Id", id);
         }
 
         let resp = http
@@ -551,6 +563,7 @@ data: {"type":"response.completed","response":{"output_text":"Hey there","usage"
             messages: vec![],
             attachments: vec![],
             reasoning_effort: None,
+            session_id: None,
             stream_events: None,
         };
 
