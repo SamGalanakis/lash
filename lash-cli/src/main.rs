@@ -4,6 +4,7 @@ mod event;
 mod input_items;
 mod markdown;
 mod prompt_overrides;
+mod server;
 mod session_log;
 mod setup;
 mod skill;
@@ -46,6 +47,9 @@ use prompt_overrides::resolve_prompt_overrides;
 
 #[derive(Parser)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<SubCommand>,
+
     /// OpenRouter API key (optional — use --provider to configure interactively)
     #[arg(long, env = "OPENROUTER_API_KEY")]
     api_key: Option<String>,
@@ -105,6 +109,17 @@ struct Args {
     /// Disable a prompt section entirely.
     #[arg(long = "prompt-disable", value_name = "SECTION")]
     prompt_disable: Vec<String>,
+}
+
+#[derive(clap::Subcommand)]
+enum SubCommand {
+    /// Run lash as a JSON-RPC app-server on stdio (for IDE/editor integrations).
+    #[command(name = "app-server")]
+    AppServer {
+        /// Transport to listen on (only stdio:// supported)
+        #[arg(long, default_value = "stdio://")]
+        listen: String,
+    },
 }
 
 struct SessionLogger {
@@ -379,6 +394,46 @@ async fn main() -> anyhow::Result<()> {
             None
         }
     });
+
+    // ── app-server subcommand ──
+    if let Some(SubCommand::AppServer { listen }) = args.command {
+        let runtime_config = RuntimeConfig {
+            model: model.clone(),
+            provider: lash_config.provider.clone(),
+            headless: true,
+            ..Default::default()
+        };
+
+        if listen == "stdio://" {
+            return server::run_server(
+                runtime_config,
+                lash_config.provider.clone(),
+                model,
+                lash_config,
+            )
+            .await;
+        } else if let Some(addr_str) = listen.strip_prefix("http://") {
+            let addr: std::net::SocketAddr = addr_str.parse().map_err(|e| {
+                anyhow::anyhow!(
+                    "invalid HTTP listen address `{addr_str}`: {e}\n\
+                     expected format: http://IP:PORT (e.g. http://127.0.0.1:3100)"
+                )
+            })?;
+            return server::run_http_server(
+                addr,
+                runtime_config,
+                lash_config.provider.clone(),
+                model,
+                lash_config,
+            )
+            .await;
+        } else {
+            anyhow::bail!(
+                "unsupported --listen URL `{listen}`; \
+                 expected `stdio://` or `http://IP:PORT`"
+            );
+        }
+    }
 
     let headless = args.print_prompt.is_some();
     let run_session_id = if headless {
