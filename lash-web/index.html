@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en" class="h-full">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lash</title>
+    <meta name="description" content="Web interface for the Lash AI coding agent" />
+    <script>
+      (function () {
+        try {
+          var theme = localStorage.getItem("lash-theme") || "dark";
+          if (theme === "system") {
+            theme = window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+          }
+          document.documentElement.classList.add(theme);
+          document.documentElement.style.colorScheme = theme;
+        } catch (e) {}
+      })();
+    </script>
+    <style>
+      #initial-loading {
+        background: #0a0a0b;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        width: 100%;
+        position: absolute;
+        z-index: 9999;
+        transition: opacity 0.3s ease-out;
+      }
+      .light #initial-loading {
+        background: #fafaf9;
+      }
+      #initial-loading.fade-out {
+        opacity: 0;
+        pointer-events: none;
+      }
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.4;
+        }
+      }
+      .loading-pulse {
+        animation: pulse 2s ease-in-out infinite;
+      }
+    </style>
+  </head>
+  <body class="h-full bg-background text-foreground antialiased">
+    <div id="root" class="h-full">
+      <div id="initial-loading">
+        <div class="loading-pulse" style="color: #a1a1aa; font-family: ui-monospace, monospace; font-size: 14px;">
+          lash
+        </div>
+      </div>
+    </div>
+    <script>
+      setTimeout(function () {
+        var el = document.getElementById("initial-loading");
+        if (el) {
+          el.classList.add("fade-out");
+          setTimeout(function () { el.remove(); }, 300);
+        }
+      }, 8000);
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

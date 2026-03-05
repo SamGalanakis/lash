@@ -60,13 +60,9 @@ pub fn resolve_projection(
         };
 
         for tool in &def.tool_names {
-            if !available_tools.contains(tool) {
-                return Err(ReconfigureError::Validation(format!(
-                    "capability `{}` references missing tool `{}`",
-                    def.id, tool
-                )));
+            if available_tools.contains(tool) {
+                effective_tools.insert(tool.clone());
             }
-            effective_tools.insert(tool.clone());
         }
 
         for helper in &def.helper_bindings {
