@@ -96,8 +96,8 @@ export function Sidebar() {
               <p className="truncate text-[13px] leading-snug">
                 {thread.preview || "New thread"}
               </p>
-              <p className="text-[11px] text-muted-foreground mt-0.5">
-                {formatDate(thread.createdAt)}
+              <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                {formatDate(thread.createdAt)} · {thread.model}
               </p>
             </div>
             <button

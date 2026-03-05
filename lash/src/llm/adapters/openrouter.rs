@@ -56,6 +56,30 @@ impl OpenRouterAdapter {
         })
     }
 
+    fn should_include_message(msg: &LlmMessage, req: &LlmRequest) -> bool {
+        if msg.kind == "image" && msg.image_idx >= 0 {
+            return req.attachments.get(msg.image_idx as usize).is_some();
+        }
+        !msg.content.trim().is_empty()
+    }
+
+    fn normalize_history_message_role(msg: &LlmMessage, json_msg: &mut Value) {
+        // OpenRouter may route to providers that reject assistant-prefill style histories
+        // and/or strip non-leading system roles. Encode in-history system guidance as user
+        // notes to preserve intent while keeping provider-compatible alternation.
+        if msg.role != LlmRole::System {
+            return;
+        }
+        if let Some(role) = json_msg.get_mut("role") {
+            *role = Value::String("user".to_string());
+        }
+        if let Some(content) = json_msg.get_mut("content")
+            && let Some(text) = content.as_str()
+        {
+            *content = Value::String(format!("[System note]\n{text}"));
+        }
+    }
+
     fn parse_i64(v: Option<&Value>) -> i64 {
         match v {
             Some(Value::Number(n)) => n.as_i64().unwrap_or(0),
@@ -193,6 +217,15 @@ impl OpenRouterAdapter {
         let usage = Self::usage_from_value(&value).unwrap_or_default();
         Ok((full, usage))
     }
+
+    fn normalize_model_alias(model: &str) -> String {
+        let trimmed = model.trim();
+        match trimmed.to_ascii_lowercase().as_str() {
+            // Historical aliases seen in older configs/session metadata.
+            "zai-org/glm-5-fp8" | "zai-org/glm-5" | "z-ai/glm-5-fp8" => "z-ai/glm-5".to_string(),
+            _ => trimmed.to_string(),
+        }
+    }
 }
 
 #[async_trait]
@@ -220,11 +253,11 @@ impl LlmTransport for OpenRouterAdapter {
     }
 
     fn normalize_model(&self, model: &str) -> String {
-        model.to_string()
+        Self::normalize_model_alias(model)
     }
 
     fn context_lookup_model(&self, model: &str) -> String {
-        model.to_string()
+        Self::normalize_model_alias(model)
     }
 
     async fn ensure_ready(&self, _provider: &mut Provider) -> Result<bool, LlmTransportError> {
@@ -247,7 +280,26 @@ impl LlmTransport for OpenRouterAdapter {
         };
 
         let mut messages = vec![json!({"role": "system", "content": req.system_prompt})];
-        messages.extend(req.messages.iter().map(|m| self.message_to_json(m, &req)));
+        for msg in &req.messages {
+            if !Self::should_include_message(msg, &req) {
+                continue;
+            }
+            let mut json_msg = self.message_to_json(msg, &req);
+            Self::normalize_history_message_role(msg, &mut json_msg);
+            messages.push(json_msg);
+        }
+
+        let ends_with_assistant = messages
+            .last()
+            .and_then(|m| m.get("role"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|role| role == "assistant");
+        if ends_with_assistant {
+            messages.push(json!({
+                "role": "user",
+                "content": "[Continuation] Continue with the next required step."
+            }));
+        }
 
         let body = json!({
             "model": req.model,
@@ -385,6 +437,7 @@ impl LlmTransport for OpenRouterAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::types::{LlmAttachment, LlmRole};
 
     #[test]
     fn parses_openrouter_sse_deltas_and_usage() {
@@ -412,5 +465,83 @@ mod tests {
         assert_eq!(usage.input_tokens, 10);
         assert_eq!(usage.output_tokens, 3);
         assert_eq!(usage.cached_input_tokens, 4);
+    }
+
+    #[test]
+    fn excludes_empty_text_messages() {
+        let req = LlmRequest {
+            model: "m".to_string(),
+            system_prompt: "s".to_string(),
+            messages: vec![],
+            attachments: vec![],
+            reasoning_effort: None,
+            session_id: None,
+            stream_events: None,
+        };
+        let msg = LlmMessage {
+            role: LlmRole::Assistant,
+            content: "   ".to_string(),
+            kind: "text".to_string(),
+            image_idx: -1,
+        };
+        assert!(!OpenRouterAdapter::should_include_message(&msg, &req));
+    }
+
+    #[test]
+    fn includes_image_only_when_attachment_exists() {
+        let mut req = LlmRequest {
+            model: "m".to_string(),
+            system_prompt: "s".to_string(),
+            messages: vec![],
+            attachments: vec![],
+            reasoning_effort: None,
+            session_id: None,
+            stream_events: None,
+        };
+        let msg = LlmMessage {
+            role: LlmRole::User,
+            content: String::new(),
+            kind: "image".to_string(),
+            image_idx: 0,
+        };
+        assert!(!OpenRouterAdapter::should_include_message(&msg, &req));
+        req.attachments.push(LlmAttachment {
+            mime: "image/png".to_string(),
+            data: vec![1, 2, 3],
+        });
+        assert!(OpenRouterAdapter::should_include_message(&msg, &req));
+    }
+
+    #[test]
+    fn normalizes_system_history_messages_to_user_notes() {
+        let msg = LlmMessage {
+            role: LlmRole::System,
+            content: "follow this".to_string(),
+            kind: "text".to_string(),
+            image_idx: -1,
+        };
+        let mut json_msg = json!({"role":"system","content":"follow this"});
+        OpenRouterAdapter::normalize_history_message_role(&msg, &mut json_msg);
+        assert_eq!(json_msg.get("role").and_then(|v| v.as_str()), Some("user"));
+        assert_eq!(
+            json_msg.get("content").and_then(|v| v.as_str()),
+            Some("[System note]\nfollow this")
+        );
+    }
+
+    #[test]
+    fn normalizes_legacy_glm_aliases() {
+        assert_eq!(
+            OpenRouterAdapter::normalize_model_alias("zai-org/GLM-5-FP8"),
+            "z-ai/glm-5"
+        );
+        assert_eq!(
+            OpenRouterAdapter::normalize_model_alias("z-ai/glm-5-fp8"),
+            "z-ai/glm-5"
+        );
+        assert_eq!(
+            OpenRouterAdapter::normalize_model_alias("anthropic/claude-sonnet-4.6"),
+            "anthropic/claude-sonnet-4.6"
+        );
     }
 }

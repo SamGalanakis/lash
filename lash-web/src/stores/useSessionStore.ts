@@ -9,12 +9,27 @@ import type {
 } from "@/lib/types";
 import { lashClient } from "@/lib/lash-client";
 
+function upsertThreadAtTop(threads: Thread[], thread: Thread): Thread[] {
+  return [thread, ...threads.filter((t) => t.id !== thread.id)];
+}
+
+function dedupeThreads(threads: Thread[]): Thread[] {
+  const seen = new Set<string>();
+  return threads.filter((thread) => {
+    if (seen.has(thread.id)) return false;
+    seen.add(thread.id);
+    return true;
+  });
+}
+
 interface ActiveTurn {
   turnId: string;
   threadId: string;
   items: ThreadItem[];
   streamingText: string;
   streamingItemId: string | null;
+  toolOutputLines: string[];
+  activeDelegate: { name: string; task: string } | null;
 }
 
 interface SessionState {
@@ -55,7 +70,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const { data } = await lashClient.threadList({ limit: 50 });
-      set({ threads: data, loading: false });
+      set({ threads: dedupeThreads(data), loading: false });
     } catch (err) {
       set({
         error: err instanceof Error ? err.message : String(err),
@@ -73,7 +88,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     try {
       const { thread } = await lashClient.threadStart();
       set((s) => ({
-        threads: [thread, ...s.threads],
+        threads: upsertThreadAtTop(s.threads, thread),
         currentThreadId: thread.id,
         activeTurn: null,
         tokenUsage: null,
@@ -92,7 +107,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   loadThreadHistory: async (threadId) => {
-    if (get().threadMessages[threadId]) return;
+    const cached = get().threadMessages[threadId];
+    if (cached && cached.length > 0) return;
     try {
       const { thread } = await lashClient.threadRead(threadId, true);
       const items: ThreadItem[] = [];
@@ -131,6 +147,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         items: [userItem],
         streamingText: "",
         streamingItemId: null,
+        toolOutputLines: [],
+        activeDelegate: null,
       },
     });
 
@@ -172,10 +190,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     switch (method) {
       case "thread/started": {
         const thread = p.thread as Thread;
-        set((s) => {
-          if (s.threads.some((t) => t.id === thread.id)) return s;
-          return { threads: [thread, ...s.threads] };
-        });
+        set((s) => ({
+          threads: upsertThreadAtTop(s.threads, thread),
+        }));
         break;
       }
 
@@ -203,10 +220,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               },
             };
           }
+          const clearDelegate =
+            item.type === "toolCall" && item.name.startsWith("delegate_");
           return {
             activeTurn: {
               ...s.activeTurn,
               items: [...s.activeTurn.items, item],
+              activeDelegate: clearDelegate ? null : s.activeTurn.activeDelegate,
             },
           };
         });
@@ -221,6 +241,72 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             activeTurn: {
               ...s.activeTurn,
               streamingText: s.activeTurn.streamingText + delta,
+            },
+          };
+        });
+        break;
+      }
+
+      case "turn/toolOutput/delta": {
+        const threadId = p.threadId as string | undefined;
+        const turnId = p.turnId as string | undefined;
+        const delta = p.delta as string;
+        set((s) => {
+          if (!s.activeTurn) return s;
+          if (
+            (threadId && s.activeTurn.threadId !== threadId) ||
+            (turnId && s.activeTurn.turnId && s.activeTurn.turnId !== turnId)
+          ) {
+            return s;
+          }
+          return {
+            activeTurn: {
+              ...s.activeTurn,
+              toolOutputLines: [...s.activeTurn.toolOutputLines, delta],
+            },
+          };
+        });
+        break;
+      }
+
+      case "turn/toolOutput/cleared": {
+        const threadId = p.threadId as string | undefined;
+        const turnId = p.turnId as string | undefined;
+        set((s) => {
+          if (!s.activeTurn) return s;
+          if (
+            (threadId && s.activeTurn.threadId !== threadId) ||
+            (turnId && s.activeTurn.turnId && s.activeTurn.turnId !== turnId)
+          ) {
+            return s;
+          }
+          return {
+            activeTurn: {
+              ...s.activeTurn,
+              toolOutputLines: [],
+            },
+          };
+        });
+        break;
+      }
+
+      case "turn/delegate/started": {
+        const threadId = p.threadId as string | undefined;
+        const turnId = p.turnId as string | undefined;
+        const name = (p.name as string) || "delegate";
+        const task = (p.task as string) || "";
+        set((s) => {
+          if (!s.activeTurn) return s;
+          if (
+            (threadId && s.activeTurn.threadId !== threadId) ||
+            (turnId && s.activeTurn.turnId && s.activeTurn.turnId !== turnId)
+          ) {
+            return s;
+          }
+          return {
+            activeTurn: {
+              ...s.activeTurn,
+              activeDelegate: { name, task },
             },
           };
         });

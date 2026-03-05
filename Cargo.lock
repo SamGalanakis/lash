@@ -1318,6 +1318,7 @@ dependencies = [
  "flate2",
  "globset",
  "ignore",
+ "libc",
  "pdf-extract",
  "pty-process",
  "pyo3",

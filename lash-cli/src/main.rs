@@ -8,6 +8,7 @@ mod server;
 mod session_log;
 mod setup;
 mod skill;
+mod stream_text;
 mod theme;
 mod ui;
 mod util;
@@ -371,16 +372,24 @@ async fn main() -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| lash_config.provider.default_model().to_string());
     let selection = parse_model_selection(&requested_model).map_err(anyhow::Error::msg)?;
-    validate_model_selection(&lash_config.provider, &selection, args.model.is_some())
-        .map_err(anyhow::Error::msg)?;
-    if args.model.is_none() && !model_known_in_catalog(&lash_config.provider, &selection.model) {
+    let mut normalized_selection = selection.clone();
+    normalized_selection.model = lash_config.provider.resolve_model(&selection.model);
+    validate_model_selection(
+        &lash_config.provider,
+        &normalized_selection,
+        args.model.is_some(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    if args.model.is_none()
+        && !model_known_in_catalog(&lash_config.provider, &normalized_selection.model)
+    {
         eprintln!(
             "warning: model `{}` is not in local catalog for {}; continuing (default model)",
-            selection.model,
+            normalized_selection.model,
             provider_label(&lash_config.provider)
         );
     }
-    let model = selection.model.clone();
+    let model = normalized_selection.model.clone();
 
     let llm_log_path = std::env::var("LASH_LOG").ok().and_then(|level| {
         let l = level.to_lowercase();
@@ -400,7 +409,10 @@ async fn main() -> anyhow::Result<()> {
         let runtime_config = RuntimeConfig {
             model: model.clone(),
             provider: lash_config.provider.clone(),
-            headless: true,
+            // Keep app-server runtime behavior aligned with the interactive CLI.
+            // Headless mode has diverged prompt/termination behavior and can
+            // cause provider-specific request differences versus TUI runs.
+            headless: false,
             ..Default::default()
         };
 

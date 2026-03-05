@@ -15,6 +15,16 @@ static PYTHON_INIT: Once = Once::new();
 /// can call `Python::attach()` concurrently after this.
 fn ensure_python_initialized(home_dir: Option<&std::path::Path>) {
     PYTHON_INIT.call_once(|| {
+        #[cfg(unix)]
+        let previous_sigint = unsafe {
+            let mut old = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+            if libc::sigaction(libc::SIGINT, std::ptr::null(), old.as_mut_ptr()) == 0 {
+                Some(old.assume_init())
+            } else {
+                None
+            }
+        };
+
         unsafe {
             if let Some(home_dir) = home_dir {
                 std::env::set_var("PYTHONHOME", home_dir);
@@ -23,6 +33,14 @@ fn ensure_python_initialized(home_dir: Option<&std::path::Path>) {
         }
         Python::initialize();
         unsafe {
+            // Py_Initialize installs Python's own SIGINT handler.
+            // Restore the prior process handler (e.g. tokio's ctrl_c handler)
+            // so app-server shutdown via Ctrl-C keeps working.
+            #[cfg(unix)]
+            if let Some(old) = previous_sigint {
+                let _ = libc::sigaction(libc::SIGINT, &old, std::ptr::null_mut());
+            }
+
             if home_dir.is_some() {
                 std::env::remove_var("PYTHONHOME");
             }
@@ -326,9 +344,9 @@ fn python_thread_main(
     request_rx: std_mpsc::Receiver<PythonRequest>,
     response_tx: std_mpsc::Sender<PythonResponse>,
 ) {
-    // Python is already initialized by ensure_python_initialized().
-    // With free-threaded 3.14t, attach() gives us thread state without a GIL.
-    Python::attach(|py| {
+    // Initialize the per-thread module once, then only hold Python attachment
+    // while actively handling a request.
+    let Some((repl, asyncio)) = Python::attach(|py| {
         // Each thread needs a UNIQUE module name to avoid clobbering each other
         // in sys.modules (shared in free-threaded Python).
         static MODULE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -343,7 +361,7 @@ fn python_thread_main(
             Ok(m) => m,
             Err(e) => {
                 tracing::error!("Failed to load repl.py: {e}");
-                return;
+                return None;
             }
         };
 
@@ -358,10 +376,31 @@ fn python_thread_main(
 
         if let Err(e) = repl.setattr("_rust_bridge", bridge) {
             tracing::error!("Failed to inject _rust_bridge: {e}");
-            return;
+            return None;
         }
-        // Main request loop
-        while let Ok(request) = request_rx.recv() {
+
+        let asyncio = match py.import("asyncio") {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!("Failed to import asyncio: {e}");
+                return None;
+            }
+        };
+
+        Some((repl.unbind(), asyncio.unbind()))
+    }) else {
+        return;
+    };
+
+    while let Ok(request) = request_rx.recv() {
+        if matches!(request, PythonRequest::Shutdown) {
+            break;
+        }
+
+        Python::attach(|py| {
+            let repl = repl.bind(py);
+            let asyncio = asyncio.bind(py);
+
             match request {
                 PythonRequest::Init {
                     tools_json,
@@ -379,9 +418,12 @@ fn python_thread_main(
                 }
                 PythonRequest::Exec { id, code } => {
                     // Run _handle_exec via asyncio.run()
-                    let asyncio = py.import("asyncio").expect("asyncio import failed");
-                    let coro = match repl.call_method1("_handle_exec", (&id, &code)) {
-                        Ok(c) => c,
+                    match repl.call_method1("_handle_exec", (&id, &code)) {
+                        Ok(coro) => {
+                            if let Err(e) = asyncio.call_method1("run", (coro,)) {
+                                tracing::error!("asyncio.run failed: {e}");
+                            }
+                        }
                         Err(e) => {
                             tracing::error!("_handle_exec failed: {e}");
                             let _ = response_tx.send(PythonResponse::ExecResult {
@@ -389,11 +431,7 @@ fn python_thread_main(
                                 output: String::new(),
                                 error: Some(format!("Python error: {e}")),
                             });
-                            continue;
                         }
-                    };
-                    if let Err(e) = asyncio.call_method1("run", (coro,)) {
-                        tracing::error!("asyncio.run failed: {e}");
                     }
                 }
                 PythonRequest::Snapshot { id } => {
@@ -434,8 +472,8 @@ fn python_thread_main(
                         .unwrap_or(false);
                     let _ = response_tx.send(PythonResponse::CheckCompleteResult { is_complete });
                 }
-                PythonRequest::Shutdown => break,
+                PythonRequest::Shutdown => unreachable!(),
             }
-        }
-    });
+        });
+    }
 }

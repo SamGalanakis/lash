@@ -110,10 +110,7 @@ async fn rpc_handler(
     }
 }
 
-async fn ws_handler(
-    State(state): State<AppState>,
-    ws: WebSocketUpgrade,
-) -> impl IntoResponse {
+async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(|socket| handle_ws_connection(socket, state))
 }
 
@@ -153,18 +150,16 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState) {
     let inbound = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_rx.next().await {
             match msg {
-                Message::Text(text) => {
-                    match serde_json::from_str::<RawMessage>(&text) {
-                        Ok(raw) => {
-                            if inbound_tx.send(raw).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("failed to parse WS JSON-RPC message: {e}");
+                Message::Text(text) => match serde_json::from_str::<RawMessage>(&text) {
+                    Ok(raw) => {
+                        if inbound_tx.send(raw).await.is_err() {
+                            break;
                         }
                     }
-                }
+                    Err(e) => {
+                        tracing::warn!("failed to parse WS JSON-RPC message: {e}");
+                    }
+                },
                 Message::Close(_) => break,
                 _ => {}
             }

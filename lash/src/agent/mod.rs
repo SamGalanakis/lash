@@ -846,6 +846,7 @@ impl Agent {
                     let mut streamed_char_count = 0usize;
                     let mut latest_stream_usage = LlmUsage::default();
                     let mut stop_stream_processing = false;
+                    let mut stream_channel_open = true;
                     let mut retry_after_error = false;
                     let mut wait_tick = tokio::time::interval(std::time::Duration::from_secs(15));
                     wait_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -892,8 +893,11 @@ impl Agent {
                                     code_executed,
                                 );
                             }
-                            maybe_event = llm_stream_rx.recv() => {
-                                let Some(event) = maybe_event else { continue };
+                            maybe_event = llm_stream_rx.recv(), if stream_channel_open => {
+                                let Some(event) = maybe_event else {
+                                    stream_channel_open = false;
+                                    continue;
+                                };
                                 stream_event_count += 1;
                                 match event {
                                     LlmStreamEvent::Delta(delta) => {

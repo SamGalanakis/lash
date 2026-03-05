@@ -1,6 +1,6 @@
 //! Request handler: dispatches JSON-RPC methods to implementations.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,11 +14,12 @@ use lash_core::tools::{FilteredTools, ToolSet, ToolSetDeps};
 use lash_core::*;
 
 use super::protocol::{self, *};
-use protocol::TurnStatus;
 use super::transport::MessageWriter;
 use super::{ActiveTurn, TurnReturn};
+use crate::app::DisplayBlock;
 use crate::session_log;
 use crate::skill::SkillRegistry;
+use protocol::TurnStatus;
 
 // ─── Loaded thread state ───
 
@@ -114,7 +115,11 @@ impl ServerHandler {
 
         if !self.initialized {
             self.writer
-                .send_response(&JsonRpcResponse::err(id, NOT_INITIALIZED, "Not initialized"))
+                .send_response(&JsonRpcResponse::err(
+                    id,
+                    NOT_INITIALIZED,
+                    "Not initialized",
+                ))
                 .await;
             return None;
         }
@@ -174,11 +179,7 @@ impl ServerHandler {
         }
     }
 
-    pub async fn handle_notification(
-        &mut self,
-        method: &str,
-        _params: Option<serde_json::Value>,
-    ) {
+    pub async fn handle_notification(&mut self, method: &str, _params: Option<serde_json::Value>) {
         match method {
             "initialized" => {
                 tracing::info!("client acknowledged initialization");
@@ -207,21 +208,20 @@ impl ServerHandler {
             return;
         }
 
-        let init_params: InitializeParams = match params
-            .and_then(|p| serde_json::from_value(p).ok())
-        {
-            Some(v) => v,
-            None => {
-                self.writer
-                    .send_response(&JsonRpcResponse::err(
-                        id,
-                        INVALID_PARAMS,
-                        "Missing or invalid params for initialize",
-                    ))
-                    .await;
-                return;
-            }
-        };
+        let init_params: InitializeParams =
+            match params.and_then(|p| serde_json::from_value(p).ok()) {
+                Some(v) => v,
+                None => {
+                    self.writer
+                        .send_response(&JsonRpcResponse::err(
+                            id,
+                            INVALID_PARAMS,
+                            "Missing or invalid params for initialize",
+                        ))
+                        .await;
+                    return;
+                }
+            };
 
         let opt_out = init_params
             .capabilities
@@ -277,14 +277,14 @@ impl ServerHandler {
             }
         }
 
-        let model = start_params.model.unwrap_or_else(|| self.model.clone());
+        let requested_model = start_params.model.unwrap_or_else(|| self.model.clone());
+        let model = self.provider.resolve_model(&requested_model);
         let thread_id = short_uuid("thr");
         let now = chrono::Utc::now().timestamp();
 
         let mut config = self.config.clone();
         config.model = model.clone();
         config.provider = self.provider.clone();
-        config.headless = true;
 
         let tools = build_tools(&self.lash_config, &config);
         let state = AgentStateEnvelope::default();
@@ -325,11 +325,8 @@ impl ServerHandler {
             },
         );
 
-        self.notify(
-            "thread/started",
-            serde_json::json!({ "thread": thread }),
-        )
-        .await;
+        self.notify("thread/started", serde_json::json!({ "thread": thread }))
+            .await;
 
         self.writer
             .send_response(&JsonRpcResponse::ok(
@@ -399,7 +396,6 @@ impl ServerHandler {
 
         let mut config = self.config.clone();
         config.provider = self.provider.clone();
-        config.headless = true;
 
         let tools = build_tools(&self.lash_config, &config);
         let state = AgentStateEnvelope {
@@ -464,10 +460,11 @@ impl ServerHandler {
         let sessions = session_log::list_sessions();
         let limit = list_params.limit.unwrap_or(50);
 
-        let data: Vec<Thread> = sessions
+        let mut session_ids = HashSet::new();
+        let mut data: Vec<Thread> = sessions
             .iter()
-            .take(limit)
             .map(|s| {
+                session_ids.insert(s.session_id.clone());
                 let status = self
                     .threads
                     .get(&s.session_id)
@@ -494,6 +491,30 @@ impl ServerHandler {
                 }
             })
             .collect();
+
+        for (thread_id, lt) in &self.threads {
+            if session_ids.contains(thread_id) {
+                continue;
+            }
+
+            let mut thread = lt.thread_meta.clone();
+            thread.status = Some(if lt.active_turn_id.is_some() {
+                ThreadStatus::Active {
+                    active_flags: vec![],
+                }
+            } else {
+                ThreadStatus::Idle
+            });
+            thread.turns = None;
+            data.push(thread);
+        }
+
+        data.sort_by(|a, b| {
+            let a_ts = a.updated_at.unwrap_or(a.created_at);
+            let b_ts = b.updated_at.unwrap_or(b.created_at);
+            b_ts.cmp(&a_ts)
+        });
+        data.truncate(limit);
 
         self.writer
             .send_response(&JsonRpcResponse::ok(
@@ -526,7 +547,7 @@ impl ServerHandler {
         if let Some(lt) = self.threads.get(&read_params.thread_id) {
             let mut thread = lt.thread_meta.clone();
             if read_params.include_turns {
-                thread.turns = Some(vec![]);
+                thread.turns = Some(load_thread_history_turns(&read_params.thread_id));
             }
             self.writer
                 .send_response(&JsonRpcResponse::ok(
@@ -561,7 +582,7 @@ impl ServerHandler {
             updated_at: None,
             status: Some(ThreadStatus::NotLoaded),
             turns: if read_params.include_turns {
-                Some(vec![])
+                Some(load_thread_history_turns(&read_params.thread_id))
             } else {
                 None
             },
@@ -681,7 +702,10 @@ impl ServerHandler {
     async fn handle_thread_loaded_list(&mut self, id: serde_json::Value) {
         let data: Vec<&String> = self.threads.keys().collect();
         self.writer
-            .send_response(&JsonRpcResponse::ok(id, serde_json::json!({ "data": data })))
+            .send_response(&JsonRpcResponse::ok(
+                id,
+                serde_json::json!({ "data": data }),
+            ))
             .await;
     }
 
@@ -692,20 +716,20 @@ impl ServerHandler {
         id: serde_json::Value,
         params: Option<serde_json::Value>,
     ) -> Option<ActiveTurn> {
-        let turn_params: TurnStartParams =
-            match params.and_then(|p| serde_json::from_value(p).ok()) {
-                Some(p) => p,
-                None => {
-                    self.writer
-                        .send_response(&JsonRpcResponse::err(
-                            id,
-                            INVALID_PARAMS,
-                            "Missing or invalid turn/start params",
-                        ))
-                        .await;
-                    return None;
-                }
-            };
+        let turn_params: TurnStartParams = match params.and_then(|p| serde_json::from_value(p).ok())
+        {
+            Some(p) => p,
+            None => {
+                self.writer
+                    .send_response(&JsonRpcResponse::err(
+                        id,
+                        INVALID_PARAMS,
+                        "Missing or invalid turn/start params",
+                    ))
+                    .await;
+                return None;
+            }
+        };
 
         let thread_id = turn_params.thread_id.clone();
 
@@ -744,7 +768,7 @@ impl ServerHandler {
 
         // Apply per-turn overrides
         if let Some(ref model) = turn_params.model {
-            runtime.set_model(model.clone());
+            runtime.set_model(self.provider.resolve_model(model));
         }
 
         let (items, image_blobs) = convert_turn_input(&turn_params.input);
@@ -780,11 +804,8 @@ impl ServerHandler {
         )
         .await;
 
-        self.notify(
-            "turn/started",
-            serde_json::json!({ "turn": turn }),
-        )
-        .await;
+        self.notify("turn/started", serde_json::json!({ "turn": turn }))
+            .await;
 
         self.writer
             .send_response(&JsonRpcResponse::ok(
@@ -971,10 +992,7 @@ fn build_tools(lash_config: &LashConfig, config: &RuntimeConfig) -> Arc<dyn Tool
         lash_core::lash_home().join("skills"),
         PathBuf::from(".lash").join("skills"),
     ];
-    let tavily_key = lash_config
-        .tavily_api_key()
-        .unwrap_or_default()
-        .to_string();
+    let tavily_key = lash_config.tavily_api_key().unwrap_or_default().to_string();
     let base = ToolSet::defaults(ToolSetDeps {
         store: None,
         tavily_api_key: if tavily_key.is_empty() {
@@ -1010,6 +1028,146 @@ fn truncate_preview(s: &str, max: usize) -> String {
     } else {
         format!("{}…", &s[..max])
     }
+}
+
+fn load_thread_history_turns(thread_id: &str) -> Vec<Turn> {
+    let sessions = session_log::list_sessions();
+    let Some(info) = sessions.iter().find(|s| s.session_id == thread_id) else {
+        return vec![];
+    };
+    let Some((_, blocks)) = session_log::load_session(&info.filename) else {
+        return vec![];
+    };
+
+    let items = blocks_to_thread_items(blocks);
+    if items.is_empty() {
+        return vec![];
+    }
+
+    vec![Turn {
+        id: format!("turn_history_{thread_id}"),
+        status: TurnStatus::Completed,
+        items,
+        error: None,
+    }]
+}
+
+fn blocks_to_thread_items(blocks: Vec<DisplayBlock>) -> Vec<ThreadItem> {
+    let mut n = 0usize;
+    let mut next_id = || {
+        let id = format!("hist_item_{n}");
+        n += 1;
+        id
+    };
+
+    let mut out = Vec::new();
+    for block in blocks {
+        match block {
+            DisplayBlock::Splash => {}
+            DisplayBlock::UserInput(text) => {
+                if text.is_empty() {
+                    continue;
+                }
+                out.push(ThreadItem::UserMessage {
+                    id: next_id(),
+                    content: vec![TurnInputItem::Text { text }],
+                });
+            }
+            DisplayBlock::AssistantText(text)
+            | DisplayBlock::SystemMessage(text)
+            | DisplayBlock::PlanContent(text) => {
+                if text.is_empty() {
+                    continue;
+                }
+                out.push(ThreadItem::AgentMessage {
+                    id: next_id(),
+                    text,
+                });
+            }
+            DisplayBlock::CodeBlock { code, .. } => {
+                if code.is_empty() {
+                    continue;
+                }
+                out.push(ThreadItem::CodeBlock {
+                    id: next_id(),
+                    code,
+                });
+            }
+            DisplayBlock::ToolCall {
+                name,
+                success,
+                duration_ms,
+                ..
+            } => {
+                out.push(ThreadItem::ToolCall {
+                    id: next_id(),
+                    name,
+                    args: serde_json::json!({}),
+                    result: None,
+                    success,
+                    duration_ms: Some(duration_ms),
+                    status: if success {
+                        ItemStatus::Completed
+                    } else {
+                        ItemStatus::Failed
+                    },
+                });
+            }
+            DisplayBlock::CodeOutput { output, error } => {
+                if output.is_empty() && error.is_none() {
+                    continue;
+                }
+                out.push(ThreadItem::CodeOutput {
+                    id: next_id(),
+                    output,
+                    error,
+                });
+            }
+            DisplayBlock::ShellOutput {
+                command,
+                output,
+                error,
+            } => {
+                let combined = if output.is_empty() {
+                    format!("$ {command}")
+                } else {
+                    format!("$ {command}\n{output}")
+                };
+                out.push(ThreadItem::CodeOutput {
+                    id: next_id(),
+                    output: combined,
+                    error,
+                });
+            }
+            DisplayBlock::Error(message) => {
+                if message.is_empty() {
+                    continue;
+                }
+                out.push(ThreadItem::Error {
+                    id: next_id(),
+                    message,
+                    error_info: None,
+                });
+            }
+            DisplayBlock::SubAgentResult {
+                task,
+                success,
+                tool_calls,
+                iterations,
+                ..
+            } => {
+                out.push(ThreadItem::SubAgentResult {
+                    id: next_id(),
+                    task,
+                    success,
+                    tool_calls,
+                    iterations,
+                });
+            }
+        }
+    }
+
+    out
 }
 
 fn short_uuid(prefix: &str) -> String {

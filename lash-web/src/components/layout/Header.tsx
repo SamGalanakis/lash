@@ -10,6 +10,11 @@ import {
 export function Header() {
   const tokenUsage = useSessionStore((s) => s.tokenUsage);
   const connected = useSessionStore((s) => s.connected);
+  const currentThread = useSessionStore((s) =>
+    s.currentThreadId
+      ? s.threads.find((thread) => thread.id === s.currentThreadId) ?? null
+      : null,
+  );
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
   const theme = useUIStore((s) => s.theme);
@@ -51,6 +56,14 @@ export function Header() {
       </div>
 
       <div className="flex items-center gap-3">
+        {currentThread && (
+          <div
+            className="max-w-52 truncate rounded-md border border-border bg-card px-2 py-1 text-[11px] font-mono text-muted-foreground"
+            title={`Model: ${currentThread.model}`}
+          >
+            {currentThread.model}
+          </div>
+        )}
         {tokenUsage && (
           <div className="text-[11px] text-muted-foreground font-mono tabular-nums">
             {tokenUsage.inputTokens.toLocaleString()}↓{" "}

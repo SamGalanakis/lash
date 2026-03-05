@@ -264,15 +264,28 @@ pub struct TurnStartParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum TurnInputItem {
-    Text { text: String },
-    Image { url: String },
+    Text {
+        text: String,
+    },
+    Image {
+        url: String,
+    },
     #[serde(rename = "localImage")]
-    LocalImage { path: String },
-    Skill { name: String, path: String },
+    LocalImage {
+        path: String,
+    },
+    Skill {
+        name: String,
+        path: String,
+    },
     #[serde(rename = "fileRef")]
-    FileRef { path: String },
+    FileRef {
+        path: String,
+    },
     #[serde(rename = "dirRef")]
-    DirRef { path: String },
+    DirRef {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

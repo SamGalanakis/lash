@@ -39,7 +39,9 @@ impl MessageWriter {
     }
 
     pub async fn send_notification(&self, notification: &JsonRpcNotification) {
-        let _ = self.tx.send(ServerMessage::Notification(notification.clone()));
+        let _ = self
+            .tx
+            .send(ServerMessage::Notification(notification.clone()));
     }
 }
 

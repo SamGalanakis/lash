@@ -396,6 +396,7 @@ mod tests {
             p.resolve_model("anthropic/claude-sonnet-4.6"),
             "anthropic/claude-sonnet-4.6"
         );
+        assert_eq!(p.resolve_model("zai-org/GLM-5-FP8"), "z-ai/glm-5");
     }
 
     #[test]

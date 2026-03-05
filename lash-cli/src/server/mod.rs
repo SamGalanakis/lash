@@ -20,10 +20,13 @@ pub mod transport;
 
 use std::net::SocketAddr;
 
+use lash_core::agent::ErrorEnvelope;
 use lash_core::provider::LashConfig;
 use lash_core::runtime::RuntimeConfig;
 use lash_core::{AgentEvent, AssembledTurn, Provider, RuntimeEngine, RuntimeError};
 use tokio::sync::{broadcast, mpsc};
+
+use crate::stream_text::normalize_stream_text;
 
 use handler::ServerHandler;
 use protocol::*;
@@ -59,7 +62,16 @@ pub async fn run_server(
     let writer = start_stdio_transport(inbound_tx);
     let handler = ServerHandler::new(writer.clone(), config, provider, model, lash_config);
 
-    run_server_loop(writer, handler, inbound_rx).await
+    tokio::select! {
+        res = run_server_loop(writer, handler, inbound_rx) => {
+            res?;
+        }
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("\nShutting down (Ctrl-C).");
+        }
+    }
+
+    Ok(())
 }
 
 /// Run the lash app-server on HTTP/WebSocket.
@@ -84,9 +96,7 @@ pub async fn run_http_server(
     let http_handle = tokio::spawn({
         let shutdown = shutdown.clone();
         let http_writer = writer.clone();
-        async move {
-            http::serve(addr, http_writer, inbound_tx, shutdown).await
-        }
+        async move { http::serve(addr, http_writer, inbound_tx, shutdown).await }
     });
 
     tokio::select! {
@@ -124,20 +134,12 @@ async fn run_server_loop(
 
     loop {
         if let Some(ref mut turn) = active_turn {
-            // Order matters: check return_rx before event_rx so that when the
-            // turn task finishes (dropping event_tx), we don't spin on the
-            // immediately-ready None from event_rx.recv(). finish_turn() drains
-            // any remaining buffered events via try_recv().
+            // Order matters: check return_rx before inbound/event so we clear
+            // active turn state promptly and avoid spinning if event_rx is
+            // closed before return_rx resolves. finish_turn() drains any
+            // remaining buffered events via try_recv().
             tokio::select! {
                 biased;
-
-                msg = inbound_rx.recv() => {
-                    let Some(msg) = msg else {
-                        tracing::info!("inbound channel closed, shutting down");
-                        return Ok(());
-                    };
-                    dispatch_message(&mut handler, msg).await;
-                }
 
                 return_val = &mut turn.return_rx => {
                     let turn_data = active_turn.take().unwrap();
@@ -152,9 +154,21 @@ async fn run_server_loop(
                     }
                 }
 
+                msg = inbound_rx.recv() => {
+                    let Some(msg) = msg else {
+                        tracing::info!("inbound channel closed, shutting down");
+                        return Ok(());
+                    };
+                    dispatch_message(&mut handler, msg).await;
+                }
+
                 event = turn.event_rx.recv() => {
                     if let Some(event) = event {
                         process_turn_event(&writer, &handler, turn, &event).await;
+                    } else {
+                        // Sender dropped but return_rx hasn't resolved yet.
+                        // Yield so we don't spin and starve the runtime.
+                        tokio::task::yield_now().await;
                     }
                 }
             }
@@ -175,10 +189,7 @@ async fn run_server_loop(
 }
 
 /// Dispatch a raw message to the handler. Returns an ActiveTurn if turn/start was called.
-async fn dispatch_message(
-    handler: &mut ServerHandler,
-    msg: RawMessage,
-) -> Option<ActiveTurn> {
+async fn dispatch_message(handler: &mut ServerHandler, msg: RawMessage) -> Option<ActiveTurn> {
     let method = match msg.method {
         Some(ref m) => m.clone(),
         None => {
@@ -215,22 +226,30 @@ async fn process_turn_event(
                     id: item_id.clone(),
                     text: String::new(),
                 };
-                notify(writer, handler, "item/started", serde_json::json!({ "item": item })).await;
+                notify(
+                    writer,
+                    handler,
+                    "item/started",
+                    serde_json::json!({ "item": item }),
+                )
+                .await;
                 turn.agent_message_item_id = Some(item_id);
             }
 
-            notify(
-                writer,
-                handler,
-                "item/agentMessage/delta",
-                serde_json::json!({
-                    "threadId": thread_id,
-                    "turnId": turn_id,
-                    "itemId": turn.agent_message_item_id,
-                    "delta": content,
-                }),
-            )
-            .await;
+            if let Some(item_id) = turn.agent_message_item_id.as_deref() {
+                notify(
+                    writer,
+                    handler,
+                    "item/agentMessage/delta",
+                    serde_json::json!({
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "itemId": item_id,
+                        "delta": content,
+                    }),
+                )
+                .await;
+            }
         }
 
         AgentEvent::CodeBlock { code } => {
@@ -241,8 +260,20 @@ async fn process_turn_event(
                 id: item_id,
                 code: code.clone(),
             };
-            notify(writer, handler, "item/started", serde_json::json!({ "item": item })).await;
-            notify(writer, handler, "item/completed", serde_json::json!({ "item": item })).await;
+            notify(
+                writer,
+                handler,
+                "item/started",
+                serde_json::json!({ "item": item }),
+            )
+            .await;
+            notify(
+                writer,
+                handler,
+                "item/completed",
+                serde_json::json!({ "item": item }),
+            )
+            .await;
             turn.items.push(item);
         }
 
@@ -253,8 +284,20 @@ async fn process_turn_event(
                 output: output.clone(),
                 error: error.clone(),
             };
-            notify(writer, handler, "item/started", serde_json::json!({ "item": item })).await;
-            notify(writer, handler, "item/completed", serde_json::json!({ "item": item })).await;
+            notify(
+                writer,
+                handler,
+                "item/started",
+                serde_json::json!({ "item": item }),
+            )
+            .await;
+            notify(
+                writer,
+                handler,
+                "item/completed",
+                serde_json::json!({ "item": item }),
+            )
+            .await;
             turn.items.push(item);
         }
 
@@ -265,6 +308,17 @@ async fn process_turn_event(
             success,
             duration_ms,
         } => {
+            notify(
+                writer,
+                handler,
+                "turn/toolOutput/cleared",
+                serde_json::json!({
+                    "threadId": thread_id,
+                    "turnId": turn_id,
+                }),
+            )
+            .await;
+
             let item_id = handler.next_item_id();
             let item = ThreadItem::ToolCall {
                 id: item_id,
@@ -279,8 +333,20 @@ async fn process_turn_event(
                     ItemStatus::Failed
                 },
             };
-            notify(writer, handler, "item/started", serde_json::json!({ "item": item })).await;
-            notify(writer, handler, "item/completed", serde_json::json!({ "item": item })).await;
+            notify(
+                writer,
+                handler,
+                "item/started",
+                serde_json::json!({ "item": item }),
+            )
+            .await;
+            notify(
+                writer,
+                handler,
+                "item/completed",
+                serde_json::json!({ "item": item }),
+            )
+            .await;
             turn.items.push(item);
         }
 
@@ -299,8 +365,20 @@ async fn process_turn_event(
                 tool_calls: *tool_calls,
                 iterations: *iterations,
             };
-            notify(writer, handler, "item/started", serde_json::json!({ "item": item })).await;
-            notify(writer, handler, "item/completed", serde_json::json!({ "item": item })).await;
+            notify(
+                writer,
+                handler,
+                "item/started",
+                serde_json::json!({ "item": item }),
+            )
+            .await;
+            notify(
+                writer,
+                handler,
+                "item/completed",
+                serde_json::json!({ "item": item }),
+            )
+            .await;
             turn.items.push(item);
         }
 
@@ -318,7 +396,13 @@ async fn process_turn_event(
                 max_attempts: *max_attempts,
                 reason: reason.clone(),
             };
-            notify(writer, handler, "item/started", serde_json::json!({ "item": item })).await;
+            notify(
+                writer,
+                handler,
+                "item/started",
+                serde_json::json!({ "item": item }),
+            )
+            .await;
             turn.items.push(item);
         }
 
@@ -346,14 +430,26 @@ async fn process_turn_event(
             message, envelope, ..
         } => {
             let item_id = handler.next_item_id();
-            let error_info = envelope.as_ref().map(|e| e.kind.clone());
+            let error_info = envelope.as_ref().and_then(error_info_from_envelope);
             let item = ThreadItem::Error {
                 id: item_id,
                 message: message.clone(),
                 error_info: error_info.clone(),
             };
-            notify(writer, handler, "item/started", serde_json::json!({ "item": item })).await;
-            notify(writer, handler, "item/completed", serde_json::json!({ "item": item })).await;
+            notify(
+                writer,
+                handler,
+                "item/started",
+                serde_json::json!({ "item": item }),
+            )
+            .await;
+            notify(
+                writer,
+                handler,
+                "item/completed",
+                serde_json::json!({ "item": item }),
+            )
+            .await;
             turn.items.push(item);
             turn.error = Some(TurnError {
                 message: message.clone(),
@@ -366,13 +462,148 @@ async fn process_turn_event(
         }
 
         AgentEvent::Message { text, kind } => {
-            if kind == "final" && !text.is_empty() {
-                turn.accumulated_text.clear();
-                turn.accumulated_text.push_str(text);
+            if kind == "final" {
+                let cleaned = normalize_stream_text(text);
+                if !cleaned.is_empty() {
+                    if turn.agent_message_item_id.is_some() {
+                        // Match CLI behavior: final message supersedes any pending streamed text.
+                        turn.accumulated_text.clear();
+                        turn.accumulated_text.push_str(&cleaned);
+                        finalize_agent_message(writer, handler, turn).await;
+                    } else {
+                        emit_agent_message_item(writer, handler, turn, cleaned).await;
+                    }
+                }
+            } else if kind == "tool_output" {
+                notify(
+                    writer,
+                    handler,
+                    "turn/toolOutput/delta",
+                    serde_json::json!({
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "delta": text,
+                    }),
+                )
+                .await;
+            } else if kind == "delegate_start" {
+                let (name, task) = parse_delegate_start(text);
+                notify(
+                    writer,
+                    handler,
+                    "turn/delegate/started",
+                    serde_json::json!({
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "name": name,
+                        "task": task,
+                    }),
+                )
+                .await;
             }
         }
 
         AgentEvent::Done | AgentEvent::LlmRequest { .. } | AgentEvent::LlmResponse { .. } => {}
+    }
+}
+
+fn parse_delegate_start(text: &str) -> (String, String) {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(v) => {
+            let name = v
+                .get("name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("delegate")
+                .to_string();
+            let task = v
+                .get("task")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            (name, task)
+        }
+        Err(_) => ("delegate".to_string(), text.to_string()),
+    }
+}
+
+fn error_info_from_envelope(envelope: &ErrorEnvelope) -> Option<String> {
+    if let Some(raw) = &envelope.raw {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw)
+            && let Some(msg) = v
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+        {
+            return Some(msg.to_string());
+        }
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let mut preview: String = trimmed.chars().take(240).collect();
+            if trimmed.chars().count() > 240 {
+                preview.push_str("...");
+            }
+            return Some(preview);
+        }
+    }
+    envelope
+        .code
+        .clone()
+        .or_else(|| Some(envelope.kind.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{error_info_from_envelope, parse_delegate_start};
+    use lash_core::agent::ErrorEnvelope;
+
+    #[test]
+    fn parse_delegate_start_json_payload() {
+        let (name, task) = parse_delegate_start(r#"{"name":"planner","task":"draft plan"}"#);
+        assert_eq!(name, "planner");
+        assert_eq!(task, "draft plan");
+    }
+
+    #[test]
+    fn parse_delegate_start_non_json_payload() {
+        let (name, task) = parse_delegate_start("raw delegate text");
+        assert_eq!(name, "delegate");
+        assert_eq!(task, "raw delegate text");
+    }
+
+    #[test]
+    fn error_info_prefers_provider_error_message() {
+        let envelope = ErrorEnvelope {
+            kind: "llm_provider".to_string(),
+            code: Some("400".to_string()),
+            user_message: "LLM error".to_string(),
+            raw: Some(r#"{"error":{"message":"invalid model id","code":400}}"#.to_string()),
+        };
+        assert_eq!(
+            error_info_from_envelope(&envelope).as_deref(),
+            Some("invalid model id")
+        );
+    }
+
+    #[test]
+    fn error_info_falls_back_to_code_or_kind() {
+        let with_code = ErrorEnvelope {
+            kind: "llm_provider".to_string(),
+            code: Some("429".to_string()),
+            user_message: "rate limited".to_string(),
+            raw: None,
+        };
+        assert_eq!(error_info_from_envelope(&with_code).as_deref(), Some("429"));
+
+        let with_kind = ErrorEnvelope {
+            kind: "runtime".to_string(),
+            code: None,
+            user_message: "runtime issue".to_string(),
+            raw: None,
+        };
+        assert_eq!(
+            error_info_from_envelope(&with_kind).as_deref(),
+            Some("runtime")
+        );
     }
 }
 
@@ -383,13 +614,52 @@ async fn finalize_agent_message(
     turn: &mut ActiveTurn,
 ) {
     if let Some(item_id) = turn.agent_message_item_id.take() {
-        let item = ThreadItem::AgentMessage {
-            id: item_id,
-            text: std::mem::take(&mut turn.accumulated_text),
-        };
-        notify(writer, handler, "item/completed", serde_json::json!({ "item": item })).await;
+        let text = normalize_stream_text(&std::mem::take(&mut turn.accumulated_text));
+        if text.is_empty() {
+            return;
+        }
+
+        let item = ThreadItem::AgentMessage { id: item_id, text };
+        notify(
+            writer,
+            handler,
+            "item/completed",
+            serde_json::json!({ "item": item }),
+        )
+        .await;
         turn.items.push(item);
     }
+}
+
+/// Emit a finalized assistant message item when no streaming item is active.
+async fn emit_agent_message_item(
+    writer: &MessageWriter,
+    handler: &ServerHandler,
+    turn: &mut ActiveTurn,
+    text: String,
+) {
+    let item_id = handler.next_item_id();
+    let started = ThreadItem::AgentMessage {
+        id: item_id.clone(),
+        text: String::new(),
+    };
+    notify(
+        writer,
+        handler,
+        "item/started",
+        serde_json::json!({ "item": started }),
+    )
+    .await;
+
+    let completed = ThreadItem::AgentMessage { id: item_id, text };
+    notify(
+        writer,
+        handler,
+        "item/completed",
+        serde_json::json!({ "item": completed }),
+    )
+    .await;
+    turn.items.push(completed);
 }
 
 /// Complete a turn after the runtime task finishes.
