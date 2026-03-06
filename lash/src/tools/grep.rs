@@ -20,10 +20,16 @@ impl ToolProvider for Grep {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "grep".into(),
-            description: format!(
-                "Search file contents for a regex pattern (ripgrep-compatible regex). Returns matching lines with file paths and line numbers, plus context lines (ripgrep `-C`) around each match. Defaults: context={}, limit={}.",
-                DEFAULT_CONTEXT, MAX_RESULTS
-            ),
+            description: vec![crate::ToolText::new(
+                format!(
+                    "Search file contents for a regex pattern (ripgrep-compatible regex). Returns matching lines with file paths and line numbers, plus context lines (ripgrep `-C`) around each match. Defaults: context={}, limit={}.",
+                    DEFAULT_CONTEXT, MAX_RESULTS
+                ),
+                [
+                    crate::ExecutionMode::Repl,
+                    crate::ExecutionMode::NativeTools,
+                ],
+            )],
             params: vec![
                 ToolParam::typed("pattern", "str"),
                 ToolParam {

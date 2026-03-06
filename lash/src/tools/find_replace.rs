@@ -14,13 +14,19 @@ impl crate::ToolProvider for FindReplace {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "find_replace".into(),
-            description: concat!(
-                "Fast path for exact-text edits. No anchors needed — works on raw file content.\n\n",
-                "Use this when you already know the exact `old_text` to change (single-line fixes, typos, straightforward renames). ",
-                "`old_text` must match exactly, including whitespace/newlines. ",
-                "By default it replaces only the first occurrence; set `all=true` to replace every match.\n\n",
-                "For structural edits (insertions, range rewrites, anchor-sensitive placement), use `edit_file`.",
-            ).into(),
+            description: vec![crate::ToolText::new(
+                concat!(
+                    "Fast path for exact-text edits. No anchors needed — works on raw file content.\n\n",
+                    "Use this when you already know the exact `old_text` to change (single-line fixes, typos, straightforward renames). ",
+                    "`old_text` must match exactly, including whitespace/newlines. ",
+                    "By default it replaces only the first occurrence; set `all=true` to replace every match.\n\n",
+                    "For structural edits (insertions, range rewrites, anchor-sensitive placement), use `edit_file`.",
+                ),
+                [
+                    crate::ExecutionMode::Repl,
+                    crate::ExecutionMode::NativeTools,
+                ],
+            )],
             params: vec![
                 ToolParam::typed("path", "str"),
                 ToolParam {
@@ -44,8 +50,8 @@ impl crate::ToolProvider for FindReplace {
             ],
             returns: "EditResult".into(),
             examples: vec![],
-                hidden: false,
-                inject_into_prompt: true,
+            hidden: false,
+            inject_into_prompt: true,
         }]
     }
 

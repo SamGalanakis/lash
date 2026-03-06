@@ -15,16 +15,22 @@ impl ToolProvider for EditFile {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "edit_file".into(),
-            description: concat!(
-                "Anchor-based file editor for structural or multi-line changes. ",
-                "Use this when you need precise placement (insert/delete/replace ranges) and have anchors from `read_file`.\n\n",
-                "If you already know the exact text to change and just want a quick substitution, prefer `find_replace`.\n\n",
-                "Each edit is one of: ",
-                "{\"set_line\": {\"anchor\": \"LINE:8HEX\", \"new_text\": \"...\"}}, ",
-                "{\"replace_lines\": {\"start_anchor\": \"LINE:8HEX\", \"end_anchor\": \"LINE:8HEX\", \"new_text\": \"...\"}}, ",
-                "{\"insert_after\": {\"anchor\": \"LINE:8HEX\", \"text\": \"...\"}}, ",
-                "{\"replace\": {\"old_text\": \"...\", \"new_text\": \"...\", \"all\": false}}",
-            ).into(),
+            description: vec![crate::ToolText::new(
+                concat!(
+                    "Anchor-based file editor for structural or multi-line changes. ",
+                    "Use this when you need precise placement (insert/delete/replace ranges) and have anchors from `read_file`.\n\n",
+                    "If you already know the exact text to change and just want a quick substitution, prefer `find_replace`.\n\n",
+                    "Each edit is one of: ",
+                    "{\"set_line\": {\"anchor\": \"LINE:8HEX\", \"new_text\": \"...\"}}, ",
+                    "{\"replace_lines\": {\"start_anchor\": \"LINE:8HEX\", \"end_anchor\": \"LINE:8HEX\", \"new_text\": \"...\"}}, ",
+                    "{\"insert_after\": {\"anchor\": \"LINE:8HEX\", \"text\": \"...\"}}, ",
+                    "{\"replace\": {\"old_text\": \"...\", \"new_text\": \"...\", \"all\": false}}",
+                ),
+                [
+                    crate::ExecutionMode::Repl,
+                    crate::ExecutionMode::NativeTools,
+                ],
+            )],
             params: vec![
                 ToolParam::typed("path", "str"),
                 ToolParam {
@@ -36,8 +42,8 @@ impl ToolProvider for EditFile {
             ],
             returns: "EditResult".into(),
             examples: vec![],
-                hidden: false,
-                inject_into_prompt: true,
+            hidden: false,
+            inject_into_prompt: true,
         }]
     }
 

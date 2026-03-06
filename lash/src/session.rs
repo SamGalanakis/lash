@@ -64,7 +64,12 @@ impl Session {
         };
 
         // Send init with tool definitions and agent identity
-        let defs = session.tools.definitions();
+        let defs: Vec<_> = session
+            .tools
+            .definitions()
+            .into_iter()
+            .map(|def| def.project(crate::ExecutionMode::Repl))
+            .collect();
         let tools_json = serde_json::to_string(&defs).unwrap_or_else(|_| "[]".to_string());
         let capabilities_json = serde_json::json!({
             "enabled_capabilities": capabilities
@@ -323,7 +328,12 @@ impl Session {
         capabilities_json: String,
         generation: u64,
     ) -> Result<(), SessionError> {
-        let defs = self.tools.definitions();
+        let defs: Vec<_> = self
+            .tools
+            .definitions()
+            .into_iter()
+            .map(|def| def.project(crate::ExecutionMode::Repl))
+            .collect();
         let tools_json = serde_json::to_string(&defs).unwrap_or_else(|_| "[]".to_string());
         self.runtime.send(PythonRequest::Reconfigure {
             tools_json,

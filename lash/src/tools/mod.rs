@@ -1,4 +1,5 @@
 mod agent_call;
+mod batch;
 mod composite;
 mod edit_file;
 mod fetch_url;
@@ -22,6 +23,7 @@ mod web_search;
 mod write_file;
 
 pub use agent_call::AgentCall;
+pub use batch::BatchingTools;
 pub use composite::CompositeTools;
 pub use edit_file::EditFile;
 pub use fetch_url::FetchUrl;

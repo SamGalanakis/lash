@@ -13,7 +13,8 @@ use crate::agent::{
 use crate::capabilities::AgentCapabilities;
 use crate::instructions::{FsInstructionSource, InstructionSource};
 use crate::provider::Provider;
-use crate::{CapabilityId, Session, SessionError, ToolCallRecord, ToolProvider};
+use crate::strip_repl_fragments;
+use crate::{CapabilityId, ExecutionMode, Session, SessionError, ToolCallRecord, ToolProvider};
 
 /// Runtime execution mode for a turn.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -56,6 +57,8 @@ enum NormalizedItem {
 pub struct AgentStateEnvelope {
     pub agent_id: String,
     #[serde(default)]
+    pub execution_mode: ExecutionMode,
+    #[serde(default)]
     pub messages: Vec<Message>,
     #[serde(default)]
     pub iteration: usize,
@@ -75,6 +78,7 @@ impl Default for AgentStateEnvelope {
     fn default() -> Self {
         Self {
             agent_id: "root".to_string(),
+            execution_mode: ExecutionMode::Repl,
             messages: Vec::new(),
             iteration: 0,
             token_usage: TokenUsage::default(),
@@ -125,12 +129,22 @@ pub enum DoneReason {
     RuntimeError,
 }
 
-/// Tool execution output observed during a turn.
+/// REPL code execution output observed during a turn.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct ToolOutputRecord {
+pub struct CodeOutputRecord {
     pub output: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// High-level execution summary shared across execution modes.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ExecutionSummary {
+    pub mode: ExecutionMode,
+    #[serde(default)]
+    pub had_tool_calls: bool,
+    #[serde(default)]
+    pub had_code_execution: bool,
 }
 
 /// Structured issue surfaced during turn execution.
@@ -142,19 +156,22 @@ pub struct TurnIssue {
     pub message: String,
 }
 
-/// Canonical assembled turn returned to hosts.
+/// Canonical high-level turn result returned to hosts.
+/// This contract is stable across execution modes; mode-specific detail is summarized in
+/// `execution`, while REPL-only detail is exposed through `code_outputs`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AssembledTurn {
     pub state: AgentStateEnvelope,
     pub status: TurnStatus,
     pub assistant_output: AssistantOutput,
     pub done_reason: DoneReason,
+    pub execution: ExecutionSummary,
     #[serde(default)]
     pub token_usage: TokenUsage,
     #[serde(default)]
     pub tool_calls: Vec<ToolCallRecord>,
     #[serde(default)]
-    pub tool_outputs: Vec<ToolOutputRecord>,
+    pub code_outputs: Vec<CodeOutputRecord>,
     #[serde(default)]
     pub errors: Vec<TurnIssue>,
 }
@@ -225,7 +242,8 @@ impl Default for TerminationPolicy {
     }
 }
 
-/// Host event sink for streaming runtime events.
+/// Host event sink for low-level streaming runtime events.
+/// `AgentEvent` is intentionally mode-specific and should be treated as preview/progress data.
 #[async_trait::async_trait]
 pub trait EventSink: Send + Sync {
     async fn emit(&self, event: AgentEvent);
@@ -244,7 +262,7 @@ struct TurnAssembler {
     final_message: Option<String>,
     text_deltas: String,
     tool_calls: Vec<ToolCallRecord>,
-    tool_outputs: Vec<ToolOutputRecord>,
+    code_outputs: Vec<CodeOutputRecord>,
     token_usage: TokenUsage,
     issues: Vec<TurnIssue>,
     saw_done: bool,
@@ -279,7 +297,7 @@ impl TurnAssembler {
                 if error.is_some() {
                     self.saw_tool_failure = true;
                 }
-                self.tool_outputs.push(ToolOutputRecord {
+                self.code_outputs.push(CodeOutputRecord {
                     output: output.clone(),
                     error: error.clone(),
                 });
@@ -354,6 +372,11 @@ impl TurnAssembler {
         };
 
         AssembledTurn {
+            execution: ExecutionSummary {
+                mode: state.execution_mode,
+                had_tool_calls: !self.tool_calls.is_empty(),
+                had_code_execution: !self.code_outputs.is_empty(),
+            },
             state,
             status,
             assistant_output: AssistantOutput {
@@ -364,7 +387,7 @@ impl TurnAssembler {
             done_reason,
             token_usage: self.token_usage,
             tool_calls: self.tool_calls,
-            tool_outputs: self.tool_outputs,
+            code_outputs: self.code_outputs,
             errors: issues,
         }
     }
@@ -376,6 +399,7 @@ pub struct RuntimeConfig {
     pub capabilities: AgentCapabilities,
     pub model: String,
     pub provider: Provider,
+    pub execution_mode: ExecutionMode,
     pub session_id: Option<String>,
     pub max_context_tokens: Option<usize>,
     pub include_soul: bool,
@@ -397,6 +421,7 @@ impl Default for RuntimeConfig {
             capabilities: cfg.capabilities,
             model: cfg.model,
             provider: cfg.provider,
+            execution_mode: cfg.execution_mode,
             session_id: cfg.session_id,
             max_context_tokens: cfg.max_context_tokens,
             include_soul: cfg.include_soul,
@@ -424,6 +449,7 @@ impl From<RuntimeConfig> for AgentConfig {
             capabilities: value.capabilities,
             model: value.model,
             provider: value.provider,
+            execution_mode: value.execution_mode,
             session_id: value.session_id,
             max_context_tokens: value.max_context_tokens,
             sub_agent: false,
@@ -433,6 +459,34 @@ impl From<RuntimeConfig> for AgentConfig {
             llm_log_path: value.llm_log_path,
             headless,
             prompt_overrides: value.prompt_overrides,
+            instruction_source: value.instruction_source,
+        }
+    }
+}
+
+impl From<AgentConfig> for RuntimeConfig {
+    fn from(value: AgentConfig) -> Self {
+        let host_profile = if value.headless {
+            HostProfile::Headless
+        } else {
+            HostProfile::Interactive
+        };
+        Self {
+            capabilities: value.capabilities,
+            model: value.model,
+            provider: value.provider,
+            execution_mode: value.execution_mode,
+            session_id: value.session_id,
+            max_context_tokens: value.max_context_tokens,
+            include_soul: value.include_soul,
+            llm_log_path: value.llm_log_path,
+            headless: value.headless,
+            host_profile,
+            prompt_overrides: value.prompt_overrides,
+            base_dir: None,
+            path_resolver: None,
+            sanitizer: SanitizerPolicy::default(),
+            termination: TerminationPolicy::default(),
             instruction_source: value.instruction_source,
         }
     }
@@ -469,6 +523,12 @@ impl RuntimeEngine {
         if state.agent_id.is_empty() {
             state.agent_id = "root".to_string();
         }
+        if matches!(state.execution_mode, ExecutionMode::Repl)
+            && !matches!(config.execution_mode, ExecutionMode::Repl)
+        {
+            state.execution_mode = config.execution_mode;
+        }
+        tools.set_execution_mode(state.execution_mode);
         let session = Session::new(
             tools,
             &state.agent_id,
@@ -477,6 +537,7 @@ impl RuntimeEngine {
         )
         .await?;
         let mut agent = Agent::new(session, config.into(), Some(state.agent_id.clone()));
+        agent.set_execution_mode(state.execution_mode);
         if let Some(snapshot) = state.repl_snapshot.clone() {
             agent.restore(&snapshot).await?;
         }
@@ -492,22 +553,6 @@ impl RuntimeEngine {
         })
     }
 
-    /// Wrap an existing agent (used by CLI adapter migration).
-    pub fn from_agent(agent: Agent, state: AgentStateEnvelope) -> Self {
-        let capabilities = agent.capabilities();
-        let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        Self {
-            agent: Some(agent),
-            state,
-            capabilities,
-            host_profile: HostProfile::Interactive,
-            base_dir,
-            path_resolver: None,
-            sanitizer: SanitizerPolicy::default(),
-            termination: TerminationPolicy::default(),
-        }
-    }
-
     /// Export current host-owned state envelope.
     pub fn export_state(&self) -> AgentStateEnvelope {
         self.state.clone()
@@ -515,6 +560,9 @@ impl RuntimeEngine {
 
     /// Replace the host-owned state envelope.
     pub fn set_state(&mut self, state: AgentStateEnvelope) {
+        if let Some(agent) = self.agent.as_mut() {
+            agent.set_execution_mode(state.execution_mode);
+        }
         self.state = state;
     }
 
@@ -543,6 +591,14 @@ impl RuntimeEngine {
     pub fn set_session_id(&mut self, session_id: Option<String>) {
         if let Some(agent) = self.agent.as_mut() {
             agent.set_session_id(session_id);
+        }
+    }
+
+    /// Update execution mode on the underlying agent and persisted envelope.
+    pub fn set_execution_mode(&mut self, execution_mode: ExecutionMode) {
+        self.state.execution_mode = execution_mode;
+        if let Some(agent) = self.agent.as_mut() {
+            agent.set_execution_mode(execution_mode);
         }
     }
 
@@ -717,6 +773,8 @@ impl RuntimeEngine {
                     id: format!("{}.p0", sys_id),
                     kind: PartKind::Text,
                     content,
+                    tool_call_id: None,
+                    tool_name: None,
                     prune_state: PruneState::Intact,
                 }],
             });
@@ -735,6 +793,8 @@ impl RuntimeEngine {
                         id: format!("{}.p{}", user_id, user_parts.len()),
                         kind: PartKind::Text,
                         content: text,
+                        tool_call_id: None,
+                        tool_name: None,
                         prune_state: PruneState::Intact,
                     });
                 }
@@ -745,6 +805,8 @@ impl RuntimeEngine {
                         id: format!("{}.p{}", user_id, user_parts.len()),
                         kind: PartKind::Text,
                         content: format!("{IMAGE_REF_PREFIX}{image_idx}"),
+                        tool_call_id: None,
+                        tool_name: None,
                         prune_state: PruneState::Intact,
                     });
                 }
@@ -755,6 +817,8 @@ impl RuntimeEngine {
                 id: format!("{}.p0", user_id),
                 kind: PartKind::Text,
                 content: String::new(),
+                tool_call_id: None,
+                tool_name: None,
                 prune_state: PruneState::Intact,
             });
         }
@@ -969,42 +1033,6 @@ fn sanitize_assistant_output(text: String, policy: &SanitizerPolicy) -> String {
     normalized.trim().to_string()
 }
 
-fn strip_repl_fragments(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0;
-    while i < text.len() {
-        let tail = &text[i..];
-        if let Some(consumed) = consume_repl_fragment_prefix(tail) {
-            i += consumed;
-            continue;
-        }
-        let mut chars = tail.chars();
-        let ch = chars.next().expect("tail is non-empty");
-        out.push(ch);
-        i += ch.len_utf8();
-    }
-    out
-}
-
-fn consume_repl_fragment_prefix(text: &str) -> Option<usize> {
-    const PREFIXES: [&str; 2] = ["<repl", "</repl"];
-    for prefix in PREFIXES {
-        if !text.starts_with(prefix) {
-            continue;
-        }
-        let next = text.as_bytes().get(prefix.len()).copied();
-        let valid_suffix = next.is_none_or(|b| b == b'>' || b == b'/' || b.is_ascii_whitespace());
-        if !valid_suffix {
-            continue;
-        }
-        if let Some(end_idx) = text.find('>') {
-            return Some(end_idx + 1);
-        }
-        return Some(prefix.len());
-    }
-    None
-}
-
 fn classify_output_state(raw_text: &str, safe_text: &str, issues: &[TurnIssue]) -> OutputState {
     if safe_text.is_empty() && raw_text.is_empty() {
         return OutputState::EmptyOutput;
@@ -1142,6 +1170,8 @@ mod tests {
                 id: "m0.p0".to_string(),
                 kind: PartKind::Text,
                 content: "Turn limit reached (5).".to_string(),
+                tool_call_id: None,
+                tool_name: None,
                 prune_state: PruneState::Intact,
             }],
         });

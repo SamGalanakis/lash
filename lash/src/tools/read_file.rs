@@ -27,10 +27,16 @@ impl ToolProvider for ReadFile {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "read_file".into(),
-            description: format!(
-                "Read a file (default: up to {} lines). Text files return hashline-prefixed content in `LINE:8HEX|text` format. PDF files are extracted to text. Image files (png, jpg, gif, webp, bmp) are read for visual inspection. Use `ls` for directories.",
-                DEFAULT_LIMIT
-            ),
+            description: vec![crate::ToolText::new(
+                format!(
+                    "Read a file (default: up to {} lines). Text files return hashline-prefixed content in `LINE:8HEX|text` format. PDF files are extracted to text. Image files (png, jpg, gif, webp, bmp) are read for visual inspection. Use `ls` for directories.",
+                    DEFAULT_LIMIT
+                ),
+                [
+                    crate::ExecutionMode::Repl,
+                    crate::ExecutionMode::NativeTools,
+                ],
+            )],
             params: vec![
                 ToolParam::typed("path", "str"),
                 ToolParam {

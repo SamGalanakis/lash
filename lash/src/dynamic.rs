@@ -601,7 +601,13 @@ mod tests {
         fn definitions(&self) -> Vec<ToolDefinition> {
             vec![ToolDefinition {
                 name: "mock_tool".to_string(),
-                description: "mock".to_string(),
+                description: vec![crate::ToolText::new(
+                    "mock",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![],
                 returns: "str".to_string(),
                 examples: vec![],

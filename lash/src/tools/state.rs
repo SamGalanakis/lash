@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use regex::Regex;
 use serde_json::json;
@@ -40,15 +40,23 @@ struct SearchDoc {
     fields: HashMap<&'static str, String>,
 }
 
+type SkillCatalogEntry = (String, String, usize);
+type SkillCatalogCache = Arc<RwLock<Option<Vec<SkillCatalogEntry>>>>;
+
 #[derive(Clone)]
 pub struct StateStore {
     store: Arc<Store>,
     skill_dirs: Vec<PathBuf>,
+    skill_catalog_cache: SkillCatalogCache,
 }
 
 impl StateStore {
     pub fn new(store: Arc<Store>, skill_dirs: Vec<PathBuf>) -> Self {
-        Self { store, skill_dirs }
+        Self {
+            store,
+            skill_dirs,
+            skill_catalog_cache: Arc::new(RwLock::new(None)),
+        }
     }
 
     fn limit_from_args(args: &serde_json::Value) -> usize {
@@ -309,7 +317,7 @@ impl StateStore {
         Some((name, description))
     }
 
-    fn discover_skills(&self) -> Vec<(String, String, usize)> {
+    fn build_skill_catalog(&self) -> Vec<(String, String, usize)> {
         let mut by_name: HashMap<String, (String, usize)> = HashMap::new();
         for dir in &self.skill_dirs {
             let entries = match std::fs::read_dir(dir) {
@@ -364,6 +372,20 @@ impl StateStore {
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
+    }
+
+    fn discover_skills(&self) -> Vec<(String, String, usize)> {
+        if let Ok(cache) = self.skill_catalog_cache.read()
+            && let Some(skills) = cache.as_ref()
+        {
+            return skills.clone();
+        }
+
+        let skills = self.build_skill_catalog();
+        if let Ok(mut cache) = self.skill_catalog_cache.write() {
+            *cache = Some(skills.clone());
+        }
+        skills
     }
 
     fn search_tools(&self, args: &serde_json::Value) -> ToolResult {
@@ -793,24 +815,36 @@ impl StateStore {
 impl ToolProvider for StateStore {
     fn definitions(&self) -> Vec<ToolDefinition> {
         let mut defs = vec![ToolDefinition {
-                name: "search_tools".into(),
-                description: "Search tools using hybrid/literal/regex matching. Results include relevance scores.".into(),
-                params: vec![
-                    ToolParam::typed("query", "str"),
-                    ToolParam::optional("mode", "str"),
-                    ToolParam::optional("regex", "str"),
-                    ToolParam::optional("limit", "int"),
-                    ToolParam::optional("injected_only", "bool"),
-                    ToolParam::optional("catalog", "list"),
+            name: "search_tools".into(),
+            description: vec![crate::ToolText::new(
+                "Search tools using hybrid/literal/regex matching. Results include relevance scores.",
+                [
+                    crate::ExecutionMode::Repl,
+                    crate::ExecutionMode::NativeTools,
                 ],
-                returns: "list".into(),
-                examples: vec![],
-                hidden: true,
-                inject_into_prompt: false,
-            }];
+            )],
+            params: vec![
+                ToolParam::typed("query", "str"),
+                ToolParam::optional("mode", "str"),
+                ToolParam::optional("regex", "str"),
+                ToolParam::optional("limit", "int"),
+                ToolParam::optional("injected_only", "bool"),
+                ToolParam::optional("catalog", "list"),
+            ],
+            returns: "list".into(),
+            examples: vec![],
+            hidden: true,
+            inject_into_prompt: false,
+        }];
         defs.push(ToolDefinition {
             name: "search_skills".into(),
-            description: "Search installed skills using hybrid/literal/regex matching.".into(),
+            description: vec![crate::ToolText::new(
+                "Search installed skills using hybrid/literal/regex matching.",
+                [
+                    crate::ExecutionMode::Repl,
+                    crate::ExecutionMode::NativeTools,
+                ],
+            )],
             params: vec![
                 ToolParam::typed("query", "str"),
                 ToolParam::optional("mode", "str"),
@@ -825,7 +859,13 @@ impl ToolProvider for StateStore {
         defs.extend(vec![
             ToolDefinition {
                 name: "search_history".into(),
-                description: "Search turn history using hybrid/literal/regex matching.".into(),
+                description: vec![crate::ToolText::new(
+                    "Search turn history using hybrid/literal/regex matching.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![
                     ToolParam::typed("query", "str"),
                     ToolParam::optional("mode", "str"),
@@ -841,7 +881,13 @@ impl ToolProvider for StateStore {
             },
             ToolDefinition {
                 name: "search_mem".into(),
-                description: "Search persistent memory using hybrid/literal/regex matching.".into(),
+                description: vec![crate::ToolText::new(
+                    "Search persistent memory using hybrid/literal/regex matching.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![
                     ToolParam::typed("query", "str"),
                     ToolParam::optional("mode", "str"),
@@ -856,7 +902,13 @@ impl ToolProvider for StateStore {
             },
             ToolDefinition {
                 name: "history_add_turn".into(),
-                description: "Internal: append a turn record to history.".into(),
+                description: vec![crate::ToolText::new(
+                    "Internal: append a turn record to history.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![ToolParam::typed("turn", "dict")],
                 returns: "None".into(),
                 examples: vec![],
@@ -865,7 +917,13 @@ impl ToolProvider for StateStore {
             },
             ToolDefinition {
                 name: "history_export".into(),
-                description: "Internal: export history turns.".into(),
+                description: vec![crate::ToolText::new(
+                    "Internal: export history turns.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![],
                 returns: "list".into(),
                 examples: vec![],
@@ -874,7 +932,13 @@ impl ToolProvider for StateStore {
             },
             ToolDefinition {
                 name: "history_load".into(),
-                description: "Internal: replace history turns.".into(),
+                description: vec![crate::ToolText::new(
+                    "Internal: replace history turns.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![ToolParam::typed("turns", "list")],
                 returns: "None".into(),
                 examples: vec![],
@@ -883,7 +947,13 @@ impl ToolProvider for StateStore {
             },
             ToolDefinition {
                 name: "mem_set_turn".into(),
-                description: "Internal: set current memory turn counter.".into(),
+                description: vec![crate::ToolText::new(
+                    "Internal: set current memory turn counter.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![ToolParam::typed("turn", "int")],
                 returns: "None".into(),
                 examples: vec![],
@@ -892,7 +962,13 @@ impl ToolProvider for StateStore {
             },
             ToolDefinition {
                 name: "mem_set".into(),
-                description: "Internal: set memory entry.".into(),
+                description: vec![crate::ToolText::new(
+                    "Internal: set memory entry.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![
                     ToolParam::typed("key", "str"),
                     ToolParam::typed("description", "str"),
@@ -905,7 +981,13 @@ impl ToolProvider for StateStore {
             },
             ToolDefinition {
                 name: "mem_get".into(),
-                description: "Internal: get memory entry.".into(),
+                description: vec![crate::ToolText::new(
+                    "Internal: get memory entry.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![ToolParam::typed("key", "str")],
                 returns: "dict".into(),
                 examples: vec![],
@@ -914,7 +996,13 @@ impl ToolProvider for StateStore {
             },
             ToolDefinition {
                 name: "mem_delete".into(),
-                description: "Internal: delete memory entry.".into(),
+                description: vec![crate::ToolText::new(
+                    "Internal: delete memory entry.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![ToolParam::typed("key", "str")],
                 returns: "None".into(),
                 examples: vec![],
@@ -923,7 +1011,13 @@ impl ToolProvider for StateStore {
             },
             ToolDefinition {
                 name: "mem_export".into(),
-                description: "Internal: export memory entries.".into(),
+                description: vec![crate::ToolText::new(
+                    "Internal: export memory entries.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![],
                 returns: "list".into(),
                 examples: vec![],
@@ -932,7 +1026,13 @@ impl ToolProvider for StateStore {
             },
             ToolDefinition {
                 name: "mem_load".into(),
-                description: "Internal: replace memory entries.".into(),
+                description: vec![crate::ToolText::new(
+                    "Internal: replace memory entries.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![ToolParam::typed("entries", "list")],
                 returns: "None".into(),
                 examples: vec![],
@@ -988,14 +1088,14 @@ mod tests {
             "__agent_id__":"root",
             "key":"decision",
             "description":"chosen provider",
-            "value":"openrouter"
+            "value":"openai-generic"
         }));
 
         let get = p.mem_get(&json!({"__agent_id__":"root","key":"decision"}));
         assert!(get.success);
         assert_eq!(
             get.result.get("value").and_then(|v| v.as_str()),
-            Some("openrouter")
+            Some("openai-generic")
         );
 
         let search = p.search_mem(&json!({

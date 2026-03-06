@@ -368,9 +368,15 @@ impl ToolProvider for Shell {
         vec![
             ToolDefinition {
                 name: "shell".into(),
-                description: format!(
-                    "Run a command via {shell_name}. Returns a ShellHandle with .wait(), .read(), .write(), .kill()."
-                ),
+                description: vec![crate::ToolText::new(
+                    format!(
+                        "Run a command via {shell_name}. Returns a ShellHandle with .wait(), .read(), .write(), .kill()."
+                    ),
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![ToolParam::typed("command", "str")],
                 returns: "ShellHandle".into(),
                 examples: vec![],
@@ -379,7 +385,13 @@ impl ToolProvider for Shell {
             },
             ToolDefinition {
                 name: "shell_wait".into(),
-                description: "Wait for a shell process to exit and return its output.".into(),
+                description: vec![crate::ToolText::new(
+                    "Wait for a shell process to exit and return its output.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![
                     ToolParam::typed("id", "str"),
                     ToolParam::optional("timeout", "float"),
@@ -391,8 +403,13 @@ impl ToolProvider for Shell {
             },
             ToolDefinition {
                 name: "shell_read".into(),
-                description: "Read accumulated output from a running shell process (non-blocking)."
-                    .into(),
+                description: vec![crate::ToolText::new(
+                    "Read accumulated output from a running shell process (non-blocking).",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![ToolParam::typed("id", "str")],
                 returns: "str".into(),
                 examples: vec![],
@@ -401,7 +418,13 @@ impl ToolProvider for Shell {
             },
             ToolDefinition {
                 name: "shell_write".into(),
-                description: "Write input to a shell process's stdin.".into(),
+                description: vec![crate::ToolText::new(
+                    "Write input to a shell process's stdin.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![
                     ToolParam::typed("id", "str"),
                     ToolParam::typed("input", "str"),
@@ -413,7 +436,13 @@ impl ToolProvider for Shell {
             },
             ToolDefinition {
                 name: "shell_kill".into(),
-                description: "Send SIGTERM to a running shell process.".into(),
+                description: vec![crate::ToolText::new(
+                    "Send SIGTERM to a running shell process.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![ToolParam::typed("id", "str")],
                 returns: "None".into(),
                 examples: vec![],

@@ -33,10 +33,22 @@ impl ToolProvider for FetchUrl {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "fetch_url".into(),
-            description: "Extract a webpage URL via Tavily and return text content.".into(),
+            description: vec![crate::ToolText::new(
+                "Fetch and extract a webpage via Tavily. Returns the extracted page text for a single URL. If extraction succeeds but no readable content is found, returns a short explanatory string instead of failing the tool call.",
+                [
+                    crate::ExecutionMode::Repl,
+                    crate::ExecutionMode::NativeTools,
+                ],
+            )],
             params: vec![ToolParam::typed("url", "str")],
             returns: "str".into(),
-            examples: vec![],
+            examples: vec![crate::ToolText::new(
+                "fetch_url(url=\"https://www.rust-lang.org/\")",
+                [
+                    crate::ExecutionMode::Repl,
+                    crate::ExecutionMode::NativeTools,
+                ],
+            )],
             hidden: false,
             inject_into_prompt: false,
         }]
@@ -79,7 +91,9 @@ impl ToolProvider for FetchUrl {
                         .unwrap_or_default();
 
                     if content.is_empty() {
-                        return ToolResult::err(json!("No content returned from Tavily extract"));
+                        return ToolResult::ok(json!(format!(
+                            "No extractable content returned for {url}"
+                        )));
                     }
 
                     ToolResult::ok(json!(content))

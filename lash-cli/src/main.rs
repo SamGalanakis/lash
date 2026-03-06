@@ -29,9 +29,9 @@ use clap::Parser;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
 use lash_core::agent::{Message, MessageRole, Part, PartKind, PruneState};
-use lash_core::provider::{LashConfig, Provider};
+use lash_core::provider::{LashConfig, OPENAI_GENERIC_DEFAULT_BASE_URL, Provider};
 use lash_core::tools::{
-    AgentCall, CompositeTools, FilteredTools, SwitchableTools, ToolSet, ToolSetDeps,
+    AgentCall, BatchingTools, CompositeTools, FilteredTools, SwitchableTools, ToolSet, ToolSetDeps,
 };
 use lash_core::*;
 use ratatui::DefaultTerminal;
@@ -46,20 +46,24 @@ use prompt_overrides::resolve_prompt_overrides;
 
 #[derive(Parser)]
 struct Args {
-    /// OpenRouter API key (optional — use --provider to configure interactively)
-    #[arg(long, env = "OPENROUTER_API_KEY")]
+    /// OpenAI-generic API key (optional — use --provider to configure interactively)
+    #[arg(long, env = "OPENAI_GENERIC_API_KEY")]
     api_key: Option<String>,
 
     /// Tavily API key for web search
     #[arg(long, env = "TAVILY_API_KEY")]
     tavily_api_key: Option<String>,
 
-    /// Model name (defaults per provider: Claude/Codex/OpenRouter/Google OAuth)
+    /// Model name (defaults per provider: Claude/Codex/OpenAI-generic/Google OAuth)
     #[arg(long)]
     model: Option<String>,
 
+    /// Execution backend (`repl` or `native-tools`)
+    #[arg(long = "execution-mode")]
+    execution_mode: Option<String>,
+
     /// Base URL for the LLM API
-    #[arg(long, default_value = "https://openrouter.ai/api/v1")]
+    #[arg(long, default_value = OPENAI_GENERIC_DEFAULT_BASE_URL)]
     base_url: String,
 
     /// Disable mouse scroll support (re-enables terminal text selection)
@@ -314,8 +318,8 @@ async fn main() -> anyhow::Result<()> {
     let existing_config = LashConfig::load();
     let mut lash_config = if args.provider || existing_config.is_none() {
         if let Some(ref key) = args.api_key {
-            // Shortcut: env var or --api-key creates OpenRouter provider directly
-            let mut cfg = LashConfig::new(Provider::OpenRouter {
+            // Shortcut: env var or --api-key creates OpenAI-generic provider directly
+            let mut cfg = LashConfig::new(Provider::OpenAiGeneric {
                 api_key: key.clone(),
                 base_url: args.base_url.clone(),
             });
@@ -362,10 +366,14 @@ async fn main() -> anyhow::Result<()> {
         eprintln!(
             "warning: model `{}` is not in local catalog for {}; continuing (default model)",
             selection.model,
-            provider_label(&lash_config.provider)
+            lash_config.provider.label()
         );
     }
     let model = selection.model.clone();
+    let execution_mode = match args.execution_mode.as_deref() {
+        Some(raw) => parse_execution_mode(raw).map_err(anyhow::Error::msg)?,
+        None => ExecutionMode::Repl,
+    };
 
     let llm_log_path = std::env::var("LASH_LOG").ok().and_then(|level| {
         let l = level.to_lowercase();
@@ -399,6 +407,7 @@ async fn main() -> anyhow::Result<()> {
         llm_log_path,
         headless,
         prompt_overrides,
+        execution_mode,
         ..Default::default()
     };
 
@@ -479,26 +488,31 @@ async fn main() -> anyhow::Result<()> {
         default_dynamic_capability_defs(),
         profile_from_agent_capabilities(&config.capabilities),
     )?);
-    let dynamic_tools_provider: Arc<dyn ToolProvider> = dynamic_tools.clone();
+    let dynamic_tools_provider: Arc<dyn ToolProvider> = Arc::new(BatchingTools::with_mode(
+        dynamic_tools.clone(),
+        execution_mode,
+    ));
     agent_parent_tools.swap(dynamic_tools_provider.clone());
     let toolset_hash = hash12(
         &serde_json::to_vec(&dynamic_tools_provider.definitions())
             .unwrap_or_else(|_| b"[]".to_vec()),
     );
-    let session = Session::new(
+    let initial_reasoning_effort = config.reasoning_effort.clone();
+    let runtime_config: RuntimeConfig = config.clone().into();
+    let runtime = RuntimeEngine::from_state(
+        runtime_config,
         dynamic_tools_provider,
-        "root",
-        headless,
-        config.capabilities.clone(),
+        AgentStateEnvelope {
+            agent_id: "root".to_string(),
+            execution_mode,
+            ..AgentStateEnvelope::default()
+        },
     )
     .await?;
 
-    let initial_reasoning_effort = config.reasoning_effort.clone();
-    let agent = Agent::new(session, config, Some("root".to_string()));
-
     // ── Headless mode: skip TUI, run agent, print to stdout ──
     if let Some(prompt) = args.print_prompt {
-        return run_headless(agent, prompt).await;
+        return run_headless(runtime, prompt).await;
     }
 
     let mut logger = SessionLogger::new(&model, run_session_id)?;
@@ -518,7 +532,7 @@ async fn main() -> anyhow::Result<()> {
     let session_name = logger.session_name.clone();
     let result = run_app(
         terminal,
-        agent,
+        runtime,
         Arc::clone(&dynamic_tools),
         &mut logger,
         &args,
@@ -528,6 +542,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&store),
         toolset_hash,
         initial_reasoning_effort,
+        execution_mode,
     )
     .await;
 
@@ -551,7 +566,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Run the agent headlessly: send prompt, consume events, print final response to stdout.
-async fn run_headless(agent: Agent, prompt: String) -> anyhow::Result<()> {
+async fn run_headless(mut runtime: RuntimeEngine, prompt: String) -> anyhow::Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct HeadlessSink {
@@ -576,7 +591,6 @@ async fn run_headless(agent: Agent, prompt: String) -> anyhow::Result<()> {
     }
 
     let (items, image_blobs) = build_items_from_editor_input(&prompt, Vec::new());
-    let mut runtime = RuntimeEngine::from_agent(agent, AgentStateEnvelope::default());
     let sink = HeadlessSink {
         had_error: AtomicBool::new(false),
     };
@@ -636,6 +650,7 @@ struct RuntimeRunResult {
 struct TurnReplayPayload {
     display_input: String,
     turn_input: TurnInput,
+    execution_mode: ExecutionMode,
 }
 
 struct AppEventSink {
@@ -675,24 +690,6 @@ fn controls_text() -> String {
     .join("\n")
 }
 
-fn provider_label(provider: &Provider) -> &'static str {
-    match provider {
-        Provider::OpenRouter { .. } => "OpenRouter (API key)",
-        Provider::Claude { .. } => "Claude OAuth",
-        Provider::Codex { .. } => "OpenAI Codex OAuth",
-        Provider::GoogleOAuth { .. } => "Google OAuth (Gemini)",
-    }
-}
-
-fn provider_id(provider: &Provider) -> &'static str {
-    match provider {
-        Provider::OpenRouter { .. } => "openrouter",
-        Provider::Claude { .. } => "claude",
-        Provider::Codex { .. } => "codex",
-        Provider::GoogleOAuth { .. } => "google_oauth",
-    }
-}
-
 #[derive(Debug, Clone)]
 struct ModelSelection {
     model: String,
@@ -729,6 +726,24 @@ fn parse_model_selection(input: &str) -> Result<ModelSelection, String> {
     }
 }
 
+fn parse_execution_mode(input: &str) -> Result<ExecutionMode, String> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" => Err("Execution mode cannot be empty.".to_string()),
+        "repl" => Ok(ExecutionMode::Repl),
+        "native" | "native-tools" | "native_tools" | "tools" => Ok(ExecutionMode::NativeTools),
+        other => Err(format!(
+            "Unknown execution mode `{other}`. Expected `repl` or `native-tools`."
+        )),
+    }
+}
+
+fn execution_mode_label(mode: ExecutionMode) -> &'static str {
+    match mode {
+        ExecutionMode::Repl => "repl",
+        ExecutionMode::NativeTools => "native-tools",
+    }
+}
+
 fn model_known_in_catalog(provider: &Provider, model: &str) -> bool {
     provider.context_window(model).is_some()
 }
@@ -757,7 +772,7 @@ fn validate_model_selection(
             "Model `{}` is not in the local catalog for {}. \
 Set `LASH_ALLOW_UNKNOWN_MODELS=1` to bypass this check.",
             selection.model,
-            provider_label(provider),
+            provider.label(),
         ));
     }
     Ok(())
@@ -802,6 +817,7 @@ fn persist_root_agent_state(
     state: &mut AgentStateEnvelope,
     provider: &Provider,
     configured_model: &str,
+    execution_mode: ExecutionMode,
     reasoning_effort: Option<&str>,
     toolset_hash: &str,
     prompt_hash: Option<String>,
@@ -810,7 +826,7 @@ fn persist_root_agent_state(
     let manifest = ReplayManifest {
         version: 1,
         saved_at: chrono::Utc::now().to_rfc3339(),
-        provider: provider_id(provider).to_string(),
+        provider: provider.id().to_string(),
         configured_model: configured_model.to_string(),
         resolved_model: provider.resolve_model(configured_model),
         reasoning_effort: reasoning_effort.map(str::to_string),
@@ -824,6 +840,7 @@ fn persist_root_agent_state(
         "provider": manifest.provider,
         "configured_model": manifest.configured_model,
         "resolved_model": manifest.resolved_model,
+        "execution_mode": execution_mode_label(execution_mode),
         "reasoning_effort": manifest.reasoning_effort,
         "toolset_hash": manifest.toolset_hash,
         "prompt_hash": manifest.prompt_hash,
@@ -870,7 +887,8 @@ fn help_text(skills: &skill::SkillRegistry) -> String {
     let mut lines = vec![
         "Commands:".to_string(),
         "  /clear, /new       Reset conversation".to_string(),
-        "  /model <name>      Switch LLM model".to_string(),
+        "  /model [name]      Show or switch LLM model".to_string(),
+        "  /mode [name]       Show or switch execution mode".to_string(),
         "  /provider          Open provider setup (in-app)".to_string(),
         "  /login             Sign in or reconfigure provider".to_string(),
         "  /logout            Remove stored credentials".to_string(),
@@ -935,7 +953,7 @@ fn help_text(skills: &skill::SkillRegistry) -> String {
 #[allow(clippy::too_many_arguments)]
 async fn run_app(
     mut terminal: DefaultTerminal,
-    agent: Agent,
+    runtime: RuntimeEngine,
     dynamic_tools: Arc<DynamicToolProvider>,
     logger: &mut SessionLogger,
     args: &Args,
@@ -945,6 +963,7 @@ async fn run_app(
     store: Arc<Store>,
     mut toolset_hash: String,
     initial_reasoning_effort: Option<String>,
+    initial_execution_mode: ExecutionMode,
 ) -> anyhow::Result<()> {
     let mut app = App::new(model, session_name, Some(store.clone()));
     app.context_window = provider.context_window(&app.model);
@@ -953,13 +972,11 @@ async fn run_app(
             .reasoning_effort_for_model(&app.model)
             .map(str::to_string)
     });
+    let mut current_execution_mode = initial_execution_mode;
     app.load_history();
     let mut history: Vec<Message> = Vec::new();
     let mut turn_counter: usize = 0;
-    let mut runtime = Some(RuntimeEngine::from_agent(
-        agent,
-        AgentStateEnvelope::default(),
-    ));
+    let mut runtime = Some(runtime);
     let mut desired_dynamic = dynamic_tools.export_state();
     let mut pending_reconfigure = false;
 
@@ -1064,7 +1081,7 @@ async fn run_app(
                     );
                     let no_visible_output = matches!(done.result.status, TurnStatus::Completed)
                         && done.result.assistant_output.safe_text.trim().is_empty()
-                        && done.result.tool_outputs.is_empty()
+                        && done.result.code_outputs.is_empty()
                         && done.result.errors.is_empty();
                     if no_visible_output {
                         let raw = done.result.assistant_output.raw_text.trim();
@@ -1115,11 +1132,13 @@ async fn run_app(
                     turn_counter = state.iteration;
                     app.token_usage = state.token_usage.clone();
 
+                    let persisted_execution_mode = state.execution_mode;
                     persist_root_agent_state(
                         &store,
                         &mut state,
                         &provider,
                         &app.model,
+                        persisted_execution_mode,
                         current_reasoning_effort.as_deref(),
                         &toolset_hash,
                         latest_user_prompt_hash(&history),
@@ -1131,8 +1150,34 @@ async fn run_app(
                     runtime_return_rx = None;
                     cancel_token = None;
 
-                    // Auto-drain: send queued message
-                    if let Some(queued) = app.take_queued_message() {
+                    if app.plan_approved {
+                        let turn_input = TurnInput {
+                            items: Vec::new(),
+                            image_blobs: HashMap::new(),
+                            mode: Some(RunMode::Normal),
+                            plan_file: app
+                                .plan_file
+                                .as_ref()
+                                .map(|path| path.to_string_lossy().to_string()),
+                        };
+                        send_user_message(
+                            String::new(),
+                            turn_input.clone(),
+                            &mut app,
+                            logger,
+                            &mut runtime,
+                            &mut history,
+                            &mut runtime_return_rx,
+                            &mut cancel_token,
+                            &mut active_stream_id,
+                            &app_tx,
+                        );
+                        last_turn = Some(TurnReplayPayload {
+                            display_input: String::new(),
+                            turn_input,
+                            execution_mode: current_execution_mode,
+                        });
+                    } else if let Some(queued) = app.take_queued_message() {
                         if let Err(e) = apply_pending_reconfigure(
                             &dynamic_tools,
                             &mut desired_dynamic,
@@ -1173,6 +1218,7 @@ async fn run_app(
                         last_turn = Some(TurnReplayPayload {
                             display_input: queued,
                             turn_input,
+                            execution_mode: current_execution_mode,
                         });
                     }
                 }
@@ -1375,6 +1421,7 @@ async fn run_app(
                                             &mut runtime,
                                             &mut app,
                                             &mut turn_counter,
+                                            &mut current_execution_mode,
                                         )
                                         .await;
 
@@ -1540,6 +1587,7 @@ async fn run_app(
                                             messages: history.clone(),
                                             iteration: turn_counter,
                                             token_usage: app.token_usage.clone(),
+                                            execution_mode: current_execution_mode,
                                             task_state: None,
                                             subagent_state: None,
                                             replay_manifest: None,
@@ -1553,6 +1601,29 @@ async fn run_app(
                                     }
                                 }
                                 command::Command::Model(new_model) => {
+                                    let Some(new_model) = new_model else {
+                                        let mut lines = vec![
+                                            format!("Current model: `{}`", app.model),
+                                            format!("Provider: {}", provider.label()),
+                                        ];
+                                        if let Some(effort) = current_reasoning_effort.as_deref() {
+                                            lines.push(format!("Reasoning effort: `{}`", effort));
+                                        }
+                                        if let Some(window) = app.context_window {
+                                            lines.push(format!("Context window: {}", window));
+                                        }
+                                        lines.push(
+                                            "Usage: `/model <name>` or `/model <name> <low|medium|high>`".to_string(),
+                                        );
+                                        if !matches!(provider, Provider::Codex { .. }) {
+                                            lines.push(
+                                                "Reasoning suffixes are only supported on the Codex provider."
+                                                    .to_string(),
+                                            );
+                                        }
+                                        push_system_message(&mut app, lines.join("\n"));
+                                        continue;
+                                    };
                                     let selection = match parse_model_selection(&new_model) {
                                         Ok(s) => s,
                                         Err(e) => {
@@ -1584,7 +1655,50 @@ async fn run_app(
                                     }
                                     current_reasoning_effort = reasoning_effort;
                                     app.context_window = provider.context_window(&selection.model);
-                                    app.model = selection.model;
+                                    app.model = selection.model.clone();
+                                    let mut msg = format!("Model set to `{}`", app.model);
+                                    if let Some(effort) = current_reasoning_effort.as_deref() {
+                                        msg.push_str(&format!(" (reasoning=`{}`)", effort));
+                                    }
+                                    if let Some(window) = app.context_window {
+                                        msg.push_str(&format!("\nContext window: {}", window));
+                                    } else {
+                                        msg.push_str("\nContext window: unknown in local catalog.");
+                                    }
+                                    push_system_message(&mut app, msg);
+                                }
+                                command::Command::Mode(new_mode) => {
+                                    let Some(new_mode) = new_mode else {
+                                        push_system_message(
+                                            &mut app,
+                                            format!(
+                                                "Current execution mode: `{}`\nUsage: `/mode <repl|native-tools>`",
+                                                execution_mode_label(current_execution_mode)
+                                            ),
+                                        );
+                                        continue;
+                                    };
+                                    let new_mode = match parse_execution_mode(&new_mode) {
+                                        Ok(mode) => mode,
+                                        Err(err) => {
+                                            push_system_message(
+                                                &mut app,
+                                                format!("Invalid execution mode: {}", err),
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    current_execution_mode = new_mode;
+                                    if let Some(rt) = runtime.as_mut() {
+                                        rt.set_execution_mode(new_mode);
+                                    }
+                                    push_system_message(
+                                        &mut app,
+                                        format!(
+                                            "Execution mode set to `{}`",
+                                            execution_mode_label(new_mode)
+                                        ),
+                                    );
                                 }
                                 command::Command::ChangeProvider => {
                                     paused.store(true, Ordering::Relaxed);
@@ -1686,7 +1800,7 @@ async fn run_app(
                                                 &mut app,
                                                 format!(
                                                     "Provider updated: {}\nModel set to default: `{}`",
-                                                    provider_label(&provider),
+                                                    provider.label(),
                                                     selection.model
                                                 ),
                                             );
@@ -1745,6 +1859,10 @@ Use `/provider` or `/login` to sign in again without restarting.",
                                             &serde_json::to_vec(&dynamic_tools.definitions())
                                                 .unwrap_or_else(|_| b"[]".to_vec()),
                                         );
+                                        current_execution_mode = previous.execution_mode;
+                                        if let Some(rt) = runtime.as_mut() {
+                                            rt.set_execution_mode(previous.execution_mode);
+                                        }
                                         send_user_message(
                                             previous.display_input.clone(),
                                             previous.turn_input.clone(),
@@ -1789,6 +1907,7 @@ Use `/provider` or `/login` to sign in again without restarting.",
                                                     &mut runtime,
                                                     &mut app,
                                                     &mut turn_counter,
+                                                    &mut current_execution_mode,
                                                 )
                                                 .await;
                                                 last_turn = None;
@@ -1883,6 +2002,7 @@ Use `/provider` or `/login` to sign in again without restarting.",
                                                 name,
                                                 handler_id,
                                                 description,
+                                                current_execution_mode,
                                             ) {
                                                 Ok(def) => {
                                                     desired_dynamic.tools.insert(
@@ -1956,7 +2076,10 @@ Use `/provider` or `/login` to sign in again without restarting.",
                                                 continue;
                                             };
                                             if let Some(desc) = kv.get("description") {
-                                                spec.definition.description = desc.clone();
+                                                spec.definition.set_description_for(
+                                                    current_execution_mode,
+                                                    desc.clone(),
+                                                );
                                             }
                                             if let Some(returns) = kv.get("returns") {
                                                 spec.definition.returns = returns.clone();
@@ -2282,6 +2405,7 @@ Use `/provider` or `/login` to sign in again without restarting.",
                                         last_turn = Some(TurnReplayPayload {
                                             display_input,
                                             turn_input,
+                                            execution_mode: current_execution_mode,
                                         });
                                     }
                                 }
@@ -2334,6 +2458,7 @@ Use `/provider` or `/login` to sign in again without restarting.",
                         last_turn = Some(TurnReplayPayload {
                             display_input: input,
                             turn_input,
+                            execution_mode: current_execution_mode,
                         });
                     }
                     KeyCode::Backspace => {
@@ -2530,6 +2655,7 @@ fn register_builtin_tool(
     tool_name: &str,
     handler_id: &str,
     description_override: Option<String>,
+    execution_mode: ExecutionMode,
 ) -> Result<ToolDefinition, String> {
     let adapter = dynamic_tools.inprocess_adapter();
     let def = match handler_id {
@@ -2546,11 +2672,17 @@ fn register_builtin_tool(
             });
             let def = ToolDefinition {
                 name: tool_name.to_string(),
-                description: description_override
-                    .unwrap_or_else(|| "Echoes back the `text` argument.".to_string()),
+                description: vec![ToolText::new(
+                    description_override
+                        .unwrap_or_else(|| "Echoes back the `text` argument.".to_string()),
+                    [execution_mode],
+                )],
                 params: vec![ToolParam::typed("text", "str")],
                 returns: "str".to_string(),
-                examples: vec![format!("{tool_name}(text=\"hello\")")],
+                examples: vec![ToolText::new(
+                    format!("{tool_name}(text=\"hello\")"),
+                    [execution_mode],
+                )],
                 hidden: false,
                 inject_into_prompt: false,
             };
@@ -2565,11 +2697,15 @@ fn register_builtin_tool(
             });
             let def = ToolDefinition {
                 name: tool_name.to_string(),
-                description: description_override
-                    .unwrap_or_else(|| "Returns the current UTC timestamp (RFC3339).".to_string()),
+                description: vec![ToolText::new(
+                    description_override.unwrap_or_else(|| {
+                        "Returns the current UTC timestamp (RFC3339).".to_string()
+                    }),
+                    [execution_mode],
+                )],
                 params: vec![],
                 returns: "str".to_string(),
-                examples: vec![format!("{tool_name}()")],
+                examples: vec![ToolText::new(format!("{tool_name}()"), [execution_mode])],
                 hidden: false,
                 inject_into_prompt: false,
             };
@@ -2584,11 +2720,14 @@ fn register_builtin_tool(
             });
             let def = ToolDefinition {
                 name: tool_name.to_string(),
-                description: description_override
-                    .unwrap_or_else(|| "Returns a random UUIDv4 string.".to_string()),
+                description: vec![ToolText::new(
+                    description_override
+                        .unwrap_or_else(|| "Returns a random UUIDv4 string.".to_string()),
+                    [execution_mode],
+                )],
                 params: vec![],
                 returns: "str".to_string(),
-                examples: vec![format!("{tool_name}()")],
+                examples: vec![ToolText::new(format!("{tool_name}()"), [execution_mode])],
                 hidden: false,
                 inject_into_prompt: false,
             };
@@ -2677,14 +2816,18 @@ fn send_user_message(
         history.clear();
     }
 
-    app.blocks
-        .push(DisplayBlock::UserInput(display_input.clone()));
-    app.invalidate_height_cache();
-    app.scroll_to_bottom();
+    if !display_input.is_empty() {
+        app.blocks
+            .push(DisplayBlock::UserInput(display_input.clone()));
+        app.invalidate_height_cache();
+        app.scroll_to_bottom();
+    }
     app.running = true;
     app.iteration = 0;
 
-    logger.log_user_input(&display_input);
+    if !display_input.is_empty() {
+        logger.log_user_input(&display_input);
+    }
 
     let mut rt = runtime
         .take()
@@ -2721,9 +2864,14 @@ fn send_user_message(
                     state: OutputState::EmptyOutput,
                 },
                 done_reason: DoneReason::RuntimeError,
+                execution: ExecutionSummary {
+                    mode: rt.export_state().execution_mode,
+                    had_tool_calls: false,
+                    had_code_execution: false,
+                },
                 token_usage: TokenUsage::default(),
                 tool_calls: Vec::new(),
-                tool_outputs: Vec::new(),
+                code_outputs: Vec::new(),
                 errors: vec![TurnIssue {
                     kind: "runtime".to_string(),
                     code: Some(e.code),
@@ -2747,6 +2895,7 @@ async fn restore_agent_state(
     runtime: &mut Option<RuntimeEngine>,
     app: &mut App,
     turn_counter: &mut usize,
+    execution_mode: &mut ExecutionMode,
 ) {
     // Derive .db path from .jsonl filename (same stem)
     let stem = jsonl_filename.trim_end_matches(".jsonl");
@@ -2763,6 +2912,8 @@ async fn restore_agent_state(
                 id: format!("{}.p0", sys_id),
                 kind: PartKind::Text,
                 content: "Session resumed. Your REPL environment was reset — re-import modules and recreate any state you need.".to_string(),
+                tool_call_id: None,
+                tool_name: None,
                 prune_state: PruneState::Intact,
             }],
         });
@@ -2782,6 +2933,17 @@ async fn restore_agent_state(
 
     if let Some(state) = resume_store.load_agent_state("root") {
         *turn_counter = state.iteration.max(0) as usize;
+        let restored_execution_mode = serde_json::from_str::<serde_json::Value>(&state.config_json)
+            .ok()
+            .and_then(|v| {
+                v.get("manifest")
+                    .and_then(|m| m.get("execution_mode"))
+                    .and_then(|m| m.as_str())
+                    .map(str::to_string)
+            })
+            .and_then(|raw| parse_execution_mode(&raw).ok())
+            .unwrap_or(ExecutionMode::Repl);
+        *execution_mode = restored_execution_mode;
         // Restore token counts from DB
         if state.input_tokens > 0 || state.output_tokens > 0 {
             app.token_usage = lash_core::TokenUsage {
@@ -2812,6 +2974,8 @@ async fn restore_agent_state(
                                     "Session resumed but REPL restore failed ({}). Re-import modules and recreate any state you need.",
                                     e
                                 ),
+                                tool_call_id: None,
+                                tool_name: None,
                                 prune_state: PruneState::Intact,
                             }],
                         });
@@ -2828,6 +2992,8 @@ async fn restore_agent_state(
                     id: format!("{}.p0", sys_id),
                     kind: PartKind::Text,
                     content: "Session resumed. Your REPL environment was reset — re-import modules and recreate any state you need.".to_string(),
+                    tool_call_id: None,
+                    tool_name: None,
                     prune_state: PruneState::Intact,
                 }],
             });
@@ -2853,6 +3019,8 @@ async fn restore_agent_state(
                         "Sub-agent '{}' was interrupted mid-task (iteration {}). You may re-delegate if needed.",
                         prompt, sub.iteration,
                     ),
+                    tool_call_id: None,
+                    tool_name: None,
                     prune_state: PruneState::Intact,
                 }],
             });
@@ -2877,6 +3045,7 @@ async fn restore_agent_state(
                 messages: history.clone(),
                 iteration: *turn_counter,
                 token_usage: app.token_usage.clone(),
+                execution_mode: restored_execution_mode,
                 task_state: None,
                 subagent_state: None,
                 replay_manifest,
@@ -2893,6 +3062,8 @@ async fn restore_agent_state(
                 id: format!("{}.p0", sys_id),
                 kind: PartKind::Text,
                 content: "Session resumed. Your REPL environment was reset — re-import modules and recreate any state you need.".to_string(),
+                tool_call_id: None,
+                tool_name: None,
                 prune_state: PruneState::Intact,
             }],
         });

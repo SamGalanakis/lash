@@ -1,6 +1,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::str::FromStr;
 
+use crate::ExecutionMode;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptSectionName {
@@ -140,6 +142,7 @@ impl PromptProfile {
 
 pub struct PromptComposeInput<'a> {
     pub profile: PromptProfile,
+    pub execution_mode: ExecutionMode,
     pub context: &'a str,
     pub tool_list: &'a str,
     pub tool_names: &'a [String],
@@ -214,7 +217,10 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
     let profile = input.profile;
     match section {
         PromptSectionName::Identity => Some(match profile {
-            PromptProfile::RootInteractive => "You are an AI coding assistant operating in a persistent Python REPL with tool access.\nYou power lash, a terminal-based coding agent. Understand the codebase, make changes, run commands, and report outcomes clearly.".to_string(),
+            PromptProfile::RootInteractive => match input.execution_mode {
+                ExecutionMode::Repl => "You are an AI coding assistant operating in a persistent Python REPL with tool access.\nYou power lash, a terminal-based coding agent. Understand the codebase, make changes, run commands, and report outcomes clearly.".to_string(),
+                ExecutionMode::NativeTools => "You are an AI coding assistant with native tool-calling access.\nYou power lash, a terminal-based coding agent. Understand the codebase, make changes, run commands, and report outcomes clearly.".to_string(),
+            },
             PromptProfile::RootHeadless => "You are an autonomous AI coding agent running in non-interactive mode.\nComplete the task end-to-end without asking for user input.".to_string(),
             PromptProfile::SubAgentInteractive => {
                 if input.can_write {
@@ -243,24 +249,57 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
             }
         }
         PromptSectionName::ExecutionContract => Some(format!(
-            "## Execution Contract\n\nYour output can include prose and `<repl>` blocks.\n- `<repl>` blocks execute immediately when `</repl>` is reached\n- Maximum one `<repl>` block per turn\n- After a `<repl>` block executes, lash continues in a new internal turn with the execution output\n- Do not emit additional `<repl>` blocks in the same response after one has closed\n- Use `<repl>` only when execution is needed; prose-only responses are valid when no execution is required\n- For direct conversational requests (greetings, small talk, time/date, simple Q&A), respond in prose and do not open `<repl>`\n- Variables persist across turns\n- `print(...)` output is model-visible only\n{}",
-            if profile.is_headless() {
-                "- In headless mode, prose-only turns are invalid; execute via `<repl>`"
+            "{}\n{}",
+            if matches!(input.execution_mode, ExecutionMode::Repl) {
+                "## Execution Contract\n\nYour output can include prose and `<repl>` blocks.\n- `<repl>` blocks execute immediately when `</repl>` is reached\n- Maximum one `<repl>` block per turn\n- After a `<repl>` block executes, lash continues in a new internal turn with the execution output\n- Do not emit additional `<repl>` blocks in the same response after one has closed\n- Use `<repl>` only when execution is needed; prose-only responses are valid when no execution is required\n- For direct conversational requests (greetings, small talk, time/date, simple Q&A), respond in prose and do not open `<repl>`\n- Variables persist across turns\n- `print(...)` output is model-visible only"
             } else {
-                "- In interactive mode, call `done(...)` only when your final user-facing answer is ready"
+                "## Execution Contract\n\nUse native tool calls when execution is needed.\n- Do not emit `<repl>` blocks or Python code\n- Call tools directly with valid arguments\n- When several tool calls are independent, emit them together in the same response instead of serializing them across turns\n- Use serial tool calls only when later arguments depend on earlier tool results or when ordering is required for correctness\n- Avoid unnecessary prose between independent tool calls; optimize for completing the task with as few tool rounds as possible\n- After tool results are returned, continue with the next tool calls or final answer\n- For direct conversational requests that need no tools, respond in prose only"
+            },
+            if matches!(input.execution_mode, ExecutionMode::Repl) {
+                if profile.is_headless() {
+                    "- In headless mode, prose-only turns are invalid; execute via `<repl>`"
+                } else {
+                    "- In interactive mode, call `done(...)` only when your final user-facing answer is ready"
+                }
+            } else if profile.is_headless() {
+                "- In headless mode, keep calling tools until the task is complete, then return a final answer without extra commentary."
+            } else {
+                "- In interactive mode, return a final user-facing answer once the task is complete."
             }
         )),
         PromptSectionName::TerminationContract => Some(format!(
-            "## Termination Contract\n\n`done(value)` ends the turn and returns control.\n- `done(...)` may only be called inside `<repl>`\n- Do not use `done(...)` for status updates\n{}",
-            if profile.is_headless() {
-                "- Headless: call `done(...)` only after the task is fully completed"
+            "{}\n{}",
+            if matches!(input.execution_mode, ExecutionMode::Repl) {
+                "## Termination Contract\n\n`done(value)` ends the turn and returns control.\n- `done(...)` may only be called inside `<repl>`\n- Do not use `done(...)` for status updates"
             } else {
-                "- Interactive: call `done(...)` only when your final user-facing answer is ready"
+                "## Termination Contract\n\nFinish by returning a final assistant answer.\n- Do not emit fake tool calls or placeholder arguments\n- Do not stop after tool execution unless the task is actually complete"
+            },
+            if matches!(input.execution_mode, ExecutionMode::Repl) {
+                if profile.is_headless() {
+                    "- Headless: call `done(...)` only after the task is fully completed"
+                } else {
+                    "- Interactive: call `done(...)` only when your final user-facing answer is ready"
+                }
+            } else if profile.is_headless() {
+                "- Headless: do not stop on prose-only intermediate steps."
+            } else {
+                "- Interactive: provide a concise final answer when complete."
             }
         )),
         PromptSectionName::ToolAccess => Some(
-            "## Tool Access\n\n- All visible tools are available in the `tools` module (e.g. `tools.read_file(...)`)\n- `from tools import *` is applied automatically, so visible tools are callable as globals\n- If a tool name is overwritten, restore it with `from tools import <tool>` or `from tools import *`\n- Use `await` only for long-running calls (`delegate_*()` and shell handle methods like `proc.wait()`)\n- Use `asyncio.gather(...)` only for `delegate_*()` and shell handle methods"
-                .to_string(),
+            if matches!(input.execution_mode, ExecutionMode::Repl) {
+                "## Tool Access\n\n- All visible tools are available in the `tools` module (e.g. `tools.read_file(...)`)\n- `from tools import *` is applied automatically, so visible tools are also callable as globals\n- If a tool name is overwritten, restore it with `import tools` or `from tools import <tool>` / `from tools import *`\n- Use `await` only for long-running calls (`delegate_*()` and shell handle methods like `proc.wait()`)\n- Use `asyncio.gather(...)` only for `delegate_*()` and shell handle methods"
+                    .to_string()
+            } else {
+                format!(
+                    "## Tool Access\n\n- The runtime will expose the visible tools as native tool calls\n- Use only the tools shown in Available Tools\n- Prefer parallel independent tool calls in one assistant turn when the model/provider supports multiple calls\n- Good candidates for one-turn parallel calls: reading several files, multiple searches, independent inspections, and unrelated diagnostics\n- Do not parallelize dependent steps, ordered stateful edits, or operations whose arguments depend on prior output\n- Never invent tool names or arguments that are not described{}",
+                    if input.tool_names.iter().any(|name| name == "batch") {
+                        "\n- If `batch` is available and you need 2 or more independent tool calls, prefer `batch` over spacing those calls across multiple turns"
+                    } else {
+                        ""
+                    }
+                )
+            },
         ),
         PromptSectionName::ToolGuides => {
             let guide = tool_guides(
@@ -528,7 +567,13 @@ fn tool_guides(
     }
     if tools.contains("create_task") {
         chunks.push(
-            "**Task management**\nFor multi-step work: create tasks, keep one in progress, and mark completion immediately."
+            "**Task management**\nFor multi-step work: create tasks, keep one in progress, and mark completion immediately. Use `create_task(subject=...)` (not `title`). For `update_task`, valid statuses are `pending`, `in_progress`, `completed`, and `cancelled`."
+                .to_string(),
+        );
+    }
+    if tools.contains("batch") {
+        chunks.push(
+            "**Batching**\nUse `batch(tool_calls=[...])` for 2-25 independent tool calls when you already know the arguments up front. Good fits: reading several files, multiple searches, or unrelated diagnostics. Do not batch dependent steps and do not nest `batch` inside `batch`."
                 .to_string(),
         );
     }
@@ -606,6 +651,7 @@ mod tests {
         ];
         let text = compose_system_prompt(PromptComposeInput {
             profile: PromptProfile::RootHeadless,
+            execution_mode: crate::ExecutionMode::Repl,
             context: "ctx",
             tool_list: "tools",
             tool_names: &[],
@@ -625,6 +671,7 @@ mod tests {
     fn memory_api_section_is_included_by_default() {
         let text = compose_system_prompt(PromptComposeInput {
             profile: PromptProfile::RootInteractive,
+            execution_mode: crate::ExecutionMode::Repl,
             context: "ctx",
             tool_list: "tools",
             tool_names: &[],
@@ -650,6 +697,7 @@ mod tests {
         }];
         let text = compose_system_prompt(PromptComposeInput {
             profile: PromptProfile::RootInteractive,
+            execution_mode: crate::ExecutionMode::Repl,
             context: "ctx",
             tool_list: "tools",
             tool_names: &[],
@@ -671,6 +719,7 @@ mod tests {
         let tools = vec!["load_skill".to_string(), "skills".to_string()];
         let text = compose_system_prompt(PromptComposeInput {
             profile: PromptProfile::RootInteractive,
+            execution_mode: crate::ExecutionMode::Repl,
             context: "ctx",
             tool_list: "tools",
             tool_names: &tools,
@@ -692,6 +741,7 @@ mod tests {
         let caps = AgentCapabilities::default().disable(CapabilityId::CoreWrite);
         let text = compose_system_prompt(PromptComposeInput {
             profile: PromptProfile::SubAgentInteractive,
+            execution_mode: crate::ExecutionMode::Repl,
             context: "ctx",
             tool_list: "tools",
             tool_names: &[],
@@ -716,6 +766,7 @@ mod tests {
         let sections = vec!["## Custom Capability\n\nCustom guidance.".to_string()];
         let text = compose_system_prompt(PromptComposeInput {
             profile: PromptProfile::RootInteractive,
+            execution_mode: crate::ExecutionMode::Repl,
             context: "ctx",
             tool_list: "tools",
             tool_names: &["agent_call".to_string()],
@@ -730,5 +781,48 @@ mod tests {
         });
         assert!(text.contains("## Custom Capability"));
         assert!(text.contains("Custom guidance."));
+    }
+
+    #[test]
+    fn native_tools_prompt_emphasizes_parallel_independent_calls() {
+        let text = compose_system_prompt(PromptComposeInput {
+            profile: PromptProfile::RootInteractive,
+            execution_mode: crate::ExecutionMode::NativeTools,
+            context: "ctx",
+            tool_list: "tools",
+            tool_names: &[],
+            has_history: false,
+            enabled_capability_ids: &ids_for(&AgentCapabilities::default()),
+            helper_bindings: &helpers_for(&AgentCapabilities::default()),
+            capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            can_write: can_write(&AgentCapabilities::default()),
+            include_soul: false,
+            project_instructions: "",
+            overrides: &[],
+        });
+        assert!(text.contains("emit them together in the same response"));
+        assert!(text.contains("Good candidates for one-turn parallel calls"));
+        assert!(text.contains("Do not parallelize dependent steps"));
+    }
+
+    #[test]
+    fn native_tools_prompt_prefers_batch_when_available() {
+        let text = compose_system_prompt(PromptComposeInput {
+            profile: PromptProfile::RootInteractive,
+            execution_mode: crate::ExecutionMode::NativeTools,
+            context: "ctx",
+            tool_list: "tools",
+            tool_names: &["batch".to_string()],
+            has_history: false,
+            enabled_capability_ids: &ids_for(&AgentCapabilities::default()),
+            helper_bindings: &helpers_for(&AgentCapabilities::default()),
+            capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            can_write: can_write(&AgentCapabilities::default()),
+            include_soul: false,
+            project_instructions: "",
+            overrides: &[],
+        });
+        assert!(text.contains("prefer `batch`"));
+        assert!(text.contains("Use `batch(tool_calls=[...])`"));
     }
 }

@@ -18,6 +18,14 @@ impl TaskStore {
         ToolResult::err(json!(msg.into()))
     }
 
+    fn agent_id(args: &serde_json::Value) -> String {
+        args.get("__agent_id__")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("root")
+            .to_string()
+    }
+
     fn task_to_json(t: &crate::store::TaskEntry) -> serde_json::Value {
         json!({
             "__type__": "task",
@@ -177,12 +185,9 @@ impl TaskStore {
             .get("id")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty());
-        let owner = match args.get("owner").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() => s,
-            _ => return Self::err("Missing required parameter: owner"),
-        };
+        let owner = Self::agent_id(args);
 
-        match self.store.claim_task(id, owner) {
+        match self.store.claim_task(id, &owner) {
             Ok(entry) => ToolResult::ok(Self::task_to_json(&entry)),
             Err(msg) => Self::err(msg),
         }
@@ -212,13 +217,40 @@ impl ToolProvider for TaskStore {
         vec![
             ToolDefinition {
                 name: "create_task".into(),
-                description: "Create a new task. Returns the Task object.".into(),
+                description: vec![crate::ToolText::new(
+                    "Create a new task. Required field: `subject` (not `title`). Returns the Task object.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![
                     ToolParam::typed("subject", "str"),
-                    ToolParam { name: "description".into(), r#type: "str".into(), description: "Detailed description of what needs to be done".into(), required: false },
-                    ToolParam { name: "priority".into(), r#type: "str".into(), description: "high, medium, or low (default: medium)".into(), required: false },
-                    ToolParam { name: "active_form".into(), r#type: "str".into(), description: "Present-continuous label shown in spinner (e.g. 'Fixing auth')".into(), required: false },
-                    ToolParam { name: "metadata".into(), r#type: "dict".into(), description: "Arbitrary key/value metadata".into(), required: false },
+                    ToolParam {
+                        name: "description".into(),
+                        r#type: "str".into(),
+                        description: "Detailed description of what needs to be done".into(),
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "priority".into(),
+                        r#type: "str".into(),
+                        description: "high, medium, or low (default: medium)".into(),
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "active_form".into(),
+                        r#type: "str".into(),
+                        description:
+                            "Present-continuous label shown in spinner (e.g. 'Fixing auth')".into(),
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "metadata".into(),
+                        r#type: "dict".into(),
+                        description: "Arbitrary key/value metadata".into(),
+                        required: false,
+                    },
                 ],
                 returns: "Task".into(),
                 examples: vec![],
@@ -227,10 +259,29 @@ impl ToolProvider for TaskStore {
             },
             ToolDefinition {
                 name: "tasks".into(),
-                description: "List tasks. Returns a list of Task objects. Optional filters: status, blocked.".into(),
+                description: vec![crate::ToolText::new(
+                    "List tasks. Returns a list of Task objects. Optional filters: status, blocked.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![
-                    ToolParam { name: "status".into(), r#type: "str".into(), description: "Filter by status: pending, in_progress, completed, cancelled".into(), required: false },
-                    ToolParam { name: "blocked".into(), r#type: "bool".into(), description: "Filter by blocked state: True for blocked tasks, False for unblocked".into(), required: false },
+                    ToolParam {
+                        name: "status".into(),
+                        r#type: "str".into(),
+                        description: "Filter by status: pending, in_progress, completed, cancelled"
+                            .into(),
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "blocked".into(),
+                        r#type: "bool".into(),
+                        description:
+                            "Filter by blocked state: True for blocked tasks, False for unblocked"
+                                .into(),
+                        required: false,
+                    },
                 ],
                 returns: "list[Task]".into(),
                 examples: vec![],
@@ -239,7 +290,13 @@ impl ToolProvider for TaskStore {
             },
             ToolDefinition {
                 name: "get_task".into(),
-                description: "Get a single task by ID.".into(),
+                description: vec![crate::ToolText::new(
+                    "Get a single task by ID.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![ToolParam::typed("id", "str")],
                 returns: "Task".into(),
                 examples: vec![],
@@ -248,19 +305,61 @@ impl ToolProvider for TaskStore {
             },
             ToolDefinition {
                 name: "update_task".into(),
-                description: "Update a task. Pass only the fields to change. Returns updated Task.".into(),
+                description: vec![crate::ToolText::new(
+                    "Update a task. Pass only the fields to change. Valid status values are `pending`, `in_progress`, `completed`, and `cancelled` (not `done`). Returns updated Task.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![
                     ToolParam::typed("id", "str"),
                     ToolParam::optional("subject", "str"),
                     ToolParam::optional("description", "str"),
-                    ToolParam { name: "status".into(), r#type: "str".into(), description: "pending, in_progress, completed, or cancelled".into(), required: false },
-                    ToolParam { name: "priority".into(), r#type: "str".into(), description: "high, medium, or low".into(), required: false },
+                    ToolParam {
+                        name: "status".into(),
+                        r#type: "str".into(),
+                        description: "pending, in_progress, completed, or cancelled".into(),
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "priority".into(),
+                        r#type: "str".into(),
+                        description: "high, medium, or low".into(),
+                        required: false,
+                    },
                     ToolParam::optional("active_form", "str"),
-                    ToolParam { name: "metadata".into(), r#type: "dict".into(), description: "Merge into existing metadata (set key to null to delete)".into(), required: false },
-                    ToolParam { name: "add_blocks".into(), r#type: "list".into(), description: "Task IDs that this task blocks".into(), required: false },
-                    ToolParam { name: "add_blocked_by".into(), r#type: "list".into(), description: "Task IDs that block this task".into(), required: false },
-                    ToolParam { name: "remove_blocks".into(), r#type: "list".into(), description: "Task IDs to remove from blocks".into(), required: false },
-                    ToolParam { name: "remove_blocked_by".into(), r#type: "list".into(), description: "Task IDs to remove from blocked_by".into(), required: false },
+                    ToolParam {
+                        name: "metadata".into(),
+                        r#type: "dict".into(),
+                        description: "Merge into existing metadata (set key to null to delete)"
+                            .into(),
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "add_blocks".into(),
+                        r#type: "list".into(),
+                        description: "Task IDs that this task blocks".into(),
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "add_blocked_by".into(),
+                        r#type: "list".into(),
+                        description: "Task IDs that block this task".into(),
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "remove_blocks".into(),
+                        r#type: "list".into(),
+                        description: "Task IDs to remove from blocks".into(),
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "remove_blocked_by".into(),
+                        r#type: "list".into(),
+                        description: "Task IDs to remove from blocked_by".into(),
+                        required: false,
+                    },
                 ],
                 returns: "Task".into(),
                 examples: vec![],
@@ -269,28 +368,48 @@ impl ToolProvider for TaskStore {
             },
             ToolDefinition {
                 name: "claim_task".into(),
-                description: "Claim a task. If no id given, claims the next available task. Owner is auto-filled.".into(),
-                params: vec![
-                    ToolParam { name: "id".into(), r#type: "str".into(), description: "Task ID to claim (omit to auto-pick next available)".into(), required: false },
-                    ToolParam { name: "owner".into(), r#type: "str".into(), description: "Agent name (auto-filled)".into(), required: false },
-                ],
+                description: vec![crate::ToolText::new(
+                    "Claim a task and mark it in progress. If no `id` is given, claims the next available task. Owner is derived from the caller automatically.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
+                params: vec![ToolParam {
+                    name: "id".into(),
+                    r#type: "str".into(),
+                    description: "Task ID to claim (omit to auto-pick next available)".into(),
+                    required: false,
+                }],
                 returns: "Task".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
             ToolDefinition {
                 name: "delete_task".into(),
-                description: "Permanently remove a task.".into(),
+                description: vec![crate::ToolText::new(
+                    "Permanently remove a task.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![ToolParam::typed("id", "str")],
                 returns: "None".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
             ToolDefinition {
                 name: "tasks_summary".into(),
-                description: "Get a formatted overview of all tasks: counts by status, blocked tasks, high-priority items.".into(),
+                description: vec![crate::ToolText::new(
+                    "Get a formatted overview of all tasks: counts by status, blocked tasks, high-priority items.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![],
                 returns: "str".into(),
                 examples: vec![],
@@ -396,7 +515,7 @@ mod tests {
         let created = store.execute("create_task", &json!({"subject": "T"})).await;
         let id = created.result["id"].as_str().unwrap().to_string();
         let result = store
-            .execute("claim_task", &json!({"id": id, "owner": "agent-1"}))
+            .execute("claim_task", &json!({"id": id, "__agent_id__": "agent-1"}))
             .await;
         assert!(result.success);
         assert_eq!(result.result["owner"], "agent-1");
@@ -409,10 +528,10 @@ mod tests {
         let created = store.execute("create_task", &json!({"subject": "T"})).await;
         let id = created.result["id"].as_str().unwrap().to_string();
         store
-            .execute("claim_task", &json!({"id": id, "owner": "agent-1"}))
+            .execute("claim_task", &json!({"id": id, "__agent_id__": "agent-1"}))
             .await;
         let result = store
-            .execute("claim_task", &json!({"id": id, "owner": "agent-2"}))
+            .execute("claim_task", &json!({"id": id, "__agent_id__": "agent-2"}))
             .await;
         assert!(!result.success);
     }

@@ -10,14 +10,12 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
   :root {
-    /* ── Core palette ── */
     --form:    #0e0d0b;
     --ash:     #2a2a28;
     --chalk:   #e8e4d0;
     --sodium:  #e8a33c;
     --lichen:  #8a9e6c;
 
-    /* ── Extended greys ── */
     --form-deep:   #080807;
     --form-raised: #141412;
     --ash-light:   #3a3a34;
@@ -26,7 +24,6 @@
     --chalk-dim:   #7a7a70;
     --chalk-mid:   #c8c4b8;
 
-    /* ── Semantic ── */
     --bg:          var(--form);
     --bg-raised:   var(--form-raised);
     --bg-surface:  var(--ash);
@@ -39,7 +36,6 @@
     --success:     var(--lichen);
     --error:       #c44;
 
-    /* ── Typography ── */
     --font-display: 'Archivo Black', sans-serif;
     --font-body:    'Instrument Sans', sans-serif;
     --font-mono:    'JetBrains Mono', monospace;
@@ -56,7 +52,6 @@
     overflow-x: hidden;
   }
 
-  /* ── Texture overlays ── */
   .texture-noise {
     position: fixed;
     top: 0; left: 0; right: 0; bottom: 0;
@@ -136,11 +131,49 @@
     text-transform: uppercase;
   }
 
-  /* ── Sections ── */
-  .section {
-    padding: 64px;
+  /* ── Tabs (wrapping) ── */
+  .tab-bar {
+    display: flex;
+    flex-wrap: wrap;
+    padding: 8px 64px 0;
     border-bottom: 1px solid var(--border);
+    background: var(--form-deep);
+    gap: 0;
   }
+  .tab-btn {
+    font-family: var(--font-system);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ash-mid);
+    background: none;
+    border: none;
+    padding: 14px 20px 12px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    white-space: nowrap;
+    transition: color 0.2s, border-color 0.2s;
+    position: relative;
+  }
+  .tab-btn:hover { color: var(--chalk-dim); }
+  .tab-btn.active {
+    color: var(--sodium);
+    border-bottom-color: var(--sodium);
+  }
+
+  .tab-panel {
+    display: none;
+    padding: 64px;
+    animation: fadeIn 0.25s ease;
+  }
+  .tab-panel.active { display: block; }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ── Section header ── */
   .section-header {
     display: flex;
     align-items: baseline;
@@ -238,6 +271,11 @@
   .tag-bridge { color: var(--sodium); }
   .tag-tools { color: var(--lichen); }
   .tag-persist { color: var(--chalk-dim); }
+  .tag-repl { color: #b39ddb; }
+  .tag-native { color: #80cbc4; }
+  .tag-memory { color: #f48fb1; }
+  .tag-skills { color: #ffcc80; }
+  .tag-caps { color: #a5d6a7; }
 
   .arch-card-title {
     font-family: var(--font-display);
@@ -272,6 +310,7 @@
   }
   .cell-grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
   .cell-grid.cols-2 { grid-template-columns: repeat(2, 1fr); }
+  .cell-grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
   .cell {
     background: var(--form);
     padding: 16px;
@@ -297,6 +336,60 @@
     background: var(--form-deep);
     padding: 1px 5px;
     border-radius: 2px;
+  }
+
+  /* ── Code examples ── */
+  .example-block {
+    background: var(--form-deep);
+    border: 1px solid var(--border-faint);
+    border-radius: 4px;
+    margin-top: 20px;
+    overflow: hidden;
+  }
+  .example-block + .example-block {
+    margin-top: 12px;
+  }
+  .example-label {
+    font-family: var(--font-system);
+    font-size: 9px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ash-mid);
+    padding: 12px 16px 0;
+  }
+  .example-block pre {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.7;
+    color: var(--chalk-dim);
+    padding: 12px 16px 16px;
+    overflow-x: auto;
+    white-space: pre;
+    tab-size: 2;
+  }
+  .example-block pre .kw { color: var(--sodium); }
+  .example-block pre .cm { color: var(--ash-mid); font-style: italic; }
+  .example-block pre .fn { color: var(--lichen); }
+  .example-block pre .str { color: #b39ddb; }
+  .example-block pre .tag { color: var(--sodium); }
+  .example-block pre .out { color: var(--ash-text); }
+  .example-block pre .role { color: var(--chalk-mid); font-weight: 500; }
+
+  /* ── Sequence diagrams ── */
+  .sequence-block {
+    background: var(--form-deep);
+    border: 1px solid var(--border-faint);
+    border-radius: 4px;
+    margin-top: 20px;
+    padding: 20px 24px;
+    overflow-x: auto;
+  }
+  .sequence-block pre {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.8;
+    color: var(--chalk-dim);
+    white-space: pre;
   }
 
   /* ── Dataflow ── */
@@ -401,17 +494,6 @@
   }
 
   /* ── Refs ── */
-  .refs-section {
-    padding: 48px 64px;
-  }
-  .refs-section h3 {
-    font-family: var(--font-display);
-    font-size: 14px;
-    color: var(--chalk-mid);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    margin-bottom: 24px;
-  }
   .ref-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -451,6 +533,7 @@
     letter-spacing: 0.15em;
     text-transform: uppercase;
     color: var(--ash-mid);
+    border-top: 1px solid var(--border);
   }
 
   /* ── Responsive ── */
@@ -458,14 +541,15 @@
     .doc-header { padding: 40px 24px 32px; flex-direction: column; gap: 16px; }
     .doc-meta { text-align: left; }
     .doc-title { font-size: 40px; }
-    .section { padding: 40px 24px; }
+    .tab-bar { padding: 8px 24px 0; }
+    .tab-btn { padding: 12px 14px 10px; font-size: 9px; letter-spacing: 0.08em; }
+    .tab-panel { padding: 40px 24px; }
     .kpi-strip { grid-template-columns: repeat(2, 1fr); }
-    .cell-grid.cols-3 { grid-template-columns: 1fr; }
+    .cell-grid.cols-3, .cell-grid.cols-4 { grid-template-columns: 1fr; }
     .cell-grid.cols-2 { grid-template-columns: 1fr; }
     .steps { grid-template-columns: 1fr; }
     .step { border-left: none; border-top: 1px solid var(--border-faint); }
     .step:first-child { border-top: none; }
-    .refs-section { padding: 40px 24px; }
     .ref-grid { grid-template-columns: 1fr; }
     .doc-footer { padding: 24px; flex-direction: column; gap: 8px; }
   }
@@ -495,8 +579,25 @@
     </div>
   </header>
 
-  <!-- ── 01 Overview ── -->
-  <section class="section">
+  <!-- ── Tab Bar ── -->
+  <nav class="tab-bar">
+    <button class="tab-btn active" data-tab="overview">Overview</button>
+    <button class="tab-btn" data-tab="host">Host Interface</button>
+    <button class="tab-btn" data-tab="agent">Agent Core</button>
+    <button class="tab-btn" data-tab="repl">REPL Mode</button>
+    <button class="tab-btn" data-tab="native">Native Tools</button>
+    <button class="tab-btn" data-tab="tools">Tools</button>
+    <button class="tab-btn" data-tab="capabilities">Capabilities</button>
+    <button class="tab-btn" data-tab="memory">Memory &amp; History</button>
+    <button class="tab-btn" data-tab="skills">Skills</button>
+    <button class="tab-btn" data-tab="dataflow">Dataflow</button>
+    <button class="tab-btn" data-tab="refs">References</button>
+  </nav>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- TAB: Overview                                       -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <div class="tab-panel active" id="tab-overview">
     <div class="section-header">
       <span class="section-number">01</span>
       <span class="section-title">Overview</span>
@@ -504,27 +605,67 @@
     </div>
 
     <div class="kpi-strip">
-      <div class="kpi">
-        <div class="kpi-label">Layers</div>
-        <div class="kpi-value">5</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-label">Runtime</div>
-        <div class="kpi-value">Rust</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-label">Execution</div>
-        <div class="kpi-value">Python</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-label">Store</div>
-        <div class="kpi-value">SQLite</div>
-      </div>
+      <div class="kpi"><div class="kpi-label">Layers</div><div class="kpi-value">5</div></div>
+      <div class="kpi"><div class="kpi-label">Runtime</div><div class="kpi-value">Rust</div></div>
+      <div class="kpi"><div class="kpi-label">Execution</div><div class="kpi-value">Dual</div></div>
+      <div class="kpi"><div class="kpi-label">Store</div><div class="kpi-value">SQLite</div></div>
     </div>
 
     <div class="arch-grid">
+      <div class="arch-card">
+        <div class="arch-card-tag tag-host"><span class="dot"></span>Layer 1</div>
+        <div class="arch-card-title">Host Interface</div>
+        <div class="arch-card-desc">
+          Three host modes (interactive CLI, headless, embedded) feed into a single runtime API.
+          Each produces ordered <code>TurnInput</code> items that the runtime normalizes before dispatch.
+        </div>
+      </div>
+      <div class="arch-card">
+        <div class="arch-card-tag tag-normalize"><span class="dot"></span>Layer 2</div>
+        <div class="arch-card-title">Normalization</div>
+        <div class="arch-card-desc">
+          Runtime validates references, canonicalizes paths, binds image blobs by id,
+          and preserves ordered interleaving. This is the host/agent contract boundary.
+        </div>
+      </div>
+      <div class="arch-card">
+        <div class="arch-card-tag tag-agent"><span class="dot"></span>Layer 3</div>
+        <div class="arch-card-title">Agent Core</div>
+        <div class="arch-card-desc">
+          Prompt assembly, provider/model resolution, token refresh, dynamic tool projection,
+          and the iterative agent loop.
+        </div>
+      </div>
+      <div class="arch-card">
+        <div class="arch-card-tag tag-bridge"><span class="dot"></span>Layer 4</div>
+        <div class="arch-card-title">Execution Bridge</div>
+        <div class="arch-card-desc">
+          Two execution backends: embedded Python REPL and provider-native tool calls.
+          Mode-specific contracts with bidirectional streaming signals.
+        </div>
+      </div>
+      <div class="arch-card">
+        <div class="arch-card-tag tag-tools"><span class="dot"></span>Layer 5</div>
+        <div class="arch-card-title">Tools, Delegation &amp; Persistence</div>
+        <div class="arch-card-desc">
+          Composite tool graph with dynamic capability profiles, sub-agent delegation,
+          and SQLite-backed session state.
+        </div>
+      </div>
+    </div>
+  </div>
 
-      <!-- Host Interface -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- TAB: Host Interface                                 -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <div class="tab-panel" id="tab-host">
+    <div class="section-header">
+      <span class="section-number">02</span>
+      <span class="section-title">Host Interface</span>
+      <span class="section-desc">Frontend modes and the normalization boundary between host and agent.</span>
+    </div>
+
+    <div class="arch-grid">
       <div class="arch-card">
         <div class="arch-card-tag tag-host"><span class="dot"></span>Host Interface</div>
         <div class="arch-card-title">Frontend Modes</div>
@@ -548,7 +689,6 @@
         </div>
       </div>
 
-      <!-- Normalization -->
       <div class="arch-card">
         <div class="arch-card-tag tag-normalize"><span class="dot"></span>Normalization</div>
         <div class="arch-card-title">Runtime Item Normalization</div>
@@ -567,20 +707,37 @@
           </div>
         </div>
       </div>
+    </div>
+  </div>
 
-      <!-- Agent Core -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- TAB: Agent Core                                     -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <div class="tab-panel" id="tab-agent">
+    <div class="section-header">
+      <span class="section-number">03</span>
+      <span class="section-title">Agent Core</span>
+      <span class="section-desc">Prompt assembly, tool projection, and the iterative agent loop.</span>
+    </div>
+
+    <div class="arch-grid">
       <div class="arch-card">
         <div class="arch-card-tag tag-agent"><span class="dot"></span>Agent Core</div>
         <div class="arch-card-title">Prompt Assembly + Iterative Loop</div>
         <div class="arch-card-desc">
           Agent resolves provider/model, refreshes tokens, reads dynamic projection state from the active tool registry,
           injects only tools with <code>inject_into_prompt=true</code>, and appends discovery guidance for omitted tools
-          (<code>list_tools</code>/<code>search_tools</code>, <code>tools.&lt;tool&gt;</code>).
+          (<code>list_tools</code>/<code>search_tools</code>, <code>tools.&lt;tool&gt;</code>). Prompt assembly is execution-mode aware:
+          the same tool identity is projected into REPL help/docs or provider-native tool schemas depending on the active mode.
         </div>
         <div class="cell-grid cols-3">
           <div class="cell">
             <h4>Prompt Tooling</h4>
             <p>Visible tools split into prompt-injected subset + discoverable runtime subset from the active generation.</p>
+          </div>
+          <div class="cell">
+            <h4>Execution Mode</h4>
+            <p><code>repl</code> and <code>native-tools</code> use different model-output contracts, but both flow back into the same <code>AssembledTurn</code> host result.</p>
           </div>
           <div class="cell">
             <h4>Context Control</h4>
@@ -592,30 +749,344 @@
           </div>
         </div>
       </div>
+    </div>
+  </div>
 
-      <!-- Execution Bridge -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- TAB: REPL Mode                                      -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <div class="tab-panel" id="tab-repl">
+    <div class="section-header">
+      <span class="section-number">04</span>
+      <span class="section-title">REPL Mode</span>
+      <span class="section-desc">Embedded Python execution with persistent state across turns.</span>
+    </div>
+
+    <div class="arch-grid">
       <div class="arch-card">
-        <div class="arch-card-tag tag-bridge"><span class="dot"></span>Execution Bridge</div>
-        <div class="arch-card-title">Session + Embedded Python REPL</div>
+        <div class="arch-card-tag tag-repl"><span class="dot"></span>Execution Contract</div>
+        <div class="arch-card-title">REPL Execution Model</div>
         <div class="arch-card-desc">
-          Session spins up embedded Python, registers tool definitions/capabilities, and executes code blocks in a persistent namespace.
-          Runtime reconfigure updates the same REPL between turns with atomic rollback semantics.
+          The session spins up embedded Python, registers tool definitions/capabilities,
+          and executes <code>&lt;repl&gt;</code> blocks in a persistent namespace. The model may emit prose
+          plus at most one <code>&lt;repl&gt;</code> block per turn.
         </div>
         <div class="cell-grid cols-2">
           <div class="cell">
-            <h4>Bidirectional Signals</h4>
-            <p>Message streaming, final responses, tool-call records, image attachments, and prompt requests.</p>
+            <h4>Contract Rules</h4>
+            <p>
+              <code>&lt;repl&gt;</code> blocks execute immediately when <code>&lt;/repl&gt;</code> is reached.
+              Maximum one block per turn. After execution, lash continues in a new internal turn with execution output.
+              Variables persist across turns. <code>print(...)</code> output is model-visible only.
+            </p>
           </div>
           <div class="cell">
-            <h4>State Durability</h4>
-            <p>Runtime keeps agent envelope + optional REPL snapshot blob for restore/resume; reconfigure never applies mid-turn.</p>
+            <h4>Termination</h4>
+            <p>
+              <code>done(value)</code> ends the turn and returns control. May only be called inside <code>&lt;repl&gt;</code>.
+              In interactive mode, call <code>done(...)</code> only when the final user-facing answer is ready.
+              In headless mode, call <code>done(...)</code> only after the task is fully completed.
+            </p>
           </div>
+          <div class="cell">
+            <h4>Tool Access</h4>
+            <p>
+              All visible tools are available in the <code>tools</code> module (e.g. <code>tools.read_file(...)</code>).
+              <code>from tools import *</code> is applied automatically. Use <code>await</code> only for long-running calls
+              (<code>delegate_*()</code> and shell handle methods).
+            </p>
+          </div>
+          <div class="cell">
+            <h4>Error Recovery</h4>
+            <p>
+              Tool failures raise <code>ToolError</code>; execution stops at the failing line.
+              Read the traceback, fix the cause, retry. If REPL state is corrupted, call <code>reset_repl()</code>.
+            </p>
+          </div>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Example &mdash; Reading a file</div>
+          <pre><span class="role">assistant:</span>
+Let me check the config file.
+
+<span class="tag">&lt;repl&gt;</span>
+content = <span class="fn">read_file</span>(<span class="str">"src/config.rs"</span>)
+<span class="fn">print</span>(content[:200])
+<span class="tag">&lt;/repl&gt;</span></pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Lash reinjects &rarr; next internal turn</div>
+          <pre><span class="role">system (reinjection):</span>
+<span class="out">[code output]
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+pub struct Config {
+    pub port: u16,
+    pub host: String,
+}</span></pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Example &mdash; Edit + completion</div>
+          <pre><span class="role">assistant:</span>
+I'll add the timeout field.
+
+<span class="tag">&lt;repl&gt;</span>
+<span class="fn">edit_file</span>(
+    <span class="str">"src/config.rs"</span>,
+    find=<span class="str">"pub host: String,"</span>,
+    replace=<span class="str">"pub host: String,\n    pub timeout_ms: u64,"</span>
+)
+<span class="fn">done</span>(<span class="str">"Added `timeout_ms: u64` field to the Config struct."</span>)
+<span class="tag">&lt;/repl&gt;</span></pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Example &mdash; Sub-agent delegation</div>
+          <pre><span class="role">assistant:</span>
+I'll research the codebase structure in parallel.
+
+<span class="tag">&lt;repl&gt;</span>
+<span class="kw">import</span> asyncio
+
+models, routes = <span class="kw">await</span> asyncio.<span class="fn">gather</span>(
+    <span class="fn">delegate_low</span>(<span class="str">"List all model structs in src/models/"</span>),
+    <span class="fn">delegate_low</span>(<span class="str">"List all route handlers in src/routes/"</span>),
+)
+<span class="fn">print</span>(<span class="str">"Models:"</span>, models)
+<span class="fn">print</span>(<span class="str">"Routes:"</span>, routes)
+<span class="tag">&lt;/repl&gt;</span></pre>
         </div>
       </div>
 
-      <!-- Tools + Delegation -->
       <div class="arch-card">
-        <div class="arch-card-tag tag-tools"><span class="dot"></span>Tools + Delegation</div>
+        <div class="arch-card-tag tag-repl"><span class="dot"></span>Reinjection</div>
+        <div class="arch-card-title">REPL Turn Cycle</div>
+        <div class="arch-card-desc">
+          After each <code>&lt;repl&gt;</code> block executes, the model sees code output, tool output, and errors
+          as typed feedback parts on the following turn. Python locals persist across turns and can be
+          snapshotted for resume.
+        </div>
+
+        <div class="sequence-block">
+          <pre>  <span class="role">Host</span>          <span class="role">Runtime</span>         <span class="role">Agent</span>           <span class="role">Python REPL</span>
+   │               │                │                │
+   │──TurnInput──▶│                │                │
+   │               │──assemble──▶  │                │
+   │               │                │──prose+&lt;repl&gt;─▶│
+   │               │                │                │──exec──┐
+   │               │                │                │◀───────┘
+   │               │◀──reinjection──│◀──output───────│
+   │               │──assemble──▶  │                │
+   │               │                │──done(...)────▶│
+   │◀──Assembled───│                │                │
+   │    Turn       │                │                │</pre>
+        </div>
+
+        <div class="cell-grid cols-2" style="margin-top: 20px;">
+          <div class="cell">
+            <h4>State Persistence</h4>
+            <p>Python locals persist across turns within the same session. The REPL namespace can be snapshotted and restored on session resume.</p>
+          </div>
+          <div class="cell">
+            <h4>Headless Constraint</h4>
+            <p>In headless mode, prose-only turns are invalid. The model must always execute via <code>&lt;repl&gt;</code> and finish with <code>done(...)</code>.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- TAB: Native Tools Mode                              -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <div class="tab-panel" id="tab-native">
+    <div class="section-header">
+      <span class="section-number">05</span>
+      <span class="section-title">Native Tools</span>
+      <span class="section-desc">Provider-native tool call execution with structured results.</span>
+    </div>
+
+    <div class="arch-grid">
+      <div class="arch-card">
+        <div class="arch-card-tag tag-native"><span class="dot"></span>Execution Contract</div>
+        <div class="arch-card-title">Native Tools Execution Model</div>
+        <div class="arch-card-desc">
+          The Rust agent loop sends tool schemas to the provider. The model responds with native tool calls
+          when execution is needed &mdash; no Python, no <code>&lt;repl&gt;</code>. Tool results are fed back as structured
+          content for the next turn.
+        </div>
+        <div class="cell-grid cols-2">
+          <div class="cell">
+            <h4>Contract Rules</h4>
+            <p>
+              Use native tool calls when execution is needed. Do not emit <code>&lt;repl&gt;</code> blocks or Python code.
+              When several tool calls are independent, emit them together in the same response.
+              Use serial calls only when later arguments depend on earlier results.
+            </p>
+          </div>
+          <div class="cell">
+            <h4>Termination</h4>
+            <p>
+              Finish by returning a final assistant answer. No fake tool calls or placeholder arguments.
+              Do not stop after tool execution unless the task is actually complete.
+              In headless mode, keep calling tools until the task is done, then return a final answer.
+            </p>
+          </div>
+          <div class="cell">
+            <h4>Tool Access</h4>
+            <p>
+              The runtime exposes visible tools as native tool call schemas. Use only the tools shown in Available Tools.
+              Prefer parallel independent calls in one turn. If <code>batch</code> is available, prefer it for 2+ independent calls.
+              Never invent tool names or arguments.
+            </p>
+          </div>
+          <div class="cell">
+            <h4>Parallelism</h4>
+            <p>
+              Good candidates for one-turn parallel calls: reading several files, multiple searches, independent inspections.
+              Do not parallelize dependent steps, ordered stateful edits, or operations whose arguments depend on prior output.
+            </p>
+          </div>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Example &mdash; Single tool call</div>
+          <pre><span class="role">assistant:</span>
+Let me check the config file.
+
+<span class="kw">tool_call:</span> <span class="fn">read_file</span>
+  <span class="str">path</span>: "src/config.rs"</pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Runtime reinjects &rarr; tool result</div>
+          <pre><span class="role">tool_result:</span> <span class="fn">read_file</span>
+<span class="out">use serde::Deserialize;
+
+#[derive(Deserialize)]
+pub struct Config {
+    pub port: u16,
+    pub host: String,
+}</span></pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Example &mdash; Parallel independent calls (same turn)</div>
+          <pre><span class="role">assistant:</span>
+I'll read both files at once.
+
+<span class="kw">tool_call:</span> <span class="fn">read_file</span>
+  <span class="str">path</span>: "src/config.rs"
+
+<span class="kw">tool_call:</span> <span class="fn">read_file</span>
+  <span class="str">path</span>: "src/main.rs"
+
+<span class="kw">tool_call:</span> <span class="fn">grep</span>
+  <span class="str">pattern</span>: "timeout"
+  <span class="str">path</span>: "src/"</pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Runtime reinjects &rarr; grouped tool results</div>
+          <pre><span class="role">tool_result:</span> <span class="fn">read_file</span> <span class="cm">(call 1)</span>
+<span class="out">use serde::Deserialize;
+...</span>
+
+<span class="role">tool_result:</span> <span class="fn">read_file</span> <span class="cm">(call 2)</span>
+<span class="out">fn main() {
+    let config = Config::load();
+...</span>
+
+<span class="role">tool_result:</span> <span class="fn">grep</span> <span class="cm">(call 3)</span>
+<span class="out">src/server.rs:42:    let timeout = Duration::from_millis(config.timeout_ms);</span></pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Example &mdash; Serial dependent calls (read then edit)</div>
+          <pre><span class="cm">── turn 1: read first ──</span>
+<span class="role">assistant:</span>
+<span class="kw">tool_call:</span> <span class="fn">read_file</span>
+  <span class="str">path</span>: "src/config.rs"
+
+<span class="cm">── turn 2: edit based on content ──</span>
+<span class="role">assistant:</span>
+<span class="kw">tool_call:</span> <span class="fn">edit_file</span>
+  <span class="str">path</span>: "src/config.rs"
+  <span class="str">old_text</span>: "pub host: String,"
+  <span class="str">new_text</span>: "pub host: String,\n    pub timeout_ms: u64,"
+
+<span class="cm">── turn 3: final answer ──</span>
+<span class="role">assistant:</span>
+Added `timeout_ms: u64` field to the Config struct.</pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Example &mdash; Batch tool (when available)</div>
+          <pre><span class="role">assistant:</span>
+<span class="kw">tool_call:</span> <span class="fn">batch</span>
+  <span class="str">invocations</span>:
+    - <span class="fn">read_file</span> { <span class="str">path</span>: "src/config.rs" }
+    - <span class="fn">read_file</span> { <span class="str">path</span>: "src/main.rs" }
+    - <span class="fn">grep</span>    { <span class="str">pattern</span>: "timeout", <span class="str">path</span>: "src/" }</pre>
+        </div>
+      </div>
+
+      <div class="arch-card">
+        <div class="arch-card-tag tag-native"><span class="dot"></span>Reinjection</div>
+        <div class="arch-card-title">Native Turn Cycle</div>
+        <div class="arch-card-desc">
+          The model sees structured tool call/result replay instead of Python state. Tool results are reinjected
+          as direct output/error content, and grouped multi-call turns are replayed back to providers where supported.
+        </div>
+
+        <div class="sequence-block">
+          <pre>  <span class="role">Host</span>          <span class="role">Runtime</span>         <span class="role">Agent</span>           <span class="role">Provider</span>
+   │               │                │                │
+   │──TurnInput──▶│                │                │
+   │               │──assemble──▶  │                │
+   │               │                │──tool schemas─▶│
+   │               │                │◀──tool_calls───│
+   │               │◀──execute──────│                │
+   │               │──results──────▶│                │
+   │               │                │──tool results─▶│
+   │               │                │◀──more calls───│  <span class="cm">(loop)</span>
+   │               │                │     ...        │
+   │               │                │◀──final answer─│
+   │◀──Assembled───│                │                │
+   │    Turn       │                │                │</pre>
+        </div>
+
+        <div class="cell-grid cols-2" style="margin-top: 20px;">
+          <div class="cell">
+            <h4>No Persistent State</h4>
+            <p>Unlike REPL mode, there is no Python namespace. Each tool call is stateless. Context comes from the transcript and prior tool results only.</p>
+          </div>
+          <div class="cell">
+            <h4>Provider Streaming</h4>
+            <p>Native mode streams structured tool-call parts from the provider layer. Grouped multi-call turns are replayed back to providers where the API supports it.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- TAB: Tools                                          -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <div class="tab-panel" id="tab-tools">
+    <div class="section-header">
+      <span class="section-number">06</span>
+      <span class="section-title">Tools &amp; Delegation</span>
+      <span class="section-desc">Composite tool graph, dynamic providers, and sub-agent delegation.</span>
+    </div>
+
+    <div class="arch-grid">
+      <div class="arch-card">
+        <div class="arch-card-tag tag-tools"><span class="dot"></span>Tools</div>
         <div class="arch-card-title">Composite Tool Graph</div>
         <div class="arch-card-desc">
           Static providers are wrapped by <code>DynamicToolProvider</code> (in-process adapter), then projected by dynamic
@@ -624,20 +1095,42 @@
         <div class="cell-grid cols-3">
           <div class="cell">
             <h4>Core Tools</h4>
-            <p><code>read_file</code>, <code>edit_file</code>, <code>shell</code>, <code>glob</code>, <code>grep</code>, tasks, plan.</p>
+            <p><code>read_file</code>, <code>edit_file</code>, <code>write_file</code>, <code>find_replace</code>, <code>shell</code>, <code>glob</code>, <code>grep</code>, <code>ls</code>.</p>
           </div>
           <div class="cell">
             <h4>Reconfigure</h4>
             <p>All-or-nothing apply with generation checks; failures roll back and block turn dispatch.</p>
           </div>
           <div class="cell">
-            <h4>Delegation</h4>
-            <p><code>agent_call</code> forks parent dynamic state per sub-agent; low tier is filtered (no write/delegation tools).</p>
+            <h4>Discovery</h4>
+            <p><code>list_tools</code>, <code>search_tools</code>, and <code>help(tool_name)</code> let the model discover tools not injected into the prompt.</p>
           </div>
         </div>
       </div>
 
-      <!-- Persistence -->
+      <div class="arch-card">
+        <div class="arch-card-tag tag-tools"><span class="dot"></span>Delegation</div>
+        <div class="arch-card-title">Sub-Agent Orchestration</div>
+        <div class="arch-card-desc">
+          <code>agent_call</code> forks parent dynamic state per sub-agent. Sub-agents share the same filesystem/worktree
+          but get isolated tool/capability state. Low tier sub-agents are filtered (no write/delegation tools).
+        </div>
+        <div class="cell-grid cols-3">
+          <div class="cell">
+            <h4>Tiers</h4>
+            <p>Low (read-only lookup), medium (general), high (full capability). Each tier has a filtered tool set.</p>
+          </div>
+          <div class="cell">
+            <h4>Recall Pattern</h4>
+            <p>Use a low-tier read-only sub-agent to summarize <code>_history</code>/<code>_mem</code> when prior context is needed.</p>
+          </div>
+          <div class="cell">
+            <h4>Constraint</h4>
+            <p>Parallel sub-agents should avoid editing the same files concurrently.</p>
+          </div>
+        </div>
+      </div>
+
       <div class="arch-card">
         <div class="arch-card-tag tag-persist"><span class="dot"></span>Persistence</div>
         <div class="arch-card-title">Store, Logs, and Session State</div>
@@ -656,20 +1149,334 @@
           </div>
         </div>
       </div>
-
     </div>
-  </section>
 
-  <!-- ── 02 Dataflow ── -->
-  <section class="section">
+    <div class="legend" style="margin-top: 2px;">
+      <span class="pill"><b>Prompt-visible</b> <code>inject_into_prompt=true</code></span>
+      <span class="pill"><b>Discoverable</b> <code>list_tools / search_tools / tools.&lt;tool&gt;</code></span>
+      <span class="pill"><b>Reconfigure</b> <code>/tools / /caps / /reconfigure</code></span>
+      <span class="pill"><b>Unified Items</b> <code>text + refs + image + skill</code></span>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- TAB: Capabilities                                   -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <div class="tab-panel" id="tab-capabilities">
     <div class="section-header">
-      <span class="section-number">02</span>
+      <span class="section-number">07</span>
+      <span class="section-title">Capabilities</span>
+      <span class="section-desc">Dynamic capability profiles that control which tools and prompt sections are active.</span>
+    </div>
+
+    <div class="arch-grid">
+      <div class="arch-card">
+        <div class="arch-card-tag tag-caps"><span class="dot"></span>Capability System</div>
+        <div class="arch-card-title">Dynamic Capability Profiles</div>
+        <div class="arch-card-desc">
+          Each capability is a named group that bundles tools, prompt sections, and helper bindings.
+          Capabilities can be toggled at runtime via <code>/caps</code>. All are enabled by default.
+          Sub-agents inherit a fork of the parent's capability state.
+        </div>
+        <div class="cell-grid cols-2">
+          <div class="cell">
+            <h4>Structure</h4>
+            <p>
+              Each <code>CapabilityDefinition</code> has an id, name, description, optional prompt section,
+              helper bindings (REPL globals), and a list of tool names it controls.
+            </p>
+          </div>
+          <div class="cell">
+            <h4>Projection</h4>
+            <p>
+              Only tools belonging to enabled capabilities appear in the active tool registry.
+              Prompt sections from enabled capabilities are injected into the system prompt automatically.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="arch-card">
+        <div class="arch-card-tag tag-caps"><span class="dot"></span>Capability Registry</div>
+        <div class="arch-card-title">Built-in Capabilities</div>
+        <div class="arch-card-desc">
+          Ten capability groups ship by default. Each controls a coherent set of tools and optional prompt guidance.
+        </div>
+        <div class="cell-grid cols-2">
+          <div class="cell">
+            <h4>Core Read</h4>
+            <p><code>read_file</code>, <code>glob</code>, <code>grep</code>, <code>ls</code>, <code>search_tools</code>. File navigation and discovery.</p>
+          </div>
+          <div class="cell">
+            <h4>Core Write</h4>
+            <p><code>write_file</code>, <code>edit_file</code>, <code>find_replace</code>. File mutation tools.</p>
+          </div>
+          <div class="cell">
+            <h4>Shell</h4>
+            <p><code>shell</code>, <code>shell_wait</code>, <code>shell_read</code>, <code>shell_write</code>, <code>shell_kill</code>. Process handles.</p>
+          </div>
+          <div class="cell">
+            <h4>Tasks</h4>
+            <p><code>tasks</code>, <code>tasks_summary</code>, <code>get_task</code>, <code>create_task</code>, <code>update_task</code>, <code>delete_task</code>, <code>claim_task</code>.</p>
+          </div>
+          <div class="cell">
+            <h4>Planning</h4>
+            <p><code>enter_plan_mode</code>, <code>exit_plan_mode</code>. Interactive plan lifecycle.</p>
+          </div>
+          <div class="cell">
+            <h4>Delegation</h4>
+            <p><code>agent_call</code>, <code>agent_result</code>, <code>agent_output</code>, <code>agent_kill</code>. Sub-agent orchestration.</p>
+          </div>
+          <div class="cell">
+            <h4>History</h4>
+            <p><code>search_history</code>, <code>history_add_turn</code>, <code>history_export</code>, <code>history_load</code>. Persistent turn history.</p>
+          </div>
+          <div class="cell">
+            <h4>Memory</h4>
+            <p><code>search_mem</code>, <code>mem_set</code>, <code>mem_get</code>, <code>mem_delete</code>, <code>mem_export</code>, <code>mem_load</code>. Key-value memory.</p>
+          </div>
+          <div class="cell">
+            <h4>Skills</h4>
+            <p><code>skills</code>, <code>load_skill</code>, <code>read_skill_file</code>, <code>search_skills</code>. Skill discovery and loading.</p>
+          </div>
+          <div class="cell">
+            <h4>Web</h4>
+            <p><code>search_web</code>, <code>fetch_url</code>. Web search and page fetch.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- TAB: Memory & History                               -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <div class="tab-panel" id="tab-memory">
+    <div class="section-header">
+      <span class="section-number">08</span>
+      <span class="section-title">Memory &amp; History</span>
+      <span class="section-desc">Persistent key-value memory and turn history that survive context pruning.</span>
+    </div>
+
+    <div class="arch-grid">
+      <div class="arch-card">
+        <div class="arch-card-tag tag-memory"><span class="dot"></span>Memory</div>
+        <div class="arch-card-title">Persistent Key-Value Memory</div>
+        <div class="arch-card-desc">
+          <code>_mem</code> is persistent key-value memory across context pruning. Use it to store durable decisions,
+          conventions, and project-specific knowledge. Available as a REPL global and via tool calls.
+        </div>
+        <div class="cell-grid cols-2">
+          <div class="cell">
+            <h4>API</h4>
+            <p>
+              <code>_mem.set(key, description, value=None)</code> &mdash; store/update<br>
+              <code>_mem.get(key)</code> &mdash; retrieve or <code>None</code><br>
+              <code>_mem.delete(key)</code> &mdash; remove<br>
+              <code>_mem.all()</code> &mdash; list keys with descriptions<br>
+              <code>_mem.search(query, mode, regex, limit, keys)</code> &mdash; search
+            </p>
+          </div>
+          <div class="cell">
+            <h4>Built-in Helper</h4>
+            <p>
+              <code>search_mem(query, mode="hybrid", regex=None, limit=10, keys=None)</code> is available as a top-level built-in in REPL mode and as a native tool in native-tools mode.
+            </p>
+          </div>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Example &mdash; Storing a convention (REPL)</div>
+          <pre><span class="tag">&lt;repl&gt;</span>
+_mem.<span class="fn">set</span>(<span class="str">"repo_convention"</span>, <span class="str">"Use snake_case for tool names"</span>)
+<span class="fn">print</span>(_mem.<span class="fn">all</span>())
+<span class="tag">&lt;/repl&gt;</span></pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Example &mdash; Searching memory (REPL)</div>
+          <pre><span class="tag">&lt;repl&gt;</span>
+results = <span class="fn">search_mem</span>(<span class="str">"naming convention"</span>)
+<span class="kw">for</span> r <span class="kw">in</span> results:
+    <span class="fn">print</span>(r.key, r.description)
+<span class="tag">&lt;/repl&gt;</span></pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Example &mdash; Searching memory (Native Tools)</div>
+          <pre><span class="role">assistant:</span>
+<span class="kw">tool_call:</span> <span class="fn">search_mem</span>
+  <span class="str">query</span>: "naming convention"
+  <span class="str">limit</span>: 5</pre>
+        </div>
+      </div>
+
+      <div class="arch-card">
+        <div class="arch-card-tag tag-memory"><span class="dot"></span>History</div>
+        <div class="arch-card-title">Persistent Turn History</div>
+        <div class="arch-card-desc">
+          <code>_history</code> tracks prior turns across context pruning. When the rolling context window drops old messages,
+          they are preserved in history for retrieval. Sub-agents can inherit parent-agent context at spawn time.
+        </div>
+        <div class="cell-grid cols-2">
+          <div class="cell">
+            <h4>API</h4>
+            <p>
+              <code>_history.user_messages()</code> &mdash; list prior user messages<br>
+              <code>_history.search(query, ...)</code> &mdash; search pruned turns<br>
+              <code>search_history(query, mode="hybrid", regex=None, limit=10, fields=None, since_turn=None)</code>
+            </p>
+          </div>
+          <div class="cell">
+            <h4>Sub-Agent Inheritance</h4>
+            <p>
+              <code>_history</code> and <code>_mem</code> can include parent-agent context inherited at spawn time.
+              A low-tier sub-agent can summarize relevant history without full write access.
+            </p>
+          </div>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Example &mdash; Recalling prior context (REPL)</div>
+          <pre><span class="tag">&lt;repl&gt;</span>
+<span class="cm"># Find what the user asked about earlier</span>
+hits = <span class="fn">search_history</span>(<span class="str">"database migration"</span>, limit=5)
+<span class="kw">for</span> h <span class="kw">in</span> hits:
+    <span class="fn">print</span>(h.turn, h.role, h.snippet)
+<span class="tag">&lt;/repl&gt;</span></pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Example &mdash; Delegating history recall (REPL)</div>
+          <pre><span class="tag">&lt;repl&gt;</span>
+<span class="cm"># Use a cheap sub-agent to mine history</span>
+summary = <span class="kw">await</span> <span class="fn">delegate_low</span>(
+    <span class="str">"Search _history for any database schema decisions and summarize them."</span>
+)
+<span class="fn">print</span>(summary)
+<span class="tag">&lt;/repl&gt;</span></pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="arch-note">
+      Use <code>_history</code> and <code>_mem</code> only when prior-turn recall is actually needed.
+      Skip history-mining detours unless the task explicitly depends on prior turns.
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- TAB: Skills                                         -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <div class="tab-panel" id="tab-skills">
+    <div class="section-header">
+      <span class="section-number">09</span>
+      <span class="section-title">Skills</span>
+      <span class="section-desc">Discoverable, loadable skill packages that extend agent behavior at runtime.</span>
+    </div>
+
+    <div class="arch-grid">
+      <div class="arch-card">
+        <div class="arch-card-tag tag-skills"><span class="dot"></span>Skills System</div>
+        <div class="arch-card-title">Skill Discovery &amp; Loading</div>
+        <div class="arch-card-desc">
+          Skills are directory-based packages containing a <code>SKILL.md</code> manifest with description and instructions,
+          plus optional supporting files. They live in <code>~/.lash/skills/</code> (global) and <code>.lash/skills/</code> (project-local),
+          with project-local overriding global by name.
+        </div>
+        <div class="cell-grid cols-3">
+          <div class="cell">
+            <h4>Structure</h4>
+            <p>
+              Each skill is a directory with a <code>SKILL.md</code> file.
+              The manifest contains a description and instructions that get injected into the agent's context when loaded.
+              Optional files alongside the manifest are accessible via <code>read_skill_file</code>.
+            </p>
+          </div>
+          <div class="cell">
+            <h4>Discovery</h4>
+            <p>
+              <code>skills</code> lists all available skills with names and descriptions.
+              <code>search_skills(query, ...)</code> performs hybrid search across skill metadata.
+              Both global and project-local skill directories are scanned.
+            </p>
+          </div>
+          <div class="cell">
+            <h4>Loading</h4>
+            <p>
+              <code>load_skill(name)</code> returns the full skill definition including instructions and file listing.
+              The agent then follows the skill's instructions to complete the requested workflow.
+            </p>
+          </div>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Example &mdash; Discovering skills (REPL)</div>
+          <pre><span class="tag">&lt;repl&gt;</span>
+<span class="cm"># List all available skills</span>
+all_skills = <span class="fn">skills</span>()
+<span class="kw">for</span> s <span class="kw">in</span> all_skills:
+    <span class="fn">print</span>(s.name, <span class="str">"-"</span>, s.description)
+<span class="tag">&lt;/repl&gt;</span></pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Example &mdash; Loading and using a skill (REPL)</div>
+          <pre><span class="tag">&lt;repl&gt;</span>
+skill = <span class="fn">load_skill</span>(<span class="str">"frontend-design"</span>)
+<span class="fn">print</span>(skill.instructions)
+<span class="cm"># Agent now follows the skill's instructions</span>
+<span class="tag">&lt;/repl&gt;</span></pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Example &mdash; Searching skills (Native Tools)</div>
+          <pre><span class="role">assistant:</span>
+<span class="kw">tool_call:</span> <span class="fn">search_skills</span>
+  <span class="str">query</span>: "UI component library"
+  <span class="str">limit</span>: 5</pre>
+        </div>
+      </div>
+
+      <div class="arch-card">
+        <div class="arch-card-tag tag-skills"><span class="dot"></span>Skill Manifest</div>
+        <div class="arch-card-title">SKILL.md Format</div>
+        <div class="arch-card-desc">
+          The manifest is a markdown file parsed for name (directory name), description (first paragraph),
+          and instructions (full content). Additional files in the skill directory are listed and accessible.
+        </div>
+        <div class="cell-grid cols-2">
+          <div class="cell">
+            <h4>Resolution Order</h4>
+            <p>
+              <code>~/.lash/skills/</code> is scanned first (global), then <code>.lash/skills/</code> (project-local).
+              Project-local skills override global skills with the same name.
+            </p>
+          </div>
+          <div class="cell">
+            <h4>File Access</h4>
+            <p>
+              <code>read_skill_file(skill_name, file_path)</code> reads supporting files bundled with the skill,
+              such as templates, schemas, or reference code.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- TAB: Dataflow                                       -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <div class="tab-panel" id="tab-dataflow">
+    <div class="section-header">
+      <span class="section-number">10</span>
       <span class="section-title">Dataflow</span>
-      <span class="section-desc">Primary execution path from host input through agent loop to streamed output.</span>
+      <span class="section-desc">Primary execution paths from host input through the agent loop to streamed output.</span>
     </div>
 
     <div class="flow-lane">
-      <h3>Primary Dataflow</h3>
+      <h3>Shared Turn Lifecycle</h3>
       <div class="steps">
         <div class="step">
           <span class="step-num">01</span>
@@ -684,47 +1491,46 @@
         <div class="step">
           <span class="step-num">03</span>
           <strong>Agent Step</strong>
-          <p>Prompt assembled from active tool/capability projection + injected tool docs.</p>
+          <p>Prompt assembled from active tool/capability projection + injected tool docs, using the current execution mode.</p>
         </div>
         <div class="step">
           <span class="step-num">04</span>
-          <strong>REPL Exec</strong>
-          <p>Python executes code blocks; bridge dispatches tool calls through dynamic adapter routing.</p>
+          <strong>Mode Exec</strong>
+          <p>Execution diverges here: persistent Python REPL for <code>repl</code>, provider-native tool loop for <code>native-tools</code>.</p>
         </div>
         <div class="step">
           <span class="step-num">05</span>
           <strong>Output</strong>
-          <p>Events stream back; final answer + updated envelope returned to host.</p>
+          <p>Events stream back; final answer + updated envelope return as one canonical <code>AssembledTurn</code>.</p>
         </div>
       </div>
     </div>
+  </div>
 
-    <div class="legend">
-      <span class="pill"><b>Prompt-visible</b> <code>inject_into_prompt=true</code></span>
-      <span class="pill"><b>Discoverable</b> <code>list_tools / search_tools / tools.&lt;tool&gt;</code></span>
-      <span class="pill"><b>Reconfigure</b> <code>/tools / /caps / /reconfigure</code></span>
-      <span class="pill"><b>Unified Items</b> <code>text + refs + image + skill</code></span>
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- TAB: References                                     -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <div class="tab-panel" id="tab-refs">
+    <div class="section-header">
+      <span class="section-number">11</span>
+      <span class="section-title">Key Source Files</span>
+      <span class="section-desc">Primary source locations for each architectural layer.</span>
     </div>
 
-    <div class="arch-note">
-      Architecture constraint: sub-agents share the same filesystem/worktree. Each sub-agent has an isolated fork
-      of parent dynamic tool/capability state, but parallel branches should still avoid editing the same files concurrently.
-    </div>
-  </section>
-
-  <!-- ── 03 Key Source Files ── -->
-  <section class="refs-section">
-    <h3>Key Source Files</h3>
     <div class="ref-grid">
       <div class="ref"><b>CLI Wiring</b><code>lash-cli/src/main.rs</code></div>
       <div class="ref"><b>Runtime API</b><code>lash/src/runtime.rs</code></div>
       <div class="ref"><b>Dynamic Runtime</b><code>lash/src/dynamic.rs</code></div>
       <div class="ref"><b>Agent Loop</b><code>lash/src/agent/mod.rs</code></div>
+      <div class="ref"><b>Prompt Contracts</b><code>lash/src/agent/prompt.rs</code></div>
       <div class="ref"><b>Session Bridge</b><code>lash/src/session.rs</code></div>
+      <div class="ref"><b>LLM Message Types</b><code>lash/src/llm/types.rs</code></div>
       <div class="ref"><b>Embedded Python</b><code>lash/src/embedded.rs + lash/python/repl.py</code></div>
       <div class="ref"><b>Tool Model</b><code>lash/src/lib.rs + lash/src/tools/*</code></div>
+      <div class="ref"><b>Capabilities</b><code>lash/src/capabilities.rs</code></div>
+      <div class="ref"><b>Skills</b><code>lash/src/tools/skills.rs</code></div>
     </div>
-  </section>
+  </div>
 
   <footer class="doc-footer">
     <div>Lash Architecture &mdash; 2026</div>
@@ -732,6 +1538,17 @@
   </footer>
 
 </div>
+
+<script>
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    });
+  });
+</script>
 
 </body>
 </html>

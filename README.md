@@ -1,6 +1,6 @@
 # lash
 
-AI coding agent with a persistent Python REPL, hashline-safe file editing, and a host-friendly runtime API for TUI and headless frontends.
+AI coding agent with a persistent Python REPL or native tool-calling execution mode, hashline-safe file editing, and a host-friendly runtime API for TUI and headless frontends.
 
 ## Setup
 
@@ -72,7 +72,8 @@ Then bootstrap bundled Python and set `PYO3_CONFIG_FILE` before running Cargo (s
 lash                               # start interactive TUI session
 lash -p "summarize this repo"      # headless mode: run one prompt and print result
 lash --print "summarize this repo"  # same, long form
-lash --model gpt-5.3-codex         # override model
+lash --model gpt-5.4               # override model
+lash --execution-mode native-tools # use provider-native tool calling instead of the Python REPL
 lash --no-mouse                    # disable mouse (re-enables terminal text selection)
 lash --provider                    # force provider setup flow
 lash --reset                       # delete ~/.lash and ~/.cache/lash, then exit
@@ -114,12 +115,12 @@ Use `/skills` to browse, `/<skill-name>` to invoke, or `load_skill("name")` from
 
 Use `scripts/run-terminalbench.sh` to run Harbor + Terminal Bench 2 with the in-repo lash adapter.
 
-By default it runs `terminal-bench-sample@2.0`, builds a glibc-compatible binary in `target-bookworm/release/lash`, and uses your local `~/.lash/config.json` inside benchmark containers (so OAuth/OpenRouter config is reused).
+By default it runs `terminal-bench-sample@2.0`, builds a glibc-compatible binary in `target-bookworm/release/lash`, and uses your local `~/.lash/config.json` inside benchmark containers (so OAuth/OpenAI-generic config is reused).
 
 ```bash
 scripts/run-terminalbench.sh --sample
 scripts/run-terminalbench.sh --full --task "git-*"
-scripts/run-terminalbench.sh --sample --task chess-best-move --model gpt-5.3-codex
+scripts/run-terminalbench.sh --sample --task chess-best-move --model gpt-5.4
 scripts/run-terminalbench.sh --sample --build-mode host   # use host binary instead
 ```
 
@@ -129,7 +130,8 @@ scripts/run-terminalbench.sh --sample --build-mode host   # use host binary inst
 |---|---|
 | `/clear`, `/new` | Reset conversation |
 | `/controls` | Show keyboard shortcuts |
-| `/model <name>` | Switch LLM model |
+| `/model [name]` | Show current model or switch LLM model |
+| `/mode [name]` | Show current execution mode or switch between `repl` and `native-tools` |
 | `/provider` | Open provider setup in-app |
 | `/login` | Alias for `/provider` |
 | `/logout` | Remove stored credentials from disk |
@@ -143,6 +145,12 @@ scripts/run-terminalbench.sh --sample --build-mode host   # use host binary inst
 | `/exit`, `/quit` | Quit |
 
 `/logout` only clears persisted config. The active session may continue with in-memory credentials until you switch provider or restart.
+
+`repl` is the default execution mode. `native-tools` uses provider-native tool calling with the same lash tool definitions, but it does not preserve arbitrary Python locals across turns.
+
+`batch` is native-tools-only. Use it for 2-25 independent tool calls when you already know the arguments up front; it runs those calls concurrently and returns a structured per-call result summary.
+
+In `native-tools`, lash persists structured tool call/result history and replays it back to providers as native tool-call turns. Multi-call assistant steps are replayed as grouped tool-calling turns where the provider supports it, and tool results are fed back as direct output/error content rather than wrapped in an extra lash-specific envelope.
 
 ## Plan Mode
 
@@ -174,18 +182,42 @@ Default root model by provider:
 
 | Provider | Default model |
 |---|---|
-| `OpenRouter` | `anthropic/claude-sonnet-4.6` |
+| `openai-generic` | `anthropic/claude-sonnet-4.6` |
 | `Claude` | `claude-opus-4-6` |
-| `Codex` | `gpt-5.3-codex` |
+| `Codex` | `gpt-5.4` |
 | `Google OAuth` | `gemini-3.1-pro-preview` |
+
+`openai-generic` defaults to `https://openrouter.ai/api/v1` as its base URL.
+
+Stored config lives at `~/.lash/config.json` and uses this shape:
+
+```json
+{
+  "provider": {
+    "type": "openai-generic",
+    "api_key": "...",
+    "base_url": "https://openrouter.ai/api/v1"
+  },
+  "auxiliary_secrets": {
+    "tavily_api_key": "..."
+  },
+  "agent_models": {
+    "low": "...",
+    "medium": "...",
+    "high": "..."
+  }
+}
+```
+
+`auxiliary_secrets.tavily_api_key` is the supported Tavily location. The old top-level `tavily_api_key` field and legacy sub-agent tier aliases are no longer part of the documented config surface.
 
 Default sub-agent tier mapping (`low` / `medium` / `high`):
 
 | Provider | low | medium | high |
 |---|---|---|---|
-| `OpenRouter` | `minimax/minimax-m2.5` | `z-ai/glm-5` | `anthropic/claude-sonnet-4.6` |
+| `openai-generic` | `minimax/minimax-m2.5` | `z-ai/glm-5` | `anthropic/claude-sonnet-4.6` |
 | `Claude` | `claude-haiku-4-5` | `claude-sonnet-4-6` | `claude-sonnet-4-6` |
-| `Codex` | `gpt-5.3-codex-spark` | `gpt-5.3-codex` (`reasoning=medium`) | `gpt-5.3-codex` (`reasoning=high`) |
+| `Codex` | `gpt-5.3-codex-spark` | `gpt-5.4` (`reasoning=medium`) | `gpt-5.4` (`reasoning=high`) |
 | `Google OAuth` | `gemini-3-flash-preview` | `gemini-3.1-pro-preview` | `gemini-3.1-pro-preview` |
 
 ## Frontend / Runtime Integration
@@ -224,10 +256,10 @@ This preserves interleaving and intent, e.g. text -> image -> text -> file refer
 `RuntimeEngine` exposes two first-class host APIs:
 
 - `stream_turn(input, sink, cancel)`:
-  - Streams raw `AgentEvent` values to an `EventSink`.
+  - Streams low-level, mode-specific `AgentEvent` values to an `EventSink`.
   - Returns canonical `AssembledTurn` when the turn terminates.
 - `run_turn_assembled(input, cancel)`:
-  - Convenience path when the host only needs the terminal structured result.
+  - Convenience path when the host only needs the high-level terminal result.
 
 ### Assembled turn contract
 
@@ -235,10 +267,19 @@ This preserves interleaving and intent, e.g. text -> image -> text -> file refer
 
 - `status`: `completed` | `interrupted` | `failed`
 - `done_reason`: `model_stop` | `max_turns` | `user_abort` | `tool_failure` | `runtime_error`
+- `execution.mode`: `repl` | `native_tools`
+- `execution.had_tool_calls` and `execution.had_code_execution`: high-level execution summary
 - `assistant_output.safe_text`: host-renderable output (always present, may be empty)
 - `assistant_output.raw_text`: unsanitized terminal output (always present, may be empty)
 - `assistant_output.state`: `usable` | `empty_output` | `traceback_only` | `sanitized` | `recovered_from_error`
-- `tool_calls`, `tool_outputs`, `errors`, `token_usage`, and updated `state`
+- `tool_calls`, `code_outputs`, `errors`, `token_usage`, and updated `state`
+
+High-level contract:
+
+- `AssembledTurn` is stable across execution modes.
+- `native-tools` is a subset of the `repl` result shape at this level.
+- REPL-only detail is represented by `code_outputs`, which is empty for native tool-calling turns.
+- The `batch` tool is an optimization at the execution layer only; batched work still folds back into the same high-level turn contract.
 
 Host/runtime policy knobs are configured via `RuntimeConfig`:
 
@@ -250,7 +291,7 @@ Integration invariants:
 
 - Keep one `RuntimeEngine` instance per active session.
 - Do not rebuild message history manually between turns while a runtime is alive.
-- Treat streamed `AgentEvent`s as preview/progress; render terminal user output from `AssembledTurn.assistant_output.safe_text`.
+- Treat streamed `AgentEvent`s as low-level preview/progress; render terminal user output from `AssembledTurn.assistant_output.safe_text`.
 
 ## Tool Exposure Model
 
@@ -258,6 +299,8 @@ Tools define `inject_into_prompt: bool` (`lash/src/lib.rs`).
 
 - `inject_into_prompt=true`: tool appears directly in the LLM system prompt.
 - `inject_into_prompt=false`: tool is omitted from prompt for brevity, but still callable at runtime.
+- Tool identity is shared across execution modes, but tool `description` and `examples` are mode-scoped.
+- Lash projects REPL-tagged metadata into the Python REPL/help surface, and native-tools-tagged metadata into provider-native tool schemas/prompt docs.
 
 Runtime discovery is available via:
 
@@ -266,6 +309,24 @@ Runtime discovery is available via:
 
 The REPL exposes the full tool namespace under `tools` (for example `tools.read_file(...)`, `tools.search_tools(...)`).
 It also implicitly runs `from tools import *`, so visible tools can be called directly.
+
+### Default Native-Tools Surface
+
+With the default capability profile, `native-tools` can call:
+
+- Core read: `read_file`, `glob`, `grep`, `ls`, `search_tools`
+- Core write: `write_file`, `edit_file`, `find_replace`
+- Shell: `shell`, `shell_wait`, `shell_read`, `shell_write`, `shell_kill`
+- Tasks: `tasks`, `tasks_summary`, `get_task`, `create_task`, `update_task`, `delete_task`, `claim_task`
+- Planning: `enter_plan_mode`, `exit_plan_mode`
+- Delegation: `agent_call`, `agent_result`, `agent_output`, `agent_kill`
+- History: `search_history`, `history_add_turn`, `history_export`, `history_load`
+- Memory: `search_mem`, `mem_set_turn`, `mem_set`, `mem_get`, `mem_delete`, `mem_export`, `mem_load`
+- Skills: `skills`, `load_skill`, `read_skill_file`, `search_skills`
+- Web, when Tavily is configured: `search_web`, `fetch_url`
+- Native-tools only: `batch`
+
+This is the callable default surface, not the prompt-injected subset. Lash still injects only a smaller prompt-visible tool list and relies on `list_tools(...)` / `search_tools(...)` for discovery of omitted tools.
 
 ## Filesystem Listing Output
 
