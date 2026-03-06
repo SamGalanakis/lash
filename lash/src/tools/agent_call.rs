@@ -152,6 +152,8 @@ impl AgentCall {
             llm_log_path: self.config.llm_log_path.clone(),
             headless: self.config.headless,
             prompt_overrides: self.config.prompt_overrides.clone(),
+            instruction_source: self.config.instruction_source.clone(),
+            execution_mode: self.config.execution_mode,
             ..Default::default()
         }
     }
@@ -426,6 +428,8 @@ impl AgentCall {
                 id: "p0".to_string(),
                 kind: PartKind::Text,
                 content: user_content,
+                tool_call_id: None,
+                tool_name: None,
                 prune_state: PruneState::Intact,
             }],
         }];
@@ -642,20 +646,52 @@ impl ToolProvider for AgentCall {
         vec![
             ToolDefinition {
                 name: "agent_call".into(),
-                description: r#"Spawn a sub-agent to perform a task. Returns an AgentHandle with .result(), .output(), .kill(). Use intelligence="low" for fast read-only tasks (lookup/summarize), and medium/high for edits/refactors. Sub-agents inherit your _mem and _history (read-only). Use await on .result() to get {"result": str, "context": [str]}."#.into(),
+                description: vec![
+                    crate::ToolText::new(
+                        r#"Spawn a sub-agent to perform a task. In REPL mode, `agent_call(...)` returns an AgentHandle immediately; then use `result = await handle.result()`. For compatibility, `await agent_call(...)` also works and yields the same handle. The handle also supports `await handle.output()` and `await handle.kill()`. Use intelligence="low" for fast read-only tasks (lookup/summarize), and medium/high for edits/refactors. Sub-agents inherit your _mem and _history (read-only)."#,
+                        [crate::ExecutionMode::Repl],
+                    ),
+                    crate::ToolText::new(
+                        r#"Spawn a sub-agent to perform a task. Returns an AgentHandle with `.result()`, `.output()`, and `.kill()`. Use intelligence="low" for fast read-only tasks (lookup/summarize), and medium/high for edits/refactors. Sub-agents inherit your _mem and _history (read-only)."#,
+                        [crate::ExecutionMode::NativeTools],
+                    ),
+                ],
                 params: vec![
                     ToolParam::typed("prompt", "str"),
                     ToolParam::typed("intelligence", "str"),
                     ToolParam::optional("schema", "str"),
                 ],
                 returns: "AgentHandle".into(),
-                examples: vec![],
+                examples: vec![
+                    crate::ToolText::new(
+                        "handle = agent_call(\"Summarize the auth flow\", intelligence=\"low\")",
+                        [crate::ExecutionMode::Repl],
+                    ),
+                    crate::ToolText::new(
+                        "result = await handle.result()",
+                        [crate::ExecutionMode::Repl],
+                    ),
+                    crate::ToolText::new(
+                        "handle = await agent_call(\"Summarize the auth flow\", intelligence=\"low\")  # also valid",
+                        [crate::ExecutionMode::Repl],
+                    ),
+                    crate::ToolText::new(
+                        "agent_call(prompt=\"Summarize the auth flow\", intelligence=\"low\")",
+                        [crate::ExecutionMode::NativeTools],
+                    ),
+                ],
                 hidden: false,
                 inject_into_prompt: true,
             },
             ToolDefinition {
                 name: "agent_result".into(),
-                description: "Wait for a sub-agent to finish and return its result.".into(),
+                description: vec![crate::ToolText::new(
+                    "Wait for a sub-agent to finish and return its result.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![
                     ToolParam::typed("id", "str"),
                     ToolParam::optional("timeout", "float"),
@@ -667,7 +703,13 @@ impl ToolProvider for AgentCall {
             },
             ToolDefinition {
                 name: "agent_output".into(),
-                description: "Read accumulated output from a running sub-agent (non-blocking).".into(),
+                description: vec![crate::ToolText::new(
+                    "Read accumulated output from a running sub-agent (non-blocking).",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![ToolParam::typed("id", "str")],
                 returns: "str".into(),
                 examples: vec![],
@@ -676,7 +718,13 @@ impl ToolProvider for AgentCall {
             },
             ToolDefinition {
                 name: "agent_kill".into(),
-                description: "Cancel a running sub-agent.".into(),
+                description: vec![crate::ToolText::new(
+                    "Cancel a running sub-agent.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![ToolParam::typed("id", "str")],
                 returns: "None".into(),
                 examples: vec![],
@@ -761,11 +809,11 @@ mod tests {
         assert_eq!(r_low, None);
 
         let (m_mid, r_mid) = pick_model_and_reasoning(&config, &None, &Tier::Medium);
-        assert_eq!(m_mid, "gpt-5.3-codex");
+        assert_eq!(m_mid, "gpt-5.4");
         assert_eq!(r_mid.as_deref(), Some("medium"));
 
         let (m_high, r_high) = pick_model_and_reasoning(&config, &None, &Tier::High);
-        assert_eq!(m_high, "gpt-5.3-codex");
+        assert_eq!(m_high, "gpt-5.4");
         assert_eq!(r_high.as_deref(), Some("high"));
     }
 
@@ -779,12 +827,29 @@ mod tests {
         let models = Some(AgentModels {
             low: None,
             medium: None,
-            high: Some("gpt-5.3-codex".to_string()),
+            high: Some("gpt-5.4".to_string()),
         });
 
         let (m, r) = pick_model_and_reasoning(&config, &models, &Tier::High);
-        assert_eq!(m, "gpt-5.3-codex");
+        assert_eq!(m, "gpt-5.4");
         assert_eq!(r.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn agent_call_docs_are_mode_specific() {
+        let defs = test_agent_call().definitions();
+        let agent_call = defs
+            .into_iter()
+            .find(|def| def.name == "agent_call")
+            .expect("agent_call definition");
+
+        let repl_desc = agent_call.description_for(crate::ExecutionMode::Repl);
+        let native_desc = agent_call.description_for(crate::ExecutionMode::NativeTools);
+
+        assert!(repl_desc.contains("returns an AgentHandle immediately"));
+        assert!(repl_desc.contains("await handle.result()"));
+        assert!(repl_desc.contains("await agent_call(...)"));
+        assert!(!native_desc.contains("returns an AgentHandle immediately"));
     }
 
     struct MockBaseTool;
@@ -795,7 +860,13 @@ mod tests {
             vec![
                 ToolDefinition {
                     name: "mock_base".into(),
-                    description: "mock".into(),
+                    description: vec![crate::ToolText::new(
+                        "mock",
+                        [
+                            crate::ExecutionMode::Repl,
+                            crate::ExecutionMode::NativeTools,
+                        ],
+                    )],
                     params: vec![],
                     returns: "None".into(),
                     examples: vec![],
@@ -804,7 +875,13 @@ mod tests {
                 },
                 ToolDefinition {
                     name: "read_file".into(),
-                    description: "mock read".into(),
+                    description: vec![crate::ToolText::new(
+                        "mock read",
+                        [
+                            crate::ExecutionMode::Repl,
+                            crate::ExecutionMode::NativeTools,
+                        ],
+                    )],
                     params: vec![],
                     returns: "str".into(),
                     examples: vec![],
@@ -813,7 +890,13 @@ mod tests {
                 },
                 ToolDefinition {
                     name: "write_file".into(),
-                    description: "mock write".into(),
+                    description: vec![crate::ToolText::new(
+                        "mock write",
+                        [
+                            crate::ExecutionMode::Repl,
+                            crate::ExecutionMode::NativeTools,
+                        ],
+                    )],
                     params: vec![],
                     returns: "None".into(),
                     examples: vec![],

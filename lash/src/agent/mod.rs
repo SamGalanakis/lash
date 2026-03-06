@@ -9,12 +9,16 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::ExecutionMode;
 use crate::ToolDefinition;
 use crate::capabilities::AgentCapabilities;
 use crate::instructions::{FsInstructionSource, InstructionSource};
 use crate::llm::factory::adapter_for;
-use crate::llm::types::{LlmAttachment, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
-use crate::provider::Provider;
+use crate::llm::types::{
+    LlmAttachment, LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmToolChoice,
+    LlmToolSpec, LlmUsage,
+};
+use crate::provider::{OPENAI_GENERIC_DEFAULT_BASE_URL, Provider};
 use crate::session::Session;
 
 pub use message::{Message, MessageRole, Part, PartKind, PruneState, messages_to_chat};
@@ -60,7 +64,7 @@ pub struct AgentConfig {
     pub capabilities: AgentCapabilities,
     /// Model identifier (e.g. "anthropic/claude-sonnet-4.6")
     pub model: String,
-    /// LLM provider (OpenRouter, Claude OAuth, Codex, or Google OAuth)
+    /// LLM provider (OpenAI-generic, Claude OAuth, Codex, or Google OAuth)
     pub provider: Provider,
     /// Override for context window size (tokens). If None, looked up from model_info.
     pub max_context_tokens: Option<usize>,
@@ -82,6 +86,8 @@ pub struct AgentConfig {
     pub prompt_overrides: Vec<PromptSectionOverride>,
     /// Host-provided instruction source (filesystem by default).
     pub instruction_source: Arc<dyn InstructionSource>,
+    /// Execution backend for turns.
+    pub execution_mode: ExecutionMode,
 }
 
 impl Default for AgentConfig {
@@ -89,9 +95,9 @@ impl Default for AgentConfig {
         Self {
             capabilities: AgentCapabilities::default(),
             model: "anthropic/claude-sonnet-4.6".to_string(),
-            provider: Provider::OpenRouter {
+            provider: Provider::OpenAiGeneric {
                 api_key: String::new(),
-                base_url: "https://openrouter.ai/api/v1".to_string(),
+                base_url: OPENAI_GENERIC_DEFAULT_BASE_URL.to_string(),
             },
             max_context_tokens: None,
             sub_agent: false,
@@ -103,6 +109,7 @@ impl Default for AgentConfig {
             headless: false,
             prompt_overrides: Vec::new(),
             instruction_source: Arc::new(FsInstructionSource::new()),
+            execution_mode: ExecutionMode::Repl,
         }
     }
 }
@@ -122,7 +129,9 @@ pub struct ErrorEnvelope {
     pub raw: Option<String>,
 }
 
-/// Events emitted during an agent run.
+/// Low-level events emitted during an agent run.
+/// These are intentionally mode-specific; hosts that want a stable cross-mode result should
+/// consume `AssembledTurn` from the runtime layer instead.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type")]
 pub enum AgentEvent {
@@ -258,6 +267,8 @@ impl TurnTerminationPolicyState {
                         3. Recommended next steps\n\
                         Do NOT make any more tool calls. Call done() immediately."
                 ),
+                tool_call_id: None,
+                tool_name: None,
                 prune_state: PruneState::Intact,
             }],
         });
@@ -338,6 +349,23 @@ pub struct Agent {
     agent_id: String,
     session: Session,
     config: AgentConfig,
+    cached_base_context: Option<String>,
+}
+
+struct ExecutionPreamble {
+    model: String,
+    tool_list: String,
+    tool_specs: Vec<LlmToolSpec>,
+    tool_names: Vec<String>,
+    enabled_capability_ids: BTreeSet<String>,
+    helper_bindings: BTreeSet<String>,
+    capability_prompt_sections: Vec<String>,
+    can_write: bool,
+    history_enabled: bool,
+    memory_enabled: bool,
+    instruction_source: Arc<dyn InstructionSource>,
+    project_instructions: String,
+    base_context: String,
 }
 
 impl Agent {
@@ -347,6 +375,7 @@ impl Agent {
             agent_id,
             session,
             config,
+            cached_base_context: None,
         }
     }
 
@@ -386,8 +415,166 @@ impl Agent {
         self.config.capabilities = capabilities;
     }
 
+    pub fn set_execution_mode(&mut self, execution_mode: ExecutionMode) {
+        self.config.execution_mode = execution_mode;
+        self.session.tools().set_execution_mode(execution_mode);
+    }
+
+    fn cached_base_context(&mut self) -> String {
+        if let Some(context) = self.cached_base_context.as_ref() {
+            return context.clone();
+        }
+        let context = build_context();
+        self.cached_base_context = Some(context.clone());
+        context
+    }
+
+    fn invalidate_context_cache_if_needed(&mut self, tool_calls: &[crate::ToolCallRecord]) {
+        let needs_refresh = tool_calls.iter().any(|call| {
+            call.success
+                && matches!(
+                    call.tool.as_str(),
+                    "write_file" | "edit_file" | "find_replace" | "shell"
+                )
+        });
+        if needs_refresh {
+            self.cached_base_context = None;
+        }
+    }
+
+    async fn prepare_execution(
+        &mut self,
+        mode: ExecutionMode,
+    ) -> Result<ExecutionPreamble, AgentEvent> {
+        match self.config.provider.ensure_fresh().await {
+            Ok(true) => {
+                let _ = crate::provider::save_provider(&self.config.provider);
+            }
+            Err(e) => {
+                return Err(make_error_event(
+                    "token_refresh",
+                    Some("refresh_failed"),
+                    format!(
+                        "Token refresh failed: {}. Re-authenticate with /provider and retry.",
+                        e
+                    ),
+                    Some(e.to_string()),
+                ));
+            }
+            _ => {}
+        }
+
+        let llm = adapter_for(&self.config.provider);
+        let model = llm.normalize_model(&self.config.model);
+
+        let all_tools = self.session.tools().definitions();
+        let visible: Vec<_> = all_tools.iter().filter(|t| !t.hidden).cloned().collect();
+        let prompt_tools: Vec<_> = visible
+            .iter()
+            .filter(|t| t.inject_into_prompt)
+            .cloned()
+            .collect();
+        let mut tool_list = ToolDefinition::format_tool_docs(&prompt_tools, mode);
+        let omitted_tool_count = visible.iter().filter(|t| !t.inject_into_prompt).count();
+        if omitted_tool_count > 0 {
+            let note = match mode {
+                ExecutionMode::Repl => format!(
+                    "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Use `list_tools()` / `search_tools(...)` to discover them, then call via `tools.<tool>(...)`."
+                ),
+                ExecutionMode::NativeTools => {
+                    format!(
+                        "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity."
+                    )
+                }
+            };
+            tool_list.push_str(&note);
+        }
+        let tool_specs = if matches!(mode, ExecutionMode::NativeTools) {
+            visible
+                .iter()
+                .map(|tool| LlmToolSpec {
+                    name: tool.name.clone(),
+                    description: tool.description_for(ExecutionMode::NativeTools),
+                    input_schema: tool.input_schema(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let tool_names: Vec<String> = visible.iter().map(|t| t.name.clone()).collect();
+        let dynamic_projection = self.session.tools().dynamic_projection();
+        let enabled_capability_ids: BTreeSet<String> = dynamic_projection
+            .as_ref()
+            .map(|p| p.enabled_capabilities.clone())
+            .unwrap_or_else(|| {
+                self.config
+                    .capabilities
+                    .enabled_capabilities
+                    .iter()
+                    .map(|id| id.as_str().to_string())
+                    .collect()
+            });
+        let helper_bindings: BTreeSet<String> = dynamic_projection
+            .as_ref()
+            .map(|p| p.helper_bindings.clone())
+            .unwrap_or_default();
+        let capability_prompt_sections: Vec<String> = dynamic_projection
+            .as_ref()
+            .map(|p| p.prompt_sections.clone())
+            .unwrap_or_default();
+        let can_write = tool_names
+            .iter()
+            .any(|name| matches!(name.as_str(), "write_file" | "edit_file" | "find_replace"));
+        let history_enabled = helper_bindings.contains("search_history")
+            || enabled_capability_ids.contains("history");
+        let memory_enabled =
+            helper_bindings.contains("search_mem") || enabled_capability_ids.contains("memory");
+        let instruction_source = Arc::clone(&self.config.instruction_source);
+        let project_instructions = instruction_source.system_instructions();
+        let base_context = self.cached_base_context();
+
+        match llm.ensure_ready(&mut self.config.provider).await {
+            Ok(changed) => {
+                if changed {
+                    let _ = crate::provider::save_provider(&self.config.provider);
+                }
+            }
+            Err(e) => {
+                return Err(make_error_event(
+                    "llm_provider",
+                    e.code.as_deref(),
+                    format!(
+                        "LLM provider initialization failed: {}. Run /provider to reconfigure credentials, then retry.",
+                        e.message
+                    ),
+                    e.raw,
+                ));
+            }
+        }
+
+        Ok(ExecutionPreamble {
+            model,
+            tool_list,
+            tool_specs,
+            tool_names,
+            enabled_capability_ids,
+            helper_bindings,
+            capability_prompt_sections,
+            can_write,
+            history_enabled,
+            memory_enabled,
+            instruction_source,
+            project_instructions,
+            base_context,
+        })
+    }
+
     pub fn capabilities(&self) -> AgentCapabilities {
         self.config.capabilities.clone()
+    }
+
+    pub fn execution_mode(&self) -> ExecutionMode {
+        self.config.execution_mode
     }
 
     /// Reset the underlying Python session (clear namespace).
@@ -421,77 +608,73 @@ impl Agent {
             };
         }
 
-        // Refresh tokens if needed before starting
-        match self.config.provider.ensure_fresh().await {
-            Ok(true) => {
-                let _ = crate::provider::save_provider(&self.config.provider);
-            }
-            Err(e) => {
-                emit!(make_error_event(
-                    "token_refresh",
-                    Some("refresh_failed"),
-                    format!(
-                        "Token refresh failed: {}. Re-authenticate with /provider and retry.",
-                        e
-                    ),
-                    Some(e.to_string()),
-                ));
+        if matches!(self.config.execution_mode, ExecutionMode::NativeTools) {
+            return self
+                .run_native_tools(messages, images, event_tx, cancel, run_offset)
+                .await;
+        }
+
+        let capabilities_json = self
+            .session
+            .tools()
+            .dynamic_capabilities_payload_json()
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "enabled_capabilities": self
+                        .config
+                        .capabilities
+                        .enabled_capabilities
+                        .iter()
+                        .map(|id| id.as_str())
+                        .collect::<Vec<_>>(),
+                    "enabled_tools": self
+                        .config
+                        .capabilities
+                        .enabled_tools
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                })
+                .to_string()
+            });
+        let generation = self.session.tools().dynamic_generation().unwrap_or(0);
+        if let Err(e) = self
+            .session
+            .reconfigure(capabilities_json, generation)
+            .await
+        {
+            emit!(make_error_event(
+                "tool_projection",
+                Some("reconfigure_failed"),
+                format!("Failed to refresh REPL tool projection: {e}"),
+                Some(e.to_string()),
+            ));
+            emit!(AgentEvent::Done);
+            return (messages, run_offset);
+        }
+
+        let ExecutionPreamble {
+            model,
+            tool_list,
+            tool_specs: _,
+            tool_names,
+            enabled_capability_ids,
+            helper_bindings,
+            capability_prompt_sections,
+            can_write,
+            history_enabled,
+            memory_enabled,
+            instruction_source,
+            project_instructions,
+            base_context,
+        } = match self.prepare_execution(ExecutionMode::Repl).await {
+            Ok(preamble) => preamble,
+            Err(event) => {
+                emit!(event);
                 emit!(AgentEvent::Done);
                 return (messages, run_offset);
             }
-            _ => {}
-        }
-
-        let llm = adapter_for(&self.config.provider);
-        let model = llm.normalize_model(&self.config.model);
-
-        // Generate tool docs, context, and dynamic prompt sections
-        let all_tools = self.session.tools().definitions();
-        let visible: Vec<_> = all_tools.iter().filter(|t| !t.hidden).cloned().collect();
-        let prompt_tools: Vec<_> = visible
-            .iter()
-            .filter(|t| t.inject_into_prompt)
-            .cloned()
-            .collect();
-        let mut tool_list = ToolDefinition::format_tool_docs(&prompt_tools);
-        let omitted_tool_count = visible.iter().filter(|t| !t.inject_into_prompt).count();
-        if omitted_tool_count > 0 {
-            let note = format!(
-                "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Use `list_tools()` / `search_tools(...)` to discover them, then call via `tools.<tool>(...)`."
-            );
-            tool_list.push_str(&note);
-        }
-        let base_context = build_context();
-        let tool_names: Vec<String> = visible.iter().map(|t| t.name.clone()).collect();
-        let dynamic_projection = self.session.tools().dynamic_projection();
-        let enabled_capability_ids: BTreeSet<String> = dynamic_projection
-            .as_ref()
-            .map(|p| p.enabled_capabilities.clone())
-            .unwrap_or_else(|| {
-                self.config
-                    .capabilities
-                    .enabled_capabilities
-                    .iter()
-                    .map(|id| id.as_str().to_string())
-                    .collect()
-            });
-        let helper_bindings: BTreeSet<String> = dynamic_projection
-            .as_ref()
-            .map(|p| p.helper_bindings.clone())
-            .unwrap_or_default();
-        let capability_prompt_sections: Vec<String> = dynamic_projection
-            .as_ref()
-            .map(|p| p.prompt_sections.clone())
-            .unwrap_or_default();
-        let can_write = tool_names
-            .iter()
-            .any(|name| matches!(name.as_str(), "write_file" | "edit_file" | "find_replace"));
-        let history_enabled = helper_bindings.contains("search_history")
-            || enabled_capability_ids.contains("history");
-        let memory_enabled =
-            helper_bindings.contains("search_mem") || enabled_capability_ids.contains("memory");
-        let instruction_source = Arc::clone(&self.config.instruction_source);
-        let project_instructions = instruction_source.system_instructions();
+        };
 
         // Keep raw image bytes so provider-specific transports can materialize
         // multimodal payloads in their native wire format.
@@ -499,28 +682,6 @@ impl Agent {
             .into_iter()
             .map(|png_bytes| ("image/png".to_string(), png_bytes))
             .collect();
-
-        // Initialize provider-specific runtime state (e.g., Cloud Code project resolution).
-        match llm.ensure_ready(&mut self.config.provider).await {
-            Ok(changed) => {
-                if changed {
-                    let _ = crate::provider::save_provider(&self.config.provider);
-                }
-            }
-            Err(e) => {
-                emit!(make_error_event(
-                    "llm_provider",
-                    e.code.as_deref(),
-                    format!(
-                        "LLM provider initialization failed: {}. Run /provider to reconfigure credentials, then retry.",
-                        e.message
-                    ),
-                    e.raw,
-                ));
-                emit!(AgentEvent::Done);
-                return (messages, run_offset);
-            }
-        }
 
         let mut cumulative_usage = TokenUsage::default();
         let mut last_input_tokens: usize = 0;
@@ -644,6 +805,8 @@ impl Agent {
                                 id: "history_note.p0".to_string(),
                                 kind: PartKind::Text,
                                 content: note,
+                                tool_call_id: None,
+                                tool_name: None,
                                 prune_state: PruneState::Intact,
                             }],
                         },
@@ -785,6 +948,7 @@ impl Agent {
                         PromptProfile::from_flags(self.config.headless, self.config.sub_agent);
                     let system_prompt = compose_system_prompt(PromptComposeInput {
                         profile,
+                        execution_mode: self.config.execution_mode,
                         context: &context,
                         tool_list: &tool_list,
                         tool_names: &tool_names,
@@ -809,6 +973,8 @@ impl Agent {
                                 data: data.clone(),
                             })
                             .collect(),
+                        tools: Vec::new(),
+                        tool_choice: LlmToolChoice::None,
                         reasoning_effort: self.config.reasoning_effort.clone(),
                         session_id: self.config.session_id.clone(),
                         stream_events: None,
@@ -951,6 +1117,68 @@ impl Agent {
                                             stop_stream_processing = true;
                                         }
                                     }
+                                    LlmStreamEvent::Part(part) => match part {
+                                        LlmOutputPart::Text { text } => {
+                                            if stop_stream_processing || text.is_empty() {
+                                                continue;
+                                            }
+                                            streamed_delta_count += 1;
+                                            streamed_char_count += text.len();
+                                            response.push_str(&text);
+
+                                            while let Some(nl) = response[last_line_start..].find('\n') {
+                                                let line_end = last_line_start + nl;
+                                                let line = response[last_line_start..line_end].to_string();
+                                                last_line_start = line_end + 1;
+
+                                                let parsed = parse_fence_line(
+                                                    &line,
+                                                    &mut in_code_fence,
+                                                    &mut current_prose,
+                                                    &mut current_code,
+                                                    &mut prose_parts,
+                                                );
+
+                                                if !parsed.prose_delta.is_empty() {
+                                                    emit!(AgentEvent::TextDelta {
+                                                        content: format!("{}\n", parsed.prose_delta),
+                                                    });
+                                                }
+
+                                                for code in parsed.codes_to_execute {
+                                                    code_parts.push(code.clone());
+                                                    emit!(AgentEvent::CodeBlock { code: code.clone() });
+                                                    if !acc.had_failure {
+                                                        execute_and_collect(
+                                                            &mut self.session,
+                                                            &code,
+                                                            &mut acc,
+                                                            &event_tx,
+                                                        )
+                                                        .await;
+                                                    }
+                                                    code_executed = true;
+                                                    if break_on_first_code || !acc.final_response.is_empty() {
+                                                        stop_stream_processing = true;
+                                                        break;
+                                                    }
+                                                }
+                                                if stop_stream_processing {
+                                                    break;
+                                                }
+                                            }
+                                            if (break_on_first_code && code_executed)
+                                                || !acc.final_response.is_empty()
+                                            {
+                                                stop_stream_processing = true;
+                                            }
+                                        }
+                                        LlmOutputPart::ToolCall { .. } => {
+                                            // Native tool-calling responses are handled by the
+                                            // dedicated native-tools loop. Ignore them here so
+                                            // the legacy REPL path stays stable.
+                                        }
+                                    },
                                     LlmStreamEvent::Usage(usage) => {
                                         usage_event_count += 1;
                                         latest_stream_usage = usage.clone();
@@ -1399,6 +1627,8 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
                                 id: format!("{}.p0", sys_id),
                                 kind: PartKind::Error,
                                 content: guidance.to_string(),
+                                tool_call_id: None,
+                                tool_name: None,
                                 prune_state: PruneState::Intact,
                             }],
                         });
@@ -1426,6 +1656,8 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
                         id: String::new(),
                         kind: PartKind::Code,
                         content: code.clone(),
+                        tool_call_id: None,
+                        tool_name: None,
                         prune_state: PruneState::Intact,
                     });
                 }
@@ -1442,6 +1674,8 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
                         id: String::new(),
                         kind: PartKind::Output,
                         content: output_text,
+                        tool_call_id: None,
+                        tool_name: None,
                         prune_state: PruneState::Intact,
                     });
                 } else if has_tool_calls {
@@ -1449,6 +1683,8 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
                         id: String::new(),
                         kind: PartKind::Output,
                         content: format!("[{} tool call(s) executed]", acc.tool_calls.len()),
+                        tool_call_id: None,
+                        tool_name: None,
                         prune_state: PruneState::Intact,
                     });
                 }
@@ -1457,6 +1693,8 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
                         id: String::new(),
                         kind: PartKind::Error,
                         content: format!("{}\nFix and retry.", err),
+                        tool_call_id: None,
+                        tool_name: None,
                         prune_state: PruneState::Intact,
                     });
                 }
@@ -1466,12 +1704,16 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
                             id: String::new(),
                             kind: PartKind::Text,
                             content: format!("[Tool image: {}]", label),
+                            tool_call_id: None,
+                            tool_name: None,
                             prune_state: PruneState::Intact,
                         });
                         feedback_parts.push(Part {
                             id: String::new(),
                             kind: PartKind::Text,
                             content: format!("{IMAGE_REF_PREFIX}{idx}"),
+                            tool_call_id: None,
+                            tool_name: None,
                             prune_state: PruneState::Intact,
                         });
                     }
@@ -1500,6 +1742,7 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
                 // Inject any newly discovered context-aware instructions from file reads.
                 let context_text =
                     resolve_context_instructions(instruction_source.as_ref(), &acc.tool_calls);
+                self.invalidate_context_cache_if_needed(&acc.tool_calls);
                 if !context_text.is_empty() {
                     let instruction_id = format!("m{}", msgs.len());
                     msgs.push(Message {
@@ -1508,7 +1751,9 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
                         parts: vec![Part {
                             id: format!("{}.p0", instruction_id),
                             kind: PartKind::Text,
-                            content: context_text,
+                            content: context_text.clone(),
+                            tool_call_id: None,
+                            tool_name: None,
                             prune_state: PruneState::Intact,
                         }],
                     });
@@ -1527,6 +1772,467 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
                 self.config.max_turns,
                 &mut msgs,
             );
+        }
+    }
+
+    async fn run_native_tools(
+        &mut self,
+        messages: Vec<Message>,
+        images: Vec<Vec<u8>>,
+        event_tx: mpsc::Sender<AgentEvent>,
+        cancel: CancellationToken,
+        run_offset: usize,
+    ) -> (Vec<Message>, usize) {
+        macro_rules! emit {
+            ($event:expr) => {
+                send_event(&event_tx, $event).await
+            };
+        }
+
+        let ExecutionPreamble {
+            model,
+            tool_list,
+            tool_specs,
+            tool_names,
+            enabled_capability_ids,
+            helper_bindings,
+            capability_prompt_sections,
+            can_write,
+            history_enabled: _,
+            memory_enabled: _,
+            instruction_source,
+            project_instructions,
+            base_context,
+        } = match self.prepare_execution(ExecutionMode::NativeTools).await {
+            Ok(preamble) => preamble,
+            Err(event) => {
+                emit!(event);
+                emit!(AgentEvent::Done);
+                return (messages, run_offset);
+            }
+        };
+
+        let mut cumulative_usage = TokenUsage::default();
+        let mut msgs = messages;
+        let mut iteration = run_offset;
+        let mut attachments: Vec<(String, Vec<u8>)> = images
+            .into_iter()
+            .map(|png_bytes| ("image/png".to_string(), png_bytes))
+            .collect();
+        let history_enabled = helper_bindings.contains("search_history")
+            || enabled_capability_ids.contains("history");
+        let context_pruned_turns = 0usize;
+
+        struct NativeToolOutcome {
+            call_id: String,
+            tool_name: String,
+            args: serde_json::Value,
+            result: crate::ToolResult,
+            duration_ms: u64,
+        }
+
+        loop {
+            if cancel.is_cancelled() {
+                emit!(AgentEvent::Done);
+                return (msgs, iteration);
+            }
+            let llm_messages = messages_to_chat(&msgs);
+
+            let history_scope = if history_enabled {
+                format!(
+                    "Context-pruned turns this run: {}. If this is 0, avoid `_history` mining detours unless prior-turn context is explicitly needed.",
+                    context_pruned_turns
+                )
+            } else {
+                format!("Context-pruned turns this run: {}.", context_pruned_turns)
+            };
+            let context = if base_context.is_empty() {
+                history_scope
+            } else {
+                format!("{base_context}\n{history_scope}")
+            };
+            let include_soul = if self.config.sub_agent {
+                self.config.include_soul
+            } else {
+                true
+            };
+            let profile = PromptProfile::from_flags(self.config.headless, self.config.sub_agent);
+            let system_prompt = compose_system_prompt(PromptComposeInput {
+                profile,
+                execution_mode: self.config.execution_mode,
+                context: &context,
+                tool_list: &tool_list,
+                tool_names: &tool_names,
+                has_history: context_pruned_turns > 0,
+                enabled_capability_ids: &enabled_capability_ids,
+                helper_bindings: &helper_bindings,
+                capability_prompt_sections: &capability_prompt_sections,
+                can_write,
+                include_soul,
+                project_instructions: &project_instructions,
+                overrides: &self.config.prompt_overrides,
+            });
+
+            emit!(AgentEvent::LlmRequest {
+                iteration,
+                message_count: llm_messages.len(),
+                tool_list: tool_list.clone(),
+            });
+
+            let llm_start = std::time::Instant::now();
+            let llm_response = 'llm_retry: {
+                let mut last_error = None;
+                for attempt in 0..=LLM_MAX_RETRIES {
+                    if attempt > 0 {
+                        let delay = LLM_RETRY_DELAYS[attempt - 1];
+                        emit!(AgentEvent::RetryStatus {
+                            wait_seconds: delay.as_secs(),
+                            attempt: attempt + 1,
+                            max_attempts: LLM_MAX_RETRIES + 1,
+                            reason: last_error
+                                .clone()
+                                .unwrap_or_else(|| "transient provider error".to_string()),
+                        });
+                        tokio::time::sleep(delay).await;
+                    }
+
+                    let llm_request = LlmRequest {
+                        model: model.clone(),
+                        system_prompt: system_prompt.clone(),
+                        messages: llm_messages.clone(),
+                        attachments: attachments
+                            .iter()
+                            .map(|(mime, data)| LlmAttachment {
+                                mime: mime.clone(),
+                                data: data.clone(),
+                            })
+                            .collect(),
+                        tools: tool_specs.clone(),
+                        tool_choice: if tool_specs.is_empty() {
+                            LlmToolChoice::None
+                        } else {
+                            LlmToolChoice::Auto
+                        },
+                        reasoning_effort: self.config.reasoning_effort.clone(),
+                        session_id: self.config.session_id.clone(),
+                        stream_events: None,
+                    };
+
+                    let mut call_provider = self.config.provider.clone();
+                    let llm = adapter_for(&call_provider);
+                    match llm.complete(&mut call_provider, llm_request).await {
+                        Ok(resp) => {
+                            self.config.provider = call_provider;
+                            break 'llm_retry resp;
+                        }
+                        Err(e) => {
+                            self.config.provider = call_provider;
+                            if e.retryable && attempt < LLM_MAX_RETRIES {
+                                last_error = Some(e.message);
+                                continue;
+                            }
+                            emit!(make_error_event(
+                                "llm_provider",
+                                e.code.as_deref(),
+                                format!("LLM error: {}", e.message),
+                                e.raw,
+                            ));
+                            emit!(AgentEvent::Done);
+                            return (msgs, iteration);
+                        }
+                    }
+                }
+
+                emit!(make_error_event(
+                    "llm_provider",
+                    Some("retries_exhausted"),
+                    format!("LLM failed after {} attempts.", LLM_MAX_RETRIES + 1),
+                    None,
+                ));
+                emit!(AgentEvent::Done);
+                return (msgs, iteration);
+            };
+
+            let usage = TokenUsage {
+                input_tokens: llm_response.usage.input_tokens,
+                output_tokens: llm_response.usage.output_tokens,
+                cached_input_tokens: llm_response.usage.cached_input_tokens,
+            };
+            cumulative_usage.add(&usage);
+            emit!(AgentEvent::TokenUsage {
+                iteration,
+                usage: usage.clone(),
+                cumulative: cumulative_usage.clone(),
+            });
+            log_llm_debug(
+                &self.config.llm_log_path,
+                &self.agent_id,
+                iteration,
+                &usage,
+                llm_response.request_body.clone(),
+                &llm_response.full_text,
+            );
+
+            let response_parts =
+                if llm_response.parts.is_empty() && !llm_response.full_text.is_empty() {
+                    vec![LlmOutputPart::Text {
+                        text: llm_response.full_text.clone(),
+                    }]
+                } else {
+                    llm_response.parts.clone()
+                };
+
+            let mut assistant_text = String::new();
+            let mut tool_calls: Vec<(String, String, String)> = Vec::new();
+            for part in response_parts {
+                match part {
+                    LlmOutputPart::Text { text } => {
+                        if !text.is_empty() {
+                            emit!(AgentEvent::TextDelta {
+                                content: text.clone(),
+                            });
+                            assistant_text.push_str(&text);
+                        }
+                    }
+                    LlmOutputPart::ToolCall {
+                        call_id,
+                        tool_name,
+                        input_json,
+                    } => {
+                        tool_calls.push((call_id, tool_name, input_json));
+                    }
+                }
+            }
+            emit!(AgentEvent::LlmResponse {
+                iteration,
+                content: assistant_text.clone(),
+                duration_ms: llm_start.elapsed().as_millis() as u64,
+            });
+
+            if tool_calls.is_empty() {
+                if assistant_text.trim().is_empty() {
+                    emit!(make_error_event(
+                        "llm_provider",
+                        Some("empty_response"),
+                        "Model returned no assistant text or tool calls.",
+                        None,
+                    ));
+                    emit!(AgentEvent::Done);
+                    return (msgs, iteration);
+                }
+                let mid = format!("m{}", msgs.len());
+                msgs.push(Message {
+                    id: mid.clone(),
+                    role: MessageRole::Assistant,
+                    parts: vec![Part {
+                        id: format!("{}.p0", mid),
+                        kind: PartKind::Prose,
+                        content: assistant_text.clone(),
+                        tool_call_id: None,
+                        tool_name: None,
+                        prune_state: PruneState::Intact,
+                    }],
+                });
+                emit!(AgentEvent::Done);
+                return (msgs, iteration);
+            }
+
+            let asst_id = format!("m{}", msgs.len());
+            let mut assistant_parts = Vec::new();
+            if !assistant_text.trim().is_empty() {
+                assistant_parts.push(Part {
+                    id: format!("{}.p{}", asst_id, assistant_parts.len()),
+                    kind: PartKind::Prose,
+                    content: assistant_text.clone(),
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: PruneState::Intact,
+                });
+            }
+            let mut pending_tool_parts = Vec::new();
+            let mut tool_records = Vec::new();
+            let tool_provider = Arc::clone(self.session.tools());
+            let mut task_handles = Vec::new();
+            for (call_id, tool_name, input_json) in tool_calls {
+                pending_tool_parts.push(Part {
+                    id: format!(
+                        "{}.p{}",
+                        asst_id,
+                        assistant_parts.len() + pending_tool_parts.len()
+                    ),
+                    kind: PartKind::ToolCall,
+                    content: input_json.clone(),
+                    tool_call_id: Some(call_id.clone()),
+                    tool_name: Some(tool_name.clone()),
+                    prune_state: PruneState::Intact,
+                });
+
+                let args = serde_json::from_str::<serde_json::Value>(&input_json)
+                    .unwrap_or_else(|_| serde_json::json!({}));
+                let provider = Arc::clone(&tool_provider);
+                let event_tx_clone = event_tx.clone();
+                let handle = tokio::spawn(async move {
+                    let (progress_tx, mut progress_rx) =
+                        tokio::sync::mpsc::unbounded_channel::<crate::SandboxMessage>();
+                    let progress_event_tx = event_tx_clone.clone();
+                    let drain_handle = tokio::spawn(async move {
+                        while let Some(sandbox_msg) = progress_rx.recv().await {
+                            if sandbox_msg.kind == "final" {
+                                continue;
+                            }
+                            let _ = progress_event_tx
+                                .send(AgentEvent::Message {
+                                    text: sandbox_msg.text,
+                                    kind: sandbox_msg.kind,
+                                })
+                                .await;
+                        }
+                    });
+
+                    let tool_start = std::time::Instant::now();
+                    let result = provider
+                        .execute_streaming(&tool_name, &args, Some(&progress_tx))
+                        .await;
+                    drop(progress_tx);
+                    let _ = drain_handle.await;
+
+                    NativeToolOutcome {
+                        call_id,
+                        tool_name,
+                        args,
+                        result,
+                        duration_ms: tool_start.elapsed().as_millis() as u64,
+                    }
+                });
+                task_handles.push(handle);
+            }
+            assistant_parts.extend(pending_tool_parts);
+            if !assistant_parts.is_empty() {
+                msgs.push(Message {
+                    id: asst_id,
+                    role: MessageRole::Assistant,
+                    parts: assistant_parts,
+                });
+            }
+
+            let mut result_parts = Vec::new();
+            for handle in task_handles {
+                let mut outcome = match handle.await {
+                    Ok(outcome) => outcome,
+                    Err(e) => NativeToolOutcome {
+                        call_id: uuid::Uuid::new_v4().to_string(),
+                        tool_name: "unknown".to_string(),
+                        args: serde_json::json!({}),
+                        result: crate::ToolResult::err_fmt(format!("tool task panicked: {e}")),
+                        duration_ms: 0,
+                    },
+                };
+
+                emit!(AgentEvent::ToolCall {
+                    name: outcome.tool_name.clone(),
+                    args: outcome.args.clone(),
+                    result: outcome.result.result.clone(),
+                    success: outcome.result.success,
+                    duration_ms: outcome.duration_ms,
+                });
+                tool_records.push(crate::ToolCallRecord {
+                    tool: outcome.tool_name.clone(),
+                    args: outcome.args.clone(),
+                    result: outcome.result.result.clone(),
+                    success: outcome.result.success,
+                    duration_ms: outcome.duration_ms,
+                });
+
+                result_parts.push(Part {
+                    id: String::new(),
+                    kind: PartKind::ToolResult,
+                    content: format_tool_result_content(
+                        outcome.result.success,
+                        &outcome.result.result,
+                    ),
+                    tool_call_id: Some(outcome.call_id.clone()),
+                    tool_name: Some(outcome.tool_name.clone()),
+                    prune_state: PruneState::Intact,
+                });
+
+                let base_image_idx = attachments.len();
+                for (image_offset, image) in std::mem::take(&mut outcome.result.images)
+                    .into_iter()
+                    .enumerate()
+                {
+                    attachments.push((image.mime.clone(), image.data.clone()));
+                    let image_idx = base_image_idx + image_offset;
+                    result_parts.push(Part {
+                        id: String::new(),
+                        kind: PartKind::Text,
+                        content: format!("[Tool image: {}]", image.label),
+                        tool_call_id: None,
+                        tool_name: None,
+                        prune_state: PruneState::Intact,
+                    });
+                    result_parts.push(Part {
+                        id: String::new(),
+                        kind: PartKind::Text,
+                        content: format!("{IMAGE_REF_PREFIX}{image_idx}"),
+                        tool_call_id: None,
+                        tool_name: None,
+                        prune_state: PruneState::Intact,
+                    });
+                }
+            }
+
+            if !result_parts.is_empty() {
+                let user_id = format!("m{}", msgs.len());
+                for (idx, part) in result_parts.iter_mut().enumerate() {
+                    part.id = format!("{}.p{}", user_id, idx);
+                }
+                msgs.push(Message {
+                    id: user_id,
+                    role: MessageRole::User,
+                    parts: result_parts,
+                });
+                let context_text =
+                    resolve_context_instructions(instruction_source.as_ref(), &tool_records);
+                self.invalidate_context_cache_if_needed(&tool_records);
+                if !context_text.is_empty() {
+                    let instruction_id = format!("m{}", msgs.len());
+                    msgs.push(Message {
+                        id: instruction_id.clone(),
+                        role: MessageRole::System,
+                        parts: vec![Part {
+                            id: format!("{}.p0", instruction_id),
+                            kind: PartKind::Text,
+                            content: context_text.clone(),
+                            tool_call_id: None,
+                            tool_name: None,
+                            prune_state: PruneState::Intact,
+                        }],
+                    });
+                }
+            }
+
+            iteration += 1;
+            if let Some(max_turns) = self.config.max_turns
+                && iteration >= run_offset + max_turns
+            {
+                let sys_id = format!("m{}", msgs.len());
+                msgs.push(Message {
+                    id: sys_id.clone(),
+                    role: MessageRole::System,
+                    parts: vec![Part {
+                        id: format!("{}.p0", sys_id),
+                        kind: PartKind::Error,
+                        content: format!(
+                            "Turn limit reached ({max_turns}) before a final assistant response."
+                        ),
+                        tool_call_id: None,
+                        tool_name: None,
+                        prune_state: PruneState::Intact,
+                    }],
+                });
+                emit!(AgentEvent::Done);
+                return (msgs, iteration);
+            }
         }
     }
 }
@@ -1562,6 +2268,27 @@ fn log_llm_debug(
     {
         use std::io::Write;
         let _ = writeln!(f, "{}", entry);
+    }
+}
+
+fn format_tool_result_content(success: bool, result: &serde_json::Value) -> String {
+    if success {
+        match result {
+            serde_json::Value::String(text) => text.clone(),
+            other => serde_json::to_string(other).unwrap_or_else(|_| "null".to_string()),
+        }
+    } else {
+        match result {
+            serde_json::Value::String(text) => {
+                if text.is_empty() {
+                    "[Tool execution failed]".to_string()
+                } else {
+                    format!("[Tool execution failed]\n{text}")
+                }
+            }
+            other => serde_json::to_string(&serde_json::json!({ "error": other }))
+                .unwrap_or_else(|_| "{\"error\":\"tool execution failed\"}".to_string()),
+        }
     }
 }
 
@@ -1713,6 +2440,8 @@ fn build_assistant_parts(msg_id: &str, prose_parts: &[String], code_parts: &[Str
                 id: format!("{}.p{}", msg_id, idx),
                 kind: PartKind::Prose,
                 content: p.clone(),
+                tool_call_id: None,
+                tool_name: None,
                 prune_state: PruneState::Intact,
             });
             idx += 1;
@@ -1724,6 +2453,8 @@ fn build_assistant_parts(msg_id: &str, prose_parts: &[String], code_parts: &[Str
                 id: format!("{}.p{}", msg_id, idx),
                 kind: PartKind::Code,
                 content: c.clone(),
+                tool_call_id: None,
+                tool_name: None,
                 prune_state: PruneState::Intact,
             });
             idx += 1;
@@ -1736,6 +2467,8 @@ fn build_assistant_parts(msg_id: &str, prose_parts: &[String], code_parts: &[Str
             id: format!("{}.p0", msg_id),
             kind: PartKind::Prose,
             content: String::new(),
+            tool_call_id: None,
+            tool_name: None,
             prune_state: PruneState::Intact,
         });
     }
@@ -1837,7 +2570,7 @@ fn parse_fence_line(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_malformed_assistant_output, parse_fence_line};
+    use super::{format_tool_result_content, is_malformed_assistant_output, parse_fence_line};
 
     #[test]
     fn parses_inline_open_and_close_tags() {
@@ -1971,6 +2704,30 @@ mod tests {
         assert!(!is_malformed_assistant_output(
             "Use `<repl>` tags only when needed."
         ));
+    }
+
+    #[test]
+    fn formats_successful_tool_results_without_wrapper() {
+        assert_eq!(
+            format_tool_result_content(true, &serde_json::json!("done")),
+            "done"
+        );
+        assert_eq!(
+            format_tool_result_content(true, &serde_json::json!({"count": 2})),
+            r#"{"count":2}"#
+        );
+    }
+
+    #[test]
+    fn formats_failed_tool_results_as_explicit_errors() {
+        assert_eq!(
+            format_tool_result_content(false, &serde_json::json!("permission denied")),
+            "[Tool execution failed]\npermission denied"
+        );
+        assert_eq!(
+            format_tool_result_content(false, &serde_json::json!({"code": "ENOENT"})),
+            r#"{"error":{"code":"ENOENT"}}"#
+        );
     }
 }
 

@@ -4,7 +4,8 @@ use crate::skill::SkillRegistry;
 pub const COMMANDS: &[(&str, &str)] = &[
     ("/clear", "Reset conversation"),
     ("/controls", "Show keyboard shortcuts"),
-    ("/model", "Switch LLM model"),
+    ("/model", "Show or switch LLM model"),
+    ("/mode", "Show or switch execution mode"),
     ("/provider", "Open provider setup (in-app)"),
     ("/login", "Sign in or reconfigure provider"),
     ("/logout", "Remove stored credentials"),
@@ -32,14 +33,24 @@ pub fn completions(prefix: &str, skills: &SkillRegistry) -> Vec<(String, String)
     results
 }
 
+/// Whether accepting autocomplete should append a trailing space.
+pub fn completion_inserts_space(cmd: &str, skills: &SkillRegistry) -> bool {
+    matches!(
+        cmd,
+        "/model" | "/mode" | "/resume" | "/tools" | "/caps" | "/reconfigure"
+    ) || skills.get(cmd.trim_start_matches('/')).is_some()
+}
+
 /// Slash commands recognized by the TUI.
 pub enum Command {
     /// Reset conversation to splash screen
     Clear,
     /// Show keyboard shortcuts
     Controls,
-    /// Switch LLM model
-    Model(String),
+    /// Show or switch LLM model
+    Model(Option<String>),
+    /// Show or switch execution mode
+    Mode(Option<String>),
     /// Show provider status and switch instructions
     ChangeProvider,
     /// Remove stored credentials
@@ -80,9 +91,12 @@ pub fn parse(input: &str, skills: &SkillRegistry) -> Option<Command> {
     match cmd {
         "clear" | "new" => Some(Command::Clear),
         "controls" => Some(Command::Controls),
-        "model" => arg
-            .filter(|a| !a.is_empty())
-            .map(|a| Command::Model(a.to_string())),
+        "model" => Some(Command::Model(
+            arg.filter(|a| !a.is_empty()).map(|a| a.to_string()),
+        )),
+        "mode" => Some(Command::Mode(
+            arg.filter(|a| !a.is_empty()).map(|a| a.to_string()),
+        )),
         "provider" | "login" => Some(Command::ChangeProvider),
         "logout" => Some(Command::Logout),
         "retry" => Some(Command::Retry),
@@ -112,8 +126,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_provider_and_login_aliases() {
+    fn parses_all_primary_commands() {
         let skills = SkillRegistry::load();
+        for (cmd, _) in COMMANDS {
+            assert!(
+                parse(cmd, &skills).is_some(),
+                "displayed command should parse: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_aliases_and_arguments() {
+        let skills = SkillRegistry::load();
+        assert!(matches!(parse("/new", &skills), Some(Command::Clear)));
         assert!(matches!(
             parse("/provider", &skills),
             Some(Command::ChangeProvider)
@@ -123,6 +149,20 @@ mod tests {
             Some(Command::ChangeProvider)
         ));
         assert!(matches!(parse("/retry", &skills), Some(Command::Retry)));
+        assert!(matches!(parse("/quit", &skills), Some(Command::Exit)));
+        assert!(matches!(parse("/?", &skills), Some(Command::Help)));
+        assert!(matches!(
+            parse("/model gpt-5.4 high", &skills),
+            Some(Command::Model(Some(_)))
+        ));
+        assert!(matches!(
+            parse("/mode native-tools", &skills),
+            Some(Command::Mode(Some(_)))
+        ));
+        assert!(matches!(
+            parse("/resume", &skills),
+            Some(Command::Resume(None))
+        ));
         assert!(matches!(parse("/tools", &skills), Some(Command::Tools(_))));
         assert!(matches!(
             parse("/caps enable web", &skills),
@@ -132,5 +172,33 @@ mod tests {
             parse("/reconfigure apply", &skills),
             Some(Command::Reconfigure(_))
         ));
+    }
+
+    #[test]
+    fn completion_spacing_matches_arg_taking_commands() {
+        let skills = SkillRegistry::load();
+        for cmd in [
+            "/model",
+            "/mode",
+            "/resume",
+            "/tools",
+            "/caps",
+            "/reconfigure",
+        ] {
+            assert!(completion_inserts_space(cmd, &skills));
+        }
+        for cmd in [
+            "/clear",
+            "/controls",
+            "/provider",
+            "/login",
+            "/logout",
+            "/retry",
+            "/skills",
+            "/help",
+            "/exit",
+        ] {
+            assert!(!completion_inserts_space(cmd, &skills));
+        }
     }
 }

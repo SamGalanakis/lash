@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use lash_core::{AgentEvent, Store, TokenUsage};
+use lash_core::{AgentEvent, Store, TokenUsage, strip_repl_fragments};
 
 use crate::command;
 use crate::markdown;
@@ -165,42 +165,6 @@ fn normalize_stream_text(text: &str) -> String {
     }
 
     out
-}
-
-fn strip_repl_fragments(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0;
-    while i < text.len() {
-        let tail = &text[i..];
-        if let Some(consumed) = consume_repl_fragment_prefix(tail) {
-            i += consumed;
-            continue;
-        }
-        let mut chars = tail.chars();
-        let ch = chars.next().expect("tail is non-empty");
-        out.push(ch);
-        i += ch.len_utf8();
-    }
-    out
-}
-
-fn consume_repl_fragment_prefix(text: &str) -> Option<usize> {
-    const PREFIXES: [&str; 2] = ["<repl", "</repl"];
-    for prefix in PREFIXES {
-        if !text.starts_with(prefix) {
-            continue;
-        }
-        let next = text.as_bytes().get(prefix.len()).copied();
-        let valid_suffix = next.is_none_or(|b| b == b'>' || b == b'/' || b.is_ascii_whitespace());
-        if !valid_suffix {
-            continue;
-        }
-        if let Some(end_idx) = text.find('>') {
-            return Some(end_idx + 1);
-        }
-        return Some(prefix.len());
-    }
-    None
 }
 
 /// Fast, coarse token estimate used only for live UI counters while streaming.
@@ -1317,8 +1281,7 @@ impl App {
                 if let Some((slash_pos, _prefix)) = self.slash_token_at_cursor()
                     && let Some((cmd, _)) = self.suggestions.get(self.suggestion_idx).cloned()
                 {
-                    let needs_arg =
-                        cmd == "/model" || self.skills.get(cmd.trim_start_matches('/')).is_some();
+                    let needs_arg = command::completion_inserts_space(&cmd, &self.skills);
                     let replacement = if needs_arg { format!("{} ", cmd) } else { cmd };
                     let before = self.input[..slash_pos].to_string();
                     let after = self.input[self.cursor_pos..].to_string();

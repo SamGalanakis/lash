@@ -5,7 +5,8 @@ use serde_json::{Value, json};
 use crate::llm::adapters::streaming::stream_chunk_timeout;
 use crate::llm::transport::{LlmTransport, LlmTransportError};
 use crate::llm::types::{
-    LlmMessage, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmUsage, ModelSelection,
+    LlmMessage, LlmOutputPart, LlmReplayChunk, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent,
+    LlmToolCall, LlmUsage, ModelSelection, coalesce_replay_messages,
 };
 use crate::provider::Provider;
 
@@ -34,6 +35,30 @@ impl ClaudeOAuthAdapter {
     }
 
     fn message_to_json(msg: &LlmMessage, req: &LlmRequest) -> Value {
+        if msg.kind == "tool_call" {
+            let input = serde_json::from_str::<Value>(&msg.content).unwrap_or_else(|_| json!({}));
+            return json!({
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": msg.tool_call_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    "name": msg.tool_name.clone().unwrap_or_default(),
+                    "input": input,
+                }]
+            });
+        }
+
+        if msg.kind == "tool_result" {
+            return json!({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": msg.tool_call_id,
+                    "content": [{ "type": "text", "text": msg.content }],
+                }]
+            });
+        }
+
         if msg.kind == "image"
             && msg.image_idx >= 0
             && let Some(att) = req.attachments.get(msg.image_idx as usize)
@@ -56,6 +81,67 @@ impl ClaudeOAuthAdapter {
             "role": Self::claude_role(&msg.role),
             "content": [{"type": "text", "text": msg.content}],
         })
+    }
+
+    fn assistant_tool_calls_json(text: Option<&str>, tool_calls: &[LlmToolCall]) -> Value {
+        let mut content = Vec::new();
+        if let Some(text) = text
+            && !text.is_empty()
+        {
+            content.push(json!({
+                "type": "text",
+                "text": text,
+            }));
+        }
+        content.extend(tool_calls.iter().map(|msg| {
+            let input =
+                serde_json::from_str::<Value>(&msg.input_json).unwrap_or_else(|_| json!({}));
+            json!({
+                "type": "tool_use",
+                "id": if msg.call_id.is_empty() { uuid::Uuid::new_v4().to_string() } else { msg.call_id.clone() },
+                "name": msg.tool_name.clone(),
+                "input": input,
+            })
+        }));
+        json!({
+            "role": "assistant",
+            "content": content,
+        })
+    }
+
+    fn user_tool_results_json(tool_results: &[&LlmMessage]) -> Value {
+        json!({
+            "role": "user",
+            "content": tool_results
+                .iter()
+                .map(|msg| json!({
+                    "type": "tool_result",
+                    "tool_use_id": msg.tool_call_id,
+                    "content": [{ "type": "text", "text": msg.content }],
+                }))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    fn build_messages(req: &LlmRequest) -> Vec<Value> {
+        let mut messages = Vec::new();
+        for chunk in coalesce_replay_messages(&req.messages) {
+            match chunk {
+                LlmReplayChunk::Message(msg) => messages.push(Self::message_to_json(&msg, req)),
+                LlmReplayChunk::AssistantToolCalls { text, tool_calls } => {
+                    messages.push(Self::assistant_tool_calls_json(
+                        text.as_deref(),
+                        &tool_calls,
+                    ));
+                }
+                LlmReplayChunk::ToolResults { results } => {
+                    messages.push(Self::user_tool_results_json(
+                        &results.iter().collect::<Vec<_>>(),
+                    ));
+                }
+            }
+        }
+        messages
     }
 
     fn parse_i64(v: Option<&Value>) -> i64 {
@@ -179,6 +265,46 @@ impl ClaudeOAuthAdapter {
         }
         Ok(())
     }
+
+    fn response_parts_from_value(value: &Value) -> Vec<LlmOutputPart> {
+        let mut parts = Vec::new();
+        let Some(content) = value.get("content").and_then(|c| c.as_array()) else {
+            return parts;
+        };
+        for block in content {
+            match block.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+                "text" => {
+                    if let Some(text) = block.get("text").and_then(|v| v.as_str())
+                        && !text.is_empty()
+                    {
+                        parts.push(LlmOutputPart::Text {
+                            text: text.to_string(),
+                        });
+                    }
+                }
+                "tool_use" => {
+                    let Some(name) = block.get("name").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    let input_json = block
+                        .get("input")
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "{}".to_string());
+                    parts.push(LlmOutputPart::ToolCall {
+                        call_id: block
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                        tool_name: name.to_string(),
+                        input_json,
+                    });
+                }
+                _ => {}
+            }
+        }
+        parts
+    }
 }
 
 #[async_trait]
@@ -235,13 +361,9 @@ impl LlmTransport for ClaudeOAuthAdapter {
             }
         };
 
-        let messages: Vec<Value> = req
-            .messages
-            .iter()
-            .map(|m| Self::message_to_json(m, &req))
-            .collect();
+        let messages = Self::build_messages(&req);
 
-        let body = json!({
+        let mut body = json!({
             "model": req.model,
             "system": [{
                 "type": "text",
@@ -251,8 +373,25 @@ impl LlmTransport for ClaudeOAuthAdapter {
             "messages": messages,
             "max_tokens": 32768,
             "temperature": 0,
-            "stream": true,
+            "stream": stream_events.is_some(),
         });
+        if !req.tools.is_empty() {
+            body["tools"] = json!(
+                req.tools
+                    .iter()
+                    .map(|tool| json!({
+                        "name": tool.name.clone(),
+                        "description": tool.description.clone(),
+                        "input_schema": tool.input_schema.clone(),
+                    }))
+                    .collect::<Vec<_>>()
+            );
+            body["tool_choice"] = match req.tool_choice {
+                crate::llm::types::LlmToolChoice::Auto => json!({"type": "auto"}),
+                crate::llm::types::LlmToolChoice::None => json!({"type": "none"}),
+                crate::llm::types::LlmToolChoice::Required => json!({"type": "any"}),
+            };
+        }
 
         let request_body = serde_json::to_string(&body).ok();
         let url = "https://api.anthropic.com/v1/messages".to_string();
@@ -302,6 +441,12 @@ impl LlmTransport for ClaudeOAuthAdapter {
                 .get("usage")
                 .map(Self::usage_from_value)
                 .unwrap_or_default();
+            let mut parts = Self::response_parts_from_value(&value);
+            if parts.is_empty() && !content.is_empty() {
+                parts.push(LlmOutputPart::Text {
+                    text: content.clone(),
+                });
+            }
             if let Some(tx) = &stream_events {
                 if !content.is_empty() {
                     let _ = tx.send(LlmStreamEvent::Delta(content.clone()));
@@ -313,6 +458,7 @@ impl LlmTransport for ClaudeOAuthAdapter {
             return Ok(LlmResponse {
                 deltas: vec![content.clone()],
                 full_text: content,
+                parts,
                 usage,
                 request_body,
                 http_summary: Some(format!("HTTP POST {}", url)),
@@ -382,9 +528,16 @@ impl LlmTransport for ClaudeOAuthAdapter {
             }
         }
 
+        let parts = if full.is_empty() {
+            Vec::new()
+        } else {
+            vec![LlmOutputPart::Text { text: full.clone() }]
+        };
+
         Ok(LlmResponse {
             deltas,
             full_text: full,
+            parts,
             usage,
             request_body,
             http_summary: Some(format!("HTTP POST {} (stream)", url)),
@@ -428,5 +581,68 @@ mod tests {
         assert_eq!(usage.input_tokens, 120);
         assert_eq!(usage.output_tokens, 12);
         assert_eq!(usage.cached_input_tokens, 80);
+    }
+
+    #[test]
+    fn build_messages_groups_multi_tool_turns_and_results() {
+        let req = LlmRequest {
+            model: "claude-sonnet".to_string(),
+            system_prompt: "sys".to_string(),
+            messages: vec![
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: "Checking both files.".to_string(),
+                    kind: "text".to_string(),
+                    image_idx: -1,
+                    tool_call_id: None,
+                    tool_name: None,
+                },
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: r#"{"path":"a.rs"}"#.to_string(),
+                    kind: "tool_call".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_a".to_string()),
+                    tool_name: Some("read_file".to_string()),
+                },
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: r#"{"path":"b.rs"}"#.to_string(),
+                    kind: "tool_call".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_b".to_string()),
+                    tool_name: Some("read_file".to_string()),
+                },
+                LlmMessage {
+                    role: LlmRole::User,
+                    content: "file a".to_string(),
+                    kind: "tool_result".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_a".to_string()),
+                    tool_name: Some("read_file".to_string()),
+                },
+                LlmMessage {
+                    role: LlmRole::User,
+                    content: "file b".to_string(),
+                    kind: "tool_result".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_b".to_string()),
+                    tool_name: Some("read_file".to_string()),
+                },
+            ],
+            attachments: vec![],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            reasoning_effort: None,
+            session_id: None,
+            stream_events: None,
+        };
+
+        let messages = ClaudeOAuthAdapter::build_messages(&req);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["content"].as_array().map(Vec::len), Some(3));
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"].as_array().map(Vec::len), Some(2));
     }
 }

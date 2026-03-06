@@ -231,8 +231,13 @@ impl ToolProvider for SkillStore {
         vec![
             ToolDefinition {
                 name: "skills".into(),
-                description: "List available skills. Returns a list of SkillSummary objects."
-                    .into(),
+                description: vec![crate::ToolText::new(
+                    "List available skills. Returns a list of SkillSummary objects.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![],
                 returns: "list[SkillSummary]".into(),
                 examples: vec![],
@@ -241,9 +246,13 @@ impl ToolProvider for SkillStore {
             },
             ToolDefinition {
                 name: "load_skill".into(),
-                description:
-                    "Load a skill by name. Returns the full Skill with instructions and file list."
-                        .into(),
+                description: vec![crate::ToolText::new(
+                    "Load a skill by name. Returns the full Skill with instructions and file list.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![ToolParam::typed("name", "str")],
                 returns: "Skill".into(),
                 examples: vec![],
@@ -252,7 +261,13 @@ impl ToolProvider for SkillStore {
             },
             ToolDefinition {
                 name: "read_skill_file".into(),
-                description: "Read a supporting file from a skill directory.".into(),
+                description: vec![crate::ToolText::new(
+                    "Read a supporting file from a skill directory.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![
                     ToolParam::typed("skill_name", "str"),
                     ToolParam {

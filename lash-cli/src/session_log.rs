@@ -149,6 +149,8 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
                         id: format!("{msg_id}.p0"),
                         kind: PartKind::Text,
                         content: text.clone(),
+                        tool_call_id: None,
+                        tool_name: None,
                         prune_state: PruneState::Intact,
                     }],
                 });
@@ -202,6 +204,8 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
                             id: format!("{msg_id}.p0"),
                             kind: PartKind::Prose,
                             content: c.to_string(),
+                            tool_call_id: None,
+                            tool_name: None,
                             prune_state: PruneState::Intact,
                         }],
                     });

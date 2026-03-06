@@ -1,6 +1,6 @@
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use lash_core::oauth;
-use lash_core::provider::{LashConfig, Provider};
+use lash_core::provider::{LashConfig, OPENAI_GENERIC_DEFAULT_BASE_URL, Provider, ProviderKind};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -43,7 +43,7 @@ enum SetupStep {
 enum CredentialMode {
     ClaudeOAuth,
     GoogleOAuth,
-    OpenRouterKey,
+    OpenAiGenericKey,
 }
 
 struct SetupApp {
@@ -182,12 +182,11 @@ async fn run_setup_inner(
                     *selected = selected.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    *selected = (*selected + 1).min(3);
+                    *selected = (*selected + 1).min(ProviderKind::ALL.len().saturating_sub(1));
                 }
                 KeyCode::Enter => {
-                    let sel = *selected;
-                    match sel {
-                        0 => {
+                    match ProviderKind::ALL[*selected] {
+                        ProviderKind::Claude => {
                             // Claude — start OAuth
                             let (verifier, challenge) = oauth::generate_pkce();
                             let url = oauth::authorize_url(&challenge, &verifier);
@@ -203,7 +202,7 @@ async fn run_setup_inner(
                                 mode: CredentialMode::ClaudeOAuth,
                             };
                         }
-                        1 => {
+                        ProviderKind::Codex => {
                             // Codex — device code auth
                             match oauth::codex_request_device_code().await {
                                 Ok(dc) => {
@@ -225,7 +224,7 @@ async fn run_setup_inner(
                                 }
                             }
                         }
-                        2 => {
+                        ProviderKind::GoogleOAuth => {
                             // Google OAuth
                             let (verifier, challenge) = oauth::generate_pkce();
                             match oauth::google_authorize_url(&challenge) {
@@ -256,8 +255,8 @@ async fn run_setup_inner(
                                 }
                             }
                         }
-                        _ => {
-                            // OpenRouter
+                        ProviderKind::OpenAiGeneric => {
+                            // OpenAI-generic
                             app.step = SetupStep::InputCredential {
                                 input: String::new(),
                                 cursor: 0,
@@ -265,7 +264,7 @@ async fn run_setup_inner(
                                 verifier: None,
                                 auth_url: None,
                                 browser_error: None,
-                                mode: CredentialMode::OpenRouterKey,
+                                mode: CredentialMode::OpenAiGenericKey,
                             };
                         }
                     }
@@ -325,10 +324,10 @@ async fn run_setup_inner(
                         *error = Some("Cannot be empty".into());
                     } else {
                         match mode {
-                            CredentialMode::OpenRouterKey => {
-                                provider = Some(Provider::OpenRouter {
+                            CredentialMode::OpenAiGenericKey => {
+                                provider = Some(Provider::OpenAiGeneric {
                                     api_key: val,
-                                    base_url: "https://openrouter.ai/api/v1".into(),
+                                    base_url: OPENAI_GENERIC_DEFAULT_BASE_URL.into(),
                                 });
                                 app.step = if tavily_key.is_some() {
                                     SetupStep::Done
@@ -513,7 +512,7 @@ fn draw_setup(frame: &mut Frame, app: &SetupApp) {
             SetupStep::SelectProvider { .. } => 10, // blank + label + blank + 4 options + blank + help + pad
             SetupStep::InputCredential { error, mode, .. } => {
                 match mode {
-                    CredentialMode::OpenRouterKey => {
+                    CredentialMode::OpenAiGenericKey => {
                         if error.is_some() {
                             10
                         } else {
@@ -627,13 +626,6 @@ fn draw_provider_select(frame: &mut Frame, area: Rect, selected: usize) {
     let cx = center_pad(area.width as usize, 46);
     let pad = " ".repeat(cx);
 
-    let options = [
-        ("Claude", "Max/Pro subscription"),
-        ("Codex", "ChatGPT Plus/Pro/Team"),
-        ("Google OAuth", "Gemini via Google account"),
-        ("OpenRouter", "API key"),
-    ];
-
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
@@ -642,7 +634,9 @@ fn draw_provider_select(frame: &mut Frame, area: Rect, selected: usize) {
     )));
     lines.push(Line::from(""));
 
-    for (i, (name, desc)) in options.iter().enumerate() {
+    for (i, kind) in ProviderKind::ALL.iter().enumerate() {
+        let name = kind.setup_name();
+        let desc = kind.setup_description();
         if i == selected {
             lines.push(Line::from(vec![
                 Span::styled(
@@ -655,7 +649,7 @@ fn draw_provider_select(frame: &mut Frame, area: Rect, selected: usize) {
                         .fg(theme::CHALK)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(*desc, Style::default().fg(theme::CHALK_DIM)),
+                Span::styled(desc, Style::default().fg(theme::CHALK_DIM)),
             ]));
         } else {
             lines.push(Line::from(vec![
@@ -664,7 +658,7 @@ fn draw_provider_select(frame: &mut Frame, area: Rect, selected: usize) {
                     format!("{:<14}", name),
                     Style::default().fg(theme::ASH_TEXT),
                 ),
-                Span::styled(*desc, Style::default().fg(theme::ASH_MID)),
+                Span::styled(desc, Style::default().fg(theme::ASH_MID)),
             ]));
         }
     }
@@ -762,9 +756,12 @@ fn draw_credential_input(
                 lines.push(Line::from(""));
             }
         }
-        CredentialMode::OpenRouterKey => {
+        CredentialMode::OpenAiGenericKey => {
             lines.push(Line::from(Span::styled(
-                format!("{}Enter your OpenRouter API key.", pad),
+                format!(
+                    "{}Enter your OpenAI-generic API key. Default base URL: {}",
+                    pad, OPENAI_GENERIC_DEFAULT_BASE_URL
+                ),
                 Style::default().fg(theme::ASH_TEXT),
             )));
             lines.push(Line::from(""));
@@ -773,7 +770,7 @@ fn draw_credential_input(
 
     // Label
     let label = match mode {
-        CredentialMode::OpenRouterKey => "API key",
+        CredentialMode::OpenAiGenericKey => "API key",
         CredentialMode::ClaudeOAuth | CredentialMode::GoogleOAuth => "Authorization code",
     };
 

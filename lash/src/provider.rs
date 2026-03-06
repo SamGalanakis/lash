@@ -5,18 +5,80 @@ use serde::{Deserialize, Serialize};
 use crate::llm::factory::adapter_for;
 use crate::oauth::{self, OAuthError};
 
+pub const OPENAI_GENERIC_DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
+
 fn default_base_url() -> String {
-    "https://openrouter.ai/api/v1".to_string()
+    OPENAI_GENERIC_DEFAULT_BASE_URL.to_string()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderKind {
+    Claude,
+    Codex,
+    GoogleOAuth,
+    OpenAiGeneric,
+}
+
+impl ProviderKind {
+    pub const ALL: [ProviderKind; 4] = [
+        ProviderKind::Claude,
+        ProviderKind::Codex,
+        ProviderKind::GoogleOAuth,
+        ProviderKind::OpenAiGeneric,
+    ];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            ProviderKind::Claude => "claude",
+            ProviderKind::Codex => "codex",
+            ProviderKind::GoogleOAuth => "google_oauth",
+            ProviderKind::OpenAiGeneric => "openai-generic",
+        }
+    }
+
+    pub fn cli_label(self) -> &'static str {
+        match self {
+            ProviderKind::Claude => "Claude OAuth",
+            ProviderKind::Codex => "OpenAI Codex OAuth",
+            ProviderKind::GoogleOAuth => "Google OAuth (Gemini)",
+            ProviderKind::OpenAiGeneric => "OpenAI-generic (API key)",
+        }
+    }
+
+    pub fn setup_name(self) -> &'static str {
+        match self {
+            ProviderKind::Claude => "Claude",
+            ProviderKind::Codex => "Codex",
+            ProviderKind::GoogleOAuth => "Google OAuth",
+            ProviderKind::OpenAiGeneric => "OpenAI-generic",
+        }
+    }
+
+    pub fn setup_description(self) -> &'static str {
+        match self {
+            ProviderKind::Claude => "Max/Pro subscription",
+            ProviderKind::Codex => "ChatGPT Plus/Pro/Team",
+            ProviderKind::GoogleOAuth => "Gemini via Google account",
+            ProviderKind::OpenAiGeneric => "API key, defaults to OpenRouter base URL",
+        }
+    }
+
+    pub fn default_base_url(self) -> Option<&'static str> {
+        match self {
+            ProviderKind::OpenAiGeneric => Some(OPENAI_GENERIC_DEFAULT_BASE_URL),
+            _ => None,
+        }
+    }
 }
 
 /// User-overridable model names for agent_call intelligence tiers.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct AgentModels {
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "quick")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub low: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "balanced")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub medium: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "thorough")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub high: Option<String>,
 }
 
@@ -39,9 +101,6 @@ pub struct LashConfig {
     pub provider: Provider,
     #[serde(default, skip_serializing_if = "AuxiliarySecrets::is_empty")]
     pub auxiliary_secrets: AuxiliarySecrets,
-    /// Legacy field (deserialize-only). Migrated into `auxiliary_secrets`.
-    #[serde(default, skip_serializing, rename = "tavily_api_key")]
-    legacy_tavily_api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_models: Option<AgentModels>,
 }
@@ -49,7 +108,8 @@ pub struct LashConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Provider {
-    OpenRouter {
+    #[serde(rename = "openai-generic")]
+    OpenAiGeneric {
         api_key: String,
         #[serde(default = "default_base_url")]
         base_url: String,
@@ -75,6 +135,23 @@ pub enum Provider {
 }
 
 impl Provider {
+    pub fn kind(&self) -> ProviderKind {
+        match self {
+            Provider::OpenAiGeneric { .. } => ProviderKind::OpenAiGeneric,
+            Provider::Claude { .. } => ProviderKind::Claude,
+            Provider::Codex { .. } => ProviderKind::Codex,
+            Provider::GoogleOAuth { .. } => ProviderKind::GoogleOAuth,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        self.kind().cli_label()
+    }
+
+    pub fn id(&self) -> &'static str {
+        self.kind().id()
+    }
+
     /// Default model for this provider.
     pub fn default_model(&self) -> &str {
         adapter_for(self).default_root_model()
@@ -133,7 +210,7 @@ impl Provider {
         Ok(())
     }
 
-    /// Refresh OAuth tokens if needed. No-op for OpenRouter.
+    /// Refresh OAuth tokens if needed. No-op for OpenAI-generic.
     /// Returns `true` if tokens were updated (caller should persist).
     pub async fn ensure_fresh(&mut self) -> Result<bool, OAuthError> {
         let now = std::time::SystemTime::now()
@@ -186,24 +263,17 @@ impl Provider {
                     return Ok(true);
                 }
             }
-            Provider::OpenRouter { .. } => {}
+            Provider::OpenAiGeneric { .. } => {}
         }
         Ok(false)
     }
 }
 
 impl LashConfig {
-    fn migrate_legacy_fields(&mut self) {
-        if self.auxiliary_secrets.tavily_api_key.is_none() && self.legacy_tavily_api_key.is_some() {
-            self.auxiliary_secrets.tavily_api_key = self.legacy_tavily_api_key.take();
-        }
-    }
-
     pub fn new(provider: Provider) -> Self {
         Self {
             provider,
             auxiliary_secrets: AuxiliarySecrets::default(),
-            legacy_tavily_api_key: None,
             agent_models: None,
         }
     }
@@ -216,9 +286,8 @@ impl LashConfig {
     pub fn load() -> Option<Self> {
         let path = Self::config_path();
         if let Ok(data) = std::fs::read_to_string(&path)
-            && let Ok(mut config) = serde_json::from_str::<Self>(&data)
+            && let Ok(config) = serde_json::from_str::<Self>(&data)
         {
-            config.migrate_legacy_fields();
             return Some(config);
         }
 
@@ -267,7 +336,6 @@ pub fn save_provider(provider: &Provider) -> Result<(), std::io::Error> {
     let mut config = LashConfig::load().unwrap_or_else(|| LashConfig {
         provider: provider.clone(),
         auxiliary_secrets: AuxiliarySecrets::default(),
-        legacy_tavily_api_key: None,
         agent_models: None,
     });
     config.provider = provider.clone();
@@ -278,8 +346,8 @@ pub fn save_provider(provider: &Provider) -> Result<(), std::io::Error> {
 mod tests {
     use super::*;
 
-    fn openrouter() -> Provider {
-        Provider::OpenRouter {
+    fn openai_generic() -> Provider {
+        Provider::OpenAiGeneric {
             api_key: "test-key".into(),
             base_url: "https://openrouter.ai/api/v1".into(),
         }
@@ -313,21 +381,25 @@ mod tests {
 
     #[test]
     fn default_model() {
-        assert_eq!(openrouter().default_model(), "anthropic/claude-sonnet-4.6");
+        assert_eq!(
+            openai_generic().default_model(),
+            "anthropic/claude-sonnet-4.6"
+        );
         assert_eq!(claude().default_model(), "claude-opus-4-6");
-        assert_eq!(codex().default_model(), "gpt-5.3-codex");
+        assert_eq!(codex().default_model(), "gpt-5.4");
         assert_eq!(google_oauth().default_model(), "gemini-3.1-pro-preview");
     }
 
     #[test]
     fn reasoning_effort_for_model() {
+        assert_eq!(codex().reasoning_effort_for_model("gpt-5.4"), Some("high"));
         assert_eq!(
             codex().reasoning_effort_for_model("gpt-5.3-codex"),
             Some("high")
         );
         assert_eq!(codex().reasoning_effort_for_model("gpt-5.1-codex"), None);
         assert_eq!(
-            openrouter().reasoning_effort_for_model("anthropic/claude-sonnet-4.6"),
+            openai_generic().reasoning_effort_for_model("anthropic/claude-sonnet-4.6"),
             None
         );
     }
@@ -350,8 +422,8 @@ mod tests {
     }
 
     #[test]
-    fn default_agent_model_openrouter() {
-        let p = openrouter();
+    fn default_agent_model_openai_generic() {
+        let p = openai_generic();
         assert!(p.default_agent_model("low").is_some());
         assert!(p.default_agent_model("medium").is_some());
         assert!(p.default_agent_model("high").is_some());
@@ -364,17 +436,17 @@ mod tests {
         assert_eq!(m, "gpt-5.3-codex-spark");
         assert_eq!(re, None);
         let (m, re) = p.default_agent_model("medium").unwrap();
-        assert_eq!(m, "gpt-5.3-codex");
+        assert_eq!(m, "gpt-5.4");
         assert_eq!(re, Some("medium"));
         let (m, re) = p.default_agent_model("high").unwrap();
-        assert_eq!(m, "gpt-5.3-codex");
+        assert_eq!(m, "gpt-5.4");
         assert_eq!(re, Some("high"));
     }
 
     #[test]
     fn default_agent_model_unknown_tier() {
         assert!(claude().default_agent_model("unknown").is_none());
-        assert!(openrouter().default_agent_model("").is_none());
+        assert!(openai_generic().default_agent_model("").is_none());
         assert!(codex().default_agent_model("extreme").is_none());
         assert!(google_oauth().default_agent_model("extreme").is_none());
     }
@@ -390,8 +462,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_openrouter_passthrough() {
-        let p = openrouter();
+    fn resolve_model_openai_generic_passthrough() {
+        let p = openai_generic();
         assert_eq!(
             p.resolve_model("anthropic/claude-sonnet-4.6"),
             "anthropic/claude-sonnet-4.6"
@@ -442,14 +514,8 @@ mod tests {
     #[test]
     fn context_lookup_model_codex_adds_prefix() {
         let p = codex();
-        assert_eq!(
-            p.context_lookup_model("gpt-5.3-codex"),
-            "openai/gpt-5.3-codex"
-        );
-        assert_eq!(
-            p.context_lookup_model("openai/gpt-5.3-codex"),
-            "openai/gpt-5.3-codex"
-        );
+        assert_eq!(p.context_lookup_model("gpt-5.4"), "openai/gpt-5.4");
+        assert_eq!(p.context_lookup_model("openai/gpt-5.4"), "openai/gpt-5.4");
     }
 
     #[test]
@@ -485,7 +551,7 @@ mod tests {
 
     #[test]
     fn validate_model_rejects_unknown_model() {
-        let p = openrouter();
+        let p = openai_generic();
         assert!(
             p.validate_model("this-model-does-not-exist-xyz-123")
                 .is_err()
@@ -493,26 +559,25 @@ mod tests {
     }
 
     #[test]
-    fn legacy_tavily_field_migrates_to_auxiliary_secrets() {
+    fn legacy_tavily_field_is_ignored() {
         let raw = serde_json::json!({
             "provider": {
-                "type": "OpenRouter",
+                "type": "openai-generic",
                 "api_key": "k",
                 "base_url": "https://openrouter.ai/api/v1"
             },
             "tavily_api_key": "legacy-key"
         });
 
-        let mut cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
-        cfg.migrate_legacy_fields();
-        assert_eq!(cfg.tavily_api_key(), Some("legacy-key"));
+        let cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
+        assert_eq!(cfg.tavily_api_key(), None);
     }
 
     #[test]
     fn modern_auxiliary_secrets_preserved() {
         let raw = serde_json::json!({
             "provider": {
-                "type": "OpenRouter",
+                "type": "openai-generic",
                 "api_key": "k",
                 "base_url": "https://openrouter.ai/api/v1"
             },
@@ -522,8 +587,7 @@ mod tests {
             "tavily_api_key": "legacy-key"
         });
 
-        let mut cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
-        cfg.migrate_legacy_fields();
+        let cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
         assert_eq!(cfg.tavily_api_key(), Some("new-key"));
     }
 }

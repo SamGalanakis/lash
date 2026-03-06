@@ -15,10 +15,13 @@ impl ToolProvider for Glob {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "glob".into(),
-            description: format!(
-                "Find filesystem entries by glob pattern. Returns `PathEntry` objects sorted by `modified_at` (newest first). Each item has: `path`, `kind`, `size_bytes`, `lines` (or null), `modified_at` (RFC3339 UTC). Defaults: limit={}, with_lines=false.",
-                MAX_RESULTS
-            ),
+            description: vec![crate::ToolText::new(
+                format!(
+                    "Find filesystem entries by glob pattern. Returns `PathEntry` objects sorted by `modified_at` (newest first). Each item has: `path`, `kind`, `size_bytes`, `lines` (or null), `modified_at` (RFC3339 UTC). Defaults: limit={}, with_lines=false.",
+                    MAX_RESULTS
+                ),
+                [crate::ExecutionMode::Repl, crate::ExecutionMode::NativeTools],
+            )],
             params: vec![
                 ToolParam::typed("pattern", "str"),
                 ToolParam {

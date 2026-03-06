@@ -44,8 +44,13 @@ impl ToolProvider for PlanMode {
         vec![
             ToolDefinition {
                 name: "enter_plan_mode".into(),
-                description: "Enter plan mode. Returns the plan file path to write your plan to."
-                    .into(),
+                description: vec![crate::ToolText::new(
+                    "Enter plan mode. Returns the plan file path to write your plan to.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![],
                 returns: "dict".into(),
                 examples: vec![],
@@ -54,7 +59,13 @@ impl ToolProvider for PlanMode {
             },
             ToolDefinition {
                 name: "exit_plan_mode".into(),
-                description: "Exit plan mode. Returns plan content for user approval.".into(),
+                description: vec![crate::ToolText::new(
+                    "Exit plan mode. Returns plan content for user approval.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![],
                 returns: "dict".into(),
                 examples: vec![],

@@ -12,6 +12,7 @@ pub mod runtime;
 pub mod session;
 #[cfg(feature = "sqlite-store")]
 pub mod store;
+pub mod text;
 pub mod tools;
 
 use std::path::PathBuf;
@@ -61,15 +62,25 @@ pub use dynamic::{
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
 pub use provider::{LashConfig, Provider};
 pub use runtime::{
-    AgentStateEnvelope, AssembledTurn, AssistantOutput, DoneReason, EventSink, HostProfile,
-    InputItem, NoopEventSink, OutputState, PathResolver, RunMode, RuntimeConfig, RuntimeEngine,
-    RuntimeError, SanitizerPolicy, TerminationPolicy, ToolOutputRecord, TurnInput, TurnIssue,
-    TurnStatus,
+    AgentStateEnvelope, AssembledTurn, AssistantOutput, CodeOutputRecord, DoneReason, EventSink,
+    ExecutionSummary, HostProfile, InputItem, NoopEventSink, OutputState, PathResolver, RunMode,
+    RuntimeConfig, RuntimeEngine, RuntimeError, SanitizerPolicy, TerminationPolicy, TurnInput,
+    TurnIssue, TurnStatus,
 };
 pub use session::{ExecResponse, Session, SessionError, UserPrompt};
 #[cfg(feature = "sqlite-store")]
 pub use store::{AgentState, Store, TaskEntry};
-pub use tools::{ToolSet, ToolSetDeps};
+pub use text::strip_repl_fragments;
+pub use tools::{BatchingTools, ToolSet, ToolSetDeps};
+
+/// Execution backend for agent turns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    #[default]
+    Repl,
+    NativeTools,
+}
 
 /// A message sent from the sandbox to the host during execution.
 #[derive(Clone, Debug)]
@@ -82,8 +93,46 @@ pub struct SandboxMessage {
 /// Sender for streaming progress messages from tools (e.g. live bash output).
 pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<SandboxMessage>;
 
-/// A typed parameter for a tool definition.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ToolText {
+    pub text: String,
+    pub modes: Vec<ExecutionMode>,
+}
+
+impl ToolText {
+    pub fn new(text: impl Into<String>, modes: impl IntoIterator<Item = ExecutionMode>) -> Self {
+        Self {
+            text: text.into(),
+            modes: modes.into_iter().collect(),
+        }
+    }
+
+    pub fn matches_mode(&self, mode: ExecutionMode) -> bool {
+        self.modes.contains(&mode)
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ProjectedToolDefinition {
+    pub name: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<ToolParam>,
+    #[serde(
+        default = "ToolDefinition::default_returns",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub returns: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<String>,
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
+    pub inject_into_prompt: bool,
+}
+
+/// A typed parameter for a tool definition.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ToolParam {
     pub name: String,
     /// Python type: "str", "int", "float", "bool", "list", "dict", "any"
@@ -125,7 +174,8 @@ impl ToolParam {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
-    pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub description: Vec<ToolText>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub params: Vec<ToolParam>,
     /// Python return type: "str", "int", "float", "bool", "list", "dict", "any", "None"
@@ -136,7 +186,7 @@ pub struct ToolDefinition {
     pub returns: String,
     /// Short usage examples for discovery UIs / REPL browsing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub examples: Vec<String>,
+    pub examples: Vec<ToolText>,
     /// Hidden tools are callable via `_call()` but don't appear in the REPL namespace or agent prompt.
     #[serde(default)]
     pub hidden: bool,
@@ -149,6 +199,41 @@ pub struct ToolDefinition {
 impl ToolDefinition {
     fn default_returns() -> String {
         "any".into()
+    }
+
+    pub fn description_for(&self, mode: ExecutionMode) -> String {
+        self.description
+            .iter()
+            .filter(|entry| entry.matches_mode(mode))
+            .map(|entry| entry.text.trim())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub fn examples_for(&self, mode: ExecutionMode) -> Vec<String> {
+        self.examples
+            .iter()
+            .filter(|entry| entry.matches_mode(mode))
+            .map(|entry| entry.text.clone())
+            .collect()
+    }
+
+    pub fn set_description_for(&mut self, mode: ExecutionMode, text: impl Into<String>) {
+        self.description.retain(|entry| !entry.matches_mode(mode));
+        self.description.push(ToolText::new(text, [mode]));
+    }
+
+    pub fn project(&self, mode: ExecutionMode) -> ProjectedToolDefinition {
+        ProjectedToolDefinition {
+            name: self.name.clone(),
+            description: self.description_for(mode),
+            params: self.params.clone(),
+            returns: self.returns.clone(),
+            examples: self.examples_for(mode),
+            hidden: self.hidden,
+            inject_into_prompt: self.inject_into_prompt,
+        }
     }
 
     /// Format as a typed Python signature: `name(param: type, ...) -> ret`
@@ -173,13 +258,14 @@ impl ToolDefinition {
     }
 
     /// Format all tools as a documentation block for LLM prompts.
-    pub fn format_tool_docs(tools: &[ToolDefinition]) -> String {
+    pub fn format_tool_docs(tools: &[ToolDefinition], mode: ExecutionMode) -> String {
         tools
             .iter()
             .map(|t| {
                 let mut lines = format!("- `{}`", t.signature());
-                if !t.description.is_empty() {
-                    lines.push_str(&format!(" — {}", t.description));
+                let description = t.description_for(mode);
+                if !description.is_empty() {
+                    lines.push_str(&format!(" — {}", description));
                 }
                 // Include parameter descriptions if any have them
                 for p in &t.params {
@@ -191,6 +277,45 @@ impl ToolDefinition {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Convert the tool signature into a basic JSON Schema object for native tool-calling APIs.
+    pub fn input_schema(&self) -> serde_json::Value {
+        let mut properties = serde_json::Map::new();
+        let mut required = Vec::new();
+
+        for param in &self.params {
+            let schema = match param.r#type.as_str() {
+                "str" | "string" => serde_json::json!({ "type": "string" }),
+                "int" => serde_json::json!({ "type": "integer" }),
+                "float" => serde_json::json!({ "type": "number" }),
+                "bool" => serde_json::json!({ "type": "boolean" }),
+                "list" => serde_json::json!({ "type": "array", "items": {} }),
+                "dict" => serde_json::json!({ "type": "object", "additionalProperties": true }),
+                _ => serde_json::json!({}),
+            };
+            let mut schema_obj = match schema {
+                serde_json::Value::Object(obj) => obj,
+                _ => serde_json::Map::new(),
+            };
+            if !param.description.is_empty() {
+                schema_obj.insert(
+                    "description".to_string(),
+                    serde_json::Value::String(param.description.clone()),
+                );
+            }
+            properties.insert(param.name.clone(), serde_json::Value::Object(schema_obj));
+            if param.required {
+                required.push(param.name.clone());
+            }
+        }
+
+        serde_json::json!({
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false,
+        })
     }
 }
 
@@ -265,7 +390,7 @@ mod tests {
     fn signature_required_params() {
         let td = ToolDefinition {
             name: "foo".into(),
-            description: String::new(),
+            description: vec![],
             params: vec![ToolParam::typed("x", "int"), ToolParam::typed("y", "str")],
             returns: "bool".into(),
             examples: vec![],
@@ -279,7 +404,7 @@ mod tests {
     fn signature_optional_params() {
         let td = ToolDefinition {
             name: "bar".into(),
-            description: String::new(),
+            description: vec![],
             params: vec![ToolParam::optional("limit", "int")],
             returns: "list".into(),
             examples: vec![],
@@ -293,7 +418,7 @@ mod tests {
     fn signature_empty_params() {
         let td = ToolDefinition {
             name: "noop".into(),
-            description: String::new(),
+            description: vec![],
             params: vec![],
             returns: "None".into(),
             examples: vec![],
@@ -307,7 +432,7 @@ mod tests {
     fn signature_empty_returns_defaults_to_any() {
         let td = ToolDefinition {
             name: "f".into(),
-            description: String::new(),
+            description: vec![],
             params: vec![],
             returns: String::new(),
             examples: vec![],
@@ -323,7 +448,10 @@ mod tests {
     fn format_tool_docs_with_descriptions() {
         let tools = vec![ToolDefinition {
             name: "read".into(),
-            description: "Read a file".into(),
+            description: vec![ToolText::new(
+                "Read a file",
+                [ExecutionMode::Repl, ExecutionMode::NativeTools],
+            )],
             params: vec![ToolParam {
                 name: "path".into(),
                 r#type: "str".into(),
@@ -335,7 +463,7 @@ mod tests {
             hidden: false,
             inject_into_prompt: true,
         }];
-        let docs = ToolDefinition::format_tool_docs(&tools);
+        let docs = ToolDefinition::format_tool_docs(&tools, ExecutionMode::Repl);
         assert!(docs.contains("- `read(path: str) -> str`"));
         assert!(docs.contains("— Read a file"));
         assert!(docs.contains("- `path`: File path"));
@@ -343,7 +471,7 @@ mod tests {
 
     #[test]
     fn format_tool_docs_empty() {
-        let docs = ToolDefinition::format_tool_docs(&[]);
+        let docs = ToolDefinition::format_tool_docs(&[], ExecutionMode::Repl);
         assert!(docs.is_empty());
     }
 }
@@ -362,6 +490,7 @@ pub struct ToolCallRecord {
 #[async_trait::async_trait]
 pub trait ToolProvider: Send + Sync + 'static {
     fn definitions(&self) -> Vec<ToolDefinition>;
+    fn set_execution_mode(&self, _execution_mode: ExecutionMode) {}
     fn dynamic_projection(&self) -> Option<crate::dynamic::ResolvedProjection> {
         None
     }

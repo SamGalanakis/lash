@@ -568,10 +568,13 @@ class ShellHandle:
 class AgentHandle:
     """Handle to a running sub-agent.
 
-    Returned by agent_call(prompt=..., intelligence=...). Provides:
-      .result(timeout=None) -- wait for completion, return result
-      .output()             -- read accumulated output (non-blocking)
-      .kill()               -- cancel the sub-agent
+    Returned by `agent_call(prompt=..., intelligence=...)`.
+    `await agent_call(...)` also works and yields the same handle.
+
+    Provides:
+      await .result(timeout=None) -- wait for completion, return result
+      await .output()             -- read accumulated output (non-blocking)
+      await .kill()               -- cancel the sub-agent
     """
     def __init__(self, id, schema_cls=None):
         self.id = id
@@ -608,6 +611,11 @@ class AgentHandle:
 
     def __str__(self):
         return f"AgentHandle({self.id})"
+
+    def __await__(self):
+        async def _return_self():
+            return self
+        return _return_self().__await__()
 
 class Task:
     """A task in the task management system.
@@ -672,7 +680,7 @@ class Task:
 
     async def start(self):
         """Claim this task and set status to in_progress."""
-        result = await _call("claim_task", {"id": self.id, "owner": _ns.get("__agent_id__", "")})
+        result = await _call("claim_task", {"id": self.id})
         return self._refresh(result)
 
     async def done(self):
@@ -843,6 +851,57 @@ class PathEntries(list):
         return f"PathEntries({len(self)})"
 
 
+class WebResult:
+    """Single search result returned by search_web()."""
+
+    def __init__(self, data):
+        self.title = data.get("title", "")
+        self.url = data.get("url", "")
+        self.content = data.get("content", "")
+
+    def as_dict(self):
+        return {
+            "title": self.title,
+            "url": self.url,
+            "content": self.content,
+        }
+
+    def __repr__(self):
+        return f"WebResult(title={self.title!r}, url={self.url!r})"
+
+    def __str__(self):
+        if self.title and self.url:
+            return f"{self.title} — {self.url}"
+        return self.title or self.url or "<empty result>"
+
+
+class WebSearchResults(list):
+    """List-like wrapper for search_web() results with an optional answer summary."""
+
+    def __init__(self, data):
+        items = [WebResult(item) for item in data.get("results", [])]
+        super().__init__(items)
+        self.answer = data.get("answer", "")
+
+    @property
+    def results(self):
+        return self
+
+    def as_dict(self):
+        result = {"results": [item.as_dict() for item in self]}
+        if self.answer:
+            result["answer"] = self.answer
+        return result
+
+    def __repr__(self):
+        return f"WebSearchResults({len(self)} results, answer={bool(self.answer)})"
+
+    def __str__(self):
+        if self.answer:
+            return f"{self.answer}\n({len(self)} results)"
+        return f"{len(self)} results"
+
+
 class ToolError(Exception):
     """Raised when a tool call fails.
 
@@ -862,7 +921,7 @@ class ToolError(Exception):
         return False
 
 
-def _decode_tool_success(value):
+def _decode_tool_success(name, value):
     # Wrap shell handles automatically
     if isinstance(value, dict) and value.get("__handle__") == "shell":
         return ShellHandle(value["id"])
@@ -886,6 +945,8 @@ def _decode_tool_success(value):
             return EditResult(value)
         if t == "path_entries":
             return PathEntries(value)
+    if name == "search_web" and isinstance(value, dict):
+        return WebSearchResults(value)
     return value
 
 
@@ -899,7 +960,7 @@ def _call_sync(name, params):
     result = json.loads(result_json)
     if result["success"]:
         value = json.loads(result["result"]) if result["result"] else None
-        return _decode_tool_success(value)
+        return _decode_tool_success(name, value)
     error = json.loads(result["result"]) if result["result"] else "Tool call failed"
     raise ToolError(name, error)
 
@@ -921,7 +982,7 @@ async def _call(name, params):
     result = json.loads(result_json)
     if result["success"]:
         value = json.loads(result["result"]) if result["result"] else None
-        return _decode_tool_success(value)
+        return _decode_tool_success(name, value)
     error = json.loads(result["result"]) if result["result"] else "Tool call failed"
     raise ToolError(name, error)
 
@@ -1381,17 +1442,24 @@ def _register_tools(tools_json, agent_id="", headless=False, capabilities=None):
             exported_names.append(name)
 
     # Override agent_call wrapper: schema hydration + parent memory/history transfer.
-    async def _agent_call(prompt, intelligence, schema=None, **kw):
-        """Spawn a sub-agent to perform a task. Returns an AgentHandle.
+    def _agent_call(prompt, intelligence, schema=None, **kw):
+        """Spawn a sub-agent and return an AgentHandle immediately.
 
         Args:
             prompt: The task description for the sub-agent.
             intelligence: "low", "medium", or "high".
             schema: Optional Pydantic BaseModel class. If provided, calling
-                handle.result() will return a hydrated model instance.
+                await handle.result() will return a hydrated model instance.
 
         Returns:
-            AgentHandle with .result(), .output(), .kill() methods.
+            AgentHandle with async .result(), .output(), .kill() methods.
+
+        Pattern:
+            handle = agent_call("Summarize auth flow", intelligence="low")
+            result = await handle.result()
+
+            # Compatibility: this also works
+            handle = await agent_call("Summarize auth flow", intelligence="low")
         """
         params = {"prompt": prompt, "intelligence": str(intelligence)}
         params.update(kw)
@@ -1415,9 +1483,9 @@ def _register_tools(tools_json, agent_id="", headless=False, capabilities=None):
             elif isinstance(schema, dict):
                 params["schema"] = json.dumps(schema)
 
-        handle = await _call("agent_call", params)
+        handle = _call_sync("agent_call", params)
 
-        # _call returns an AgentHandle via __handle__ detection; attach schema_cls
+        # _call_sync returns an AgentHandle via __handle__ detection; attach schema_cls
         if isinstance(handle, AgentHandle) and _schema_cls is not None:
             handle._schema_cls = _schema_cls
         return handle

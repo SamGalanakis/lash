@@ -1,9 +1,10 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::{ProgressSender, ToolDefinition, ToolProvider, ToolResult};
 
-/// Combines multiple `ToolProvider`s into one.
+use super::ToolSet;
+
+/// Thin compatibility wrapper around `ToolSet`.
 ///
 /// ```rust,ignore
 /// let tools = CompositeTools::new()
@@ -12,63 +13,26 @@ use crate::{ProgressSender, ToolDefinition, ToolProvider, ToolResult};
 ///     .add(my_custom_provider);
 /// ```
 pub struct CompositeTools {
-    providers: Vec<Box<dyn ToolProvider>>,
-    tool_index: HashMap<String, usize>,
-    definitions_cache: Vec<ToolDefinition>,
+    inner: ToolSet,
 }
 
 impl CompositeTools {
     pub fn new() -> Self {
         Self {
-            providers: Vec::new(),
-            tool_index: HashMap::new(),
-            definitions_cache: Vec::new(),
+            inner: ToolSet::new(),
         }
     }
 
     #[allow(clippy::should_implement_trait)]
-    pub fn add(mut self, provider: impl ToolProvider) -> Self {
-        let defs = provider.definitions();
-        let idx = self.providers.len();
-        for def in &defs {
-            self.tool_index.entry(def.name.clone()).or_insert(idx);
-        }
-        self.definitions_cache.extend(defs);
-        self.providers.push(Box::new(provider));
+    pub fn add<T: ToolProvider>(mut self, provider: T) -> Self {
+        self.inner = self.inner + provider;
         self
     }
 
     /// Add an `Arc<dyn ToolProvider>` (e.g. to share a tool set with sub-agents).
     pub fn add_arc(mut self, provider: Arc<dyn ToolProvider>) -> Self {
-        let defs = provider.definitions();
-        let idx = self.providers.len();
-        for def in &defs {
-            self.tool_index.entry(def.name.clone()).or_insert(idx);
-        }
-        self.definitions_cache.extend(defs);
-        self.providers.push(Box::new(ArcToolProvider(provider)));
+        self.inner = self.inner + provider;
         self
-    }
-}
-
-/// Wrapper so an `Arc<dyn ToolProvider>` can live inside a `Box<dyn ToolProvider>`.
-struct ArcToolProvider(Arc<dyn ToolProvider>);
-
-#[async_trait::async_trait]
-impl ToolProvider for ArcToolProvider {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        self.0.definitions()
-    }
-    async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
-        self.0.execute(name, args).await
-    }
-    async fn execute_streaming(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        progress: Option<&ProgressSender>,
-    ) -> ToolResult {
-        self.0.execute_streaming(name, args, progress).await
     }
 }
 
@@ -81,16 +45,11 @@ impl Default for CompositeTools {
 #[async_trait::async_trait]
 impl ToolProvider for CompositeTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        self.definitions_cache.clone()
+        self.inner.definitions()
     }
 
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
-        if let Some(idx) = self.tool_index.get(name)
-            && let Some(provider) = self.providers.get(*idx)
-        {
-            return provider.execute(name, args).await;
-        }
-        ToolResult::err_fmt(format_args!("Unknown tool: {name}"))
+        self.inner.execute(name, args).await
     }
 
     async fn execute_streaming(
@@ -99,12 +58,7 @@ impl ToolProvider for CompositeTools {
         args: &serde_json::Value,
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
-        if let Some(idx) = self.tool_index.get(name)
-            && let Some(provider) = self.providers.get(*idx)
-        {
-            return provider.execute_streaming(name, args, progress).await;
-        }
-        ToolResult::err_fmt(format_args!("Unknown tool: {name}"))
+        self.inner.execute_streaming(name, args, progress).await
     }
 }
 
@@ -120,7 +74,13 @@ mod tests {
         fn definitions(&self) -> Vec<ToolDefinition> {
             vec![ToolDefinition {
                 name: "tool_a".into(),
-                description: "Tool A".into(),
+                description: vec![crate::ToolText::new(
+                    "Tool A",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![],
                 returns: "str".into(),
                 examples: vec![],
@@ -140,7 +100,13 @@ mod tests {
         fn definitions(&self) -> Vec<ToolDefinition> {
             vec![ToolDefinition {
                 name: "tool_b".into(),
-                description: "Tool B".into(),
+                description: vec![crate::ToolText::new(
+                    "Tool B",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![ToolParam::typed("x", "int")],
                 returns: "int".into(),
                 examples: vec![],
@@ -152,8 +118,6 @@ mod tests {
             ToolResult::ok(serde_json::json!(42))
         }
     }
-
-    // ── CompositeTools ──
 
     #[tokio::test]
     async fn composite_combines_definitions() {

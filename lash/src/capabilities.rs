@@ -306,7 +306,7 @@ mod tests {
             .iter()
             .map(|n| ToolDefinition {
                 name: (*n).to_string(),
-                description: String::new(),
+                description: vec![],
                 params: vec![],
                 returns: "any".to_string(),
                 examples: vec![],

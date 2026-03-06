@@ -174,7 +174,13 @@ mod tests {
         fn definitions(&self) -> Vec<ToolDefinition> {
             vec![ToolDefinition {
                 name: "alpha".into(),
-                description: "Alpha tool".into(),
+                description: vec![crate::ToolText::new(
+                    "Alpha tool",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![],
                 returns: "str".into(),
                 examples: vec![],
@@ -194,7 +200,13 @@ mod tests {
         fn definitions(&self) -> Vec<ToolDefinition> {
             vec![ToolDefinition {
                 name: "beta".into(),
-                description: "Beta tool".into(),
+                description: vec![crate::ToolText::new(
+                    "Beta tool",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
                 params: vec![ToolParam::typed("x", "int")],
                 returns: "int".into(),
                 examples: vec![],
@@ -216,7 +228,7 @@ mod tests {
             vec![
                 ToolDefinition {
                     name: "multi_a".into(),
-                    description: String::new(),
+                    description: vec![],
                     params: vec![],
                     returns: "str".into(),
                     examples: vec![],
@@ -225,7 +237,7 @@ mod tests {
                 },
                 ToolDefinition {
                     name: "multi_b".into(),
-                    description: String::new(),
+                    description: vec![],
                     params: vec![],
                     returns: "str".into(),
                     examples: vec![],
@@ -303,7 +315,13 @@ mod tests {
             fn definitions(&self) -> Vec<ToolDefinition> {
                 vec![ToolDefinition {
                     name: "alpha".into(),
-                    description: "Alpha v2".into(),
+                    description: vec![crate::ToolText::new(
+                        "Alpha v2",
+                        [
+                            crate::ExecutionMode::Repl,
+                            crate::ExecutionMode::NativeTools,
+                        ],
+                    )],
                     params: vec![],
                     returns: "str".into(),
                     examples: vec![],
@@ -319,7 +337,10 @@ mod tests {
         let set = ToolSet::new() + MockAlpha + MockAlpha2;
         let defs = set.definitions();
         assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].description, "Alpha v2");
+        assert_eq!(
+            defs[0].description_for(crate::ExecutionMode::Repl),
+            "Alpha v2"
+        );
     }
 
     #[test]

@@ -5,21 +5,22 @@ use serde_json::{Value, json};
 use crate::llm::adapters::streaming::stream_chunk_timeout;
 use crate::llm::transport::{LlmTransport, LlmTransportError};
 use crate::llm::types::{
-    LlmMessage, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmUsage, ModelSelection,
+    LlmMessage, LlmOutputPart, LlmReplayChunk, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent,
+    LlmToolCall, LlmUsage, ModelSelection, coalesce_replay_messages,
 };
 use crate::provider::Provider;
 
-pub struct OpenRouterAdapter {
+pub struct OpenAiGenericAdapter {
     client: reqwest::Client,
 }
 
-impl Default for OpenRouterAdapter {
+impl Default for OpenAiGenericAdapter {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl OpenRouterAdapter {
+impl OpenAiGenericAdapter {
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::new(),
@@ -35,6 +36,30 @@ impl OpenRouterAdapter {
     }
 
     fn message_to_json(&self, msg: &LlmMessage, req: &LlmRequest) -> Value {
+        if msg.kind == "tool_call" {
+            return json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": msg.tool_call_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    "type": "function",
+                    "function": {
+                        "name": msg.tool_name.clone().unwrap_or_default(),
+                        "arguments": msg.content,
+                    }
+                }]
+            });
+        }
+
+        if msg.kind == "tool_result" {
+            return json!({
+                "role": "tool",
+                "tool_call_id": msg.tool_call_id,
+                "name": msg.tool_name,
+                "content": msg.content,
+            });
+        }
+
         if msg.kind == "image"
             && msg.image_idx >= 0
             && let Some(att) = req.attachments.get(msg.image_idx as usize)
@@ -54,6 +79,43 @@ impl OpenRouterAdapter {
             "role": Self::map_role(&msg.role),
             "content": msg.content,
         })
+    }
+
+    fn assistant_tool_calls_json(text: Option<&str>, tool_calls: &[LlmToolCall]) -> Value {
+        json!({
+            "role": "assistant",
+            "content": text.unwrap_or_default(),
+            "tool_calls": tool_calls
+                .iter()
+                .map(|msg| json!({
+                    "id": if msg.call_id.is_empty() { uuid::Uuid::new_v4().to_string() } else { msg.call_id.clone() },
+                    "type": "function",
+                    "function": {
+                        "name": msg.tool_name.clone(),
+                        "arguments": msg.input_json,
+                    }
+                }))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    fn build_messages(&self, req: &LlmRequest) -> Vec<Value> {
+        let mut messages = vec![json!({"role": "system", "content": req.system_prompt})];
+        for chunk in coalesce_replay_messages(&req.messages) {
+            match chunk {
+                LlmReplayChunk::Message(msg) => messages.push(self.message_to_json(&msg, req)),
+                LlmReplayChunk::AssistantToolCalls { text, tool_calls } => {
+                    messages.push(Self::assistant_tool_calls_json(
+                        text.as_deref(),
+                        &tool_calls,
+                    ));
+                }
+                LlmReplayChunk::ToolResults { results } => {
+                    messages.extend(results.iter().map(|msg| self.message_to_json(msg, req)));
+                }
+            }
+        }
+        messages
     }
 
     fn parse_i64(v: Option<&Value>) -> i64 {
@@ -193,10 +255,74 @@ impl OpenRouterAdapter {
         let usage = Self::usage_from_value(&value).unwrap_or_default();
         Ok((full, usage))
     }
+
+    fn response_parts_from_value(value: &Value) -> Vec<LlmOutputPart> {
+        let mut parts = Vec::new();
+        let Some(choice) = value
+            .get("choices")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+        else {
+            return parts;
+        };
+        let Some(message) = choice.get("message") else {
+            return parts;
+        };
+
+        if let Some(text) = message.get("content").and_then(|c| c.as_str())
+            && !text.is_empty()
+        {
+            parts.push(LlmOutputPart::Text {
+                text: text.to_string(),
+            });
+        } else if let Some(content) = message.get("content").and_then(|c| c.as_array()) {
+            for item in content {
+                if let Some(text) = item.get("text").and_then(|t| t.as_str())
+                    && !text.is_empty()
+                {
+                    parts.push(LlmOutputPart::Text {
+                        text: text.to_string(),
+                    });
+                }
+            }
+        }
+
+        if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
+            for tool_call in tool_calls {
+                let Some(name) = tool_call
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                else {
+                    continue;
+                };
+                let arguments = tool_call
+                    .get("function")
+                    .and_then(|f| f.get("arguments"))
+                    .map(|v| {
+                        v.as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| v.to_string())
+                    })
+                    .unwrap_or_else(|| "{}".to_string());
+                parts.push(LlmOutputPart::ToolCall {
+                    call_id: tool_call
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    tool_name: name.to_string(),
+                    input_json: arguments,
+                });
+            }
+        }
+
+        parts
+    }
 }
 
 #[async_trait]
-impl LlmTransport for OpenRouterAdapter {
+impl LlmTransport for OpenAiGenericAdapter {
     fn default_root_model(&self) -> &'static str {
         "anthropic/claude-sonnet-4.6"
     }
@@ -238,25 +364,46 @@ impl LlmTransport for OpenRouterAdapter {
     ) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
         let (api_key, base_url) = match provider {
-            Provider::OpenRouter { api_key, base_url } => (api_key.clone(), base_url.clone()),
+            Provider::OpenAiGeneric { api_key, base_url } => (api_key.clone(), base_url.clone()),
             _ => {
                 return Err(LlmTransportError::new(
-                    "OpenRouter adapter received non-OpenRouter provider",
+                    "OpenAI-generic adapter received non-OpenAI-generic provider",
                 ));
             }
         };
 
-        let mut messages = vec![json!({"role": "system", "content": req.system_prompt})];
-        messages.extend(req.messages.iter().map(|m| self.message_to_json(m, &req)));
+        let messages = self.build_messages(&req);
 
-        let body = json!({
+        let mut body = json!({
             "model": req.model,
             "messages": messages,
             "temperature": 0,
             "max_tokens": 32768,
-            "stream": true,
-            "stream_options": { "include_usage": true },
+            "stream": stream_events.is_some(),
         });
+        if stream_events.is_some() {
+            body["stream_options"] = json!({ "include_usage": true });
+        }
+        if !req.tools.is_empty() {
+            body["tools"] = json!(
+                req.tools
+                    .iter()
+                    .map(|tool| json!({
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.input_schema,
+                        }
+                    }))
+                    .collect::<Vec<_>>()
+            );
+            body["tool_choice"] = match req.tool_choice {
+                crate::llm::types::LlmToolChoice::Auto => json!("auto"),
+                crate::llm::types::LlmToolChoice::None => json!("none"),
+                crate::llm::types::LlmToolChoice::Required => json!("required"),
+            };
+        }
 
         let request_body = serde_json::to_string(&body).ok();
         let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
@@ -275,7 +422,7 @@ impl LlmTransport for OpenRouterAdapter {
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             return Err(LlmTransportError {
-                message: format!("OpenRouter request failed with {}", status.as_u16()),
+                message: format!("OpenAI-generic request failed with {}", status.as_u16()),
                 retryable: status.as_u16() == 429 || status.as_u16() >= 500,
                 raw: Some(text),
                 code: Some(status.as_u16().to_string()),
@@ -292,6 +439,16 @@ impl LlmTransport for OpenRouterAdapter {
         if !is_sse {
             let text = resp.text().await.unwrap_or_default();
             let (content, usage) = Self::parse_non_stream_response(&text)?;
+            let value: Value = serde_json::from_str(&text).map_err(|e| {
+                LlmTransportError::new(format!("Invalid OpenRouter response JSON: {e}"))
+                    .with_raw(text.clone())
+            })?;
+            let mut parts = Self::response_parts_from_value(&value);
+            if parts.is_empty() && !content.is_empty() {
+                parts.push(LlmOutputPart::Text {
+                    text: content.clone(),
+                });
+            }
             if let Some(tx) = &stream_events {
                 if !content.is_empty() {
                     let _ = tx.send(LlmStreamEvent::Delta(content.clone()));
@@ -303,6 +460,7 @@ impl LlmTransport for OpenRouterAdapter {
             return Ok(LlmResponse {
                 deltas: vec![content.clone()],
                 full_text: content,
+                parts,
                 usage,
                 request_body,
                 http_summary: Some(format!("HTTP POST {}", url)),
@@ -372,9 +530,16 @@ impl LlmTransport for OpenRouterAdapter {
             }
         }
 
+        let parts = if full.is_empty() {
+            Vec::new()
+        } else {
+            vec![LlmOutputPart::Text { text: full.clone() }]
+        };
+
         Ok(LlmResponse {
             deltas,
             full_text: full,
+            parts,
             usage,
             request_body,
             http_summary: Some(format!("HTTP POST {} (stream)", url)),
@@ -387,19 +552,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_openrouter_sse_deltas_and_usage() {
+    fn parses_openai_generic_sse_deltas_and_usage() {
         let mut full = String::new();
         let mut deltas = Vec::new();
         let mut usage = LlmUsage::default();
 
-        OpenRouterAdapter::process_sse_event(
+        OpenAiGenericAdapter::process_sse_event(
             r#"{"choices":[{"delta":{"content":"Hel"}}]}"#,
             &mut full,
             &mut deltas,
             &mut usage,
         )
         .unwrap();
-        OpenRouterAdapter::process_sse_event(
+        OpenAiGenericAdapter::process_sse_event(
             r#"{"choices":[{"delta":{"content":"lo"}}],"usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4}}}"#,
             &mut full,
             &mut deltas,
@@ -412,5 +577,61 @@ mod tests {
         assert_eq!(usage.input_tokens, 10);
         assert_eq!(usage.output_tokens, 3);
         assert_eq!(usage.cached_input_tokens, 4);
+    }
+
+    #[test]
+    fn build_messages_groups_assistant_multi_tool_turns() {
+        let adapter = OpenAiGenericAdapter::new();
+        let req = LlmRequest {
+            model: "gpt-5.4".to_string(),
+            system_prompt: "sys".to_string(),
+            messages: vec![
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: "Checking both files.".to_string(),
+                    kind: "text".to_string(),
+                    image_idx: -1,
+                    tool_call_id: None,
+                    tool_name: None,
+                },
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: r#"{"path":"a.rs"}"#.to_string(),
+                    kind: "tool_call".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_a".to_string()),
+                    tool_name: Some("read_file".to_string()),
+                },
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: r#"{"path":"b.rs"}"#.to_string(),
+                    kind: "tool_call".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_b".to_string()),
+                    tool_name: Some("read_file".to_string()),
+                },
+                LlmMessage {
+                    role: LlmRole::User,
+                    content: "file a".to_string(),
+                    kind: "tool_result".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_a".to_string()),
+                    tool_name: Some("read_file".to_string()),
+                },
+            ],
+            attachments: vec![],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            reasoning_effort: None,
+            session_id: None,
+            stream_events: None,
+        };
+
+        let messages = adapter.build_messages(&req);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"], "Checking both files.");
+        assert_eq!(messages[1]["tool_calls"].as_array().map(Vec::len), Some(2));
+        assert_eq!(messages[2]["role"], "tool");
     }
 }

@@ -15,10 +15,13 @@ impl ToolProvider for Ls {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "ls".into(),
-            description: format!(
-                "List filesystem entries as `PathEntry` objects, respecting .gitignore. Each item has: `path`, `kind`, `size_bytes`, `lines` (or null), `modified_at` (RFC3339 UTC). Defaults: depth={}, limit={}, with_lines=false.",
-                DEFAULT_DEPTH, MAX_ENTRIES
-            ),
+            description: vec![crate::ToolText::new(
+                format!(
+                    "List filesystem entries as `PathEntry` objects, respecting .gitignore. Each item has: `path`, `kind`, `size_bytes`, `lines` (or null), `modified_at` (RFC3339 UTC). Defaults: depth={}, limit={}, with_lines=false.",
+                    DEFAULT_DEPTH, MAX_ENTRIES
+                ),
+                [crate::ExecutionMode::Repl, crate::ExecutionMode::NativeTools],
+            )],
             params: vec![
                 ToolParam {
                     name: "path".into(),
