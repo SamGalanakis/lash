@@ -211,7 +211,7 @@ impl Default for AgentConfig {
             headless: false,
             prompt_overrides: Vec::new(),
             instruction_source: Arc::new(FsInstructionSource::new()),
-            execution_mode: ExecutionMode::Repl,
+            execution_mode: crate::default_execution_mode(),
             context_folding: ContextFoldingConfig::default(),
         }
     }

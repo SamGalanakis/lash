@@ -9,6 +9,7 @@ const PBS_RELEASE: &str = "20260211";
 enum PythonBuildMode {
     System,
     Bundled,
+    None,
 }
 
 fn main() {
@@ -21,10 +22,12 @@ fn main() {
     match resolve_python_build_mode() {
         PythonBuildMode::System => configure_system_python_build(),
         PythonBuildMode::Bundled => configure_bundled_python_build(),
+        PythonBuildMode::None => {}
     }
 }
 
 fn resolve_python_build_mode() -> PythonBuildMode {
+    let native_only = std::env::var_os("CARGO_FEATURE_NATIVE_TOOLS_ONLY").is_some();
     let bundled = std::env::var_os("CARGO_FEATURE_PYTHON_BUNDLED").is_some();
     let system = std::env::var_os("CARGO_FEATURE_PYTHON_SYSTEM").is_some();
 
@@ -32,11 +35,16 @@ fn resolve_python_build_mode() -> PythonBuildMode {
         !(bundled && system),
         "Features 'python-system' and 'python-bundled' are mutually exclusive. Enable at most one."
     );
+    assert!(
+        !(native_only && (bundled || system)),
+        "Feature 'native-tools-only' is mutually exclusive with 'python-system' and 'python-bundled'."
+    );
 
-    if bundled {
+    if native_only || (!bundled && !system) {
+        PythonBuildMode::None
+    } else if bundled {
         PythonBuildMode::Bundled
     } else {
-        // Default to system Python unless bundled mode is explicitly requested.
         PythonBuildMode::System
     }
 }

@@ -15,16 +15,18 @@ chmod +x ~/.local/bin/lash
 
 ## Python Build Modes
 
-`lash`/`lash-core` support two PyO3 build modes:
+`lash`/`lash-core` support three build modes:
 
 - `python-system` (default): link against host Python discovered by PyO3 (and provide `dill` in that Python env).
 - `python-bundled`: link against `python-build-standalone` and bundle stdlib+dill.
+- `native-tools-only`: build without embedded Python/PyO3 at all. This defaults runtime execution to `native-tools`, and `repl` mode is unavailable in that build.
 
 ### Local dev
 
 ```bash
 ./dev.sh                           # default: system Python
 LASH_PYTHON_MODE=bundled ./dev.sh  # bundled python-build-standalone
+LASH_PYTHON_MODE=none ./dev.sh     # native-tools-only, no Python required
 ```
 
 ### Build commands
@@ -35,6 +37,9 @@ cargo xtask build --python system
 
 # Bundled Python (auto-bootstrap + auto-configure)
 cargo xtask build --python bundled
+
+# No embedded Python at all
+cargo xtask build --python none
 ```
 
 `cargo xtask build --python bundled` bootstraps standalone Python as needed and sets
@@ -65,6 +70,13 @@ lash-core = { path = "../lash", default-features = false, features = ["full", "p
 ```
 
 Then bootstrap bundled Python and set `PYO3_CONFIG_FILE` before running Cargo (same as above).
+
+For native-tools-only mode in downstream projects:
+
+```toml
+[dependencies]
+lash-core = { path = "../lash", default-features = false, features = ["full", "native-tools-only"] }
+```
 
 ## CLI Usage
 

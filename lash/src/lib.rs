@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod capabilities;
 pub mod dynamic;
+#[cfg_attr(not(feature = "python-runtime"), path = "embedded_stub.rs")]
 pub mod embedded;
 pub mod instructions;
 pub mod llm;
@@ -16,6 +17,16 @@ pub mod text;
 pub mod tools;
 
 use std::path::PathBuf;
+
+#[cfg(all(feature = "python-system", feature = "python-bundled"))]
+compile_error!("Features 'python-system' and 'python-bundled' are mutually exclusive.");
+#[cfg(all(
+    feature = "native-tools-only",
+    any(feature = "python-system", feature = "python-bundled")
+))]
+compile_error!(
+    "Feature 'native-tools-only' is mutually exclusive with 'python-system' and 'python-bundled'."
+);
 
 /// Return the root data directory for lash.
 ///
@@ -74,12 +85,33 @@ pub use text::strip_repl_fragments;
 pub use tools::{BatchingTools, ToolSet, ToolSetDeps};
 
 /// Execution backend for agent turns.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
-    #[default]
     Repl,
     NativeTools,
+}
+
+impl Default for ExecutionMode {
+    fn default() -> Self {
+        if python_runtime_available() {
+            Self::Repl
+        } else {
+            Self::NativeTools
+        }
+    }
+}
+
+pub fn python_runtime_available() -> bool {
+    cfg!(feature = "python-runtime")
+}
+
+pub fn execution_mode_supported(mode: ExecutionMode) -> bool {
+    !matches!(mode, ExecutionMode::Repl) || python_runtime_available()
+}
+
+pub fn default_execution_mode() -> ExecutionMode {
+    ExecutionMode::default()
 }
 
 /// Watermark policy for folding old context out of the active prompt window.

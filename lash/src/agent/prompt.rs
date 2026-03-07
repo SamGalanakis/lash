@@ -222,20 +222,38 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
                 ExecutionMode::NativeTools => "You are an AI coding assistant with native tool-calling access.\nYou power lash, a terminal-based coding agent. Understand the codebase, make changes, run commands, and report outcomes clearly.".to_string(),
             },
             PromptProfile::RootHeadless => "You are an autonomous AI coding agent running in non-interactive mode.\nComplete the task end-to-end without asking for user input.".to_string(),
-            PromptProfile::SubAgentInteractive => {
-                if input.can_write {
-                    "You are a sub-agent inside lash working on a delegated task.\nUse tools decisively and return results to the caller via done() when complete.".to_string()
-                } else {
-                    "You are a read-only sub-agent inside lash working on a delegated task.\nFocus on lookup/summarization tasks and return results to the caller via done() when complete.".to_string()
+            PromptProfile::SubAgentInteractive => match input.execution_mode {
+                ExecutionMode::Repl => {
+                    if input.can_write {
+                        "You are a sub-agent inside lash working on a delegated task.\nUse tools decisively and return results to the caller via done() when complete.".to_string()
+                    } else {
+                        "You are a read-only sub-agent inside lash working on a delegated task.\nFocus on lookup/summarization tasks and return results to the caller via done() when complete.".to_string()
+                    }
                 }
-            }
-            PromptProfile::SubAgentHeadless => {
-                if input.can_write {
-                    "You are a headless sub-agent inside lash working on a delegated task.\nOperate autonomously and return final results via done() only when complete.".to_string()
-                } else {
-                    "You are a headless read-only sub-agent inside lash working on a delegated task.\nOperate autonomously on lookup/summarization tasks and return final results via done() only when complete.".to_string()
+                ExecutionMode::NativeTools => {
+                    if input.can_write {
+                        "You are a sub-agent inside lash working on a delegated task.\nUse tools decisively and return a final answer to the caller when complete.".to_string()
+                    } else {
+                        "You are a read-only sub-agent inside lash working on a delegated task.\nFocus on lookup/summarization tasks and return a final answer to the caller when complete.".to_string()
+                    }
                 }
-            }
+            },
+            PromptProfile::SubAgentHeadless => match input.execution_mode {
+                ExecutionMode::Repl => {
+                    if input.can_write {
+                        "You are a headless sub-agent inside lash working on a delegated task.\nOperate autonomously and return final results via done() only when complete.".to_string()
+                    } else {
+                        "You are a headless read-only sub-agent inside lash working on a delegated task.\nOperate autonomously on lookup/summarization tasks and return final results via done() only when complete.".to_string()
+                    }
+                }
+                ExecutionMode::NativeTools => {
+                    if input.can_write {
+                        "You are a headless sub-agent inside lash working on a delegated task.\nOperate autonomously and return a final answer only when complete.".to_string()
+                    } else {
+                        "You are a headless read-only sub-agent inside lash working on a delegated task.\nOperate autonomously on lookup/summarization tasks and return a final answer only when complete.".to_string()
+                    }
+                }
+            },
         }),
         PromptSectionName::Environment => Some(format!("## Environment\n\n{}", input.context)),
         PromptSectionName::Personality => {

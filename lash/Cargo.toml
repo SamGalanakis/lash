@@ -10,8 +10,10 @@ sqlite-store = ["dep:rusqlite"]
 # Build modes for embedded Python (PyO3):
 # - python-system: link against system Python discovered by PyO3.
 # - python-bundled: use python-build-standalone + generated PYO3_CONFIG_FILE.
-python-system = []
-python-bundled = []
+python-runtime = ["dep:pyo3"]
+python-system = ["python-runtime"]
+python-bundled = ["python-runtime"]
+native-tools-only = []
 # Convenience umbrella for first-party consumers (e.g. lash-cli).
 full = ["sqlite-store"]
 
@@ -34,7 +36,7 @@ base64 = "0.22"
 sha2 = "0.10"
 rusqlite = { version = "0.33", features = ["bundled"], optional = true }
 pty-process = { version = "0.4", features = ["async"] }
-pyo3 = { version = "0.28" }
+pyo3 = { version = "0.28", optional = true }
 dirs = "6"
 chrono = "0.4"
 flate2 = "1"
