@@ -83,7 +83,7 @@ impl Default for AgentStateEnvelope {
     fn default() -> Self {
         Self {
             agent_id: "root".to_string(),
-            execution_mode: ExecutionMode::Repl,
+            execution_mode: crate::default_execution_mode(),
             context_folding: ContextFoldingConfig::default(),
             messages: Vec::new(),
             iteration: 0,
@@ -547,12 +547,15 @@ impl RuntimeEngine {
             &state.agent_id,
             config.headless,
             capabilities.clone(),
+            state.execution_mode,
         )
         .await?;
         let mut agent = Agent::new(session, config.into(), Some(state.agent_id.clone()));
         agent.set_execution_mode(state.execution_mode);
         agent.set_context_folding(state.context_folding);
-        if let Some(snapshot) = state.repl_snapshot.clone() {
+        if matches!(state.execution_mode, ExecutionMode::Repl)
+            && let Some(snapshot) = state.repl_snapshot.clone()
+        {
             agent.restore(&snapshot).await?;
         }
         Ok(Self {

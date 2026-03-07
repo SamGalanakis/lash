@@ -23,14 +23,21 @@ pub enum SessionError {
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("python execution mode is not available in this build or session")]
+    ReplUnavailable,
     #[error("python runtime exited unexpectedly")]
     RuntimeExited,
     #[error("protocol error: {0}")]
     Protocol(String),
 }
 
+enum SessionBackend {
+    NativeTools,
+    Python(PythonRuntime),
+}
+
 pub struct Session {
-    runtime: PythonRuntime,
+    backend: SessionBackend,
     tools: Arc<dyn ToolProvider>,
     tool_calls: Vec<ToolCallRecord>,
     tool_images: Vec<ToolImage>,
@@ -46,14 +53,12 @@ impl Session {
         agent_id: &str,
         headless: bool,
         capabilities: AgentCapabilities,
+        execution_mode: crate::ExecutionMode,
     ) -> Result<Self, SessionError> {
         let scratch_dir = tempfile::TempDir::new()?;
 
-        // Start the embedded Python runtime
-        let runtime = PythonRuntime::start()?;
-
-        let session = Self {
-            runtime,
+        let mut session = Self {
+            backend: SessionBackend::NativeTools,
             tools,
             tool_calls: Vec::new(),
             tool_images: Vec::new(),
@@ -63,42 +68,58 @@ impl Session {
             scratch_dir,
         };
 
-        // Send init with tool definitions and agent identity
-        let defs: Vec<_> = session
-            .tools
-            .definitions()
-            .into_iter()
-            .map(|def| def.project(crate::ExecutionMode::Repl))
-            .collect();
-        let tools_json = serde_json::to_string(&defs).unwrap_or_else(|_| "[]".to_string());
-        let capabilities_json = serde_json::json!({
-            "enabled_capabilities": capabilities
-                .enabled_capabilities
-                .iter()
-                .map(|id| id.as_str())
-                .collect::<Vec<_>>(),
-            "enabled_tools": capabilities.enabled_tools.iter().collect::<Vec<_>>(),
-        })
-        .to_string();
-        session.runtime.send(PythonRequest::Init {
-            tools_json,
-            agent_id: agent_id.to_string(),
-            headless,
-            capabilities_json,
-        })?;
+        if matches!(execution_mode, crate::ExecutionMode::Repl) {
+            let runtime = PythonRuntime::start()?;
+            session.backend = SessionBackend::Python(runtime);
 
-        // Wait for ready
-        match session.runtime.recv()? {
-            PythonResponse::Ready => {}
-            other => {
-                return Err(SessionError::Protocol(format!(
-                    "expected ready, got: {:?}",
-                    std::mem::discriminant(&other)
-                )));
+            // Send init with tool definitions and agent identity
+            let defs: Vec<_> = session
+                .tools
+                .definitions()
+                .into_iter()
+                .map(|def| def.project(crate::ExecutionMode::Repl))
+                .collect();
+            let tools_json = serde_json::to_string(&defs).unwrap_or_else(|_| "[]".to_string());
+            let capabilities_json = serde_json::json!({
+                "enabled_capabilities": capabilities
+                    .enabled_capabilities
+                    .iter()
+                    .map(|id| id.as_str())
+                    .collect::<Vec<_>>(),
+                "enabled_tools": capabilities.enabled_tools.iter().collect::<Vec<_>>(),
+            })
+            .to_string();
+            session.runtime()?.send(PythonRequest::Init {
+                tools_json,
+                agent_id: agent_id.to_string(),
+                headless,
+                capabilities_json,
+            })?;
+
+            // Wait for ready
+            match session.runtime()?.recv()? {
+                PythonResponse::Ready => {}
+                other => {
+                    return Err(SessionError::Protocol(format!(
+                        "expected ready, got: {:?}",
+                        std::mem::discriminant(&other)
+                    )));
+                }
             }
         }
 
         Ok(session)
+    }
+
+    fn runtime(&self) -> Result<&PythonRuntime, SessionError> {
+        match &self.backend {
+            SessionBackend::NativeTools => Err(SessionError::ReplUnavailable),
+            SessionBackend::Python(runtime) => Ok(runtime),
+        }
+    }
+
+    pub fn supports_repl(&self) -> bool {
+        matches!(self.backend, SessionBackend::Python(_))
     }
 
     /// Set the message sender for streaming messages during execution.
@@ -144,7 +165,7 @@ impl Session {
             .collect::<Vec<_>>()
             .join("\n");
 
-        self.runtime.send(PythonRequest::Exec {
+        self.runtime()?.send(PythonRequest::Exec {
             id: id.clone(),
             code: clean_code,
         })?;
@@ -158,7 +179,7 @@ impl Session {
         // Use block_in_place so tokio knows this thread is blocked and can
         // schedule drain tasks (prompt forwarding, message forwarding) on other threads.
         loop {
-            let runtime = &self.runtime;
+            let runtime = self.runtime()?;
             let response = tokio::task::block_in_place(|| runtime.recv())
                 .map_err(|_| SessionError::RuntimeExited)?;
             match response {
@@ -295,10 +316,11 @@ impl Session {
     /// Check if a code string is syntactically complete Python.
     /// Uses `ast.parse()` on the Python thread — returns true if the code parses.
     pub fn check_complete(&self, code: &str) -> Result<bool, SessionError> {
-        self.runtime.send(PythonRequest::CheckComplete {
+        self.runtime()?.send(PythonRequest::CheckComplete {
             code: code.to_string(),
         })?;
-        let response = tokio::task::block_in_place(|| self.runtime.recv())
+        let runtime = self.runtime()?;
+        let response = tokio::task::block_in_place(|| runtime.recv())
             .map_err(|_| SessionError::RuntimeExited)?;
         match response {
             PythonResponse::CheckCompleteResult { is_complete } => Ok(is_complete),
@@ -309,10 +331,11 @@ impl Session {
     /// Reset the Python REPL namespace and re-register tools.
     pub async fn reset(&mut self) -> Result<(), SessionError> {
         let id = uuid::Uuid::new_v4().to_string();
-        self.runtime.send(PythonRequest::Reset { id: id.clone() })?;
+        self.runtime()?
+            .send(PythonRequest::Reset { id: id.clone() })?;
 
         loop {
-            match self.runtime.recv()? {
+            match self.runtime()?.recv()? {
                 PythonResponse::ResetResult { .. } => break,
                 _ => continue,
             }
@@ -335,14 +358,14 @@ impl Session {
             .map(|def| def.project(crate::ExecutionMode::Repl))
             .collect();
         let tools_json = serde_json::to_string(&defs).unwrap_or_else(|_| "[]".to_string());
-        self.runtime.send(PythonRequest::Reconfigure {
+        self.runtime()?.send(PythonRequest::Reconfigure {
             tools_json,
             capabilities_json,
             generation,
         })?;
 
         loop {
-            match self.runtime.recv()? {
+            match self.runtime()?.recv()? {
                 PythonResponse::ReconfigureResult {
                     generation: got_generation,
                     error,
@@ -367,11 +390,11 @@ impl Session {
     /// Snapshot the session: Python namespace (via dill) + scratch filesystem.
     pub async fn snapshot(&mut self) -> Result<Vec<u8>, SessionError> {
         let id = uuid::Uuid::new_v4().to_string();
-        self.runtime
+        self.runtime()?
             .send(PythonRequest::Snapshot { id: id.clone() })?;
 
         let data = loop {
-            match self.runtime.recv()? {
+            match self.runtime()?.recv()? {
                 PythonResponse::SnapshotResult { id: _, data } => break data,
                 _ => continue,
             }
@@ -397,12 +420,12 @@ impl Session {
             .to_string();
 
         let id = uuid::Uuid::new_v4().to_string();
-        self.runtime
+        self.runtime()?
             .send(PythonRequest::Restore { id, data: vars_str })?;
 
         // Wait for acknowledgment (exec_result with empty response)
         loop {
-            match self.runtime.recv()? {
+            match self.runtime()?.recv()? {
                 PythonResponse::ExecResult { .. } => break,
                 _ => continue,
             }

@@ -6,6 +6,7 @@ use std::process::{Command, ExitCode};
 enum PythonMode {
     System,
     Bundled,
+    None,
 }
 
 impl PythonMode {
@@ -13,8 +14,9 @@ impl PythonMode {
         match value {
             "system" => Ok(Self::System),
             "bundled" => Ok(Self::Bundled),
+            "none" | "native" | "native-tools" => Ok(Self::None),
             _ => Err(format!(
-                "Invalid --python mode '{value}' (expected 'system' or 'bundled')"
+                "Invalid --python mode '{value}' (expected 'system', 'bundled', or 'none')"
             )),
         }
     }
@@ -23,6 +25,7 @@ impl PythonMode {
         match self {
             Self::System => "python-system",
             Self::Bundled => "python-bundled",
+            Self::None => "native-tools-only",
         }
     }
 }
@@ -78,10 +81,16 @@ fn run_build(raw_args: Vec<String>) -> Result<(), String> {
     let mut cargo = Command::new("cargo");
     cargo.current_dir(&root).arg("build").args(&cargo_args);
 
-    if python_mode == PythonMode::Bundled {
-        let target = parse_target_flag(&cargo_args);
-        let config_path = ensure_bundled_config(&root, target.as_deref())?;
-        cargo.env("PYO3_CONFIG_FILE", &config_path);
+    match python_mode {
+        PythonMode::Bundled => {
+            let target = parse_target_flag(&cargo_args);
+            let config_path = ensure_bundled_config(&root, target.as_deref())?;
+            cargo.env("PYO3_CONFIG_FILE", &config_path);
+        }
+        PythonMode::None => {
+            cargo.env_remove("PYO3_CONFIG_FILE");
+        }
+        PythonMode::System => {}
     }
 
     let status = cargo
@@ -159,12 +168,13 @@ fn has_python_feature(args: &[String], feature: &str) -> bool {
 
 fn has_conflicting_python_feature(args: &[String], mode: PythonMode) -> bool {
     let disallowed = match mode {
-        PythonMode::System => "python-bundled",
-        PythonMode::Bundled => "python-system",
+        PythonMode::System => ["python-bundled", "native-tools-only"].as_slice(),
+        PythonMode::Bundled => ["python-system", "native-tools-only"].as_slice(),
+        PythonMode::None => ["python-system", "python-bundled"].as_slice(),
     };
     iter_feature_values(args)
         .into_iter()
-        .any(|feature| feature == disallowed)
+        .any(|feature| disallowed.contains(&feature.as_str()))
 }
 
 fn iter_feature_values(args: &[String]) -> Vec<String> {
@@ -267,11 +277,12 @@ fn ensure_bundled_config(root: &Path, target: Option<&str>) -> Result<PathBuf, S
 
 fn print_help() {
     println!(
-        "cargo xtask build [--python <system|bundled>] [-- <cargo build args>]\n\
+        "cargo xtask build [--python <system|bundled|none>] [-- <cargo build args>]\n\
          \n\
          Examples:\n\
          cargo xtask build\n\
          cargo xtask build --python bundled\n\
+         cargo xtask build --python none\n\
          cargo xtask build --python bundled -- --release\n\
          cargo xtask build --python bundled -- -p lash-cli --target x86_64-unknown-linux-gnu"
     );

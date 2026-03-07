@@ -276,6 +276,7 @@ impl AgentCall {
             .map(|s| s.to_string());
 
         let agent_config = self.build_agent_config(&tier);
+        let agent_execution_mode = agent_config.execution_mode;
 
         // Generate agent ID for the sub-agent
         let agent_id = uuid::Uuid::new_v4().to_string();
@@ -288,6 +289,7 @@ impl AgentCall {
             &agent_id,
             self.config.headless,
             agent_config.capabilities.clone(),
+            agent_config.execution_mode,
         )
         .await
         {
@@ -302,10 +304,12 @@ impl AgentCall {
         // Dynamic tool providers may carry capability IDs beyond the static enum.
         // Re-register capability payload from the forked dynamic registry so Python
         // helpers/prompt bindings reflect the actual child projection.
-        if let (Some(caps_json), Some(generation)) = (
-            session_tools.dynamic_capabilities_payload_json(),
-            session_tools.dynamic_generation(),
-        ) && let Err(e) = session.reconfigure(caps_json, generation).await
+        if session.supports_repl()
+            && let (Some(caps_json), Some(generation)) = (
+                session_tools.dynamic_capabilities_payload_json(),
+                session_tools.dynamic_generation(),
+            )
+            && let Err(e) = session.reconfigure(caps_json, generation).await
         {
             return ToolResult::err_fmt(format_args!(
                 "Failed to reconfigure sub-agent session: {e}"
@@ -313,7 +317,9 @@ impl AgentCall {
         }
 
         // If a schema is provided, inject the model class and a validating done() wrapper
-        if let Some(ref schema_str) = schema {
+        if matches!(agent_execution_mode, crate::ExecutionMode::Repl)
+            && let Some(ref schema_str) = schema
+        {
             let inject_code = format!(
                 concat!(
                     "import json as _json\n",
@@ -395,7 +401,7 @@ impl AgentCall {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        if parent_history.is_some() || parent_mem.is_some() {
+        if session.supports_repl() && (parent_history.is_some() || parent_mem.is_some()) {
             let mut init_parts = Vec::new();
             if let Some(ref hist_json) = parent_history {
                 let json_str = serde_json::to_string(hist_json).unwrap_or_default();
@@ -419,9 +425,14 @@ impl AgentCall {
                 .ok()
                 .and_then(|v| v.get("title").and_then(|t| t.as_str()).map(String::from))
                 .unwrap_or_else(|| "Result".to_string());
-            format!(
-                "{prompt}\n\nA `{model_name}` class is available in your environment. You MUST call done() with an instance of `{model_name}`. Construct it and pass it to done()."
-            )
+            match agent_execution_mode {
+                crate::ExecutionMode::Repl => format!(
+                    "{prompt}\n\nA `{model_name}` class is available in your environment. You MUST call done() with an instance of `{model_name}`. Construct it and pass it to done()."
+                ),
+                crate::ExecutionMode::NativeTools => format!(
+                    "{prompt}\n\nReturn your final answer as a single JSON object matching this schema exactly:\n{schema_str}\n\nDo not wrap it in markdown fences or extra commentary."
+                ),
+            }
         } else {
             prompt.to_string()
         };

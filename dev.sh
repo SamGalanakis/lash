@@ -23,8 +23,11 @@ if [ "$mode" = "bundled" ]; then
     export PYO3_CONFIG_FILE="$PWD/$config"
   fi
   features=(--features python-bundled)
+elif [ "$mode" = "none" ]; then
+  unset PYO3_CONFIG_FILE
+  features=(--features native-tools-only)
 elif [ "$mode" != "system" ]; then
-  echo "Invalid LASH_PYTHON_MODE=$mode (expected 'system' or 'bundled')" >&2
+  echo "Invalid LASH_PYTHON_MODE=$mode (expected 'system', 'bundled', or 'none')" >&2
   exit 1
 fi
 

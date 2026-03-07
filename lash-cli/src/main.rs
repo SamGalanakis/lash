@@ -385,10 +385,11 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     let model = selection.model.clone();
-    let execution_mode = match args.execution_mode.as_deref() {
+    let execution_mode = ensure_supported_execution_mode(match args.execution_mode.as_deref() {
         Some(raw) => parse_execution_mode(raw).map_err(anyhow::Error::msg)?,
-        None => ExecutionMode::Repl,
-    };
+        None => lash_core::default_execution_mode(),
+    })
+    .map_err(anyhow::Error::msg)?;
 
     let llm_log_path = std::env::var("LASH_LOG").ok().and_then(|level| {
         let l = level.to_lowercase();
@@ -754,6 +755,28 @@ fn parse_execution_mode(input: &str) -> Result<ExecutionMode, String> {
     }
 }
 
+fn execution_mode_usage() -> &'static str {
+    if lash_core::python_runtime_available() {
+        "<repl|native-tools>"
+    } else {
+        "<native-tools>"
+    }
+}
+
+fn ensure_supported_execution_mode(mode: ExecutionMode) -> Result<ExecutionMode, String> {
+    if lash_core::execution_mode_supported(mode) {
+        Ok(mode)
+    } else {
+        Err(match mode {
+            ExecutionMode::Repl => {
+                "REPL mode is not available in this build. Rebuild without `native-tools-only` to enable it."
+                    .to_string()
+            }
+            ExecutionMode::NativeTools => "Execution mode is not available.".to_string(),
+        })
+    }
+}
+
 fn execution_mode_label(mode: ExecutionMode) -> &'static str {
     match mode {
         ExecutionMode::Repl => "repl",
@@ -926,7 +949,10 @@ fn help_text(skills: &skill::SkillRegistry) -> String {
         "Commands:".to_string(),
         "  /clear, /new       Reset conversation".to_string(),
         "  /model [name]      Show or switch LLM model".to_string(),
-        "  /mode [name]       Show or switch execution mode".to_string(),
+        format!(
+            "  /mode [name]       Show or switch execution mode {}",
+            execution_mode_usage()
+        ),
         "  /provider          Open provider setup (in-app)".to_string(),
         "  /login             Sign in or reconfigure provider".to_string(),
         "  /logout            Remove stored credentials".to_string(),
@@ -1150,21 +1176,26 @@ async fn run_app(
 
                     // Snapshot REPL after each completed turn so resume can restore exact state.
                     let snapshot_hash = if let Some(rt) = runtime.as_mut() {
-                        match rt.snapshot_repl().await {
-                            Ok(blob) => {
-                                state = rt.export_state();
-                                Some(hash12(&blob))
+                        if matches!(state.execution_mode, ExecutionMode::Repl) {
+                            match rt.snapshot_repl().await {
+                                Ok(blob) => {
+                                    state = rt.export_state();
+                                    Some(hash12(&blob))
+                                }
+                                Err(e) => {
+                                    push_system_message(
+                                        &mut app,
+                                        format!(
+                                            "Warning: failed to snapshot REPL state for resume: {}",
+                                            e
+                                        ),
+                                    );
+                                    None
+                                }
                             }
-                            Err(e) => {
-                                push_system_message(
-                                    &mut app,
-                                    format!(
-                                        "Warning: failed to snapshot REPL state for resume: {}",
-                                        e
-                                    ),
-                                );
-                                None
-                            }
+                        } else {
+                            state = rt.export_state();
+                            None
                         }
                     } else {
                         None
@@ -1718,13 +1749,16 @@ async fn run_app(
                                         push_system_message(
                                             &mut app,
                                             format!(
-                                                "Current execution mode: `{}`\nUsage: `/mode <repl|native-tools>`",
-                                                execution_mode_label(current_execution_mode)
+                                                "Current execution mode: `{}`\nUsage: `/mode {}`",
+                                                execution_mode_label(current_execution_mode),
+                                                execution_mode_usage()
                                             ),
                                         );
                                         continue;
                                     };
-                                    let new_mode = match parse_execution_mode(&new_mode) {
+                                    let new_mode = match parse_execution_mode(&new_mode)
+                                        .and_then(ensure_supported_execution_mode)
+                                    {
                                         Ok(mode) => mode,
                                         Err(err) => {
                                             push_system_message(
@@ -2980,7 +3014,7 @@ async fn restore_agent_state(
     if let Some(state) = resume_store.load_agent_state("root") {
         let config_value = serde_json::from_str::<serde_json::Value>(&state.config_json).ok();
         *turn_counter = state.iteration.max(0) as usize;
-        let restored_execution_mode = config_value
+        let requested_execution_mode = config_value
             .as_ref()
             .and_then(|v| {
                 v.get("manifest")
@@ -2988,8 +3022,10 @@ async fn restore_agent_state(
                     .and_then(|m| m.as_str())
                     .map(str::to_string)
             })
-            .and_then(|raw| parse_execution_mode(&raw).ok())
-            .unwrap_or(ExecutionMode::Repl);
+            .and_then(|raw| parse_execution_mode(&raw).ok());
+        let restored_execution_mode = requested_execution_mode
+            .and_then(|mode| ensure_supported_execution_mode(mode).ok())
+            .unwrap_or_else(lash_core::default_execution_mode);
         let restored_context_folding = config_value
             .as_ref()
             .and_then(|v| v.get("context_folding").cloned())
@@ -2997,6 +3033,13 @@ async fn restore_agent_state(
             .and_then(|cfg| cfg.validate().ok())
             .unwrap_or_default();
         *execution_mode = restored_execution_mode;
+        if matches!(requested_execution_mode, Some(ExecutionMode::Repl))
+            && !lash_core::execution_mode_supported(ExecutionMode::Repl)
+        {
+            app.blocks.push(DisplayBlock::SystemMessage(
+                "This build does not support REPL mode; resuming in `native-tools`.".to_string(),
+            ));
+        }
         // Restore token counts from DB
         if state.input_tokens > 0 || state.output_tokens > 0 {
             app.token_usage = lash_core::TokenUsage {
@@ -3006,51 +3049,53 @@ async fn restore_agent_state(
             };
         }
 
-        if let Some(ref dill_blob) = state.dill_blob {
-            // Try to restore REPL state
-            if let Some(rt) = runtime.as_mut() {
-                rt.set_context_folding(restored_context_folding);
-                match rt.restore_repl(dill_blob).await {
-                    Ok(()) => {
-                        app.blocks.push(DisplayBlock::SystemMessage(
-                            "REPL state restored from snapshot.".to_string(),
-                        ));
-                    }
-                    Err(e) => {
-                        let sys_id = format!("m{}", history.len());
-                        history.push(Message {
-                            id: sys_id.clone(),
-                            role: MessageRole::System,
-                            parts: vec![Part {
-                                id: format!("{}.p0", sys_id),
-                                kind: PartKind::Text,
-                                content: format!(
-                                    "Session resumed but REPL restore failed ({}). Re-import modules and recreate any state you need.",
-                                    e
-                                ),
-                                tool_call_id: None,
-                                tool_name: None,
-                                prune_state: PruneState::Intact,
-                            }],
-                        });
+        if matches!(restored_execution_mode, ExecutionMode::Repl) {
+            if let Some(ref dill_blob) = state.dill_blob {
+                // Try to restore REPL state
+                if let Some(rt) = runtime.as_mut() {
+                    rt.set_context_folding(restored_context_folding);
+                    match rt.restore_repl(dill_blob).await {
+                        Ok(()) => {
+                            app.blocks.push(DisplayBlock::SystemMessage(
+                                "REPL state restored from snapshot.".to_string(),
+                            ));
+                        }
+                        Err(e) => {
+                            let sys_id = format!("m{}", history.len());
+                            history.push(Message {
+                                id: sys_id.clone(),
+                                role: MessageRole::System,
+                                parts: vec![Part {
+                                    id: format!("{}.p0", sys_id),
+                                    kind: PartKind::Text,
+                                    content: format!(
+                                        "Session resumed but REPL restore failed ({}). Re-import modules and recreate any state you need.",
+                                        e
+                                    ),
+                                    tool_call_id: None,
+                                    tool_name: None,
+                                    prune_state: PruneState::Intact,
+                                }],
+                            });
+                        }
                     }
                 }
+            } else {
+                // No dill blob — inject reset message
+                let sys_id = format!("m{}", history.len());
+                history.push(Message {
+                    id: sys_id.clone(),
+                    role: MessageRole::System,
+                    parts: vec![Part {
+                        id: format!("{}.p0", sys_id),
+                        kind: PartKind::Text,
+                        content: "Session resumed. Your REPL environment was reset — re-import modules and recreate any state you need.".to_string(),
+                        tool_call_id: None,
+                        tool_name: None,
+                        prune_state: PruneState::Intact,
+                    }],
+                });
             }
-        } else {
-            // No dill blob — inject reset message
-            let sys_id = format!("m{}", history.len());
-            history.push(Message {
-                id: sys_id.clone(),
-                role: MessageRole::System,
-                parts: vec![Part {
-                    id: format!("{}.p0", sys_id),
-                    kind: PartKind::Text,
-                    content: "Session resumed. Your REPL environment was reset — re-import modules and recreate any state you need.".to_string(),
-                    tool_call_id: None,
-                    tool_name: None,
-                    prune_state: PruneState::Intact,
-                }],
-            });
         }
 
         // Handle active sub-agents: inject context into parent history and mark them done
@@ -3109,19 +3154,21 @@ async fn restore_agent_state(
         }
     } else {
         // No root agent state in .db
-        let sys_id = format!("m{}", history.len());
-        history.push(Message {
-            id: sys_id.clone(),
-            role: MessageRole::System,
-            parts: vec![Part {
-                id: format!("{}.p0", sys_id),
-                kind: PartKind::Text,
-                content: "Session resumed. Your REPL environment was reset — re-import modules and recreate any state you need.".to_string(),
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: PruneState::Intact,
-            }],
-        });
+        if matches!(*execution_mode, ExecutionMode::Repl) {
+            let sys_id = format!("m{}", history.len());
+            history.push(Message {
+                id: sys_id.clone(),
+                role: MessageRole::System,
+                parts: vec![Part {
+                    id: format!("{}.p0", sys_id),
+                    kind: PartKind::Text,
+                    content: "Session resumed. Your REPL environment was reset — re-import modules and recreate any state you need.".to_string(),
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: PruneState::Intact,
+                }],
+            });
+        }
     }
 }
 
