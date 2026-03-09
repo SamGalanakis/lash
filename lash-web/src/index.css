@@ -6,62 +6,81 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+  --font-sans: "IBM Plex Sans", "SF Pro Text", -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", "JetBrains Mono", "SF Mono", "Menlo", monospace;
 
-  --color-background: #fafaf9;
-  --color-foreground: #0a0a0b;
-  --color-muted: #f5f5f4;
-  --color-muted-foreground: #78716c;
-  --color-card: #ffffff;
-  --color-card-foreground: #0a0a0b;
-  --color-border: #e7e5e4;
-  --color-input: #e7e5e4;
-  --color-primary: #18181b;
-  --color-primary-foreground: #fafafa;
-  --color-secondary: #f5f5f4;
-  --color-secondary-foreground: #18181b;
-  --color-accent: #f5f5f4;
-  --color-accent-foreground: #18181b;
-  --color-destructive: #ef4444;
-  --color-destructive-foreground: #fafafa;
-  --color-ring: #a8a29e;
-  --color-sidebar: #f5f5f4;
-  --color-sidebar-foreground: #44403c;
-  --color-sidebar-border: #e7e5e4;
-  --color-sidebar-accent: #e7e5e4;
-  --color-sidebar-accent-foreground: #18181b;
+  --color-background: #f8f2e8;
+  --color-foreground: #2b2621;
+  --color-muted: #f0e6d7;
+  --color-muted-foreground: #6f6352;
+  --color-card: #fffaf0;
+  --color-card-foreground: #2b2621;
+  --color-border: #d9cab6;
+  --color-input: #e4d4bf;
+  --color-primary: #c5873d;
+  --color-primary-foreground: #fffaf0;
+  --color-secondary: #efe3d1;
+  --color-secondary-foreground: #2b2621;
+  --color-accent: #f2e8d9;
+  --color-accent-foreground: #2b2621;
+  --color-destructive: #bd5c4a;
+  --color-destructive-foreground: #fffaf0;
+  --color-ring: #c5873d;
+  --color-sidebar: #f2e7d7;
+  --color-sidebar-foreground: #3f352c;
+  --color-sidebar-border: #d9cab6;
+  --color-sidebar-accent: #e8dbc6;
+  --color-sidebar-accent-foreground: #2b2621;
 
   --radius-sm: 0.375rem;
   --radius-md: 0.5rem;
-  --radius-lg: 0.75rem;
-  --radius-xl: 1rem;
+  --radius-lg: 0.875rem;
+  --radius-xl: 1.15rem;
+
+  --surface-background: var(--color-background);
+  --surface-elevated: var(--color-card);
+  --interactive-hover: color-mix(in srgb, var(--color-primary) 12%, transparent);
+  --chat-user-message-bg: color-mix(
+    in srgb,
+    var(--color-primary) 17%,
+    var(--color-card)
+  );
 }
 
 @layer base {
   .dark {
-    --color-background: #0a0a0b;
-    --color-foreground: #fafaf9;
-    --color-muted: #1c1917;
-    --color-muted-foreground: #a8a29e;
-    --color-card: #141413;
-    --color-card-foreground: #fafaf9;
-    --color-border: #292524;
-    --color-input: #292524;
-    --color-primary: #fafaf9;
-    --color-primary-foreground: #0a0a0b;
-    --color-secondary: #1c1917;
-    --color-secondary-foreground: #fafaf9;
-    --color-accent: #1c1917;
-    --color-accent-foreground: #fafaf9;
-    --color-destructive: #dc2626;
-    --color-destructive-foreground: #fafafa;
-    --color-ring: #57534e;
-    --color-sidebar: #0f0e0d;
-    --color-sidebar-foreground: #d6d3d1;
-    --color-sidebar-border: #292524;
-    --color-sidebar-accent: #1c1917;
-    --color-sidebar-accent-foreground: #fafaf9;
+    --color-background: #171311;
+    --color-foreground: #ded3c2;
+    --color-muted: #2b241f;
+    --color-muted-foreground: #a79a85;
+    --color-card: #1f1916;
+    --color-card-foreground: #ded3c2;
+    --color-border: #3a312a;
+    --color-input: #40352d;
+    --color-primary: #edb449;
+    --color-primary-foreground: #211910;
+    --color-secondary: #2a221d;
+    --color-secondary-foreground: #ded3c2;
+    --color-accent: #312822;
+    --color-accent-foreground: #ded3c2;
+    --color-destructive: #cf7d6b;
+    --color-destructive-foreground: #fbf4ea;
+    --color-ring: #edb449;
+    --color-sidebar: #15110f;
+    --color-sidebar-foreground: #ded3c2;
+    --color-sidebar-border: #3a312a;
+    --color-sidebar-accent: #2a221d;
+    --color-sidebar-accent-foreground: #ded3c2;
+
+    --surface-background: var(--color-background);
+    --surface-elevated: var(--color-card);
+    --interactive-hover: color-mix(in srgb, var(--color-primary) 14%, transparent);
+    --chat-user-message-bg: color-mix(
+      in srgb,
+      var(--color-primary) 21%,
+      var(--color-card)
+    );
   }
 }
 
@@ -71,6 +90,31 @@
 
 body {
   @apply bg-background text-foreground;
+  font-family: var(--font-sans);
+}
+
+@layer components {
+  .chat-column {
+    width: min(100%, 56rem);
+    margin-inline: auto;
+    padding-inline: clamp(0.75rem, 2.5vw, 1rem);
+  }
+
+  .chat-message-column {
+    width: min(100%, 56rem);
+    margin-inline: auto;
+    padding-inline: clamp(0.75rem, 2.5vw, 1rem);
+  }
+}
+
+@media (min-width: 1024px) {
+  .chat-column {
+    padding-inline: clamp(1rem, 2.5vw, 1.5rem);
+  }
+
+  .chat-message-column {
+    padding-inline: clamp(1rem, 2.5vw, 1.5rem);
+  }
 }
 
 ::-webkit-scrollbar {

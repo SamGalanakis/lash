@@ -33,12 +33,12 @@ export function WelcomeView() {
 
   return (
     <div className="flex h-full items-center justify-center">
-      <div className="w-full max-w-2xl px-6">
+      <div className="chat-column">
         <div className="mb-8 text-center">
-          <div className="inline-flex items-center justify-center rounded-2xl bg-muted p-4 mb-4">
+          <div className="mb-4 inline-flex items-center justify-center rounded-2xl bg-muted p-4">
             <RiTerminalLine className="h-8 w-8 text-muted-foreground" />
           </div>
-          <h1 className="text-2xl font-semibold tracking-tight mb-2">lash</h1>
+          <h1 className="mb-2 text-2xl font-semibold tracking-tight">lash</h1>
           <p className="text-sm text-muted-foreground">
             AI coding agent. Ask anything to get started.
           </p>
@@ -55,28 +55,33 @@ export function WelcomeView() {
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="relative">
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSubmit(e);
-              }
-            }}
-            placeholder="Ask lash something..."
-            rows={3}
-            disabled={submitting}
-            className="w-full resize-none rounded-xl border border-border bg-card px-4 py-3 pr-12 text-sm shadow-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring/20 disabled:opacity-50 transition-shadow"
-          />
-          <button
-            type="submit"
-            disabled={!input.trim() || submitting}
-            className="absolute bottom-3 right-3 rounded-lg bg-primary p-2 text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-30"
-          >
-            <RiSendPlane2Fill className="h-4 w-4" />
-          </button>
+        <form onSubmit={handleSubmit}>
+          <div className="overflow-hidden rounded-2xl border border-input/80 bg-card shadow-sm transition-shadow focus-within:shadow-[0_0_0_2px_color-mix(in_srgb,var(--color-ring)_18%,transparent)]">
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSubmit(e);
+                }
+              }}
+              placeholder="Ask lash something..."
+              rows={3}
+              disabled={submitting}
+              className="w-full resize-none border-0 bg-transparent px-4 py-3 text-sm leading-relaxed placeholder:text-muted-foreground focus:outline-none disabled:opacity-55"
+            />
+            <div className="flex items-center justify-end border-t border-border/70 bg-muted/40 px-3 py-2">
+              <button
+                type="submit"
+                disabled={!input.trim() || submitting}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-primary/35 bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-35"
+              >
+                <RiSendPlane2Fill className="h-4 w-4" />
+                Send
+              </button>
+            </div>
+          </div>
         </form>
 
         <div className="mt-6 grid grid-cols-2 gap-2">
