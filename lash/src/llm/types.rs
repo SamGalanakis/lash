@@ -148,10 +148,17 @@ pub struct LlmAttachment {
     pub data: Vec<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LlmPromptPart {
+    Text(String),
+    Image(usize),
+}
+
 #[derive(Clone, Debug)]
 pub struct LlmRequest {
     pub model: String,
     pub system_prompt: String,
+    pub user_prompt: Vec<LlmPromptPart>,
     pub messages: Vec<LlmMessage>,
     pub attachments: Vec<LlmAttachment>,
     pub tools: Vec<LlmToolSpec>,

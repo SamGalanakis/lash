@@ -388,6 +388,32 @@ impl StateStore {
         skills
     }
 
+    fn fallback_tool_catalog(&self) -> Vec<serde_json::Value> {
+        self.definitions()
+            .into_iter()
+            .filter(|d| {
+                !d.description_for(crate::ExecutionMode::NativeTools)
+                    .is_empty()
+            })
+            .map(|d| {
+                let p = d.project(crate::ExecutionMode::NativeTools);
+                json!({
+                    "name": p.name,
+                    "description": p.description,
+                    "examples": p.examples,
+                    "inject_into_prompt": p.inject_into_prompt,
+                })
+            })
+            .collect()
+    }
+
+    fn tool_catalog(&self, args: &serde_json::Value) -> Vec<serde_json::Value> {
+        args.get("catalog")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_else(|| self.fallback_tool_catalog())
+    }
+
     fn list_tools(&self, args: &serde_json::Value) -> ToolResult {
         let query = args
             .get("query")
@@ -398,13 +424,10 @@ impl StateStore {
             .get("verbose")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-
-        let Some(catalog) = args.get("catalog").and_then(|v| v.as_array()) else {
-            return ToolResult::err(json!("Missing required parameter: catalog"));
-        };
+        let catalog = self.tool_catalog(args);
 
         let items: Vec<serde_json::Value> = catalog
-            .iter()
+            .into_iter()
             .filter(|t| {
                 if let Some(flag) = injected_only {
                     let inject = t
@@ -432,7 +455,7 @@ impl StateStore {
             })
             .map(|t| {
                 if verbose {
-                    t.clone()
+                    t
                 } else {
                     let name = t.get("name").and_then(|v| v.as_str()).unwrap_or_default();
                     let desc = t
@@ -461,13 +484,10 @@ impl StateStore {
         let regex = args.get("regex").and_then(|v| v.as_str());
         let limit = Self::limit_from_args(args);
         let injected_only = args.get("injected_only").and_then(|v| v.as_bool());
-
-        let Some(catalog) = args.get("catalog").and_then(|v| v.as_array()) else {
-            return ToolResult::err(json!("Missing required parameter: catalog"));
-        };
+        let catalog = self.tool_catalog(args);
 
         let mut filtered = Vec::new();
-        for t in catalog {
+        for t in &catalog {
             if let Some(injected) = injected_only {
                 let inject = t
                     .get("inject_into_prompt")
@@ -844,6 +864,10 @@ impl StateStore {
         ToolResult::ok(json!(null))
     }
 
+    fn mem_all(&self, args: &serde_json::Value) -> ToolResult {
+        self.mem_export(args)
+    }
+
     fn mem_export(&self, args: &serde_json::Value) -> ToolResult {
         let agent_id = Self::agent_id(args);
         let entries = self
@@ -882,7 +906,10 @@ impl ToolProvider for StateStore {
                 name: "list_tools".into(),
                 description: vec![crate::ToolText::new(
                     "List available tools with compact summaries. Use verbose=true for full details. Use search_tools for ranked/filtered results.",
-                    [crate::ExecutionMode::NativeTools],
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
                 )],
                 params: vec![
                     ToolParam::optional("query", "str"),
@@ -891,7 +918,7 @@ impl ToolProvider for StateStore {
                 ],
                 returns: "list".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
             ToolDefinition {
@@ -912,7 +939,7 @@ impl ToolProvider for StateStore {
                 ],
                 returns: "list".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
         ];
@@ -933,7 +960,7 @@ impl ToolProvider for StateStore {
             ],
             returns: "list[SkillSummary]".into(),
             examples: vec![],
-            hidden: true,
+            hidden: false,
             inject_into_prompt: false,
         });
         defs.extend(vec![
@@ -956,7 +983,7 @@ impl ToolProvider for StateStore {
                 ],
                 returns: "list".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
             ToolDefinition {
@@ -977,7 +1004,7 @@ impl ToolProvider for StateStore {
                 ],
                 returns: "list".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
             ToolDefinition {
@@ -992,7 +1019,7 @@ impl ToolProvider for StateStore {
                 params: vec![ToolParam::typed("turn", "dict")],
                 returns: "None".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
             ToolDefinition {
@@ -1007,7 +1034,7 @@ impl ToolProvider for StateStore {
                 params: vec![],
                 returns: "list".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
             ToolDefinition {
@@ -1022,7 +1049,7 @@ impl ToolProvider for StateStore {
                 params: vec![ToolParam::typed("turns", "list")],
                 returns: "None".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
             ToolDefinition {
@@ -1037,13 +1064,13 @@ impl ToolProvider for StateStore {
                 params: vec![ToolParam::typed("turn", "int")],
                 returns: "None".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
             ToolDefinition {
                 name: "mem_set".into(),
                 description: vec![crate::ToolText::new(
-                    "Internal: set memory entry.",
+                    "Store or update a persistent memory entry.",
                     [
                         crate::ExecutionMode::Repl,
                         crate::ExecutionMode::NativeTools,
@@ -1056,13 +1083,13 @@ impl ToolProvider for StateStore {
                 ],
                 returns: "None".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
             ToolDefinition {
                 name: "mem_get".into(),
                 description: vec![crate::ToolText::new(
-                    "Internal: get memory entry.",
+                    "Fetch a persistent memory entry by key.",
                     [
                         crate::ExecutionMode::Repl,
                         crate::ExecutionMode::NativeTools,
@@ -1071,13 +1098,13 @@ impl ToolProvider for StateStore {
                 params: vec![ToolParam::typed("key", "str")],
                 returns: "dict".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
             ToolDefinition {
                 name: "mem_delete".into(),
                 description: vec![crate::ToolText::new(
-                    "Internal: delete memory entry.",
+                    "Delete a persistent memory entry by key.",
                     [
                         crate::ExecutionMode::Repl,
                         crate::ExecutionMode::NativeTools,
@@ -1086,7 +1113,22 @@ impl ToolProvider for StateStore {
                 params: vec![ToolParam::typed("key", "str")],
                 returns: "None".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
+                inject_into_prompt: false,
+            },
+            ToolDefinition {
+                name: "mem_all".into(),
+                description: vec![crate::ToolText::new(
+                    "List all persistent memory entries.",
+                    [
+                        crate::ExecutionMode::Repl,
+                        crate::ExecutionMode::NativeTools,
+                    ],
+                )],
+                params: vec![],
+                returns: "list".into(),
+                examples: vec![],
+                hidden: false,
                 inject_into_prompt: false,
             },
             ToolDefinition {
@@ -1101,7 +1143,7 @@ impl ToolProvider for StateStore {
                 params: vec![],
                 returns: "list".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
             ToolDefinition {
@@ -1116,7 +1158,7 @@ impl ToolProvider for StateStore {
                 params: vec![ToolParam::typed("entries", "list")],
                 returns: "None".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
         ]);
@@ -1140,6 +1182,7 @@ impl ToolProvider for StateStore {
             "mem_set" => this.mem_set(&args),
             "mem_get" => this.mem_get(&args),
             "mem_delete" => this.mem_delete(&args),
+            "mem_all" => this.mem_all(&args),
             "mem_export" => this.mem_export(&args),
             "mem_load" => this.mem_load(&args),
             _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
@@ -1187,6 +1230,15 @@ mod tests {
         }));
         assert!(search.success);
         let items = search.result.as_array().cloned().unwrap_or_default();
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].get("key").and_then(|v| v.as_str()),
+            Some("decision")
+        );
+
+        let all = p.mem_all(&json!({"__agent_id__":"root"}));
+        assert!(all.success);
+        let items = all.result.as_array().cloned().unwrap_or_default();
         assert_eq!(items.len(), 1);
         assert_eq!(
             items[0].get("key").and_then(|v| v.as_str()),
@@ -1246,6 +1298,35 @@ mod tests {
             items[0].get("name").and_then(|v| v.as_str()),
             Some("write_file")
         );
+    }
+
+    #[test]
+    fn list_tools_works_without_catalog_arg() {
+        let p = provider();
+        let result = p.list_tools(&json!({
+            "query":"list_tools",
+            "verbose": true
+        }));
+        assert!(result.success);
+        let items = result.result.as_array().cloned().unwrap_or_default();
+        assert!(!items.is_empty());
+        assert_eq!(
+            items[0].get("name").and_then(|v| v.as_str()),
+            Some("list_tools")
+        );
+    }
+
+    #[test]
+    fn search_tools_works_without_catalog_arg() {
+        let p = provider();
+        let result = p.search_tools(&json!({
+            "query":"search tools",
+            "mode":"hybrid",
+            "limit":10
+        }));
+        assert!(result.success);
+        let items = result.result.as_array().cloned().unwrap_or_default();
+        assert!(!items.is_empty());
     }
 
     #[test]

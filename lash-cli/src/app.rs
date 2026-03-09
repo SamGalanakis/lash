@@ -180,8 +180,8 @@ impl DisplayBlock {
     pub fn height(&self, expand_level: u8, width: usize, viewport_height: usize) -> usize {
         match self {
             DisplayBlock::UserInput(s) => {
-                // Left-aligned with "\u{2590} " prefix (2 chars) + 1 slack
-                wrapped_text_height(s, width, 3)
+                // Left-aligned with "\u{25CF} " prefix (2 chars)
+                wrapped_text_height(s, width, 2)
             }
             DisplayBlock::AssistantText(s) => {
                 markdown::markdown_height_compact(s, width.saturating_sub(2))
@@ -450,6 +450,15 @@ impl App {
         false
     }
 
+    fn flush_pending_text(&mut self) {
+        let flushed = normalize_stream_text(&self.pending_text);
+        if !flushed.is_empty() {
+            self.blocks.push(DisplayBlock::AssistantText(flushed));
+            self.invalidate_height_cache();
+        }
+        self.pending_text.clear();
+    }
+
     /// Process an agent event, updating display blocks.
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
@@ -465,12 +474,7 @@ impl App {
             }
             AgentEvent::CodeBlock { code } => {
                 self.status_text = Some("code".into());
-                let flushed = normalize_stream_text(&self.pending_text);
-                if !flushed.is_empty() {
-                    self.blocks.push(DisplayBlock::AssistantText(flushed));
-                    self.invalidate_height_cache();
-                }
-                self.pending_text.clear();
+                self.flush_pending_text();
                 let trimmed = code.trim_matches('\n');
                 if !trimmed.is_empty() {
                     let continuation = self.is_code_continuation();
@@ -574,7 +578,7 @@ impl App {
                 }
             }
             AgentEvent::LlmRequest { iteration, .. } => {
-                self.pending_text.clear();
+                self.flush_pending_text();
                 self.iteration = iteration + 1;
                 self.status_text = Some("thinking".into());
                 self.live_output_chars_estimate = 0;
@@ -597,12 +601,7 @@ impl App {
                 self.scroll_to_bottom();
             }
             AgentEvent::Done => {
-                let flushed = normalize_stream_text(&self.pending_text);
-                if !flushed.is_empty() {
-                    self.blocks.push(DisplayBlock::AssistantText(flushed));
-                    self.invalidate_height_cache();
-                }
-                self.pending_text.clear();
+                self.flush_pending_text();
                 self.running = false;
                 self.status_text = None;
                 self.streaming_output.clear();
@@ -1829,6 +1828,31 @@ mod tests {
     }
 
     #[test]
+    fn llm_request_flushes_intermediate_stream_text() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: "Let me continue testing.".into(),
+        });
+        app.handle_agent_event(AgentEvent::ToolCall {
+            name: "batch".into(),
+            args: serde_json::json!({}),
+            result: serde_json::json!(null),
+            success: true,
+            duration_ms: 1,
+        });
+        app.handle_agent_event(AgentEvent::LlmRequest {
+            iteration: 1,
+            message_count: 0,
+            tool_list: String::new(),
+        });
+
+        assert!(app.pending_text.is_empty());
+        assert!(app.blocks.iter().any(|block| {
+            matches!(block, DisplayBlock::AssistantText(text) if text == "Let me continue testing.")
+        }));
+    }
+
+    #[test]
     fn token_usage_resets_live_token_estimate() {
         let mut app = App::new("test-model".into(), "test".into(), None);
         app.handle_agent_event(AgentEvent::TextDelta {
@@ -1876,6 +1900,13 @@ mod tests {
         // "hello" with 2-char prefix = 1 line
         let block = DisplayBlock::UserInput("hello".into());
         assert_eq!(block.height(0, 80, 0), 1);
+    }
+
+    #[test]
+    fn display_block_user_input_height_matches_render_prefix_width() {
+        // Eight columns of text plus the two-column marker fits exactly in width 10.
+        let block = DisplayBlock::UserInput("12345678".into());
+        assert_eq!(block.height(0, 10, 0), 1);
     }
 
     #[test]

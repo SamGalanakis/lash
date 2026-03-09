@@ -1,4 +1,4 @@
-pub use crate::llm::types::{LlmMessage as ChatMsg, LlmRole};
+pub use crate::llm::types::LlmPromptPart;
 
 pub const IMAGE_REF_PREFIX: &str = "__LASH_IMAGE_IDX:";
 
@@ -101,80 +101,116 @@ fn render_part_for_chat(role: MessageRole, part: &Part) -> String {
     }
 }
 
-/// Convert Vec<Message> to Vec<ChatMsg> (for LLM calls).
-pub fn messages_to_chat(msgs: &[Message]) -> Vec<ChatMsg> {
-    let mut out: Vec<ChatMsg> = Vec::new();
-    for msg in msgs {
-        if msg.parts.is_empty() {
-            out.push(ChatMsg {
-                role: match msg.role {
-                    MessageRole::User => LlmRole::User,
-                    MessageRole::Assistant => LlmRole::Assistant,
-                    MessageRole::System => LlmRole::System,
-                },
-                content: String::new(),
-                kind: "text".to_string(),
-                image_idx: -1,
-                tool_call_id: None,
-                tool_name: None,
-            });
+fn render_message_for_transcript(msg: &Message, image_indices: &mut Vec<usize>) -> String {
+    let mut out = Vec::new();
+    for part in &msg.parts {
+        let rendered = render_part_for_chat(msg.role, part);
+        if let Some(idx_str) = rendered.strip_prefix(IMAGE_REF_PREFIX)
+            && let Ok(idx) = idx_str.parse::<usize>()
+        {
+            image_indices.push(idx);
+            out.push("[Image attached]".to_string());
             continue;
         }
-
-        for part in &msg.parts {
-            let rendered = render_part_for_chat(msg.role, part);
-            if matches!(part.kind, PartKind::ToolCall) {
-                out.push(ChatMsg {
-                    role: LlmRole::Assistant,
-                    content: rendered,
-                    kind: "tool_call".to_string(),
-                    image_idx: -1,
-                    tool_call_id: part.tool_call_id.clone(),
-                    tool_name: part.tool_name.clone(),
-                });
-                continue;
-            }
-            if matches!(part.kind, PartKind::ToolResult) {
-                out.push(ChatMsg {
-                    role: LlmRole::User,
-                    content: rendered,
-                    kind: "tool_result".to_string(),
-                    image_idx: -1,
-                    tool_call_id: part.tool_call_id.clone(),
-                    tool_name: part.tool_name.clone(),
-                });
-                continue;
-            }
-            if let Some(idx_str) = rendered.strip_prefix(IMAGE_REF_PREFIX)
-                && let Ok(idx) = idx_str.parse::<i64>()
-            {
-                // Route image payloads as user messages for broad provider compatibility.
-                out.push(ChatMsg {
-                    role: LlmRole::User,
-                    content: String::new(),
-                    kind: "image".to_string(),
-                    image_idx: idx,
-                    tool_call_id: None,
-                    tool_name: None,
-                });
-                continue;
-            }
-
-            out.push(ChatMsg {
-                role: match msg.role {
-                    MessageRole::User => LlmRole::User,
-                    MessageRole::Assistant => LlmRole::Assistant,
-                    MessageRole::System => LlmRole::System,
-                },
-                content: rendered,
-                kind: "text".to_string(),
-                image_idx: -1,
-                tool_call_id: None,
-                tool_name: None,
-            });
+        if !rendered.trim().is_empty() {
+            out.push(rendered);
         }
     }
-    out
+    out.join("\n\n")
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RenderedPrompt {
+    pub user_prompt: Vec<LlmPromptPart>,
+    pub image_indices: Vec<usize>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct TranscriptTurn {
+    user: Vec<String>,
+    assistant: Vec<String>,
+}
+
+pub fn render_transcript_prompt(
+    msgs: &[Message],
+    base_context: &str,
+    project_instructions: &str,
+) -> RenderedPrompt {
+    let mut image_indices = Vec::new();
+    let mut turns = Vec::new();
+    let mut current = TranscriptTurn::default();
+    let mut has_current = false;
+
+    for msg in msgs {
+        let text = render_message_for_transcript(msg, &mut image_indices);
+        let has_text = !text.trim().is_empty();
+        match msg.role {
+            MessageRole::User => {
+                if has_current && (!current.user.is_empty() || !current.assistant.is_empty()) {
+                    turns.push(current);
+                    current = TranscriptTurn::default();
+                }
+                if has_text {
+                    current.user.push(text);
+                }
+                has_current = true;
+            }
+            MessageRole::Assistant | MessageRole::System => {
+                if !has_current {
+                    has_current = true;
+                }
+                if has_text {
+                    current.assistant.push(text);
+                }
+            }
+        }
+    }
+
+    if has_current && (!current.user.is_empty() || !current.assistant.is_empty()) {
+        turns.push(current);
+    }
+
+    let mut text = String::new();
+    if !base_context.trim().is_empty() {
+        text.push_str("Project:\n");
+        text.push_str(base_context.trim());
+        text.push_str("\n\n");
+    }
+    if !project_instructions.trim().is_empty() {
+        text.push_str("Project Instructions:\n");
+        text.push_str(project_instructions.trim());
+        text.push_str("\n\n");
+    }
+    text.push_str(
+        "History:\nThis is a chronological transcript. `Assistant` refers to Lash, and you are continuing as the same agent.\n\n",
+    );
+    for (idx, turn) in turns.iter().enumerate() {
+        text.push_str(&format!("=== Turn {} ===\n", idx + 1));
+        text.push_str("User:\n");
+        if turn.user.is_empty() {
+            text.push_str("[No user content recorded]\n");
+        } else {
+            text.push_str(&turn.user.join("\n\n"));
+            text.push('\n');
+        }
+        text.push('\n');
+        text.push_str("Assistant (Lash, continuing this transcript):\n");
+        if turn.assistant.is_empty() {
+            text.push_str("[No assistant content recorded]\n");
+        } else {
+            text.push_str(&turn.assistant.join("\n\n"));
+            text.push('\n');
+        }
+        text.push('\n');
+    }
+    text.push_str(
+        "Continue from the latest turn as Lash.\nIf the task is complete, provide the final answer.\nOtherwise produce the next valid step for this runtime.",
+    );
+
+    RenderedPrompt {
+        user_prompt: vec![LlmPromptPart::Text(text)],
+        image_indices,
+    }
 }
 
 #[cfg(test)]
@@ -193,71 +229,52 @@ mod tests {
     }
 
     #[test]
-    fn messages_to_chat_preserves_system_output_wrapping() {
-        let msgs = vec![Message {
-            id: "m0".to_string(),
-            role: MessageRole::System,
-            parts: vec![part(PartKind::Output, "hello")],
-        }];
+    fn render_transcript_prompt_orders_turns_oldest_first() {
+        let msgs = vec![
+            Message {
+                id: "m0".to_string(),
+                role: MessageRole::User,
+                parts: vec![part(PartKind::Text, "first")],
+            },
+            Message {
+                id: "m1".to_string(),
+                role: MessageRole::Assistant,
+                parts: vec![part(PartKind::Prose, "reply one")],
+            },
+            Message {
+                id: "m2".to_string(),
+                role: MessageRole::User,
+                parts: vec![part(PartKind::Text, "second")],
+            },
+        ];
 
-        let out = messages_to_chat(&msgs);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].role, LlmRole::System);
-        assert_eq!(out[0].kind, "text");
-        assert_eq!(out[0].content, "<output>\nhello\n</output>");
+        let rendered = render_transcript_prompt(&msgs, "ctx", "rules");
+        let text = match &rendered.user_prompt[0] {
+            LlmPromptPart::Text(text) => text,
+            LlmPromptPart::Image(_) => panic!("expected text prompt"),
+        };
+
+        assert!(text.contains("Project:\nctx"));
+        assert!(text.contains("Project Instructions:\nrules"));
+        assert!(text.contains("=== Turn 1 ===\nUser:\nfirst"));
+        assert!(text.contains("Assistant (Lash, continuing this transcript):\nreply one"));
+        assert!(text.contains("=== Turn 2 ===\nUser:\nsecond"));
     }
 
     #[test]
-    fn messages_to_chat_turns_system_image_ref_into_image_message() {
+    fn render_transcript_prompt_collects_images() {
         let msgs = vec![Message {
             id: "m0".to_string(),
-            role: MessageRole::System,
+            role: MessageRole::User,
             parts: vec![part(PartKind::Text, "__LASH_IMAGE_IDX:3")],
         }];
 
-        let out = messages_to_chat(&msgs);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].role, LlmRole::User);
-        assert_eq!(out[0].kind, "image");
-        assert_eq!(out[0].image_idx, 3);
-    }
-
-    #[test]
-    fn messages_to_chat_expands_tool_parts_into_llm_tool_messages() {
-        let msgs = vec![Message {
-            id: "m0".to_string(),
-            role: MessageRole::Assistant,
-            parts: vec![
-                Part {
-                    id: "m0.p0".to_string(),
-                    kind: PartKind::ToolCall,
-                    content: r#"{"path":"src/lib.rs"}"#.to_string(),
-                    tool_call_id: Some("call_1".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                    prune_state: PruneState::Intact,
-                },
-                Part {
-                    id: "m0.p1".to_string(),
-                    kind: PartKind::ToolResult,
-                    content: "file contents".to_string(),
-                    tool_call_id: Some("call_1".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                    prune_state: PruneState::Intact,
-                },
-            ],
-        }];
-
-        let out = messages_to_chat(&msgs);
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].role, LlmRole::Assistant);
-        assert_eq!(out[0].kind, "tool_call");
-        assert_eq!(out[0].tool_call_id.as_deref(), Some("call_1"));
-        assert_eq!(out[0].tool_name.as_deref(), Some("read_file"));
-        assert_eq!(out[0].content, r#"{"path":"src/lib.rs"}"#);
-        assert_eq!(out[1].role, LlmRole::User);
-        assert_eq!(out[1].kind, "tool_result");
-        assert_eq!(out[1].tool_call_id.as_deref(), Some("call_1"));
-        assert_eq!(out[1].tool_name.as_deref(), Some("read_file"));
-        assert_eq!(out[1].content, "file contents");
+        let rendered = render_transcript_prompt(&msgs, "", "");
+        assert_eq!(rendered.image_indices, vec![3]);
+        let text = match &rendered.user_prompt[0] {
+            LlmPromptPart::Text(text) => text,
+            LlmPromptPart::Image(_) => panic!("expected text prompt"),
+        };
+        assert!(text.contains("[Image attached]"));
     }
 }

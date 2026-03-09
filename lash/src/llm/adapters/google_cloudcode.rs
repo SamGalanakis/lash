@@ -5,8 +5,7 @@ use serde_json::{Value, json};
 use crate::llm::adapters::streaming::{drive_sse_response, emit_progress, stream_chunk_timeout};
 use crate::llm::transport::{LlmTransport, LlmTransportError};
 use crate::llm::types::{
-    LlmAttachment, LlmMessage, LlmOutputPart, LlmReplayChunk, LlmRequest, LlmResponse, LlmRole,
-    LlmToolCall, LlmUsage, ModelSelection, coalesce_replay_messages,
+    LlmOutputPart, LlmPromptPart, LlmRequest, LlmResponse, LlmUsage, ModelSelection,
 };
 use crate::provider::Provider;
 
@@ -42,132 +41,32 @@ impl GoogleCloudCodeAdapter {
         format!("{}:{}", Self::endpoint_base_url(), method)
     }
 
-    fn content_role(role: &LlmRole) -> &'static str {
-        if matches!(role, LlmRole::Assistant) {
-            "model"
-        } else {
-            "user"
-        }
-    }
-
-    fn message_to_content(msg: &LlmMessage, attachments: &[LlmAttachment]) -> Option<Value> {
-        if msg.kind == "tool_call" {
-            let args = serde_json::from_str::<Value>(&msg.content).unwrap_or_else(|_| json!({}));
-            return Some(json!({
-                "role": "model",
-                "parts": [{
-                    "functionCall": {
-                        "name": msg.tool_name.clone().unwrap_or_default(),
-                        "args": args,
-                    }
-                }]
-            }));
-        }
-
-        if msg.kind == "tool_result" {
-            let response = serde_json::from_str::<Value>(&msg.content)
-                .unwrap_or_else(|_| json!({ "result": msg.content.clone() }));
-            return Some(json!({
-                "role": "user",
-                "parts": [{
-                    "functionResponse": {
-                        "name": msg.tool_name.clone().unwrap_or_default(),
-                        "response": response,
-                    }
-                }]
-            }));
-        }
-
-        if msg.kind == "image"
-            && msg.image_idx >= 0
-            && let Some(att) = attachments.get(msg.image_idx as usize)
-        {
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
-            return Some(json!({
-                "role": Self::content_role(&msg.role),
-                "parts": [{
-                    "inlineData": {
-                        "mimeType": att.mime,
-                        "data": b64,
-                    }
-                }]
-            }));
-        }
-
-        if msg.content.is_empty() {
-            return None;
-        }
-
-        Some(json!({
-            "role": Self::content_role(&msg.role),
-            "parts": [{ "text": msg.content }],
-        }))
-    }
-
-    fn assistant_tool_calls_content(text: Option<&str>, tool_calls: &[LlmToolCall]) -> Value {
-        let mut parts = Vec::new();
-        if let Some(text) = text
-            && !text.is_empty()
-        {
-            parts.push(json!({ "text": text }));
-        }
-        parts.extend(tool_calls.iter().map(|msg| {
-            let args = serde_json::from_str::<Value>(&msg.input_json).unwrap_or_else(|_| json!({}));
-            json!({
-                "functionCall": {
-                    "name": msg.tool_name.clone(),
-                    "args": args,
-                }
-            })
-        }));
-        json!({
-            "role": "model",
-            "parts": parts,
-        })
-    }
-
-    fn user_tool_results_content(tool_results: &[&LlmMessage]) -> Value {
-        json!({
-            "role": "user",
-            "parts": tool_results
-                .iter()
-                .map(|msg| {
-                    let response = serde_json::from_str::<Value>(&msg.content)
-                        .unwrap_or_else(|_| json!({ "result": msg.content.clone() }));
-                    json!({
-                        "functionResponse": {
-                            "name": msg.tool_name.clone().unwrap_or_default(),
-                            "response": response,
-                        }
-                    })
-                })
-                .collect::<Vec<_>>(),
-        })
-    }
-
     fn build_contents(req: &LlmRequest) -> Vec<Value> {
-        let mut contents = Vec::new();
-        for chunk in coalesce_replay_messages(&req.messages) {
-            match chunk {
-                LlmReplayChunk::Message(msg) => {
-                    if let Some(content) = Self::message_to_content(&msg, &req.attachments) {
-                        contents.push(content);
+        let mut parts = Vec::new();
+        for part in &req.user_prompt {
+            match part {
+                LlmPromptPart::Text(text) => {
+                    if !text.is_empty() {
+                        parts.push(json!({ "text": text }));
                     }
                 }
-                LlmReplayChunk::AssistantToolCalls { text, tool_calls } => {
-                    contents.push(Self::assistant_tool_calls_content(
-                        text.as_deref(),
-                        &tool_calls,
-                    ));
-                }
-                LlmReplayChunk::ToolResults { results } => {
-                    contents.push(Self::user_tool_results_content(
-                        &results.iter().collect::<Vec<_>>(),
-                    ));
+                LlmPromptPart::Image(idx) => {
+                    if let Some(att) = req.attachments.get(*idx) {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
+                        parts.push(json!({
+                            "inlineData": {
+                                "mimeType": att.mime,
+                                "data": b64,
+                            }
+                        }));
+                    }
                 }
             }
         }
-        contents
+        vec![json!({
+            "role": "user",
+            "parts": parts,
+        })]
     }
 
     fn parse_i64(v: Option<&Value>) -> i64 {
@@ -704,52 +603,12 @@ mod tests {
     }
 
     #[test]
-    fn build_contents_groups_multi_tool_turns_and_results() {
+    fn build_contents_uses_single_user_prompt() {
         let req = LlmRequest {
             model: "gemini".to_string(),
             system_prompt: "sys".to_string(),
-            messages: vec![
-                LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: "Checking both files.".to_string(),
-                    kind: "text".to_string(),
-                    image_idx: -1,
-                    tool_call_id: None,
-                    tool_name: None,
-                },
-                LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: r#"{"path":"a.rs"}"#.to_string(),
-                    kind: "tool_call".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_a".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                },
-                LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: r#"{"path":"b.rs"}"#.to_string(),
-                    kind: "tool_call".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_b".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                },
-                LlmMessage {
-                    role: LlmRole::User,
-                    content: r#"{"text":"file a"}"#.to_string(),
-                    kind: "tool_result".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_a".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                },
-                LlmMessage {
-                    role: LlmRole::User,
-                    content: r#"{"text":"file b"}"#.to_string(),
-                    kind: "tool_result".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_b".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                },
-            ],
+            user_prompt: vec![LlmPromptPart::Text("history".to_string())],
+            messages: vec![],
             attachments: vec![],
             tools: vec![],
             tool_choice: crate::llm::types::LlmToolChoice::Auto,
@@ -759,10 +618,9 @@ mod tests {
         };
 
         let contents = GoogleCloudCodeAdapter::build_contents(&req);
-        assert_eq!(contents.len(), 2);
-        assert_eq!(contents[0]["role"], "model");
-        assert_eq!(contents[0]["parts"].as_array().map(Vec::len), Some(3));
-        assert_eq!(contents[1]["role"], "user");
-        assert_eq!(contents[1]["parts"].as_array().map(Vec::len), Some(2));
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0]["role"], "user");
+        assert_eq!(contents[0]["parts"].as_array().map(Vec::len), Some(1));
+        assert_eq!(contents[0]["parts"][0]["text"], "history");
     }
 }

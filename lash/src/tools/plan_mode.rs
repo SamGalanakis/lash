@@ -54,7 +54,7 @@ impl ToolProvider for PlanMode {
                 params: vec![],
                 returns: "dict".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
             ToolDefinition {
@@ -69,7 +69,7 @@ impl ToolProvider for PlanMode {
                 params: vec![],
                 returns: "dict".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
         ]

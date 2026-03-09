@@ -247,11 +247,11 @@ pub struct ToolDefinition {
     /// Short usage examples for discovery UIs / REPL browsing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<ToolText>,
-    /// Hidden tools are callable via `_call()` but don't appear in the REPL namespace or agent prompt.
+    /// Whether this tool should be hidden from normal discovery listings.
     #[serde(default)]
     pub hidden: bool,
     /// Whether this tool should be injected into the LLM system prompt.
-    /// Non-injected tools remain callable via discovery/meta helpers.
+    /// Non-injected tools remain callable via discovery/meta calls.
     #[serde(default)]
     pub inject_into_prompt: bool,
 }
@@ -259,6 +259,17 @@ pub struct ToolDefinition {
 impl ToolDefinition {
     fn default_returns() -> String {
         "any".into()
+    }
+
+    pub fn batchable_in(&self, mode: ExecutionMode) -> bool {
+        if self.description_for(mode).is_empty() {
+            return false;
+        }
+
+        !matches!(
+            self.name.as_str(),
+            "batch" | "enter_plan_mode" | "exit_plan_mode"
+        )
     }
 
     pub fn description_for(&self, mode: ExecutionMode) -> String {

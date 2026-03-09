@@ -58,7 +58,7 @@ impl BatchingTools {
             name: "batch".into(),
             description: vec![crate::ToolText::new(
                 format!(
-                    "Execute 1-{} independent visible tool calls concurrently to reduce latency. Use for parallel reads, searches, inspections, and unrelated diagnostics. Do not batch dependent steps or nest `batch` inside `batch`.",
+                    "Execute 1-{} independent tool calls concurrently to reduce latency. Use for parallel reads, searches, inspections, writes, and unrelated diagnostics. Do not batch dependent steps or nest `batch` inside `batch`.",
                     MAX_BATCH_CALLS
                 ),
                 [
@@ -86,16 +86,16 @@ impl BatchingTools {
         }
     }
 
-    fn visible_inner_definitions(&self) -> Vec<ToolDefinition> {
+    fn batchable_inner_definitions(&self) -> Vec<ToolDefinition> {
         self.inner
             .definitions()
             .into_iter()
-            .filter(|def| def.name != "batch")
+            .filter(|def| def.batchable_in(self.current_mode()))
             .collect()
     }
 
     fn merged_definitions(&self) -> Vec<ToolDefinition> {
-        let mut defs = self.visible_inner_definitions();
+        let mut defs = self.batchable_inner_definitions();
         if matches!(self.current_mode(), ExecutionMode::NativeTools)
             && !defs.iter().any(|def| def.name == "batch")
         {
@@ -114,7 +114,7 @@ impl BatchingTools {
             Err(err) => return err,
         };
 
-        let available_defs = self.visible_inner_definitions();
+        let available_defs = self.batchable_inner_definitions();
         let available_tools: std::collections::BTreeSet<String> =
             available_defs.iter().map(|def| def.name.clone()).collect();
         let available_tools_list = available_tools
@@ -445,6 +445,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn non_prompt_tools_can_still_be_batchable() {
+        struct NonPromptBatchable;
+
+        #[async_trait::async_trait]
+        impl ToolProvider for NonPromptBatchable {
+            fn definitions(&self) -> Vec<ToolDefinition> {
+                vec![ToolDefinition {
+                    name: "alpha_omitted_from_prompt".into(),
+                    description: vec![crate::ToolText::new(
+                        "alpha omitted from prompt",
+                        [
+                            crate::ExecutionMode::Repl,
+                            crate::ExecutionMode::NativeTools,
+                        ],
+                    )],
+                    params: vec![],
+                    returns: "str".into(),
+                    examples: vec![],
+                    hidden: false,
+                    inject_into_prompt: false,
+                }]
+            }
+
+            async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
+                ToolResult::ok(serde_json::json!("hidden_ok"))
+            }
+        }
+
+        let provider: Arc<dyn ToolProvider> = Arc::new(NonPromptBatchable);
+        let wrapped = BatchingTools::with_mode(provider, crate::ExecutionMode::NativeTools);
+
+        let result = wrapped
+            .execute(
+                "batch",
+                &serde_json::json!({
+                    "tool_calls": [
+                        { "tool": "alpha_omitted_from_prompt", "parameters": {} }
+                    ]
+                }),
+            )
+            .await;
+
+        assert!(result.success);
+        let first = result
+            .result
+            .get("results")
+            .and_then(|value| value.as_array())
+            .and_then(|results| results.first())
+            .expect("first batch result");
+        assert_eq!(first["success"], true);
+        assert_eq!(first["tool"], "alpha_omitted_from_prompt");
+    }
+
+    #[tokio::test]
     async fn batch_rejects_nested_batch() {
         let provider: Arc<dyn ToolProvider> = Arc::new(MockTools {
             calls: Arc::new(AtomicUsize::new(0)),
@@ -486,5 +540,83 @@ mod tests {
             .execute("batch", &serde_json::json!({"tool_calls": []}))
             .await;
         assert!(!result.success);
+    }
+
+    #[tokio::test]
+    async fn plan_mode_tools_are_not_batchable() {
+        let provider: Arc<dyn ToolProvider> = Arc::new(crate::tools::PlanMode::new());
+        let wrapped = BatchingTools::with_mode(provider, crate::ExecutionMode::NativeTools);
+
+        let result = wrapped
+            .execute(
+                "batch",
+                &serde_json::json!({
+                    "tool_calls": [
+                        { "tool": "enter_plan_mode", "parameters": {} }
+                    ]
+                }),
+            )
+            .await;
+
+        assert!(result.success);
+        let first = result
+            .result
+            .get("results")
+            .and_then(|value| value.as_array())
+            .and_then(|results| results.first())
+            .expect("first batch result");
+        assert_eq!(first["success"], false);
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    #[tokio::test]
+    async fn batch_accepts_mem_all_as_real_tool() {
+        let store = Arc::new(crate::store::Store::memory().expect("in-memory store"));
+        let provider: Arc<dyn ToolProvider> =
+            Arc::new(crate::tools::StateStore::new(store, Vec::new()));
+        let wrapped = BatchingTools::with_mode(provider.clone(), crate::ExecutionMode::NativeTools);
+
+        let set_turn = provider
+            .execute(
+                "mem_set_turn",
+                &serde_json::json!({"__agent_id__":"root","turn":1}),
+            )
+            .await;
+        assert!(set_turn.success);
+        let set_value = provider
+            .execute(
+                "mem_set",
+                &serde_json::json!({
+                    "__agent_id__":"root",
+                    "key":"decision",
+                    "description":"chosen provider",
+                    "value":"openai-generic"
+                }),
+            )
+            .await;
+        assert!(set_value.success);
+
+        let result = wrapped
+            .execute(
+                "batch",
+                &serde_json::json!({
+                    "tool_calls": [
+                        { "tool": "mem_all", "parameters": { "__agent_id__": "root" } }
+                    ]
+                }),
+            )
+            .await;
+
+        assert!(result.success);
+        let first = result
+            .result
+            .get("results")
+            .and_then(|value| value.as_array())
+            .and_then(|results| results.first())
+            .expect("first batch result");
+        assert_eq!(first["success"], true);
+        let items = first["result"].as_array().cloned().unwrap_or_default();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["key"], "decision");
     }
 }

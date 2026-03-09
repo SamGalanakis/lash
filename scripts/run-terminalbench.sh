@@ -19,6 +19,7 @@ Options:
   --task <glob>                 Task include pattern (repeatable)
   --exclude-task <glob>         Task exclude pattern (repeatable)
   --model <model>               Model passed to lash (optional)
+  --execution-mode <mode>       Lash execution mode: repl|native-tools (required)
   --jobs-dir <path>             Harbor jobs output dir (default: jobs)
   --job-name <name>             Harbor job name (optional)
   --n-concurrent <int>          Concurrent trials (default: 1)
@@ -39,9 +40,9 @@ Options:
   --help                        Show this help
 
 Examples:
-  scripts/run-terminalbench.sh --sample
-  scripts/run-terminalbench.sh --full --task "git-*"
-  scripts/run-terminalbench.sh --sample --task chess-best-move --model gpt-5.3-codex
+  scripts/run-terminalbench.sh --sample --execution-mode repl
+  scripts/run-terminalbench.sh --full --execution-mode native-tools --task "git-*"
+  scripts/run-terminalbench.sh --sample --execution-mode repl --task chess-best-move --model gpt-5.3-codex
 EOF
 }
 
@@ -56,6 +57,7 @@ DATASET="terminal-bench-sample@2.0"
 JOBS_DIR="jobs"
 JOB_NAME=""
 MODEL=""
+EXECUTION_MODE=""
 N_CONCURRENT="1"
 ATTEMPTS="1"
 TIMEOUT_MULT="1.0"
@@ -96,6 +98,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --model)
       MODEL="${2:?missing value for --model}"
+      shift 2
+      ;;
+    --execution-mode)
+      EXECUTION_MODE="${2:?missing value for --execution-mode}"
       shift 2
       ;;
     --jobs-dir)
@@ -192,6 +198,16 @@ EOF
   exit 1
 fi
 
+if [[ -z "${EXECUTION_MODE}" ]]; then
+  echo "error: --execution-mode is required (expected repl|native-tools)" >&2
+  exit 2
+fi
+
+if [[ "${EXECUTION_MODE}" != "repl" && "${EXECUTION_MODE}" != "native-tools" ]]; then
+  echo "error: unsupported --execution-mode: ${EXECUTION_MODE} (expected repl|native-tools)" >&2
+  exit 2
+fi
+
 build_host_binary() {
   echo "==> Building lash release binary on host" >&2
   cargo build --release --manifest-path "${REPO_ROOT}/Cargo.toml" --bin lash >/dev/null
@@ -238,6 +254,7 @@ if [[ ! -x "${BINARY_PATH}" ]]; then
 fi
 
 export LASH_BENCH_BINARY="${BINARY_PATH}"
+export LASH_BENCH_EXECUTION_MODE="${EXECUTION_MODE}"
 
 if [[ -z "${LASH_PROMPT_REPLACE_IDENTITY:-}" ]]; then
   export LASH_PROMPT_REPLACE_IDENTITY="$(cat <<EOF

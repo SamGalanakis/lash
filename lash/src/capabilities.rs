@@ -209,6 +209,7 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
             "mem_set",
             "mem_get",
             "mem_delete",
+            "mem_all",
             "mem_export",
             "mem_load",
         ],
@@ -358,12 +359,14 @@ mod tests {
                 "mem_set",
                 "mem_get",
                 "mem_delete",
+                "mem_all",
                 "mem_export",
                 "mem_load",
             ]),
         );
         assert!(resolved.effective_tools.contains("search_mem"));
         assert!(resolved.effective_tools.contains("mem_set"));
+        assert!(resolved.effective_tools.contains("mem_all"));
         assert!(resolved.helper_bindings.contains("search_mem"));
         assert!(resolved.helper_bindings.contains("mem_set"));
         assert!(resolved.helper_bindings.contains("mem_get"));

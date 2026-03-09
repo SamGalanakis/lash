@@ -91,13 +91,13 @@ Use `/skills` to browse, `/<skill-name>` to invoke, or call `load_skill("name")`
 
 Use `scripts/run-terminalbench.sh` to run Harbor + Terminal Bench 2 with the in-repo lash adapter.
 
-By default it runs `terminal-bench-sample@2.0`, builds a glibc-compatible binary in `target-bookworm/release/lash`, and uses your local `~/.lash/config.json` inside benchmark containers (so OAuth/OpenAI-generic config is reused).
+By default it runs `terminal-bench-sample@2.0`, builds a glibc-compatible binary in `target-bookworm/release/lash`, and uses your local `~/.lash/config.json` inside benchmark containers (so OAuth/OpenAI-generic config is reused). You must specify `--execution-mode repl` or `--execution-mode native-tools` explicitly.
 
 ```bash
-scripts/run-terminalbench.sh --sample
-scripts/run-terminalbench.sh --full --task "git-*"
-scripts/run-terminalbench.sh --sample --task chess-best-move --model gpt-5.4
-scripts/run-terminalbench.sh --sample --build-mode host   # use host binary instead
+scripts/run-terminalbench.sh --sample --execution-mode repl
+scripts/run-terminalbench.sh --full --execution-mode native-tools --task "git-*"
+scripts/run-terminalbench.sh --sample --execution-mode repl --task chess-best-move --model gpt-5.4
+scripts/run-terminalbench.sh --sample --execution-mode native-tools --build-mode host
 ```
 
 ## Slash Commands
@@ -133,7 +133,7 @@ lash --context-fold-soft-pct 45 --context-fold-hard-pct 58
 
 `batch` is native-tools-only. Use it for 2-25 independent tool calls when you already know the arguments up front; it runs those calls concurrently and returns a structured per-call result summary.
 
-In `native-tools`, lash persists structured tool call/result history and replays it back to providers as native tool-call turns. Multi-call assistant steps are replayed as grouped tool-calling turns where the provider supports it, and tool results are fed back as direct output/error content rather than wrapped in an extra lash-specific envelope.
+Across both `repl` and `native-tools`, lash now renders active history as one cache-friendly chronological transcript inside a single user prompt, paired with a stable system prompt. The internal turn state and structured tool/code records are still preserved for execution and folding, but provider requests no longer depend on replaying provider-specific conversational role sequences.
 
 ## Plan Mode
 
@@ -297,15 +297,17 @@ Tools define `inject_into_prompt: bool` (`lash/src/lib.rs`).
 - `inject_into_prompt=true`: tool appears directly in the LLM system prompt.
 - `inject_into_prompt=false`: tool is omitted from prompt for brevity, but still callable at runtime.
 - Tool identity is shared across execution modes, but tool `description` and `examples` are mode-scoped.
-- Lash projects REPL-tagged metadata into the `repl` helper surface, and native-tools-tagged metadata into provider-native tool schemas and prompt docs.
+- The runtime exposes one callable tool namespace. Prompt injection only controls which tools are described up front.
 
 Runtime discovery is available via:
 
-- `list_tools(...)`
-- `search_tools(query, mode="hybrid", ...)`
+- `T.list_tools(...)` in `repl`, `list_tools(...)` in `native-tools`
+- `T.search_tools(query, mode="hybrid", ...)` in `repl`, `search_tools(query, mode="hybrid", ...)` in `native-tools`
 
-The `repl` executor exposes visible tools as global functions (for example `read_file(...)`, `search_tools(...)`).
-Use `list_tools(...)` and `search_tools(...)` to discover prompt-omitted tools at runtime.
+The `repl` executor exposes tools through the `T` namespace (for example `T.read_file(...)`, `T.search_tools(...)`).
+Only runtime control calls remain bare globals in `repl`: `done(...)`, `ask(...)`, and `reset_repl()`.
+Use `T.list_tools(...)` and `T.search_tools(...)` to discover prompt-omitted tools at runtime.
+Both discovery calls always search the full current runtime tool catalog; callers do not pass a separate `catalog` argument.
 
 ### Default Native-Tools Surface
 
@@ -318,17 +320,33 @@ With the default capability profile, `native-tools` can call:
 - Planning: `enter_plan_mode`, `exit_plan_mode`
 - Delegation: `agent_call`, `agent_result`, `agent_output`, `agent_kill`
 - History: `search_history`, `history_add_turn`, `history_export`, `history_load`
-- Memory: `search_mem`, `mem_set_turn`, `mem_set`, `mem_get`, `mem_delete`, `mem_export`, `mem_load`
+- Memory: `search_mem`, `mem_set_turn`, `mem_set`, `mem_get`, `mem_delete`, `mem_all`, `mem_export`, `mem_load`
 - Skills: `skills`, `load_skill`, `read_skill_file`, `search_skills`
 - Web, when Tavily is configured: `search_web`, `fetch_url`
 - Native-tools only: `batch`
 
-This is the callable default surface, not the prompt-injected subset. Lash still injects only a smaller prompt-visible tool list and relies on `list_tools(...)` / `search_tools(...)` for discovery of omitted tools.
+This is the callable default surface, not the prompt-injected subset. Lash still injects only a smaller prompt-visible tool list and relies on `T.list_tools(...)` / `T.search_tools(...)` in `repl`, or `list_tools(...)` / `search_tools(...)` in `native-tools`, for discovery of omitted tools across the full active runtime tool set.
 For delegation, low-tier sub-agents use this native-tools surface by default even when the parent session is in `repl`.
 
 ## Filesystem Listing Output
 
-`glob(...)` and `ls(...)` return typed filesystem entries (`PathEntry`) rather than plain path/tree strings.
+`T.glob(...)` / `T.ls(...)` in `repl`, and `glob(...)` / `ls(...)` in `native-tools`, return a typed envelope rather than plain path/tree strings:
+
+```json
+{
+  "__type__": "path_entries",
+  "items": [
+    {
+      "path": "src/main.rs",
+      "kind": "file",
+      "size_bytes": 1234,
+      "lines": 87,
+      "modified_at": "2026-03-09T10:11:12Z"
+    }
+  ],
+  "truncated": null
+}
+```
 
 Each item includes:
 

@@ -18,8 +18,8 @@ use crate::agent::{
     PartKind, PromptComposeInput, PromptProfile, PromptSectionOverride, PruneState, TokenUsage,
     TurnTerminationPolicyState, apply_context_folding, build_assistant_parts,
     compose_system_prompt, format_tool_result_content, is_malformed_assistant_output,
-    log_llm_debug, make_error_event, parse_fence_line, resolve_context_instructions,
-    truncate_raw_error,
+    log_llm_debug, make_error_event, parse_fence_line, render_transcript_prompt,
+    resolve_context_instructions, truncate_raw_error,
 };
 use crate::instructions::InstructionSource;
 use crate::llm::types::{
@@ -328,9 +328,6 @@ impl TurnMachine {
             self.config.history_enabled,
         );
 
-        let context = self.config.base_context.clone();
-        let chat_msgs = crate::agent::messages_to_chat(&self.messages);
-
         self.emit(AgentEvent::LlmRequest {
             iteration: self.iteration,
             message_count: self.messages.len(),
@@ -346,7 +343,7 @@ impl TurnMachine {
         let system_prompt = compose_system_prompt(PromptComposeInput {
             profile,
             execution_mode: self.config.execution_mode,
-            context: &context,
+            context: "",
             tool_list: &self.config.tool_list,
             tool_names: &self.config.tool_names,
             has_history: fold.has_archived_history,
@@ -355,7 +352,7 @@ impl TurnMachine {
             capability_prompt_sections: &self.config.capability_prompt_sections,
             can_write: self.config.can_write,
             include_soul,
-            project_instructions: &self.config.project_instructions,
+            project_instructions: "",
             overrides: &self.config.prompt_overrides,
         });
 
@@ -365,15 +362,23 @@ impl TurnMachine {
             .chain(self.tool_images.iter())
             .map(|(mime, data)| (mime.clone(), data.clone()))
             .collect();
+        let rendered_prompt = render_transcript_prompt(
+            &self.messages,
+            &self.config.base_context,
+            &self.config.project_instructions,
+        );
 
         let is_native = matches!(self.config.execution_mode, ExecutionMode::NativeTools);
 
         let llm_request = LlmRequest {
             model: self.config.model.clone(),
             system_prompt,
-            messages: chat_msgs,
-            attachments: all_images
-                .iter()
+            user_prompt: rendered_prompt.user_prompt,
+            messages: Vec::new(),
+            attachments: rendered_prompt
+                .image_indices
+                .into_iter()
+                .filter_map(|idx| all_images.get(idx))
                 .map(|(mime, data)| LlmAttachment {
                     mime: mime.clone(),
                     data: data.clone(),

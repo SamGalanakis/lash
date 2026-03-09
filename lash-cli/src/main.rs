@@ -2074,9 +2074,6 @@ Use `/provider` or `/login` to sign in again without restarting.",
                                             if let Some(returns) = kv.get("returns") {
                                                 spec.definition.returns = returns.clone();
                                             }
-                                            if let Some(hidden) = kv.get("hidden") {
-                                                spec.definition.hidden = hidden == "true";
-                                            }
                                             if let Some(inject) = kv.get("inject_into_prompt") {
                                                 spec.definition.inject_into_prompt =
                                                     inject == "true";

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import os
 import shlex
+import json
 from pathlib import Path
 
 from harbor.agents.installed.base import BaseInstalledAgent, ExecInput
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
+from harbor.utils.templating import render_prompt_template
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_LASH_BINARY = REPO_ROOT / "target" / "release" / "lash"
@@ -16,7 +18,8 @@ OPTIONAL_LIBS_DIR = REPO_ROOT / "bench" / "libs"
 HOST_LASH_CONFIG = Path.home() / ".lash" / "config.json"
 
 REMOTE_HOME = "/installed-agent/home"
-REMOTE_LASH_CONFIG = f"{REMOTE_HOME}/.lash/config.json"
+REMOTE_LASH_HOME = f"{REMOTE_HOME}/.lash"
+REMOTE_LASH_CONFIG = f"{REMOTE_LASH_HOME}/config.json"
 
 
 class LashAgent(BaseInstalledAgent):
@@ -71,8 +74,15 @@ class LashAgent(BaseInstalledAgent):
         await super().setup(environment)
 
     def create_run_agent_commands(self, instruction: str) -> list[ExecInput]:
+        execution_mode = os.environ.get("LASH_BENCH_EXECUTION_MODE", "").strip()
+        if execution_mode not in {"repl", "native-tools"}:
+            raise ValueError(
+                "LASH_BENCH_EXECUTION_MODE must be set to 'repl' or 'native-tools'"
+            )
+
         env: dict[str, str] = {
             "HOME": REMOTE_HOME,
+            "LASH_HOME": REMOTE_LASH_HOME,
             # Bench tasks can involve long thinking phases with sparse stream chunks.
             # Use a higher default than interactive runs; allow override from host env.
             "LASH_LLM_STREAM_TIMEOUT_SECS": os.environ.get(
@@ -99,6 +109,7 @@ class LashAgent(BaseInstalledAgent):
         model_flag = (
             f"--model {shlex.quote(self.model_name)} " if self.model_name else ""
         )
+        execution_mode_flag = f"--execution-mode {shlex.quote(execution_mode)} "
         prompt_flags = ""
         for env_key, section in (
             ("LASH_PROMPT_REPLACE_IDENTITY", "identity"),
@@ -121,7 +132,10 @@ class LashAgent(BaseInstalledAgent):
 
         return [
             ExecInput(
-                command=f"lash {provider_flag}{model_flag}{prompt_flags}--print {prompt}",
+                command=(
+                    f"lash {provider_flag}{model_flag}{execution_mode_flag}"
+                    f"{prompt_flags}--print {prompt}"
+                ),
                 env=env,
                 timeout_sec=None,
             )
@@ -182,10 +196,62 @@ class LashAgent(BaseInstalledAgent):
         context: AgentContext,
     ) -> None:
         try:
-            await super().run(instruction, environment, context)
+            rendered_instruction = (
+                render_prompt_template(self._prompt_template_path, instruction)
+                if self._prompt_template_path
+                else instruction
+            )
+            for i, exec_input in enumerate(self.create_run_agent_commands(rendered_instruction)):
+                command_dir = self.logs_dir / f"command-{i}"
+                command_dir.mkdir(parents=True, exist_ok=True)
+                (command_dir / "command.txt").write_text(exec_input.command)
+
+                result = await environment.exec(
+                    command=exec_input.command,
+                    cwd=exec_input.cwd,
+                    env=exec_input.env,
+                    timeout_sec=exec_input.timeout_sec,
+                )
+
+                (command_dir / "return-code.txt").write_text(str(result.return_code))
+                if result.stdout:
+                    (command_dir / "stdout.txt").write_text(result.stdout)
+                if result.stderr:
+                    (command_dir / "stderr.txt").write_text(result.stderr)
         finally:
             await self._persist_lash_log(environment)
             await self._persist_lash_sessions(environment)
+        self.populate_context_post_run(context)
 
     def populate_context_post_run(self, context: AgentContext) -> None:
-        pass
+        sessions_dir = self.logs_dir / "sessions"
+        if not sessions_dir.exists():
+            return
+
+        n_input_tokens = 0
+        n_output_tokens = 0
+        n_cache_tokens = 0
+        saw_usage = False
+
+        for path in sorted(sessions_dir.glob("*.llm.jsonl")):
+            try:
+                with path.open() as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        record = json.loads(line)
+                        usage = record.get("usage")
+                        if not isinstance(usage, dict):
+                            continue
+                        n_input_tokens += int(usage.get("input_tokens") or 0)
+                        n_output_tokens += int(usage.get("output_tokens") or 0)
+                        n_cache_tokens += int(usage.get("cached_input_tokens") or 0)
+                        saw_usage = True
+            except Exception as exc:  # pragma: no cover - defensive, non-fatal
+                self.logger.warning("Failed to parse lash usage from %s: %s", path, exc)
+
+        if saw_usage:
+            context.n_input_tokens = n_input_tokens
+            context.n_output_tokens = n_output_tokens
+            context.n_cache_tokens = n_cache_tokens

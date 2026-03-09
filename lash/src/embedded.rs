@@ -164,6 +164,9 @@ struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
+    const TOOL_NAMESPACE_NAME: &'static str = "T";
+    const TOOL_NAMESPACE_TYPE_ID: u64 = 0x544f_4f4c;
+
     fn apply(
         &mut self,
         tools_json: &str,
@@ -193,36 +196,85 @@ impl RuntimeConfig {
         Ok(())
     }
 
-    fn visible_tools(&self) -> impl Iterator<Item = &crate::ProjectedToolDefinition> {
-        self.tool_defs.iter().filter(|tool| !tool.hidden)
+    fn runtime_global_defs(&self) -> Vec<crate::ProjectedToolDefinition> {
+        let mut defs = vec![
+            crate::ProjectedToolDefinition {
+                name: "done".to_string(),
+                description: "Finish the current REPL turn and return the value to the caller."
+                    .to_string(),
+                params: vec![crate::ToolParam::optional("value", "any")],
+                returns: "None".to_string(),
+                examples: vec!["done(\"finished\")".to_string()],
+                hidden: false,
+                inject_into_prompt: false,
+            },
+            crate::ProjectedToolDefinition {
+                name: "reset_repl".to_string(),
+                description: "Reset REPL state when execution context is corrupted.".to_string(),
+                params: vec![],
+                returns: "None".to_string(),
+                examples: vec!["reset_repl()".to_string()],
+                hidden: false,
+                inject_into_prompt: false,
+            },
+        ];
+        if !self.headless {
+            defs.push(crate::ProjectedToolDefinition {
+                name: "ask".to_string(),
+                description: "Prompt the user for input and return the selected answer."
+                    .to_string(),
+                params: vec![
+                    crate::ToolParam::typed("question", "str"),
+                    crate::ToolParam::optional("options", "list"),
+                ],
+                returns: "str".to_string(),
+                examples: vec!["ask(\"Choose one\", [\"a\", \"b\"])".to_string()],
+                hidden: false,
+                inject_into_prompt: false,
+            });
+        }
+        defs
     }
 
-    fn tool_def(&self, name: &str) -> Option<&crate::ProjectedToolDefinition> {
-        self.tool_defs.iter().find(|tool| tool.name == name)
+    fn discoverable_tools(&self) -> Vec<crate::ProjectedToolDefinition> {
+        self.tool_defs
+            .iter()
+            .filter(|tool| !tool.hidden)
+            .cloned()
+            .collect()
     }
 
-    fn helper_visible(&self, name: &str) -> bool {
-        match name {
-            "done" | "list_tools" | "search_tools" | "reset_repl" => true,
-            "ask" => !self.headless,
-            "search_history" => self.helper_bindings.contains("search_history"),
-            "search_mem" | "mem_set" | "mem_get" | "mem_delete" | "mem_all" => {
-                self.helper_bindings.contains("search_mem")
-            }
-            "search_skills" => self.helper_bindings.contains("search_skills"),
-            _ => false,
+    fn tool_def(&self, name: &str) -> Option<crate::ProjectedToolDefinition> {
+        self.tool_defs
+            .iter()
+            .find(|tool| tool.name == name)
+            .cloned()
+    }
+
+    fn runtime_global_def(&self, name: &str) -> Option<crate::ProjectedToolDefinition> {
+        self.runtime_global_defs()
+            .into_iter()
+            .find(|tool| tool.name == name)
+    }
+
+    fn tool_namespace_object(&self) -> MontyObject {
+        MontyObject::Dataclass {
+            name: Self::TOOL_NAMESPACE_NAME.to_string(),
+            type_id: Self::TOOL_NAMESPACE_TYPE_ID,
+            field_names: Vec::new(),
+            attrs: Vec::new().into(),
+            frozen: true,
         }
     }
 
     fn lookup_name(&self, name: &str) -> NameLookupResult {
-        if self.visible_tools().any(|tool| tool.name == name) || self.helper_visible(name) {
-            let docstring = self
-                .tool_def(name)
-                .map(|tool| tool.description.clone())
-                .filter(|value| !value.is_empty());
+        if name == Self::TOOL_NAMESPACE_NAME {
+            NameLookupResult::Value(self.tool_namespace_object())
+        } else if let Some(tool) = self.runtime_global_def(name) {
+            let docstring = tool.description.trim().to_string();
             NameLookupResult::Value(MontyObject::Function {
                 name: name.to_string(),
-                docstring,
+                docstring: (!docstring.is_empty()).then_some(docstring),
             })
         } else {
             NameLookupResult::Undefined
@@ -508,11 +560,17 @@ fn handle_function_call(
     context: &mut ExecContext,
 ) -> Result<ReplProgress<NoLimitTracker>, String> {
     let function_name = call.function_name.clone();
+    let namespace_call =
+        call.args.first().is_some_and(is_tool_namespace_object) && call.method_call;
+    let args = if namespace_call {
+        &call.args[1..]
+    } else {
+        &call.args[..]
+    };
 
     match function_name.as_str() {
         "done" => {
-            let value = call
-                .args
+            let value = args
                 .first()
                 .cloned()
                 .unwrap_or(MontyObject::String(String::new()));
@@ -534,22 +592,27 @@ fn handle_function_call(
                 .map_err(map_done_error);
         }
         "ask" => {
-            let question = call.args.first().and_then(as_string).unwrap_or_default();
-            let options = call.args.get(1).map(parse_string_list).unwrap_or_default();
+            let question = args.first().and_then(as_string).unwrap_or_default();
+            let options = args.get(1).map(parse_string_list).unwrap_or_default();
             let answer = ask_user(response_tx, question, options)?;
             return call
                 .resume(MontyObject::String(answer), print)
                 .map_err(|err| err.error.to_string());
         }
         "list_tools" => {
-            let items = list_tools(state, &call.args, &call.kwargs);
+            let items = list_tools(state, args, &call.kwargs);
             return call
                 .resume(items, print)
                 .map_err(|err| err.error.to_string());
         }
         "search_tools" => {
-            let payload = helper_payload(state, "search_tools", &call.args, &call.kwargs)?;
-            let catalog: Vec<Value> = state.config.visible_tools().map(tool_info_json).collect();
+            let payload = helper_payload(state, "search_tools", args, &call.kwargs)?;
+            let catalog: Vec<Value> = state
+                .config
+                .discoverable_tools()
+                .iter()
+                .map(tool_info_json)
+                .collect();
             let mut args = payload.as_object().cloned().unwrap_or_default();
             args.insert("catalog".to_string(), Value::Array(catalog));
             let result = invoke_tool(
@@ -564,7 +627,7 @@ fn handle_function_call(
         }
         "search_history" | "search_mem" | "search_skills" | "mem_set" | "mem_get"
         | "mem_delete" => {
-            let payload = helper_payload(state, &function_name, &call.args, &call.kwargs)?;
+            let payload = helper_payload(state, &function_name, args, &call.kwargs)?;
             let result = invoke_tool(response_tx, &state.config.agent_id, &function_name, payload)?;
             return call
                 .resume(result, print)
@@ -579,7 +642,7 @@ fn handle_function_call(
         _ => {}
     }
 
-    let payload = tool_payload(state, &function_name, &call.args, &call.kwargs)?;
+    let payload = tool_payload(state, &function_name, args, &call.kwargs)?;
     if is_async_tool(&function_name) {
         let rx = send_tool_call(response_tx, &state.config.agent_id, &function_name, payload)?;
         context.pending_calls.insert(call.call_id, rx);
@@ -817,7 +880,8 @@ fn list_tools(
         .unwrap_or(false);
     let items: Vec<Value> = state
         .config
-        .visible_tools()
+        .discoverable_tools()
+        .iter()
         .filter(|tool| match injected_only {
             Some(flag) => tool.inject_into_prompt == flag,
             None => true,
@@ -837,6 +901,15 @@ fn list_tools(
         })
         .collect();
     json_to_monty(Value::Array(items))
+}
+
+fn is_tool_namespace_object(value: &MontyObject) -> bool {
+    matches!(
+        value,
+        MontyObject::Dataclass { name, type_id, .. }
+            if name == RuntimeConfig::TOOL_NAMESPACE_NAME
+                && *type_id == RuntimeConfig::TOOL_NAMESPACE_TYPE_ID
+    )
 }
 
 fn tool_info_compact(tool: &crate::ProjectedToolDefinition) -> Value {
@@ -859,7 +932,6 @@ fn tool_info_compact(tool: &crate::ProjectedToolDefinition) -> Value {
                 .join(", "),
             if tool.returns.is_empty() { "any" } else { &tool.returns }
         ),
-        "hidden": tool.hidden,
     })
 }
 
@@ -893,7 +965,6 @@ fn tool_info_json(tool: &crate::ProjectedToolDefinition) -> Value {
             if tool.returns.is_empty() { "any" } else { &tool.returns }
         ),
         "score": 0.0,
-        "hidden": tool.hidden,
         "inject_into_prompt": tool.inject_into_prompt,
     })
 }
@@ -1473,6 +1544,36 @@ mod tests {
     }
 
     // ── Helpers ──
+
+    #[test]
+    fn lookup_name_exposes_namespace_and_runtime_globals_only() {
+        let config = RuntimeConfig {
+            tool_defs: vec![crate::ProjectedToolDefinition {
+                name: "glob".into(),
+                description: "Find files".into(),
+                params: vec![crate::ToolParam::typed("pattern", "str")],
+                returns: "dict".into(),
+                examples: vec![],
+                hidden: false,
+                inject_into_prompt: true,
+            }],
+            headless: false,
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            config.lookup_name("T"),
+            NameLookupResult::Value(MontyObject::Dataclass { ref name, .. }) if name == "T"
+        ));
+        assert!(matches!(
+            config.lookup_name("done"),
+            NameLookupResult::Value(MontyObject::Function { ref name, .. }) if name == "done"
+        ));
+        assert!(matches!(
+            config.lookup_name("glob"),
+            NameLookupResult::Undefined
+        ));
+    }
 
     fn sample_monty_for_type(ty: &str) -> MontyObject {
         match ty {

@@ -28,12 +28,66 @@ impl ExecAccumulator {
 }
 
 #[allow(dead_code)]
-fn extract_exec_error_summary(raw: &str) -> String {
+fn clean_exec_error(raw: &str) -> &str {
     let mut cleaned = raw.trim();
     if let Some(rest) = cleaned.strip_prefix("Runtime error:") {
         cleaned = rest.trim();
     }
+    cleaned
+}
 
+fn traceback_source_line(lines: &[&str]) -> Option<String> {
+    lines.iter().enumerate().find_map(|(idx, line)| {
+        if !line.starts_with("File ") {
+            return None;
+        }
+        let next = lines.get(idx + 1)?.trim();
+        if next.is_empty()
+            || next.starts_with("File ")
+            || next.starts_with("Traceback")
+            || next.starts_with("During handling of the above exception")
+        {
+            return None;
+        }
+        Some(next.to_string())
+    })
+}
+
+fn exception_summary_line(lines: &[&str]) -> Option<String> {
+    for line in lines.iter().rev() {
+        let line = line.trim();
+        if line.is_empty()
+            || line.starts_with("Traceback")
+            || line.starts_with("File ")
+            || line.starts_with('^')
+            || line.starts_with('~')
+            || line.starts_with("During handling of the above exception")
+        {
+            continue;
+        }
+        let Some((prefix, _)) = line.split_once(':') else {
+            continue;
+        };
+        if prefix.is_empty() {
+            continue;
+        }
+        let looks_like_exception = prefix
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            && prefix
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase());
+        if looks_like_exception {
+            return Some(line.to_string());
+        }
+    }
+    None
+}
+
+#[allow(dead_code)]
+fn extract_exec_error_summary(raw: &str) -> String {
+    let cleaned = clean_exec_error(raw);
     let lines: Vec<&str> = cleaned
         .lines()
         .map(str::trim)
@@ -43,17 +97,8 @@ fn extract_exec_error_summary(raw: &str) -> String {
         return "Execution failed".to_string();
     }
 
-    // Prefer the terminal Python exception line (e.g. NameError: ...).
-    for line in lines.iter().rev() {
-        if line.starts_with("Traceback")
-            || line.starts_with("File ")
-            || line.starts_with("During handling of the above exception")
-        {
-            continue;
-        }
-        if line.contains(':') {
-            return (*line).to_string();
-        }
+    if let Some(summary) = exception_summary_line(&lines) {
+        return summary;
     }
 
     lines.last().unwrap_or(&"Execution failed").to_string()
@@ -71,7 +116,19 @@ fn format_exec_error_for_output(raw: &str) -> String {
     ) {
         return raw.trim().to_string();
     }
-    extract_exec_error_summary(raw)
+    let cleaned = clean_exec_error(raw);
+    let lines: Vec<&str> = cleaned
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let summary = extract_exec_error_summary(raw);
+    if let Some(source) = traceback_source_line(&lines)
+        && source != summary
+    {
+        return format!("{summary}\nAt: {source}");
+    }
+    summary
 }
 
 /// Execute a code block, emit events, and collect results into the accumulator.
@@ -170,7 +227,7 @@ pub(crate) async fn execute_and_collect(
 
 #[cfg(test)]
 mod tests {
-    use super::extract_exec_error_summary;
+    use super::{extract_exec_error_summary, format_exec_error_for_output};
 
     #[test]
     fn summarizes_python_traceback_to_exception_line() {
@@ -185,5 +242,23 @@ mod tests {
     fn keeps_single_line_error() {
         let raw = "ValueError: bad input";
         assert_eq!(extract_exec_error_summary(raw), "ValueError: bad input");
+    }
+
+    #[test]
+    fn does_not_mistake_code_for_exception_summary() {
+        let raw = "Runtime error: Traceback (most recent call last):\n  File \"<python-input-0>\", line 1, in <module>\n    print(\"ls:\", result[\"entries\"][0][\"path\"] if result[\"entries\"] else \"empty\")\nIndexError: list index out of range";
+        assert_eq!(
+            extract_exec_error_summary(raw),
+            "IndexError: list index out of range"
+        );
+    }
+
+    #[test]
+    fn formats_exception_with_source_preview() {
+        let raw = "Runtime error: Traceback (most recent call last):\n  File \"<python-input-0>\", line 1, in <module>\n    print(\"ls:\", result[\"entries\"][0][\"path\"] if result[\"entries\"] else \"empty\")\nIndexError: list index out of range";
+        assert_eq!(
+            format_exec_error_for_output(raw),
+            "IndexError: list index out of range\nAt: print(\"ls:\", result[\"entries\"][0][\"path\"] if result[\"entries\"] else \"empty\")"
+        );
     }
 }

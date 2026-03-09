@@ -5,8 +5,7 @@ use serde_json::{Value, json};
 use crate::llm::adapters::streaming::{drive_sse_response, emit_progress, stream_chunk_timeout};
 use crate::llm::transport::{LlmTransport, LlmTransportError};
 use crate::llm::types::{
-    LlmMessage, LlmOutputPart, LlmReplayChunk, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent,
-    LlmToolCall, LlmUsage, ModelSelection, coalesce_replay_messages,
+    LlmOutputPart, LlmPromptPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage, ModelSelection,
 };
 use crate::provider::Provider;
 
@@ -27,80 +26,30 @@ impl CodexOAuthAdapter {
         }
     }
 
-    fn role_name(role: &LlmRole) -> &'static str {
-        match role {
-            LlmRole::User => "user",
-            LlmRole::Assistant => "assistant",
-            LlmRole::System => "system",
-        }
-    }
-
-    fn assistant_text_input_item(text: &str) -> Value {
-        json!({
-            "role": "assistant",
-            "content": [{"type": "output_text", "text": text}],
-        })
-    }
-
-    fn tool_call_input_item(call: &LlmToolCall) -> Value {
-        json!({
-            "type": "function_call",
-            "call_id": call.call_id,
-            "name": call.tool_name,
-            "arguments": call.input_json,
-        })
-    }
-
-    fn message_to_input_item(msg: &LlmMessage, req: &LlmRequest) -> Value {
-        if msg.kind == "tool_call" {
-            return json!({
-                "type": "function_call",
-                "call_id": msg.tool_call_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                "name": msg.tool_name.clone().unwrap_or_default(),
-                "arguments": msg.content,
-            });
-        }
-
-        if msg.kind == "tool_result" {
-            return json!({
-                "type": "function_call_output",
-                "call_id": msg.tool_call_id,
-                "output": msg.content,
-            });
-        }
-
-        if msg.kind == "image" && msg.image_idx >= 0 {
-            if matches!(msg.role, LlmRole::Assistant) {
-                // Codex Responses expects assistant content parts to be output_*.
-                // If we ever see an assistant image here, degrade to text instead
-                // of sending an invalid input_* part.
-                return json!({
-                    "role": Self::role_name(&msg.role),
-                    "content": [{"type": "output_text", "text": "[assistant image omitted]"}],
-                });
-            }
-            if let Some(att) = req.attachments.get(msg.image_idx as usize) {
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
-                return json!({
-                    "role": Self::role_name(&msg.role),
-                    "content": [{
-                        "type": "input_image",
-                        "image_base64": b64,
-                        "mime_type": att.mime,
-                    }]
-                });
+    fn user_input_item(req: &LlmRequest) -> Value {
+        let mut content = Vec::new();
+        for part in &req.user_prompt {
+            match part {
+                LlmPromptPart::Text(text) => {
+                    if !text.is_empty() {
+                        content.push(json!({"type": "input_text", "text": text}));
+                    }
+                }
+                LlmPromptPart::Image(idx) => {
+                    if let Some(att) = req.attachments.get(*idx) {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
+                        content.push(json!({
+                            "type": "input_image",
+                            "image_base64": b64,
+                            "mime_type": att.mime,
+                        }));
+                    }
+                }
             }
         }
-
-        let text_part_type = if matches!(msg.role, LlmRole::Assistant) {
-            "output_text"
-        } else {
-            "input_text"
-        };
-
         json!({
-            "role": Self::role_name(&msg.role),
-            "content": [{"type": text_part_type, "text": msg.content}],
+            "role": "user",
+            "content": content,
         })
     }
 
@@ -408,32 +357,13 @@ impl LlmTransport for CodexOAuthAdapter {
             }
         };
 
-        let mut input = vec![json!({
+        let input = vec![
+            json!({
             "role": "system",
             "content": [{"type": "input_text", "text": req.system_prompt}],
-        })];
-        for chunk in coalesce_replay_messages(&req.messages) {
-            match chunk {
-                LlmReplayChunk::Message(msg) => {
-                    input.push(Self::message_to_input_item(&msg, &req));
-                }
-                LlmReplayChunk::AssistantToolCalls { text, tool_calls } => {
-                    if let Some(text) = text.as_deref()
-                        && !text.is_empty()
-                    {
-                        input.push(Self::assistant_text_input_item(text));
-                    }
-                    input.extend(tool_calls.iter().map(Self::tool_call_input_item));
-                }
-                LlmReplayChunk::ToolResults { results } => {
-                    input.extend(
-                        results
-                            .iter()
-                            .map(|msg| Self::message_to_input_item(msg, &req)),
-                    );
-                }
-            }
-        }
+            }),
+            Self::user_input_item(&req),
+        ];
 
         let mut body = json!({
             "model": req.model,
@@ -744,10 +674,11 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
     }
 
     #[test]
-    fn assistant_messages_use_output_text_content_type() {
+    fn user_input_item_uses_input_text_content_type() {
         let req = LlmRequest {
             model: "gpt-5.4".to_string(),
             system_prompt: "sys".to_string(),
+            user_prompt: vec![LlmPromptPart::Text("hello".to_string())],
             messages: vec![],
             attachments: vec![],
             tools: vec![],
@@ -757,20 +688,10 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
             stream_events: None,
         };
 
-        let item = CodexOAuthAdapter::message_to_input_item(
-            &LlmMessage {
-                role: LlmRole::Assistant,
-                content: "hello".to_string(),
-                kind: "text".to_string(),
-                image_idx: -1,
-                tool_call_id: None,
-                tool_name: None,
-            },
-            &req,
-        );
+        let item = CodexOAuthAdapter::user_input_item(&req);
 
-        assert_eq!(item["role"], "assistant");
-        assert_eq!(item["content"][0]["type"], "output_text");
+        assert_eq!(item["role"], "user");
+        assert_eq!(item["content"][0]["type"], "input_text");
         assert_eq!(item["content"][0]["text"], "hello");
     }
 }

@@ -319,7 +319,7 @@ impl AgentCall {
             }
         };
 
-        // Load parent memory/history into the child session via hidden state tools.
+        // Load parent memory/history into the child session via state tools.
         let parent_history = args
             .get("_parent_history")
             .and_then(|v| v.as_str())
@@ -660,7 +660,7 @@ impl ToolProvider for AgentCall {
                     ),
                 ],
                 hidden: false,
-                inject_into_prompt: true,
+        inject_into_prompt: true,
             },
             ToolDefinition {
                 name: "agent_result".into(),
@@ -677,8 +677,8 @@ impl ToolProvider for AgentCall {
                 ],
                 returns: "dict".into(),
                 examples: vec![],
-                hidden: true,
-                inject_into_prompt: false,
+                hidden: false,
+        inject_into_prompt: false,
             },
             ToolDefinition {
                 name: "agent_output".into(),
@@ -692,8 +692,8 @@ impl ToolProvider for AgentCall {
                 params: vec![ToolParam::typed("id", "str")],
                 returns: "str".into(),
                 examples: vec![],
-                hidden: true,
-                inject_into_prompt: false,
+                hidden: false,
+        inject_into_prompt: false,
             },
             ToolDefinition {
                 name: "agent_kill".into(),
@@ -707,8 +707,8 @@ impl ToolProvider for AgentCall {
                 params: vec![ToolParam::typed("id", "str")],
                 returns: "None".into(),
                 examples: vec![],
-                hidden: true,
-                inject_into_prompt: false,
+                hidden: false,
+        inject_into_prompt: false,
             },
         ]
     }

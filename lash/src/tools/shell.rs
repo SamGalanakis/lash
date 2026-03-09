@@ -24,7 +24,7 @@ struct ShellProcess {
 const MAX_OUTPUT: usize = 512_000;
 
 /// Async process manager. Spawns shell processes and returns handles;
-/// hidden tools interact with running processes by ID.
+/// follow-up shell tools interact with running processes by ID.
 pub struct Shell {
     /// $SHELL or "bash" fallback.
     shell_path: String,
@@ -398,7 +398,7 @@ impl ToolProvider for Shell {
                 ],
                 returns: "str".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
             ToolDefinition {
@@ -413,7 +413,7 @@ impl ToolProvider for Shell {
                 params: vec![ToolParam::typed("id", "str")],
                 returns: "str".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
             ToolDefinition {
@@ -431,7 +431,7 @@ impl ToolProvider for Shell {
                 ],
                 returns: "None".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
             ToolDefinition {
@@ -446,7 +446,7 @@ impl ToolProvider for Shell {
                 params: vec![ToolParam::typed("id", "str")],
                 returns: "None".into(),
                 examples: vec![],
-                hidden: true,
+                hidden: false,
                 inject_into_prompt: false,
             },
         ]
@@ -659,8 +659,7 @@ mod tests {
         let shell = Shell::default();
         let defs = shell.definitions();
         assert_eq!(defs.len(), 5);
-        assert_eq!(defs.iter().filter(|d| !d.hidden).count(), 1);
-        assert_eq!(defs.iter().filter(|d| d.hidden).count(), 4);
+        assert_eq!(defs.len(), 5);
     }
 
     #[tokio::test]

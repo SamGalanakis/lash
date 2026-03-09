@@ -5,8 +5,7 @@ use serde_json::{Value, json};
 use crate::llm::adapters::streaming::{drive_sse_response, emit_progress, stream_chunk_timeout};
 use crate::llm::transport::{LlmTransport, LlmTransportError};
 use crate::llm::types::{
-    LlmMessage, LlmOutputPart, LlmReplayChunk, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent,
-    LlmToolCall, LlmUsage, ModelSelection, coalesce_replay_messages,
+    LlmOutputPart, LlmPromptPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage, ModelSelection,
 };
 use crate::provider::Provider;
 
@@ -34,95 +33,38 @@ impl OpenAiGenericAdapter {
         }
     }
 
-    fn map_role(role: &LlmRole) -> &'static str {
-        match role {
-            LlmRole::User => "user",
-            LlmRole::Assistant => "assistant",
-            LlmRole::System => "system",
-        }
-    }
-
-    fn message_to_json(&self, msg: &LlmMessage, req: &LlmRequest) -> Value {
-        if msg.kind == "tool_call" {
-            return json!({
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [{
-                    "id": msg.tool_call_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                    "type": "function",
-                    "function": {
-                        "name": msg.tool_name.clone().unwrap_or_default(),
-                        "arguments": msg.content,
+    fn user_content_json(req: &LlmRequest) -> Value {
+        let mut content = Vec::new();
+        for part in &req.user_prompt {
+            match part {
+                LlmPromptPart::Text(text) => {
+                    if !text.is_empty() {
+                        content.push(json!(text));
                     }
-                }]
-            });
-        }
-
-        if msg.kind == "tool_result" {
-            return json!({
-                "role": "tool",
-                "tool_call_id": msg.tool_call_id,
-                "name": msg.tool_name,
-                "content": msg.content,
-            });
-        }
-
-        if msg.kind == "image"
-            && msg.image_idx >= 0
-            && let Some(att) = req.attachments.get(msg.image_idx as usize)
-        {
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
-            let data_url = format!("data:{};base64,{}", att.mime, b64);
-            return json!({
-                "role": Self::map_role(&msg.role),
-                "content": [{
-                    "type": "image_url",
-                    "image_url": {"url": data_url}
-                }]
-            });
-        }
-
-        json!({
-            "role": Self::map_role(&msg.role),
-            "content": msg.content,
-        })
-    }
-
-    fn assistant_tool_calls_json(text: Option<&str>, tool_calls: &[LlmToolCall]) -> Value {
-        json!({
-            "role": "assistant",
-            "content": text.unwrap_or_default(),
-            "tool_calls": tool_calls
-                .iter()
-                .map(|msg| json!({
-                    "id": if msg.call_id.is_empty() { uuid::Uuid::new_v4().to_string() } else { msg.call_id.clone() },
-                    "type": "function",
-                    "function": {
-                        "name": msg.tool_name.clone(),
-                        "arguments": msg.input_json,
-                    }
-                }))
-                .collect::<Vec<_>>(),
-        })
-    }
-
-    fn build_messages(&self, req: &LlmRequest) -> Vec<Value> {
-        let mut messages = vec![json!({"role": "system", "content": req.system_prompt})];
-        for chunk in coalesce_replay_messages(&req.messages) {
-            match chunk {
-                LlmReplayChunk::Message(msg) => messages.push(self.message_to_json(&msg, req)),
-                LlmReplayChunk::AssistantToolCalls { text, tool_calls } => {
-                    messages.push(Self::assistant_tool_calls_json(
-                        text.as_deref(),
-                        &tool_calls,
-                    ));
                 }
-                LlmReplayChunk::ToolResults { results } => {
-                    messages.extend(results.iter().map(|msg| self.message_to_json(msg, req)));
+                LlmPromptPart::Image(idx) => {
+                    if let Some(att) = req.attachments.get(*idx) {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
+                        let data_url = format!("data:{};base64,{}", att.mime, b64);
+                        content.push(json!({
+                            "type": "image_url",
+                            "image_url": {"url": data_url}
+                        }));
+                    }
                 }
             }
         }
-        messages
+        if content.len() == 1 && content[0].is_string() {
+            return content.into_iter().next().unwrap_or_default();
+        }
+        Value::Array(content)
+    }
+
+    fn build_messages(&self, req: &LlmRequest) -> Vec<Value> {
+        vec![
+            json!({"role": "system", "content": req.system_prompt}),
+            json!({"role": "user", "content": Self::user_content_json(req)}),
+        ]
     }
 
     fn parse_i64(v: Option<&Value>) -> i64 {
@@ -653,45 +595,13 @@ mod tests {
     }
 
     #[test]
-    fn build_messages_groups_assistant_multi_tool_turns() {
+    fn build_messages_uses_single_system_and_user_prompt() {
         let adapter = OpenAiGenericAdapter::new();
         let req = LlmRequest {
             model: "gpt-5.4".to_string(),
             system_prompt: "sys".to_string(),
-            messages: vec![
-                LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: "Checking both files.".to_string(),
-                    kind: "text".to_string(),
-                    image_idx: -1,
-                    tool_call_id: None,
-                    tool_name: None,
-                },
-                LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: r#"{"path":"a.rs"}"#.to_string(),
-                    kind: "tool_call".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_a".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                },
-                LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: r#"{"path":"b.rs"}"#.to_string(),
-                    kind: "tool_call".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_b".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                },
-                LlmMessage {
-                    role: LlmRole::User,
-                    content: "file a".to_string(),
-                    kind: "tool_result".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_a".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                },
-            ],
+            user_prompt: vec![LlmPromptPart::Text("history".to_string())],
+            messages: vec![],
             attachments: vec![],
             tools: vec![],
             tool_choice: crate::llm::types::LlmToolChoice::Auto,
@@ -701,10 +611,9 @@ mod tests {
         };
 
         let messages = adapter.build_messages(&req);
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages[1]["role"], "assistant");
-        assert_eq!(messages[1]["content"], "Checking both files.");
-        assert_eq!(messages[1]["tool_calls"].as_array().map(Vec::len), Some(2));
-        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "history");
     }
 }

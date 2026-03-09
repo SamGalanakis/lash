@@ -1525,9 +1525,7 @@ impl RuntimeTurnDriver {
                 let catalog: Vec<serde_json::Value> = tool_provider
                     .definitions()
                     .into_iter()
-                    .filter(|d| {
-                        !d.hidden && !d.description_for(ExecutionMode::NativeTools).is_empty()
-                    })
+                    .filter(|d| !d.description_for(ExecutionMode::NativeTools).is_empty())
                     .map(|d| {
                         let p = d.project(ExecutionMode::NativeTools);
                         serde_json::json!({

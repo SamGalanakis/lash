@@ -873,10 +873,11 @@
           <div class="cell">
             <h4>Tool Access</h4>
             <p>
-              All visible tools are available as direct globals (for example <code>read_file(...)</code>).
-              There is no <code>tools</code> module or implicit import layer. Use <code>list_tools()</code> and
-              <code>search_tools(...)</code> to discover prompt-omitted tools, and use <code>await</code> only for
-              async helpers such as shell handle methods and sub-agent result/output calls.
+              In REPL mode, tools live under the <code>T</code> namespace (for example <code>T.read_file(...)</code>).
+              Only <code>done(...)</code>, <code>ask(...)</code>, and <code>reset_repl()</code> remain bare globals.
+              Use <code>T.list_tools()</code> and <code>T.search_tools(...)</code> to discover prompt-omitted tools, and use <code>await</code> only for
+              async tools such as shell handle methods and sub-agent result/output calls.
+              Both discovery calls search the full current runtime tool catalog; there is no separate caller-supplied <code>catalog</code> parameter.
             </p>
           </div>
           <div class="cell">
@@ -1022,7 +1023,7 @@ models, routes = <span class="kw">await</span> asyncio.<span class="fn">gather</
           <div class="cell">
             <h4>Tool Access</h4>
             <p>
-              The runtime exposes visible tools as native tool call schemas. Use only the tools shown in Available Tools.
+              The runtime exposes the available tools as native tool call schemas. Use only the tools shown in Available Tools.
               Prefer parallel independent calls in one turn. If <code>batch</code> is available, prefer it for 2+ independent calls.
               Never invent tool names or arguments.
             </p>
@@ -1236,7 +1237,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
 
     <div class="legend" style="margin-top: 2px;">
       <span class="pill"><b>Prompt-visible</b> <code>inject_into_prompt=true</code></span>
-      <span class="pill"><b>Discoverable</b> <code>list_tools / search_tools / tools.&lt;tool&gt;</code></span>
+      <span class="pill"><b>Discoverable</b> <code>T.list_tools / T.search_tools / T.&lt;tool&gt;</code></span>
       <span class="pill"><b>Reconfigure</b> <code>/tools / /caps / /reconfigure</code></span>
       <span class="pill"><b>Unified Items</b> <code>text + refs + image + skill</code></span>
     </div>
@@ -1257,7 +1258,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="arch-card-tag tag-caps"><span class="dot"></span>Capability System</div>
         <div class="arch-card-title">Dynamic Capability Profiles</div>
         <div class="arch-card-desc">
-          Each capability is a named group that bundles tools, prompt sections, and helper bindings.
+          Each capability is a named group that bundles tools, prompt sections, and runtime-call bindings.
           Capabilities can be toggled at runtime via <code>/caps</code>. All are enabled by default.
           Sub-agents inherit a fork of the parent's capability state.
         </div>
@@ -1266,7 +1267,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
             <h4>Structure</h4>
             <p>
               Each <code>CapabilityDefinition</code> has an id, name, description, optional prompt section,
-              helper bindings (REPL globals), and a list of tool names it controls.
+              runtime-call bindings (REPL globals), and a list of tool names it controls.
             </p>
           </div>
           <div class="cell">
@@ -1347,22 +1348,22 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="arch-card-title">Persistent Key-Value Memory</div>
         <div class="arch-card-desc">
           Memory is persistent key-value storage across context pruning. Use it to store durable decisions,
-          conventions, and project-specific knowledge. Accessed via host tool calls (<code>mem_set</code>, <code>mem_get</code>, <code>mem_delete</code>, <code>search_mem</code>) in both execution modes.
+          conventions, and project-specific knowledge. Accessed via host tool calls (<code>T.mem_set</code>, <code>T.mem_get</code>, <code>T.mem_delete</code>, <code>T.search_mem</code>) in REPL mode, or the bare tool names in native-tools mode.
         </div>
         <div class="cell-grid cols-2">
           <div class="cell">
             <h4>Tool API</h4>
             <p>
-              <code>mem_set(key, description, value=None)</code> &mdash; store/update<br>
-              <code>mem_get(key)</code> &mdash; retrieve or <code>None</code><br>
-              <code>mem_delete(key)</code> &mdash; remove<br>
-              <code>search_mem(query, mode, regex, limit, keys)</code> &mdash; search
+              <code>T.mem_set(key, description, value=None)</code> &mdash; store/update in REPL<br>
+              <code>T.mem_get(key)</code> &mdash; retrieve or <code>None</code> in REPL<br>
+              <code>T.mem_delete(key)</code> &mdash; remove in REPL<br>
+              <code>T.search_mem(query, mode, regex, limit, keys)</code> &mdash; search in REPL
             </p>
           </div>
           <div class="cell">
             <h4>Availability</h4>
             <p>
-              <code>search_mem(query, mode="hybrid", regex=None, limit=10, keys=None)</code> is available as a callable tool in both REPL and native-tools modes.
+              <code>search_mem(query, mode="hybrid", regex=None, limit=10, keys=None)</code> is available in both execution modes, but REPL calls it as <code>T.search_mem(...)</code>.
             </p>
           </div>
         </div>
@@ -1370,14 +1371,14 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="example-block">
           <div class="example-label">Example &mdash; Storing a convention (REPL)</div>
           <pre><span class="tag">&lt;repl&gt;</span>
-<span class="fn">mem_set</span>(<span class="str">"repo_convention"</span>, <span class="str">"Use snake_case for tool names"</span>)
+<span class="fn">T.mem_set</span>(<span class="str">"repo_convention"</span>, <span class="str">"Use snake_case for tool names"</span>)
 <span class="tag">&lt;/repl&gt;</span></pre>
         </div>
 
         <div class="example-block">
           <div class="example-label">Example &mdash; Searching memory (REPL)</div>
           <pre><span class="tag">&lt;repl&gt;</span>
-results = <span class="fn">search_mem</span>(<span class="str">"naming convention"</span>)
+results = <span class="fn">T.search_mem</span>(<span class="str">"naming convention"</span>)
 <span class="kw">for</span> r <span class="kw">in</span> results:
     <span class="fn">print</span>(r.key, r.description)
 <span class="tag">&lt;/repl&gt;</span></pre>

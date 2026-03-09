@@ -19,7 +19,7 @@ use crate::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, 
 use crate::provider::{OPENAI_GENERIC_DEFAULT_BASE_URL, Provider};
 use crate::session::Session;
 
-pub use message::{Message, MessageRole, Part, PartKind, PruneState, messages_to_chat};
+pub use message::{Message, MessageRole, Part, PartKind, PruneState, render_transcript_prompt};
 
 #[allow(unused_imports)]
 pub(crate) use exec::{ExecAccumulator, execute_and_collect};
@@ -506,18 +506,22 @@ pub(crate) fn build_execution_preamble(
     model: String,
 ) -> ExecutionPreamble {
     let all_tools = session.tools().definitions();
-    let visible: Vec<_> = all_tools.iter().filter(|t| !t.hidden).cloned().collect();
-    let prompt_tools: Vec<_> = visible
+    let mut prompt_tools: Vec<_> = all_tools
         .iter()
         .filter(|t| t.inject_into_prompt)
         .cloned()
         .collect();
+    if matches!(mode, ExecutionMode::Repl) {
+        for tool in &mut prompt_tools {
+            tool.name = format!("T.{}", tool.name);
+        }
+    }
     let mut tool_list = ToolDefinition::format_tool_docs(&prompt_tools, mode);
-    let omitted_tool_count = visible.iter().filter(|t| !t.inject_into_prompt).count();
+    let omitted_tool_count = all_tools.iter().filter(|t| !t.inject_into_prompt).count();
     if omitted_tool_count > 0 {
         let note = match mode {
             ExecutionMode::Repl => format!(
-                "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Use `list_tools()` / `search_tools(...)` to discover them, then call them directly as global functions."
+                "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Use `T.list_tools()` / `T.search_tools(...)` to discover them, then call them via `T.<tool>(...)`."
             ),
             ExecutionMode::NativeTools => {
                 format!(
@@ -528,7 +532,7 @@ pub(crate) fn build_execution_preamble(
         tool_list.push_str(&note);
     }
     let tool_specs = if matches!(mode, ExecutionMode::NativeTools) {
-        visible
+        all_tools
             .iter()
             .map(|tool| LlmToolSpec {
                 name: tool.name.clone(),
@@ -539,7 +543,7 @@ pub(crate) fn build_execution_preamble(
     } else {
         Vec::new()
     };
-    let tool_names: Vec<String> = visible.iter().map(|t| t.name.clone()).collect();
+    let tool_names: Vec<String> = all_tools.iter().map(|t| t.name.clone()).collect();
     let dynamic_projection = session.tools().dynamic_projection();
     let enabled_capability_ids: BTreeSet<String> = dynamic_projection
         .as_ref()
@@ -711,18 +715,22 @@ impl Agent {
         let model = llm.normalize_model(&self.config.model);
 
         let all_tools = self.session.tools().definitions();
-        let visible: Vec<_> = all_tools.iter().filter(|t| !t.hidden).cloned().collect();
-        let prompt_tools: Vec<_> = visible
+        let mut prompt_tools: Vec<_> = all_tools
             .iter()
             .filter(|t| t.inject_into_prompt)
             .cloned()
             .collect();
+        if matches!(mode, ExecutionMode::Repl) {
+            for tool in &mut prompt_tools {
+                tool.name = format!("T.{}", tool.name);
+            }
+        }
         let mut tool_list = ToolDefinition::format_tool_docs(&prompt_tools, mode);
-        let omitted_tool_count = visible.iter().filter(|t| !t.inject_into_prompt).count();
+        let omitted_tool_count = all_tools.iter().filter(|t| !t.inject_into_prompt).count();
         if omitted_tool_count > 0 {
             let note = match mode {
                 ExecutionMode::Repl => format!(
-                    "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Use `list_tools()` / `search_tools(...)` to discover them, then call them directly as global functions."
+                    "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Use `T.list_tools()` / `T.search_tools(...)` to discover them, then call them via `T.<tool>(...)`."
                 ),
                 ExecutionMode::NativeTools => {
                     format!(
@@ -733,7 +741,7 @@ impl Agent {
             tool_list.push_str(&note);
         }
         let tool_specs = if matches!(mode, ExecutionMode::NativeTools) {
-            visible
+            all_tools
                 .iter()
                 .map(|tool| LlmToolSpec {
                     name: tool.name.clone(),
@@ -744,7 +752,7 @@ impl Agent {
         } else {
             Vec::new()
         };
-        let tool_names: Vec<String> = visible.iter().map(|t| t.name.clone()).collect();
+        let tool_names: Vec<String> = all_tools.iter().map(|t| t.name.clone()).collect();
         let dynamic_projection = self.session.tools().dynamic_projection();
         let enabled_capability_ids: BTreeSet<String> = dynamic_projection
             .as_ref()
@@ -1466,8 +1474,7 @@ impl Agent {
                                 .definitions()
                                 .into_iter()
                                 .filter(|d| {
-                                    !d.hidden
-                                        && !d.description_for(ExecutionMode::NativeTools).is_empty()
+                                    !d.description_for(ExecutionMode::NativeTools).is_empty()
                                 })
                                 .map(|d| {
                                     let p = d.project(ExecutionMode::NativeTools);

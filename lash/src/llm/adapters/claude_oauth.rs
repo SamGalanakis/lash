@@ -5,8 +5,7 @@ use serde_json::{Value, json};
 use crate::llm::adapters::streaming::{drive_sse_response, emit_progress, stream_chunk_timeout};
 use crate::llm::transport::{LlmTransport, LlmTransportError};
 use crate::llm::types::{
-    LlmMessage, LlmOutputPart, LlmReplayChunk, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent,
-    LlmToolCall, LlmUsage, ModelSelection, coalesce_replay_messages,
+    LlmOutputPart, LlmPromptPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage, ModelSelection,
 };
 use crate::provider::Provider;
 
@@ -34,121 +33,38 @@ impl ClaudeOAuthAdapter {
         }
     }
 
-    fn claude_role(role: &LlmRole) -> &'static str {
-        match role {
-            LlmRole::Assistant => "assistant",
-            LlmRole::User | LlmRole::System => "user",
-        }
-    }
-
-    fn message_to_json(msg: &LlmMessage, req: &LlmRequest) -> Value {
-        if msg.kind == "tool_call" {
-            let input = serde_json::from_str::<Value>(&msg.content).unwrap_or_else(|_| json!({}));
-            return json!({
-                "role": "assistant",
-                "content": [{
-                    "type": "tool_use",
-                    "id": msg.tool_call_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                    "name": msg.tool_name.clone().unwrap_or_default(),
-                    "input": input,
-                }]
-            });
-        }
-
-        if msg.kind == "tool_result" {
-            return json!({
-                "role": "user",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": msg.tool_call_id,
-                    "content": [{ "type": "text", "text": msg.content }],
-                }]
-            });
-        }
-
-        if msg.kind == "image"
-            && msg.image_idx >= 0
-            && let Some(att) = req.attachments.get(msg.image_idx as usize)
-        {
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
-            return json!({
-                "role": Self::claude_role(&msg.role),
-                "content": [{
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": att.mime,
-                        "data": b64,
-                    }
-                }]
-            });
-        }
-
-        json!({
-            "role": Self::claude_role(&msg.role),
-            "content": [{"type": "text", "text": msg.content}],
-        })
-    }
-
-    fn assistant_tool_calls_json(text: Option<&str>, tool_calls: &[LlmToolCall]) -> Value {
+    fn user_message_json(req: &LlmRequest) -> Value {
         let mut content = Vec::new();
-        if let Some(text) = text
-            && !text.is_empty()
-        {
-            content.push(json!({
-                "type": "text",
-                "text": text,
-            }));
+        for part in &req.user_prompt {
+            match part {
+                LlmPromptPart::Text(text) => {
+                    if !text.is_empty() {
+                        content.push(json!({"type": "text", "text": text}));
+                    }
+                }
+                LlmPromptPart::Image(idx) => {
+                    if let Some(att) = req.attachments.get(*idx) {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
+                        content.push(json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": att.mime,
+                                "data": b64,
+                            }
+                        }));
+                    }
+                }
+            }
         }
-        content.extend(tool_calls.iter().map(|msg| {
-            let input =
-                serde_json::from_str::<Value>(&msg.input_json).unwrap_or_else(|_| json!({}));
-            json!({
-                "type": "tool_use",
-                "id": if msg.call_id.is_empty() { uuid::Uuid::new_v4().to_string() } else { msg.call_id.clone() },
-                "name": msg.tool_name.clone(),
-                "input": input,
-            })
-        }));
         json!({
-            "role": "assistant",
+            "role": "user",
             "content": content,
         })
     }
 
-    fn user_tool_results_json(tool_results: &[&LlmMessage]) -> Value {
-        json!({
-            "role": "user",
-            "content": tool_results
-                .iter()
-                .map(|msg| json!({
-                    "type": "tool_result",
-                    "tool_use_id": msg.tool_call_id,
-                    "content": [{ "type": "text", "text": msg.content }],
-                }))
-                .collect::<Vec<_>>(),
-        })
-    }
-
     fn build_messages(req: &LlmRequest) -> Vec<Value> {
-        let mut messages = Vec::new();
-        for chunk in coalesce_replay_messages(&req.messages) {
-            match chunk {
-                LlmReplayChunk::Message(msg) => messages.push(Self::message_to_json(&msg, req)),
-                LlmReplayChunk::AssistantToolCalls { text, tool_calls } => {
-                    messages.push(Self::assistant_tool_calls_json(
-                        text.as_deref(),
-                        &tool_calls,
-                    ));
-                }
-                LlmReplayChunk::ToolResults { results } => {
-                    messages.push(Self::user_tool_results_json(
-                        &results.iter().collect::<Vec<_>>(),
-                    ));
-                }
-            }
-        }
-        messages
+        vec![Self::user_message_json(req)]
     }
 
     fn parse_i64(v: Option<&Value>) -> i64 {
@@ -704,52 +620,12 @@ mod tests {
     }
 
     #[test]
-    fn build_messages_groups_multi_tool_turns_and_results() {
+    fn build_messages_uses_single_user_prompt() {
         let req = LlmRequest {
             model: "claude-sonnet".to_string(),
             system_prompt: "sys".to_string(),
-            messages: vec![
-                LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: "Checking both files.".to_string(),
-                    kind: "text".to_string(),
-                    image_idx: -1,
-                    tool_call_id: None,
-                    tool_name: None,
-                },
-                LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: r#"{"path":"a.rs"}"#.to_string(),
-                    kind: "tool_call".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_a".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                },
-                LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: r#"{"path":"b.rs"}"#.to_string(),
-                    kind: "tool_call".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_b".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                },
-                LlmMessage {
-                    role: LlmRole::User,
-                    content: "file a".to_string(),
-                    kind: "tool_result".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_a".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                },
-                LlmMessage {
-                    role: LlmRole::User,
-                    content: "file b".to_string(),
-                    kind: "tool_result".to_string(),
-                    image_idx: -1,
-                    tool_call_id: Some("call_b".to_string()),
-                    tool_name: Some("read_file".to_string()),
-                },
-            ],
+            user_prompt: vec![LlmPromptPart::Text("history".to_string())],
+            messages: vec![],
             attachments: vec![],
             tools: vec![],
             tool_choice: crate::llm::types::LlmToolChoice::Auto,
@@ -759,10 +635,9 @@ mod tests {
         };
 
         let messages = ClaudeOAuthAdapter::build_messages(&req);
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0]["role"], "assistant");
-        assert_eq!(messages[0]["content"].as_array().map(Vec::len), Some(3));
-        assert_eq!(messages[1]["role"], "user");
-        assert_eq!(messages[1]["content"].as_array().map(Vec::len), Some(2));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"].as_array().map(Vec::len), Some(1));
+        assert_eq!(messages[0]["content"][0]["text"], "history");
     }
 }
