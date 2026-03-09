@@ -60,13 +60,9 @@ pub fn resolve_projection(
         };
 
         for tool in &def.tool_names {
-            if !available_tools.contains(tool) {
-                return Err(ReconfigureError::Validation(format!(
-                    "capability `{}` references missing tool `{}`",
-                    def.id, tool
-                )));
+            if available_tools.contains(tool) {
+                effective_tools.insert(tool.clone());
             }
-            effective_tools.insert(tool.clone());
         }
 
         for helper in &def.helper_bindings {
@@ -695,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_projection_rejects_capability_with_unavailable_pack_tools() {
+    fn resolve_projection_skips_unavailable_capability_tools() {
         let mut defs = BTreeMap::new();
         defs.insert(
             "planning".to_string(),
@@ -723,6 +719,7 @@ mod tests {
         let available_tools = BTreeSet::new();
 
         let result = resolve_projection(&defs, &profile, &available_tools);
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        assert!(result.unwrap().effective_tools.is_empty());
     }
 }
