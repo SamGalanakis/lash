@@ -77,6 +77,9 @@ pub enum Response {
     LlmComplete {
         id: EffectId,
         result: Result<LlmResponse, LlmCallError>,
+        /// When true, text deltas were already emitted during streaming,
+        /// so the machine should skip emitting `TextDelta` events.
+        text_streamed: bool,
     },
     /// Native tool result.
     ToolResult {
@@ -537,7 +540,11 @@ impl TurnMachine {
     /// Feed a response to a previously emitted effect.
     pub fn handle_response(&mut self, response: Response) {
         match response {
-            Response::LlmComplete { id, result } => self.handle_llm_complete(id, result),
+            Response::LlmComplete {
+                id,
+                result,
+                text_streamed,
+            } => self.handle_llm_complete(id, result, text_streamed),
             Response::ToolResult {
                 id,
                 call_id,
@@ -550,16 +557,25 @@ impl TurnMachine {
         }
     }
 
-    fn handle_llm_complete(&mut self, _id: EffectId, result: Result<LlmResponse, LlmCallError>) {
+    fn handle_llm_complete(
+        &mut self,
+        _id: EffectId,
+        result: Result<LlmResponse, LlmCallError>,
+        text_streamed: bool,
+    ) {
         match self.config.execution_mode {
-            ExecutionMode::NativeTools => self.handle_native_llm_complete(result),
+            ExecutionMode::NativeTools => self.handle_native_llm_complete(result, text_streamed),
             ExecutionMode::Repl => self.handle_repl_llm_complete(result),
         }
     }
 
     // ─── NativeTools path ───
 
-    fn handle_native_llm_complete(&mut self, result: Result<LlmResponse, LlmCallError>) {
+    fn handle_native_llm_complete(
+        &mut self,
+        result: Result<LlmResponse, LlmCallError>,
+        text_streamed: bool,
+    ) {
         let retry_attempt = match &self.state {
             MachineState::WaitingLlm { retry_attempt, .. } => *retry_attempt,
             _ => 0,
@@ -636,9 +652,11 @@ impl TurnMachine {
             match part {
                 LlmOutputPart::Text { text } => {
                     if !text.is_empty() {
-                        self.emit(AgentEvent::TextDelta {
-                            content: text.clone(),
-                        });
+                        if !text_streamed {
+                            self.emit(AgentEvent::TextDelta {
+                                content: text.clone(),
+                            });
+                        }
                         assistant_text.push_str(&text);
                     }
                 }
@@ -1601,6 +1619,7 @@ mod tests {
         // Respond with prose-only
         machine.handle_response(Response::LlmComplete {
             id: llm_id,
+            text_streamed: false,
             result: Ok(LlmResponse {
                 full_text: "Hello there!".to_string(),
                 parts: vec![LlmOutputPart::Text {
@@ -1627,6 +1646,7 @@ mod tests {
         // Respond with tool call
         machine.handle_response(Response::LlmComplete {
             id: llm_id,
+            text_streamed: false,
             result: Ok(LlmResponse {
                 parts: vec![
                     LlmOutputPart::Text {
@@ -1676,6 +1696,7 @@ mod tests {
         // Respond with prose to end
         machine.handle_response(Response::LlmComplete {
             id: *llm_id2.unwrap(),
+            text_streamed: false,
             result: Ok(LlmResponse {
                 full_text: "Done.".to_string(),
                 parts: vec![LlmOutputPart::Text {
@@ -1701,6 +1722,7 @@ mod tests {
         // Retryable error
         machine.handle_response(Response::LlmComplete {
             id: llm_id,
+            text_streamed: false,
             result: Err(LlmCallError {
                 message: "rate limited".to_string(),
                 retryable: true,
@@ -1737,6 +1759,7 @@ mod tests {
 
         machine.handle_response(Response::LlmComplete {
             id: llm_id,
+            text_streamed: false,
             result: Err(LlmCallError {
                 message: "auth failed".to_string(),
                 retryable: false,
@@ -1761,6 +1784,7 @@ mod tests {
 
         machine.handle_response(Response::LlmComplete {
             id: llm_id,
+            text_streamed: false,
             result: Ok(LlmResponse::default()),
         });
 
@@ -1785,6 +1809,7 @@ mod tests {
         // Respond with tool call to trigger iteration
         machine.handle_response(Response::LlmComplete {
             id: llm_id,
+            text_streamed: false,
             result: Ok(LlmResponse {
                 parts: vec![LlmOutputPart::ToolCall {
                     call_id: "tc1".to_string(),
@@ -1830,6 +1855,7 @@ mod tests {
 
         machine.handle_response(Response::LlmComplete {
             id: llm_id,
+            text_streamed: false,
             result: Ok(LlmResponse {
                 full_text: "Hello there!".to_string(),
                 deltas: vec!["Hello there!".to_string()],
@@ -1881,6 +1907,7 @@ mod tests {
         // Now feed the LlmComplete since stream was cancelled
         machine.handle_response(Response::LlmComplete {
             id: llm_id,
+            text_streamed: false,
             result: Ok(LlmResponse {
                 usage: LlmUsage {
                     input_tokens: 100,
@@ -1907,6 +1934,7 @@ mod tests {
         // Feed deltas with code block via buffered response
         machine.handle_response(Response::LlmComplete {
             id: llm_id,
+            text_streamed: false,
             result: Ok(LlmResponse {
                 full_text: "<repl>\nbad_code()\n</repl>\n".to_string(),
                 deltas: vec!["<repl>\nbad_code()\n</repl>\n".to_string()],
@@ -1948,6 +1976,7 @@ mod tests {
         // Malformed output
         machine.handle_response(Response::LlmComplete {
             id: llm_id,
+            text_streamed: false,
             result: Ok(LlmResponse {
                 full_text: "<repl>".to_string(),
                 deltas: vec!["<repl>".to_string()],

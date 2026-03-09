@@ -1050,6 +1050,7 @@ impl Agent {
                     machine.handle_response(crate::sansio::Response::LlmComplete {
                         id,
                         result: llm_response,
+                        text_streamed: false,
                     });
                 }
                 crate::sansio::Effect::ExecCode { id, code } => {
@@ -1215,29 +1216,87 @@ impl Agent {
                         return (Vec::new(), run_offset);
                     }
 
+                    // Enable streaming so we can emit text deltas incrementally
+                    let (llm_stream_tx, mut llm_stream_rx) =
+                        tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
                     let llm_request = LlmRequest {
-                        stream_events: self.transport_stream_events(None),
+                        stream_events: self.transport_stream_events(Some(llm_stream_tx)),
                         ..request
                     };
 
                     let mut call_provider = self.config.provider.clone();
-                    let llm = adapter_for(&call_provider);
-                    let result = llm.complete(&mut call_provider, llm_request).await;
-                    self.config.provider = call_provider;
+                    let llm_task = tokio::spawn(async move {
+                        let llm = adapter_for(&call_provider);
+                        let result = llm.complete(&mut call_provider, llm_request).await;
+                        (result, call_provider)
+                    });
 
-                    let response = match result {
+                    let mut llm_task = llm_task;
+                    let mut text_streamed = false;
+                    let llm_result: Result<LlmResponse, crate::sansio::LlmCallError> = loop {
+                        tokio::select! {
+                            _ = cancel.cancelled() => {
+                                llm_task.abort();
+                                emit!(AgentEvent::Done);
+                                return (Vec::new(), run_offset);
+                            }
+                            maybe_event = llm_stream_rx.recv() => {
+                                let Some(event) = maybe_event else { continue };
+                                match event {
+                                    LlmStreamEvent::Delta(delta) => {
+                                        if !delta.is_empty() {
+                                            text_streamed = true;
+                                            emit!(AgentEvent::TextDelta { content: delta });
+                                        }
+                                    }
+                                    LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
+                                        if !text.is_empty() {
+                                            text_streamed = true;
+                                            emit!(AgentEvent::TextDelta { content: text });
+                                        }
+                                    }
+                                    LlmStreamEvent::Part(LlmOutputPart::ToolCall { .. }) => {}
+                                    LlmStreamEvent::Usage(_) => {}
+                                }
+                            }
+                            join = &mut llm_task => {
+                                let (result, provider_after) = match join {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        break Err(crate::sansio::LlmCallError {
+                                            message: format!("internal task failed: {e}"),
+                                            retryable: false,
+                                            raw: None,
+                                            code: Some("task_join_failed".to_string()),
+                                        });
+                                    }
+                                };
+                                self.config.provider = provider_after;
+                                match result {
+                                    Ok(resp) => break Ok(resp),
+                                    Err(e) => {
+                                        break Err(crate::sansio::LlmCallError {
+                                            message: e.message,
+                                            retryable: e.retryable,
+                                            raw: e.raw,
+                                            code: e.code,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    };
+
+                    let response = match llm_result {
                         Ok(resp) => crate::sansio::Response::LlmComplete {
                             id,
                             result: Ok(resp),
+                            text_streamed,
                         },
                         Err(e) => crate::sansio::Response::LlmComplete {
                             id,
-                            result: Err(crate::sansio::LlmCallError {
-                                message: e.message,
-                                retryable: e.retryable,
-                                raw: e.raw,
-                                code: e.code,
-                            }),
+                            result: Err(e),
+                            text_streamed: false,
                         },
                     };
                     machine.handle_response(response);
