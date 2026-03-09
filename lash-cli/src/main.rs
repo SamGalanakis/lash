@@ -31,7 +31,7 @@ use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
 use lash_core::agent::{Message, MessageRole, Part, PartKind, PruneState};
 use lash_core::provider::{LashConfig, OPENAI_GENERIC_DEFAULT_BASE_URL, Provider};
 use lash_core::tools::{
-    AgentCall, BatchingTools, CompositeTools, FilteredTools, SwitchableTools, ToolSet, ToolSetDeps,
+    AgentCall, BatchingTools, FilteredTools, SwitchableTools, ToolSet, ToolSetDeps,
 };
 use lash_core::*;
 use ratatui::DefaultTerminal;
@@ -43,6 +43,7 @@ use app::{App, DisplayBlock};
 use event::AppEvent;
 use input_items::{build_items_from_editor_input, insert_inline_marker};
 use prompt_overrides::resolve_prompt_overrides;
+use session_log::SessionLogger;
 
 #[derive(Parser)]
 struct Args {
@@ -117,102 +118,6 @@ struct Args {
     /// Disable a prompt section entirely.
     #[arg(long = "prompt-disable", value_name = "SECTION")]
     prompt_disable: Vec<String>,
-}
-
-struct SessionLogger {
-    file: std::io::BufWriter<std::fs::File>,
-    session_id: String,
-    session_name: String,
-    pending_turn: Vec<serde_json::Value>,
-}
-
-impl SessionLogger {
-    fn new(model: &str, session_id: Option<String>) -> anyhow::Result<Self> {
-        let dir = lash_core::lash_home().join("sessions");
-        std::fs::create_dir_all(&dir)?;
-
-        let now = chrono::Local::now();
-        let filename = format!("{}.jsonl", now.format("%Y%m%d_%H%M%S"));
-        let path = dir.join(&filename);
-        let file = std::io::BufWriter::new(std::fs::File::create(&path)?);
-        let session_id = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let session_name = generate_session_name(&dir);
-
-        let mut logger = Self {
-            file,
-            session_id: session_id.clone(),
-            session_name: session_name.clone(),
-            pending_turn: Vec::new(),
-        };
-        logger.write_json(&serde_json::json!({
-            "type": "session_start",
-            "session_id": session_id,
-            "session_name": session_name,
-            "ts": now.to_rfc3339(),
-            "model": model,
-            "cwd": std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()),
-        }))?;
-        logger.flush_file()?;
-
-        Ok(logger)
-    }
-
-    fn write_json(&mut self, value: &serde_json::Value) -> anyhow::Result<()> {
-        use std::io::Write;
-        serde_json::to_writer(&mut self.file, value)?;
-        self.file.write_all(b"\n")?;
-        Ok(())
-    }
-
-    fn flush_file(&mut self) -> anyhow::Result<()> {
-        use std::io::Write;
-        self.file.flush()?;
-        Ok(())
-    }
-
-    fn flush_pending_turn(&mut self) {
-        if self.pending_turn.is_empty() {
-            return;
-        }
-        let pending = std::mem::take(&mut self.pending_turn);
-        for value in pending {
-            let _ = self.write_json(&value);
-        }
-        let _ = self.flush_file();
-    }
-
-    fn log_user_input(&mut self, input: &str) {
-        // If a previous turn never emitted `done`, discard the in-memory buffer
-        // to preserve the invariant that session logs append only completed turns.
-        if !self.pending_turn.is_empty() {
-            self.pending_turn.clear();
-        }
-        self.pending_turn.push(serde_json::json!({
-            "type": "user_input",
-            "ts": chrono::Local::now().to_rfc3339(),
-            "content": input,
-        }));
-    }
-
-    fn log_event(&mut self, event: &AgentEvent) {
-        let mut value = serde_json::to_value(event).unwrap_or_default();
-        let mut event_type = String::new();
-        if let serde_json::Value::Object(ref mut map) = value {
-            map.insert(
-                "ts".into(),
-                serde_json::Value::String(chrono::Local::now().to_rfc3339()),
-            );
-            event_type = map
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-        }
-        self.pending_turn.push(value);
-        if event_type == "done" {
-            self.flush_pending_turn();
-        }
-    }
 }
 
 fn cleanup_terminal() {
@@ -487,7 +392,7 @@ async fn main() -> anyhow::Result<()> {
         .filter(|n| resolved.effective_tools.contains(n))
         .collect();
 
-    let mut tools_comp = CompositeTools::new().add_arc(Arc::clone(&filtered_base));
+    let mut tools_comp = ToolSet::new() + Arc::clone(&filtered_base);
     if !agent_allowed.is_empty() {
         let agent_call = AgentCall::new(
             Arc::clone(&agent_parent_tools) as Arc<dyn ToolProvider>,
@@ -497,7 +402,7 @@ async fn main() -> anyhow::Result<()> {
         );
         let filtered_agent: Arc<dyn ToolProvider> =
             Arc::new(FilteredTools::new(Arc::new(agent_call), agent_allowed));
-        tools_comp = tools_comp.add_arc(filtered_agent);
+        tools_comp = tools_comp + filtered_agent;
     }
     let tools: Arc<dyn ToolProvider> = Arc::new(tools_comp);
     let dynamic_tools = Arc::new(DynamicToolProvider::from_tool_provider(
@@ -533,7 +438,8 @@ async fn main() -> anyhow::Result<()> {
         return run_headless(runtime, prompt).await;
     }
 
-    let mut logger = SessionLogger::new(&model, run_session_id)?;
+    let session_name = generate_session_name(&sessions_dir);
+    let mut logger = SessionLogger::new(&model, run_session_id, session_name.clone())?;
 
     // Install panic hook that restores the terminal
     let default_hook = std::panic::take_hook();
@@ -547,7 +453,6 @@ async fn main() -> anyhow::Result<()> {
 
     configure_terminal_ui(args.no_mouse)?;
 
-    let session_name = logger.session_name.clone();
     let result = run_app(
         terminal,
         runtime,

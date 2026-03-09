@@ -30,8 +30,10 @@ Options:
   --build-mode <mode>           Binary build mode: docker-bookworm|host
                                 (default: docker-bookworm)
   --no-build                    Skip building lash binary (uses existing path for selected mode)
+  --debug                       Enable Harbor debug logging
+  --no-debug                    Disable Harbor debug logging (default)
   --delete                      Delete benchmark environments after run
-  --no-delete                   Keep benchmark environments after run (default)
+  --no-delete                   Keep benchmark environments after run
   --allow-no-config             Do not require ~/.lash/config.json
   --dry-run                     Print command and exit
   --help                        Show this help
@@ -61,10 +63,10 @@ ENV_BACKEND="docker"
 REGISTRY_URL="https://raw.githubusercontent.com/laude-institute/harbor/main/registry.json"
 BUILD_MODE="docker-bookworm"
 DO_BUILD=1
-DELETE_AFTER_RUN=0
+DELETE_AFTER_RUN=1
 REQUIRE_CONFIG=1
 DRY_RUN=0
-DEBUG=1
+DEBUG=0
 
 TASK_PATTERNS=()
 EXCLUDE_PATTERNS=()
@@ -132,6 +134,14 @@ while [[ $# -gt 0 ]]; do
       DO_BUILD=0
       shift
       ;;
+    --debug)
+      DEBUG=1
+      shift
+      ;;
+    --no-debug)
+      DEBUG=0
+      shift
+      ;;
     --delete)
       DELETE_AFTER_RUN=1
       shift
@@ -165,9 +175,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-require_cmd cargo
 require_cmd harbor
-require_cmd docker
+if [[ "${DO_BUILD}" -eq 1 ]]; then
+  require_cmd cargo
+fi
+if [[ "${BUILD_MODE}" == "docker-bookworm" || "${ENV_BACKEND}" == "docker" ]]; then
+  require_cmd docker
+fi
 
 if [[ "${REQUIRE_CONFIG}" -eq 1 && ! -f "${HOME}/.lash/config.json" ]]; then
   cat >&2 <<EOF

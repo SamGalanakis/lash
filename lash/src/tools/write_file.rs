@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
-use super::require_str;
+use super::{require_str, run_blocking};
 
 /// Write complete file contents, creating parent directories if needed.
 #[derive(Default)]
@@ -37,28 +37,32 @@ impl ToolProvider for WriteFile {
             Ok(s) => s,
             Err(e) => return e,
         };
+        let path_str = path_str.to_string();
         let content = args
             .get("content")
             .and_then(|v| v.as_str())
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .to_string();
 
-        let path = Path::new(path_str);
+        run_blocking(move || {
+            let path = Path::new(&path_str);
 
-        // Create parent directories
-        if let Some(parent) = path.parent()
-            && !parent.exists()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            return ToolResult::err_fmt(format_args!("Failed to create directories: {e}"));
-        }
-
-        match std::fs::write(path, content) {
-            Ok(()) => {
-                let bytes = content.len();
-                ToolResult::ok(json!(format!("Wrote {} bytes to {}", bytes, path_str)))
+            if let Some(parent) = path.parent()
+                && !parent.exists()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                return ToolResult::err_fmt(format_args!("Failed to create directories: {e}"));
             }
-            Err(e) => ToolResult::err_fmt(format_args!("Failed to write file: {e}")),
-        }
+
+            match std::fs::write(path, &content) {
+                Ok(()) => {
+                    let bytes = content.len();
+                    ToolResult::ok(json!(format!("Wrote {} bytes to {}", bytes, path_str)))
+                }
+                Err(e) => ToolResult::err_fmt(format_args!("Failed to write file: {e}")),
+            }
+        })
+        .await
     }
 }
 

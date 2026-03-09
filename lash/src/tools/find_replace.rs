@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::{ToolDefinition, ToolParam, ToolResult};
 
-use super::{compact_diff, read_to_string, require_str};
+use super::{compact_diff, read_to_string, require_str, run_blocking};
 
 /// Simple text find-and-replace tool (no anchors needed).
 #[derive(Default)]
@@ -60,58 +60,64 @@ impl crate::ToolProvider for FindReplace {
             Ok(s) => s,
             Err(e) => return e,
         };
+        let path_str = path_str.to_string();
 
         let old_text = match args.get("old_text").and_then(|v| v.as_str()) {
             Some(s) => s,
             None => return ToolResult::err_fmt("Missing required parameter: old_text"),
-        };
+        }
+        .to_string();
 
         let new_text = match args.get("new_text").and_then(|v| v.as_str()) {
             Some(s) => s,
             None => return ToolResult::err_fmt("Missing required parameter: new_text"),
-        };
+        }
+        .to_string();
 
         let replace_all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
 
-        let path = Path::new(path_str);
+        run_blocking(move || {
+            let path = Path::new(&path_str);
 
-        if !path.exists() {
-            return ToolResult::err_fmt(format_args!("File does not exist: {path_str}"));
-        }
+            if !path.exists() {
+                return ToolResult::err_fmt(format_args!("File does not exist: {path_str}"));
+            }
 
-        let content = match read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => return e,
-        };
+            let content = match read_to_string(path) {
+                Ok(c) => c,
+                Err(e) => return e,
+            };
 
-        if !content.contains(old_text) {
-            return ToolResult::err_fmt("old_text not found in file");
-        }
+            if !content.contains(&old_text) {
+                return ToolResult::err_fmt("old_text not found in file");
+            }
 
-        let (new_content, count) = if replace_all {
-            let count = content.matches(old_text).count();
-            (content.replace(old_text, new_text), count)
-        } else {
-            (content.replacen(old_text, new_text, 1), 1)
-        };
+            let (new_content, count) = if replace_all {
+                let count = content.matches(&old_text).count();
+                (content.replace(&old_text, &new_text), count)
+            } else {
+                (content.replacen(&old_text, &new_text, 1), 1)
+            };
 
-        if let Err(e) = std::fs::write(path, &new_content) {
-            return ToolResult::err_fmt(format_args!("Failed to write file: {e}"));
-        }
+            if let Err(e) = std::fs::write(path, &new_content) {
+                return ToolResult::err_fmt(format_args!("Failed to write file: {e}"));
+            }
 
-        let label = if count == 1 {
-            "1 replacement".to_string()
-        } else {
-            format!("{} replacements", count)
-        };
+            let label = if count == 1 {
+                "1 replacement".to_string()
+            } else {
+                format!("{} replacements", count)
+            };
 
-        let diff = compact_diff(&content, &new_content, path_str, 50);
-        let summary = format!("{} made in {}", label, path_str);
-        ToolResult::ok(json!({
-            "__type__": "edit_result",
-            "summary": summary,
-            "diff": diff,
-        }))
+            let diff = compact_diff(&content, &new_content, &path_str, 50);
+            let summary = format!("{} made in {}", label, path_str);
+            ToolResult::ok(json!({
+                "__type__": "edit_result",
+                "summary": summary,
+                "diff": diff,
+            }))
+        })
+        .await
     }
 }
 

@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::{ToolDefinition, ToolImage, ToolParam, ToolProvider, ToolResult};
 
 use super::hashline;
-use super::{read_to_string, require_str, run_blocking};
+use super::{parse_optional_usize_arg, read_to_string, require_str, run_blocking};
 
 /// Read files with hashline-prefixed output. Supports images natively.
 #[derive(Default)]
@@ -85,36 +85,7 @@ impl ToolProvider for ReadFile {
 }
 
 fn parse_limit(args: &serde_json::Value) -> Result<Option<usize>, ToolResult> {
-    match args.get("limit") {
-        None => Ok(Some(DEFAULT_LIMIT)),
-        Some(v) if v.is_null() => Ok(None),
-        Some(v) => {
-            if let Some(s) = v.as_str() {
-                if s.eq_ignore_ascii_case("none") {
-                    return Ok(None);
-                }
-                return Err(ToolResult::err_fmt(format_args!(
-                    "Invalid limit: expected int, null, or \"none\""
-                )));
-            }
-
-            let n = match v.as_u64() {
-                Some(n) => n,
-                None => {
-                    return Err(ToolResult::err_fmt(format_args!(
-                        "Invalid limit: expected int, null, or \"none\""
-                    )));
-                }
-            };
-
-            if n == 0 {
-                return Err(ToolResult::err_fmt(format_args!(
-                    "Invalid limit: must be >= 1, or use null/\"none\" for no cap"
-                )));
-            }
-            Ok(Some(n as usize))
-        }
-    }
+    parse_optional_usize_arg(args, "limit", Some(DEFAULT_LIMIT), true, 1)
 }
 
 fn execute_read_file_sync(path_str: &str, offset: usize, limit: Option<usize>) -> ToolResult {

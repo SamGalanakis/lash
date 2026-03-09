@@ -1325,7 +1325,9 @@ impl TurnMachine {
         let has_output = !fence.acc.combined_output.is_empty();
         let has_tool_calls = !fence.acc.tool_calls.is_empty();
 
-        // Pure prose response — turn ends
+        let repl_execution_started = self.iteration > self.run_offset;
+
+        // Pure prose response — valid only before any REPL execution has happened in this turn.
         if !has_code && !has_output && !has_tool_calls && !fence.acc.had_failure {
             let mid = format!("m{}", self.messages.len());
             let asst_parts = build_assistant_parts(&mid, &fence.prose_parts, &fence.code_parts);
@@ -1364,6 +1366,31 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
                     return;
                 }
                 // Continue to next iteration
+                self.state = MachineState::PrepareIteration;
+                return;
+            }
+            if repl_execution_started {
+                let sys_id = format!("m{}", self.messages.len());
+                let guidance = "You have already used <repl> in this turn. Do not stop with prose alone. Continue working and call done(...) inside <repl> when the final user-facing answer is ready.";
+                self.messages.push(Message {
+                    id: sys_id.clone(),
+                    role: MessageRole::System,
+                    parts: vec![Part {
+                        id: format!("{}.p0", sys_id),
+                        kind: PartKind::Error,
+                        content: guidance.to_string(),
+                        tool_call_id: None,
+                        tool_name: None,
+                        prune_state: PruneState::Intact,
+                    }],
+                });
+                self.iteration += 1;
+                self.termination.maybe_schedule_turn_limit_final(
+                    self.iteration,
+                    self.run_offset,
+                    self.config.max_turns,
+                    &mut self.messages,
+                );
                 self.state = MachineState::PrepareIteration;
                 return;
             }
@@ -1920,6 +1947,71 @@ mod tests {
 
         let effects = drain_effects(&mut machine);
         assert!(find_done(&effects).is_some());
+    }
+
+    #[test]
+    fn repl_prose_after_exec_requires_done() {
+        let config = test_config(ExecutionMode::Repl);
+        let msgs = vec![user_message("run code then summarize")];
+        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+
+        let effects = drain_effects(&mut machine);
+        let llm_id = *find_llm_call(&effects).unwrap();
+
+        let cont = machine.handle_llm_delta(llm_id, "<repl>\nprint('hi')\n</repl>\n");
+        assert!(!cont);
+
+        let effects = drain_effects(&mut machine);
+        let exec_id = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::ExecCode { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("exec effect");
+
+        machine.handle_response(Response::ExecResult {
+            id: exec_id,
+            result: Ok(crate::ExecResponse {
+                output: "hi\n".to_string(),
+                response: String::new(),
+                tool_calls: Vec::new(),
+                images: Vec::new(),
+                error: None,
+                duration_ms: 5,
+            }),
+        });
+        machine.handle_response(Response::LlmComplete {
+            id: llm_id,
+            text_streamed: false,
+            result: Ok(LlmResponse {
+                usage: LlmUsage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    cached_input_tokens: 0,
+                },
+                ..LlmResponse::default()
+            }),
+        });
+
+        let effects = drain_effects(&mut machine);
+        let next_llm_id = *find_llm_call(&effects).expect("next llm call");
+        assert!(find_done(&effects).is_none());
+
+        machine.handle_response(Response::LlmComplete {
+            id: next_llm_id,
+            text_streamed: false,
+            result: Ok(LlmResponse {
+                full_text: "All done.".to_string(),
+                deltas: vec!["All done.".to_string()],
+                ..LlmResponse::default()
+            }),
+        });
+
+        let effects = drain_effects(&mut machine);
+        assert!(find_done(&effects).is_none());
+        let follow_up_llm = find_llm_call(&effects);
+        assert!(follow_up_llm.is_some(), "should continue until done()");
     }
 
     #[test]

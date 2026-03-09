@@ -471,6 +471,123 @@ pub(crate) struct ExecutionPreamble {
     pub(crate) base_context: String,
 }
 
+pub(crate) fn transport_stream_events(
+    provider: &Provider,
+    requested: Option<tokio::sync::mpsc::UnboundedSender<LlmStreamEvent>>,
+) -> Option<tokio::sync::mpsc::UnboundedSender<LlmStreamEvent>> {
+    if requested.is_some() {
+        return requested;
+    }
+
+    let llm = adapter_for(provider);
+    if llm.requires_streaming() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
+        drop(rx);
+        Some(tx)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn cached_base_context(context_cache: &mut Option<String>) -> String {
+    if let Some(context) = context_cache.as_ref() {
+        return context.clone();
+    }
+    let context = build_context();
+    *context_cache = Some(context.clone());
+    context
+}
+
+pub(crate) fn build_execution_preamble(
+    session: &Session,
+    config: &AgentConfig,
+    base_context_cache: &mut Option<String>,
+    mode: ExecutionMode,
+    model: String,
+) -> ExecutionPreamble {
+    let all_tools = session.tools().definitions();
+    let visible: Vec<_> = all_tools.iter().filter(|t| !t.hidden).cloned().collect();
+    let prompt_tools: Vec<_> = visible
+        .iter()
+        .filter(|t| t.inject_into_prompt)
+        .cloned()
+        .collect();
+    let mut tool_list = ToolDefinition::format_tool_docs(&prompt_tools, mode);
+    let omitted_tool_count = visible.iter().filter(|t| !t.inject_into_prompt).count();
+    if omitted_tool_count > 0 {
+        let note = match mode {
+            ExecutionMode::Repl => format!(
+                "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Use `list_tools()` / `search_tools(...)` to discover them, then call them directly as global functions."
+            ),
+            ExecutionMode::NativeTools => {
+                format!(
+                    "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity."
+                )
+            }
+        };
+        tool_list.push_str(&note);
+    }
+    let tool_specs = if matches!(mode, ExecutionMode::NativeTools) {
+        visible
+            .iter()
+            .map(|tool| LlmToolSpec {
+                name: tool.name.clone(),
+                description: tool.description_for(ExecutionMode::NativeTools),
+                input_schema: tool.input_schema(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let tool_names: Vec<String> = visible.iter().map(|t| t.name.clone()).collect();
+    let dynamic_projection = session.tools().dynamic_projection();
+    let enabled_capability_ids: BTreeSet<String> = dynamic_projection
+        .as_ref()
+        .map(|p| p.enabled_capabilities.clone())
+        .unwrap_or_else(|| {
+            config
+                .capabilities
+                .enabled_capabilities
+                .iter()
+                .map(|id| id.as_str().to_string())
+                .collect()
+        });
+    let helper_bindings: BTreeSet<String> = dynamic_projection
+        .as_ref()
+        .map(|p| p.helper_bindings.clone())
+        .unwrap_or_default();
+    let capability_prompt_sections: Vec<String> = dynamic_projection
+        .as_ref()
+        .map(|p| p.prompt_sections.clone())
+        .unwrap_or_default();
+    let can_write = tool_names
+        .iter()
+        .any(|name| matches!(name.as_str(), "write_file" | "edit_file" | "find_replace"));
+    let history_enabled =
+        helper_bindings.contains("search_history") || enabled_capability_ids.contains("history");
+    let memory_enabled =
+        helper_bindings.contains("search_mem") || enabled_capability_ids.contains("memory");
+    let instruction_source = Arc::clone(&config.instruction_source);
+    let project_instructions = instruction_source.system_instructions();
+    let base_context = cached_base_context(base_context_cache);
+
+    ExecutionPreamble {
+        model,
+        tool_list,
+        tool_specs,
+        tool_names,
+        enabled_capability_ids,
+        helper_bindings,
+        capability_prompt_sections,
+        can_write,
+        history_enabled,
+        memory_enabled,
+        instruction_source,
+        project_instructions,
+        base_context,
+    }
+}
+
 impl Agent {
     pub fn new(session: Session, config: AgentConfig, agent_id: Option<String>) -> Self {
         let agent_id = agent_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -1497,7 +1614,7 @@ pub(crate) fn format_tool_result_content(success: bool, result: &serde_json::Val
 }
 
 /// Build environment context string for the system prompt.
-fn build_context() -> String {
+pub(crate) fn build_context() -> String {
     let mut parts = Vec::new();
 
     if let Ok(cwd) = std::env::current_dir() {

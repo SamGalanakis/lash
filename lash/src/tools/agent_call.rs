@@ -8,12 +8,12 @@ use tokio_util::sync::CancellationToken;
 use crate::capabilities::{CapabilityId, tools_for_capability};
 use crate::provider::AgentModels;
 use crate::{
-    Agent, AgentConfig, AgentEvent, DynamicStateSnapshot, Message, MessageRole, Part, PartKind,
-    ProgressSender, PruneState, SandboxMessage, Session, ToolDefinition, ToolParam, ToolProvider,
-    ToolResult,
+    AgentConfig, AgentEvent, AgentStateEnvelope, DynamicStateSnapshot, EventSink, Message,
+    MessageRole, Part, PartKind, ProgressSender, PruneState, RuntimeConfig, RuntimeEngine,
+    SandboxMessage, ToolDefinition, ToolParam, ToolProvider, ToolResult,
 };
 
-use super::{CompositeTools, FilteredTools, require_str};
+use super::{FilteredTools, ToolSet, require_str};
 
 /// Intelligence tier determines model choice, capabilities, and turn limits.
 enum Tier {
@@ -101,6 +101,19 @@ struct RunningAgent {
     done_notify: Arc<Notify>,
     /// Cancel token to kill the agent.
     cancel: CancellationToken,
+}
+
+struct ChannelEventSink {
+    tx: mpsc::Sender<AgentEvent>,
+}
+
+#[async_trait::async_trait]
+impl EventSink for ChannelEventSink {
+    async fn emit(&self, event: AgentEvent) {
+        if !self.tx.is_closed() {
+            let _ = self.tx.send(event).await;
+        }
+    }
 }
 
 /// Single agent-call tool that spawns sub-agents at different intelligence tiers.
@@ -234,14 +247,14 @@ impl AgentCall {
         }
 
         Arc::new(
-            CompositeTools::new()
-                .add_arc(Arc::clone(&self.tools))
-                .add(AgentCall::new(
+            ToolSet::new()
+                + Arc::clone(&self.tools)
+                + AgentCall::new(
                     Arc::clone(&self.tools),
                     &self.config,
                     self.agent_models.clone(),
                     self.cancel.clone(),
-                )),
+                ),
         )
     }
 
@@ -282,39 +295,29 @@ impl AgentCall {
         let agent_id = uuid::Uuid::new_v4().to_string();
         let handle_id = uuid::Uuid::new_v4().to_string();
 
-        // Create a new session with tier-specific tools.
+        // Create a new runtime with tier-specific tools.
         let session_tools = self.session_tools_for_tier(&tier);
-        let mut session = match Session::new(
+        let runtime_state = AgentStateEnvelope {
+            agent_id: agent_id.clone(),
+            execution_mode: agent_execution_mode,
+            context_folding: agent_config.context_folding,
+            ..Default::default()
+        };
+        let runtime_config: RuntimeConfig = agent_config.clone().into();
+        let mut runtime = match RuntimeEngine::from_state(
+            runtime_config,
             Arc::clone(&session_tools),
-            &agent_id,
-            self.config.headless,
-            agent_config.capabilities.clone(),
-            agent_config.execution_mode,
+            runtime_state,
         )
         .await
         {
-            Ok(s) => s,
+            Ok(runtime) => runtime,
             Err(e) => {
                 return ToolResult::err_fmt(format_args!(
-                    "Failed to create sub-agent session: {e}"
+                    "Failed to create sub-agent runtime: {e}"
                 ));
             }
         };
-
-        // Dynamic tool providers may carry capability IDs beyond the static enum.
-        // Re-register capability payload so the child REPL helper surface reflects
-        // the actual projected tool/capability set.
-        if session.supports_repl()
-            && let (Some(caps_json), Some(generation)) = (
-                session_tools.dynamic_capabilities_payload_json(),
-                session_tools.dynamic_generation(),
-            )
-            && let Err(e) = session.reconfigure(caps_json, generation).await
-        {
-            return ToolResult::err_fmt(format_args!(
-                "Failed to reconfigure sub-agent session: {e}"
-            ));
-        }
 
         // Load parent memory/history into the child session via hidden state tools.
         let parent_history = args
@@ -326,12 +329,13 @@ impl AgentCall {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        if session.supports_repl() && (parent_history.is_some() || parent_mem.is_some()) {
+        if matches!(agent_execution_mode, crate::ExecutionMode::Repl)
+            && (parent_history.is_some() || parent_mem.is_some())
+        {
             if let Some(ref hist_json) = parent_history
                 && let Ok(turns) = serde_json::from_str::<serde_json::Value>(hist_json)
             {
-                let _ = session
-                    .tools()
+                let _ = session_tools
                     .execute(
                         "history_load",
                         &json!({"__agent_id__": agent_id, "turns": turns}),
@@ -341,8 +345,7 @@ impl AgentCall {
             if let Some(ref mem_json) = parent_mem
                 && let Ok(entries) = serde_json::from_str::<serde_json::Value>(mem_json)
             {
-                let _ = session
-                    .tools()
+                let _ = session_tools
                     .execute(
                         "mem_load",
                         &json!({"__agent_id__": agent_id, "entries": entries}),
@@ -350,8 +353,6 @@ impl AgentCall {
                     .await;
             }
         }
-
-        let mut agent = Agent::new(session, agent_config, Some(agent_id));
 
         // Build the user message, optionally appending schema instructions
         let user_content = if let Some(ref schema_str) = schema {
@@ -400,10 +401,13 @@ impl AgentCall {
         let done_clone = done_notify.clone();
 
         // Spawn the agent run
-        let run_handle =
-            tokio::spawn(
-                async move { agent.run(messages, vec![], event_tx, agent_cancel, 0).await },
-            );
+        let run_handle = tokio::spawn(async move {
+            let sink = ChannelEventSink { tx: event_tx };
+            let turn = runtime
+                .stream_prepared_turn(messages, vec![], &sink, agent_cancel)
+                .await;
+            (runtime, turn)
+        });
 
         let prompt_for_meta = prompt.to_string();
 
@@ -444,7 +448,28 @@ impl AgentCall {
             }
 
             // Wait for the agent task to finish
-            let (_, iterations) = run_handle.await.unwrap_or_default();
+            let (_, turn_result) = match run_handle.await {
+                Ok(result) => result,
+                Err(_) => {
+                    *res_clone.lock().unwrap() = Some(json!({
+                        "result": "",
+                        "context": [],
+                        "_sub_agent": {
+                            "task": prompt_for_meta,
+                            "usage": cumulative_usage,
+                            "tool_calls": tool_call_count,
+                            "iterations": 0,
+                        }
+                    }));
+                    done_clone.notify_waiters();
+                    return;
+                }
+            };
+            let assembled = turn_result.ok();
+            let iterations = assembled
+                .as_ref()
+                .map(|turn| turn.state.iteration)
+                .unwrap_or(0);
 
             let result_text = if let Some(msg) = final_message {
                 msg

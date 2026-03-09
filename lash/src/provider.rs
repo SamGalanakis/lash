@@ -110,6 +110,7 @@ impl RuntimeSettings {
 
 /// Stored configuration: provider credentials + service API keys.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LashConfig {
     pub provider: Provider,
     #[serde(default, skip_serializing_if = "AuxiliarySecrets::is_empty")]
@@ -584,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_tavily_field_is_ignored() {
+    fn rejects_unknown_top_level_config_fields() {
         let raw = serde_json::json!({
             "provider": {
                 "type": "openai-generic",
@@ -594,12 +595,12 @@ mod tests {
             "tavily_api_key": "legacy-key"
         });
 
-        let cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
-        assert_eq!(cfg.tavily_api_key(), None);
+        let err = serde_json::from_value::<LashConfig>(raw).expect_err("unknown field rejected");
+        assert!(err.to_string().contains("unknown field `tavily_api_key`"));
     }
 
     #[test]
-    fn modern_auxiliary_secrets_preserved() {
+    fn auxiliary_secrets_preserved() {
         let raw = serde_json::json!({
             "provider": {
                 "type": "openai-generic",
@@ -608,8 +609,7 @@ mod tests {
             },
             "auxiliary_secrets": {
                 "tavily_api_key": "new-key"
-            },
-            "tavily_api_key": "legacy-key"
+            }
         });
 
         let cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");

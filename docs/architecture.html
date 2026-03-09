@@ -855,14 +855,17 @@
             <h4>Contract Rules</h4>
             <p>
               <code>&lt;repl&gt;</code> blocks execute immediately when <code>&lt;/repl&gt;</code> is reached.
-              Maximum one block per turn. After execution, lash continues in a new internal turn with execution output.
+              Maximum one block per response. After execution, lash continues in a new internal turn with execution output.
+              Once a turn has executed <code>&lt;repl&gt;</code>, it must continue until <code>done(...)</code> is called inside <code>&lt;repl&gt;</code>.
               Variables persist across turns. <code>print(...)</code> output is model-visible only.
             </p>
           </div>
           <div class="cell">
             <h4>Termination</h4>
             <p>
-              <code>done(value)</code> ends the turn and returns control. May only be called inside <code>&lt;repl&gt;</code>.
+              <code>done(value)</code> ends the turn and returns control. It may only be called inside <code>&lt;repl&gt;</code>.
+              If a turn never opened <code>&lt;repl&gt;</code>, plain prose can still finish the turn.
+              After any REPL execution, only <code>done(...)</code> can terminate the turn.
               In interactive mode, call <code>done(...)</code> only when the final user-facing answer is ready.
               In headless mode, call <code>done(...)</code> only after the task is fully completed.
             </p>
@@ -870,9 +873,10 @@
           <div class="cell">
             <h4>Tool Access</h4>
             <p>
-              All visible tools are available in the <code>tools</code> module (e.g. <code>tools.read_file(...)</code>).
-              <code>from tools import *</code> is applied automatically. Use <code>await</code> only for long-running calls
-              (<code>delegate_*()</code> and shell handle methods).
+              All visible tools are available as direct globals (for example <code>read_file(...)</code>).
+              There is no <code>tools</code> module or implicit import layer. Use <code>list_tools()</code> and
+              <code>search_tools(...)</code> to discover prompt-omitted tools, and use <code>await</code> only for
+              async helpers such as shell handle methods and sub-agent result/output calls.
             </p>
           </div>
           <div class="cell">

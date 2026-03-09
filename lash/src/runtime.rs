@@ -7,16 +7,19 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::message::IMAGE_REF_PREFIX;
 use crate::agent::{
-    Agent, AgentConfig, AgentEvent, Message, MessageRole, Part, PartKind, PromptSectionOverride,
-    PruneState, TokenUsage,
+    AgentConfig, AgentEvent, Message, MessageRole, Part, PartKind, PromptSectionOverride,
+    PruneState, TokenUsage, build_execution_preamble, make_error_event, transport_stream_events,
 };
 use crate::capabilities::AgentCapabilities;
 use crate::instructions::{FsInstructionSource, InstructionSource};
+use crate::llm::factory::adapter_for;
+use crate::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent};
 use crate::provider::Provider;
+use crate::sansio::{Effect, LlmCallError, Response, TurnMachine, TurnMachineConfig};
 use crate::strip_repl_fragments;
 use crate::{
-    CapabilityId, ContextFoldingConfig, ExecutionMode, Session, SessionError, ToolCallRecord,
-    ToolProvider,
+    CapabilityId, ContextFoldingConfig, ExecutionMode, SandboxMessage, Session, SessionError,
+    ToolCallRecord, ToolProvider,
 };
 
 /// Runtime execution mode for a turn.
@@ -407,8 +410,11 @@ pub struct RuntimeConfig {
     pub provider: Provider,
     pub execution_mode: ExecutionMode,
     pub context_folding: ContextFoldingConfig,
+    pub sub_agent: bool,
+    pub reasoning_effort: Option<String>,
     pub session_id: Option<String>,
     pub max_context_tokens: Option<usize>,
+    pub max_turns: Option<usize>,
     pub include_soul: bool,
     pub llm_log_path: Option<PathBuf>,
     pub headless: bool,
@@ -430,8 +436,11 @@ impl Default for RuntimeConfig {
             provider: cfg.provider,
             execution_mode: cfg.execution_mode,
             context_folding: cfg.context_folding,
+            sub_agent: cfg.sub_agent,
+            reasoning_effort: cfg.reasoning_effort,
             session_id: cfg.session_id,
             max_context_tokens: cfg.max_context_tokens,
+            max_turns: cfg.max_turns,
             include_soul: cfg.include_soul,
             llm_log_path: cfg.llm_log_path,
             headless: cfg.headless,
@@ -461,9 +470,9 @@ impl From<RuntimeConfig> for AgentConfig {
             context_folding: value.context_folding,
             session_id: value.session_id,
             max_context_tokens: value.max_context_tokens,
-            sub_agent: false,
-            reasoning_effort: None,
-            max_turns: None,
+            sub_agent: value.sub_agent,
+            reasoning_effort: value.reasoning_effort,
+            max_turns: value.max_turns,
             include_soul: value.include_soul,
             llm_log_path: value.llm_log_path,
             headless,
@@ -486,8 +495,11 @@ impl From<AgentConfig> for RuntimeConfig {
             provider: value.provider,
             execution_mode: value.execution_mode,
             context_folding: value.context_folding,
+            sub_agent: value.sub_agent,
+            reasoning_effort: value.reasoning_effort,
             session_id: value.session_id,
             max_context_tokens: value.max_context_tokens,
+            max_turns: value.max_turns,
             include_soul: value.include_soul,
             llm_log_path: value.llm_log_path,
             headless: value.headless,
@@ -504,7 +516,8 @@ impl From<AgentConfig> for RuntimeConfig {
 
 /// Generic runtime engine for CLI or programmatic embedding.
 pub struct RuntimeEngine {
-    agent: Option<Agent>,
+    session: Option<Session>,
+    config: RuntimeConfig,
     state: AgentStateEnvelope,
     capabilities: AgentCapabilities,
     host_profile: HostProfile,
@@ -512,6 +525,7 @@ pub struct RuntimeEngine {
     path_resolver: Option<Arc<dyn PathResolver>>,
     sanitizer: SanitizerPolicy,
     termination: TerminationPolicy,
+    cached_base_context: Option<String>,
 }
 
 impl RuntimeEngine {
@@ -542,7 +556,7 @@ impl RuntimeEngine {
             state.context_folding = config.context_folding;
         }
         tools.set_execution_mode(state.execution_mode);
-        let session = Session::new(
+        let mut session = Session::new(
             tools,
             &state.agent_id,
             config.headless,
@@ -550,16 +564,14 @@ impl RuntimeEngine {
             state.execution_mode,
         )
         .await?;
-        let mut agent = Agent::new(session, config.into(), Some(state.agent_id.clone()));
-        agent.set_execution_mode(state.execution_mode);
-        agent.set_context_folding(state.context_folding);
         if matches!(state.execution_mode, ExecutionMode::Repl)
             && let Some(snapshot) = state.repl_snapshot.clone()
         {
-            agent.restore(&snapshot).await?;
+            session.restore(&snapshot).await?;
         }
         Ok(Self {
-            agent: Some(agent),
+            session: Some(session),
+            config,
             state,
             capabilities,
             host_profile,
@@ -567,6 +579,7 @@ impl RuntimeEngine {
             path_resolver,
             sanitizer,
             termination,
+            cached_base_context: None,
         })
     }
 
@@ -577,63 +590,51 @@ impl RuntimeEngine {
 
     /// Replace the host-owned state envelope.
     pub fn set_state(&mut self, state: AgentStateEnvelope) {
-        if let Some(agent) = self.agent.as_mut() {
-            agent.set_execution_mode(state.execution_mode);
-            agent.set_context_folding(state.context_folding);
+        if let Some(session) = self.session.as_ref() {
+            session.tools().set_execution_mode(state.execution_mode);
         }
         self.state = state;
     }
 
-    /// Update model on the underlying agent.
+    /// Update model on the runtime config.
     pub fn set_model(&mut self, model: String) {
-        if let Some(agent) = self.agent.as_mut() {
-            agent.set_model(model);
-        }
+        self.config.model = model;
     }
 
-    /// Update reasoning effort on the underlying agent.
+    /// Update reasoning effort on the runtime config.
     pub fn set_reasoning_effort(&mut self, reasoning_effort: Option<String>) {
-        if let Some(agent) = self.agent.as_mut() {
-            agent.set_reasoning_effort(reasoning_effort);
-        }
+        self.config.reasoning_effort = reasoning_effort;
     }
 
-    /// Update provider on the underlying agent.
+    /// Update provider on the runtime config.
     pub fn set_provider(&mut self, provider: Provider) {
-        if let Some(agent) = self.agent.as_mut() {
-            agent.set_provider(provider);
-        }
+        self.config.provider = provider;
     }
 
-    /// Update session ID metadata on the underlying agent.
+    /// Update session ID metadata on the runtime config.
     pub fn set_session_id(&mut self, session_id: Option<String>) {
-        if let Some(agent) = self.agent.as_mut() {
-            agent.set_session_id(session_id);
-        }
+        self.config.session_id = session_id;
     }
 
-    /// Update execution mode on the underlying agent and persisted envelope.
+    /// Update execution mode on the runtime and persisted envelope.
     pub fn set_execution_mode(&mut self, execution_mode: ExecutionMode) {
         self.state.execution_mode = execution_mode;
-        if let Some(agent) = self.agent.as_mut() {
-            agent.set_execution_mode(execution_mode);
+        self.config.execution_mode = execution_mode;
+        if let Some(session) = self.session.as_ref() {
+            session.tools().set_execution_mode(execution_mode);
         }
     }
 
-    /// Update context folding policy on the underlying agent and persisted envelope.
+    /// Update context folding policy on the runtime and persisted envelope.
     pub fn set_context_folding(&mut self, context_folding: ContextFoldingConfig) {
         self.state.context_folding = context_folding;
-        if let Some(agent) = self.agent.as_mut() {
-            agent.set_context_folding(context_folding);
-        }
+        self.config.context_folding = context_folding;
     }
 
     /// Update the active prompt-facing capability set.
     pub fn set_capabilities(&mut self, capabilities: AgentCapabilities) {
         self.capabilities = capabilities.clone();
-        if let Some(agent) = self.agent.as_mut() {
-            agent.set_capabilities(capabilities);
-        }
+        self.config.capabilities = capabilities;
     }
 
     /// Re-register the current tool/capability projection in the live Python session.
@@ -642,50 +643,44 @@ impl RuntimeEngine {
         capabilities_json: String,
         generation: u64,
     ) -> Result<(), SessionError> {
-        let Some(agent) = self.agent.as_mut() else {
+        let Some(session) = self.session.as_mut() else {
             return Err(SessionError::Protocol(
-                "runtime agent not available".to_string(),
+                "runtime session not available".to_string(),
             ));
         };
-        agent
-            .reconfigure_session(capabilities_json, generation)
-            .await
+        session.reconfigure(capabilities_json, generation).await
     }
 
     /// Reset the REPL session on the underlying agent.
     pub async fn reset_session(&mut self) -> Result<(), SessionError> {
-        let Some(agent) = self.agent.as_mut() else {
+        let Some(session) = self.session.as_mut() else {
             return Err(SessionError::Protocol(
-                "runtime agent not available".to_string(),
+                "runtime session not available".to_string(),
             ));
         };
-        agent.reset_session().await
+        session.reset().await
     }
 
     /// Explicitly snapshot REPL state; does not run an LLM turn.
     pub async fn snapshot_repl(&mut self) -> Result<Vec<u8>, SessionError> {
-        let Some(agent) = self.agent.as_mut() else {
+        let Some(session) = self.session.as_mut() else {
             return Err(SessionError::Protocol(
-                "runtime agent not available".to_string(),
+                "runtime session not available".to_string(),
             ));
         };
-        let Some(blob) = agent.snapshot().await else {
-            return Err(SessionError::Protocol(
-                "failed to snapshot runtime repl".to_string(),
-            ));
-        };
+        let blob = session.snapshot().await?;
         self.state.repl_snapshot = Some(blob.clone());
         Ok(blob)
     }
 
     /// Explicitly restore REPL state from an opaque snapshot blob.
     pub async fn restore_repl(&mut self, snapshot: &[u8]) -> Result<(), SessionError> {
-        let Some(agent) = self.agent.as_mut() else {
+        let Some(session) = self.session.as_mut() else {
             return Err(SessionError::Protocol(
-                "runtime agent not available".to_string(),
+                "runtime session not available".to_string(),
             ));
         };
-        agent.restore(snapshot).await?;
+        session.restore(snapshot).await?;
         self.state.repl_snapshot = Some(snapshot.to_vec());
         Ok(())
     }
@@ -876,17 +871,23 @@ impl RuntimeEngine {
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         let cancel_state = cancel.clone();
-        let mut agent = self
-            .agent
+        let session = self
+            .session
             .take()
-            .expect("runtime engine agent must be available");
+            .expect("runtime engine session must be available");
+        let mut driver = RuntimeTurnDriver {
+            session,
+            config: self.config.clone(),
+            cached_base_context: self.cached_base_context.take(),
+            agent_id: self.state.agent_id.clone(),
+        };
         let run_offset = self.state.iteration;
         let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
         let run_task = tokio::spawn(async move {
-            let (new_messages, new_iteration) = agent
+            let (new_messages, new_iteration) = driver
                 .run(messages, images_png, event_tx, cancel, run_offset)
                 .await;
-            (agent, new_messages, new_iteration)
+            (driver, new_messages, new_iteration)
         });
 
         let mut assembler = TurnAssembler::default();
@@ -895,7 +896,7 @@ impl RuntimeEngine {
             events.emit(event).await;
         }
 
-        let (agent, new_messages, new_iteration) = match run_task.await {
+        let (driver, new_messages, new_iteration) = match run_task.await {
             Ok(v) => v,
             Err(e) => {
                 let issue = TurnIssue {
@@ -913,7 +914,9 @@ impl RuntimeEngine {
             }
         };
 
-        self.agent = Some(agent);
+        self.session = Some(driver.session);
+        self.config = driver.config;
+        self.cached_base_context = driver.cached_base_context;
         self.state.messages = new_messages;
         self.state.iteration = new_iteration;
         if assembler.token_usage.total() > 0 {
@@ -927,6 +930,666 @@ impl RuntimeEngine {
             &self.sanitizer,
             &self.termination,
         ))
+    }
+}
+
+struct RuntimeTurnDriver {
+    session: Session,
+    config: RuntimeConfig,
+    cached_base_context: Option<String>,
+    agent_id: String,
+}
+
+impl RuntimeTurnDriver {
+    async fn run(
+        &mut self,
+        messages: Vec<Message>,
+        images: Vec<Vec<u8>>,
+        event_tx: mpsc::Sender<AgentEvent>,
+        cancel: CancellationToken,
+        run_offset: usize,
+    ) -> (Vec<Message>, usize) {
+        macro_rules! emit {
+            ($event:expr) => {
+                crate::agent::send_event(&event_tx, $event).await
+            };
+        }
+
+        if matches!(self.config.execution_mode, ExecutionMode::NativeTools) {
+            return self
+                .run_native_tools(messages, images, event_tx, cancel, run_offset)
+                .await;
+        }
+
+        let capabilities_json = self
+            .session
+            .tools()
+            .dynamic_capabilities_payload_json()
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "enabled_capabilities": self
+                        .config
+                        .capabilities
+                        .enabled_capabilities
+                        .iter()
+                        .map(|id| id.as_str())
+                        .collect::<Vec<_>>(),
+                    "enabled_tools": self
+                        .config
+                        .capabilities
+                        .enabled_tools
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                })
+                .to_string()
+            });
+        let generation = self.session.tools().dynamic_generation().unwrap_or(0);
+        if let Err(e) = self
+            .session
+            .reconfigure(capabilities_json, generation)
+            .await
+        {
+            emit!(make_error_event(
+                "tool_projection",
+                Some("reconfigure_failed"),
+                format!("Failed to refresh REPL tool projection: {e}"),
+                Some(e.to_string()),
+            ));
+            emit!(AgentEvent::Done);
+            return (messages, run_offset);
+        }
+
+        let mut agent_config = self.runtime_agent_config();
+        let model = match self.prepare_provider(&mut agent_config).await {
+            Ok(model) => model,
+            Err(event) => {
+                emit!(event);
+                emit!(AgentEvent::Done);
+                return (messages, run_offset);
+            }
+        };
+        let preamble = build_execution_preamble(
+            &self.session,
+            &agent_config,
+            &mut self.cached_base_context,
+            ExecutionMode::Repl,
+            model,
+        );
+        self.config = agent_config.into();
+
+        let max_context = self.max_context_tokens(&preamble.model);
+        let machine_config = self.machine_config(preamble, max_context, ExecutionMode::Repl);
+        let mut machine = TurnMachine::new(machine_config, messages, images, run_offset);
+
+        loop {
+            let Some(effect) = machine.poll_effect() else {
+                break;
+            };
+            match effect {
+                Effect::Emit(event) => emit!(event),
+                Effect::Done {
+                    messages,
+                    iteration,
+                } => return (messages, iteration),
+                Effect::LlmCall { id, request } => {
+                    if cancel.is_cancelled() {
+                        emit!(AgentEvent::Done);
+                        return (Vec::new(), run_offset);
+                    }
+                    let llm_response = self
+                        .run_repl_llm_call(&mut machine, id, request, &event_tx, &cancel)
+                        .await;
+                    machine.handle_response(Response::LlmComplete {
+                        id,
+                        result: llm_response,
+                        text_streamed: false,
+                    });
+                }
+                Effect::ExecCode { id, code } => {
+                    let result = self.run_exec_code(&code, &event_tx).await;
+                    let response = match result {
+                        Ok(output) => Response::ExecResult {
+                            id,
+                            result: Ok(output),
+                        },
+                        Err(error) => Response::ExecResult {
+                            id,
+                            result: Err(error),
+                        },
+                    };
+                    machine.handle_response(response);
+                }
+                Effect::Sleep { id, duration } => {
+                    tokio::time::sleep(duration).await;
+                    machine.handle_response(Response::Timeout { id });
+                }
+                Effect::CancelLlm { .. } => {}
+                Effect::ToolCall { .. } => {}
+            }
+        }
+
+        (Vec::new(), run_offset)
+    }
+
+    async fn run_native_tools(
+        &mut self,
+        messages: Vec<Message>,
+        images: Vec<Vec<u8>>,
+        event_tx: mpsc::Sender<AgentEvent>,
+        cancel: CancellationToken,
+        run_offset: usize,
+    ) -> (Vec<Message>, usize) {
+        macro_rules! emit {
+            ($event:expr) => {
+                crate::agent::send_event(&event_tx, $event).await
+            };
+        }
+
+        let mut agent_config = self.runtime_agent_config();
+        let model = match self.prepare_provider(&mut agent_config).await {
+            Ok(model) => model,
+            Err(event) => {
+                emit!(event);
+                emit!(AgentEvent::Done);
+                return (messages, run_offset);
+            }
+        };
+        let preamble = build_execution_preamble(
+            &self.session,
+            &agent_config,
+            &mut self.cached_base_context,
+            ExecutionMode::NativeTools,
+            model,
+        );
+        self.config = agent_config.into();
+
+        let max_context = self.max_context_tokens(&preamble.model);
+        let machine_config = self.machine_config(preamble, max_context, ExecutionMode::NativeTools);
+        let mut machine = TurnMachine::new(machine_config, messages, images, run_offset);
+
+        loop {
+            let Some(effect) = machine.poll_effect() else {
+                break;
+            };
+            match effect {
+                Effect::Emit(event) => emit!(event),
+                Effect::Done {
+                    messages,
+                    iteration,
+                } => return (messages, iteration),
+                Effect::LlmCall { id, request } => {
+                    if cancel.is_cancelled() {
+                        emit!(AgentEvent::Done);
+                        return (Vec::new(), run_offset);
+                    }
+                    let (result, text_streamed) =
+                        self.run_native_llm_call(request, &event_tx, &cancel).await;
+                    machine.handle_response(Response::LlmComplete {
+                        id,
+                        result,
+                        text_streamed,
+                    });
+                }
+                Effect::ToolCall {
+                    id,
+                    call_id,
+                    tool_name,
+                    args,
+                } => {
+                    let mut pending_tools = vec![(id, call_id, tool_name, args)];
+                    while let Some(next) = machine.poll_effect() {
+                        match next {
+                            Effect::ToolCall {
+                                id,
+                                call_id,
+                                tool_name,
+                                args,
+                            } => pending_tools.push((id, call_id, tool_name, args)),
+                            Effect::Emit(event) => emit!(event),
+                            Effect::Done {
+                                messages,
+                                iteration,
+                            } => return (messages, iteration),
+                            _ => break,
+                        }
+                    }
+                    for (id, call_id, tool_name, _args, result, duration_ms) in
+                        self.run_tool_calls(pending_tools, &event_tx).await
+                    {
+                        machine.handle_response(Response::ToolResult {
+                            id,
+                            call_id,
+                            tool_name,
+                            result,
+                            duration_ms,
+                        });
+                    }
+                }
+                Effect::Sleep { id, duration } => {
+                    tokio::time::sleep(duration).await;
+                    machine.handle_response(Response::Timeout { id });
+                }
+                Effect::CancelLlm { .. } => {}
+                Effect::ExecCode { .. } => {}
+            }
+        }
+
+        (Vec::new(), run_offset)
+    }
+
+    fn runtime_agent_config(&self) -> AgentConfig {
+        self.config.clone().into()
+    }
+
+    async fn prepare_provider(&mut self, config: &mut AgentConfig) -> Result<String, AgentEvent> {
+        match config.provider.ensure_fresh().await {
+            Ok(true) => {
+                let _ = crate::provider::save_provider(&config.provider);
+            }
+            Err(e) => {
+                return Err(make_error_event(
+                    "token_refresh",
+                    Some("refresh_failed"),
+                    format!(
+                        "Token refresh failed: {}. Re-authenticate with /provider and retry.",
+                        e
+                    ),
+                    Some(e.to_string()),
+                ));
+            }
+            _ => {}
+        }
+
+        let llm = adapter_for(&config.provider);
+        let model = llm.normalize_model(&config.model);
+        match llm.ensure_ready(&mut config.provider).await {
+            Ok(changed) => {
+                if changed {
+                    let _ = crate::provider::save_provider(&config.provider);
+                }
+            }
+            Err(e) => {
+                return Err(make_error_event(
+                    "llm_provider",
+                    e.code.as_deref(),
+                    format!(
+                        "LLM provider initialization failed: {}. Run /provider to reconfigure credentials, then retry.",
+                        e.message
+                    ),
+                    e.raw,
+                ));
+            }
+        }
+
+        Ok(model)
+    }
+
+    fn machine_config(
+        &self,
+        preamble: crate::agent::ExecutionPreamble,
+        max_context_tokens: usize,
+        execution_mode: ExecutionMode,
+    ) -> TurnMachineConfig {
+        let history_enabled = if matches!(execution_mode, ExecutionMode::NativeTools) {
+            preamble.helper_bindings.contains("search_history")
+                || preamble.enabled_capability_ids.contains("history")
+        } else {
+            preamble.history_enabled
+        };
+        TurnMachineConfig {
+            execution_mode,
+            model: preamble.model,
+            context_folding: self.config.context_folding,
+            max_context_tokens,
+            max_turns: self.config.max_turns,
+            headless: self.config.headless,
+            sub_agent: self.config.sub_agent,
+            include_soul: self.config.include_soul,
+            reasoning_effort: self.config.reasoning_effort.clone(),
+            session_id: self.config.session_id.clone(),
+            tool_list: preamble.tool_list,
+            tool_specs: preamble.tool_specs,
+            tool_names: preamble.tool_names,
+            enabled_capability_ids: preamble.enabled_capability_ids,
+            helper_bindings: preamble.helper_bindings,
+            capability_prompt_sections: preamble.capability_prompt_sections,
+            can_write: preamble.can_write,
+            history_enabled,
+            project_instructions: preamble.project_instructions,
+            prompt_overrides: self.config.prompt_overrides.clone(),
+            base_context: preamble.base_context,
+            instruction_source: preamble.instruction_source,
+            llm_log_path: self.config.llm_log_path.clone(),
+            agent_id: self.agent_id.clone(),
+        }
+    }
+
+    fn max_context_tokens(&self, model: &str) -> usize {
+        self.config
+            .max_context_tokens
+            .or_else(|| {
+                self.config
+                    .provider
+                    .context_window(model)
+                    .map(|v| v as usize)
+            })
+            .unwrap_or(200_000)
+    }
+
+    async fn run_exec_code(
+        &mut self,
+        code: &str,
+        event_tx: &mpsc::Sender<AgentEvent>,
+    ) -> Result<crate::ExecResponse, String> {
+        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
+        self.session.set_message_sender(msg_tx);
+        let event_tx_clone = event_tx.clone();
+        let drain_handle = tokio::spawn(async move {
+            while let Some(sandbox_msg) = msg_rx.recv().await {
+                if sandbox_msg.kind != "final" && !event_tx_clone.is_closed() {
+                    let _ = event_tx_clone
+                        .send(AgentEvent::Message {
+                            text: sandbox_msg.text,
+                            kind: sandbox_msg.kind,
+                        })
+                        .await;
+                }
+            }
+        });
+        let result = self.session.run_code(code).await.map_err(|e| e.to_string());
+        self.session.clear_message_sender();
+        let _ = drain_handle.await;
+        result
+    }
+
+    async fn run_repl_llm_call(
+        &mut self,
+        machine: &mut TurnMachine,
+        effect_id: crate::sansio::EffectId,
+        request: LlmRequest,
+        event_tx: &mpsc::Sender<AgentEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<LlmResponse, LlmCallError> {
+        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
+        self.session.set_message_sender(msg_tx);
+        let (prompt_tx, mut prompt_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::session::UserPrompt>();
+        self.session.set_prompt_sender(prompt_tx);
+        let (llm_stream_tx, mut llm_stream_rx) =
+            tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
+        let llm_request = LlmRequest {
+            stream_events: transport_stream_events(&self.config.provider, Some(llm_stream_tx)),
+            ..request
+        };
+
+        let mut call_provider = self.config.provider.clone();
+        let mut llm_task = tokio::spawn(async move {
+            let llm = adapter_for(&call_provider);
+            let result = llm.complete(&mut call_provider, llm_request).await;
+            (result, call_provider)
+        });
+
+        let result = loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    llm_task.abort();
+                    break Err(LlmCallError {
+                        message: "cancelled".to_string(),
+                        retryable: false,
+                        raw: None,
+                        code: Some("cancelled".to_string()),
+                    });
+                }
+                Some(sandbox_msg) = msg_rx.recv() => {
+                    if sandbox_msg.kind != "final" && !event_tx.is_closed() {
+                        let _ = event_tx.send(AgentEvent::Message {
+                            text: sandbox_msg.text,
+                            kind: sandbox_msg.kind,
+                        }).await;
+                    }
+                }
+                Some(user_prompt) = prompt_rx.recv() => {
+                    if !event_tx.is_closed() {
+                        let _ = event_tx.send(AgentEvent::Prompt {
+                            question: user_prompt.question,
+                            options: user_prompt.options,
+                            response_tx: user_prompt.response_tx,
+                        }).await;
+                    }
+                }
+                Some(stream_event) = llm_stream_rx.recv() => {
+                    match stream_event {
+                        LlmStreamEvent::Delta(delta) => {
+                            if !machine.handle_llm_delta(effect_id, &delta) {
+                                llm_task.abort();
+                                break Ok(LlmResponse::default());
+                            }
+                        }
+                        LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
+                            if !machine.handle_llm_delta(effect_id, &text) {
+                                llm_task.abort();
+                                break Ok(LlmResponse::default());
+                            }
+                        }
+                        LlmStreamEvent::Part(LlmOutputPart::ToolCall { .. }) => {}
+                        LlmStreamEvent::Usage(usage) => machine.handle_llm_usage(effect_id, &usage),
+                    }
+                }
+                join = &mut llm_task => {
+                    let (result, provider_after) = match join {
+                        Ok(v) => v,
+                        Err(e) => break Err(LlmCallError {
+                            message: format!("internal task failed: {e}"),
+                            retryable: false,
+                            raw: None,
+                            code: Some("task_join_failed".to_string()),
+                        }),
+                    };
+                    self.config.provider = provider_after;
+                    match result {
+                        Ok(resp) => break Ok(resp),
+                        Err(e) => break Err(LlmCallError {
+                            message: e.message,
+                            retryable: e.retryable,
+                            raw: e.raw,
+                            code: e.code,
+                        }),
+                    }
+                }
+            }
+        };
+
+        self.session.clear_message_sender();
+        self.session.clear_prompt_sender();
+        while let Ok(sandbox_msg) = msg_rx.try_recv() {
+            if sandbox_msg.kind != "final" && !event_tx.is_closed() {
+                let _ = event_tx
+                    .send(AgentEvent::Message {
+                        text: sandbox_msg.text,
+                        kind: sandbox_msg.kind,
+                    })
+                    .await;
+            }
+        }
+        while let Ok(user_prompt) = prompt_rx.try_recv() {
+            if !event_tx.is_closed() {
+                let _ = event_tx
+                    .send(AgentEvent::Prompt {
+                        question: user_prompt.question,
+                        options: user_prompt.options,
+                        response_tx: user_prompt.response_tx,
+                    })
+                    .await;
+            }
+        }
+        result
+    }
+
+    async fn run_native_llm_call(
+        &mut self,
+        request: LlmRequest,
+        event_tx: &mpsc::Sender<AgentEvent>,
+        cancel: &CancellationToken,
+    ) -> (Result<LlmResponse, LlmCallError>, bool) {
+        let (llm_stream_tx, mut llm_stream_rx) =
+            tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
+        let llm_request = LlmRequest {
+            stream_events: transport_stream_events(&self.config.provider, Some(llm_stream_tx)),
+            ..request
+        };
+
+        let mut call_provider = self.config.provider.clone();
+        let mut llm_task = tokio::spawn(async move {
+            let llm = adapter_for(&call_provider);
+            let result = llm.complete(&mut call_provider, llm_request).await;
+            (result, call_provider)
+        });
+
+        let mut text_streamed = false;
+        let result = loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    llm_task.abort();
+                    break Err(LlmCallError {
+                        message: "cancelled".to_string(),
+                        retryable: false,
+                        raw: None,
+                        code: Some("cancelled".to_string()),
+                    });
+                }
+                Some(stream_event) = llm_stream_rx.recv() => {
+                    match stream_event {
+                        LlmStreamEvent::Delta(delta) => {
+                            if !delta.is_empty() {
+                                text_streamed = true;
+                                crate::agent::send_event(event_tx, AgentEvent::TextDelta { content: delta }).await;
+                            }
+                        }
+                        LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
+                            if !text.is_empty() {
+                                text_streamed = true;
+                                crate::agent::send_event(event_tx, AgentEvent::TextDelta { content: text }).await;
+                            }
+                        }
+                        LlmStreamEvent::Part(LlmOutputPart::ToolCall { .. }) => {}
+                        LlmStreamEvent::Usage(_) => {}
+                    }
+                }
+                join = &mut llm_task => {
+                    let (result, provider_after) = match join {
+                        Ok(v) => v,
+                        Err(e) => break Err(LlmCallError {
+                            message: format!("internal task failed: {e}"),
+                            retryable: false,
+                            raw: None,
+                            code: Some("task_join_failed".to_string()),
+                        }),
+                    };
+                    self.config.provider = provider_after;
+                    match result {
+                        Ok(resp) => break Ok(resp),
+                        Err(e) => break Err(LlmCallError {
+                            message: e.message,
+                            retryable: e.retryable,
+                            raw: e.raw,
+                            code: e.code,
+                        }),
+                    }
+                }
+            }
+        };
+
+        (result, text_streamed)
+    }
+
+    async fn run_tool_calls(
+        &mut self,
+        pending_tools: Vec<(crate::sansio::EffectId, String, String, serde_json::Value)>,
+        event_tx: &mpsc::Sender<AgentEvent>,
+    ) -> Vec<(
+        crate::sansio::EffectId,
+        String,
+        String,
+        serde_json::Value,
+        crate::ToolResult,
+        u64,
+    )> {
+        let tool_provider = Arc::clone(self.session.tools());
+        let mut join_set = tokio::task::JoinSet::new();
+        for (eid, call_id, tool_name, mut args) in pending_tools {
+            if (tool_name == "list_tools" || tool_name == "search_tools")
+                && let Some(obj) = args.as_object_mut()
+                && !obj.contains_key("catalog")
+            {
+                let catalog: Vec<serde_json::Value> = tool_provider
+                    .definitions()
+                    .into_iter()
+                    .filter(|d| {
+                        !d.hidden && !d.description_for(ExecutionMode::NativeTools).is_empty()
+                    })
+                    .map(|d| {
+                        let p = d.project(ExecutionMode::NativeTools);
+                        serde_json::json!({
+                            "name": p.name,
+                            "description": p.description,
+                            "examples": p.examples,
+                            "inject_into_prompt": p.inject_into_prompt,
+                        })
+                    })
+                    .collect();
+                obj.insert("catalog".to_string(), serde_json::Value::Array(catalog));
+            }
+
+            let provider = Arc::clone(&tool_provider);
+            let event_tx_clone = event_tx.clone();
+            join_set.spawn(async move {
+                let (progress_tx, mut progress_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
+                let progress_handle = tokio::spawn(async move {
+                    while let Some(sandbox_msg) = progress_rx.recv().await {
+                        if sandbox_msg.kind != "final" {
+                            let _ = event_tx_clone
+                                .send(AgentEvent::Message {
+                                    text: sandbox_msg.text,
+                                    kind: sandbox_msg.kind,
+                                })
+                                .await;
+                        }
+                    }
+                });
+                let tool_start = std::time::Instant::now();
+                let result = provider
+                    .execute_streaming(&tool_name, &args, Some(&progress_tx))
+                    .await;
+                drop(progress_tx);
+                let _ = progress_handle.await;
+                (
+                    eid,
+                    call_id,
+                    tool_name,
+                    args,
+                    result,
+                    tool_start.elapsed().as_millis() as u64,
+                )
+            });
+        }
+
+        let mut outcomes = Vec::new();
+        while let Some(joined) = join_set.join_next().await {
+            match joined {
+                Ok(outcome) => outcomes.push(outcome),
+                Err(e) => outcomes.push((
+                    crate::sansio::EffectId(0),
+                    uuid::Uuid::new_v4().to_string(),
+                    "unknown".to_string(),
+                    serde_json::json!({}),
+                    crate::ToolResult::err_fmt(format!("tool task panicked: {e}")),
+                    0,
+                )),
+            }
+        }
+        outcomes
     }
 }
 

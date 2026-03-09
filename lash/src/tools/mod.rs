@@ -1,6 +1,5 @@
 mod agent_call;
 mod batch;
-mod composite;
 mod edit_file;
 mod fetch_url;
 mod filtered;
@@ -24,7 +23,6 @@ mod write_file;
 
 pub use agent_call::AgentCall;
 pub use batch::BatchingTools;
-pub use composite::CompositeTools;
 pub use edit_file::EditFile;
 pub use fetch_url::FetchUrl;
 pub use filtered::FilteredTools;
@@ -92,6 +90,65 @@ pub(crate) fn parse_optional_bool(
                 "Invalid {key}: expected bool"
             ))),
         },
+    }
+}
+
+/// Parse an optional positive integer arg.
+/// Accepts `null` or `"none"` when `allow_none` is true.
+pub(crate) fn parse_optional_usize_arg(
+    args: &serde_json::Value,
+    key: &str,
+    default: Option<usize>,
+    allow_none: bool,
+    min: usize,
+) -> Result<Option<usize>, ToolResult> {
+    match args.get(key) {
+        None => Ok(default),
+        Some(v) if v.is_null() => {
+            if allow_none {
+                Ok(None)
+            } else {
+                Err(ToolResult::err_fmt(format_args!(
+                    "Invalid {key}: expected int >= {min}"
+                )))
+            }
+        }
+        Some(v) => {
+            if let Some(s) = v.as_str() {
+                if allow_none && s.eq_ignore_ascii_case("none") {
+                    return Ok(None);
+                }
+                return Err(ToolResult::err_fmt(format_args!(
+                    "Invalid {key}: expected int{}",
+                    if allow_none {
+                        ", null, or \"none\""
+                    } else {
+                        ""
+                    }
+                )));
+            }
+            let n = v.as_u64().ok_or_else(|| {
+                ToolResult::err_fmt(format_args!(
+                    "Invalid {key}: expected int{}",
+                    if allow_none {
+                        ", null, or \"none\""
+                    } else {
+                        ""
+                    }
+                ))
+            })? as usize;
+            if n < min {
+                return Err(ToolResult::err_fmt(format_args!(
+                    "Invalid {key}: must be >= {min}{}",
+                    if allow_none {
+                        ", or use null/\"none\" for no cap"
+                    } else {
+                        ""
+                    }
+                )));
+            }
+            Ok(Some(n))
+        }
     }
 }
 

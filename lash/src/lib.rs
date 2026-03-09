@@ -46,7 +46,7 @@ pub fn lash_cache_dir() -> PathBuf {
 
 // Re-exports
 pub use agent::{
-    Agent, AgentConfig, AgentEvent, Message, MessageRole, Part, PartKind, PromptOverrideMode,
+    AgentConfig, AgentEvent, Message, MessageRole, Part, PartKind, PromptOverrideMode,
     PromptSectionName, PromptSectionOverride, PruneState, TokenUsage,
 };
 pub use capabilities::{

@@ -192,7 +192,7 @@ Stored config lives at `~/.lash/config.json` and uses this shape:
 }
 ```
 
-`auxiliary_secrets.tavily_api_key` is the supported Tavily location. The old top-level `tavily_api_key` field and legacy sub-agent tier aliases are no longer part of the documented config surface.
+`auxiliary_secrets.tavily_api_key` is the supported Tavily location. The old top-level `tavily_api_key` field is rejected, and legacy sub-agent tier aliases are no longer part of the documented config surface.
 
 Default sub-agent tier mapping (`low` / `medium` / `high`):
 

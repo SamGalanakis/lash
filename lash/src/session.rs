@@ -31,8 +31,6 @@ pub enum SessionError {
     RuntimeExited,
     #[error("protocol error: {0}")]
     Protocol(String),
-    #[error("legacy REPL snapshots are no longer supported")]
-    LegacySnapshot,
 }
 
 enum SessionBackend {
@@ -420,7 +418,9 @@ impl Session {
         let parsed: serde_json::Value = serde_json::from_slice(data).unwrap_or(json!({}));
 
         if parsed.get("version").is_none() || parsed.get("engine").is_none() {
-            return Err(SessionError::LegacySnapshot);
+            return Err(SessionError::Protocol(
+                "unsupported REPL snapshot format".to_string(),
+            ));
         }
         if parsed.get("version").and_then(|v| v.as_u64()) != Some(REPL_SNAPSHOT_VERSION as u64) {
             return Err(SessionError::Protocol(

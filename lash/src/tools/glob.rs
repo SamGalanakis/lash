@@ -2,7 +2,10 @@ use std::path::Path;
 
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
-use super::{build_path_entry, parse_optional_bool, path_entries_value, require_str};
+use super::{
+    build_path_entry, parse_optional_bool, parse_optional_usize_arg, path_entries_value,
+    require_str,
+};
 
 /// Find files by glob pattern.
 #[derive(Default)]
@@ -138,36 +141,7 @@ impl ToolProvider for Glob {
 }
 
 fn parse_limit(args: &serde_json::Value) -> Result<Option<usize>, ToolResult> {
-    match args.get("limit") {
-        None => Ok(Some(MAX_RESULTS)),
-        Some(v) if v.is_null() => Ok(None),
-        Some(v) => {
-            if let Some(s) = v.as_str() {
-                if s.eq_ignore_ascii_case("none") {
-                    return Ok(None);
-                }
-                return Err(ToolResult::err_fmt(format_args!(
-                    "Invalid limit: expected int, null, or \"none\""
-                )));
-            }
-
-            let n = match v.as_u64() {
-                Some(n) => n,
-                None => {
-                    return Err(ToolResult::err_fmt(format_args!(
-                        "Invalid limit: expected int, null, or \"none\""
-                    )));
-                }
-            };
-
-            if n == 0 {
-                return Err(ToolResult::err_fmt(format_args!(
-                    "Invalid limit: must be >= 1, or use null/\"none\" for no cap"
-                )));
-            }
-            Ok(Some(n as usize))
-        }
-    }
+    parse_optional_usize_arg(args, "limit", Some(MAX_RESULTS), true, 1)
 }
 
 #[cfg(test)]

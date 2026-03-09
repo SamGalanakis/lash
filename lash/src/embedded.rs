@@ -970,8 +970,7 @@ fn restore_runtime(data: &str) -> Result<MontyRepl<NoLimitTracker>, String> {
         || parsed.get("engine").and_then(Value::as_str) != Some("monty")
     {
         return Err(
-            "snapshot is from an unsupported legacy REPL executor and cannot be restored"
-                .to_string(),
+            "snapshot is from an unsupported REPL executor and cannot be restored".to_string(),
         );
     }
     let encoded = parsed

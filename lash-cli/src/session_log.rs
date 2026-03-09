@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use anyhow::Result;
+use lash_core::AgentEvent;
 use lash_core::TokenUsage;
 use lash_core::agent::{Message, MessageRole, Part, PartKind, PruneState};
 
@@ -12,6 +14,97 @@ pub struct SessionInfo {
     pub message_count: usize,
     pub first_message: String,
     pub modified: SystemTime,
+}
+
+pub struct SessionLogger {
+    file: std::io::BufWriter<std::fs::File>,
+    pub session_id: String,
+    pending_turn: Vec<serde_json::Value>,
+}
+
+impl SessionLogger {
+    pub fn new(model: &str, session_id: Option<String>, session_name: String) -> Result<Self> {
+        let dir = lash_core::lash_home().join("sessions");
+        std::fs::create_dir_all(&dir)?;
+
+        let now = chrono::Local::now();
+        let filename = format!("{}.jsonl", now.format("%Y%m%d_%H%M%S"));
+        let path = dir.join(&filename);
+        let file = std::io::BufWriter::new(std::fs::File::create(&path)?);
+        let session_id = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        let mut logger = Self {
+            file,
+            session_id: session_id.clone(),
+            pending_turn: Vec::new(),
+        };
+        logger.write_json(&serde_json::json!({
+            "type": "session_start",
+            "session_id": session_id,
+            "session_name": session_name,
+            "ts": now.to_rfc3339(),
+            "model": model,
+            "cwd": std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()),
+        }))?;
+        logger.flush_file()?;
+
+        Ok(logger)
+    }
+
+    fn write_json(&mut self, value: &serde_json::Value) -> Result<()> {
+        use std::io::Write;
+        serde_json::to_writer(&mut self.file, value)?;
+        self.file.write_all(b"\n")?;
+        Ok(())
+    }
+
+    fn flush_file(&mut self) -> Result<()> {
+        use std::io::Write;
+        self.file.flush()?;
+        Ok(())
+    }
+
+    fn flush_pending_turn(&mut self) {
+        if self.pending_turn.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_turn);
+        for value in pending {
+            let _ = self.write_json(&value);
+        }
+        let _ = self.flush_file();
+    }
+
+    pub fn log_user_input(&mut self, input: &str) {
+        if !self.pending_turn.is_empty() {
+            self.pending_turn.clear();
+        }
+        self.pending_turn.push(serde_json::json!({
+            "type": "user_input",
+            "ts": chrono::Local::now().to_rfc3339(),
+            "content": input,
+        }));
+    }
+
+    pub fn log_event(&mut self, event: &AgentEvent) {
+        let mut value = serde_json::to_value(event).unwrap_or_default();
+        let mut event_type = String::new();
+        if let serde_json::Value::Object(ref mut map) = value {
+            map.insert(
+                "ts".into(),
+                serde_json::Value::String(chrono::Local::now().to_rfc3339()),
+            );
+            event_type = map
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+        }
+        self.pending_turn.push(value);
+        if event_type == "done" {
+            self.flush_pending_turn();
+        }
+    }
 }
 
 impl SessionInfo {

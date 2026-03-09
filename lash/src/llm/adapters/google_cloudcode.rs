@@ -2,11 +2,11 @@ use async_trait::async_trait;
 use base64::Engine;
 use serde_json::{Value, json};
 
-use crate::llm::adapters::streaming::stream_chunk_timeout;
+use crate::llm::adapters::streaming::{drive_sse_response, emit_progress, stream_chunk_timeout};
 use crate::llm::transport::{LlmTransport, LlmTransportError};
 use crate::llm::types::{
     LlmAttachment, LlmMessage, LlmOutputPart, LlmReplayChunk, LlmRequest, LlmResponse, LlmRole,
-    LlmStreamEvent, LlmToolCall, LlmUsage, ModelSelection, coalesce_replay_messages,
+    LlmToolCall, LlmUsage, ModelSelection, coalesce_replay_messages,
 };
 use crate::provider::Provider;
 
@@ -589,80 +589,31 @@ impl LlmTransport for GoogleCloudCodeAdapter {
         let mut deltas = Vec::new();
         let mut usage = LlmUsage::default();
         let mut tool_call_parts: Vec<LlmOutputPart> = Vec::new();
-
-        let mut pending = String::new();
-        let mut event_lines: Vec<String> = Vec::new();
-        let mut resp = resp;
-        loop {
-            let chunk_opt = tokio::time::timeout(stream_chunk_timeout(), resp.chunk())
-                .await
-                .map_err(|_| LlmTransportError::new("Cloud Code stream chunk timed out"))?
-                .map_err(|e| LlmTransportError::new(format!("Stream read failed: {e}")))?;
-            let Some(chunk) = chunk_opt else { break };
-            pending.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(pos) = pending.find('\n') {
-                let mut line = pending[..pos].to_string();
-                pending.drain(..=pos);
-                if line.ends_with('\r') {
-                    line.pop();
-                }
-
-                if let Some(data) = line.strip_prefix("data:") {
-                    event_lines.push(data.trim().to_string());
-                    continue;
-                }
-                if line.trim().is_empty() {
-                    if !event_lines.is_empty() {
-                        let raw = event_lines.join("\n");
-                        let prev_len = deltas.len();
-                        let prev_usage = usage.clone();
-                        Self::process_sse_event(
-                            &raw,
-                            &mut full,
-                            &mut deltas,
-                            &mut usage,
-                            Some(&mut tool_call_parts),
-                        )?;
-                        if let Some(tx) = &stream_events {
-                            for piece in deltas.iter().skip(prev_len) {
-                                let _ = tx.send(LlmStreamEvent::Delta(piece.clone()));
-                            }
-                            if usage != prev_usage && usage != LlmUsage::default() {
-                                let _ = tx.send(LlmStreamEvent::Usage(usage.clone()));
-                            }
-                        }
-                        event_lines.clear();
-                    }
-                    continue;
-                }
-            }
-        }
-
-        if !pending.trim().is_empty()
-            && let Some(data) = pending.trim().strip_prefix("data:")
-        {
-            event_lines.push(data.trim().to_string());
-        }
-        if !event_lines.is_empty() {
-            let raw = event_lines.join("\n");
-            let prev_len = deltas.len();
-            let prev_usage = usage.clone();
-            Self::process_sse_event(
-                &raw,
-                &mut full,
-                &mut deltas,
-                &mut usage,
-                Some(&mut tool_call_parts),
-            )?;
-            if let Some(tx) = &stream_events {
-                for piece in deltas.iter().skip(prev_len) {
-                    let _ = tx.send(LlmStreamEvent::Delta(piece.clone()));
-                }
-                if usage != prev_usage && usage != LlmUsage::default() {
-                    let _ = tx.send(LlmStreamEvent::Usage(usage.clone()));
-                }
-            }
-        }
+        drive_sse_response(
+            resp,
+            stream_chunk_timeout(),
+            "Cloud Code stream chunk timed out",
+            |raw| {
+                let prev_len = deltas.len();
+                let prev_usage = usage.clone();
+                Self::process_sse_event(
+                    &raw,
+                    &mut full,
+                    &mut deltas,
+                    &mut usage,
+                    Some(&mut tool_call_parts),
+                )?;
+                emit_progress(
+                    stream_events.as_ref(),
+                    &deltas,
+                    prev_len,
+                    &usage,
+                    &prev_usage,
+                );
+                Ok(())
+            },
+        )
+        .await?;
 
         let mut parts = Vec::new();
         if !full.is_empty() {
