@@ -28,10 +28,17 @@ BENCHMARK_GUIDELINES_APPEND = """## Benchmark Constraints
 - Do exactly what the task asks. Match required filenames, file contents, output formats, ports, protocols, process state, and side effects exactly.
 - Do not stop at an approximate solution. If the task asks for a concrete final state, keep going until that exact state exists.
 - Treat extra files, leftover build products, debug artifacts, temporary scripts, and stray outputs as failures unless the task explicitly requires them.
+- Work in phases: inspect briefly, make the smallest plausible change, then verify the exact required outcome.
+- Avoid broad rewrites or speculative reimplementation unless the task clearly requires them.
+- Prefer the shortest path to a passing verifier over a more ambitious or polished solution.
 - Before finishing, remove temporary/debug artifacts that are not part of the required final state.
 - Before finishing, re-read the task and verify each concrete requirement against the current environment.
 - If the task implies that a service, VM, server, or port must be reachable, verify it yourself before stopping.
+- If a service, VM, or port must be reachable, do not stop until you have confirmed the exact port/protocol works from the environment.
 - Prefer direct verification over assumption. Re-open files, re-run checks, and inspect the exact final outputs before returning.
+- Use web/search tools only when the task clearly requires outside information. Prefer local inspection, editing, and verification.
+- Avoid repeated rereads and repeated searches unless new evidence justifies them.
+- When close to timeout, stop exploring, simplify the plan, verify the minimum required final state, and finish.
 - Optimize for correctness and task completion, not for narration.
 """
 
