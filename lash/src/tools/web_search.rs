@@ -23,7 +23,7 @@ impl ToolProvider for WebSearch {
         vec![ToolDefinition {
             name: "search_web".into(),
             description: vec![crate::ToolText::new(
-                "Search the web via Tavily. Returns a dict with `results` (list of `{title, url, content}` dicts) and, when available, a top-level `answer` summary string. Access results via `r[\"results\"]` and `r[\"answer\"]`.",
+                "Search the web via Tavily. Returns `{results: [...], answer?: str}` where each result has `title`, `url`, and `content`.",
                 [
                     crate::ExecutionMode::Repl,
                     crate::ExecutionMode::NativeTools,

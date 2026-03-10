@@ -13,7 +13,8 @@ use crate::agent::{
 use crate::capabilities::AgentCapabilities;
 use crate::instructions::{FsInstructionSource, InstructionSource};
 use crate::llm::factory::adapter_for;
-use crate::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent};
+use crate::llm::transport::LlmTransport;
+use crate::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
 use crate::provider::Provider;
 use crate::sansio::{Effect, LlmCallError, Response, TurnMachine, TurnMachineConfig};
 use crate::strip_repl_fragments;
@@ -266,6 +267,12 @@ impl EventSink for NoopEventSink {
     async fn emit(&self, _event: AgentEvent) {}
 }
 
+type LlmFactory = Arc<dyn Fn(&Provider) -> Box<dyn LlmTransport> + Send + Sync>;
+
+fn default_llm_factory() -> LlmFactory {
+    Arc::new(|provider| adapter_for(provider))
+}
+
 #[derive(Default)]
 struct TurnAssembler {
     final_message: Option<String>,
@@ -402,6 +409,104 @@ impl TurnAssembler {
     }
 }
 
+fn latest_turn_history_payload(turn: &AssembledTurn) -> serde_json::Value {
+    let messages = &turn.state.messages;
+    let turn_index = messages
+        .iter()
+        .filter(|msg| matches!(msg.role, MessageRole::User))
+        .count() as i64;
+    let last_user_idx = messages
+        .iter()
+        .rposition(|msg| matches!(msg.role, MessageRole::User));
+
+    let user_message = last_user_idx
+        .and_then(|idx| messages.get(idx))
+        .map(message_text_for_history)
+        .unwrap_or_default();
+
+    let mut prose_parts = Vec::new();
+    let mut code_parts = Vec::new();
+    if let Some(idx) = last_user_idx {
+        for msg in messages.iter().skip(idx + 1) {
+            if !matches!(msg.role, MessageRole::Assistant) {
+                continue;
+            }
+            for part in &msg.parts {
+                match part.kind {
+                    PartKind::Text | PartKind::Prose => {
+                        if !part.content.trim().is_empty() {
+                            prose_parts.push(part.content.clone());
+                        }
+                    }
+                    PartKind::Code => {
+                        if !part.content.trim().is_empty() {
+                            code_parts.push(part.content.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let prose = if prose_parts.is_empty() {
+        turn.assistant_output.raw_text.clone()
+    } else {
+        prose_parts.join("\n\n")
+    };
+    let code = code_parts.join("\n\n");
+    let output = turn
+        .code_outputs
+        .iter()
+        .map(|record| match (&record.output, &record.error) {
+            (output, Some(error)) if !output.is_empty() && !error.is_empty() => {
+                format!("{output}\n{error}")
+            }
+            (output, _) if !output.is_empty() => output.clone(),
+            (_, Some(error)) => error.clone(),
+            _ => String::new(),
+        })
+        .filter(|chunk| !chunk.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let error = turn.errors.first().map(|issue| issue.message.clone());
+
+    serde_json::json!({
+        "index": turn_index,
+        "user_message": user_message,
+        "prose": prose,
+        "code": code,
+        "output": output,
+        "error": error,
+        "tool_calls": turn.tool_calls,
+    })
+}
+
+fn message_text_for_history(msg: &Message) -> String {
+    msg.parts
+        .iter()
+        .filter_map(|part| match part.kind {
+            PartKind::Text | PartKind::Prose | PartKind::Code => Some(part.content.as_str()),
+            _ => None,
+        })
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+async fn persist_completed_turn_history(tools: &Arc<dyn ToolProvider>, turn: &AssembledTurn) {
+    let payload = latest_turn_history_payload(turn);
+    let _ = tools
+        .execute(
+            "history_add_turn",
+            &serde_json::json!({
+                "__agent_id__": turn.state.agent_id,
+                "turn": payload,
+            }),
+        )
+        .await;
+}
+
 /// Runtime config used by embedders to construct an engine.
 #[derive(Clone)]
 pub struct RuntimeConfig {
@@ -514,8 +619,8 @@ impl From<AgentConfig> for RuntimeConfig {
     }
 }
 
-/// Generic runtime engine for CLI or programmatic embedding.
-pub struct RuntimeEngine {
+/// Generic runtime for CLI or programmatic embedding.
+pub struct LashRuntime {
     session: Option<Session>,
     config: RuntimeConfig,
     state: AgentStateEnvelope,
@@ -526,9 +631,10 @@ pub struct RuntimeEngine {
     sanitizer: SanitizerPolicy,
     termination: TerminationPolicy,
     cached_base_context: Option<String>,
+    llm_factory: LlmFactory,
 }
 
-impl RuntimeEngine {
+impl LashRuntime {
     /// Build a runtime from host-provided state + tools.
     pub async fn from_state(
         config: RuntimeConfig,
@@ -580,6 +686,7 @@ impl RuntimeEngine {
             sanitizer,
             termination,
             cached_base_context: None,
+            llm_factory: default_llm_factory(),
         })
     }
 
@@ -874,12 +981,13 @@ impl RuntimeEngine {
         let session = self
             .session
             .take()
-            .expect("runtime engine session must be available");
+            .expect("lash runtime session must be available");
         let mut driver = RuntimeTurnDriver {
             session,
             config: self.config.clone(),
             cached_base_context: self.cached_base_context.take(),
             agent_id: self.state.agent_id.clone(),
+            llm_factory: Arc::clone(&self.llm_factory),
         };
         let run_offset = self.state.iteration;
         let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
@@ -923,13 +1031,17 @@ impl RuntimeEngine {
             self.state.token_usage = assembler.token_usage.clone();
         }
 
-        Ok(assembler.finish(
+        let assembled = assembler.finish(
             self.state.clone(),
             cancel_state.is_cancelled(),
             None,
             &self.sanitizer,
             &self.termination,
-        ))
+        );
+        if let Some(session) = self.session.as_ref() {
+            persist_completed_turn_history(session.tools(), &assembled).await;
+        }
+        Ok(assembled)
     }
 }
 
@@ -938,9 +1050,14 @@ struct RuntimeTurnDriver {
     config: RuntimeConfig,
     cached_base_context: Option<String>,
     agent_id: String,
+    llm_factory: LlmFactory,
 }
 
 impl RuntimeTurnDriver {
+    fn llm(&self, provider: &Provider) -> Box<dyn LlmTransport> {
+        (self.llm_factory)(provider)
+    }
+
     async fn run(
         &mut self,
         messages: Vec<Message>,
@@ -1201,7 +1318,7 @@ impl RuntimeTurnDriver {
             _ => {}
         }
 
-        let llm = adapter_for(&config.provider);
+        let llm = self.llm(&config.provider);
         let model = llm.normalize_model(&config.model);
         match llm.ensure_ready(&mut config.provider).await {
             Ok(changed) => {
@@ -1324,8 +1441,9 @@ impl RuntimeTurnDriver {
         };
 
         let mut call_provider = self.config.provider.clone();
+        let llm_factory = Arc::clone(&self.llm_factory);
         let mut llm_task = tokio::spawn(async move {
-            let llm = adapter_for(&call_provider);
+            let llm = llm_factory(&call_provider);
             let result = llm.complete(&mut call_provider, llm_request).await;
             (result, call_provider)
         });
@@ -1387,6 +1505,30 @@ impl RuntimeTurnDriver {
                         }),
                     };
                     self.config.provider = provider_after;
+                    let mut completed_from_stream: Option<LlmResponse> = None;
+                    while let Ok(stream_event) = llm_stream_rx.try_recv() {
+                        match stream_event {
+                            LlmStreamEvent::Delta(delta) => {
+                                if !machine.handle_llm_delta(effect_id, &delta) {
+                                    completed_from_stream = Some(LlmResponse::default());
+                                    break;
+                                }
+                            }
+                            LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
+                                if !machine.handle_llm_delta(effect_id, &text) {
+                                    completed_from_stream = Some(LlmResponse::default());
+                                    break;
+                                }
+                            }
+                            LlmStreamEvent::Part(LlmOutputPart::ToolCall { .. }) => {}
+                            LlmStreamEvent::Usage(usage) => {
+                                machine.handle_llm_usage(effect_id, &usage);
+                            }
+                        }
+                    }
+                    if let Some(response) = completed_from_stream {
+                        break Ok(response);
+                    }
                     match result {
                         Ok(resp) => break Ok(resp),
                         Err(e) => break Err(LlmCallError {
@@ -1440,13 +1582,15 @@ impl RuntimeTurnDriver {
         };
 
         let mut call_provider = self.config.provider.clone();
+        let llm_factory = Arc::clone(&self.llm_factory);
         let mut llm_task = tokio::spawn(async move {
-            let llm = adapter_for(&call_provider);
+            let llm = llm_factory(&call_provider);
             let result = llm.complete(&mut call_provider, llm_request).await;
             (result, call_provider)
         });
 
         let mut text_streamed = false;
+        let mut streamed_usage = LlmUsage::default();
         let result = loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -1459,22 +1603,12 @@ impl RuntimeTurnDriver {
                     });
                 }
                 Some(stream_event) = llm_stream_rx.recv() => {
-                    match stream_event {
-                        LlmStreamEvent::Delta(delta) => {
-                            if !delta.is_empty() {
-                                text_streamed = true;
-                                crate::agent::send_event(event_tx, AgentEvent::TextDelta { content: delta }).await;
-                            }
-                        }
-                        LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
-                            if !text.is_empty() {
-                                text_streamed = true;
-                                crate::agent::send_event(event_tx, AgentEvent::TextDelta { content: text }).await;
-                            }
-                        }
-                        LlmStreamEvent::Part(LlmOutputPart::ToolCall { .. }) => {}
-                        LlmStreamEvent::Usage(_) => {}
-                    }
+                    forward_native_stream_event(
+                        event_tx,
+                        stream_event,
+                        &mut text_streamed,
+                        &mut streamed_usage,
+                    ).await;
                 }
                 join = &mut llm_task => {
                     let (result, provider_after) = match join {
@@ -1487,8 +1621,19 @@ impl RuntimeTurnDriver {
                         }),
                     };
                     self.config.provider = provider_after;
+                    drain_native_stream_queue(
+                        event_tx,
+                        &mut llm_stream_rx,
+                        &mut text_streamed,
+                        &mut streamed_usage,
+                    ).await;
                     match result {
-                        Ok(resp) => break Ok(resp),
+                        Ok(mut resp) => {
+                            if response_usage_is_empty(&resp.usage) {
+                                resp.usage = streamed_usage.clone();
+                            }
+                            break Ok(resp)
+                        }
                         Err(e) => break Err(LlmCallError {
                             message: e.message,
                             retryable: e.retryable,
@@ -1525,13 +1670,17 @@ impl RuntimeTurnDriver {
                 let catalog: Vec<serde_json::Value> = tool_provider
                     .definitions()
                     .into_iter()
+                    .filter(|d| !d.hidden)
                     .filter(|d| !d.description_for(ExecutionMode::NativeTools).is_empty())
                     .map(|d| {
                         let p = d.project(ExecutionMode::NativeTools);
                         serde_json::json!({
                             "name": p.name,
                             "description": p.description,
+                            "params": p.params,
+                            "returns": p.returns,
                             "examples": p.examples,
+                            "hidden": p.hidden,
                             "inject_into_prompt": p.inject_into_prompt,
                         })
                     })
@@ -1591,7 +1740,46 @@ impl RuntimeTurnDriver {
     }
 }
 
-impl RuntimeEngine {
+async fn forward_native_stream_event(
+    event_tx: &mpsc::Sender<AgentEvent>,
+    stream_event: LlmStreamEvent,
+    text_streamed: &mut bool,
+    streamed_usage: &mut LlmUsage,
+) {
+    match stream_event {
+        LlmStreamEvent::Delta(delta) => {
+            if !delta.is_empty() {
+                *text_streamed = true;
+                crate::agent::send_event(event_tx, AgentEvent::TextDelta { content: delta }).await;
+            }
+        }
+        LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
+            if !text.is_empty() {
+                *text_streamed = true;
+                crate::agent::send_event(event_tx, AgentEvent::TextDelta { content: text }).await;
+            }
+        }
+        LlmStreamEvent::Part(LlmOutputPart::ToolCall { .. }) => {}
+        LlmStreamEvent::Usage(usage) => *streamed_usage = usage,
+    }
+}
+
+async fn drain_native_stream_queue(
+    event_tx: &mpsc::Sender<AgentEvent>,
+    llm_stream_rx: &mut tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,
+    text_streamed: &mut bool,
+    streamed_usage: &mut LlmUsage,
+) {
+    while let Ok(stream_event) = llm_stream_rx.try_recv() {
+        forward_native_stream_event(event_tx, stream_event, text_streamed, streamed_usage).await;
+    }
+}
+
+fn response_usage_is_empty(usage: &LlmUsage) -> bool {
+    usage.input_tokens == 0 && usage.output_tokens == 0 && usage.cached_input_tokens == 0
+}
+
+impl LashRuntime {
     fn normalize_input_items(
         &self,
         items: &[InputItem],
@@ -1773,9 +1961,120 @@ fn contains_traceback_only(raw_text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use crate::llm::transport::LlmTransportError;
+    use crate::llm::types::{LlmRequest, LlmUsage};
+    use crate::provider::Provider;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
 
     fn default_state() -> AgentStateEnvelope {
         AgentStateEnvelope::default()
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingSink {
+        events: Arc<Mutex<Vec<AgentEvent>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl EventSink for RecordingSink {
+        async fn emit(&self, event: AgentEvent) {
+            self.events.lock().expect("lock sink").push(event);
+        }
+    }
+
+    impl RecordingSink {
+        fn snapshot(&self) -> Vec<AgentEvent> {
+            self.events.lock().expect("lock sink").clone()
+        }
+    }
+
+    struct MockCall {
+        stream_events: Vec<LlmStreamEvent>,
+        response: Result<LlmResponse, LlmTransportError>,
+    }
+
+    #[derive(Clone)]
+    struct MockTransport {
+        calls: Arc<Mutex<Vec<MockCall>>>,
+    }
+
+    impl MockTransport {
+        fn new(calls: Vec<MockCall>) -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(calls)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmTransport for MockTransport {
+        fn default_root_model(&self) -> &'static str {
+            "mock-model"
+        }
+
+        fn default_agent_model(&self, _tier: &str) -> Option<crate::llm::types::ModelSelection> {
+            None
+        }
+
+        fn requires_streaming(&self) -> bool {
+            true
+        }
+
+        fn normalize_model(&self, model: &str) -> String {
+            model.to_string()
+        }
+
+        fn context_lookup_model(&self, model: &str) -> String {
+            model.to_string()
+        }
+
+        async fn ensure_ready(&self, _provider: &mut Provider) -> Result<bool, LlmTransportError> {
+            Ok(false)
+        }
+
+        async fn complete(
+            &self,
+            _provider: &mut Provider,
+            req: LlmRequest,
+        ) -> Result<LlmResponse, LlmTransportError> {
+            let call = self.calls.lock().expect("lock calls").remove(0);
+            if let Some(tx) = req.stream_events.as_ref() {
+                for event in &call.stream_events {
+                    let _ = tx.send(event.clone());
+                }
+            }
+            call.response
+        }
+    }
+
+    fn native_test_config() -> RuntimeConfig {
+        RuntimeConfig {
+            execution_mode: ExecutionMode::NativeTools,
+            provider: Provider::OpenAiGeneric {
+                api_key: "test-key".to_string(),
+                base_url: "https://example.invalid/v1".to_string(),
+            },
+            model: "mock-model".to_string(),
+            headless: true,
+            host_profile: HostProfile::Headless,
+            ..RuntimeConfig::default()
+        }
+    }
+
+    async fn native_runtime_with_transport(transport: MockTransport) -> LashRuntime {
+        let mut runtime = LashRuntime::from_state(
+            native_test_config(),
+            Arc::new(crate::ToolSet::new()),
+            AgentStateEnvelope::default(),
+        )
+        .await
+        .expect("runtime");
+        runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
+        runtime
     }
 
     #[test]
@@ -1960,5 +2259,250 @@ mod tests {
             }
             _ => panic!("expected merged text item"),
         }
+    }
+
+    #[tokio::test]
+    async fn native_runtime_assembles_stream_only_text_response() {
+        let transport = MockTransport::new(vec![MockCall {
+            stream_events: vec![
+                LlmStreamEvent::Delta("What time ".to_string()),
+                LlmStreamEvent::Part(LlmOutputPart::Text {
+                    text: "is it?".to_string(),
+                }),
+                LlmStreamEvent::Usage(LlmUsage {
+                    input_tokens: 11,
+                    output_tokens: 4,
+                    cached_input_tokens: 0,
+                }),
+            ],
+            response: Ok(LlmResponse {
+                full_text: "What time is it?".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "What time is it?".to_string(),
+                }],
+                ..LlmResponse::default()
+            }),
+        }]);
+        let mut runtime = native_runtime_with_transport(transport).await;
+        let sink = RecordingSink::default();
+
+        let turn = runtime
+            .stream_turn(
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "hi".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    mode: None,
+                    plan_file: None,
+                },
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("turn");
+
+        assert_eq!(turn.status, TurnStatus::Completed);
+        assert_eq!(turn.done_reason, DoneReason::ModelStop);
+        assert_eq!(turn.assistant_output.safe_text, "What time is it?");
+
+        let streamed_text: String = sink
+            .snapshot()
+            .into_iter()
+            .filter_map(|event| match event {
+                AgentEvent::TextDelta { content } => Some(content),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(streamed_text, "What time is it?");
+    }
+
+    #[tokio::test]
+    async fn native_runtime_uses_streamed_usage_when_final_usage_missing() {
+        let transport = MockTransport::new(vec![MockCall {
+            stream_events: vec![
+                LlmStreamEvent::Delta("Hi".to_string()),
+                LlmStreamEvent::Usage(LlmUsage {
+                    input_tokens: 9,
+                    output_tokens: 3,
+                    cached_input_tokens: 2,
+                }),
+            ],
+            response: Ok(LlmResponse {
+                full_text: "Hi".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "Hi".to_string(),
+                }],
+                usage: LlmUsage::default(),
+                ..LlmResponse::default()
+            }),
+        }]);
+        let mut runtime = native_runtime_with_transport(transport).await;
+
+        let turn = runtime
+            .run_turn_assembled(
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "hello".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    mode: None,
+                    plan_file: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("turn");
+
+        assert_eq!(turn.token_usage.input_tokens, 9);
+        assert_eq!(turn.token_usage.output_tokens, 3);
+        assert_eq!(turn.token_usage.cached_input_tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn native_runtime_prefers_final_usage_over_streamed_usage() {
+        let transport = MockTransport::new(vec![MockCall {
+            stream_events: vec![
+                LlmStreamEvent::Delta("Hi".to_string()),
+                LlmStreamEvent::Usage(LlmUsage {
+                    input_tokens: 9,
+                    output_tokens: 3,
+                    cached_input_tokens: 2,
+                }),
+            ],
+            response: Ok(LlmResponse {
+                full_text: "Hi".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "Hi".to_string(),
+                }],
+                usage: LlmUsage {
+                    input_tokens: 12,
+                    output_tokens: 4,
+                    cached_input_tokens: 1,
+                },
+                ..LlmResponse::default()
+            }),
+        }]);
+        let mut runtime = native_runtime_with_transport(transport).await;
+
+        let turn = runtime
+            .run_turn_assembled(
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "hello".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    mode: None,
+                    plan_file: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("turn");
+
+        assert_eq!(turn.token_usage.input_tokens, 12);
+        assert_eq!(turn.token_usage.output_tokens, 4);
+        assert_eq!(turn.token_usage.cached_input_tokens, 1);
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    #[tokio::test]
+    async fn completed_turns_are_persisted_for_search_history() {
+        let transport = MockTransport::new(vec![MockCall {
+            stream_events: vec![LlmStreamEvent::Delta("Stored answer".to_string())],
+            response: Ok(LlmResponse {
+                full_text: "Stored answer".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "Stored answer".to_string(),
+                }],
+                ..LlmResponse::default()
+            }),
+        }]);
+
+        let store = Arc::new(crate::store::Store::memory().expect("store"));
+        let tools: Arc<dyn ToolProvider> = Arc::new(
+            crate::ToolSet::new() + crate::tools::StateStore::new(Arc::clone(&store), Vec::new()),
+        );
+        let mut runtime =
+            LashRuntime::from_state(native_test_config(), tools, AgentStateEnvelope::default())
+                .await
+                .expect("runtime");
+        runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
+
+        let _turn = runtime
+            .run_turn_assembled(
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "where did this go?".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    mode: None,
+                    plan_file: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("turn");
+
+        let state_tools = crate::tools::StateStore::new(store, Vec::new());
+        let result = state_tools
+            .execute(
+                "search_history",
+                &serde_json::json!({
+                    "__agent_id__":"root",
+                    "query":"where did this go",
+                    "mode":"hybrid",
+                    "limit":10
+                }),
+            )
+            .await;
+        assert!(result.success);
+        let items = result.result.as_array().cloned().unwrap_or_default();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].get("turn").and_then(|v| v.as_i64()), Some(1));
+        assert!(
+            items[0]
+                .get("preview")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .contains("where did this go")
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_native_stream_queue_forwards_prequeued_text() {
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (llm_stream_tx, mut llm_stream_rx) =
+            tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
+        llm_stream_tx
+            .send(LlmStreamEvent::Delta("Hello".to_string()))
+            .expect("delta");
+        llm_stream_tx
+            .send(LlmStreamEvent::Part(LlmOutputPart::Text {
+                text: " there".to_string(),
+            }))
+            .expect("part");
+        drop(llm_stream_tx);
+
+        let mut text_streamed = false;
+        let mut streamed_usage = LlmUsage::default();
+        drain_native_stream_queue(
+            &event_tx,
+            &mut llm_stream_rx,
+            &mut text_streamed,
+            &mut streamed_usage,
+        )
+        .await;
+        drop(event_tx);
+
+        let mut streamed_text = String::new();
+        while let Some(event) = event_rx.recv().await {
+            if let AgentEvent::TextDelta { content } = event {
+                streamed_text.push_str(&content);
+            }
+        }
+
+        assert!(text_streamed);
+        assert_eq!(streamed_text, "Hello there");
     }
 }

@@ -16,11 +16,9 @@ impl crate::ToolProvider for FindReplace {
             name: "find_replace".into(),
             description: vec![crate::ToolText::new(
                 concat!(
-                    "Fast path for exact-text edits. No anchors needed — works on raw file content.\n\n",
-                    "Use this when you already know the exact `old_text` to change (single-line fixes, typos, straightforward renames). ",
-                    "`old_text` must match exactly, including whitespace/newlines. ",
-                    "By default it replaces only the first occurrence; set `all=true` to replace every match.\n\n",
-                    "For structural edits (insertions, range rewrites, anchor-sensitive placement), use `edit_file`.",
+                    "Replace exact text in a file. Use this for simple substitutions when you already know `old_text` exactly.\n\n",
+                    "`old_text` must match exactly, including whitespace/newlines. Default: replace the first match; set `all=true` for all matches.\n\n",
+                    "Use `edit_file` for anchor-based or structural edits.",
                 ),
                 [
                     crate::ExecutionMode::Repl,

@@ -392,8 +392,10 @@ impl StateStore {
         self.definitions()
             .into_iter()
             .filter(|d| {
-                !d.description_for(crate::ExecutionMode::NativeTools)
-                    .is_empty()
+                !d.hidden
+                    && !d
+                        .description_for(crate::ExecutionMode::NativeTools)
+                        .is_empty()
             })
             .map(|d| {
                 let p = d.project(crate::ExecutionMode::NativeTools);
@@ -402,6 +404,7 @@ impl StateStore {
                     "description": p.description,
                     "examples": p.examples,
                     "inject_into_prompt": p.inject_into_prompt,
+                    "hidden": d.hidden,
                 })
             })
             .collect()
@@ -420,15 +423,14 @@ impl StateStore {
             .and_then(|v| v.as_str())
             .map(|v| v.to_ascii_lowercase());
         let injected_only = args.get("injected_only").and_then(|v| v.as_bool());
-        let verbose = args
-            .get("verbose")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
         let catalog = self.tool_catalog(args);
 
         let items: Vec<serde_json::Value> = catalog
             .into_iter()
             .filter(|t| {
+                if t.get("hidden").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    return false;
+                }
                 if let Some(flag) = injected_only {
                     let inject = t
                         .get("inject_into_prompt")
@@ -454,20 +456,47 @@ impl StateStore {
                 true
             })
             .map(|t| {
-                if verbose {
-                    t
-                } else {
-                    let name = t.get("name").and_then(|v| v.as_str()).unwrap_or_default();
-                    let desc = t
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    let oneliner = desc.lines().next().unwrap_or("").trim();
-                    json!({
-                        "name": name,
-                        "oneliner": oneliner,
-                    })
-                }
+                let name = t.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+                let desc = t
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let oneliner = desc.lines().next().unwrap_or("").trim();
+                let signature = match (
+                    t.get("params").and_then(|v| v.as_array()),
+                    t.get("returns").and_then(|v| v.as_str()),
+                ) {
+                    (Some(params), Some(returns)) => {
+                        let rendered = params
+                            .iter()
+                            .map(|param| {
+                                let name = param
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default();
+                                let ty =
+                                    param.get("type").and_then(|v| v.as_str()).unwrap_or("any");
+                                let required = param
+                                    .get("required")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(true);
+                                if required {
+                                    format!("{name}: {ty}")
+                                } else {
+                                    format!("{name}: {ty} = None")
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("{name}({rendered}) -> {returns}")
+                    }
+                    _ => String::new(),
+                };
+                json!({
+                    "name": name,
+                    "oneliner": oneliner,
+                    "signature": signature,
+                })
             })
             .collect();
 
@@ -488,6 +517,9 @@ impl StateStore {
 
         let mut filtered = Vec::new();
         for t in &catalog {
+            if t.get("hidden").and_then(|v| v.as_bool()).unwrap_or(false) {
+                continue;
+            }
             if let Some(injected) = injected_only {
                 let inject = t
                     .get("inject_into_prompt")
@@ -905,7 +937,7 @@ impl ToolProvider for StateStore {
             ToolDefinition {
                 name: "list_tools".into(),
                 description: vec![crate::ToolText::new(
-                    "List available tools with compact summaries. Use verbose=true for full details. Use search_tools for ranked/filtered results.",
+                    "List available tools with compact summaries. Use search_tools for ranked or filtered results.",
                     [
                         crate::ExecutionMode::Repl,
                         crate::ExecutionMode::NativeTools,
@@ -914,7 +946,6 @@ impl ToolProvider for StateStore {
                 params: vec![
                     ToolParam::optional("query", "str"),
                     ToolParam::optional("injected_only", "bool"),
-                    ToolParam::optional("verbose", "bool"),
                 ],
                 returns: "list".into(),
                 examples: vec![],
@@ -1019,7 +1050,7 @@ impl ToolProvider for StateStore {
                 params: vec![ToolParam::typed("turn", "dict")],
                 returns: "None".into(),
                 examples: vec![],
-                hidden: false,
+                hidden: true,
                 inject_into_prompt: false,
             },
             ToolDefinition {
@@ -1034,7 +1065,7 @@ impl ToolProvider for StateStore {
                 params: vec![],
                 returns: "list".into(),
                 examples: vec![],
-                hidden: false,
+                hidden: true,
                 inject_into_prompt: false,
             },
             ToolDefinition {
@@ -1049,7 +1080,7 @@ impl ToolProvider for StateStore {
                 params: vec![ToolParam::typed("turns", "list")],
                 returns: "None".into(),
                 examples: vec![],
-                hidden: false,
+                hidden: true,
                 inject_into_prompt: false,
             },
             ToolDefinition {
@@ -1064,7 +1095,7 @@ impl ToolProvider for StateStore {
                 params: vec![ToolParam::typed("turn", "int")],
                 returns: "None".into(),
                 examples: vec![],
-                hidden: false,
+                hidden: true,
                 inject_into_prompt: false,
             },
             ToolDefinition {
@@ -1143,7 +1174,7 @@ impl ToolProvider for StateStore {
                 params: vec![],
                 returns: "list".into(),
                 examples: vec![],
-                hidden: false,
+                hidden: true,
                 inject_into_prompt: false,
             },
             ToolDefinition {
@@ -1158,7 +1189,7 @@ impl ToolProvider for StateStore {
                 params: vec![ToolParam::typed("entries", "list")],
                 returns: "None".into(),
                 examples: vec![],
-                hidden: false,
+                hidden: true,
                 inject_into_prompt: false,
             },
         ]);
@@ -1304,8 +1335,7 @@ mod tests {
     fn list_tools_works_without_catalog_arg() {
         let p = provider();
         let result = p.list_tools(&json!({
-            "query":"list_tools",
-            "verbose": true
+            "query":"list_tools"
         }));
         assert!(result.success);
         let items = result.result.as_array().cloned().unwrap_or_default();
@@ -1314,6 +1344,7 @@ mod tests {
             items[0].get("name").and_then(|v| v.as_str()),
             Some("list_tools")
         );
+        assert!(items[0].get("signature").and_then(|v| v.as_str()).is_some());
     }
 
     #[test]
@@ -1327,6 +1358,39 @@ mod tests {
         assert!(result.success);
         let items = result.result.as_array().cloned().unwrap_or_default();
         assert!(!items.is_empty());
+    }
+
+    #[test]
+    fn internal_tools_are_hidden_from_tool_discovery() {
+        let p = provider();
+
+        let listed = p.list_tools(&json!({
+            "query":"history"
+        }));
+        assert!(listed.success);
+        let listed_items = listed.result.as_array().cloned().unwrap_or_default();
+        let listed_names: Vec<_> = listed_items
+            .iter()
+            .filter_map(|item| item.get("name").and_then(|v| v.as_str()))
+            .collect();
+        assert!(listed_names.contains(&"search_history"));
+        assert!(!listed_names.contains(&"history_add_turn"));
+        assert!(!listed_names.contains(&"history_export"));
+        assert!(!listed_names.contains(&"history_load"));
+
+        let searched = p.search_tools(&json!({
+            "query":"replace history turns",
+            "mode":"hybrid",
+            "limit":10
+        }));
+        assert!(searched.success);
+        let searched_items = searched.result.as_array().cloned().unwrap_or_default();
+        let searched_names: Vec<_> = searched_items
+            .iter()
+            .filter_map(|item| item.get("name").and_then(|v| v.as_str()))
+            .collect();
+        assert!(!searched_names.contains(&"history_load"));
+        assert!(!searched_names.contains(&"mem_load"));
     }
 
     #[test]

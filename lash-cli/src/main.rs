@@ -421,7 +421,7 @@ async fn main() -> anyhow::Result<()> {
     );
     let initial_reasoning_effort = config.reasoning_effort.clone();
     let runtime_config: RuntimeConfig = config.clone().into();
-    let runtime = RuntimeEngine::from_state(
+    let runtime = LashRuntime::from_state(
         runtime_config,
         dynamic_tools_provider,
         AgentStateEnvelope {
@@ -489,7 +489,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Run the agent headlessly: send prompt, consume events, print final response to stdout.
-async fn run_headless(mut runtime: RuntimeEngine, prompt: String) -> anyhow::Result<()> {
+async fn run_headless(mut runtime: LashRuntime, prompt: String) -> anyhow::Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct HeadlessSink {
@@ -565,7 +565,7 @@ async fn run_headless(mut runtime: RuntimeEngine, prompt: String) -> anyhow::Res
 /// Returned by the spawned runtime task so we can reclaim ownership.
 struct RuntimeRunResult {
     stream_id: u64,
-    runtime: RuntimeEngine,
+    runtime: LashRuntime,
     result: AssembledTurn,
 }
 
@@ -919,7 +919,7 @@ fn help_text(skills: &skill::SkillRegistry) -> String {
 #[allow(clippy::too_many_arguments)]
 async fn run_app(
     mut terminal: DefaultTerminal,
-    runtime: RuntimeEngine,
+    runtime: LashRuntime,
     dynamic_tools: Arc<DynamicToolProvider>,
     logger: &mut SessionLogger,
     args: &Args,
@@ -2745,7 +2745,7 @@ async fn apply_pending_reconfigure(
     dynamic_tools: &Arc<DynamicToolProvider>,
     desired_dynamic: &mut DynamicStateSnapshot,
     pending_reconfigure: &mut bool,
-    runtime: &mut Option<RuntimeEngine>,
+    runtime: &mut Option<LashRuntime>,
 ) -> Result<u64, String> {
     if !*pending_reconfigure {
         return Ok(dynamic_tools.generation());
@@ -2794,7 +2794,7 @@ fn send_user_message(
     turn_input: TurnInput,
     app: &mut App,
     logger: &mut SessionLogger,
-    runtime: &mut Option<RuntimeEngine>,
+    runtime: &mut Option<LashRuntime>,
     history: &mut Vec<Message>,
     runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
     cancel_token: &mut Option<CancellationToken>,
@@ -2889,7 +2889,7 @@ fn send_user_message(
 async fn restore_agent_state(
     jsonl_filename: &str,
     history: &mut Vec<Message>,
-    runtime: &mut Option<RuntimeEngine>,
+    runtime: &mut Option<LashRuntime>,
     app: &mut App,
     turn_counter: &mut usize,
     execution_mode: &mut ExecutionMode,

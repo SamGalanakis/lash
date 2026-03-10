@@ -269,7 +269,7 @@ impl ToolProvider for TaskStore {
             ToolDefinition {
                 name: "tasks".into(),
                 description: vec![crate::ToolText::new(
-                    "List tasks. Returns a dict with `items` (list of Task dicts). Each task has: `id`, `subject`, `status`, `priority`, `active_form`, `description`. Optional filters: status, blocked.",
+                    "List tasks. Returns `{items: [...]}`. Optional filters: `status`, `blocked`.",
                     [
                         crate::ExecutionMode::Repl,
                         crate::ExecutionMode::NativeTools,
@@ -315,7 +315,7 @@ impl ToolProvider for TaskStore {
             ToolDefinition {
                 name: "update_task".into(),
                 description: vec![crate::ToolText::new(
-                    "Update a task. Pass only the fields to change. Valid status values are `pending`, `in_progress`, `completed`, and `cancelled` (not `done`). Returns updated Task.",
+                    "Update a task. Pass only changed fields. Valid `status`: `pending`, `in_progress`, `completed`, `cancelled`.",
                     [
                         crate::ExecutionMode::Repl,
                         crate::ExecutionMode::NativeTools,
@@ -378,7 +378,7 @@ impl ToolProvider for TaskStore {
             ToolDefinition {
                 name: "claim_task".into(),
                 description: vec![crate::ToolText::new(
-                    "Claim a task and mark it in progress. If no `id` is given, claims the next available task. Owner is derived from the caller automatically.",
+                    "Claim a task and mark it `in_progress`. If `id` is omitted, claim the next available task.",
                     [
                         crate::ExecutionMode::Repl,
                         crate::ExecutionMode::NativeTools,
@@ -413,7 +413,7 @@ impl ToolProvider for TaskStore {
             ToolDefinition {
                 name: "tasks_summary".into(),
                 description: vec![crate::ToolText::new(
-                    "Get a formatted overview of all tasks: counts by status, blocked tasks, high-priority items.",
+                    "Get a formatted task summary: counts by status, blocked tasks, and high-priority items.",
                     [
                         crate::ExecutionMode::Repl,
                         crate::ExecutionMode::NativeTools,

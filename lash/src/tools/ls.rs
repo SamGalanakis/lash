@@ -17,10 +17,13 @@ impl ToolProvider for Ls {
             name: "ls".into(),
             description: vec![crate::ToolText::new(
                 format!(
-                    "List filesystem entries, respecting .gitignore. Returns a dict `{{ \"__type__\": \"path_entries\", \"items\": PathEntry[], \"truncated\": null|{{shown,total,omitted}} }}`. `items` is sorted alphabetically by path. Each `PathEntry` has: `path`, `kind`, `size_bytes`, `lines` (or null), `modified_at` (RFC3339 UTC). Defaults: depth={}, limit={}, with_lines=false.",
+                    "List filesystem entries, respecting `.gitignore`. Returns `path_entries` with `items` sorted by path. Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: depth={}, limit={}, with_lines=false.",
                     DEFAULT_DEPTH, MAX_ENTRIES
                 ),
-                [crate::ExecutionMode::Repl, crate::ExecutionMode::NativeTools],
+                [
+                    crate::ExecutionMode::Repl,
+                    crate::ExecutionMode::NativeTools,
+                ],
             )],
             params: vec![
                 ToolParam {
@@ -56,16 +59,15 @@ impl ToolProvider for Ls {
                 ToolParam {
                     name: "with_lines".into(),
                     r#type: "bool".into(),
-                    description:
-                        "If true, count text lines for file entries (`lines` field). Non-text files return lines=null. Default: false."
-                            .into(),
+                    description: "Count text lines for file entries (`lines`). Default: false."
+                        .into(),
                     required: false,
                 },
             ],
             returns: "dict".into(),
             examples: vec![],
             hidden: false,
-        inject_into_prompt: true,
+            inject_into_prompt: true,
         }]
     }
 

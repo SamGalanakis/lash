@@ -187,12 +187,7 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
             "## History\n\nPrior turns can be searched with `search_history(...)` when earlier context is actually needed.",
         ),
         helper_bindings: &["search_history"],
-        tools: &[
-            "search_history",
-            "history_add_turn",
-            "history_export",
-            "history_load",
-        ],
+        tools: &["search_history"],
         enabled_by_default: true,
     },
     CapabilityDefinition {
@@ -203,16 +198,7 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
             "## Memory\n\nUse `mem_set`, `mem_get`, `mem_delete`, `mem_all`, and `search_mem(...)` for durable decisions that should survive context pruning.",
         ),
         helper_bindings: &["search_mem", "mem_set", "mem_get", "mem_delete", "mem_all"],
-        tools: &[
-            "search_mem",
-            "mem_set_turn",
-            "mem_set",
-            "mem_get",
-            "mem_delete",
-            "mem_all",
-            "mem_export",
-            "mem_load",
-        ],
+        tools: &["search_mem", "mem_set", "mem_get", "mem_delete", "mem_all"],
         enabled_by_default: true,
     },
     CapabilityDefinition {
@@ -336,15 +322,7 @@ mod tests {
     #[test]
     fn enabled_capability_adds_bundled_tools_and_helpers() {
         let caps = AgentCapabilities::default().enable(CapabilityId::History);
-        let resolved = resolve_features(
-            &caps,
-            &defs(&[
-                "search_history",
-                "history_add_turn",
-                "history_export",
-                "history_load",
-            ]),
-        );
+        let resolved = resolve_features(&caps, &defs(&["search_history"]));
         assert!(resolved.effective_tools.contains("search_history"));
         assert!(resolved.helper_bindings.contains("search_history"));
     }
@@ -354,15 +332,7 @@ mod tests {
         let caps = AgentCapabilities::default().enable(CapabilityId::Memory);
         let resolved = resolve_features(
             &caps,
-            &defs(&[
-                "search_mem",
-                "mem_set",
-                "mem_get",
-                "mem_delete",
-                "mem_all",
-                "mem_export",
-                "mem_load",
-            ]),
+            &defs(&["search_mem", "mem_set", "mem_get", "mem_delete", "mem_all"]),
         );
         assert!(resolved.effective_tools.contains("search_mem"));
         assert!(resolved.effective_tools.contains("mem_set"));

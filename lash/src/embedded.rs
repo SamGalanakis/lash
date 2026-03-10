@@ -863,7 +863,6 @@ fn list_tools(
         &[
             crate::ToolParam::optional("query", "str"),
             crate::ToolParam::optional("injected_only", "bool"),
-            crate::ToolParam::optional("verbose", "bool"),
         ],
         args,
         kwargs,
@@ -874,10 +873,6 @@ fn list_tools(
         .and_then(Value::as_str)
         .map(|value| value.to_ascii_lowercase());
     let injected_only = payload.get("injected_only").and_then(Value::as_bool);
-    let verbose = payload
-        .get("verbose")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let items: Vec<Value> = state
         .config
         .discoverable_tools()
@@ -892,13 +887,7 @@ fn list_tools(
                     || tool.description.to_ascii_lowercase().contains(needle)
             })
         })
-        .map(|tool| {
-            if verbose {
-                tool_info_json(tool)
-            } else {
-                tool_info_compact(tool)
-            }
-        })
+        .map(tool_info_compact)
         .collect();
     json_to_monty(Value::Array(items))
 }

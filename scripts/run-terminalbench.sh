@@ -17,6 +17,8 @@ Options:
   --sample                      Shortcut for --dataset terminal-bench-sample@2.0
   --full                        Shortcut for --dataset terminal-bench@2.0
   --task <glob>                 Task include pattern (repeatable)
+  --tasks <a,b,c>               Exact task names as a comma-separated list
+  --task-file <path>            Exact task names from a file (one per line, # comments allowed)
   --exclude-task <glob>         Task exclude pattern (repeatable)
   --model <model>               Model passed to lash (optional)
   --execution-mode <mode>       Lash execution mode: repl|native-tools (required)
@@ -42,6 +44,7 @@ Options:
 Examples:
   scripts/run-terminalbench.sh --sample --execution-mode repl
   scripts/run-terminalbench.sh --full --execution-mode native-tools --task "git-*"
+  scripts/run-terminalbench.sh --sample --execution-mode native-tools --tasks regex-log,sqlite-with-gcov
   scripts/run-terminalbench.sh --sample --execution-mode repl --task chess-best-move --model gpt-5.3-codex
 EOF
 }
@@ -59,6 +62,7 @@ JOB_NAME=""
 MODEL=""
 EXECUTION_MODE=""
 N_CONCURRENT="1"
+N_CONCURRENT_SET=0
 ATTEMPTS="1"
 TIMEOUT_MULT="1.0"
 ENV_BACKEND="docker"
@@ -71,8 +75,55 @@ DRY_RUN=0
 DEBUG=0
 
 TASK_PATTERNS=()
+EXACT_TASKS=()
 EXCLUDE_PATTERNS=()
 EXTRA_ARGS=()
+
+append_exact_tasks() {
+  local raw="$1"
+  local part trimmed
+  IFS=',' read -r -a parts <<<"${raw}"
+  for part in "${parts[@]}"; do
+    trimmed="$(printf '%s' "${part}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    if [[ -n "${trimmed}" ]]; then
+      EXACT_TASKS+=("${trimmed}")
+    fi
+  done
+}
+
+load_task_file() {
+  local path="$1"
+  if [[ ! -f "${path}" ]]; then
+    echo "error: task file not found: ${path}" >&2
+    exit 1
+  fi
+
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line%%#*}"
+    line="$(printf '%s' "${line}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    if [[ -n "${line}" ]]; then
+      EXACT_TASKS+=("${line}")
+    fi
+  done <"${path}"
+}
+
+join_by() {
+  local delim="$1"
+  shift
+  local out=""
+  local item
+  for item in "$@"; do
+    if [[ -n "${out}" ]]; then
+      out+="${delim}"
+    fi
+    out+="${item}"
+  done
+  printf '%s' "${out}"
+}
+
+sanitize_job_fragment() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g; s/--*/-/g; s/^-//; s/-$//'
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -90,6 +141,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --task)
       TASK_PATTERNS+=("${2:?missing value for --task}")
+      shift 2
+      ;;
+    --tasks)
+      append_exact_tasks "${2:?missing value for --tasks}"
+      shift 2
+      ;;
+    --task-file)
+      load_task_file "${2:?missing value for --task-file}"
       shift 2
       ;;
     --exclude-task)
@@ -114,6 +173,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --n-concurrent)
       N_CONCURRENT="${2:?missing value for --n-concurrent}"
+      N_CONCURRENT_SET=1
       shift 2
       ;;
     --attempts)
@@ -208,6 +268,14 @@ if [[ "${EXECUTION_MODE}" != "repl" && "${EXECUTION_MODE}" != "native-tools" ]];
   exit 2
 fi
 
+if [[ ${#EXACT_TASKS[@]} -gt 0 ]]; then
+  mapfile -t EXACT_TASKS < <(printf '%s\n' "${EXACT_TASKS[@]}" | awk '!seen[$0]++')
+fi
+
+if [[ ${#EXACT_TASKS[@]} -gt 0 && "${N_CONCURRENT_SET}" -eq 0 ]]; then
+  N_CONCURRENT="${#EXACT_TASKS[@]}"
+fi
+
 build_host_binary() {
   echo "==> Building lash release binary on host" >&2
   cargo build --release --manifest-path "${REPO_ROOT}/Cargo.toml" --bin lash >/dev/null
@@ -272,6 +340,18 @@ export LASH_LOG="debug"
 
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
+if [[ -z "${JOB_NAME}" ]]; then
+  dataset_slug="$(sanitize_job_fragment "${DATASET%@*}")"
+  mode_slug="$(sanitize_job_fragment "${EXECUTION_MODE}")"
+  if [[ ${#EXACT_TASKS[@]} -gt 0 ]]; then
+    task_slug="$(sanitize_job_fragment "$(join_by "-" "${EXACT_TASKS[@]}")")"
+    task_slug="${task_slug:0:48}"
+    JOB_NAME="${dataset_slug}-${mode_slug}-${task_slug}"
+  else
+    JOB_NAME="${dataset_slug}-${mode_slug}-$(date +%Y%m%d-%H%M%S)"
+  fi
+fi
+
 CMD=(
   harbor run
   --agent-import-path scripts.harbor_lash_agent:LashAgent
@@ -282,11 +362,8 @@ CMD=(
   --n-concurrent "${N_CONCURRENT}"
   --n-attempts "${ATTEMPTS}"
   --timeout-multiplier "${TIMEOUT_MULT}"
+  --job-name "${JOB_NAME}"
 )
-
-if [[ -n "${JOB_NAME}" ]]; then
-  CMD+=(--job-name "${JOB_NAME}")
-fi
 
 if [[ -n "${MODEL}" ]]; then
   CMD+=(--model "${MODEL}")
@@ -304,6 +381,10 @@ for pattern in "${TASK_PATTERNS[@]}"; do
   CMD+=(--task-name "${pattern}")
 done
 
+for task_name in "${EXACT_TASKS[@]}"; do
+  CMD+=(--task-name "${task_name}")
+done
+
 for pattern in "${EXCLUDE_PATTERNS[@]}"; do
   CMD+=(--exclude-task-name "${pattern}")
 done
@@ -318,4 +399,10 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   exit 0
 fi
 
+set +e
 "${CMD[@]}"
+HARBOR_RC=$?
+set -e
+
+python3 "${SCRIPT_DIR}/summarize_terminalbench.py" "${JOBS_DIR}/${JOB_NAME}" || true
+exit "${HARBOR_RC}"

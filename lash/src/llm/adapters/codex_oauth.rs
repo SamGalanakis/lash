@@ -124,6 +124,30 @@ impl CodexOAuthAdapter {
         deltas.push(piece.to_string());
     }
 
+    fn log_sse_event(
+        event_type: &str,
+        raw: &str,
+        added_deltas: &[String],
+        full_len: usize,
+        usage: &LlmUsage,
+        has_final_response: bool,
+    ) {
+        tracing::debug!(
+            target: "lash::llm::codex_oauth",
+            event_type,
+            raw_len = raw.len(),
+            raw_preview = %raw.chars().take(240).collect::<String>(),
+            delta_count = added_deltas.len(),
+            delta_lens = ?added_deltas.iter().map(|d| d.len()).collect::<Vec<_>>(),
+            full_len,
+            input_tokens = usage.input_tokens,
+            output_tokens = usage.output_tokens,
+            cached_input_tokens = usage.cached_input_tokens,
+            has_final_response,
+            "codex sse event"
+        );
+    }
+
     fn process_sse_event(
         raw: &str,
         full: &mut String,
@@ -138,7 +162,12 @@ impl CodexOAuthAdapter {
         let event: Value = serde_json::from_str(raw).map_err(|e| {
             LlmTransportError::new(format!("Invalid Codex SSE payload: {e}")).with_raw(raw)
         })?;
-        if event.get("type").and_then(|t| t.as_str()) == Some("error") {
+        let event_type = event
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+        if event_type == "error" {
             let msg = event
                 .get("error")
                 .and_then(|e| e.get("message"))
@@ -146,6 +175,9 @@ impl CodexOAuthAdapter {
                 .unwrap_or("Codex stream error");
             return Err(LlmTransportError::new(msg).with_raw(event.to_string()));
         }
+
+        let had_final_response = event.get("response").is_some();
+        let prev_delta_len = deltas.len();
 
         if let Some(resp_value) = event.get("response") {
             *final_response = Some(resp_value.clone());
@@ -156,7 +188,7 @@ impl CodexOAuthAdapter {
             Self::merge_usage(usage, &u);
         }
 
-        match event.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+        match event_type.as_str() {
             "response.output_text.delta" => {
                 if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
                     Self::apply_stream_piece(full, deltas, delta);
@@ -184,6 +216,15 @@ impl CodexOAuthAdapter {
             }
             _ => {}
         }
+
+        Self::log_sse_event(
+            &event_type,
+            raw,
+            &deltas[prev_delta_len..],
+            full.len(),
+            usage,
+            had_final_response,
+        );
         Ok(())
     }
 

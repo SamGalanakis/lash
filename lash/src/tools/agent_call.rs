@@ -8,8 +8,8 @@ use tokio_util::sync::CancellationToken;
 use crate::capabilities::{CapabilityId, tools_for_capability};
 use crate::provider::AgentModels;
 use crate::{
-    AgentConfig, AgentEvent, AgentStateEnvelope, DynamicStateSnapshot, EventSink, Message,
-    MessageRole, Part, PartKind, ProgressSender, PruneState, RuntimeConfig, RuntimeEngine,
+    AgentConfig, AgentEvent, AgentStateEnvelope, DynamicStateSnapshot, EventSink, LashRuntime,
+    Message, MessageRole, Part, PartKind, ProgressSender, PruneState, RuntimeConfig,
     SandboxMessage, ToolDefinition, ToolParam, ToolProvider, ToolResult,
 };
 
@@ -304,7 +304,7 @@ impl AgentCall {
             ..Default::default()
         };
         let runtime_config: RuntimeConfig = agent_config.clone().into();
-        let mut runtime = match RuntimeEngine::from_state(
+        let mut runtime = match LashRuntime::from_state(
             runtime_config,
             Arc::clone(&session_tools),
             runtime_state,
@@ -622,11 +622,11 @@ impl ToolProvider for AgentCall {
                 name: "agent_call".into(),
                 description: vec![
                     crate::ToolText::new(
-                        r#"Spawn a sub-agent to perform a task. Returns a plain handle dict immediately; then use `await agent_result(handle["id"])`, `await agent_output(handle["id"])`, and `await agent_kill(handle["id"])`. Use intelligence="low" for fast read-only tasks (lookup/summarize); low-intelligence sub-agents always run in native-tools mode. Use medium/high for edits/refactors; those tiers inherit the parent session's execution mode. Sub-agents inherit your prior-turn history and memory context read-only."#,
+                        r#"Spawn a sub-agent and return a handle. Use `await agent_result(handle["id"])`, `await agent_output(handle["id"])`, and `await agent_kill(handle["id"])`. Use `intelligence="low"` for fast read-only work; low-tier sub-agents always run in native-tools mode. Medium/high inherit the parent execution mode and receive parent history/memory read-only."#,
                         [crate::ExecutionMode::Repl],
                     ),
                     crate::ToolText::new(
-                        r#"Spawn a sub-agent to perform a task. Returns a plain handle dict. Use `agent_result(id)`, `agent_output(id)`, and `agent_kill(id)` with the returned handle ID. Use intelligence="low" for fast read-only tasks (lookup/summarize); low-intelligence sub-agents always run in native-tools mode. Use medium/high for edits/refactors; those tiers inherit the parent session's execution mode. Sub-agents inherit your prior-turn history and memory context read-only."#,
+                        r#"Spawn a sub-agent and return a handle. Use `agent_result(id)`, `agent_output(id)`, and `agent_kill(id)` with that ID. Use `intelligence="low"` for fast read-only work; low-tier sub-agents always run in native-tools mode. Medium/high inherit the parent execution mode and receive parent history/memory read-only."#,
                         [crate::ExecutionMode::NativeTools],
                     ),
                 ],
@@ -683,7 +683,7 @@ impl ToolProvider for AgentCall {
             ToolDefinition {
                 name: "agent_output".into(),
                 description: vec![crate::ToolText::new(
-                    "Read and drain accumulated streaming output from a running sub-agent (non-blocking). Returns empty string if no new output. Agent must still be running — use before agent_result.",
+                    "Read and drain buffered output from a running sub-agent. Non-blocking; returns an empty string if nothing new is available.",
                     [
                         crate::ExecutionMode::Repl,
                         crate::ExecutionMode::NativeTools,

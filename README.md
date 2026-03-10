@@ -20,7 +20,7 @@ chmod +x ~/.local/bin/lash
 - `repl` (default): a persistent Monty-backed sandbox that executes agent-written Python-like code with host-call boundaries for tools.
 - `native-tools`: provider-native tool calling without the REPL sandbox.
 
-Both backends are driven by a single sans-IO state machine (`TurnMachine` in `lash/src/sansio.rs`). All protocol logic (prompt assembly, fence parsing, retry/backoff, context folding, turn limits) lives in the synchronous machine; the async `Agent::run` / `run_native_tools` methods are thin host drivers that fulfil I/O effects. This makes the core turn logic independently testable without a tokio runtime.
+Both backends are driven by a single sans-IO state machine (`TurnMachine` in `lash/src/sansio.rs`). All protocol logic (prompt assembly, fence parsing, retry/backoff, context folding, turn limits) lives in the synchronous machine; the async `LashRuntime` host driver in `lash/src/runtime.rs` fulfils I/O effects. This makes the core turn logic independently testable without a tokio runtime.
 
 ### Local dev
 
@@ -93,10 +93,16 @@ Use `scripts/run-terminalbench.sh` to run Harbor + Terminal Bench 2 with the in-
 
 By default it runs `terminal-bench-sample@2.0`, builds a glibc-compatible binary in `target-bookworm/release/lash`, and uses your local `~/.lash/config.json` inside benchmark containers (so OAuth/OpenAI-generic config is reused). You must specify `--execution-mode repl` or `--execution-mode native-tools` explicitly.
 
+The Harbor adapter also appends benchmark-specific guidelines to lash's `guidelines` prompt section for these runs. That overlay makes exact verifier compliance explicit: match required final state exactly, clean up temporary artifacts, and self-verify ports/files/processes before finishing. Override it with `LASH_BENCH_PROMPT_APPEND_GUIDELINES` if needed.
+
+For exact task batches, use `--tasks a,b,c` or `--task-file path.txt`. The runner will set Harbor concurrency to the full explicit task count unless you override `--n-concurrent`, and it prints a per-task summary from the job artifacts after the run.
+
 ```bash
 scripts/run-terminalbench.sh --sample --execution-mode repl
 scripts/run-terminalbench.sh --full --execution-mode native-tools --task "git-*"
 scripts/run-terminalbench.sh --sample --execution-mode repl --task chess-best-move --model gpt-5.4
+scripts/run-terminalbench.sh --sample --execution-mode native-tools --tasks regex-log,sqlite-with-gcov
+scripts/run-terminalbench.sh --sample --execution-mode native-tools --task-file bench/tasks.txt
 scripts/run-terminalbench.sh --sample --execution-mode native-tools --build-mode host
 ```
 
@@ -236,7 +242,7 @@ This preserves interleaving and intent, e.g. text -> image -> text -> file refer
 
 ### Runtime APIs
 
-`RuntimeEngine` exposes two first-class host APIs:
+`LashRuntime` exposes two first-class host APIs:
 
 - `stream_turn(input, sink, cancel)`:
   - Streams low-level, mode-specific `AgentEvent` values to an `EventSink`.
@@ -286,7 +292,7 @@ The same folding policy is persisted in CLI config under:
 
 Integration invariants:
 
-- Keep one `RuntimeEngine` instance per active session.
+- Keep one `LashRuntime` instance per active session.
 - Do not rebuild message history manually between turns while a runtime is alive.
 - Treat streamed `AgentEvent`s as low-level preview/progress; render terminal user output from `AssembledTurn.assistant_output.safe_text`.
 
@@ -306,7 +312,7 @@ Runtime discovery is available via:
 
 The `repl` executor exposes tools through the `T` namespace (for example `T.read_file(...)`, `T.search_tools(...)`).
 Only runtime control calls remain bare globals in `repl`: `done(...)`, `ask(...)`, and `reset_repl()`.
-Use `T.list_tools(...)` and `T.search_tools(...)` to discover prompt-omitted tools at runtime.
+Use `T.list_tools(...)` and `T.search_tools(...)` to discover prompt-omitted tools at runtime. `list_tools` is compact-only and returns `name`, `oneliner`, and `signature`.
 Both discovery calls always search the full current runtime tool catalog; callers do not pass a separate `catalog` argument.
 
 ### Default Native-Tools Surface
@@ -319,13 +325,15 @@ With the default capability profile, `native-tools` can call:
 - Tasks: `tasks`, `tasks_summary`, `get_task`, `create_task`, `update_task`, `delete_task`, `claim_task`
 - Planning: `enter_plan_mode`, `exit_plan_mode`
 - Delegation: `agent_call`, `agent_result`, `agent_output`, `agent_kill`
-- History: `search_history`, `history_add_turn`, `history_export`, `history_load`
-- Memory: `search_mem`, `mem_set_turn`, `mem_set`, `mem_get`, `mem_delete`, `mem_all`, `mem_export`, `mem_load`
+- History: `search_history`
+- Memory: `search_mem`, `mem_set`, `mem_get`, `mem_delete`, `mem_all`
 - Skills: `skills`, `load_skill`, `read_skill_file`, `search_skills`
 - Web, when Tavily is configured: `search_web`, `fetch_url`
 - Native-tools only: `batch`
 
 This is the callable default surface, not the prompt-injected subset. Lash still injects only a smaller prompt-visible tool list and relies on `T.list_tools(...)` / `T.search_tools(...)` in `repl`, or `list_tools(...)` / `search_tools(...)` in `native-tools`, for discovery of omitted tools across the full active runtime tool set.
+
+`search_history(...)` searches all prior completed turns persisted by the runtime, not just turns folded out of the active prompt window.
 For delegation, low-tier sub-agents use this native-tools surface by default even when the parent session is in `repl`.
 
 ## Filesystem Listing Output

@@ -58,7 +58,7 @@ impl BatchingTools {
             name: "batch".into(),
             description: vec![crate::ToolText::new(
                 format!(
-                    "Execute 1-{} independent tool calls concurrently to reduce latency. Use for parallel reads, searches, inspections, writes, and unrelated diagnostics. Do not batch dependent steps or nest `batch` inside `batch`.",
+                    "Run 1-{} independent tool calls concurrently. Use it for parallel reads, searches, and unrelated diagnostics. Do not batch dependent steps or nest `batch`.",
                     MAX_BATCH_CALLS
                 ),
                 [

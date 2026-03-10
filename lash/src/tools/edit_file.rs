@@ -17,10 +17,9 @@ impl ToolProvider for EditFile {
             name: "edit_file".into(),
             description: vec![crate::ToolText::new(
                 concat!(
-                    "Anchor-based file editor for structural or multi-line changes. ",
-                    "Use this when you need precise placement (insert/delete/replace ranges) and have anchors from `read_file`.\n\n",
-                    "If you already know the exact text to change and just want a quick substitution, prefer `find_replace`.\n\n",
-                    "Each edit is one of: ",
+                    "Anchor-based file editor for structural or multi-line edits. Use anchors from `read_file`.\n\n",
+                    "Prefer `find_replace` for simple exact-text substitutions.\n\n",
+                    "Edit forms: ",
                     "{\"set_line\": {\"anchor\": \"LINE:8HEX\", \"new_text\": \"...\"}}, ",
                     "{\"replace_lines\": {\"start_anchor\": \"LINE:8HEX\", \"end_anchor\": \"LINE:8HEX\", \"new_text\": \"...\"}}, ",
                     "{\"insert_after\": {\"anchor\": \"LINE:8HEX\", \"text\": \"...\"}}, ",

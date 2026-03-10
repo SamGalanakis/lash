@@ -583,7 +583,7 @@
   <nav class="tab-bar">
     <button class="tab-btn active" data-tab="overview">Overview</button>
     <button class="tab-btn" data-tab="host">Host Interface</button>
-    <button class="tab-btn" data-tab="agent">Agent Core</button>
+    <button class="tab-btn" data-tab="agent">Runtime Core</button>
     <button class="tab-btn" data-tab="repl">REPL Mode</button>
     <button class="tab-btn" data-tab="native">Native Tools</button>
     <button class="tab-btn" data-tab="tools">Tools</button>
@@ -625,15 +625,15 @@
         <div class="arch-card-title">Normalization</div>
         <div class="arch-card-desc">
           Runtime validates references, canonicalizes paths, binds image blobs by id,
-          and preserves ordered interleaving. This is the host/agent contract boundary.
+          and preserves ordered interleaving. This is the host/runtime contract boundary.
         </div>
       </div>
       <div class="arch-card">
         <div class="arch-card-tag tag-agent"><span class="dot"></span>Layer 3</div>
-        <div class="arch-card-title">Agent Core</div>
+        <div class="arch-card-title">Runtime Core</div>
         <div class="arch-card-desc">
           Prompt assembly, provider/model resolution, token refresh, dynamic tool projection,
-          and the iterative agent loop.
+          and the iterative runtime loop.
         </div>
       </div>
       <div class="arch-card">
@@ -662,7 +662,7 @@
     <div class="section-header">
       <span class="section-number">02</span>
       <span class="section-title">Host Interface</span>
-      <span class="section-desc">Frontend modes and the normalization boundary between host and agent.</span>
+      <span class="section-desc">Frontend modes and the normalization boundary between host and runtime.</span>
     </div>
 
     <div class="arch-grid">
@@ -684,7 +684,7 @@
           </div>
           <div class="cell">
             <h4>Embedded Host</h4>
-            <p>Programmatic <code>RuntimeEngine::stream_turn</code> / <code>run_turn_assembled</code> with structured items and canonical assembled turn results.</p>
+            <p>Programmatic <code>LashRuntime::stream_turn</code> / <code>run_turn_assembled</code> with structured items and canonical assembled turn results.</p>
           </div>
         </div>
       </div>
@@ -694,7 +694,7 @@
         <div class="arch-card-title">Runtime Item Normalization</div>
         <div class="arch-card-desc">
           Runtime validates references, canonicalizes paths, binds image blobs by id, and preserves ordered interleaving.
-          This is the host/agent contract boundary.
+          This is the host/runtime contract boundary.
         </div>
         <div class="cell-grid cols-2">
           <div class="cell">
@@ -711,21 +711,21 @@
   </div>
 
   <!-- ═══════════════════════════════════════════════════ -->
-  <!-- TAB: Agent Core                                     -->
+  <!-- TAB: Runtime Core                                   -->
   <!-- ═══════════════════════════════════════════════════ -->
   <div class="tab-panel" id="tab-agent">
     <div class="section-header">
       <span class="section-number">03</span>
-      <span class="section-title">Agent Core</span>
-      <span class="section-desc">Prompt assembly, tool projection, and the iterative agent loop.</span>
+      <span class="section-title">Runtime Core</span>
+      <span class="section-desc">Prompt assembly, tool projection, and runtime turn orchestration.</span>
     </div>
 
     <div class="arch-grid">
       <div class="arch-card">
-        <div class="arch-card-tag tag-agent"><span class="dot"></span>Agent Core</div>
+        <div class="arch-card-tag tag-agent"><span class="dot"></span>Runtime Core</div>
         <div class="arch-card-title">Prompt Assembly + Sans-IO Turn Machine</div>
         <div class="arch-card-desc">
-          Agent resolves provider/model, refreshes tokens, reads dynamic projection state from the active tool registry,
+          LashRuntime resolves provider/model, refreshes tokens, reads dynamic projection state from the active tool registry,
           injects only tools with <code>inject_into_prompt=true</code>, and appends discovery guidance for omitted tools
           (<code>list_tools</code>/<code>search_tools</code>, <code>tools.&lt;tool&gt;</code>). Prompt assembly is execution-mode aware:
           the same tool identity is projected into REPL help/docs or provider-native tool schemas depending on the active mode.
@@ -757,7 +757,7 @@
         <div class="arch-card-title">Sans-IO Turn Machine</div>
         <div class="arch-card-desc">
           <code>TurnMachine</code> (<code>lash/src/sansio.rs</code>) is a synchronous state machine that owns all protocol logic
-          for a single agent run. The async host driver (<code>Agent::run</code> / <code>run_native_tools</code>) is a thin loop
+          for a single turn. The async host driver (<code>LashRuntime</code> in <code>lash/src/runtime.rs</code>) is a thin loop
           that calls <code>poll_effect()</code> to drain effects and <code>handle_response()</code> to feed results back.
           This separation makes the core turn logic independently testable without a tokio runtime.
         </div>
@@ -1313,11 +1313,11 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
           </div>
           <div class="cell">
             <h4>History</h4>
-            <p><code>search_history</code>, <code>history_add_turn</code>, <code>history_export</code>, <code>history_load</code>. Persistent turn history.</p>
+            <p><code>search_history</code>. Persistent turn history search across prior completed turns.</p>
           </div>
           <div class="cell">
             <h4>Memory</h4>
-            <p><code>search_mem</code>, <code>mem_set</code>, <code>mem_get</code>, <code>mem_delete</code>, <code>mem_export</code>, <code>mem_load</code>. Key-value memory.</p>
+            <p><code>search_mem</code>, <code>mem_set</code>, <code>mem_get</code>, <code>mem_delete</code>, <code>mem_all</code>. Key-value memory.</p>
           </div>
           <div class="cell">
             <h4>Skills</h4>
@@ -1397,16 +1397,14 @@ results = <span class="fn">T.search_mem</span>(<span class="str">"naming convent
         <div class="arch-card-tag tag-memory"><span class="dot"></span>History</div>
         <div class="arch-card-title">Persistent Turn History</div>
         <div class="arch-card-desc">
-          History tools track prior turns across context pruning. When the rolling context window drops old messages,
-          they are preserved in history for retrieval. Sub-agents can inherit parent-agent context at spawn time.
+          History search covers prior completed turns persisted by the runtime, including turns no longer visible in the
+          active prompt window. Sub-agents can inherit parent-agent context at spawn time.
         </div>
         <div class="cell-grid cols-2">
           <div class="cell">
             <h4>API</h4>
             <p>
-              <code>search_history(query, mode="hybrid", regex=None, limit=10, fields=None, since_turn=None)</code> &mdash; search pruned turns<br>
-              <code>history_add_turn(...)</code> &mdash; add a turn to history<br>
-              <code>history_export(...)</code> / <code>history_load(...)</code> &mdash; export/import history
+              <code>search_history(query, mode="hybrid", regex=None, limit=10, fields=None, since_turn=None)</code> &mdash; search prior completed turns
             </p>
           </div>
           <div class="cell">
@@ -1603,7 +1601,7 @@ skill = <span class="fn">load_skill</span>(<span class="str">"frontend-design"</
       <div class="ref"><b>CLI Wiring</b><code>lash-cli/src/main.rs</code></div>
       <div class="ref"><b>Runtime API</b><code>lash/src/runtime.rs</code></div>
       <div class="ref"><b>Dynamic Runtime</b><code>lash/src/dynamic.rs</code></div>
-      <div class="ref"><b>Agent Loop</b><code>lash/src/agent/mod.rs</code></div>
+      <div class="ref"><b>Runtime Loop</b><code>lash/src/runtime.rs</code></div>
       <div class="ref"><b>Sans-IO Turn Machine</b><code>lash/src/sansio.rs</code></div>
       <div class="ref"><b>Prompt Contracts</b><code>lash/src/agent/prompt.rs</code></div>
       <div class="ref"><b>Session Bridge</b><code>lash/src/session.rs</code></div>

@@ -63,9 +63,9 @@ pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource
 pub use provider::{LashConfig, Provider};
 pub use runtime::{
     AgentStateEnvelope, AssembledTurn, AssistantOutput, CodeOutputRecord, DoneReason, EventSink,
-    ExecutionSummary, HostProfile, InputItem, NoopEventSink, OutputState, PathResolver, RunMode,
-    RuntimeConfig, RuntimeEngine, RuntimeError, SanitizerPolicy, TerminationPolicy, TurnInput,
-    TurnIssue, TurnStatus,
+    ExecutionSummary, HostProfile, InputItem, LashRuntime, NoopEventSink, OutputState,
+    PathResolver, RunMode, RuntimeConfig, RuntimeError, SanitizerPolicy, TerminationPolicy,
+    TurnInput, TurnIssue, TurnStatus,
 };
 pub use sansio::{Effect, EffectId, LlmCallError, Response, TurnMachine, TurnMachineConfig};
 pub use session::{ExecResponse, Session, SessionError, UserPrompt};

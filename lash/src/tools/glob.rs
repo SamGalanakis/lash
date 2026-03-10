@@ -20,10 +20,13 @@ impl ToolProvider for Glob {
             name: "glob".into(),
             description: vec![crate::ToolText::new(
                 format!(
-                    "Find filesystem entries by glob pattern. Returns a dict `{{ \"__type__\": \"path_entries\", \"items\": PathEntry[], \"truncated\": null|{{shown,total,omitted}} }}`. `items` is sorted by `modified_at` (newest first). Each `PathEntry` has: `path`, `kind`, `size_bytes`, `lines` (or null), `modified_at` (RFC3339 UTC). Defaults: limit={}, with_lines=false.",
+                    "Find filesystem entries by glob. Returns `path_entries` with `items` sorted by `modified_at` (newest first). Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: limit={}, with_lines=false.",
                     MAX_RESULTS
                 ),
-                [crate::ExecutionMode::Repl, crate::ExecutionMode::NativeTools],
+                [
+                    crate::ExecutionMode::Repl,
+                    crate::ExecutionMode::NativeTools,
+                ],
             )],
             params: vec![
                 ToolParam::typed("pattern", "str"),
@@ -45,16 +48,15 @@ impl ToolProvider for Glob {
                 ToolParam {
                     name: "with_lines".into(),
                     r#type: "bool".into(),
-                    description:
-                        "If true, count text lines for file entries (`lines` field). Non-text files return lines=null. Default: false."
-                            .into(),
+                    description: "Count text lines for file entries (`lines`). Default: false."
+                        .into(),
                     required: false,
                 },
             ],
             returns: "dict".into(),
             examples: vec![],
             hidden: false,
-        inject_into_prompt: true,
+            inject_into_prompt: true,
         }]
     }
 

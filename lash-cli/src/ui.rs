@@ -115,19 +115,13 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     };
     let ctx = ctx_pct.map(|p| format!("{}% ctx", p)).unwrap_or_default();
 
-    // Build right-side variants from longest to shortest
-    let join_parts = |parts: &[&str]| -> String {
-        parts
-            .iter()
-            .filter(|s| !s.is_empty())
-            .copied()
-            .collect::<Vec<_>>()
-            .join(" \u{b7} ")
+    // Prefer current-turn context occupancy. Fall back to cumulative session tokens
+    // only when we do not have a context-window-backed percentage.
+    let right_variants = if ctx_pct.is_some() {
+        [ctx.clone(), String::new(), String::new(), String::new()]
+    } else {
+        [in_out.clone(), total.clone(), String::new(), String::new()]
     };
-    let r0 = join_parts(&[&in_out, &total, &ctx]);
-    let r1 = join_parts(&[&total, &ctx]);
-    let r2 = ctx.clone();
-    let right_variants = [r0, r1, r2, String::new()];
 
     let right_w = |idx: usize| -> usize {
         let s = &right_variants[idx];
@@ -206,28 +200,10 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 theme::CHALK_DIM
             };
-            if right_idx == 2 {
-                // ctx only
-                spans.push(Span::styled(
-                    token_text.clone(),
-                    Style::default().fg(ctx_color),
-                ));
-            } else {
-                let ctx_suffix = format!(" \u{b7} {}% ctx", pct);
-                if let Some(prefix) = token_text.strip_suffix(&ctx_suffix) {
-                    spans.push(Span::styled(
-                        prefix.to_string(),
-                        Style::default().fg(theme::CHALK_DIM),
-                    ));
-                    spans.push(Span::styled(ctx_suffix, Style::default().fg(ctx_color)));
-                } else {
-                    // text IS just the ctx (no prefix)
-                    spans.push(Span::styled(
-                        token_text.clone(),
-                        Style::default().fg(ctx_color),
-                    ));
-                }
-            }
+            spans.push(Span::styled(
+                token_text.clone(),
+                Style::default().fg(ctx_color),
+            ));
         } else {
             spans.push(Span::styled(
                 token_text.clone(),

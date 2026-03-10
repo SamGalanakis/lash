@@ -370,7 +370,7 @@ impl ToolProvider for Shell {
                 name: "shell".into(),
                 description: vec![crate::ToolText::new(
                     format!(
-                        "Run a command via {shell_name}. Returns a plain handle dict; use `shell_wait(id)`, `shell_read(id)`, `shell_write(id, input)`, and `shell_kill(id)` with the returned handle ID."
+                        "Run a command via {shell_name}. Returns a handle; use `shell_wait`, `shell_read`, `shell_write`, and `shell_kill` with its ID."
                     ),
                     [
                         crate::ExecutionMode::Repl,
@@ -404,7 +404,7 @@ impl ToolProvider for Shell {
             ToolDefinition {
                 name: "shell_read".into(),
                 description: vec![crate::ToolText::new(
-                    "Read and drain accumulated output from a running shell process (non-blocking). Returns empty string if no new output has arrived yet.",
+                    "Read and drain buffered output from a running shell process. Non-blocking; returns an empty string if nothing new is available.",
                     [
                         crate::ExecutionMode::Repl,
                         crate::ExecutionMode::NativeTools,

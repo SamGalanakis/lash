@@ -10,6 +10,7 @@ from pathlib import Path
 from harbor.agents.installed.base import BaseInstalledAgent, ExecInput
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
+from harbor.models.trial.paths import EnvironmentPaths
 from harbor.utils.templating import render_prompt_template
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -18,8 +19,21 @@ OPTIONAL_LIBS_DIR = REPO_ROOT / "bench" / "libs"
 HOST_LASH_CONFIG = Path.home() / ".lash" / "config.json"
 
 REMOTE_HOME = "/installed-agent/home"
-REMOTE_LASH_HOME = f"{REMOTE_HOME}/.lash"
+REMOTE_LASH_HOME = (EnvironmentPaths.agent_dir / "lash-home").as_posix()
 REMOTE_LASH_CONFIG = f"{REMOTE_LASH_HOME}/config.json"
+
+BENCHMARK_GUIDELINES_APPEND = """## Benchmark Constraints
+
+- You are being graded by exact verifier checks, not by partial progress.
+- Do exactly what the task asks. Match required filenames, file contents, output formats, ports, protocols, process state, and side effects exactly.
+- Do not stop at an approximate solution. If the task asks for a concrete final state, keep going until that exact state exists.
+- Treat extra files, leftover build products, debug artifacts, temporary scripts, and stray outputs as failures unless the task explicitly requires them.
+- Before finishing, remove temporary/debug artifacts that are not part of the required final state.
+- Before finishing, re-read the task and verify each concrete requirement against the current environment.
+- If the task implies that a service, VM, server, or port must be reachable, verify it yourself before stopping.
+- Prefer direct verification over assumption. Re-open files, re-run checks, and inspect the exact final outputs before returning.
+- Optimize for correctness and task completion, not for narration.
+"""
 
 
 class LashAgent(BaseInstalledAgent):
@@ -33,7 +47,7 @@ class LashAgent(BaseInstalledAgent):
 
     async def setup(self, environment: BaseEnvironment) -> None:
         await environment.exec(
-            command=f"mkdir -p /installed-agent/libs {REMOTE_HOME}/.lash"
+            command=f"mkdir -p /installed-agent/libs {REMOTE_HOME} {REMOTE_LASH_HOME}"
         )
 
         # Optional host-provided libs are disabled by default because they may
@@ -122,6 +136,14 @@ class LashAgent(BaseInstalledAgent):
                     f"--prompt-replace {shlex.quote(f'{section}={value}')} "
                 )
 
+        benchmark_guidelines = os.environ.get(
+            "LASH_BENCH_PROMPT_APPEND_GUIDELINES", BENCHMARK_GUIDELINES_APPEND
+        )
+        if benchmark_guidelines.strip():
+            prompt_flags += (
+                f"--prompt-append {shlex.quote(f'guidelines={benchmark_guidelines}')} "
+            )
+
         disable_sections = os.environ.get("LASH_PROMPT_DISABLE", "").strip()
         if disable_sections:
             for section in disable_sections.split(","):
@@ -141,90 +163,38 @@ class LashAgent(BaseInstalledAgent):
             )
         ]
 
-    async def _persist_lash_log(self, environment: BaseEnvironment) -> None:
-        """Best-effort copy of lash runtime log into Harbor trial artifacts."""
-        source = f"{REMOTE_HOME}/.lash/lash.log"
-        target = self.logs_dir / "lash.log"
-        try:
-            await environment.download_file(source_path=source, target_path=target)
-        except Exception as exc:  # pragma: no cover - defensive, non-fatal
-            self.logger.warning("Failed to persist lash log from %s: %s", source, exc)
-
-    async def _persist_lash_sessions(self, environment: BaseEnvironment) -> None:
-        """Best-effort copy of lash session artifacts (db/jsonl/llm trace) into trial logs."""
-        sessions_dir = f"{REMOTE_HOME}/.lash/sessions"
-        target_dir = self.logs_dir / "sessions"
-        target_dir.mkdir(parents=True, exist_ok=True)
-
-        list_cmd = (
-            "bash -lc "
-            + shlex.quote(
-                f"ls -1 {sessions_dir}/*.db {sessions_dir}/*.jsonl {sessions_dir}/*.llm.jsonl "
-                "2>/dev/null | sort -u || true"
-            )
-        )
-
-        try:
-            result = await environment.exec(command=list_cmd)
-        except Exception as exc:  # pragma: no cover - defensive, non-fatal
-            self.logger.warning("Failed to enumerate lash session artifacts: %s", exc)
-            return
-
-        if result.return_code != 0:
-            self.logger.warning(
-                "Failed to enumerate lash session artifacts (rc=%s): %s",
-                result.return_code,
-                result.stderr or "",
-            )
-            return
-
-        for remote_path in [
-            line.strip() for line in (result.stdout or "").splitlines() if line.strip()
-        ]:
-            target = target_dir / Path(remote_path).name
-            try:
-                await environment.download_file(source_path=remote_path, target_path=target)
-            except Exception as exc:  # pragma: no cover - defensive, non-fatal
-                self.logger.warning(
-                    "Failed to persist lash session artifact %s: %s", remote_path, exc
-                )
-
     async def run(
         self,
         instruction: str,
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
-        try:
-            rendered_instruction = (
-                render_prompt_template(self._prompt_template_path, instruction)
-                if self._prompt_template_path
-                else instruction
+        rendered_instruction = (
+            render_prompt_template(self._prompt_template_path, instruction)
+            if self._prompt_template_path
+            else instruction
+        )
+        for i, exec_input in enumerate(self.create_run_agent_commands(rendered_instruction)):
+            command_dir = self.logs_dir / f"command-{i}"
+            command_dir.mkdir(parents=True, exist_ok=True)
+            (command_dir / "command.txt").write_text(exec_input.command)
+
+            result = await environment.exec(
+                command=exec_input.command,
+                cwd=exec_input.cwd,
+                env=exec_input.env,
+                timeout_sec=exec_input.timeout_sec,
             )
-            for i, exec_input in enumerate(self.create_run_agent_commands(rendered_instruction)):
-                command_dir = self.logs_dir / f"command-{i}"
-                command_dir.mkdir(parents=True, exist_ok=True)
-                (command_dir / "command.txt").write_text(exec_input.command)
 
-                result = await environment.exec(
-                    command=exec_input.command,
-                    cwd=exec_input.cwd,
-                    env=exec_input.env,
-                    timeout_sec=exec_input.timeout_sec,
-                )
-
-                (command_dir / "return-code.txt").write_text(str(result.return_code))
-                if result.stdout:
-                    (command_dir / "stdout.txt").write_text(result.stdout)
-                if result.stderr:
-                    (command_dir / "stderr.txt").write_text(result.stderr)
-        finally:
-            await self._persist_lash_log(environment)
-            await self._persist_lash_sessions(environment)
+            (command_dir / "return-code.txt").write_text(str(result.return_code))
+            if result.stdout:
+                (command_dir / "stdout.txt").write_text(result.stdout)
+            if result.stderr:
+                (command_dir / "stderr.txt").write_text(result.stderr)
         self.populate_context_post_run(context)
 
     def populate_context_post_run(self, context: AgentContext) -> None:
-        sessions_dir = self.logs_dir / "sessions"
+        sessions_dir = self.logs_dir / "lash-home" / "sessions"
         if not sessions_dir.exists():
             return
 

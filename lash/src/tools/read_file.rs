@@ -29,7 +29,7 @@ impl ToolProvider for ReadFile {
             name: "read_file".into(),
             description: vec![crate::ToolText::new(
                 format!(
-                    "Read a file (default: up to {} lines). Text files return hashline-prefixed content in `LINE:8HEX|text` format. PDF files are extracted to text. Image files (png, jpg, gif, webp, bmp) are read for visual inspection. Use `ls` for directories.",
+                    "Read a file. Text returns hashlines (`LINE:8HEX|text`), PDFs return extracted text, and images return visual content. Default: {} lines. Use `ls` for directories.",
                     DEFAULT_LIMIT
                 ),
                 [
