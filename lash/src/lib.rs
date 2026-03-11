@@ -6,9 +6,12 @@ pub mod instructions;
 pub mod llm;
 pub mod model_info;
 pub mod oauth;
+pub mod plugin;
 pub mod provider;
 pub mod runtime;
 pub mod sansio;
+#[cfg(feature = "sqlite-store")]
+mod search;
 pub mod session;
 #[cfg(feature = "sqlite-store")]
 pub mod store;
@@ -45,6 +48,7 @@ pub fn lash_cache_dir() -> PathBuf {
 }
 
 // Re-exports
+pub use agent::message::MessageOrigin;
 pub use agent::{
     AgentConfig, AgentEvent, Message, MessageRole, Part, PartKind, PromptOverrideMode,
     PromptSectionName, PromptSectionOverride, PruneState, TokenUsage,
@@ -57,9 +61,23 @@ pub use dynamic::{
     CapabilityProfile, DynamicCapabilityDef, DynamicStateSnapshot, DynamicToolProvider,
     DynamicToolSpec, InProcessToolExecutionAdapter, InProcessToolFuture, InProcessToolHandler,
     ReconfigureError, ResolvedProjection, ToolExecutionAdapter, agent_capabilities_from_profile,
-    default_dynamic_capability_defs, profile_from_agent_capabilities, resolve_projection,
+    default_dynamic_capability_defs, profile_from_agent_capabilities,
+    resolve_capability_projection, resolve_projection,
 };
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
+#[cfg(feature = "sqlite-store")]
+pub use plugin::{
+    BuiltinHistoryPluginFactory, BuiltinMemoryPluginFactory, builtin_dynamic_capability_defs,
+};
+pub use plugin::{
+    ExternalInvokeContext, ExternalInvokeError, ExternalOpDef, ExternalOpKind, PluginDirective,
+    PluginError, PluginFactory, PluginHost, PluginMessage, PluginRegistrar, PluginSession,
+    PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry,
+    PluginSnapshotMeta, PromptContribution, PromptHookContext, RuntimeServices,
+    SessionConfigOverrides, SessionCreateRequest, SessionHandle, SessionManager, SessionParam,
+    SessionPlugin, SessionSnapshot, SessionStartPoint, SnapshotReader, SnapshotWriter,
+    TurnHookContext, TurnResultHookContext,
+};
 pub use provider::{LashConfig, Provider};
 pub use runtime::{
     AgentStateEnvelope, AssembledTurn, AssistantOutput, CodeOutputRecord, DoneReason, EventSink,
@@ -80,7 +98,7 @@ pub use tools::{BatchingTools, ToolSet, ToolSetDeps};
 pub enum ExecutionMode {
     #[default]
     Repl,
-    NativeTools,
+    Standard,
 }
 
 pub fn python_runtime_available() -> bool {
@@ -89,7 +107,7 @@ pub fn python_runtime_available() -> bool {
 
 pub fn execution_mode_supported(mode: ExecutionMode) -> bool {
     match mode {
-        ExecutionMode::Repl | ExecutionMode::NativeTools => true,
+        ExecutionMode::Repl | ExecutionMode::Standard => true,
     }
 }
 
@@ -350,7 +368,7 @@ impl ToolDefinition {
             .join("\n")
     }
 
-    /// Convert the tool signature into a basic JSON Schema object for native tool-calling APIs.
+    /// Convert the tool signature into a basic JSON Schema object for structured tool-calling APIs.
     pub fn input_schema(&self) -> serde_json::Value {
         let mut properties = serde_json::Map::new();
         let mut required = Vec::new();
@@ -521,7 +539,7 @@ mod tests {
             name: "read".into(),
             description: vec![ToolText::new(
                 "Read a file",
-                [ExecutionMode::Repl, ExecutionMode::NativeTools],
+                [ExecutionMode::Repl, ExecutionMode::Standard],
             )],
             params: vec![ToolParam {
                 name: "path".into(),

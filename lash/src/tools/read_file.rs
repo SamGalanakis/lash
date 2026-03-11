@@ -32,10 +32,7 @@ impl ToolProvider for ReadFile {
                     "Read a file. Text returns hashlines (`LINE:8HEX|text`), PDFs return extracted text, and images return visual content. Default: {} lines. Use `ls` for directories.",
                     DEFAULT_LIMIT
                 ),
-                [
-                    crate::ExecutionMode::Repl,
-                    crate::ExecutionMode::NativeTools,
-                ],
+                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             params: vec![
                 ToolParam::typed("path", "str"),

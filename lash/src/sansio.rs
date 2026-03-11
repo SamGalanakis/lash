@@ -1,10 +1,10 @@
 //! Sans-IO state machine for agent turns.
 //!
-//! `TurnMachine` encapsulates all protocol logic for both NativeTools and REPL
+//! `TurnMachine` encapsulates all protocol logic for both Standard and REPL
 //! execution modes. The host event loop drives the machine by calling
 //! `poll_effect()` and feeding responses back via `handle_response()`.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,12 +37,12 @@ pub struct EffectId(pub u64);
 #[derive(Debug)]
 pub enum Effect {
     /// Start an LLM call.
-    /// For NativeTools the host returns `Response::LlmComplete`.
+    /// For Standard the host returns `Response::LlmComplete`.
     /// For REPL the host streams via `handle_llm_delta()` then `Response::LlmComplete`.
     LlmCall { id: EffectId, request: LlmRequest },
     /// Cancel an in-progress LLM stream (REPL: code fence detected mid-stream).
     CancelLlm { id: EffectId },
-    /// Execute a native tool call. Host returns `Response::ToolResult`.
+    /// Execute a standard-mode tool call. Host returns `Response::ToolResult`.
     ToolCall {
         id: EffectId,
         call_id: String,
@@ -73,7 +73,7 @@ pub struct LlmCallError {
 
 /// A response to a previously emitted effect.
 pub enum Response {
-    /// Full LLM response (NativeTools), or final response after streaming (REPL).
+    /// Full LLM response (Standard), or final response after streaming (REPL).
     LlmComplete {
         id: EffectId,
         result: Result<LlmResponse, LlmCallError>,
@@ -113,9 +113,9 @@ pub struct TurnMachineConfig {
     pub tool_list: String,
     pub tool_specs: Vec<LlmToolSpec>,
     pub tool_names: Vec<String>,
-    pub enabled_capability_ids: BTreeSet<String>,
     pub helper_bindings: BTreeSet<String>,
     pub capability_prompt_sections: Vec<String>,
+    pub plugin_prompt_sections: Vec<String>,
     pub can_write: bool,
     pub history_enabled: bool,
     pub project_instructions: String,
@@ -128,13 +128,6 @@ pub struct TurnMachineConfig {
 
 // ─── Internal state ───
 
-#[allow(dead_code)]
-struct PendingToolCall {
-    call_id: String,
-    tool_name: String,
-}
-
-#[allow(dead_code)]
 struct CompletedToolCall {
     call_id: String,
     tool_name: String,
@@ -187,37 +180,31 @@ impl FenceState {
 }
 
 /// Accumulated REPL turn state carried across exec cycles.
-#[allow(dead_code)]
 struct ReplTurnState {
     fence: FenceState,
-    tool_images: Vec<(String, Vec<u8>)>,
 }
 
-#[allow(dead_code)]
 enum MachineState {
     PrepareIteration,
     WaitingLlm {
         effect_id: EffectId,
-        // REPL streaming state (None for NativeTools)
+        // REPL streaming state (None for Standard)
         fence: Option<FenceState>,
         retry_attempt: usize,
         stop_stream_processing: bool,
     },
     WaitingRetry {
-        effect_id: EffectId,
         retry_attempt: usize,
         last_error: String,
         /// Saved REPL fence state for retry continuation
         fence: Option<FenceState>,
     },
     WaitingTools {
-        pending: HashMap<EffectId, PendingToolCall>,
+        pending: HashSet<EffectId>,
         completed: Vec<CompletedToolCall>,
         assistant_text: String,
-        tool_call_parts: Vec<(String, String, String)>, // (call_id, tool_name, input_json)
     },
     WaitingExec {
-        effect_id: EffectId,
         repl: ReplTurnState,
     },
     ProcessReplResult {
@@ -347,9 +334,9 @@ impl TurnMachine {
             tool_list: &self.config.tool_list,
             tool_names: &self.config.tool_names,
             has_history: fold.has_archived_history,
-            enabled_capability_ids: &self.config.enabled_capability_ids,
             helper_bindings: &self.config.helper_bindings,
             capability_prompt_sections: &self.config.capability_prompt_sections,
+            plugin_prompt_sections: &self.config.plugin_prompt_sections,
             can_write: self.config.can_write,
             include_soul,
             project_instructions: "",
@@ -368,7 +355,7 @@ impl TurnMachine {
             &self.config.project_instructions,
         );
 
-        let is_native = matches!(self.config.execution_mode, ExecutionMode::NativeTools);
+        let is_standard = matches!(self.config.execution_mode, ExecutionMode::Standard);
 
         let llm_request = LlmRequest {
             model: self.config.model.clone(),
@@ -384,12 +371,12 @@ impl TurnMachine {
                     data: data.clone(),
                 })
                 .collect(),
-            tools: if is_native {
+            tools: if is_standard {
                 self.config.tool_specs.clone()
             } else {
                 Vec::new()
             },
-            tool_choice: if is_native && !self.config.tool_specs.is_empty() {
+            tool_choice: if is_standard && !self.config.tool_specs.is_empty() {
                 LlmToolChoice::Auto
             } else {
                 LlmToolChoice::None
@@ -404,7 +391,7 @@ impl TurnMachine {
         self.tool_images.clear();
 
         let id = self.next_id();
-        let fence = if !is_native {
+        let fence = if !is_standard {
             Some(FenceState::new())
         } else {
             None
@@ -506,11 +493,7 @@ impl TurnMachine {
                 .push_back(Effect::CancelLlm { id: effect_id });
 
             self.state = MachineState::WaitingExec {
-                effect_id: exec_id,
-                repl: ReplTurnState {
-                    fence: fence_taken,
-                    tool_images: std::mem::take(&mut self.tool_images),
-                },
+                repl: ReplTurnState { fence: fence_taken },
             };
             self.pending_effects
                 .push_back(Effect::ExecCode { id: exec_id, code });
@@ -569,14 +552,14 @@ impl TurnMachine {
         text_streamed: bool,
     ) {
         match self.config.execution_mode {
-            ExecutionMode::NativeTools => self.handle_native_llm_complete(result, text_streamed),
+            ExecutionMode::Standard => self.handle_standard_llm_complete(result, text_streamed),
             ExecutionMode::Repl => self.handle_repl_llm_complete(result),
         }
     }
 
-    // ─── NativeTools path ───
+    // ─── Standard path ───
 
-    fn handle_native_llm_complete(
+    fn handle_standard_llm_complete(
         &mut self,
         result: Result<LlmResponse, LlmCallError>,
         text_streamed: bool,
@@ -599,7 +582,6 @@ impl TurnMachine {
                     });
                     let sleep_id = self.next_id();
                     self.state = MachineState::WaitingRetry {
-                        effect_id: sleep_id,
                         retry_attempt: retry_attempt + 1,
                         last_error: e.message,
                         fence: None,
@@ -625,6 +607,7 @@ impl TurnMachine {
             input_tokens: llm_response.usage.input_tokens,
             output_tokens: llm_response.usage.output_tokens,
             cached_input_tokens: llm_response.usage.cached_input_tokens,
+            reasoning_tokens: llm_response.usage.reasoning_tokens,
         };
         self.last_input_tokens = usage.input_tokens as usize;
         self.cumulative_usage.add(&usage);
@@ -704,6 +687,7 @@ impl TurnMachine {
                     tool_name: None,
                     prune_state: PruneState::Intact,
                 }],
+                origin: None,
             });
             self.finish();
             return;
@@ -723,7 +707,7 @@ impl TurnMachine {
             });
         }
 
-        let mut pending = HashMap::new();
+        let mut pending = HashSet::new();
         for (call_id, tool_name, input_json) in &tool_calls {
             assistant_parts.push(Part {
                 id: format!("{}.p{}", asst_id, assistant_parts.len()),
@@ -737,13 +721,7 @@ impl TurnMachine {
             let args =
                 serde_json::from_str::<Value>(input_json).unwrap_or_else(|_| serde_json::json!({}));
             let effect_id = self.next_id();
-            pending.insert(
-                effect_id,
-                PendingToolCall {
-                    call_id: call_id.clone(),
-                    tool_name: tool_name.clone(),
-                },
-            );
+            pending.insert(effect_id);
             self.pending_effects.push_back(Effect::ToolCall {
                 id: effect_id,
                 call_id: call_id.clone(),
@@ -757,6 +735,7 @@ impl TurnMachine {
                 id: asst_id,
                 role: MessageRole::Assistant,
                 parts: assistant_parts,
+                origin: None,
             });
         }
 
@@ -764,7 +743,6 @@ impl TurnMachine {
             pending,
             completed: Vec::new(),
             assistant_text,
-            tool_call_parts: tool_calls,
         };
     }
 
@@ -804,11 +782,11 @@ impl TurnMachine {
         };
 
         if all_done {
-            self.process_native_tool_results();
+            self.process_standard_tool_results();
         }
     }
 
-    fn process_native_tool_results(&mut self) {
+    fn process_standard_tool_results(&mut self) {
         let (completed, _assistant_text) =
             match std::mem::replace(&mut self.state, MachineState::Finished) {
                 MachineState::WaitingTools {
@@ -873,6 +851,7 @@ impl TurnMachine {
                 id: user_id,
                 role: MessageRole::User,
                 parts: result_parts,
+                origin: None,
             });
             let context_text = resolve_context_instructions(
                 self.config.instruction_source.as_ref(),
@@ -891,6 +870,7 @@ impl TurnMachine {
                         tool_name: None,
                         prune_state: PruneState::Intact,
                     }],
+                    origin: None,
                 });
             }
         }
@@ -913,6 +893,7 @@ impl TurnMachine {
                     tool_name: None,
                     prune_state: PruneState::Intact,
                 }],
+                origin: None,
             });
             self.finish();
             return;
@@ -952,7 +933,6 @@ impl TurnMachine {
                     });
                     let sleep_id = self.next_id();
                     self.state = MachineState::WaitingRetry {
-                        effect_id: sleep_id,
                         retry_attempt: retry_attempt + 1,
                         last_error: e.message,
                         fence: Some(fence),
@@ -980,6 +960,7 @@ impl TurnMachine {
                     input_tokens: llm_response.usage.input_tokens,
                     output_tokens: llm_response.usage.output_tokens,
                     cached_input_tokens: llm_response.usage.cached_input_tokens,
+                    reasoning_tokens: llm_response.usage.reasoning_tokens,
                 };
                 self.last_input_tokens = usage.input_tokens as usize;
                 self.cumulative_usage.add(&usage);
@@ -1005,10 +986,7 @@ impl TurnMachine {
                         duration_ms: 0,
                     });
                     self.state = MachineState::ProcessReplResult {
-                        repl: ReplTurnState {
-                            fence,
-                            tool_images: std::mem::take(&mut self.tool_images),
-                        },
+                        repl: ReplTurnState { fence },
                     };
                     self.process_repl_result();
                     return;
@@ -1055,11 +1033,7 @@ impl TurnMachine {
                                     duration_ms: 0,
                                 });
                                 self.state = MachineState::WaitingExec {
-                                    effect_id: exec_id,
-                                    repl: ReplTurnState {
-                                        fence,
-                                        tool_images: std::mem::take(&mut self.tool_images),
-                                    },
+                                    repl: ReplTurnState { fence },
                                 };
                                 self.pending_effects
                                     .push_back(Effect::ExecCode { id: exec_id, code });
@@ -1078,10 +1052,7 @@ impl TurnMachine {
                             duration_ms: 0,
                         });
                         self.state = MachineState::ProcessReplResult {
-                            repl: ReplTurnState {
-                                fence,
-                                tool_images: std::mem::take(&mut self.tool_images),
-                            },
+                            repl: ReplTurnState { fence },
                         };
                         self.process_repl_result();
                         return;
@@ -1124,11 +1095,7 @@ impl TurnMachine {
 
                         let exec_id = self.next_id();
                         self.state = MachineState::WaitingExec {
-                            effect_id: exec_id,
-                            repl: ReplTurnState {
-                                fence,
-                                tool_images: std::mem::take(&mut self.tool_images),
-                            },
+                            repl: ReplTurnState { fence },
                         };
                         self.pending_effects
                             .push_back(Effect::ExecCode { id: exec_id, code });
@@ -1146,11 +1113,7 @@ impl TurnMachine {
 
                     let exec_id = self.next_id();
                     self.state = MachineState::WaitingExec {
-                        effect_id: exec_id,
-                        repl: ReplTurnState {
-                            fence,
-                            tool_images: std::mem::take(&mut self.tool_images),
-                        },
+                        repl: ReplTurnState { fence },
                     };
                     self.pending_effects
                         .push_back(Effect::ExecCode { id: exec_id, code });
@@ -1183,7 +1146,6 @@ impl TurnMachine {
                         });
                         let sleep_id = self.next_id();
                         self.state = MachineState::WaitingRetry {
-                            effect_id: sleep_id,
                             retry_attempt: retry_attempt + 1,
                             last_error:
                                 "malformed assistant output from model (partial repl fragment)"
@@ -1208,10 +1170,7 @@ impl TurnMachine {
 
                 // Go to result processing
                 self.state = MachineState::ProcessReplResult {
-                    repl: ReplTurnState {
-                        fence,
-                        tool_images: std::mem::take(&mut self.tool_images),
-                    },
+                    repl: ReplTurnState { fence },
                 };
                 self.process_repl_result();
             }
@@ -1322,6 +1281,7 @@ impl TurnMachine {
                 id: mid,
                 role: MessageRole::Assistant,
                 parts: asst_parts,
+                origin: None,
             });
             self.finish();
             return;
@@ -1340,6 +1300,7 @@ impl TurnMachine {
                 id: mid,
                 role: MessageRole::Assistant,
                 parts: asst_parts,
+                origin: None,
             });
             if self.config.headless {
                 let sys_id = format!("m{}", self.messages.len());
@@ -1356,6 +1317,7 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
                         tool_name: None,
                         prune_state: PruneState::Intact,
                     }],
+                    origin: None,
                 });
                 if self
                     .termination
@@ -1388,6 +1350,7 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
                         tool_name: None,
                         prune_state: PruneState::Intact,
                     }],
+                    origin: None,
                 });
                 self.iteration += 1;
                 self.termination.maybe_schedule_turn_limit_final(
@@ -1481,6 +1444,7 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
             id: asst_id,
             role: MessageRole::Assistant,
             parts: asst_parts,
+            origin: None,
         });
 
         // Push system feedback
@@ -1492,6 +1456,7 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
             id: sys_id,
             role: MessageRole::System,
             parts: feedback_parts,
+            origin: None,
         });
 
         // Context instructions
@@ -1512,6 +1477,7 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
                     tool_name: None,
                     prune_state: PruneState::Intact,
                 }],
+                origin: None,
             });
         }
 
@@ -1582,9 +1548,9 @@ mod tests {
             tool_list: String::new(),
             tool_specs: Vec::new(),
             tool_names: Vec::new(),
-            enabled_capability_ids: BTreeSet::new(),
             helper_bindings: BTreeSet::new(),
             capability_prompt_sections: Vec::new(),
+            plugin_prompt_sections: Vec::new(),
             can_write: false,
             history_enabled: false,
             project_instructions: String::new(),
@@ -1608,6 +1574,7 @@ mod tests {
                 tool_name: None,
                 prune_state: PruneState::Intact,
             }],
+            origin: None,
         }
     }
 
@@ -1637,11 +1604,11 @@ mod tests {
         })
     }
 
-    // ─── NativeTools tests ───
+    // ─── Standard tests ───
 
     #[test]
-    fn native_prose_only_response_emits_done() {
-        let config = test_config(ExecutionMode::NativeTools);
+    fn standard_prose_only_response_emits_done() {
+        let config = test_config(ExecutionMode::Standard);
         let msgs = vec![user_message("hello")];
         let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
 
@@ -1667,8 +1634,8 @@ mod tests {
     }
 
     #[test]
-    fn native_tool_calls_produce_effects_and_loop() {
-        let config = test_config(ExecutionMode::NativeTools);
+    fn standard_tool_calls_produce_effects_and_loop() {
+        let config = test_config(ExecutionMode::Standard);
         let msgs = vec![user_message("read file")];
         let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
 
@@ -1743,8 +1710,8 @@ mod tests {
     }
 
     #[test]
-    fn native_retryable_error_sleeps_then_retries() {
-        let config = test_config(ExecutionMode::NativeTools);
+    fn standard_retryable_error_sleeps_then_retries() {
+        let config = test_config(ExecutionMode::Standard);
         let msgs = vec![user_message("hello")];
         let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
 
@@ -1781,8 +1748,8 @@ mod tests {
     }
 
     #[test]
-    fn native_fatal_error_emits_done() {
-        let config = test_config(ExecutionMode::NativeTools);
+    fn standard_fatal_error_emits_done() {
+        let config = test_config(ExecutionMode::Standard);
         let msgs = vec![user_message("hello")];
         let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
 
@@ -1806,8 +1773,8 @@ mod tests {
     }
 
     #[test]
-    fn native_empty_response_emits_error() {
-        let config = test_config(ExecutionMode::NativeTools);
+    fn standard_empty_response_emits_error() {
+        let config = test_config(ExecutionMode::Standard);
         let msgs = vec![user_message("hello")];
         let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
 
@@ -1829,8 +1796,8 @@ mod tests {
     }
 
     #[test]
-    fn native_max_turns_stops_iteration() {
-        let mut config = test_config(ExecutionMode::NativeTools);
+    fn standard_max_turns_stops_iteration() {
+        let mut config = test_config(ExecutionMode::Standard);
         config.max_turns = Some(1);
         let msgs = vec![user_message("hello")];
         let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
@@ -1945,6 +1912,7 @@ mod tests {
                     input_tokens: 100,
                     output_tokens: 50,
                     cached_input_tokens: 0,
+                    reasoning_tokens: 0,
                 },
                 ..LlmResponse::default()
             }),
@@ -1994,6 +1962,7 @@ mod tests {
                     input_tokens: 100,
                     output_tokens: 50,
                     cached_input_tokens: 0,
+                    reasoning_tokens: 0,
                 },
                 ..LlmResponse::default()
             }),

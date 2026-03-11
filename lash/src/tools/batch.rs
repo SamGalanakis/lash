@@ -61,10 +61,7 @@ impl BatchingTools {
                     "Run 1-{} independent tool calls concurrently. Use it for parallel reads, searches, and unrelated diagnostics. Do not batch dependent steps or nest `batch`.",
                     MAX_BATCH_CALLS
                 ),
-                [
-                    crate::ExecutionMode::Repl,
-                    crate::ExecutionMode::NativeTools,
-                ],
+                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             params: vec![ToolParam {
                 name: "tool_calls".into(),
@@ -76,10 +73,7 @@ impl BatchingTools {
             returns: "dict".into(),
             examples: vec![crate::ToolText::new(
                 "batch(tool_calls=[{\"tool\":\"grep\",\"parameters\":{\"pattern\":\"TODO\",\"include\":\"src/**/*.rs\"}},{\"tool\":\"read_file\",\"parameters\":{\"path\":\"src/lib.rs\",\"limit\":200}}])",
-                [
-                    crate::ExecutionMode::Repl,
-                    crate::ExecutionMode::NativeTools,
-                ],
+                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             hidden: false,
             inject_into_prompt: true,
@@ -96,7 +90,7 @@ impl BatchingTools {
 
     fn merged_definitions(&self) -> Vec<ToolDefinition> {
         let mut defs = self.batchable_inner_definitions();
-        if matches!(self.current_mode(), ExecutionMode::NativeTools)
+        if matches!(self.current_mode(), ExecutionMode::Standard)
             && !defs.iter().any(|def| def.name == "batch")
         {
             defs.push(Self::batch_definition());
@@ -332,7 +326,7 @@ impl ToolProvider for BatchingTools {
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
         if name == "batch" {
-            if !matches!(self.current_mode(), ExecutionMode::NativeTools) {
+            if !matches!(self.current_mode(), ExecutionMode::Standard) {
                 return ToolResult::err_fmt("Unknown tool: batch");
             }
             return self.execute_batch(args, progress).await;
@@ -367,10 +361,7 @@ mod tests {
                     name: "alpha".into(),
                     description: vec![crate::ToolText::new(
                         "alpha",
-                        [
-                            crate::ExecutionMode::Repl,
-                            crate::ExecutionMode::NativeTools,
-                        ],
+                        [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                     )],
                     params: vec![],
                     returns: "str".into(),
@@ -382,10 +373,7 @@ mod tests {
                     name: "beta".into(),
                     description: vec![crate::ToolText::new(
                         "beta",
-                        [
-                            crate::ExecutionMode::Repl,
-                            crate::ExecutionMode::NativeTools,
-                        ],
+                        [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                     )],
                     params: vec![],
                     returns: "str".into(),
@@ -408,7 +396,7 @@ mod tests {
         let provider: Arc<dyn ToolProvider> = Arc::new(MockTools {
             calls: Arc::new(AtomicUsize::new(0)),
         });
-        let wrapped = BatchingTools::with_mode(provider, crate::ExecutionMode::NativeTools);
+        let wrapped = BatchingTools::with_mode(provider, crate::ExecutionMode::Standard);
         let defs = wrapped.definitions();
         assert_eq!(defs.iter().filter(|def| def.name == "batch").count(), 1);
     }
@@ -419,7 +407,7 @@ mod tests {
         let provider: Arc<dyn ToolProvider> = Arc::new(MockTools {
             calls: Arc::clone(&calls),
         });
-        let wrapped = BatchingTools::with_mode(provider, crate::ExecutionMode::NativeTools);
+        let wrapped = BatchingTools::with_mode(provider, crate::ExecutionMode::Standard);
 
         let result = wrapped
             .execute(
@@ -455,10 +443,7 @@ mod tests {
                     name: "alpha_omitted_from_prompt".into(),
                     description: vec![crate::ToolText::new(
                         "alpha omitted from prompt",
-                        [
-                            crate::ExecutionMode::Repl,
-                            crate::ExecutionMode::NativeTools,
-                        ],
+                        [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                     )],
                     params: vec![],
                     returns: "str".into(),
@@ -474,7 +459,7 @@ mod tests {
         }
 
         let provider: Arc<dyn ToolProvider> = Arc::new(NonPromptBatchable);
-        let wrapped = BatchingTools::with_mode(provider, crate::ExecutionMode::NativeTools);
+        let wrapped = BatchingTools::with_mode(provider, crate::ExecutionMode::Standard);
 
         let result = wrapped
             .execute(
@@ -503,7 +488,7 @@ mod tests {
         let provider: Arc<dyn ToolProvider> = Arc::new(MockTools {
             calls: Arc::new(AtomicUsize::new(0)),
         });
-        let wrapped = BatchingTools::with_mode(provider, crate::ExecutionMode::NativeTools);
+        let wrapped = BatchingTools::with_mode(provider, crate::ExecutionMode::Standard);
 
         let result = wrapped
             .execute(
@@ -545,7 +530,7 @@ mod tests {
     #[tokio::test]
     async fn plan_mode_tools_are_not_batchable() {
         let provider: Arc<dyn ToolProvider> = Arc::new(crate::tools::PlanMode::new());
-        let wrapped = BatchingTools::with_mode(provider, crate::ExecutionMode::NativeTools);
+        let wrapped = BatchingTools::with_mode(provider, crate::ExecutionMode::Standard);
 
         let result = wrapped
             .execute(
@@ -572,17 +557,20 @@ mod tests {
     #[tokio::test]
     async fn batch_accepts_mem_all_as_real_tool() {
         let store = Arc::new(crate::store::Store::memory().expect("in-memory store"));
-        let provider: Arc<dyn ToolProvider> =
-            Arc::new(crate::tools::StateStore::new(store, Vec::new()));
-        let wrapped = BatchingTools::with_mode(provider.clone(), crate::ExecutionMode::NativeTools);
+        let base: Arc<dyn ToolProvider> = Arc::new(crate::tools::StateStore::new(Vec::new()));
+        let plugins = crate::PluginHost::new(vec![Arc::new(
+            crate::BuiltinMemoryPluginFactory::new(Arc::clone(&store)),
+        )])
+        .build_session("root", None)
+        .expect("plugins");
+        let mut toolset = crate::ToolSet::new() + Arc::clone(&base);
+        for tool_provider in plugins.tool_providers() {
+            toolset = toolset + Arc::clone(tool_provider);
+        }
+        let provider: Arc<dyn ToolProvider> = Arc::new(toolset);
+        let wrapped = BatchingTools::with_mode(provider.clone(), crate::ExecutionMode::Standard);
 
-        let set_turn = provider
-            .execute(
-                "mem_set_turn",
-                &serde_json::json!({"__agent_id__":"root","turn":1}),
-            )
-            .await;
-        assert!(set_turn.success);
+        store.mem_set_turn("root", 1);
         let set_value = provider
             .execute(
                 "mem_set",

@@ -46,10 +46,7 @@ impl ToolProvider for PlanMode {
                 name: "enter_plan_mode".into(),
                 description: vec![crate::ToolText::new(
                     "Enter plan mode. Returns the plan file path to write your plan to.",
-                    [
-                        crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::NativeTools,
-                    ],
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                 )],
                 params: vec![],
                 returns: "dict".into(),
@@ -61,10 +58,7 @@ impl ToolProvider for PlanMode {
                 name: "exit_plan_mode".into(),
                 description: vec![crate::ToolText::new(
                     "Exit plan mode. Returns plan content for user approval.",
-                    [
-                        crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::NativeTools,
-                    ],
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                 )],
                 params: vec![],
                 returns: "dict".into(),

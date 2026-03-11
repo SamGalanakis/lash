@@ -233,10 +233,7 @@ impl ToolProvider for SkillStore {
                 name: "skills".into(),
                 description: vec![crate::ToolText::new(
                     "List available skills. Returns a dict with `items` (list of `{name, description, file_count}` dicts).",
-                    [
-                        crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::NativeTools,
-                    ],
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                 )],
                 params: vec![],
                 returns: "dict".into(),
@@ -248,10 +245,7 @@ impl ToolProvider for SkillStore {
                 name: "load_skill".into(),
                 description: vec![crate::ToolText::new(
                     "Load a skill by name. Returns a dict with `name`, `description`, `instructions`, `files`, and `file_count`.",
-                    [
-                        crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::NativeTools,
-                    ],
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                 )],
                 params: vec![ToolParam::typed("name", "str")],
                 returns: "dict".into(),
@@ -263,10 +257,7 @@ impl ToolProvider for SkillStore {
                 name: "read_skill_file".into(),
                 description: vec![crate::ToolText::new(
                     "Read a supporting file from a skill directory.",
-                    [
-                        crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::NativeTools,
-                    ],
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                 )],
                 params: vec![
                     ToolParam::typed("skill_name", "str"),

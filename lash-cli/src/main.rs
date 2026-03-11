@@ -1,9 +1,12 @@
 mod app;
 mod command;
 mod event;
+mod fork;
 mod input_items;
 mod markdown;
 mod prompt_overrides;
+mod replay;
+mod resume;
 mod session_log;
 mod setup;
 mod skill;
@@ -28,7 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use clap::Parser;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
-use lash_core::agent::{Message, MessageRole, Part, PartKind, PruneState};
+use lash_core::agent::{Message, MessageRole};
 use lash_core::provider::{LashConfig, OPENAI_GENERIC_DEFAULT_BASE_URL, Provider};
 use lash_core::tools::{
     AgentCall, BatchingTools, FilteredTools, SwitchableTools, ToolSet, ToolSetDeps,
@@ -59,7 +62,7 @@ struct Args {
     #[arg(long)]
     model: Option<String>,
 
-    /// Execution backend (`repl` or `native-tools`)
+    /// Execution backend (`repl` or `standard`, default: `standard`)
     #[arg(long = "execution-mode")]
     execution_mode: Option<String>,
 
@@ -78,6 +81,14 @@ struct Args {
     /// Disable mouse scroll support (re-enables terminal text selection)
     #[arg(long)]
     no_mouse: bool,
+
+    /// Resume an existing session file on startup
+    #[arg(long, value_name = "SESSION.jsonl")]
+    resume: Option<String>,
+
+    /// Queue and immediately send a prompt after startup resume
+    #[arg(long, value_name = "PROMPT")]
+    resume_prompt: Option<String>,
 
     /// Force re-run provider setup
     #[arg(long)]
@@ -292,7 +303,7 @@ async fn main() -> anyhow::Result<()> {
     let model = selection.model.clone();
     let execution_mode = ensure_supported_execution_mode(match args.execution_mode.as_deref() {
         Some(raw) => parse_execution_mode(raw).map_err(anyhow::Error::msg)?,
-        None => lash_core::default_execution_mode(),
+        None => ExecutionMode::Standard,
     })
     .map_err(anyhow::Error::msg)?;
 
@@ -309,11 +320,25 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let sessions_dir = lash_core::lash_home().join("sessions");
+    std::fs::create_dir_all(&sessions_dir)?;
+    let resume_start = if let Some(filename) = args.resume.as_deref() {
+        Some(
+            session_log::load_session_start(filename)
+                .ok_or_else(|| anyhow::anyhow!("Could not load session metadata: {}", filename))?,
+        )
+    } else {
+        None
+    };
+
     let headless = args.print_prompt.is_some();
     let run_session_id = if headless {
         None
     } else {
-        Some(uuid::Uuid::new_v4().to_string())
+        resume_start
+            .as_ref()
+            .map(|start| start.session_id.clone())
+            .or_else(|| Some(uuid::Uuid::new_v4().to_string()))
     };
     let config = AgentConfig {
         model: model.clone(),
@@ -334,12 +359,14 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Build store (SQLite-backed archive + tasks)
-    let sessions_dir = lash_core::lash_home().join("sessions");
-    std::fs::create_dir_all(&sessions_dir)?;
-    let db_path = sessions_dir.join(format!(
-        "{}.db",
-        chrono::Local::now().format("%Y%m%d_%H%M%S")
-    ));
+    let db_path = if let Some(filename) = args.resume.as_deref() {
+        sessions_dir.join(format!("{}.db", filename.trim_end_matches(".jsonl")))
+    } else {
+        sessions_dir.join(format!(
+            "{}.db",
+            chrono::Local::now().format("%Y%m%d_%H%M%S")
+        ))
+    };
     let store = Arc::new(Store::open(&db_path).expect("Failed to open session database"));
 
     let skill_dirs = vec![
@@ -356,7 +383,32 @@ async fn main() -> anyhow::Result<()> {
         },
         skill_dirs: Some(skill_dirs),
     });
-    let all_base_tools: Arc<dyn ToolProvider> = Arc::new(base_all);
+    let base_provider: Arc<dyn ToolProvider> = Arc::new(base_all);
+    let plugin_host = PluginHost::new(vec![
+        Arc::new(BuiltinHistoryPluginFactory::new(Arc::clone(&store))),
+        Arc::new(BuiltinMemoryPluginFactory::new(Arc::clone(&store))),
+        Arc::new(fork::ForkPluginFactory),
+    ]);
+    let root_plugins = plugin_host.build_session("root", None)?;
+
+    let mut all_base = ToolSet::new() + Arc::clone(&base_provider);
+    let mut tool_names: BTreeSet<String> = base_provider
+        .definitions()
+        .into_iter()
+        .map(|def| def.name)
+        .collect();
+    for provider in root_plugins.tool_providers() {
+        for def in provider.definitions() {
+            if !tool_names.insert(def.name.clone()) {
+                return Err(anyhow::anyhow!(format!(
+                    "duplicate tool name registered by plugin runtime: {}",
+                    def.name
+                )));
+            }
+        }
+        all_base = all_base + Arc::clone(provider);
+    }
+    let all_base_tools: Arc<dyn ToolProvider> = Arc::new(all_base);
 
     let agent_parent_tools: Arc<SwitchableTools> =
         Arc::new(SwitchableTools::new(Arc::clone(&all_base_tools)));
@@ -365,13 +417,19 @@ async fn main() -> anyhow::Result<()> {
     let root_cancel = CancellationToken::new();
     let probe_agent_call = AgentCall::new(
         Arc::clone(&agent_parent_tools) as Arc<dyn ToolProvider>,
+        Arc::clone(&root_plugins),
         &config,
         lash_config.agent_models.clone(),
         root_cancel.clone(),
     );
+    let mut capability_defs = default_dynamic_capability_defs();
+    for (id, def) in root_plugins.capability_defs() {
+        capability_defs.insert(id.clone(), def.clone());
+    }
     let mut resolver_catalog = all_base_tools.definitions();
     resolver_catalog.extend(probe_agent_call.definitions());
-    let resolved = resolve_features(&config.capabilities, &resolver_catalog);
+    let resolved =
+        resolve_capability_projection(&capability_defs, &config.capabilities, &resolver_catalog)?;
 
     let base_allowed: BTreeSet<String> = all_base_tools
         .definitions()
@@ -396,6 +454,7 @@ async fn main() -> anyhow::Result<()> {
     if !agent_allowed.is_empty() {
         let agent_call = AgentCall::new(
             Arc::clone(&agent_parent_tools) as Arc<dyn ToolProvider>,
+            Arc::clone(&root_plugins),
             &config,
             lash_config.agent_models.clone(),
             root_cancel.clone(),
@@ -407,7 +466,7 @@ async fn main() -> anyhow::Result<()> {
     let tools: Arc<dyn ToolProvider> = Arc::new(tools_comp);
     let dynamic_tools = Arc::new(DynamicToolProvider::from_tool_provider(
         Arc::clone(&tools),
-        default_dynamic_capability_defs(),
+        capability_defs,
         profile_from_agent_capabilities(&config.capabilities),
     )?);
     let dynamic_tools_provider: Arc<dyn ToolProvider> = Arc::new(BatchingTools::with_mode(
@@ -423,7 +482,7 @@ async fn main() -> anyhow::Result<()> {
     let runtime_config: RuntimeConfig = config.clone().into();
     let runtime = LashRuntime::from_state(
         runtime_config,
-        dynamic_tools_provider,
+        RuntimeServices::new(dynamic_tools_provider, root_plugins),
         AgentStateEnvelope {
             agent_id: "root".to_string(),
             execution_mode,
@@ -438,8 +497,15 @@ async fn main() -> anyhow::Result<()> {
         return run_headless(runtime, prompt).await;
     }
 
-    let session_name = generate_session_name(&sessions_dir);
-    let mut logger = SessionLogger::new(&model, run_session_id, session_name.clone())?;
+    let session_name = resume_start
+        .as_ref()
+        .map(|start| start.session_name.clone())
+        .unwrap_or_else(|| generate_session_name(&sessions_dir));
+    let mut logger = if let Some(filename) = args.resume.as_deref() {
+        SessionLogger::resume(filename)?
+    } else {
+        SessionLogger::new(&model, run_session_id, session_name.clone())?
+    };
 
     // Install panic hook that restores the terminal
     let default_hook = std::panic::take_hook();
@@ -653,18 +719,18 @@ fn parse_execution_mode(input: &str) -> Result<ExecutionMode, String> {
     match input.trim().to_ascii_lowercase().as_str() {
         "" => Err("Execution mode cannot be empty.".to_string()),
         "repl" => Ok(ExecutionMode::Repl),
-        "native" | "native-tools" | "native_tools" | "tools" => Ok(ExecutionMode::NativeTools),
+        "standard" | "tools" => Ok(ExecutionMode::Standard),
         other => Err(format!(
-            "Unknown execution mode `{other}`. Expected `repl` or `native-tools`."
+            "Unknown execution mode `{other}`. Expected `repl` or `standard`."
         )),
     }
 }
 
 fn execution_mode_usage() -> &'static str {
     if lash_core::python_runtime_available() {
-        "<repl|native-tools>"
+        "<repl|standard>"
     } else {
-        "<native-tools>"
+        "<standard>"
     }
 }
 
@@ -674,7 +740,7 @@ fn ensure_supported_execution_mode(mode: ExecutionMode) -> Result<ExecutionMode,
     } else {
         Err(match mode {
             ExecutionMode::Repl => "REPL mode is not available in this build.".to_string(),
-            ExecutionMode::NativeTools => "Execution mode is not available.".to_string(),
+            ExecutionMode::Standard => "Execution mode is not available.".to_string(),
         })
     }
 }
@@ -682,7 +748,7 @@ fn ensure_supported_execution_mode(mode: ExecutionMode) -> Result<ExecutionMode,
 fn execution_mode_label(mode: ExecutionMode) -> &'static str {
     match mode {
         ExecutionMode::Repl => "repl",
-        ExecutionMode::NativeTools => "native-tools",
+        ExecutionMode::Standard => "standard",
     }
 }
 
@@ -769,6 +835,7 @@ struct ReplayManifest {
 fn persist_root_agent_state(
     store: &Store,
     state: &mut AgentStateEnvelope,
+    dynamic_state: &DynamicStateSnapshot,
     provider: &Provider,
     configured_model: &str,
     execution_mode: ExecutionMode,
@@ -812,8 +879,10 @@ fn persist_root_agent_state(
             "soft_limit_pct": context_folding.soft_limit_pct,
             "hard_limit_pct": context_folding.hard_limit_pct,
         },
+        "plugin_snapshot": state.plugin_snapshot,
         "task_state": state.task_state,
         "subagent_state": state.subagent_state,
+        "dynamic_state": dynamic_state,
     })
     .to_string();
     let messages_json = serde_json::to_string(&state.messages).unwrap_or_else(|_| "[]".to_string());
@@ -850,6 +919,7 @@ fn help_text(skills: &skill::SkillRegistry) -> String {
     let mut lines = vec![
         "Commands:".to_string(),
         "  /clear, /new       Reset conversation".to_string(),
+        "  /fork [prompt]     Open a forked session in a new terminal".to_string(),
         "  /model [name]      Show or switch LLM model".to_string(),
         format!(
             "  /mode [name]       Show or switch execution mode {}",
@@ -1020,6 +1090,77 @@ async fn run_app(
     let mut active_stream_id: u64 = 0;
     let mut pending_clear_after_return = false;
 
+    if let Some(filename) = args.resume.as_deref() {
+        if let Err(err) = resume::load_resumed_session(
+            filename,
+            &mut app,
+            &mut history,
+            &mut runtime,
+            &mut turn_counter,
+            &mut current_execution_mode,
+            &provider,
+            &mut current_reasoning_effort,
+            &dynamic_tools,
+            &mut desired_dynamic,
+        )
+        .await
+        {
+            push_system_message(&mut app, err);
+        } else {
+            toolset_hash = hash12(
+                &serde_json::to_vec(&dynamic_tools.definitions())
+                    .unwrap_or_else(|_| b"[]".to_vec()),
+            );
+        }
+        if let Some(prompt) = args
+            .resume_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty())
+        {
+            if let Err(e) = apply_pending_reconfigure(
+                &dynamic_tools,
+                &mut desired_dynamic,
+                &mut pending_reconfigure,
+                &mut runtime,
+            )
+            .await
+            {
+                push_system_message(
+                    &mut app,
+                    format!(
+                        "Pending runtime reconfigure failed; startup prompt blocked: {}",
+                        e
+                    ),
+                );
+            } else {
+                toolset_hash = hash12(
+                    &serde_json::to_vec(&dynamic_tools.definitions())
+                        .unwrap_or_else(|_| b"[]".to_vec()),
+                );
+                let (items, image_blobs) = build_items_from_editor_input(prompt, Vec::new());
+                let turn_input = make_turn_input(&mut app, items, image_blobs);
+                send_user_message(
+                    prompt.to_string(),
+                    turn_input.clone(),
+                    &mut app,
+                    logger,
+                    &mut runtime,
+                    &mut history,
+                    &mut runtime_return_rx,
+                    &mut cancel_token,
+                    &mut active_stream_id,
+                    &app_tx,
+                );
+                last_turn = Some(TurnReplayPayload {
+                    display_input: prompt.to_string(),
+                    turn_input,
+                    execution_mode: current_execution_mode,
+                });
+            }
+        }
+    }
+
     loop {
         // Check if runtime turn completed — reclaim runtime + updated history
         if let Some(ref mut rx) = runtime_return_rx {
@@ -1110,9 +1251,11 @@ async fn run_app(
 
                     let persisted_execution_mode = state.execution_mode;
                     let persisted_context_folding = state.context_folding;
+                    let persisted_dynamic_state = dynamic_tools.export_state();
                     persist_root_agent_state(
                         &store,
                         &mut state,
+                        &persisted_dynamic_state,
                         &provider,
                         &app.model,
                         persisted_execution_mode,
@@ -1391,34 +1534,28 @@ async fn run_app(
                         KeyCode::Down | KeyCode::Char('j') => app.session_picker_down(),
                         KeyCode::Enter => {
                             if let Some(filename) = app.take_session_pick() {
-                                match session_log::load_session(&filename) {
-                                    Some((msgs, blocks)) => {
-                                        history = msgs;
-                                        app.blocks = blocks;
-                                        app.blocks.push(DisplayBlock::SystemMessage(format!(
-                                            "Resumed: {}",
-                                            filename
-                                        )));
-
-                                        // Try to restore agent state from .db
-                                        restore_agent_state(
-                                            &filename,
-                                            &mut history,
-                                            &mut runtime,
-                                            &mut app,
-                                            &mut turn_counter,
-                                            &mut current_execution_mode,
-                                        )
-                                        .await;
-
-                                        app.invalidate_height_cache();
-                                        app.scroll_to_bottom();
+                                match resume::load_resumed_session(
+                                    &filename,
+                                    &mut app,
+                                    &mut history,
+                                    &mut runtime,
+                                    &mut turn_counter,
+                                    &mut current_execution_mode,
+                                    &provider,
+                                    &mut current_reasoning_effort,
+                                    &dynamic_tools,
+                                    &mut desired_dynamic,
+                                )
+                                .await
+                                {
+                                    Ok(()) => {
+                                        toolset_hash = hash12(
+                                            &serde_json::to_vec(&dynamic_tools.definitions())
+                                                .unwrap_or_else(|_| b"[]".to_vec()),
+                                        );
                                     }
-                                    None => {
-                                        app.blocks.push(DisplayBlock::SystemMessage(format!(
-                                            "Could not load: {}",
-                                            filename
-                                        )));
+                                    Err(err) => {
+                                        app.blocks.push(DisplayBlock::SystemMessage(err));
                                         app.invalidate_height_cache();
                                         app.scroll_to_bottom();
                                     }
@@ -1578,6 +1715,7 @@ async fn run_app(
                                             task_state: None,
                                             subagent_state: None,
                                             replay_manifest: None,
+                                            plugin_snapshot: None,
                                             repl_snapshot: None,
                                         });
                                         pending_clear_after_return = false;
@@ -1875,40 +2013,106 @@ Use `/provider` or `/login` to sign in again without restarting.",
                                 command::Command::Controls => {
                                     push_system_message(&mut app, controls_text());
                                 }
+                                command::Command::Fork(prompt) => {
+                                    let Some(rt) = runtime.as_mut() else {
+                                        push_system_message(
+                                            &mut app,
+                                            "Runtime is not available to fork right now.",
+                                        );
+                                        continue;
+                                    };
+                                    let current_dynamic_state = dynamic_tools.export_state();
+                                    match fork::fork_current_session(
+                                        rt,
+                                        logger,
+                                        &provider,
+                                        &app.model,
+                                        current_reasoning_effort.as_deref(),
+                                        &toolset_hash,
+                                        &current_dynamic_state,
+                                    )
+                                    .await
+                                    {
+                                        Ok((child_filename, child_session_name)) => {
+                                            let exe = match std::env::current_exe() {
+                                                Ok(exe) => exe,
+                                                Err(err) => {
+                                                    push_system_message(
+                                                        &mut app,
+                                                        format!(
+                                                            "Fork created but launcher lookup failed: {}",
+                                                            err
+                                                        ),
+                                                    );
+                                                    continue;
+                                                }
+                                            };
+                                            let mut child_args = vec![
+                                                "--resume".to_string(),
+                                                child_filename.clone(),
+                                            ];
+                                            if let Some(prompt) = prompt
+                                                .as_deref()
+                                                .map(str::trim)
+                                                .filter(|prompt| !prompt.is_empty())
+                                            {
+                                                child_args.push("--resume-prompt".to_string());
+                                                child_args.push(prompt.to_string());
+                                            }
+                                            match fork::spawn_in_new_terminal(&exe, &child_args) {
+                                                Ok(()) => push_system_message(
+                                                    &mut app,
+                                                    format!(
+                                                        "Forked into `{}` ({})",
+                                                        child_session_name, child_filename
+                                                    ),
+                                                ),
+                                                Err(err) => push_system_message(
+                                                    &mut app,
+                                                    format!(
+                                                        "Fork created but launch failed: {}",
+                                                        err
+                                                    ),
+                                                ),
+                                            }
+                                        }
+                                        Err(err) => push_system_message(
+                                            &mut app,
+                                            format!("Fork failed: {}", err),
+                                        ),
+                                    }
+                                }
                                 command::Command::Help => {
                                     let help = help_text(&app.skills);
                                     push_system_message(&mut app, help);
                                 }
                                 command::Command::Resume(name) => {
                                     if let Some(filename) = name {
-                                        // Direct load by filename
-                                        match session_log::load_session(&filename) {
-                                            Some((msgs, blocks)) => {
-                                                history = msgs;
-                                                app.blocks = blocks;
-                                                app.blocks.push(DisplayBlock::SystemMessage(
-                                                    format!("Resumed: {}", filename),
-                                                ));
-
-                                                // Try to restore agent state from .db
-                                                restore_agent_state(
-                                                    &filename,
-                                                    &mut history,
-                                                    &mut runtime,
-                                                    &mut app,
-                                                    &mut turn_counter,
-                                                    &mut current_execution_mode,
-                                                )
-                                                .await;
+                                        match resume::load_resumed_session(
+                                            &filename,
+                                            &mut app,
+                                            &mut history,
+                                            &mut runtime,
+                                            &mut turn_counter,
+                                            &mut current_execution_mode,
+                                            &provider,
+                                            &mut current_reasoning_effort,
+                                            &dynamic_tools,
+                                            &mut desired_dynamic,
+                                        )
+                                        .await
+                                        {
+                                            Ok(()) => {
                                                 last_turn = None;
-
-                                                app.invalidate_height_cache();
-                                                app.scroll_to_bottom();
+                                                toolset_hash = hash12(
+                                                    &serde_json::to_vec(
+                                                        &dynamic_tools.definitions(),
+                                                    )
+                                                    .unwrap_or_else(|_| b"[]".to_vec()),
+                                                );
                                             }
-                                            None => {
-                                                app.blocks.push(DisplayBlock::SystemMessage(
-                                                    format!("Could not load: {}", filename),
-                                                ));
+                                            Err(err) => {
+                                                app.blocks.push(DisplayBlock::SystemMessage(err));
                                                 app.invalidate_height_cache();
                                                 app.scroll_to_bottom();
                                             }
@@ -2882,211 +3086,6 @@ fn send_user_message(
             result,
         });
     });
-}
-
-/// Try to restore agent state from the .db file corresponding to a .jsonl session file.
-/// On success, restores the REPL from a persisted snapshot. On failure (or no .db), injects a reset message.
-async fn restore_agent_state(
-    jsonl_filename: &str,
-    history: &mut Vec<Message>,
-    runtime: &mut Option<LashRuntime>,
-    app: &mut App,
-    turn_counter: &mut usize,
-    execution_mode: &mut ExecutionMode,
-) {
-    // Derive .db path from .jsonl filename (same stem)
-    let stem = jsonl_filename.trim_end_matches(".jsonl");
-    let db_filename = format!("{}.db", stem);
-    let db_path = session_log::sessions_dir().join(&db_filename);
-
-    if !db_path.exists() {
-        // No .db file — inject reset message
-        let sys_id = format!("m{}", history.len());
-        history.push(Message {
-            id: sys_id.clone(),
-            role: MessageRole::System,
-            parts: vec![Part {
-                id: format!("{}.p0", sys_id),
-                kind: PartKind::Text,
-                content: "Session resumed. Your REPL environment was reset — re-import modules and recreate any state you need.".to_string(),
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: PruneState::Intact,
-            }],
-        });
-        return;
-    }
-
-    // Open the .db and try to load root agent state
-    let resume_store = match Store::open(&db_path) {
-        Ok(s) => s,
-        Err(_) => {
-            app.blocks.push(DisplayBlock::SystemMessage(
-                "Could not open session database.".to_string(),
-            ));
-            return;
-        }
-    };
-
-    if let Some(state) = resume_store.load_agent_state("root") {
-        let config_value = serde_json::from_str::<serde_json::Value>(&state.config_json).ok();
-        *turn_counter = state.iteration.max(0) as usize;
-        let requested_execution_mode = config_value
-            .as_ref()
-            .and_then(|v| {
-                v.get("manifest")
-                    .and_then(|m| m.get("execution_mode"))
-                    .and_then(|m| m.as_str())
-                    .map(str::to_string)
-            })
-            .and_then(|raw| parse_execution_mode(&raw).ok());
-        let restored_execution_mode = requested_execution_mode
-            .and_then(|mode| ensure_supported_execution_mode(mode).ok())
-            .unwrap_or_else(lash_core::default_execution_mode);
-        let restored_context_folding = config_value
-            .as_ref()
-            .and_then(|v| v.get("context_folding").cloned())
-            .and_then(|v| serde_json::from_value::<ContextFoldingConfig>(v).ok())
-            .and_then(|cfg| cfg.validate().ok())
-            .unwrap_or_default();
-        *execution_mode = restored_execution_mode;
-        if matches!(requested_execution_mode, Some(ExecutionMode::Repl))
-            && !lash_core::execution_mode_supported(ExecutionMode::Repl)
-        {
-            app.blocks.push(DisplayBlock::SystemMessage(
-                "This build does not support REPL mode; resuming in `native-tools`.".to_string(),
-            ));
-        }
-        // Restore token counts from DB
-        if state.input_tokens > 0 || state.output_tokens > 0 {
-            app.token_usage = lash_core::TokenUsage {
-                input_tokens: state.input_tokens,
-                output_tokens: state.output_tokens,
-                cached_input_tokens: state.cached_input_tokens,
-            };
-        }
-
-        if matches!(restored_execution_mode, ExecutionMode::Repl) {
-            if let Some(ref repl_snapshot) = state.repl_snapshot {
-                // Try to restore REPL state
-                if let Some(rt) = runtime.as_mut() {
-                    rt.set_context_folding(restored_context_folding);
-                    match rt.restore_repl(repl_snapshot).await {
-                        Ok(()) => {
-                            app.blocks.push(DisplayBlock::SystemMessage(
-                                "REPL state restored from snapshot.".to_string(),
-                            ));
-                        }
-                        Err(e) => {
-                            let sys_id = format!("m{}", history.len());
-                            history.push(Message {
-                                id: sys_id.clone(),
-                                role: MessageRole::System,
-                                parts: vec![Part {
-                                    id: format!("{}.p0", sys_id),
-                                    kind: PartKind::Text,
-                                    content: format!(
-                                        "Session resumed but REPL restore failed ({}). Re-import modules and recreate any state you need.",
-                                        e
-                                    ),
-                                    tool_call_id: None,
-                                    tool_name: None,
-                                    prune_state: PruneState::Intact,
-                                }],
-                            });
-                        }
-                    }
-                }
-            } else {
-                // No persisted snapshot — inject reset message
-                let sys_id = format!("m{}", history.len());
-                history.push(Message {
-                    id: sys_id.clone(),
-                    role: MessageRole::System,
-                    parts: vec![Part {
-                        id: format!("{}.p0", sys_id),
-                        kind: PartKind::Text,
-                        content: "Session resumed. Your REPL environment was reset — re-import modules and recreate any state you need.".to_string(),
-                        tool_call_id: None,
-                        tool_name: None,
-                        prune_state: PruneState::Intact,
-                    }],
-                });
-            }
-        }
-
-        // Handle active sub-agents: inject context into parent history and mark them done
-        let active_subs = resume_store.list_active_agents(Some("root"));
-        for sub in &active_subs {
-            // Extract prompt from config_json if available
-            let prompt = serde_json::from_str::<serde_json::Value>(&sub.config_json)
-                .ok()
-                .and_then(|v| v.get("prompt").and_then(|p| p.as_str()).map(String::from))
-                .unwrap_or_else(|| format!("sub-agent {}", sub.agent_id));
-
-            let sys_id = format!("m{}", history.len());
-            history.push(Message {
-                id: sys_id.clone(),
-                role: MessageRole::System,
-                parts: vec![Part {
-                    id: format!("{}.p0", sys_id),
-                    kind: PartKind::Text,
-                    content: format!(
-                        "Sub-agent '{}' was interrupted mid-task (iteration {}). You may re-delegate if needed.",
-                        prompt, sub.iteration,
-                    ),
-                    tool_call_id: None,
-                    tool_name: None,
-                    prune_state: PruneState::Intact,
-                }],
-            });
-
-            resume_store.mark_agent_done(&sub.agent_id);
-        }
-
-        if !active_subs.is_empty() {
-            app.blocks.push(DisplayBlock::SystemMessage(format!(
-                "{} interrupted sub-agent(s) noted in context.",
-                active_subs.len()
-            )));
-        }
-
-        // Restore runtime envelope so replay metadata and token counters survive resume.
-        if let Some(rt) = runtime.as_mut() {
-            let replay_manifest = config_value
-                .as_ref()
-                .and_then(|v| v.get("manifest").cloned());
-            rt.set_state(AgentStateEnvelope {
-                agent_id: "root".to_string(),
-                context_folding: restored_context_folding,
-                messages: history.clone(),
-                iteration: *turn_counter,
-                token_usage: app.token_usage.clone(),
-                execution_mode: restored_execution_mode,
-                task_state: None,
-                subagent_state: None,
-                replay_manifest,
-                repl_snapshot: state.repl_snapshot.clone(),
-            });
-        }
-    } else {
-        // No root agent state in .db
-        if matches!(*execution_mode, ExecutionMode::Repl) {
-            let sys_id = format!("m{}", history.len());
-            history.push(Message {
-                id: sys_id.clone(),
-                role: MessageRole::System,
-                parts: vec![Part {
-                    id: format!("{}.p0", sys_id),
-                    kind: PartKind::Text,
-                    content: "Session resumed. Your REPL environment was reset — re-import modules and recreate any state you need.".to_string(),
-                    tool_call_id: None,
-                    tool_name: None,
-                    prune_state: PruneState::Intact,
-                }],
-            });
-        }
-    }
 }
 
 /// Send a desktop notification that the agent finished.

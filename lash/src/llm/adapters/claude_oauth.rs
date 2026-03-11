@@ -85,6 +85,11 @@ impl ClaudeOAuthAdapter {
                     .or_else(|| value.get("cached_input_tokens"))
                     .or_else(|| value.get("cached_tokens")),
             ),
+            reasoning_tokens: Self::parse_i64(
+                value
+                    .get("reasoning_tokens")
+                    .or_else(|| value.get("thinking_tokens")),
+            ),
         }
     }
 
@@ -97,6 +102,9 @@ impl ClaudeOAuthAdapter {
         }
         if next.cached_input_tokens > 0 {
             dst.cached_input_tokens = next.cached_input_tokens;
+        }
+        if next.reasoning_tokens > 0 {
+            dst.reasoning_tokens = next.reasoning_tokens;
         }
     }
 

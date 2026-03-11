@@ -23,10 +23,7 @@ impl ToolProvider for Glob {
                     "Find filesystem entries by glob. Returns `path_entries` with `items` sorted by `modified_at` (newest first). Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: limit={}, with_lines=false.",
                     MAX_RESULTS
                 ),
-                [
-                    crate::ExecutionMode::Repl,
-                    crate::ExecutionMode::NativeTools,
-                ],
+                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             params: vec![
                 ToolParam::typed("pattern", "str"),

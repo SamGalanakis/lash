@@ -6,9 +6,51 @@ use serde_json::json;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::embedded::{PythonRequest, PythonResponse, PythonRuntime};
-use crate::{AgentCapabilities, SandboxMessage, ToolCallRecord, ToolImage, ToolProvider};
+use crate::{
+    AgentCapabilities, RuntimeServices, SandboxMessage, ToolCallRecord, ToolImage, ToolProvider,
+};
 
 const REPL_SNAPSHOT_VERSION: u32 = 2;
+
+fn capabilities_payload_json(
+    tools: &Arc<dyn ToolProvider>,
+    capabilities: &AgentCapabilities,
+) -> String {
+    if let Some(projection) = tools.dynamic_projection() {
+        return serde_json::json!({
+            "enabled_capabilities": projection.enabled_capabilities.into_iter().collect::<Vec<_>>(),
+            "enabled_tools": projection.effective_tools.into_iter().collect::<Vec<_>>(),
+            "helper_bindings": projection.helper_bindings.into_iter().collect::<Vec<_>>(),
+        })
+        .to_string();
+    }
+
+    let available_defs = tools.definitions();
+    let capability_defs = crate::default_dynamic_capability_defs();
+    let resolved =
+        crate::resolve_capability_projection(&capability_defs, capabilities, &available_defs)
+            .unwrap_or_else(|_| crate::ResolvedProjection {
+                enabled_capabilities: capabilities
+                    .enabled_capabilities
+                    .iter()
+                    .map(|id| id.as_str().to_string())
+                    .collect(),
+                effective_tools: capabilities
+                    .enabled_tools
+                    .iter()
+                    .filter(|tool| available_defs.iter().any(|def| def.name == tool.as_str()))
+                    .cloned()
+                    .collect(),
+                helper_bindings: std::collections::BTreeSet::new(),
+                prompt_sections: Vec::new(),
+            });
+    serde_json::json!({
+        "enabled_capabilities": resolved.enabled_capabilities.into_iter().collect::<Vec<_>>(),
+        "enabled_tools": resolved.effective_tools.into_iter().collect::<Vec<_>>(),
+        "helper_bindings": resolved.helper_bindings.into_iter().collect::<Vec<_>>(),
+    })
+    .to_string()
+}
 
 /// A prompt from the agent asking the user a question.
 /// The `response_tx` travels all the way to the TUI, which sends the answer
@@ -34,13 +76,13 @@ pub enum SessionError {
 }
 
 enum SessionBackend {
-    NativeTools,
+    Standard,
     Python(PythonRuntime),
 }
 
 pub struct Session {
     backend: SessionBackend,
-    tools: Arc<dyn ToolProvider>,
+    services: RuntimeServices,
     tool_calls: Vec<ToolCallRecord>,
     tool_images: Vec<ToolImage>,
     message_tx: Option<UnboundedSender<SandboxMessage>>,
@@ -51,7 +93,7 @@ pub struct Session {
 
 impl Session {
     pub async fn new(
-        tools: Arc<dyn ToolProvider>,
+        services: RuntimeServices,
         agent_id: &str,
         headless: bool,
         capabilities: AgentCapabilities,
@@ -60,8 +102,8 @@ impl Session {
         let scratch_dir = tempfile::TempDir::new()?;
 
         let mut session = Self {
-            backend: SessionBackend::NativeTools,
-            tools,
+            backend: SessionBackend::Standard,
+            services,
             tool_calls: Vec::new(),
             tool_images: Vec::new(),
             message_tx: None,
@@ -76,21 +118,13 @@ impl Session {
 
             // Send init with tool definitions and agent identity
             let defs: Vec<_> = session
-                .tools
+                .tools()
                 .definitions()
                 .into_iter()
                 .map(|def| def.project(crate::ExecutionMode::Repl))
                 .collect();
             let tools_json = serde_json::to_string(&defs).unwrap_or_else(|_| "[]".to_string());
-            let capabilities_json = serde_json::json!({
-                "enabled_capabilities": capabilities
-                    .enabled_capabilities
-                    .iter()
-                    .map(|id| id.as_str())
-                    .collect::<Vec<_>>(),
-                "enabled_tools": capabilities.enabled_tools.iter().collect::<Vec<_>>(),
-            })
-            .to_string();
+            let capabilities_json = capabilities_payload_json(session.tools(), &capabilities);
             session.runtime()?.send(PythonRequest::Init {
                 tools_json,
                 agent_id: agent_id.to_string(),
@@ -115,13 +149,21 @@ impl Session {
 
     fn runtime(&self) -> Result<&PythonRuntime, SessionError> {
         match &self.backend {
-            SessionBackend::NativeTools => Err(SessionError::ReplUnavailable),
+            SessionBackend::Standard => Err(SessionError::ReplUnavailable),
             SessionBackend::Python(runtime) => Ok(runtime),
         }
     }
 
     pub fn supports_repl(&self) -> bool {
         matches!(self.backend, SessionBackend::Python(_))
+    }
+
+    pub fn tools(&self) -> &Arc<dyn ToolProvider> {
+        &self.services.tools
+    }
+
+    pub fn plugins(&self) -> &Arc<crate::PluginSession> {
+        &self.services.plugins
     }
 
     /// Set the message sender for streaming messages during execution.
@@ -196,7 +238,7 @@ impl Session {
                         "PARALLEL: ToolCall #{tc_num} '{name}' received at t+{:.3}s",
                         start.elapsed().as_secs_f64()
                     );
-                    let tools = Arc::clone(&self.tools);
+                    let tools = Arc::clone(self.tools());
                     let parsed_args: serde_json::Value =
                         serde_json::from_str(&args).unwrap_or(json!({}));
                     let msg_tx = self.message_tx.clone();
@@ -275,6 +317,7 @@ impl Session {
                     }
 
                     let response = self.final_response.clone().unwrap_or_default();
+                    let error = error.filter(|value| !value.trim().is_empty());
                     return Ok(ExecResponse {
                         output,
                         response,
@@ -353,7 +396,7 @@ impl Session {
         generation: u64,
     ) -> Result<(), SessionError> {
         let defs: Vec<_> = self
-            .tools
+            .tools()
             .definitions()
             .into_iter()
             .map(|def| def.project(crate::ExecutionMode::Repl))
@@ -478,11 +521,6 @@ impl Session {
         }
 
         Ok(())
-    }
-
-    /// Access the tool provider.
-    pub fn tools(&self) -> &Arc<dyn ToolProvider> {
-        &self.tools
     }
 }
 

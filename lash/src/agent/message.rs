@@ -10,6 +10,8 @@ pub struct Message {
     pub id: String,
     pub role: MessageRole,
     pub parts: Vec<Part>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<MessageOrigin>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -17,6 +19,12 @@ pub enum MessageRole {
     User,
     Assistant,
     System,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MessageOrigin {
+    Plugin { plugin_id: String },
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -195,9 +203,10 @@ pub fn render_transcript_prompt(
         }
         text.push('\n');
         text.push_str("Assistant (Lash, continuing this transcript):\n");
-        if turn.assistant.is_empty() {
+        let is_current_pending_turn = idx + 1 == turns.len() && turn.assistant.is_empty();
+        if turn.assistant.is_empty() && !is_current_pending_turn {
             text.push_str("[No assistant content recorded]\n");
-        } else {
+        } else if !turn.assistant.is_empty() {
             text.push_str(&turn.assistant.join("\n\n"));
             text.push('\n');
         }
@@ -235,16 +244,19 @@ mod tests {
                 id: "m0".to_string(),
                 role: MessageRole::User,
                 parts: vec![part(PartKind::Text, "first")],
+                origin: None,
             },
             Message {
                 id: "m1".to_string(),
                 role: MessageRole::Assistant,
                 parts: vec![part(PartKind::Prose, "reply one")],
+                origin: None,
             },
             Message {
                 id: "m2".to_string(),
                 role: MessageRole::User,
                 parts: vec![part(PartKind::Text, "second")],
+                origin: None,
             },
         ];
 
@@ -267,6 +279,7 @@ mod tests {
             id: "m0".to_string(),
             role: MessageRole::User,
             parts: vec![part(PartKind::Text, "__LASH_IMAGE_IDX:3")],
+            origin: None,
         }];
 
         let rendered = render_transcript_prompt(&msgs, "", "");
@@ -276,5 +289,38 @@ mod tests {
             LlmPromptPart::Image(_) => panic!("expected text prompt"),
         };
         assert!(text.contains("[Image attached]"));
+    }
+
+    #[test]
+    fn render_transcript_prompt_omits_missing_assistant_placeholder_for_current_turn() {
+        let msgs = vec![
+            Message {
+                id: "m0".to_string(),
+                role: MessageRole::User,
+                parts: vec![part(PartKind::Text, "first")],
+                origin: None,
+            },
+            Message {
+                id: "m1".to_string(),
+                role: MessageRole::Assistant,
+                parts: vec![part(PartKind::Prose, "reply one")],
+                origin: None,
+            },
+            Message {
+                id: "m2".to_string(),
+                role: MessageRole::User,
+                parts: vec![part(PartKind::Text, "second")],
+                origin: None,
+            },
+        ];
+
+        let rendered = render_transcript_prompt(&msgs, "", "");
+        let text = match &rendered.user_prompt[0] {
+            LlmPromptPart::Text(text) => text,
+            LlmPromptPart::Image(_) => panic!("expected text prompt"),
+        };
+
+        assert!(text.contains("=== Turn 2 ===\nUser:\nsecond"));
+        assert!(!text.contains("=== Turn 2 ===\nUser:\nsecond\n\nAssistant (Lash, continuing this transcript):\n[No assistant content recorded]"));
     }
 }

@@ -25,10 +25,7 @@ impl ToolProvider for Grep {
                     "Search file contents with a ripgrep-style regex. Returns `file:line:text` matches plus `file-line-text` context lines. Defaults: context={}, limit={}.",
                     DEFAULT_CONTEXT, MAX_RESULTS
                 ),
-                [
-                    crate::ExecutionMode::Repl,
-                    crate::ExecutionMode::NativeTools,
-                ],
+                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             params: vec![
                 ToolParam::typed("pattern", "str"),

@@ -98,6 +98,11 @@ impl GoogleCloudCodeAdapter {
                     .or_else(|| meta.get("cachedPromptTokenCount"))
                     .or_else(|| meta.get("cachedInputTokenCount")),
             ),
+            reasoning_tokens: Self::parse_i64(
+                meta.get("thoughtsTokenCount")
+                    .or_else(|| meta.get("reasoningTokenCount"))
+                    .or_else(|| meta.get("reasoningTokens")),
+            ),
         }
     }
 
@@ -204,6 +209,7 @@ impl GoogleCloudCodeAdapter {
         if new_usage.input_tokens > 0
             || new_usage.output_tokens > 0
             || new_usage.cached_input_tokens > 0
+            || new_usage.reasoning_tokens > 0
         {
             *usage = new_usage;
         }

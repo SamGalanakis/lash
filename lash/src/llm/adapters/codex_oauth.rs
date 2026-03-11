@@ -93,6 +93,11 @@ impl CodexOAuthAdapter {
                     .or_else(|| usage.get("cached_input_tokens"))
                     .or_else(|| usage.get("cached_tokens")),
             ),
+            reasoning_tokens: Self::parse_i64(usage.get("reasoning_tokens").or_else(|| {
+                usage
+                    .get("output_tokens_details")
+                    .and_then(|d| d.get("reasoning_tokens"))
+            })),
         }
     }
 
@@ -105,6 +110,9 @@ impl CodexOAuthAdapter {
         }
         if next.cached_input_tokens > 0 {
             dst.cached_input_tokens = next.cached_input_tokens;
+        }
+        if next.reasoning_tokens > 0 {
+            dst.reasoning_tokens = next.reasoning_tokens;
         }
     }
 
@@ -143,6 +151,7 @@ impl CodexOAuthAdapter {
             input_tokens = usage.input_tokens,
             output_tokens = usage.output_tokens,
             cached_input_tokens = usage.cached_input_tokens,
+            reasoning_tokens = usage.reasoning_tokens,
             has_final_response,
             "codex sse event"
         );

@@ -20,10 +20,7 @@ impl crate::ToolProvider for FindReplace {
                     "`old_text` must match exactly, including whitespace/newlines. Default: replace the first match; set `all=true` for all matches.\n\n",
                     "Use `edit_file` for anchor-based or structural edits.",
                 ),
-                [
-                    crate::ExecutionMode::Repl,
-                    crate::ExecutionMode::NativeTools,
-                ],
+                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             params: vec![
                 ToolParam::typed("path", "str"),

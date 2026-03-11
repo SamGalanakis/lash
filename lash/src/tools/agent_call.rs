@@ -9,8 +9,8 @@ use crate::capabilities::{CapabilityId, tools_for_capability};
 use crate::provider::AgentModels;
 use crate::{
     AgentConfig, AgentEvent, AgentStateEnvelope, DynamicStateSnapshot, EventSink, LashRuntime,
-    Message, MessageRole, Part, PartKind, ProgressSender, PruneState, RuntimeConfig,
-    SandboxMessage, ToolDefinition, ToolParam, ToolProvider, ToolResult,
+    Message, MessageRole, Part, PartKind, PluginSession, ProgressSender, PruneState, RuntimeConfig,
+    RuntimeServices, SandboxMessage, ToolDefinition, ToolParam, ToolProvider, ToolResult,
 };
 
 use super::{FilteredTools, ToolSet, require_str};
@@ -120,6 +120,7 @@ impl EventSink for ChannelEventSink {
 /// Returns a handle immediately; use agent_result/agent_output/agent_kill to interact.
 pub struct AgentCall {
     tools: Arc<dyn ToolProvider>,
+    plugins: Arc<PluginSession>,
     config: AgentConfig,
     agent_models: Option<AgentModels>,
     cancel: CancellationToken,
@@ -129,12 +130,14 @@ pub struct AgentCall {
 impl AgentCall {
     pub fn new(
         tools: Arc<dyn ToolProvider>,
+        plugins: Arc<PluginSession>,
         config: &AgentConfig,
         agent_models: Option<AgentModels>,
         cancel: CancellationToken,
     ) -> Self {
         Self {
             tools,
+            plugins,
             config: config.clone(),
             agent_models,
             cancel,
@@ -154,7 +157,7 @@ impl AgentCall {
             self.config.capabilities.clone()
         };
         let execution_mode = if matches!(tier, Tier::Low) {
-            crate::ExecutionMode::NativeTools
+            crate::ExecutionMode::Standard
         } else {
             self.config.execution_mode
         };
@@ -251,6 +254,7 @@ impl AgentCall {
                 + Arc::clone(&self.tools)
                 + AgentCall::new(
                     Arc::clone(&self.tools),
+                    Arc::clone(&self.plugins),
                     &self.config,
                     self.agent_models.clone(),
                     self.cancel.clone(),
@@ -297,6 +301,14 @@ impl AgentCall {
 
         // Create a new runtime with tier-specific tools.
         let session_tools = self.session_tools_for_tier(&tier);
+        let session_plugins = match self.plugins.fork_for_agent(&agent_id) {
+            Ok(plugins) => plugins,
+            Err(err) => {
+                return ToolResult::err_fmt(format_args!(
+                    "Failed to prepare sub-agent plugins: {err}"
+                ));
+            }
+        };
         let runtime_state = AgentStateEnvelope {
             agent_id: agent_id.clone(),
             execution_mode: agent_execution_mode,
@@ -306,7 +318,7 @@ impl AgentCall {
         let runtime_config: RuntimeConfig = agent_config.clone().into();
         let mut runtime = match LashRuntime::from_state(
             runtime_config,
-            Arc::clone(&session_tools),
+            RuntimeServices::new(Arc::clone(&session_tools), session_plugins),
             runtime_state,
         )
         .await
@@ -319,41 +331,6 @@ impl AgentCall {
             }
         };
 
-        // Load parent memory/history into the child session via state tools.
-        let parent_history = args
-            .get("_parent_history")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let parent_mem = args
-            .get("_parent_mem")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        if matches!(agent_execution_mode, crate::ExecutionMode::Repl)
-            && (parent_history.is_some() || parent_mem.is_some())
-        {
-            if let Some(ref hist_json) = parent_history
-                && let Ok(turns) = serde_json::from_str::<serde_json::Value>(hist_json)
-            {
-                let _ = session_tools
-                    .execute(
-                        "history_load",
-                        &json!({"__agent_id__": agent_id, "turns": turns}),
-                    )
-                    .await;
-            }
-            if let Some(ref mem_json) = parent_mem
-                && let Ok(entries) = serde_json::from_str::<serde_json::Value>(mem_json)
-            {
-                let _ = session_tools
-                    .execute(
-                        "mem_load",
-                        &json!({"__agent_id__": agent_id, "entries": entries}),
-                    )
-                    .await;
-            }
-        }
-
         // Build the user message, optionally appending schema instructions
         let user_content = if let Some(ref schema_str) = schema {
             let model_name = serde_json::from_str::<serde_json::Value>(schema_str)
@@ -364,7 +341,7 @@ impl AgentCall {
                 crate::ExecutionMode::Repl => format!(
                     "{prompt}\n\nCall done(...) with a single JSON-compatible dict matching this schema exactly:\n{schema_str}\n\nDo not return prose in done(). The dict should represent a `{model_name}` object."
                 ),
-                crate::ExecutionMode::NativeTools => format!(
+                crate::ExecutionMode::Standard => format!(
                     "{prompt}\n\nReturn your final answer as a single JSON object matching this schema exactly:\n{schema_str}\n\nDo not wrap it in markdown fences or extra commentary."
                 ),
             }
@@ -383,6 +360,7 @@ impl AgentCall {
                 tool_name: None,
                 prune_state: PruneState::Intact,
             }],
+            origin: None,
         }];
 
         let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
@@ -622,12 +600,12 @@ impl ToolProvider for AgentCall {
                 name: "agent_call".into(),
                 description: vec![
                     crate::ToolText::new(
-                        r#"Spawn a sub-agent and return a handle. Use `await agent_result(handle["id"])`, `await agent_output(handle["id"])`, and `await agent_kill(handle["id"])`. Use `intelligence="low"` for fast read-only work; low-tier sub-agents always run in native-tools mode. Medium/high inherit the parent execution mode and receive parent history/memory read-only."#,
+                        r#"Spawn a sub-agent and return a handle. Use `await agent_result(handle["id"])`, `await agent_output(handle["id"])`, and `await agent_kill(handle["id"])`. Use `intelligence="low"` for fast read-only work; low-tier sub-agents always run in standard mode. Medium/high inherit the parent execution mode and receive parent history/memory read-only."#,
                         [crate::ExecutionMode::Repl],
                     ),
                     crate::ToolText::new(
-                        r#"Spawn a sub-agent and return a handle. Use `agent_result(id)`, `agent_output(id)`, and `agent_kill(id)` with that ID. Use `intelligence="low"` for fast read-only work; low-tier sub-agents always run in native-tools mode. Medium/high inherit the parent execution mode and receive parent history/memory read-only."#,
-                        [crate::ExecutionMode::NativeTools],
+                        r#"Spawn a sub-agent and return a handle. Use `agent_result(id)`, `agent_output(id)`, and `agent_kill(id)` with that ID. Use `intelligence="low"` for fast read-only work; low-tier sub-agents always run in standard mode. Medium/high inherit the parent execution mode and receive parent history/memory read-only."#,
+                        [crate::ExecutionMode::Standard],
                     ),
                 ],
                 params: vec![
@@ -656,7 +634,7 @@ impl ToolProvider for AgentCall {
                     ),
                     crate::ToolText::new(
                         "handle = agent_call(prompt=\"Summarize the auth flow\", intelligence=\"low\")",
-                        [crate::ExecutionMode::NativeTools],
+                        [crate::ExecutionMode::Standard],
                     ),
                 ],
                 hidden: false,
@@ -668,7 +646,7 @@ impl ToolProvider for AgentCall {
                     "Wait for a sub-agent to finish and return its final result.",
                     [
                         crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::NativeTools,
+                        crate::ExecutionMode::Standard,
                     ],
                 )],
                 params: vec![
@@ -686,7 +664,7 @@ impl ToolProvider for AgentCall {
                     "Read and drain buffered output from a running sub-agent. Non-blocking; returns an empty string if nothing new is available.",
                     [
                         crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::NativeTools,
+                        crate::ExecutionMode::Standard,
                     ],
                 )],
                 params: vec![ToolParam::typed("id", "str")],
@@ -701,7 +679,7 @@ impl ToolProvider for AgentCall {
                     "Cancel a running sub-agent.",
                     [
                         crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::NativeTools,
+                        crate::ExecutionMode::Standard,
                     ],
                 )],
                 params: vec![ToolParam::typed("id", "str")],
@@ -823,11 +801,11 @@ mod tests {
             .expect("agent_call definition");
 
         let repl_desc = agent_call.description_for(crate::ExecutionMode::Repl);
-        let native_desc = agent_call.description_for(crate::ExecutionMode::NativeTools);
+        let standard_desc = agent_call.description_for(crate::ExecutionMode::Standard);
 
-        assert!(repl_desc.contains("plain handle dict"));
+        assert!(repl_desc.contains("return a handle"));
         assert!(repl_desc.contains("await agent_result(handle[\"id\"])"));
-        assert!(!native_desc.contains("AgentHandle"));
+        assert!(!standard_desc.contains("AgentHandle"));
     }
 
     struct MockBaseTool;
@@ -840,10 +818,7 @@ mod tests {
                     name: "mock_base".into(),
                     description: vec![crate::ToolText::new(
                         "mock",
-                        [
-                            crate::ExecutionMode::Repl,
-                            crate::ExecutionMode::NativeTools,
-                        ],
+                        [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                     )],
                     params: vec![],
                     returns: "None".into(),
@@ -855,10 +830,7 @@ mod tests {
                     name: "read_file".into(),
                     description: vec![crate::ToolText::new(
                         "mock read",
-                        [
-                            crate::ExecutionMode::Repl,
-                            crate::ExecutionMode::NativeTools,
-                        ],
+                        [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                     )],
                     params: vec![],
                     returns: "str".into(),
@@ -870,10 +842,7 @@ mod tests {
                     name: "write_file".into(),
                     description: vec![crate::ToolText::new(
                         "mock write",
-                        [
-                            crate::ExecutionMode::Repl,
-                            crate::ExecutionMode::NativeTools,
-                        ],
+                        [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                     )],
                     params: vec![],
                     returns: "None".into(),
@@ -895,8 +864,12 @@ mod tests {
             provider: codex_provider(),
             ..Default::default()
         };
+        let plugins = crate::PluginHost::empty()
+            .build_session("root", None)
+            .expect("plugins");
         AgentCall::new(
             Arc::new(MockBaseTool),
+            plugins,
             &config,
             None,
             CancellationToken::new(),
@@ -946,7 +919,7 @@ mod tests {
         let medium = agent_call.build_agent_config(&Tier::Medium);
         assert!(!low.capabilities.enabled(CapabilityId::CoreWrite));
         assert!(medium.capabilities.enabled(CapabilityId::CoreWrite));
-        assert_eq!(low.execution_mode, crate::ExecutionMode::NativeTools);
+        assert_eq!(low.execution_mode, crate::ExecutionMode::Standard);
         assert_eq!(medium.execution_mode, crate::ExecutionMode::Repl);
     }
 }

@@ -35,19 +35,13 @@ impl ToolProvider for FetchUrl {
             name: "fetch_url".into(),
             description: vec![crate::ToolText::new(
                 "Fetch and extract one webpage via Tavily. Returns extracted text, or a short explanatory string if no readable content is found.",
-                [
-                    crate::ExecutionMode::Repl,
-                    crate::ExecutionMode::NativeTools,
-                ],
+                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             params: vec![ToolParam::typed("url", "str")],
             returns: "str".into(),
             examples: vec![crate::ToolText::new(
                 "fetch_url(url=\"https://www.rust-lang.org/\")",
-                [
-                    crate::ExecutionMode::Repl,
-                    crate::ExecutionMode::NativeTools,
-                ],
+                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             hidden: false,
             inject_into_prompt: false,

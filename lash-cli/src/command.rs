@@ -4,6 +4,7 @@ use crate::skill::SkillRegistry;
 pub const COMMANDS: &[(&str, &str)] = &[
     ("/clear", "Reset conversation"),
     ("/controls", "Show keyboard shortcuts"),
+    ("/fork", "Open a forked session in a new terminal"),
     ("/model", "Show or switch LLM model"),
     ("/mode", "Show or switch execution mode"),
     ("/provider", "Open provider setup (in-app)"),
@@ -37,7 +38,7 @@ pub fn completions(prefix: &str, skills: &SkillRegistry) -> Vec<(String, String)
 pub fn completion_inserts_space(cmd: &str, skills: &SkillRegistry) -> bool {
     matches!(
         cmd,
-        "/model" | "/mode" | "/resume" | "/tools" | "/caps" | "/reconfigure"
+        "/fork" | "/model" | "/mode" | "/resume" | "/tools" | "/caps" | "/reconfigure"
     ) || skills.get(cmd.trim_start_matches('/')).is_some()
 }
 
@@ -47,6 +48,8 @@ pub enum Command {
     Clear,
     /// Show keyboard shortcuts
     Controls,
+    /// Fork the current session into a new terminal (optional initial prompt)
+    Fork(Option<String>),
     /// Show or switch LLM model
     Model(Option<String>),
     /// Show or switch execution mode
@@ -91,6 +94,9 @@ pub fn parse(input: &str, skills: &SkillRegistry) -> Option<Command> {
     match cmd {
         "clear" | "new" => Some(Command::Clear),
         "controls" => Some(Command::Controls),
+        "fork" => Some(Command::Fork(
+            arg.filter(|a| !a.is_empty()).map(|a| a.to_string()),
+        )),
         "model" => Some(Command::Model(
             arg.filter(|a| !a.is_empty()).map(|a| a.to_string()),
         )),
@@ -140,6 +146,11 @@ mod tests {
     fn parses_aliases_and_arguments() {
         let skills = SkillRegistry::load();
         assert!(matches!(parse("/new", &skills), Some(Command::Clear)));
+        assert!(matches!(parse("/fork", &skills), Some(Command::Fork(None))));
+        assert!(matches!(
+            parse("/fork draft a reply", &skills),
+            Some(Command::Fork(Some(_)))
+        ));
         assert!(matches!(
             parse("/provider", &skills),
             Some(Command::ChangeProvider)
@@ -156,7 +167,7 @@ mod tests {
             Some(Command::Model(Some(_)))
         ));
         assert!(matches!(
-            parse("/mode native-tools", &skills),
+            parse("/mode standard", &skills),
             Some(Command::Mode(Some(_)))
         ));
         assert!(matches!(
@@ -178,6 +189,7 @@ mod tests {
     fn completion_spacing_matches_arg_taking_commands() {
         let skills = SkillRegistry::load();
         for cmd in [
+            "/fork",
             "/model",
             "/mode",
             "/resume",

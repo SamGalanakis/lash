@@ -66,7 +66,9 @@ pub fn resolve_projection(
         }
 
         for helper in &def.helper_bindings {
-            helper_bindings.insert(helper.clone());
+            if available_tools.contains(helper) {
+                helper_bindings.insert(helper.clone());
+            }
         }
 
         if let Some(section) = &def.prompt_section
@@ -113,7 +115,23 @@ pub fn default_dynamic_capability_defs() -> BTreeMap<String, DynamicCapabilityDe
             },
         );
     }
+    #[cfg(feature = "sqlite-store")]
+    defs.extend(crate::plugin::builtin_dynamic_capability_defs());
     defs
+}
+
+pub fn resolve_capability_projection(
+    defs: &BTreeMap<String, DynamicCapabilityDef>,
+    caps: &AgentCapabilities,
+    available_defs: &[ToolDefinition],
+) -> Result<ResolvedProjection, ReconfigureError> {
+    let available_tools: BTreeSet<String> =
+        available_defs.iter().map(|def| def.name.clone()).collect();
+    resolve_projection(
+        defs,
+        &profile_from_agent_capabilities(caps),
+        &available_tools,
+    )
 }
 
 pub fn profile_from_agent_capabilities(caps: &AgentCapabilities) -> CapabilityProfile {
@@ -393,10 +411,13 @@ impl DynamicToolProvider {
     }
 
     pub fn capabilities_payload_json(&self) -> String {
+        let resolved = self.resolved_projection();
         let profile = self.profile();
         serde_json::json!({
-            "enabled_capabilities": profile.enabled_capabilities.into_iter().collect::<Vec<_>>(),
-            "enabled_tools": profile.enabled_tools.into_iter().collect::<Vec<_>>(),
+            "enabled_capabilities": resolved.enabled_capabilities.into_iter().collect::<Vec<_>>(),
+            "enabled_tools": resolved.effective_tools.into_iter().collect::<Vec<_>>(),
+            "helper_bindings": resolved.helper_bindings.into_iter().collect::<Vec<_>>(),
+            "explicit_enabled_tools": profile.enabled_tools.into_iter().collect::<Vec<_>>(),
         })
         .to_string()
     }
@@ -555,11 +576,41 @@ impl ToolProvider for DynamicToolProvider {
         args: &serde_json::Value,
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
-        let (adapter_id, allowed) = {
+        let (adapter_id, allowed, catalog) = {
             let state = self.state.read().expect("dynamic state lock poisoned");
             let allowed = state.resolved.effective_tools.contains(name);
             let adapter_id = state.tools.get(name).map(|s| s.adapter_id.clone());
-            (adapter_id, allowed)
+            let catalog = if matches!(name, "list_tools" | "search_tools")
+                && args.get("catalog").is_none()
+            {
+                Some(
+                    state
+                        .tools
+                        .values()
+                        .filter(|spec| {
+                            state
+                                .resolved
+                                .effective_tools
+                                .contains(&spec.definition.name)
+                        })
+                        .map(|spec| {
+                            let projected = spec.definition.project(crate::ExecutionMode::Standard);
+                            serde_json::json!({
+                                "name": projected.name,
+                                "description": projected.description,
+                                "params": projected.params,
+                                "returns": projected.returns,
+                                "examples": projected.examples,
+                                "inject_into_prompt": projected.inject_into_prompt,
+                                "hidden": projected.hidden,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                None
+            };
+            (adapter_id, allowed, catalog)
         };
 
         if !allowed {
@@ -582,7 +633,15 @@ impl ToolProvider for DynamicToolProvider {
             return ToolResult::err_fmt(format_args!("Tool adapter missing for tool `{name}`"));
         };
 
-        adapter.execute(name, args, progress).await
+        let payload = if let Some(catalog) = catalog {
+            let mut object = args.as_object().cloned().unwrap_or_default();
+            object.insert("catalog".to_string(), serde_json::Value::Array(catalog));
+            serde_json::Value::Object(object)
+        } else {
+            args.clone()
+        };
+
+        adapter.execute(name, &payload, progress).await
     }
 }
 
@@ -599,10 +658,7 @@ mod tests {
                 name: "mock_tool".to_string(),
                 description: vec![crate::ToolText::new(
                     "mock",
-                    [
-                        crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::NativeTools,
-                    ],
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                 )],
                 params: vec![],
                 returns: "str".to_string(),

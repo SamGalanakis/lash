@@ -24,10 +24,7 @@ impl ToolProvider for WebSearch {
             name: "search_web".into(),
             description: vec![crate::ToolText::new(
                 "Search the web via Tavily. Returns `{results: [...], answer?: str}` where each result has `title`, `url`, and `content`.",
-                [
-                    crate::ExecutionMode::Repl,
-                    crate::ExecutionMode::NativeTools,
-                ],
+                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             params: vec![
                 ToolParam::typed("query", "str"),
@@ -46,7 +43,7 @@ impl ToolProvider for WebSearch {
                 ),
                 crate::ToolText::new(
                     "search_web(query=\"latest Rust release notes\", max_results=5)",
-                    [crate::ExecutionMode::NativeTools],
+                    [crate::ExecutionMode::Standard],
                 ),
             ],
             hidden: false,

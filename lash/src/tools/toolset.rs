@@ -53,11 +53,7 @@ impl ToolSet {
         #[cfg(feature = "sqlite-store")]
         if let Some(ref store) = deps.store {
             set = set + super::TaskStore::new(Arc::clone(store));
-            set = set
-                + super::StateStore::new(
-                    Arc::clone(store),
-                    deps.skill_dirs.clone().unwrap_or_default(),
-                );
+            set = set + super::StateStore::new(deps.skill_dirs.clone().unwrap_or_default());
         }
 
         if let Some(key) = deps.tavily_api_key {
@@ -176,10 +172,7 @@ mod tests {
                 name: "alpha".into(),
                 description: vec![crate::ToolText::new(
                     "Alpha tool",
-                    [
-                        crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::NativeTools,
-                    ],
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                 )],
                 params: vec![],
                 returns: "str".into(),
@@ -202,10 +195,7 @@ mod tests {
                 name: "beta".into(),
                 description: vec![crate::ToolText::new(
                     "Beta tool",
-                    [
-                        crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::NativeTools,
-                    ],
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                 )],
                 params: vec![ToolParam::typed("x", "int")],
                 returns: "int".into(),
@@ -317,10 +307,7 @@ mod tests {
                     name: "alpha".into(),
                     description: vec![crate::ToolText::new(
                         "Alpha v2",
-                        [
-                            crate::ExecutionMode::Repl,
-                            crate::ExecutionMode::NativeTools,
-                        ],
+                        [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                     )],
                     params: vec![],
                     returns: "str".into(),

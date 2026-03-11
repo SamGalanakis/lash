@@ -21,8 +21,6 @@ use crate::session::Session;
 pub use message::{Message, MessageRole, Part, PartKind, PruneState, render_transcript_prompt};
 
 #[allow(unused_imports)]
-pub(crate) use exec::{ExecAccumulator, execute_and_collect};
-#[allow(unused_imports)]
 pub(crate) use message::IMAGE_REF_PREFIX;
 pub(crate) use prompt::{PromptComposeInput, PromptProfile, compose_system_prompt};
 pub use prompt::{PromptOverrideMode, PromptSectionName, PromptSectionOverride};
@@ -63,6 +61,7 @@ fn context_archive_marker(history_enabled: bool) -> Message {
             tool_name: None,
             prune_state: PruneState::Intact,
         }],
+        origin: None,
     }
 }
 
@@ -141,16 +140,22 @@ pub struct TokenUsage {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cached_input_tokens: i64,
+    #[serde(default)]
+    pub reasoning_tokens: i64,
 }
 
 impl TokenUsage {
     pub fn total(&self) -> i64 {
-        self.input_tokens + self.output_tokens
+        self.input_tokens + self.output_tokens + self.reasoning_tokens
+    }
+    pub fn context_total(&self) -> i64 {
+        self.total() + self.cached_input_tokens
     }
     pub fn add(&mut self, other: &TokenUsage) {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
         self.cached_input_tokens += other.cached_input_tokens;
+        self.reasoning_tokens += other.reasoning_tokens;
     }
 }
 
@@ -372,6 +377,7 @@ impl TurnTerminationPolicyState {
                 tool_name: None,
                 prune_state: PruneState::Intact,
             }],
+            origin: None,
         });
         self.max_steps_final = true;
     }
@@ -450,13 +456,11 @@ pub(crate) struct ExecutionPreamble {
     pub(crate) tool_list: String,
     pub(crate) tool_specs: Vec<LlmToolSpec>,
     pub(crate) tool_names: Vec<String>,
-    pub(crate) enabled_capability_ids: BTreeSet<String>,
     pub(crate) helper_bindings: BTreeSet<String>,
     pub(crate) capability_prompt_sections: Vec<String>,
+    pub(crate) plugin_prompt_sections: Vec<String>,
     pub(crate) can_write: bool,
     pub(crate) history_enabled: bool,
-    #[allow(dead_code)]
-    pub(crate) memory_enabled: bool,
     pub(crate) instruction_source: Arc<dyn InstructionSource>,
     pub(crate) project_instructions: String,
     pub(crate) base_context: String,
@@ -495,6 +499,7 @@ pub(crate) fn build_execution_preamble(
     base_context_cache: &mut Option<String>,
     mode: ExecutionMode,
     model: String,
+    plugin_prompt_sections: Vec<String>,
 ) -> ExecutionPreamble {
     let all_tools = session.tools().definitions();
     let mut prompt_tools: Vec<_> = all_tools
@@ -514,7 +519,7 @@ pub(crate) fn build_execution_preamble(
             ExecutionMode::Repl => format!(
                 "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Use `T.list_tools()` / `T.search_tools(...)` to discover them, then call them via `T.<tool>(...)`."
             ),
-            ExecutionMode::NativeTools => {
+            ExecutionMode::Standard => {
                 format!(
                     "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity."
                 )
@@ -522,12 +527,12 @@ pub(crate) fn build_execution_preamble(
         };
         tool_list.push_str(&note);
     }
-    let tool_specs = if matches!(mode, ExecutionMode::NativeTools) {
+    let tool_specs = if matches!(mode, ExecutionMode::Standard) {
         all_tools
             .iter()
             .map(|tool| LlmToolSpec {
                 name: tool.name.clone(),
-                description: tool.description_for(ExecutionMode::NativeTools),
+                description: tool.description_for(ExecutionMode::Standard),
                 input_schema: tool.input_schema(),
             })
             .collect()
@@ -536,17 +541,6 @@ pub(crate) fn build_execution_preamble(
     };
     let tool_names: Vec<String> = all_tools.iter().map(|t| t.name.clone()).collect();
     let dynamic_projection = session.tools().dynamic_projection();
-    let enabled_capability_ids: BTreeSet<String> = dynamic_projection
-        .as_ref()
-        .map(|p| p.enabled_capabilities.clone())
-        .unwrap_or_else(|| {
-            config
-                .capabilities
-                .enabled_capabilities
-                .iter()
-                .map(|id| id.as_str().to_string())
-                .collect()
-        });
     let helper_bindings: BTreeSet<String> = dynamic_projection
         .as_ref()
         .map(|p| p.helper_bindings.clone())
@@ -558,10 +552,8 @@ pub(crate) fn build_execution_preamble(
     let can_write = tool_names
         .iter()
         .any(|name| matches!(name.as_str(), "write_file" | "edit_file" | "find_replace"));
-    let history_enabled =
-        helper_bindings.contains("search_history") || enabled_capability_ids.contains("history");
-    let memory_enabled =
-        helper_bindings.contains("search_mem") || enabled_capability_ids.contains("memory");
+    let history_enabled = tool_names.iter().any(|name| name == "search_history")
+        || helper_bindings.contains("search_history");
     let instruction_source = Arc::clone(&config.instruction_source);
     let project_instructions = instruction_source.system_instructions();
     let base_context = cached_base_context(base_context_cache);
@@ -571,12 +563,11 @@ pub(crate) fn build_execution_preamble(
         tool_list,
         tool_specs,
         tool_names,
-        enabled_capability_ids,
         helper_bindings,
         capability_prompt_sections,
+        plugin_prompt_sections,
         can_write,
         history_enabled,
-        memory_enabled,
         instruction_source,
         project_instructions,
         base_context,
@@ -604,6 +595,7 @@ pub(crate) fn log_llm_debug(
             "input_tokens": usage.input_tokens,
             "output_tokens": usage.output_tokens,
             "cached_input_tokens": usage.cached_input_tokens,
+            "reasoning_tokens": usage.reasoning_tokens,
         }
     });
 
@@ -859,6 +851,7 @@ mod tests {
                 tool_name: None,
                 prune_state: PruneState::Intact,
             }],
+            origin: None,
         }
     }
 

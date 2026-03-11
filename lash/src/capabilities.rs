@@ -180,28 +180,6 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
         enabled_by_default: true,
     },
     CapabilityDefinition {
-        id: CapabilityId::History,
-        name: "History",
-        description: "Persistent turn history and retrieval.",
-        prompt_section: Some(
-            "## History\n\nPrior turns can be searched with `search_history(...)` when earlier context is actually needed.",
-        ),
-        helper_bindings: &["search_history"],
-        tools: &["search_history"],
-        enabled_by_default: true,
-    },
-    CapabilityDefinition {
-        id: CapabilityId::Memory,
-        name: "Memory",
-        description: "Persistent key-value memory and retrieval.",
-        prompt_section: Some(
-            "## Memory\n\nUse `mem_set`, `mem_get`, `mem_delete`, `mem_all`, and `search_mem(...)` for durable decisions that should survive context pruning.",
-        ),
-        helper_bindings: &["search_mem", "mem_set", "mem_get", "mem_delete", "mem_all"],
-        tools: &["search_mem", "mem_set", "mem_get", "mem_delete", "mem_all"],
-        enabled_by_default: true,
-    },
-    CapabilityDefinition {
         id: CapabilityId::Skills,
         name: "Skills",
         description: "Skill discovery and loading.",
@@ -224,11 +202,22 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
 ];
 
 pub fn default_enabled_capabilities() -> BTreeSet<CapabilityId> {
-    CAPABILITY_DEFINITIONS
+    let enabled = CAPABILITY_DEFINITIONS
         .iter()
         .filter(|d| d.enabled_by_default)
         .map(|d| d.id)
-        .collect()
+        .collect::<BTreeSet<_>>();
+    #[cfg(feature = "sqlite-store")]
+    {
+        let mut enabled = enabled;
+        enabled.insert(CapabilityId::History);
+        enabled.insert(CapabilityId::Memory);
+        enabled
+    }
+    #[cfg(not(feature = "sqlite-store"))]
+    {
+        enabled
+    }
 }
 
 pub fn capability_def(id: CapabilityId) -> Option<&'static CapabilityDefinition> {
@@ -276,7 +265,9 @@ pub fn resolve_features(
             }
         }
         for binding in helper_bindings_for_capability(*id) {
-            helper_bindings.insert((*binding).to_string());
+            if available.contains(*binding) {
+                helper_bindings.insert((*binding).to_string());
+            }
         }
     }
     for tool in &caps.enabled_tools {
@@ -320,28 +311,25 @@ mod tests {
     }
 
     #[test]
-    fn enabled_capability_adds_bundled_tools_and_helpers() {
-        let caps = AgentCapabilities::default().enable(CapabilityId::History);
-        let resolved = resolve_features(&caps, &defs(&["search_history"]));
-        assert!(resolved.effective_tools.contains("search_history"));
-        assert!(resolved.helper_bindings.contains("search_history"));
-    }
-
-    #[test]
-    fn memory_capability_uses_global_memory_helpers() {
-        let caps = AgentCapabilities::default().enable(CapabilityId::Memory);
+    fn plugin_capabilities_are_not_resolved_from_static_definitions() {
+        let caps = AgentCapabilities::default()
+            .enable(CapabilityId::History)
+            .enable(CapabilityId::Memory);
         let resolved = resolve_features(
             &caps,
-            &defs(&["search_mem", "mem_set", "mem_get", "mem_delete", "mem_all"]),
+            &defs(&["search_history", "search_mem", "mem_set", "mem_all"]),
         );
-        assert!(resolved.effective_tools.contains("search_mem"));
-        assert!(resolved.effective_tools.contains("mem_set"));
-        assert!(resolved.effective_tools.contains("mem_all"));
-        assert!(resolved.helper_bindings.contains("search_mem"));
-        assert!(resolved.helper_bindings.contains("mem_set"));
-        assert!(resolved.helper_bindings.contains("mem_get"));
-        assert!(resolved.helper_bindings.contains("mem_delete"));
-        assert!(resolved.helper_bindings.contains("mem_all"));
-        assert!(!resolved.helper_bindings.contains("_mem"));
+        assert!(!resolved.effective_tools.contains("search_history"));
+        assert!(!resolved.effective_tools.contains("search_mem"));
+        assert!(
+            resolved
+                .enabled_capabilities
+                .contains(&CapabilityId::History)
+        );
+        assert!(
+            resolved
+                .enabled_capabilities
+                .contains(&CapabilityId::Memory)
+        );
     }
 }

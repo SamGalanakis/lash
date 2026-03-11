@@ -228,10 +228,7 @@ impl ToolProvider for TaskStore {
                 name: "create_task".into(),
                 description: vec![crate::ToolText::new(
                     "Create a new task. Required field: `subject` (not `title`). Returns the Task object.",
-                    [
-                        crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::NativeTools,
-                    ],
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                 )],
                 params: vec![
                     ToolParam::typed("subject", "str"),
@@ -270,10 +267,7 @@ impl ToolProvider for TaskStore {
                 name: "tasks".into(),
                 description: vec![crate::ToolText::new(
                     "List tasks. Returns `{items: [...]}`. Optional filters: `status`, `blocked`.",
-                    [
-                        crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::NativeTools,
-                    ],
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                 )],
                 params: vec![
                     ToolParam {
@@ -301,10 +295,7 @@ impl ToolProvider for TaskStore {
                 name: "get_task".into(),
                 description: vec![crate::ToolText::new(
                     "Get a single task by ID.",
-                    [
-                        crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::NativeTools,
-                    ],
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                 )],
                 params: vec![ToolParam::typed("id", "str")],
                 returns: "Task".into(),
@@ -316,10 +307,7 @@ impl ToolProvider for TaskStore {
                 name: "update_task".into(),
                 description: vec![crate::ToolText::new(
                     "Update a task. Pass only changed fields. Valid `status`: `pending`, `in_progress`, `completed`, `cancelled`.",
-                    [
-                        crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::NativeTools,
-                    ],
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                 )],
                 params: vec![
                     ToolParam::typed("id", "str"),
@@ -379,10 +367,7 @@ impl ToolProvider for TaskStore {
                 name: "claim_task".into(),
                 description: vec![crate::ToolText::new(
                     "Claim a task and mark it `in_progress`. If `id` is omitted, claim the next available task.",
-                    [
-                        crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::NativeTools,
-                    ],
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                 )],
                 params: vec![ToolParam {
                     name: "id".into(),
@@ -399,10 +384,7 @@ impl ToolProvider for TaskStore {
                 name: "delete_task".into(),
                 description: vec![crate::ToolText::new(
                     "Permanently remove a task.",
-                    [
-                        crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::NativeTools,
-                    ],
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                 )],
                 params: vec![ToolParam::typed("id", "str")],
                 returns: "None".into(),
@@ -414,10 +396,7 @@ impl ToolProvider for TaskStore {
                 name: "tasks_summary".into(),
                 description: vec![crate::ToolText::new(
                     "Get a formatted task summary: counts by status, blocked tasks, and high-priority items.",
-                    [
-                        crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::NativeTools,
-                    ],
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                 )],
                 params: vec![],
                 returns: "str".into(),

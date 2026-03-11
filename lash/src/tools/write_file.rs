@@ -16,10 +16,7 @@ impl ToolProvider for WriteFile {
             name: "write_file".into(),
             description: vec![crate::ToolText::new(
                 "Write content to a file, creating parent directories if needed.",
-                [
-                    crate::ExecutionMode::Repl,
-                    crate::ExecutionMode::NativeTools,
-                ],
+                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             params: vec![
                 ToolParam::typed("path", "str"),

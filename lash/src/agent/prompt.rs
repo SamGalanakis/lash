@@ -18,12 +18,13 @@ pub enum PromptSectionName {
     Builtins,
     Memory,
     MemoryApi,
+    PluginExtensions,
     ProjectInstructions,
     Guidelines,
 }
 
 impl PromptSectionName {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Identity,
         Self::Personality,
         Self::ExecutionContract,
@@ -37,6 +38,7 @@ impl PromptSectionName {
         Self::ToolAccess,
         Self::Builtins,
         Self::ToolGuides,
+        Self::PluginExtensions,
         Self::AvailableTools,
     ];
 
@@ -54,6 +56,7 @@ impl PromptSectionName {
             Self::Builtins => "builtins",
             Self::Memory => "memory",
             Self::MemoryApi => "memory_api",
+            Self::PluginExtensions => "plugin_extensions",
             Self::ProjectInstructions => "project_instructions",
             Self::Guidelines => "guidelines",
         }
@@ -86,6 +89,7 @@ impl FromStr for PromptSectionName {
             "builtins" => Ok(Self::Builtins),
             "memory" => Ok(Self::Memory),
             "memory_api" => Ok(Self::MemoryApi),
+            "plugin_extensions" => Ok(Self::PluginExtensions),
             "project_instructions" => Ok(Self::ProjectInstructions),
             "guidelines" => Ok(Self::Guidelines),
             _ => Err(format!(
@@ -147,21 +151,42 @@ pub struct PromptComposeInput<'a> {
     pub tool_list: &'a str,
     pub tool_names: &'a [String],
     pub has_history: bool,
-    pub enabled_capability_ids: &'a BTreeSet<String>,
     pub helper_bindings: &'a BTreeSet<String>,
     pub capability_prompt_sections: &'a [String],
+    pub plugin_prompt_sections: &'a [String],
     pub can_write: bool,
     pub include_soul: bool,
     pub project_instructions: &'a str,
     pub overrides: &'a [PromptSectionOverride],
 }
 
-fn has_capability(input: &PromptComposeInput<'_>, id: &str) -> bool {
-    input.enabled_capability_ids.contains(id)
-}
-
 fn has_helper(input: &PromptComposeInput<'_>, helper: &str) -> bool {
     input.helper_bindings.contains(helper)
+}
+
+fn history_enabled(input: &PromptComposeInput<'_>) -> bool {
+    has_helper(input, "search_history")
+        || input.tool_names.iter().any(|name| name == "search_history")
+}
+
+fn memory_enabled(input: &PromptComposeInput<'_>) -> bool {
+    has_helper(input, "search_mem")
+        || input.tool_names.iter().any(|name| {
+            matches!(
+                name.as_str(),
+                "search_mem" | "mem_set" | "mem_get" | "mem_delete" | "mem_all"
+            )
+        })
+}
+
+fn skills_enabled(input: &PromptComposeInput<'_>) -> bool {
+    has_helper(input, "search_skills")
+        || input.tool_names.iter().any(|name| {
+            matches!(
+                name.as_str(),
+                "skills" | "load_skill" | "read_skill_file" | "search_skills"
+            )
+        })
 }
 
 pub fn compose_system_prompt(input: PromptComposeInput<'_>) -> String {
@@ -219,7 +244,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
         PromptSectionName::Identity => Some(match profile {
             PromptProfile::RootInteractive => match input.execution_mode {
                 ExecutionMode::Repl => "You are an AI coding assistant operating in a persistent REPL with tool access.\nYou power lash, a terminal-based coding agent. Understand the codebase, make changes, run commands, and report outcomes clearly.".to_string(),
-                ExecutionMode::NativeTools => "You are an AI coding assistant with native tool-calling access.\nYou power lash, a terminal-based coding agent. Understand the codebase, make changes, run commands, and report outcomes clearly.".to_string(),
+                ExecutionMode::Standard => "You are an AI coding assistant with direct tool-calling access.\nYou power lash, a terminal-based coding agent. Understand the codebase, make changes, run commands, and report outcomes clearly.".to_string(),
             },
             PromptProfile::RootHeadless => "You are an autonomous AI coding agent running in non-interactive mode.\nComplete the task end-to-end without asking for user input.".to_string(),
             PromptProfile::SubAgentInteractive => match input.execution_mode {
@@ -230,7 +255,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
                         "You are a read-only sub-agent inside lash working on a delegated task.\nFocus on lookup/summarization tasks and return results to the caller via done() when complete.".to_string()
                     }
                 }
-                ExecutionMode::NativeTools => {
+                ExecutionMode::Standard => {
                     if input.can_write {
                         "You are a sub-agent inside lash working on a delegated task.\nUse tools decisively and return a final answer to the caller when complete.".to_string()
                     } else {
@@ -246,7 +271,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
                         "You are a headless read-only sub-agent inside lash working on a delegated task.\nOperate autonomously on lookup/summarization tasks and return final results via done() only when complete.".to_string()
                     }
                 }
-                ExecutionMode::NativeTools => {
+                ExecutionMode::Standard => {
                     if input.can_write {
                         "You are a headless sub-agent inside lash working on a delegated task.\nOperate autonomously and return a final answer only when complete.".to_string()
                     } else {
@@ -271,7 +296,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
             if matches!(input.execution_mode, ExecutionMode::Repl) {
                 "## Execution Contract\n\nYour output can include prose and `<repl>` blocks.\n- Pure prose with no `<repl>` block is a valid final answer when no execution is needed\n- If you open `<repl>`, the turn is not finished when `</repl>` is reached\n- `<repl>` blocks execute immediately when `</repl>` is reached\n- After a `<repl>` block executes, lash continues in a new internal turn with the execution output\n- After you have used `<repl>` in a turn, do not end with prose alone; continue until you call `done(...)` inside `<repl>`\n- Do not assume prose after a `<repl>` block will be shown to the user unless you pass it to `done(...)`\n- Maximum one `<repl>` block per response\n- Do not emit additional `<repl>` blocks in the same response after one has closed\n- For direct conversational requests (greetings, small talk, time/date, simple Q&A), respond in prose and do not open `<repl>`\n- Variables persist across turns\n- `print(...)` output is model-visible only\n\n### REPL Language\n\nThe REPL runs a lightweight Python dialect (not CPython). It supports:\n- Functions (`def`, `lambda`, `async def`), closures, `*args`/`**kwargs`\n- Control flow: `if`/`elif`/`else`, `for`, `while`, `try`/`except`/`finally`, `raise`\n- Data types: `int`, `float`, `bool`, `str`, `bytes`, `list`, `tuple`, `dict`, `set`, `frozenset`, `None`\n- Comprehensions (list, dict, set), f-strings, unpacking, chained comparisons\n- `await` for async tool helpers; `asyncio.gather(...)` for parallel calls (only `asyncio.gather` and `asyncio.run` are available — `asyncio.sleep`, `asyncio.create_task`, and other asyncio APIs are not supported)\n- Builtins: `len`, `range`, `enumerate`, `zip`, `map`, `filter`, `sorted`, `reversed`, `min`, `max`, `sum`, `all`, `any`, `abs`, `round`, `isinstance`, `type`, `print`, `repr`, `hash`, `id`, `int()`, `str()`, `list()`, etc.\n- Limited modules: `re`, `os.getenv`, `pathlib.Path`\n\nNot supported: `class`, `yield`/generators, `with`/context managers, `del`, decorators, `match`/`case`, walrus `:=`, `import` of arbitrary modules, standard library (`json`, `collections`, `itertools`, etc.), `open()`/file I/O.\n\nFor tasks requiring unsupported features, write a script file and run it via `T.shell(\"python3 script.py\")`."
             } else {
-                "## Execution Contract\n\nUse native tool calls when execution is needed.\n- Do not emit `<repl>` blocks or Python code\n- Call tools directly with valid arguments\n- When several tool calls are independent, emit them together in the same response instead of serializing them across turns\n- Use serial tool calls only when later arguments depend on earlier tool results or when ordering is required for correctness\n- Avoid unnecessary prose between independent tool calls; optimize for completing the task with as few tool rounds as possible\n- After tool results are returned, continue with the next tool calls or final answer\n- For direct conversational requests that need no tools, respond in prose only"
+                "## Execution Contract\n\nUse direct tool calls when execution is needed.\n- Do not emit `<repl>` blocks or Python code\n- Call tools directly with valid arguments\n- When several tool calls are independent, emit them together in the same response instead of serializing them across turns\n- Use serial tool calls only when later arguments depend on earlier tool results or when ordering is required for correctness\n- Avoid unnecessary prose between independent tool calls; optimize for completing the task with as few tool rounds as possible\n- After tool results are returned, continue with the next tool calls or final answer\n- For direct conversational requests that need no tools, respond in prose only"
             },
             if matches!(input.execution_mode, ExecutionMode::Repl) {
                 if profile.is_headless() {
@@ -310,7 +335,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
                     .to_string()
             } else {
                 format!(
-                    "## Tool Access\n\n- The runtime will expose the available tools as native tool calls\n- Use only the tools shown in Available Tools\n- Prefer parallel independent tool calls in one assistant turn when the model/provider supports multiple calls\n- Good candidates for one-turn parallel calls: reading several files, multiple searches, independent inspections, and unrelated diagnostics\n- Do not parallelize dependent steps, ordered stateful edits, or operations whose arguments depend on prior output\n- Never invent tool names or arguments that are not described{}",
+                    "## Tool Access\n\n- The runtime will expose the available tools as direct tool calls\n- Use only the tools shown in Available Tools\n- Prefer parallel independent tool calls in one assistant turn when the model/provider supports multiple calls\n- Good candidates for one-turn parallel calls: reading several files, multiple searches, independent inspections, and unrelated diagnostics\n- Do not parallelize dependent steps, ordered stateful edits, or operations whose arguments depend on prior output\n- Never invent tool names or arguments that are not described{}",
                     if input.tool_names.iter().any(|name| name == "batch") {
                         "\n- If `batch` is available and you need 2 or more independent tool calls, prefer `batch` over spacing those calls across multiple turns"
                     } else {
@@ -322,9 +347,9 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
         PromptSectionName::ToolGuides => {
             let guide = tool_guides(
                 input.tool_names,
-                has_helper(input, "search_history") || has_capability(input, "history"),
-                has_helper(input, "search_mem") || has_capability(input, "memory"),
-                has_helper(input, "search_skills") || has_capability(input, "skills"),
+                history_enabled(input),
+                memory_enabled(input),
+                skills_enabled(input),
                 input.capability_prompt_sections,
             );
             if guide.is_empty() {
@@ -344,13 +369,13 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
         PromptSectionName::Builtins => Some(builtins_section(
             profile,
             input.tool_names,
-            has_helper(input, "search_history") || has_capability(input, "history"),
-            has_helper(input, "search_mem") || has_capability(input, "memory"),
-            has_helper(input, "search_skills") || has_capability(input, "skills"),
+            history_enabled(input),
+            memory_enabled(input),
+            skills_enabled(input),
         )),
         PromptSectionName::Memory => {
-            let history_enabled = has_helper(input, "search_history") || has_capability(input, "history");
-            let memory_enabled = has_helper(input, "search_mem") || has_capability(input, "memory");
+            let history_enabled = history_enabled(input);
+            let memory_enabled = memory_enabled(input);
             if history_enabled || memory_enabled {
                 Some(memory_section(
                     input.has_history,
@@ -363,7 +388,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
             }
         }
         PromptSectionName::MemoryApi => {
-            if has_helper(input, "search_mem") || has_capability(input, "memory") {
+            if memory_enabled(input) {
                 Some(memory_api_section())
             } else {
                 None
@@ -379,6 +404,19 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
                 ))
             }
         }
+        PromptSectionName::PluginExtensions => {
+            let sections: Vec<String> = input
+                .plugin_prompt_sections
+                .iter()
+                .map(|section| section.trim().to_string())
+                .filter(|section| !section.is_empty())
+                .collect();
+            if sections.is_empty() {
+                None
+            } else {
+                Some(sections.join("\n\n"))
+            }
+        }
         PromptSectionName::Guidelines => Some(format!(
             "## Guidelines\n\n- Bias toward concrete execution over planning chatter\n- For substantial scripts/workflows, create files and run them with host tooling\n- Use isolated environments only when required dependencies are missing\n- Avoid redundant file reads when values already exist in variables\n- Never speculate about files you have not read\n- Be concise and action-oriented\n{}\n{}\n{}",
             if profile == PromptProfile::RootInteractive {
@@ -391,7 +429,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
             } else {
                 ""
             },
-            if !(has_helper(input, "search_history") || has_capability(input, "history")) {
+            if !history_enabled(input) {
                 ""
             } else {
                 "- Use `T.search_history(...)` and other `T.` memory/search calls only when prior-turn recall is actually needed"
@@ -596,13 +634,6 @@ mod tests {
         AgentCapabilities, CapabilityId, capability_def, helper_bindings_for_capability,
     };
 
-    fn ids_for(caps: &AgentCapabilities) -> BTreeSet<String> {
-        caps.enabled_capabilities
-            .iter()
-            .map(|id| id.as_str().to_string())
-            .collect()
-    }
-
     fn helpers_for(caps: &AgentCapabilities) -> BTreeSet<String> {
         let mut out = BTreeSet::new();
         for id in &caps.enabled_capabilities {
@@ -658,9 +689,9 @@ mod tests {
             tool_list: "tools",
             tool_names: &[],
             has_history: false,
-            enabled_capability_ids: &ids_for(&AgentCapabilities::default()),
             helper_bindings: &helpers_for(&AgentCapabilities::default()),
             capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            plugin_prompt_sections: &[],
             can_write: can_write(&AgentCapabilities::default()),
             include_soul: false,
             project_instructions: "",
@@ -671,6 +702,13 @@ mod tests {
 
     #[test]
     fn memory_api_section_is_included_by_default() {
+        let helper_bindings = BTreeSet::from([
+            "search_mem".to_string(),
+            "mem_set".to_string(),
+            "mem_get".to_string(),
+            "mem_delete".to_string(),
+            "mem_all".to_string(),
+        ]);
         let text = compose_system_prompt(PromptComposeInput {
             profile: PromptProfile::RootInteractive,
             execution_mode: crate::ExecutionMode::Repl,
@@ -678,9 +716,9 @@ mod tests {
             tool_list: "tools",
             tool_names: &[],
             has_history: false,
-            enabled_capability_ids: &ids_for(&AgentCapabilities::default()),
-            helper_bindings: &helpers_for(&AgentCapabilities::default()),
+            helper_bindings: &helper_bindings,
             capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            plugin_prompt_sections: &[],
             can_write: can_write(&AgentCapabilities::default()),
             include_soul: false,
             project_instructions: "",
@@ -697,6 +735,13 @@ mod tests {
             mode: PromptOverrideMode::Disable,
             content: String::new(),
         }];
+        let helper_bindings = BTreeSet::from([
+            "search_mem".to_string(),
+            "mem_set".to_string(),
+            "mem_get".to_string(),
+            "mem_delete".to_string(),
+            "mem_all".to_string(),
+        ]);
         let text = compose_system_prompt(PromptComposeInput {
             profile: PromptProfile::RootInteractive,
             execution_mode: crate::ExecutionMode::Repl,
@@ -704,9 +749,9 @@ mod tests {
             tool_list: "tools",
             tool_names: &[],
             has_history: false,
-            enabled_capability_ids: &ids_for(&AgentCapabilities::default()),
-            helper_bindings: &helpers_for(&AgentCapabilities::default()),
+            helper_bindings: &helper_bindings,
             capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            plugin_prompt_sections: &[],
             can_write: can_write(&AgentCapabilities::default()),
             include_soul: false,
             project_instructions: "",
@@ -724,9 +769,9 @@ mod tests {
             tool_list: "tools",
             tool_names: &["shell".to_string(), "agent_call".to_string()],
             has_history: false,
-            enabled_capability_ids: &ids_for(&AgentCapabilities::default()),
             helper_bindings: &helpers_for(&AgentCapabilities::default()),
             capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            plugin_prompt_sections: &[],
             can_write: can_write(&AgentCapabilities::default()),
             include_soul: false,
             project_instructions: "",
@@ -754,9 +799,9 @@ mod tests {
             tool_list: "tools",
             tool_names: &tools,
             has_history: false,
-            enabled_capability_ids: &ids_for(&caps),
             helper_bindings: &helpers_for(&caps),
             capability_prompt_sections: &prompt_sections_for(&caps),
+            plugin_prompt_sections: &[],
             can_write: can_write(&caps),
             include_soul: false,
             project_instructions: "",
@@ -776,9 +821,9 @@ mod tests {
             tool_list: "tools",
             tool_names: &[],
             has_history: false,
-            enabled_capability_ids: &ids_for(&caps),
             helper_bindings: &helpers_for(&caps),
             capability_prompt_sections: &prompt_sections_for(&caps),
+            plugin_prompt_sections: &[],
             can_write: can_write(&caps),
             include_soul: false,
             project_instructions: "",
@@ -791,8 +836,6 @@ mod tests {
     #[test]
     fn dynamic_capability_prompt_sections_are_included() {
         let caps = AgentCapabilities::default();
-        let mut cap_ids = ids_for(&caps);
-        cap_ids.insert("custom_cap".to_string());
         let sections = vec!["## Custom Capability\n\nCustom guidance.".to_string()];
         let text = compose_system_prompt(PromptComposeInput {
             profile: PromptProfile::RootInteractive,
@@ -801,9 +844,9 @@ mod tests {
             tool_list: "tools",
             tool_names: &["agent_call".to_string()],
             has_history: false,
-            enabled_capability_ids: &cap_ids,
             helper_bindings: &helpers_for(&caps),
             capability_prompt_sections: &sections,
+            plugin_prompt_sections: &[],
             can_write: can_write(&caps),
             include_soul: false,
             project_instructions: "",
@@ -814,17 +857,17 @@ mod tests {
     }
 
     #[test]
-    fn native_tools_prompt_emphasizes_parallel_independent_calls() {
+    fn standard_prompt_emphasizes_parallel_independent_calls() {
         let text = compose_system_prompt(PromptComposeInput {
             profile: PromptProfile::RootInteractive,
-            execution_mode: crate::ExecutionMode::NativeTools,
+            execution_mode: crate::ExecutionMode::Standard,
             context: "ctx",
             tool_list: "tools",
             tool_names: &[],
             has_history: false,
-            enabled_capability_ids: &ids_for(&AgentCapabilities::default()),
             helper_bindings: &helpers_for(&AgentCapabilities::default()),
             capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            plugin_prompt_sections: &[],
             can_write: can_write(&AgentCapabilities::default()),
             include_soul: false,
             project_instructions: "",
@@ -836,17 +879,17 @@ mod tests {
     }
 
     #[test]
-    fn native_tools_prompt_prefers_batch_when_available() {
+    fn standard_prompt_prefers_batch_when_available() {
         let text = compose_system_prompt(PromptComposeInput {
             profile: PromptProfile::RootInteractive,
-            execution_mode: crate::ExecutionMode::NativeTools,
+            execution_mode: crate::ExecutionMode::Standard,
             context: "ctx",
             tool_list: "tools",
             tool_names: &["batch".to_string()],
             has_history: false,
-            enabled_capability_ids: &ids_for(&AgentCapabilities::default()),
             helper_bindings: &helpers_for(&AgentCapabilities::default()),
             capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            plugin_prompt_sections: &[],
             can_write: can_write(&AgentCapabilities::default()),
             include_soul: false,
             project_instructions: "",
@@ -868,9 +911,9 @@ mod tests {
             tool_list: "tools",
             tool_names: &["read_file".to_string()],
             has_history: true,
-            enabled_capability_ids: &ids_for(&AgentCapabilities::default()),
             helper_bindings: &helpers_for(&AgentCapabilities::default()),
             capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            plugin_prompt_sections: &[],
             can_write: can_write(&AgentCapabilities::default()),
             include_soul: true,
             project_instructions: "project rules",
@@ -894,9 +937,9 @@ mod tests {
             tool_list: "tools",
             tool_names: &[],
             has_history: true,
-            enabled_capability_ids: &ids_for(&AgentCapabilities::default()),
             helper_bindings: &helpers_for(&AgentCapabilities::default()),
             capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            plugin_prompt_sections: &[],
             can_write: can_write(&AgentCapabilities::default()),
             include_soul: false,
             project_instructions: "",

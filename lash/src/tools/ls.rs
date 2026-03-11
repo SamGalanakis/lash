@@ -20,10 +20,7 @@ impl ToolProvider for Ls {
                     "List filesystem entries, respecting `.gitignore`. Returns `path_entries` with `items` sorted by path. Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: depth={}, limit={}, with_lines=false.",
                     DEFAULT_DEPTH, MAX_ENTRIES
                 ),
-                [
-                    crate::ExecutionMode::Repl,
-                    crate::ExecutionMode::NativeTools,
-                ],
+                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             params: vec![
                 ToolParam {

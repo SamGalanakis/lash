@@ -25,10 +25,7 @@ impl ToolProvider for EditFile {
                     "{\"insert_after\": {\"anchor\": \"LINE:8HEX\", \"text\": \"...\"}}, ",
                     "{\"replace\": {\"old_text\": \"...\", \"new_text\": \"...\", \"all\": false}}",
                 ),
-                [
-                    crate::ExecutionMode::Repl,
-                    crate::ExecutionMode::NativeTools,
-                ],
+                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             params: vec![
                 ToolParam::typed("path", "str"),

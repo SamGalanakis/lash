@@ -87,6 +87,11 @@ impl OpenAiGenericAdapter {
                     .or_else(|| usage.get("cached_prompt_tokens"))
                     .or_else(|| usage.get("cached_tokens")),
             ),
+            reasoning_tokens: Self::parse_i64(usage.get("reasoning_tokens").or_else(|| {
+                usage
+                    .get("completion_tokens_details")
+                    .and_then(|d| d.get("reasoning_tokens"))
+            })),
         })
     }
 
@@ -193,7 +198,8 @@ impl OpenAiGenericAdapter {
         if let Some(new_usage) = Self::usage_from_value(&event)
             && (new_usage.input_tokens > 0
                 || new_usage.output_tokens > 0
-                || new_usage.cached_input_tokens > 0)
+                || new_usage.cached_input_tokens > 0
+                || new_usage.reasoning_tokens > 0)
         {
             *usage = new_usage;
         }

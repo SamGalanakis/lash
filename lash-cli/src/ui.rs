@@ -12,6 +12,7 @@ use crate::app::{
 };
 use crate::markdown;
 use crate::theme;
+use lash_core::TokenUsage;
 
 fn input_height(app: &App, frame_width: u16) -> u16 {
     if app.has_prompt() {
@@ -91,13 +92,13 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let display_output_tokens = app.token_usage.output_tokens + app.live_output_tokens_estimate;
     let display_total_tokens = display_input_tokens + display_output_tokens;
     let has_usage = display_total_tokens > 0;
-    let ctx_pct: Option<u64> = app.context_window.and_then(|ctx_win| {
-        if app.last_input_tokens > 0 && ctx_win > 0 {
-            Some((app.last_input_tokens as f64 / ctx_win as f64 * 100.0) as u64)
-        } else {
-            None
-        }
-    });
+    let ctx_pct = app
+        .context_window
+        .and_then(|ctx_win| context_usage_pct(&app.last_response_usage, ctx_win));
+    let ctx_display = app
+        .context_window
+        .and_then(|ctx_win| format_context_usage(&app.last_response_usage, ctx_win));
+    let ctx_display_pct = ctx_pct.map(|pct| format!("{pct:.1}%"));
 
     let in_out = if has_usage {
         format!(
@@ -113,12 +114,15 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         String::new()
     };
-    let ctx = ctx_pct.map(|p| format!("{}% ctx", p)).unwrap_or_default();
-
     // Prefer current-turn context occupancy. Fall back to cumulative session tokens
     // only when we do not have a context-window-backed percentage.
-    let right_variants = if ctx_pct.is_some() {
-        [ctx.clone(), String::new(), String::new(), String::new()]
+    let right_variants = if let Some(ctx) = ctx_display {
+        [
+            ctx,
+            ctx_display_pct.unwrap_or_default(),
+            String::new(),
+            String::new(),
+        ]
     } else {
         [in_out.clone(), total.clone(), String::new(), String::new()]
     };
@@ -195,7 +199,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     if right_idx < 3 && !right_variants[right_idx].is_empty() {
         let token_text = &right_variants[right_idx];
         if let Some(pct) = ctx_pct {
-            let ctx_color = if pct >= 80 {
+            let ctx_color = if pct >= 80.0 {
                 theme::SODIUM
             } else {
                 theme::CHALK_DIM
@@ -215,6 +219,28 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 
     let bar = Paragraph::new(Line::from(spans)).style(theme::bar_bg());
     frame.render_widget(bar, area);
+}
+
+fn context_usage_pct(usage: &TokenUsage, context_window: u64) -> Option<f64> {
+    let used = usage.context_total();
+    if used <= 0 || context_window == 0 {
+        return None;
+    }
+    Some(used as f64 / context_window as f64 * 100.0)
+}
+
+fn format_context_usage(usage: &TokenUsage, context_window: u64) -> Option<String> {
+    let used = usage.context_total();
+    let pct = context_usage_pct(usage, context_window)?;
+    if used <= 0 || context_window == 0 {
+        return None;
+    }
+    Some(format!(
+        "{} / {} ({:.1}%)",
+        crate::app::format_tokens(used),
+        crate::app::format_tokens(context_window as i64),
+        pct
+    ))
 }
 
 fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
@@ -364,6 +390,193 @@ fn truncate_to_display_width(text: &str, max_width: usize) -> String {
     out
 }
 
+fn tool_arg_str<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+}
+
+fn tool_arg_u64(args: &serde_json::Value, key: &str) -> Option<u64> {
+    args.get(key).and_then(|v| v.as_u64())
+}
+
+fn inline_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn human_tool_name(name: &str) -> &'static str {
+    match name {
+        "read_file" => "read",
+        "write_file" => "write",
+        "edit_file" => "edit",
+        "find_replace" => "replace",
+        "grep" => "grep",
+        "glob" => "glob",
+        "ls" => "list",
+        "shell" => "shell",
+        "shell_wait" => "wait",
+        "shell_read" => "read shell",
+        "shell_write" => "write shell",
+        "shell_kill" => "kill shell",
+        "fetch_url" => "fetch",
+        "search_web" => "search",
+        "agent_call" => "delegate",
+        "agent_result" => "collect agent",
+        "agent_output" => "stream agent",
+        "agent_kill" => "kill agent",
+        "create_task" => "create task",
+        "update_task" => "update task",
+        "claim_task" => "claim task",
+        "delete_task" => "delete task",
+        "tasks" => "list tasks",
+        "tasks_summary" => "task summary",
+        "get_task" => "get task",
+        "list_tools" => "list tools",
+        "search_tools" => "search tools",
+        "search_skills" => "search skills",
+        "skills" => "list skills",
+        "load_skill" => "load skill",
+        "read_skill_file" => "read skill file",
+        "batch" => "parallel",
+        "enter_plan_mode" => "enter plan mode",
+        "exit_plan_mode" => "exit plan mode",
+        _ => "tool",
+    }
+}
+
+fn tool_group_name(name: &str) -> String {
+    match human_tool_name(name) {
+        "tool" => name.replace('_', " "),
+        label => label.to_string(),
+    }
+}
+
+fn summarize_batch_result(result: &serde_json::Value) -> Option<String> {
+    let results = result.get("results").and_then(|v| v.as_array())?;
+    if results.is_empty() {
+        return result
+            .get("summary")
+            .and_then(|v| v.get("total_calls"))
+            .and_then(|v| v.as_u64())
+            .map(|count| {
+                format!(
+                    "parallel · {} call{}",
+                    count,
+                    if count == 1 { "" } else { "s" }
+                )
+            });
+    }
+
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for entry in results {
+        let Some(tool) = entry.get("tool").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let key = tool_group_name(tool);
+        if let Some((last, count)) = counts.last_mut()
+            && *last == key
+        {
+            *count += 1;
+            continue;
+        }
+        counts.push((tool_group_name(tool), 1));
+    }
+
+    if counts.is_empty() {
+        return None;
+    }
+
+    let mut parts = counts
+        .into_iter()
+        .map(|(label, count)| {
+            if count > 1 {
+                format!("{label}\u{00d7}{count}")
+            } else {
+                label
+            }
+        })
+        .collect::<Vec<_>>();
+    let extra = parts.len().saturating_sub(3);
+    parts.truncate(3);
+    let mut summary = format!("parallel · {}", parts.join(", "));
+    if extra > 0 {
+        summary.push_str(&format!(", +{} more", extra));
+    }
+    Some(summary)
+}
+
+fn tool_display_label(name: &str, args: &serde_json::Value, result: &serde_json::Value) -> String {
+    match name {
+        "batch" => summarize_batch_result(result).unwrap_or_else(|| "parallel".to_string()),
+        "read_file" => {
+            let mut label = tool_arg_str(args, "path")
+                .map(|path| format!("read {}", path))
+                .unwrap_or_else(|| "read file".to_string());
+            if let Some(offset) = tool_arg_u64(args, "offset")
+                && offset > 1
+            {
+                label.push_str(&format!(" @{}", offset));
+            }
+            label
+        }
+        "write_file" => tool_arg_str(args, "path")
+            .map(|path| format!("write {}", path))
+            .unwrap_or_else(|| "write file".to_string()),
+        "edit_file" | "find_replace" => tool_arg_str(args, "path")
+            .map(|path| format!("edit {}", path))
+            .unwrap_or_else(|| "edit file".to_string()),
+        "grep" => {
+            let pattern = tool_arg_str(args, "pattern").unwrap_or("pattern");
+            let mut label = format!("grep {:?}", pattern);
+            if let Some(path) = tool_arg_str(args, "path") {
+                label.push_str(&format!(" in {}", path));
+            }
+            label
+        }
+        "glob" => {
+            let pattern = tool_arg_str(args, "pattern").unwrap_or("*");
+            let mut label = format!("glob {}", pattern);
+            if let Some(path) = tool_arg_str(args, "path") {
+                label.push_str(&format!(" in {}", path));
+            }
+            label
+        }
+        "ls" => format!("list {}", tool_arg_str(args, "path").unwrap_or(".")),
+        "shell" => tool_arg_str(args, "command")
+            .map(|cmd| format!("shell {}", inline_text(cmd)))
+            .unwrap_or_else(|| "shell".to_string()),
+        "shell_wait" => "wait for shell".to_string(),
+        "shell_read" => "read shell output".to_string(),
+        "shell_write" => "write to shell".to_string(),
+        "shell_kill" => "kill shell".to_string(),
+        "fetch_url" => tool_arg_str(args, "url")
+            .map(|url| format!("fetch {}", url))
+            .unwrap_or_else(|| "fetch url".to_string()),
+        "search_web" => tool_arg_str(args, "query")
+            .map(|query| format!("search {:?}", query))
+            .unwrap_or_else(|| "search web".to_string()),
+        "agent_call" => tool_arg_str(args, "task")
+            .map(|task| format!("delegate {}", inline_text(task)))
+            .unwrap_or_else(|| "delegate task".to_string()),
+        "agent_result" => "collect agent result".to_string(),
+        "agent_output" => "stream agent output".to_string(),
+        "agent_kill" => "kill agent".to_string(),
+        "create_task" => tool_arg_str(args, "description")
+            .map(|desc| format!("create task {}", inline_text(desc)))
+            .unwrap_or_else(|| "create task".to_string()),
+        "update_task" | "claim_task" | "delete_task" | "get_task" => tool_arg_str(args, "id")
+            .map(|id| format!("{} {}", human_tool_name(name), id))
+            .unwrap_or_else(|| human_tool_name(name).to_string()),
+        "tasks" | "tasks_summary" | "list_tools" | "search_tools" | "search_skills" | "skills" => {
+            human_tool_name(name).to_string()
+        }
+        "load_skill" | "read_skill_file" => tool_arg_str(args, "path")
+            .map(|path| format!("{} {}", human_tool_name(name), path))
+            .unwrap_or_else(|| human_tool_name(name).to_string()),
+        _ => name.replace('_', " "),
+    }
+}
+
 /// Build a ghost fold summary for a group of tool calls starting at `idx`.
 /// `idx` should point to the first (non-continuation) ToolCall in a group.
 /// Scans forward through contiguous ToolCall/CodeBlock/CodeOutput blocks,
@@ -377,16 +590,19 @@ fn build_ghost_fold_summary(blocks: &[DisplayBlock], idx: usize) -> (String, boo
     // Include the block at idx itself
     if let DisplayBlock::ToolCall {
         name,
+        args,
+        result,
         success,
         duration_ms,
         ..
     } = &blocks[idx]
+        && !crate::app::tool_call_hidden(name, *success)
     {
         total_ms += *duration_ms;
         if !*success {
             any_failed = true;
         }
-        groups.push((name.clone(), 1));
+        groups.push((tool_display_label(name, args, result), 1));
     }
 
     // Scan forward from idx+1
@@ -395,24 +611,34 @@ fn build_ghost_fold_summary(blocks: &[DisplayBlock], idx: usize) -> (String, boo
             DisplayBlock::CodeBlock { .. } | DisplayBlock::CodeOutput { .. } => continue,
             DisplayBlock::ToolCall {
                 name,
+                args,
+                result,
                 success,
                 duration_ms,
                 ..
             } => {
+                if crate::app::tool_call_hidden(name, *success) {
+                    continue;
+                }
                 total_ms += *duration_ms;
                 if !*success {
                     any_failed = true;
                 }
+                let label = tool_display_label(name, args, result);
                 if let Some((last_name, count)) = groups.last_mut()
-                    && last_name == name
+                    && *last_name == label
                 {
                     *count += 1;
                 } else {
-                    groups.push((name.clone(), 1));
+                    groups.push((label, 1));
                 }
             }
             _ => break,
         }
+    }
+
+    if groups.is_empty() {
+        return (String::new(), any_failed);
     }
 
     let total_tools: usize = groups.iter().map(|(_, c)| c).sum();
@@ -604,10 +830,15 @@ fn render_block<'a>(
         }
         DisplayBlock::ToolCall {
             name,
+            args,
+            result,
             success,
             duration_ms,
             continuation,
         } => {
+            if crate::app::tool_call_hidden(name, *success) {
+                return;
+            }
             match expand_level {
                 0 => {
                     if *continuation {
@@ -615,6 +846,9 @@ fn render_block<'a>(
                     } else {
                         // Ghost fold: build summary scanning forward
                         let (summary, any_failed) = build_ghost_fold_summary(blocks, idx);
+                        if summary.is_empty() {
+                            return;
+                        }
                         let summary = truncate_to_display_width(&summary, viewport_width);
                         lines.push(Line::from(Span::styled(
                             summary,
@@ -638,7 +872,7 @@ fn render_block<'a>(
                         format!(
                             "{} {} \u{b7} {}",
                             icon,
-                            name,
+                            tool_display_label(name, args, result),
                             crate::util::format_duration_ms(*duration_ms)
                         ),
                         style,
@@ -1842,5 +2076,77 @@ mod tests {
 
         let got = history_viewport_height(&app, fw, fh);
         assert_eq!(got, fh.saturating_sub(expected_overhead) as usize);
+    }
+
+    #[test]
+    fn context_usage_pct_returns_fractional_percent() {
+        let usage = TokenUsage {
+            input_tokens: 78_182,
+            output_tokens: 1_200,
+            cached_input_tokens: 3_000,
+            reasoning_tokens: 400,
+        };
+        let pct = context_usage_pct(&usage, 1_050_000).expect("context pct");
+        assert!(pct > 7.8 && pct < 7.9, "unexpected pct: {pct}");
+    }
+
+    #[test]
+    fn format_context_usage_shows_raw_values() {
+        let usage = TokenUsage {
+            input_tokens: 78_182,
+            output_tokens: 1_200,
+            cached_input_tokens: 3_000,
+            reasoning_tokens: 400,
+        };
+        assert_eq!(
+            format_context_usage(&usage, 1_050_000).as_deref(),
+            Some("82.8k / 1.1M (7.9%)")
+        );
+        assert_eq!(
+            format_context_usage(
+                &TokenUsage {
+                    input_tokens: 1_000,
+                    output_tokens: 0,
+                    cached_input_tokens: 0,
+                    reasoning_tokens: 0,
+                },
+                1_050_000
+            )
+            .as_deref(),
+            Some("1.0k / 1.1M (0.1%)")
+        );
+        assert_eq!(
+            format_context_usage(&TokenUsage::default(), 1_050_000),
+            None
+        );
+    }
+
+    #[test]
+    fn tool_display_label_uses_semantic_read_summary() {
+        let label = tool_display_label(
+            "read_file",
+            &serde_json::json!({"path":"src/main.rs","offset":40}),
+            &serde_json::Value::Null,
+        );
+        assert_eq!(label, "read src/main.rs @40");
+    }
+
+    #[test]
+    fn tool_display_label_replaces_batch_with_parallel_summary() {
+        let label = tool_display_label(
+            "batch",
+            &serde_json::json!({}),
+            &serde_json::json!({
+                "results": [
+                    {"tool":"read_file","parameters":{"path":"src/main.rs"}},
+                    {"tool":"read_file","parameters":{"path":"Cargo.toml"}},
+                    {"tool":"grep","parameters":{"pattern":"ctx","path":"lash-cli/src"}}
+                ]
+            }),
+        );
+        assert!(label.starts_with("parallel · "));
+        assert!(!label.contains("batch"));
+        assert!(label.contains("read"));
+        assert!(label.contains("grep"));
     }
 }

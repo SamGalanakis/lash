@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use lash_core::{AgentEvent, Store, TokenUsage, strip_repl_fragments};
+use lash_core::{AgentEvent, Store, TokenUsage};
 
 use crate::command;
 use crate::markdown;
+use crate::replay::push_assistant_text_block;
 use crate::skill::SkillRegistry;
 
 /// Find the byte offset within `line` that corresponds to a given display column.
@@ -70,6 +71,8 @@ pub enum DisplayBlock {
     },
     ToolCall {
         name: String,
+        args: serde_json::Value,
+        result: serde_json::Value,
         success: bool,
         duration_ms: u64,
         /// If true, this block is a continuation of a prior tool-call group.
@@ -127,49 +130,13 @@ fn wrapped_text_height(text: &str, width: usize, prefix_chars: usize) -> usize {
     h
 }
 
-/// Normalize streaming assistant text for display:
-/// - drop leading/trailing blank lines
-/// - collapse consecutive blank lines to a single blank line
-fn normalize_stream_text(text: &str) -> String {
-    let sanitized = strip_repl_fragments(text);
-    let mut out = String::new();
-    let mut started = false;
-    let mut prev_blank = false;
-
-    for line in sanitized.split('\n') {
-        let is_blank = line.trim().is_empty();
-        if !started {
-            if is_blank {
-                continue;
-            }
-            out.push_str(line);
-            started = true;
-            prev_blank = false;
-            continue;
-        }
-
-        if is_blank {
-            if !prev_blank {
-                out.push('\n');
-                prev_blank = true;
-            }
-        } else {
-            out.push('\n');
-            out.push_str(line);
-            prev_blank = false;
-        }
-    }
-
-    while out.ends_with('\n') {
-        out.pop();
-    }
-
-    out
-}
-
 /// Fast, coarse token estimate used only for live UI counters while streaming.
 fn estimate_tokens_from_char_count(chars: i64) -> i64 {
     if chars <= 0 { 0 } else { (chars + 3) / 4 }
+}
+
+pub(crate) fn tool_call_hidden(name: &str, success: bool) -> bool {
+    success && matches!(name, "enter_plan_mode" | "exit_plan_mode")
 }
 
 impl DisplayBlock {
@@ -201,7 +168,15 @@ impl DisplayBlock {
                     }
                 }
             }
-            DisplayBlock::ToolCall { continuation, .. } => {
+            DisplayBlock::ToolCall {
+                name,
+                success,
+                continuation,
+                ..
+            } => {
+                if tool_call_hidden(name, *success) {
+                    return 0;
+                }
                 match expand_level {
                     0 => {
                         // Ghost fold: first in group = 1 (summary line), continuation = 0 (absorbed)
@@ -310,8 +285,8 @@ pub struct App {
     pub token_usage: TokenUsage,
     /// Context window size for the current model (from models.dev).
     pub context_window: Option<u64>,
-    /// Latest iteration's input tokens (current context size, not cumulative).
-    pub last_input_tokens: i64,
+    /// Latest completed model usage for context accounting.
+    pub last_response_usage: TokenUsage,
     /// Estimated output character count from live streaming chunks.
     pub live_output_chars_estimate: i64,
     /// Estimated output tokens from live streamed chunks before final usage arrives.
@@ -395,7 +370,7 @@ impl App {
             focused: true,
             token_usage: TokenUsage::default(),
             context_window,
-            last_input_tokens: 0,
+            last_response_usage: TokenUsage::default(),
             live_output_chars_estimate: 0,
             live_output_tokens_estimate: 0,
             mode: Mode::Normal,
@@ -451,9 +426,7 @@ impl App {
     }
 
     fn flush_pending_text(&mut self) {
-        let flushed = normalize_stream_text(&self.pending_text);
-        if !flushed.is_empty() {
-            self.blocks.push(DisplayBlock::AssistantText(flushed));
+        if push_assistant_text_block(&mut self.blocks, &self.pending_text) {
             self.invalidate_height_cache();
         }
         self.pending_text.clear();
@@ -488,6 +461,8 @@ impl App {
             }
             AgentEvent::ToolCall {
                 name,
+                args,
+                result,
                 success,
                 duration_ms,
                 ..
@@ -505,6 +480,8 @@ impl App {
                     matches!(self.blocks.last(), Some(DisplayBlock::ToolCall { .. }));
                 self.blocks.push(DisplayBlock::ToolCall {
                     name,
+                    args,
+                    result,
                     success,
                     duration_ms,
                     continuation,
@@ -516,6 +493,7 @@ impl App {
                 self.scroll_to_bottom();
             }
             AgentEvent::CodeOutput { output, error } => {
+                let error = error.filter(|value| !value.trim().is_empty());
                 if error.is_some() {
                     self.status_text = Some("execution_failed".into());
                 }
@@ -567,9 +545,7 @@ impl App {
                         self.scroll_to_bottom();
                     }
                 } else if kind == "final" {
-                    let cleaned = normalize_stream_text(&text);
-                    if !cleaned.is_empty() {
-                        self.blocks.push(DisplayBlock::AssistantText(cleaned));
+                    if push_assistant_text_block(&mut self.blocks, &text) {
                         self.invalidate_height_cache();
                         self.scroll_to_bottom();
                     }
@@ -617,7 +593,7 @@ impl App {
             }
             AgentEvent::TokenUsage { usage, .. } => {
                 self.token_usage.add(&usage);
-                self.last_input_tokens = usage.input_tokens;
+                self.last_response_usage = usage;
                 self.live_output_chars_estimate = 0;
                 self.live_output_tokens_estimate = 0;
             }
@@ -686,7 +662,7 @@ impl App {
         self.task_tray.clear();
         self.active_delegate = None;
         self.token_usage = TokenUsage::default();
-        self.last_input_tokens = 0;
+        self.last_response_usage = TokenUsage::default();
         self.live_output_chars_estimate = 0;
         self.live_output_tokens_estimate = 0;
         self.invalidate_height_cache();
@@ -1627,6 +1603,7 @@ fn generate_plan_slug() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::replay::normalize_stream_text;
 
     // ── wrapped_line_height ──
 
@@ -1737,6 +1714,8 @@ mod tests {
     fn display_block_tool_call_height() {
         let block = DisplayBlock::ToolCall {
             name: "read_file".into(),
+            args: serde_json::json!({}),
+            result: serde_json::json!(null),
             success: true,
             duration_ms: 50,
             continuation: false,
@@ -1750,6 +1729,8 @@ mod tests {
 
         let cont = DisplayBlock::ToolCall {
             name: "read_file".into(),
+            args: serde_json::json!({}),
+            result: serde_json::json!(null),
             success: true,
             duration_ms: 50,
             continuation: true,
@@ -1757,6 +1738,21 @@ mod tests {
         assert_eq!(cont.height(0, 80, 0), 0); // absorbed into ghost fold
         assert_eq!(cont.height(1, 80, 0), 1); // visible at level 1
         assert_eq!(cont.height(2, 80, 0), 1); // visible at level 2
+    }
+
+    #[test]
+    fn successful_plan_mode_tool_calls_are_hidden() {
+        let block = DisplayBlock::ToolCall {
+            name: "enter_plan_mode".into(),
+            args: serde_json::json!({}),
+            result: serde_json::json!({"plan_file":"/tmp/plan.md"}),
+            success: true,
+            duration_ms: 10,
+            continuation: false,
+        };
+        assert_eq!(block.height(0, 80, 0), 0);
+        assert_eq!(block.height(1, 80, 0), 0);
+        assert_eq!(block.height(2, 80, 0), 0);
     }
 
     #[test]
@@ -1865,15 +1861,18 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 cached_input_tokens: 0,
+                reasoning_tokens: 2,
             },
             cumulative: TokenUsage {
                 input_tokens: 10,
                 output_tokens: 5,
                 cached_input_tokens: 0,
+                reasoning_tokens: 2,
             },
         });
         assert_eq!(app.live_output_tokens_estimate, 0);
-        assert_eq!(app.last_input_tokens, 10);
+        assert_eq!(app.last_response_usage.input_tokens, 10);
+        assert_eq!(app.last_response_usage.reasoning_tokens, 2);
     }
 
     #[test]
@@ -1932,6 +1931,8 @@ mod tests {
         });
         app.blocks.push(DisplayBlock::ToolCall {
             name: "read_file".into(),
+            args: serde_json::json!({}),
+            result: serde_json::json!(null),
             success: true,
             duration_ms: 50,
             continuation: false,
@@ -2011,6 +2012,8 @@ mod tests {
         });
         app.blocks.push(DisplayBlock::ToolCall {
             name: "read_file".into(),
+            args: serde_json::json!({}),
+            result: serde_json::json!(null),
             success: true,
             duration_ms: 50,
             continuation: false,

@@ -151,6 +151,8 @@ struct CapabilityPayload {
     enabled_capabilities: Vec<String>,
     #[serde(default)]
     enabled_tools: Vec<String>,
+    #[serde(default)]
+    helper_bindings: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -190,7 +192,16 @@ impl RuntimeConfig {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .collect();
-        self.helper_bindings = helper_bindings_for(&self.enabled_capabilities);
+        self.helper_bindings = if payload.helper_bindings.is_empty() {
+            self.enabled_tools.clone()
+        } else {
+            payload
+                .helper_bindings
+                .into_iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect()
+        };
         self.agent_id = agent_id;
         self.headless = headless;
         Ok(())
@@ -634,7 +645,7 @@ fn handle_function_call(
                 .map_err(|err| err.error.to_string());
         }
         "mem_all" => {
-            let result = invoke_tool(response_tx, &state.config.agent_id, "mem_export", json!({}))?;
+            let result = invoke_tool(response_tx, &state.config.agent_id, "mem_all", json!({}))?;
             return call
                 .resume(result, print)
                 .map_err(|err| err.error.to_string());
@@ -976,28 +987,6 @@ fn default_example(tool: &crate::ProjectedToolDefinition) -> String {
         })
         .collect::<Vec<_>>();
     format!("{}({})", tool.name, params.join(", "))
-}
-
-fn helper_bindings_for(enabled_capabilities: &BTreeSet<String>) -> BTreeSet<String> {
-    let mut bindings = BTreeSet::from([
-        "list_tools".to_string(),
-        "search_tools".to_string(),
-        "reset_repl".to_string(),
-    ]);
-    if enabled_capabilities.contains("history") {
-        bindings.insert("search_history".to_string());
-    }
-    if enabled_capabilities.contains("memory") {
-        bindings.insert("search_mem".to_string());
-        bindings.insert("mem_set".to_string());
-        bindings.insert("mem_get".to_string());
-        bindings.insert("mem_delete".to_string());
-        bindings.insert("mem_all".to_string());
-    }
-    if enabled_capabilities.contains("skills") {
-        bindings.insert("search_skills".to_string());
-    }
-    bindings
 }
 
 fn empty_repl() -> Result<MontyRepl<NoLimitTracker>, std::io::Error> {

@@ -1,3 +1,5 @@
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -7,6 +9,7 @@ use lash_core::TokenUsage;
 use lash_core::agent::{Message, MessageRole, Part, PartKind, PruneState};
 
 use crate::app::DisplayBlock;
+use crate::replay::{AssistantReplay, push_assistant_text_block};
 
 pub struct SessionInfo {
     pub filename: String,
@@ -16,9 +19,21 @@ pub struct SessionInfo {
     pub modified: SystemTime,
 }
 
+pub struct SessionStart {
+    pub session_id: String,
+    pub session_name: String,
+}
+
+pub struct LoadedSession {
+    pub messages: Vec<Message>,
+    pub blocks: Vec<DisplayBlock>,
+    pub last_token_usage: TokenUsage,
+}
+
 pub struct SessionLogger {
     file: std::io::BufWriter<std::fs::File>,
     pub session_id: String,
+    filename: String,
     pending_turn: Vec<serde_json::Value>,
 }
 
@@ -36,6 +51,7 @@ impl SessionLogger {
         let mut logger = Self {
             file,
             session_id: session_id.clone(),
+            filename,
             pending_turn: Vec::new(),
         };
         logger.write_json(&serde_json::json!({
@@ -51,6 +67,24 @@ impl SessionLogger {
         Ok(logger)
     }
 
+    pub fn resume(filename: &str) -> Result<Self> {
+        let start = load_session_start(filename)
+            .ok_or_else(|| anyhow::anyhow!("Could not load session metadata for {}", filename))?;
+        let path = sessions_dir().join(filename);
+        let file = std::io::BufWriter::new(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&path)?,
+        );
+        Ok(Self {
+            file,
+            session_id: start.session_id,
+            filename: filename.to_string(),
+            pending_turn: Vec::new(),
+        })
+    }
+
     fn write_json(&mut self, value: &serde_json::Value) -> Result<()> {
         use std::io::Write;
         serde_json::to_writer(&mut self.file, value)?;
@@ -62,6 +96,27 @@ impl SessionLogger {
         use std::io::Write;
         self.file.flush()?;
         Ok(())
+    }
+
+    pub fn flush(&mut self) -> Result<()> {
+        self.flush_pending_turn();
+        self.flush_file()
+    }
+
+    pub fn filename(&self) -> &str {
+        &self.filename
+    }
+
+    pub fn clone_history_from(&mut self, source_filename: &str) -> Result<()> {
+        let path = sessions_dir().join(source_filename);
+        use std::io::Write;
+        let reader = BufReader::new(File::open(&path)?);
+        for line in reader.lines().skip(1) {
+            let line = line?;
+            self.file.write_all(line.as_bytes())?;
+            self.file.write_all(b"\n")?;
+        }
+        self.flush_file()
     }
 
     fn flush_pending_turn(&mut self) {
@@ -130,6 +185,26 @@ pub fn sessions_dir() -> PathBuf {
     lash_core::lash_home().join("sessions")
 }
 
+pub fn load_session_start(filename: &str) -> Option<SessionStart> {
+    let path = sessions_dir().join(filename);
+    let file = File::open(&path).ok()?;
+    let mut reader = BufReader::new(file);
+    let mut first_line = String::new();
+    reader.read_line(&mut first_line).ok()?;
+    if first_line.is_empty() {
+        return None;
+    }
+    let val: serde_json::Value = serde_json::from_str(&first_line).ok()?;
+    Some(SessionStart {
+        session_id: val.get("session_id")?.as_str()?.to_string(),
+        session_name: val
+            .get("session_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(filename.trim_end_matches(".jsonl"))
+            .to_string(),
+    })
+}
+
 /// List available session files, most recently modified first.
 pub fn list_sessions() -> Vec<SessionInfo> {
     let dir = sessions_dir();
@@ -149,17 +224,19 @@ pub fn list_sessions() -> Vec<SessionInfo> {
             .and_then(|m| m.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
 
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
+        let file = match File::open(&path) {
+            Ok(file) => file,
             Err(_) => continue,
         };
+        let reader = BufReader::new(file);
+        let mut lines = reader.lines();
 
         // Parse first line for session metadata
-        let first_line = match content.lines().next() {
-            Some(l) => l,
-            None => continue,
+        let first_line = match lines.next() {
+            Some(Ok(line)) => line,
+            _ => continue,
         };
-        let val: serde_json::Value = match serde_json::from_str(first_line) {
+        let val: serde_json::Value = match serde_json::from_str(&first_line) {
             Ok(v) => v,
             Err(_) => continue,
         };
@@ -175,8 +252,11 @@ pub fn list_sessions() -> Vec<SessionInfo> {
         // Scan for first user_input and count messages
         let mut message_count = 0;
         let mut first_message = String::new();
-        for line in content.lines() {
-            let v: serde_json::Value = match serde_json::from_str(line) {
+        for line in lines {
+            let Ok(line) = line else {
+                continue;
+            };
+            let v: serde_json::Value = match serde_json::from_str(&line) {
                 Ok(v) => v,
                 Err(_) => continue,
             };
@@ -210,16 +290,22 @@ pub fn list_sessions() -> Vec<SessionInfo> {
 }
 
 /// Load a session JSONL file, reconstructing display blocks and structured messages.
-pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)> {
+pub fn load_session(filename: &str) -> Option<LoadedSession> {
     let path = sessions_dir().join(filename);
-    let content = std::fs::read_to_string(&path).ok()?;
+    let file = File::open(&path).ok()?;
+    let reader = BufReader::new(file);
 
     let mut messages = Vec::new();
     let mut blocks = Vec::new();
     let mut sub_agent_count: usize = 0;
+    let mut assistant_replay = AssistantReplay::default();
+    let mut last_token_usage = TokenUsage::default();
 
-    for line in content.lines() {
-        let val: serde_json::Value = match serde_json::from_str(line) {
+    for line in reader.lines() {
+        let Ok(line) = line else {
+            continue;
+        };
+        let val: serde_json::Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(_) => continue,
         };
@@ -229,6 +315,7 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
         };
         match ty {
             "user_input" => {
+                assistant_replay.flush(&mut blocks);
                 let text = val
                     .get("content")
                     .and_then(|v| v.as_str())
@@ -246,11 +333,23 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
                         tool_name: None,
                         prune_state: PruneState::Intact,
                     }],
+                    origin: None,
                 });
                 blocks.push(DisplayBlock::UserInput(text));
             }
-            "text_delta" | "llm_request" | "done" => {}
+            "text_delta" => {
+                if let Some(text) = val.get("content").and_then(|v| v.as_str()) {
+                    assistant_replay.push_text_delta(text);
+                }
+            }
+            "llm_request" => {
+                assistant_replay.flush(&mut blocks);
+            }
+            "done" => {
+                assistant_replay.flush(&mut blocks);
+            }
             "code_block" => {
+                assistant_replay.flush(&mut blocks);
                 if let Some(code) = val.get("code").and_then(|v| v.as_str()) {
                     blocks.push(DisplayBlock::CodeBlock {
                         code: code.to_string(),
@@ -259,14 +358,25 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
                 }
             }
             "tool_call" => {
+                assistant_replay.flush(&mut blocks);
                 if let (Some(name), Some(success), Some(duration_ms)) = (
                     val.get("name").and_then(|v| v.as_str()),
                     val.get("success").and_then(|v| v.as_bool()),
                     val.get("duration_ms").and_then(|v| v.as_u64()),
                 ) {
+                    let args = val
+                        .get("args")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    let result = val
+                        .get("result")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
                     let continuation = matches!(blocks.last(), Some(DisplayBlock::ToolCall { .. }));
                     blocks.push(DisplayBlock::ToolCall {
                         name: name.to_string(),
+                        args,
+                        result,
                         success,
                         duration_ms,
                         continuation,
@@ -274,6 +384,7 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
                 }
             }
             "code_output" => {
+                assistant_replay.flush(&mut blocks);
                 let output = val
                     .get("output")
                     .and_then(|v| v.as_str())
@@ -282,13 +393,15 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
                 let error = val
                     .get("error")
                     .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.trim().is_empty());
                 if !output.is_empty() || error.is_some() {
                     blocks.push(DisplayBlock::CodeOutput { output, error });
                 }
             }
             "llm_response" => {
                 if let Some(c) = val.get("content").and_then(|v| v.as_str()) {
+                    assistant_replay.remember_llm_response(c);
                     let msg_id = format!("m{}", messages.len());
                     messages.push(Message {
                         id: msg_id.clone(),
@@ -301,10 +414,12 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
                             tool_name: None,
                             prune_state: PruneState::Intact,
                         }],
+                        origin: None,
                     });
                 }
             }
             "sub_agent_done" => {
+                assistant_replay.flush(&mut blocks);
                 sub_agent_count += 1;
                 let task = val
                     .get("task")
@@ -329,7 +444,16 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
                     is_last: true, // will be fixed below
                 });
             }
+            "token_usage" => {
+                if let Some(usage) = val
+                    .get("usage")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                {
+                    last_token_usage = usage;
+                }
+            }
             "message" => {
+                assistant_replay.flush(&mut blocks);
                 let text = val
                     .get("text")
                     .and_then(|v| v.as_str())
@@ -337,10 +461,11 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
                     .to_string();
                 let kind = val.get("kind").and_then(|v| v.as_str()).unwrap_or("");
                 if kind == "final" && !text.is_empty() {
-                    blocks.push(DisplayBlock::AssistantText(text));
+                    push_assistant_text_block(&mut blocks, &text);
                 }
             }
             "error" => {
+                assistant_replay.flush(&mut blocks);
                 if let Some(msg) = val.get("message").and_then(|v| v.as_str()) {
                     blocks.push(DisplayBlock::Error(msg.to_string()));
                 }
@@ -348,6 +473,8 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
             _ => {}
         }
     }
+
+    assistant_replay.flush(&mut blocks);
 
     // Fix is_last flags for consecutive SubAgentResult blocks
     if sub_agent_count > 0 {
@@ -371,5 +498,66 @@ pub fn load_session(filename: &str) -> Option<(Vec<Message>, Vec<DisplayBlock>)>
         }
     }
 
-    Some((messages, blocks))
+    Some(LoadedSession {
+        messages,
+        blocks,
+        last_token_usage,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_session_reconstructs_streamed_assistant_blocks() {
+        let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
+        let path = sessions_dir().join(&filename);
+        std::fs::create_dir_all(sessions_dir()).unwrap();
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
+                "{\"type\":\"user_input\",\"content\":\"Hi\"}\n",
+                "{\"type\":\"text_delta\",\"content\":\"Hello\"}\n",
+                "{\"type\":\"text_delta\",\"content\":\" world\"}\n",
+                "{\"type\":\"llm_response\",\"content\":\"Hello world\"}\n",
+                "{\"type\":\"done\"}\n"
+            ),
+        )
+        .unwrap();
+
+        let loaded = load_session(&filename).unwrap();
+        let blocks = loaded.blocks;
+        assert!(matches!(blocks.first(), Some(DisplayBlock::UserInput(text)) if text == "Hi"));
+        assert!(
+            matches!(blocks.get(1), Some(DisplayBlock::AssistantText(text)) if text == "Hello world")
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_session_ignores_empty_code_output_errors() {
+        let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
+        let path = sessions_dir().join(&filename);
+        std::fs::create_dir_all(sessions_dir()).unwrap();
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
+                "{\"type\":\"user_input\",\"content\":\"Hi\"}\n",
+                "{\"type\":\"code_output\",\"output\":\"\",\"error\":\"\"}\n",
+                "{\"type\":\"done\"}\n"
+            ),
+        )
+        .unwrap();
+
+        let loaded = load_session(&filename).unwrap();
+        let blocks = loaded.blocks;
+        assert!(matches!(blocks.first(), Some(DisplayBlock::UserInput(text)) if text == "Hi"));
+        assert_eq!(blocks.len(), 1);
+
+        let _ = std::fs::remove_file(path);
+    }
 }

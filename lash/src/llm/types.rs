@@ -173,6 +173,7 @@ pub struct LlmUsage {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cached_input_tokens: i64,
+    pub reasoning_tokens: i64,
 }
 
 #[derive(Clone, Debug)]
