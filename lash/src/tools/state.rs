@@ -142,101 +142,20 @@ impl StateStore {
             .unwrap_or_else(|| self.fallback_tool_catalog())
     }
 
-    fn list_tools(&self, args: &serde_json::Value) -> ToolResult {
-        let query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .map(|v| v.to_ascii_lowercase());
-        let injected_only = args.get("injected_only").and_then(|v| v.as_bool());
-        let catalog = self.tool_catalog(args);
-
-        let items: Vec<serde_json::Value> = catalog
-            .into_iter()
-            .filter(|t| {
-                if t.get("hidden").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    return false;
-                }
-                if let Some(flag) = injected_only {
-                    let inject = t
-                        .get("inject_into_prompt")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    if inject != flag {
-                        return false;
-                    }
-                }
-                if let Some(needle) = &query {
-                    let name = t
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_ascii_lowercase();
-                    let desc = t
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_ascii_lowercase();
-                    return name.contains(needle) || desc.contains(needle);
-                }
-                true
-            })
-            .map(|t| {
-                let name = t.get("name").and_then(|v| v.as_str()).unwrap_or_default();
-                let desc = t
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                let oneliner = desc.lines().next().unwrap_or("").trim();
-                let signature = match (
-                    t.get("params").and_then(|v| v.as_array()),
-                    t.get("returns").and_then(|v| v.as_str()),
-                ) {
-                    (Some(params), Some(returns)) => {
-                        let rendered = params
-                            .iter()
-                            .map(|param| {
-                                let name = param
-                                    .get("name")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or_default();
-                                let ty =
-                                    param.get("type").and_then(|v| v.as_str()).unwrap_or("any");
-                                let required = param
-                                    .get("required")
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or(true);
-                                if required {
-                                    format!("{name}: {ty}")
-                                } else {
-                                    format!("{name}: {ty} = None")
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        format!("{name}({rendered}) -> {returns}")
-                    }
-                    _ => String::new(),
-                };
-                json!({
-                    "name": name,
-                    "oneliner": oneliner,
-                    "signature": signature,
-                })
-            })
-            .collect();
-
-        ToolResult::ok(json!(items))
-    }
-
     fn search_tools(&self, args: &serde_json::Value) -> ToolResult {
         let query = args
             .get("query")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
+        let browse_all = query.trim().is_empty();
         let mode = SearchMode::parse(args.get("mode").and_then(|v| v.as_str()));
         let regex = args.get("regex").and_then(|v| v.as_str());
-        let limit = limit_from_args(args);
+        let limit = if browse_all && args.get("limit").is_none() {
+            usize::MAX
+        } else {
+            limit_from_args(args)
+        };
         let injected_only = args.get("injected_only").and_then(|v| v.as_bool());
         let catalog = self.tool_catalog(args);
 
@@ -255,6 +174,21 @@ impl StateStore {
                 }
             }
             filtered.push(t.clone());
+        }
+
+        if browse_all {
+            filtered.sort_by(|left, right| {
+                let left_name = left
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                let right_name = right
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                left_name.cmp(right_name)
+            });
+            return ToolResult::ok(json!(filtered.into_iter().take(limit).collect::<Vec<_>>()));
         }
 
         let docs: Vec<SearchDoc> = filtered
@@ -357,41 +291,33 @@ impl StateStore {
 #[async_trait::async_trait]
 impl ToolProvider for StateStore {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        let mut defs = vec![
-            ToolDefinition {
-                name: "list_tools".into(),
-                description: vec![crate::ToolText::new(
-                    "List available tools with compact summaries. Use search_tools for ranked or filtered results.",
+        let mut defs = vec![ToolDefinition {
+            name: "search_tools".into(),
+            description: vec![crate::ToolText::new(
+                "Discover available tools. With a focused `query`, returns ranked matches using hybrid/literal/regex search. With no `query`, returns the full active tool catalog in stable name order. Prefer this tool for both browsing and discovery.",
+                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
+            )],
+            params: vec![
+                ToolParam::optional("query", "str"),
+                ToolParam::optional("mode", "str"),
+                ToolParam::optional("regex", "str"),
+                ToolParam::optional("limit", "int"),
+                ToolParam::optional("injected_only", "bool"),
+            ],
+            returns: "list".into(),
+            examples: vec![
+                crate::ToolText::new(
+                    "search_tools(query=\"task planning\")",
                     [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-                )],
-                params: vec![
-                    ToolParam::optional("query", "str"),
-                    ToolParam::optional("injected_only", "bool"),
-                ],
-                returns: "list".into(),
-                examples: vec![],
-                hidden: false,
-                inject_into_prompt: false,
-            },
-            ToolDefinition {
-                name: "search_tools".into(),
-                description: vec![crate::ToolText::new(
-                    "Search tools using hybrid/literal/regex matching. Results include relevance scores.",
+                ),
+                crate::ToolText::new(
+                    "search_tools()",
                     [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-                )],
-                params: vec![
-                    ToolParam::typed("query", "str"),
-                    ToolParam::optional("mode", "str"),
-                    ToolParam::optional("regex", "str"),
-                    ToolParam::optional("limit", "int"),
-                    ToolParam::optional("injected_only", "bool"),
-                ],
-                returns: "list".into(),
-                examples: vec![],
-                hidden: false,
-                inject_into_prompt: false,
-            },
-        ];
+                ),
+            ],
+            hidden: false,
+            inject_into_prompt: false,
+        }];
         defs.push(ToolDefinition {
             name: "search_skills".into(),
             description: vec![crate::ToolText::new(
@@ -417,7 +343,6 @@ impl ToolProvider for StateStore {
         let name = name.to_string();
         let args = args.clone();
         run_blocking(move || match name.as_str() {
-            "list_tools" => this.list_tools(&args),
             "search_tools" => this.search_tools(&args),
             "search_skills" => this.search_skills(&args),
             _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
@@ -456,22 +381,6 @@ mod tests {
     }
 
     #[test]
-    fn list_tools_works_without_catalog_arg() {
-        let p = provider();
-        let result = p.list_tools(&json!({
-            "query":"list_tools"
-        }));
-        assert!(result.success);
-        let items = result.result.as_array().cloned().unwrap_or_default();
-        assert!(!items.is_empty());
-        assert_eq!(
-            items[0].get("name").and_then(|v| v.as_str()),
-            Some("list_tools")
-        );
-        assert!(items[0].get("signature").and_then(|v| v.as_str()).is_some());
-    }
-
-    #[test]
     fn search_tools_works_without_catalog_arg() {
         let p = provider();
         let result = p.search_tools(&json!({
@@ -482,6 +391,47 @@ mod tests {
         assert!(result.success);
         let items = result.result.as_array().cloned().unwrap_or_default();
         assert!(!items.is_empty());
+    }
+
+    #[test]
+    fn search_tools_lists_all_without_query() {
+        let p = provider();
+        let result = p.search_tools(&json!({
+            "catalog":[
+                {"name":"search_tools","description":"Discover tools","examples":[],"inject_into_prompt":true},
+                {"name":"read_file","description":"Read file","examples":[],"inject_into_prompt":true}
+            ]
+        }));
+        assert!(result.success);
+        let items = result.result.as_array().cloned().unwrap_or_default();
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items[0].get("name").and_then(|v| v.as_str()),
+            Some("read_file")
+        );
+        assert_eq!(
+            items[1].get("name").and_then(|v| v.as_str()),
+            Some("search_tools")
+        );
+        assert!(items[0].get("score").is_none());
+    }
+
+    #[test]
+    fn search_tools_hybrid_matches_broader_query_terms() {
+        let p = provider();
+        let result = p.search_tools(&json!({
+            "query":"asking users",
+            "mode":"hybrid",
+            "limit":10,
+            "catalog":[
+                {"name":"ask","description":"Pause and ask the user a targeted question, then wait for the answer before continuing.","examples":[],"inject_into_prompt":true},
+                {"name":"read_file","description":"Read file contents from disk.","examples":[],"inject_into_prompt":true}
+            ]
+        }));
+        assert!(result.success);
+        let items = result.result.as_array().cloned().unwrap_or_default();
+        assert!(!items.is_empty());
+        assert_eq!(items[0].get("name").and_then(|v| v.as_str()), Some("ask"));
     }
 
     #[test]

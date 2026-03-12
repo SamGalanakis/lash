@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use lash_core::oauth;
 use lash_core::provider::{LashConfig, OPENAI_GENERIC_DEFAULT_BASE_URL, Provider, ProviderKind};
@@ -31,6 +33,7 @@ enum SetupStep {
         device_auth_id: String,
         interval: u64,
         error: Option<String>,
+        copy_status: Option<String>,
     },
     InputBaseUrl {
         api_key: String,
@@ -54,13 +57,19 @@ enum CredentialMode {
 struct SetupApp {
     step: SetupStep,
     tick: u64,
+    saved_kinds: BTreeSet<ProviderKind>,
+    active_kind: Option<ProviderKind>,
 }
 
 impl SetupApp {
-    fn new() -> Self {
+    fn new(existing: Option<&LashConfig>) -> Self {
         Self {
             step: SetupStep::SelectProvider { selected: 0 },
             tick: 0,
+            saved_kinds: existing
+                .map(|cfg| cfg.provider_kinds().into_iter().collect())
+                .unwrap_or_default(),
+            active_kind: existing.map(LashConfig::active_provider_kind),
         }
     }
 }
@@ -88,7 +97,8 @@ async fn run_setup_inner(
     terminal: &mut ratatui::DefaultTerminal,
     existing: Option<&LashConfig>,
 ) -> anyhow::Result<LashConfig> {
-    let mut app = SetupApp::new();
+    let existing_config = existing.cloned();
+    let mut app = SetupApp::new(existing_config.as_ref());
     let mut provider: Option<Provider> = None;
     let mut tavily_key: Option<String> =
         existing.and_then(|c| c.tavily_api_key().map(str::to_string));
@@ -110,6 +120,7 @@ async fn run_setup_inner(
             user_code,
             interval,
             error,
+            copy_status,
         } = &mut app.step
         {
             let poll_secs = *interval;
@@ -125,6 +136,18 @@ async fn run_setup_inner(
                     }
                     if key.code == KeyCode::Esc {
                         app.step = SetupStep::SelectProvider { selected: 1 };
+                        continue;
+                    }
+                    if key.code == KeyCode::Char('c') && !user_code.is_empty() {
+                        match copy_to_clipboard(user_code) {
+                            Ok(()) => {
+                                *copy_status = Some("Copied code to clipboard.".into());
+                            }
+                            Err(copy_err) => {
+                                *error = Some(copy_err);
+                            }
+                        }
+                        app.tick += 1;
                         continue;
                     }
                 }
@@ -190,89 +213,22 @@ async fn run_setup_inner(
                     *selected = (*selected + 1).min(ProviderKind::ALL.len().saturating_sub(1));
                 }
                 KeyCode::Enter => {
-                    match ProviderKind::ALL[*selected] {
-                        ProviderKind::Claude => {
-                            // Claude — start OAuth
-                            let (verifier, challenge) = oauth::generate_pkce();
-                            let url = oauth::authorize_url(&challenge, &verifier);
-                            persist_oauth_url(&url);
-                            let browser_error = open_browser(&url).err().map(|e| e.to_string());
-                            app.step = SetupStep::InputCredential {
-                                input: String::new(),
-                                cursor: 0,
-                                error: None,
-                                verifier: Some(verifier),
-                                auth_url: Some(url),
-                                browser_error,
-                                mode: CredentialMode::ClaudeOAuth,
-                            };
-                        }
-                        ProviderKind::Codex => {
-                            // Codex — device code auth
-                            match oauth::codex_request_device_code().await {
-                                Ok(dc) => {
-                                    let _ = open_browser(oauth::CODEX_DEVICE_VERIFY_URL);
-                                    app.step = SetupStep::CodexDeviceAuth {
-                                        user_code: dc.user_code,
-                                        device_auth_id: dc.device_auth_id,
-                                        interval: dc.interval,
-                                        error: None,
-                                    };
-                                }
-                                Err(e) => {
-                                    app.step = SetupStep::CodexDeviceAuth {
-                                        user_code: String::new(),
-                                        device_auth_id: String::new(),
-                                        interval: 5,
-                                        error: Some(format!("{}", e)),
-                                    };
-                                }
-                            }
-                        }
-                        ProviderKind::GoogleOAuth => {
-                            // Google OAuth
-                            let (verifier, challenge) = oauth::generate_pkce();
-                            match oauth::google_authorize_url(&challenge) {
-                                Ok(url) => {
-                                    persist_oauth_url(&url);
-                                    let browser_error =
-                                        open_browser(&url).err().map(|e| e.to_string());
-                                    app.step = SetupStep::InputCredential {
-                                        input: String::new(),
-                                        cursor: 0,
-                                        error: None,
-                                        verifier: Some(verifier),
-                                        auth_url: Some(url),
-                                        browser_error,
-                                        mode: CredentialMode::GoogleOAuth,
-                                    };
-                                }
-                                Err(e) => {
-                                    app.step = SetupStep::InputCredential {
-                                        input: String::new(),
-                                        cursor: 0,
-                                        error: Some(format!("{}", e)),
-                                        verifier: Some(verifier),
-                                        auth_url: None,
-                                        browser_error: None,
-                                        mode: CredentialMode::GoogleOAuth,
-                                    };
-                                }
-                            }
-                        }
-                        ProviderKind::OpenAiGeneric => {
-                            // OpenAI-generic
-                            app.step = SetupStep::InputCredential {
-                                input: String::new(),
-                                cursor: 0,
-                                error: None,
-                                verifier: None,
-                                auth_url: None,
-                                browser_error: None,
-                                mode: CredentialMode::OpenAiGenericKey,
-                            };
-                        }
+                    let kind = ProviderKind::ALL[*selected];
+                    if let Some(saved) = existing_config
+                        .as_ref()
+                        .and_then(|cfg| cfg.provider(kind))
+                        .cloned()
+                    {
+                        provider = Some(saved);
+                        app.active_kind = Some(kind);
+                        app.step = SetupStep::Done;
+                    } else {
+                        start_provider_flow(&mut app, kind).await;
                     }
+                }
+                KeyCode::Char('r') => {
+                    let kind = ProviderKind::ALL[*selected];
+                    start_provider_flow(&mut app, kind).await;
                 }
                 _ => {}
             },
@@ -554,10 +510,96 @@ async fn run_setup_inner(
         }
     }
 
-    let mut config = LashConfig::new(provider.expect("provider must be set before Done"));
+    let provider = provider.expect("provider must be set before Done");
+    let mut config = existing_config.unwrap_or_else(|| LashConfig::new(provider.clone()));
+    config.upsert_provider(provider.clone());
+    config
+        .set_active_provider_kind(provider.kind())
+        .expect("active provider must exist after upsert");
     config.set_tavily_api_key(tavily_key);
     config.agent_models = existing_agent_models;
     Ok(config)
+}
+
+async fn start_provider_flow(app: &mut SetupApp, kind: ProviderKind) {
+    match kind {
+        ProviderKind::Claude => {
+            let (verifier, challenge) = oauth::generate_pkce();
+            let url = oauth::authorize_url(&challenge, &verifier);
+            persist_oauth_url(&url);
+            let browser_error = open_browser(&url).err().map(|e| e.to_string());
+            app.step = SetupStep::InputCredential {
+                input: String::new(),
+                cursor: 0,
+                error: None,
+                verifier: Some(verifier),
+                auth_url: Some(url),
+                browser_error,
+                mode: CredentialMode::ClaudeOAuth,
+            };
+        }
+        ProviderKind::Codex => match oauth::codex_request_device_code().await {
+            Ok(dc) => {
+                let _ = open_browser(oauth::CODEX_DEVICE_VERIFY_URL);
+                app.step = SetupStep::CodexDeviceAuth {
+                    user_code: dc.user_code,
+                    device_auth_id: dc.device_auth_id,
+                    interval: dc.interval,
+                    error: None,
+                    copy_status: None,
+                };
+            }
+            Err(e) => {
+                app.step = SetupStep::CodexDeviceAuth {
+                    user_code: String::new(),
+                    device_auth_id: String::new(),
+                    interval: 5,
+                    error: Some(format!("{}", e)),
+                    copy_status: None,
+                };
+            }
+        },
+        ProviderKind::GoogleOAuth => {
+            let (verifier, challenge) = oauth::generate_pkce();
+            match oauth::google_authorize_url(&challenge) {
+                Ok(url) => {
+                    persist_oauth_url(&url);
+                    let browser_error = open_browser(&url).err().map(|e| e.to_string());
+                    app.step = SetupStep::InputCredential {
+                        input: String::new(),
+                        cursor: 0,
+                        error: None,
+                        verifier: Some(verifier),
+                        auth_url: Some(url),
+                        browser_error,
+                        mode: CredentialMode::GoogleOAuth,
+                    };
+                }
+                Err(e) => {
+                    app.step = SetupStep::InputCredential {
+                        input: String::new(),
+                        cursor: 0,
+                        error: Some(format!("{}", e)),
+                        verifier: Some(verifier),
+                        auth_url: None,
+                        browser_error: None,
+                        mode: CredentialMode::GoogleOAuth,
+                    };
+                }
+            }
+        }
+        ProviderKind::OpenAiGeneric => {
+            app.step = SetupStep::InputCredential {
+                input: String::new(),
+                cursor: 0,
+                error: None,
+                verifier: None,
+                auth_url: None,
+                browser_error: None,
+                mode: CredentialMode::OpenAiGenericKey,
+            };
+        }
+    }
 }
 
 // ── Rendering ───────────────────────────────────────────────────────
@@ -588,13 +630,13 @@ fn draw_setup(frame: &mut Frame, app: &SetupApp) {
                     }
                 }
             }
-            SetupStep::CodexDeviceAuth { error, .. } => {
-                if error.is_some() {
-                    10
-                } else {
-                    9
-                }
-            }
+            SetupStep::CodexDeviceAuth {
+                error, copy_status, ..
+            } => match (error.is_some(), copy_status.is_some()) {
+                (true, true) => 11,
+                (true, false) | (false, true) => 10,
+                (false, false) => 9,
+            },
             SetupStep::InputBaseUrl { .. } => 8,
             SetupStep::InputTavily { .. } => 7,
             SetupStep::Done => 4,
@@ -611,7 +653,13 @@ fn draw_setup(frame: &mut Frame, app: &SetupApp) {
     draw_logo(frame, chunks[1]);
 
     match &app.step {
-        SetupStep::SelectProvider { selected } => draw_provider_select(frame, chunks[2], *selected),
+        SetupStep::SelectProvider { selected } => draw_provider_select(
+            frame,
+            chunks[2],
+            *selected,
+            &app.saved_kinds,
+            app.active_kind,
+        ),
         SetupStep::InputCredential {
             input,
             cursor,
@@ -631,8 +679,18 @@ fn draw_setup(frame: &mut Frame, app: &SetupApp) {
             browser_error.as_deref(),
         ),
         SetupStep::CodexDeviceAuth {
-            user_code, error, ..
-        } => draw_codex_device_auth(frame, chunks[2], user_code, error.as_deref(), app.tick),
+            user_code,
+            error,
+            copy_status,
+            ..
+        } => draw_codex_device_auth(
+            frame,
+            chunks[2],
+            user_code,
+            error.as_deref(),
+            copy_status.as_deref(),
+            app.tick,
+        ),
         SetupStep::InputBaseUrl { input, cursor, .. } => {
             draw_base_url_input(frame, chunks[2], input, *cursor)
         }
@@ -690,7 +748,13 @@ fn draw_logo(frame: &mut Frame, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-fn draw_provider_select(frame: &mut Frame, area: Rect, selected: usize) {
+fn draw_provider_select(
+    frame: &mut Frame,
+    area: Rect,
+    selected: usize,
+    saved_kinds: &BTreeSet<ProviderKind>,
+    active_kind: Option<ProviderKind>,
+) {
     let cx = center_pad(area.width as usize, 46);
     let pad = " ".repeat(cx);
 
@@ -704,7 +768,12 @@ fn draw_provider_select(frame: &mut Frame, area: Rect, selected: usize) {
 
     for (i, kind) in ProviderKind::ALL.iter().enumerate() {
         let name = kind.setup_name();
-        let desc = kind.setup_description();
+        let mut desc = kind.setup_description().to_string();
+        if active_kind == Some(*kind) {
+            desc.push_str("  [active]");
+        } else if saved_kinds.contains(kind) {
+            desc.push_str("  [saved]");
+        }
         if i == selected {
             lines.push(Line::from(vec![
                 Span::styled(
@@ -738,7 +807,9 @@ fn draw_provider_select(frame: &mut Frame, area: Rect, selected: usize) {
         Span::styled(format!("{}\u{2191}\u{2193}", pad), theme::help_key()),
         Span::styled(" navigate  ", theme::help_desc()),
         Span::styled("enter", theme::help_key()),
-        Span::styled(" select", theme::help_desc()),
+        Span::styled(" switch/auth  ", theme::help_desc()),
+        Span::styled("r", theme::help_key()),
+        Span::styled(" re-auth", theme::help_desc()),
     ]));
 
     let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::FORM));
@@ -921,6 +992,7 @@ fn draw_codex_device_auth(
     area: Rect,
     user_code: &str,
     error: Option<&str>,
+    copy_status: Option<&str>,
     tick: u64,
 ) {
     let cx = center_pad(area.width as usize, 40);
@@ -959,6 +1031,9 @@ fn draw_codex_device_auth(
                     .fg(theme::SODIUM)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled("  [", Style::default().fg(theme::ASH_MID)),
+            Span::styled("c", theme::help_key()),
+            Span::styled(" copy]", Style::default().fg(theme::ASH_MID)),
         ]));
     }
 
@@ -974,6 +1049,13 @@ fn draw_codex_device_auth(
         ),
     ]));
 
+    if let Some(status) = copy_status {
+        lines.push(Line::from(Span::styled(
+            format!("{}  {}", pad, status),
+            Style::default().fg(theme::LICHEN),
+        )));
+    }
+
     if let Some(err) = error {
         lines.push(Line::from(Span::styled(
             format!("{}  {}", pad, err),
@@ -983,7 +1065,9 @@ fn draw_codex_device_auth(
 
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled(format!("{}esc", pad), theme::help_key()),
+        Span::styled(format!("{}c", pad), theme::help_key()),
+        Span::styled(" copy code  ", theme::help_desc()),
+        Span::styled("esc", theme::help_key()),
         Span::styled(" back", theme::help_desc()),
     ]));
 
@@ -1224,7 +1308,24 @@ fn open_browser(url: &str) -> std::io::Result<()> {
             .stderr(std::process::Stdio::null())
             .spawn()?;
     }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+    }
     Ok(())
+}
+
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|err| format!("Clipboard unavailable: {err}"))?;
+    clipboard
+        .set_text(text.to_string())
+        .map_err(|err| format!("Failed to copy code: {err}"))
 }
 
 fn oauth_url_path() -> std::path::PathBuf {

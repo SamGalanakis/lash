@@ -7,6 +7,7 @@ use crate::llm::transport::{LlmTransport, LlmTransportError};
 use crate::llm::types::{
     LlmOutputPart, LlmPromptPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage, ModelSelection,
 };
+use crate::model_variant::VariantRequestConfig;
 use crate::provider::Provider;
 
 pub struct OpenAiGenericAdapter {
@@ -328,15 +329,15 @@ impl LlmTransport for OpenAiGenericAdapter {
         match tier {
             "low" => Some(ModelSelection {
                 model: "minimax/minimax-m2.5",
-                reasoning_effort: None,
+                variant: None,
             }),
             "medium" => Some(ModelSelection {
                 model: "z-ai/glm-5",
-                reasoning_effort: None,
+                variant: None,
             }),
             "high" => Some(ModelSelection {
                 model: "anthropic/claude-sonnet-4.6",
-                reasoning_effort: None,
+                variant: Some("high"),
             }),
             _ => None,
         }
@@ -382,6 +383,12 @@ impl LlmTransport for OpenAiGenericAdapter {
             "max_tokens": 32768,
             "stream": stream_events.is_some(),
         });
+        if let Some(variant) = req.model_variant.as_deref()
+            && let Some(VariantRequestConfig::ReasoningEffort(effort)) =
+                crate::model_variant::request_config(provider, &req.model, variant)
+        {
+            body["reasoning"] = json!({ "effort": effort });
+        }
         if stream_events.is_some() {
             body["stream_options"] = json!({ "include_usage": true });
         }
@@ -611,7 +618,7 @@ mod tests {
             attachments: vec![],
             tools: vec![],
             tool_choice: crate::llm::types::LlmToolChoice::Auto,
-            reasoning_effort: None,
+            model_variant: None,
             session_id: None,
             stream_events: None,
         };

@@ -1,13 +1,19 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
-#[derive(Clone, Debug, serde::Serialize)]
-struct PlanItem {
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PlanItem {
     step: String,
     status: String,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PlanSnapshot {
+    explanation: Option<String>,
+    plan: Vec<PlanItem>,
 }
 
 #[derive(Default)]
@@ -17,14 +23,35 @@ struct PlanState {
 }
 
 pub struct UpdatePlanTool {
-    state: Mutex<PlanState>,
+    state: Arc<Mutex<PlanState>>,
 }
 
 impl UpdatePlanTool {
     pub fn new() -> Self {
         Self {
-            state: Mutex::new(PlanState::default()),
+            state: Arc::new(Mutex::new(PlanState::default())),
         }
+    }
+
+    pub fn snapshot(&self) -> Result<PlanSnapshot, String> {
+        let guard = self
+            .state
+            .lock()
+            .map_err(|_| "plan state poisoned".to_string())?;
+        Ok(PlanSnapshot {
+            explanation: guard.explanation.clone(),
+            plan: guard.items.clone(),
+        })
+    }
+
+    pub fn restore(&self, snapshot: PlanSnapshot) -> Result<(), String> {
+        let mut guard = self
+            .state
+            .lock()
+            .map_err(|_| "plan state poisoned".to_string())?;
+        guard.explanation = snapshot.explanation;
+        guard.items = snapshot.plan;
+        Ok(())
     }
 }
 
@@ -40,14 +67,14 @@ impl ToolProvider for UpdatePlanTool {
         vec![ToolDefinition {
             name: "update_plan".into(),
             description: vec![crate::ToolText::new(
-                "Update the working plan with short steps and statuses. Use for substantial multi-step work. Valid statuses: pending, in_progress, completed.",
+                "Update the task plan for substantial multi-step work. Provide an optional explanation and a list of short steps with statuses. Valid statuses: pending, in_progress, completed. At most one step can be in_progress at a time.",
                 [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             params: vec![
                 ToolParam::optional("explanation", "str"),
                 ToolParam::typed("plan", "list"),
             ],
-            returns: "dict".into(),
+            returns: "str".into(),
             examples: vec![
                 crate::ToolText::new(
                     "update_plan(explanation=\"I found the main renderer.\", plan=[{\"step\":\"Inspect renderer\", \"status\":\"completed\"}, {\"step\":\"Patch layout\", \"status\":\"in_progress\"}, {\"step\":\"Run tests\", \"status\":\"pending\"}])",
@@ -71,7 +98,7 @@ impl ToolProvider for UpdatePlanTool {
     }
 }
 
-fn execute_update_plan(state: &Mutex<PlanState>, args: &serde_json::Value) -> ToolResult {
+fn execute_update_plan(state: &Arc<Mutex<PlanState>>, args: &serde_json::Value) -> ToolResult {
     let explanation = args
         .get("explanation")
         .and_then(|value| value.as_str())
@@ -122,39 +149,18 @@ fn execute_update_plan(state: &Mutex<PlanState>, args: &serde_json::Value) -> To
         });
     }
 
-    let mut guard = state.lock().unwrap();
-    guard.explanation = explanation.clone();
-    guard.items = items.clone();
-
-    let completed = items
-        .iter()
-        .filter(|item| item.status == "completed")
-        .count();
     let in_progress = items
         .iter()
         .filter(|item| item.status == "in_progress")
         .count();
-    let summary = if in_progress > 0 {
-        format!(
-            "updated plan · {} steps, {} completed, {} in progress",
-            items.len(),
-            completed,
-            in_progress
-        )
-    } else {
-        format!(
-            "updated plan · {} steps, {} completed",
-            items.len(),
-            completed
-        )
-    };
+    if in_progress > 1 {
+        return ToolResult::err_fmt("Plan may contain at most one in_progress step");
+    }
 
-    ToolResult::ok(json!({
-        "__type__": "plan_update",
-        "summary": summary,
-        "explanation": explanation,
-        "plan": items,
-    }))
+    let mut guard = state.lock().unwrap();
+    guard.explanation = explanation.clone();
+    guard.items = items.clone();
+    ToolResult::ok(json!("Plan updated"))
 }
 
 #[cfg(test)]
@@ -180,7 +186,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_plan_returns_structured_payload() {
+    async fn update_plan_returns_text_acknowledgement() {
         let tool = UpdatePlanTool::new();
         let result = tool
             .execute(
@@ -195,20 +201,53 @@ mod tests {
             )
             .await;
         assert!(result.success);
-        assert_eq!(
+        assert_eq!(result.result.as_str(), Some("Plan updated"));
+    }
+
+    #[tokio::test]
+    async fn update_plan_rejects_multiple_in_progress_steps() {
+        let tool = UpdatePlanTool::new();
+        let result = tool
+            .execute(
+                "update_plan",
+                &json!({
+                    "plan":[
+                        {"step":"Inspect UI","status":"in_progress"},
+                        {"step":"Patch layout","status":"in_progress"}
+                    ]
+                }),
+            )
+            .await;
+        assert!(!result.success);
+        assert!(
             result
                 .result
-                .get("__type__")
-                .and_then(|value| value.as_str()),
-            Some("plan_update")
+                .as_str()
+                .is_some_and(|value| value.contains("at most one in_progress"))
         );
+    }
+
+    #[test]
+    fn update_plan_snapshot_round_trip() {
+        let tool = UpdatePlanTool::new();
+        tool.restore(PlanSnapshot {
+            explanation: Some("Found the entry point.".to_string()),
+            plan: vec![PlanItem {
+                step: "Inspect renderer".to_string(),
+                status: "completed".to_string(),
+            }],
+        })
+        .expect("restore");
+        let snapshot = tool.snapshot().expect("snapshot");
         assert_eq!(
-            result
-                .result
-                .get("plan")
-                .and_then(|value| value.as_array())
-                .map(Vec::len),
-            Some(2)
+            snapshot,
+            PlanSnapshot {
+                explanation: Some("Found the entry point.".to_string()),
+                plan: vec![PlanItem {
+                    step: "Inspect renderer".to_string(),
+                    status: "completed".to_string(),
+                }],
+            }
         );
     }
 }

@@ -21,6 +21,9 @@ pub const CHALK: Color = Color::Rgb(232, 228, 208);
 pub const SODIUM: Color = Color::Rgb(232, 163, 60);
 pub const LICHEN: Color = Color::Rgb(138, 158, 108);
 pub const ERROR: Color = Color::Rgb(204, 68, 68);
+pub const PATCH_FRAME: Color = Color::Rgb(128, 94, 38);
+pub const PATCH_ADD: Color = Color::Rgb(126, 164, 92);
+pub const PATCH_HUNK: Color = Color::Rgb(154, 142, 106);
 
 // ── Character constants ────────────────────────────────────────────
 pub const PROMPT_CHAR: &str = "❯";
@@ -141,4 +144,29 @@ pub fn heading() -> Style {
 /// Markdown inline code
 pub fn inline_code() -> Style {
     Style::default().fg(SODIUM)
+}
+
+/// Patch rail and inset chrome
+pub fn patch_frame() -> Style {
+    Style::default().fg(PATCH_FRAME)
+}
+
+/// Patch status label
+pub fn patch_label() -> Style {
+    Style::default().fg(SODIUM).add_modifier(Modifier::BOLD)
+}
+
+/// Added-line or positive count styling
+pub fn patch_add() -> Style {
+    Style::default().fg(PATCH_ADD)
+}
+
+/// Removed-line or negative count styling
+pub fn patch_remove() -> Style {
+    Style::default().fg(ERROR)
+}
+
+/// Patch hunk header styling
+pub fn patch_hunk() -> Style {
+    Style::default().fg(PATCH_HUNK)
 }

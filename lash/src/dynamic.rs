@@ -579,9 +579,7 @@ impl ToolProvider for DynamicToolProvider {
             let state = self.state.read().expect("dynamic state lock poisoned");
             let allowed = state.resolved.effective_tools.contains(name);
             let adapter_id = state.tools.get(name).map(|s| s.adapter_id.clone());
-            let catalog = if matches!(name, "list_tools" | "search_tools")
-                && args.get("catalog").is_none()
-            {
+            let catalog = if name == "search_tools" && args.get("catalog").is_none() {
                 Some(
                     state
                         .tools

@@ -34,7 +34,7 @@ impl ToolProvider for FetchUrl {
         vec![ToolDefinition {
             name: "fetch_url".into(),
             description: vec![crate::ToolText::new(
-                "Fetch and extract one webpage via Tavily. Returns extracted text, or a short explanatory string if no readable content is found.",
+                "Fetch one known URL and extract readable page text.",
                 [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             params: vec![ToolParam::typed("url", "str")],

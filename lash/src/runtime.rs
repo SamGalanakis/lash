@@ -17,15 +17,18 @@ use crate::instructions::{FsInstructionSource, InstructionSource};
 use crate::llm::factory::adapter_for;
 use crate::llm::transport::LlmTransport;
 use crate::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
-use crate::plugin::{MessageMutatorContext, MessageMutatorHook};
+use crate::plugin::{
+    CheckpointHookContext, MessageMutatorContext, MessageMutatorHook, SessionConfigChangedContext,
+    SessionConfigSnapshot,
+};
 use crate::provider::Provider;
 use crate::sansio::{Effect, LlmCallError, Response, TurnMachine, TurnMachineConfig};
 use crate::strip_repl_fragments;
 use crate::{
-    ContextFoldingConfig, ExecutionMode, ExternalInvokeError, PluginMessage, PluginSessionSnapshot,
-    PromptHookContext, RuntimeServices, SandboxMessage, Session, SessionConfigOverrides,
-    SessionCreateRequest, SessionError, SessionHandle, SessionManager, SessionSnapshot,
-    SessionStartPoint, ToolCallRecord, TurnHookContext, TurnResultHookContext,
+    CheckpointKind, ContextFoldingConfig, ExecutionMode, ExternalInvokeError, PluginMessage,
+    PluginSessionSnapshot, PromptHookContext, RuntimeServices, SandboxMessage, Session,
+    SessionConfigOverrides, SessionCreateRequest, SessionError, SessionHandle, SessionManager,
+    SessionSnapshot, SessionStartPoint, ToolCallRecord, TurnHookContext, TurnResultHookContext,
 };
 
 /// Runtime execution mode for a turn.
@@ -549,7 +552,7 @@ pub struct RuntimeConfig {
     pub execution_mode: ExecutionMode,
     pub context_folding: ContextFoldingConfig,
     pub sub_agent: bool,
-    pub reasoning_effort: Option<String>,
+    pub model_variant: Option<String>,
     pub session_id: Option<String>,
     pub max_context_tokens: Option<usize>,
     pub max_turns: Option<usize>,
@@ -575,7 +578,7 @@ impl Default for RuntimeConfig {
             execution_mode: cfg.execution_mode,
             context_folding: cfg.context_folding,
             sub_agent: cfg.sub_agent,
-            reasoning_effort: cfg.reasoning_effort,
+            model_variant: cfg.model_variant,
             session_id: cfg.session_id,
             max_context_tokens: cfg.max_context_tokens,
             max_turns: cfg.max_turns,
@@ -609,7 +612,7 @@ impl From<RuntimeConfig> for AgentConfig {
             session_id: value.session_id,
             max_context_tokens: value.max_context_tokens,
             sub_agent: value.sub_agent,
-            reasoning_effort: value.reasoning_effort,
+            model_variant: value.model_variant,
             max_turns: value.max_turns,
             include_soul: value.include_soul,
             llm_log_path: value.llm_log_path,
@@ -634,7 +637,7 @@ impl From<AgentConfig> for RuntimeConfig {
             execution_mode: value.execution_mode,
             context_folding: value.context_folding,
             sub_agent: value.sub_agent,
-            reasoning_effort: value.reasoning_effort,
+            model_variant: value.model_variant,
             session_id: value.session_id,
             max_context_tokens: value.max_context_tokens,
             max_turns: value.max_turns,
@@ -684,8 +687,8 @@ impl RuntimeSessionManager {
         if let Some(model) = &overrides.model {
             config.model = model.clone();
         }
-        if let Some(reasoning_effort) = &overrides.reasoning_effort {
-            config.reasoning_effort = Some(reasoning_effort.clone());
+        if let Some(model_variant) = &overrides.model_variant {
+            config.model_variant = Some(model_variant.clone());
         }
         if let Some(execution_mode) = overrides.execution_mode {
             config.execution_mode = execution_mode;
@@ -816,6 +819,7 @@ impl SessionManager for RuntimeSessionManager {
             ));
         }
         self.registry.lock().await.remove(session_id);
+        self.current_plugins.host().unregister_session(session_id)?;
         Ok(())
     }
 
@@ -869,6 +873,46 @@ fn append_plugin_messages(messages: &mut Vec<Message>, plugin_messages: &[Plugin
         .map(|(idx, message)| plugin_message_to_message(messages, idx, message))
         .collect::<Vec<_>>();
     messages.extend(new_messages);
+}
+
+async fn send_plugin_surface_event(
+    event_tx: &mpsc::Sender<AgentEvent>,
+    plugin_id: &str,
+    event: crate::plugin::PluginSurfaceEvent,
+) {
+    crate::agent::send_event(
+        event_tx,
+        AgentEvent::PluginEvent {
+            plugin_id: plugin_id.to_string(),
+            event,
+        },
+    )
+    .await;
+}
+
+async fn emit_plugin_surface_events(
+    event_tx: &mpsc::Sender<AgentEvent>,
+    plugin_id: &str,
+    events: Vec<crate::plugin::PluginSurfaceEvent>,
+) {
+    for event in events {
+        send_plugin_surface_event(event_tx, plugin_id, event).await;
+    }
+}
+
+async fn emit_plugin_surface_events_to_sink(
+    events: &dyn EventSink,
+    plugin_id: &str,
+    surface_events: Vec<crate::plugin::PluginSurfaceEvent>,
+) {
+    for event in surface_events {
+        events
+            .emit(AgentEvent::PluginEvent {
+                plugin_id: plugin_id.to_string(),
+                event,
+            })
+            .await;
+    }
 }
 
 fn normalize_message_ids(messages: &mut [Message]) {
@@ -1080,13 +1124,79 @@ impl LashRuntime {
         }))
     }
 
+    pub fn session_manager(&self) -> Result<Arc<dyn SessionManager>, ExternalInvokeError> {
+        self.runtime_session_manager()
+    }
+
+    fn session_config_snapshot(&self) -> SessionConfigSnapshot {
+        SessionConfigSnapshot {
+            provider_kind: self.config.provider.kind(),
+            model: self.config.model.clone(),
+            model_variant: self.config.model_variant.clone(),
+            execution_mode: self.config.execution_mode,
+            context_folding: self.config.context_folding,
+            context_window: self
+                .config
+                .max_context_tokens
+                .map(|tokens| tokens as u64)
+                .or_else(|| self.config.provider.context_window(&self.config.model)),
+        }
+    }
+
+    async fn notify_session_config_changed(&self, previous: SessionConfigSnapshot) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let current = self.session_config_snapshot();
+        if current == previous {
+            return;
+        }
+        let Ok(host) = self.runtime_session_manager() else {
+            return;
+        };
+        session
+            .plugins()
+            .on_session_config_changed(SessionConfigChangedContext {
+                session_id: self.state.agent_id.clone(),
+                previous,
+                current,
+                host,
+            })
+            .await;
+    }
+
+    async fn apply_session_config_mutations(&mut self, previous: SessionConfigSnapshot) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let current = self.session_config_snapshot();
+        if current == previous {
+            return;
+        }
+        let Ok(host) = self.runtime_session_manager() else {
+            return;
+        };
+        self.state = session
+            .plugins()
+            .mutate_session_config(
+                SessionConfigChangedContext {
+                    session_id: self.state.agent_id.clone(),
+                    previous,
+                    current,
+                    host,
+                },
+                self.state.clone(),
+            )
+            .await;
+    }
+
     /// Replace the host-owned state envelope.
     pub fn set_state(&mut self, state: AgentStateEnvelope) {
-        if let Some(session) = self.session.as_ref()
-            && let Some(snapshot) = state.plugin_snapshot.as_ref()
-            && let Err(err) = session.plugins().restore(snapshot)
-        {
-            tracing::warn!("failed to restore plugin snapshot in set_state: {err}");
+        if let Some(session) = self.session.as_ref() {
+            let snapshot = state.plugin_snapshot.clone().unwrap_or_default();
+            if let Err(err) = session.plugins().restore(&snapshot) {
+                tracing::warn!("failed to restore plugin snapshot in set_state: {err}");
+            }
         }
         self.state = state;
     }
@@ -1096,9 +1206,9 @@ impl LashRuntime {
         self.config.model = model;
     }
 
-    /// Update reasoning effort on the runtime config.
-    pub fn set_reasoning_effort(&mut self, reasoning_effort: Option<String>) {
-        self.config.reasoning_effort = reasoning_effort;
+    /// Update model variant on the runtime config.
+    pub fn set_model_variant(&mut self, model_variant: Option<String>) {
+        self.config.model_variant = model_variant;
     }
 
     /// Update provider on the runtime config.
@@ -1115,6 +1225,31 @@ impl LashRuntime {
     pub fn set_context_folding(&mut self, context_folding: ContextFoldingConfig) {
         self.state.context_folding = context_folding;
         self.config.context_folding = context_folding;
+    }
+
+    pub async fn update_session_config(
+        &mut self,
+        provider: Option<Provider>,
+        model: Option<String>,
+        model_variant: Option<Option<String>>,
+        context_folding: Option<ContextFoldingConfig>,
+    ) {
+        let previous = self.session_config_snapshot();
+        if let Some(provider) = provider {
+            self.config.provider = provider;
+        }
+        if let Some(model) = model {
+            self.config.model = model;
+        }
+        if let Some(model_variant) = model_variant {
+            self.config.model_variant = model_variant;
+        }
+        if let Some(context_folding) = context_folding {
+            self.state.context_folding = context_folding;
+            self.config.context_folding = context_folding;
+        }
+        self.apply_session_config_mutations(previous.clone()).await;
+        self.notify_session_config_changed(previous).await;
     }
 
     /// Update the active prompt-facing capability set.
@@ -1406,8 +1541,8 @@ impl LashRuntime {
                 message: err.to_string(),
             })?;
         let mut maybe_abort: Option<(String, String)> = None;
-        for directive in before_turn {
-            match directive {
+        for emitted in before_turn {
+            match emitted.value {
                 crate::PluginDirective::AbortTurn { code, message } => {
                     maybe_abort = Some((code, message));
                 }
@@ -1424,6 +1559,12 @@ impl LashRuntime {
                             code: "plugin_create_session".to_string(),
                             message: err.to_string(),
                         })?;
+                }
+                crate::PluginDirective::EmitEvents {
+                    events: surface_events,
+                } => {
+                    emit_plugin_surface_events_to_sink(events, &emitted.plugin_id, surface_events)
+                        .await;
                 }
                 crate::PluginDirective::ReplaceToolArgs { .. }
                 | crate::PluginDirective::ShortCircuitTool { .. } => {
@@ -1576,8 +1717,8 @@ impl LashRuntime {
                     code: "plugin_after_turn".to_string(),
                     message: err.to_string(),
                 })?;
-            for directive in after_turn {
-                match directive {
+            for emitted in after_turn {
+                match emitted.value {
                     crate::PluginDirective::EnqueueMessages {
                         messages: plugin_messages,
                     } => append_plugin_messages(&mut self.state.messages, &plugin_messages),
@@ -1589,6 +1730,16 @@ impl LashRuntime {
                                 code: "plugin_create_session".to_string(),
                                 message: err.to_string(),
                             })?;
+                    }
+                    crate::PluginDirective::EmitEvents {
+                        events: surface_events,
+                    } => {
+                        emit_plugin_surface_events_to_sink(
+                            events,
+                            &emitted.plugin_id,
+                            surface_events,
+                        )
+                        .await;
                     }
                     crate::PluginDirective::AbortTurn { .. }
                     | crate::PluginDirective::ReplaceToolArgs { .. }
@@ -1763,6 +1914,24 @@ impl RuntimeTurnDriver {
                     };
                     machine.handle_response(response);
                 }
+                Effect::Checkpoint { id, checkpoint } => {
+                    match self
+                        .run_checkpoint(&mut machine, checkpoint, &event_tx)
+                        .await
+                    {
+                        Ok(messages) => {
+                            machine.handle_response(Response::Checkpoint { id, messages })
+                        }
+                        Err(err) => {
+                            machine.fail_turn(make_error_event(
+                                "plugin",
+                                Some(&err.code),
+                                err.message,
+                                None,
+                            ));
+                        }
+                    }
+                }
                 Effect::Sleep { id, duration } => {
                     tokio::time::sleep(duration).await;
                     machine.handle_response(Response::Timeout { id });
@@ -1835,6 +2004,24 @@ impl RuntimeTurnDriver {
                         text_streamed,
                     });
                 }
+                Effect::Checkpoint { id, checkpoint } => {
+                    match self
+                        .run_checkpoint(&mut machine, checkpoint, &event_tx)
+                        .await
+                    {
+                        Ok(messages) => {
+                            machine.handle_response(Response::Checkpoint { id, messages })
+                        }
+                        Err(err) => {
+                            machine.fail_turn(make_error_event(
+                                "plugin",
+                                Some(&err.code),
+                                err.message,
+                                None,
+                            ));
+                        }
+                    }
+                }
                 Effect::ToolCall {
                     id,
                     call_id,
@@ -1886,6 +2073,101 @@ impl RuntimeTurnDriver {
         self.config.clone().into()
     }
 
+    fn checkpoint_state_snapshot(
+        &self,
+        messages: &[Message],
+        iteration: usize,
+    ) -> AgentStateEnvelope {
+        AgentStateEnvelope {
+            agent_id: self.agent_id.clone(),
+            execution_mode: self.config.execution_mode,
+            context_folding: self.config.context_folding,
+            messages: messages.to_vec(),
+            iteration,
+            token_usage: TokenUsage::default(),
+            last_prompt_usage: None,
+            task_state: None,
+            subagent_state: None,
+            replay_manifest: None,
+            plugin_snapshot: self.session.plugins().snapshot().ok(),
+            repl_snapshot: None,
+        }
+    }
+
+    async fn run_checkpoint(
+        &mut self,
+        machine: &mut TurnMachine,
+        checkpoint: CheckpointKind,
+        event_tx: &mpsc::Sender<AgentEvent>,
+    ) -> Result<Vec<PluginMessage>, RuntimeError> {
+        let mut committed = self
+            .session
+            .turn_injection_bridge()
+            .drain()
+            .map_err(|err| RuntimeError {
+                code: "turn_injection_bridge".to_string(),
+                message: err,
+            })?;
+        let plugins = Arc::clone(self.session.plugins());
+        let directives = plugins
+            .at_checkpoint(CheckpointHookContext {
+                session_id: self.agent_id.clone(),
+                checkpoint,
+                state: self.checkpoint_state_snapshot(machine.messages(), machine.iteration()),
+                host: Arc::clone(&self.session_manager),
+            })
+            .await
+            .map_err(|err| RuntimeError {
+                code: "plugin_checkpoint".to_string(),
+                message: err.to_string(),
+            })?;
+
+        for emitted in directives {
+            match emitted.value {
+                crate::PluginDirective::EnqueueMessages { messages } => {
+                    committed.extend(messages);
+                }
+                crate::PluginDirective::CreateSession { request } => {
+                    self.session_manager
+                        .create_session(*request)
+                        .await
+                        .map_err(|err| RuntimeError {
+                            code: "plugin_create_session".to_string(),
+                            message: err.to_string(),
+                        })?;
+                }
+                crate::PluginDirective::AbortTurn { code, message } => {
+                    return Err(RuntimeError { code, message });
+                }
+                crate::PluginDirective::EmitEvents { events } => {
+                    emit_plugin_surface_events(event_tx, &emitted.plugin_id, events).await;
+                }
+                crate::PluginDirective::ReplaceToolArgs { .. }
+                | crate::PluginDirective::ShortCircuitTool { .. } => {
+                    return Err(RuntimeError {
+                        code: "plugin_invalid_checkpoint".to_string(),
+                        message:
+                            "checkpoint hooks only support abort, message enqueue, and session creation"
+                                .to_string(),
+                    });
+                }
+            }
+        }
+
+        if !committed.is_empty() {
+            crate::agent::send_event(
+                event_tx,
+                AgentEvent::InjectedMessagesCommitted {
+                    messages: committed.clone(),
+                    checkpoint,
+                },
+            )
+            .await;
+        }
+
+        Ok(committed)
+    }
+
     async fn prepare_provider(&mut self, config: &mut AgentConfig) -> Result<String, AgentEvent> {
         match config.provider.ensure_fresh().await {
             Ok(true) => {
@@ -1929,6 +2211,64 @@ impl RuntimeTurnDriver {
         Ok(model)
     }
 
+    async fn transform_assistant_stream_chunk(
+        &mut self,
+        event_tx: &mpsc::Sender<AgentEvent>,
+        chunk: String,
+    ) -> Result<String, LlmCallError> {
+        let original = chunk.clone();
+        let transforms = self
+            .session
+            .plugins()
+            .transform_assistant_stream(&self.agent_id, chunk, Arc::clone(&self.session_manager))
+            .await
+            .map_err(|err| LlmCallError {
+                message: err.to_string(),
+                retryable: false,
+                raw: None,
+                code: Some("plugin_assistant_stream".to_string()),
+            })?;
+        let mut current = String::new();
+        let mut first = true;
+        for emitted in transforms {
+            if first {
+                first = false;
+            }
+            current = emitted.value.chunk.clone();
+            emit_plugin_surface_events(event_tx, &emitted.plugin_id, emitted.value.events).await;
+        }
+        if first { Ok(original) } else { Ok(current) }
+    }
+
+    async fn transform_assistant_response(
+        &mut self,
+        event_tx: &mpsc::Sender<AgentEvent>,
+        response: LlmResponse,
+    ) -> Result<LlmResponse, LlmCallError> {
+        let original = response.clone();
+        let transforms = self
+            .session
+            .plugins()
+            .transform_assistant_response(
+                &self.agent_id,
+                response,
+                Arc::clone(&self.session_manager),
+            )
+            .await
+            .map_err(|err| LlmCallError {
+                message: err.to_string(),
+                retryable: false,
+                raw: None,
+                code: Some("plugin_assistant_response".to_string()),
+            })?;
+        let mut current: Option<LlmResponse> = None;
+        for emitted in transforms {
+            emit_plugin_surface_events(event_tx, &emitted.plugin_id, emitted.value.events).await;
+            current = Some(emitted.value.response);
+        }
+        Ok(current.unwrap_or(original))
+    }
+
     fn machine_config(
         &self,
         preamble: crate::agent::ExecutionPreamble,
@@ -1941,7 +2281,7 @@ impl RuntimeTurnDriver {
             headless: self.config.headless,
             sub_agent: self.config.sub_agent,
             include_soul: self.config.include_soul,
-            reasoning_effort: self.config.reasoning_effort.clone(),
+            model_variant: self.config.model_variant.clone(),
             session_id: self.config.session_id.clone(),
             tool_list: preamble.tool_list,
             tool_specs: preamble.tool_specs,
@@ -2045,12 +2385,20 @@ impl RuntimeTurnDriver {
                 Some(stream_event) = llm_stream_rx.recv() => {
                     match stream_event {
                         LlmStreamEvent::Delta(delta) => {
+                            let delta = match self.transform_assistant_stream_chunk(event_tx, delta).await {
+                                Ok(delta) => delta,
+                                Err(err) => break Err(err),
+                            };
                             if !machine.handle_llm_delta(effect_id, &delta) {
                                 llm_task.abort();
                                 break Ok(LlmResponse::default());
                             }
                         }
                         LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
+                            let text = match self.transform_assistant_stream_chunk(event_tx, text).await {
+                                Ok(text) => text,
+                                Err(err) => break Err(err),
+                            };
                             if !machine.handle_llm_delta(effect_id, &text) {
                                 llm_task.abort();
                                 break Ok(LlmResponse::default());
@@ -2072,15 +2420,30 @@ impl RuntimeTurnDriver {
                     };
                     self.config.provider = provider_after;
                     let mut completed_from_stream: Option<LlmResponse> = None;
+                    let mut stream_transform_error: Option<LlmCallError> = None;
                     while let Ok(stream_event) = llm_stream_rx.try_recv() {
                         match stream_event {
                             LlmStreamEvent::Delta(delta) => {
+                                let delta = match self.transform_assistant_stream_chunk(event_tx, delta).await {
+                                    Ok(delta) => delta,
+                                    Err(err) => {
+                                        stream_transform_error = Some(err);
+                                        break;
+                                    }
+                                };
                                 if !machine.handle_llm_delta(effect_id, &delta) {
                                     completed_from_stream = Some(LlmResponse::default());
                                     break;
                                 }
                             }
                             LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
+                                let text = match self.transform_assistant_stream_chunk(event_tx, text).await {
+                                    Ok(text) => text,
+                                    Err(err) => {
+                                        stream_transform_error = Some(err);
+                                        break;
+                                    }
+                                };
                                 if !machine.handle_llm_delta(effect_id, &text) {
                                     completed_from_stream = Some(LlmResponse::default());
                                     break;
@@ -2092,11 +2455,20 @@ impl RuntimeTurnDriver {
                             }
                         }
                     }
+                    if let Some(err) = stream_transform_error {
+                        break Err(err);
+                    }
                     if let Some(response) = completed_from_stream {
                         break Ok(response);
                     }
                     match result {
-                        Ok(resp) => break Ok(resp),
+                        Ok(resp) => {
+                            let resp = match self.transform_assistant_response(event_tx, resp).await {
+                                Ok(resp) => resp,
+                                Err(err) => break Err(err),
+                            };
+                            break Ok(resp)
+                        }
                         Err(e) => break Err(LlmCallError {
                             message: e.message,
                             retryable: e.retryable,
@@ -2169,12 +2541,17 @@ impl RuntimeTurnDriver {
                     });
                 }
                 Some(stream_event) = llm_stream_rx.recv() => {
-                    forward_standard_stream_event(
-                        event_tx,
-                        stream_event,
-                        &mut text_streamed,
-                        &mut streamed_usage,
-                    ).await;
+                    if let Err(err) = self
+                        .forward_standard_stream_event(
+                            event_tx,
+                            stream_event,
+                            &mut text_streamed,
+                            &mut streamed_usage,
+                        )
+                        .await
+                    {
+                        break Err(err);
+                    }
                 }
                 join = &mut llm_task => {
                     let (result, provider_after) = match join {
@@ -2187,17 +2564,26 @@ impl RuntimeTurnDriver {
                         }),
                     };
                     self.config.provider = provider_after;
-                    drain_standard_stream_queue(
-                        event_tx,
-                        &mut llm_stream_rx,
-                        &mut text_streamed,
-                        &mut streamed_usage,
-                    ).await;
+                    if let Err(err) = self
+                        .drain_standard_stream_queue(
+                            event_tx,
+                            &mut llm_stream_rx,
+                            &mut text_streamed,
+                            &mut streamed_usage,
+                        )
+                        .await
+                    {
+                        break Err(err);
+                    }
                     match result {
                         Ok(mut resp) => {
                             if response_usage_is_empty(&resp.usage) {
                                 resp.usage = streamed_usage.clone();
                             }
+                            let resp = match self.transform_assistant_response(event_tx, resp).await {
+                                Ok(resp) => resp,
+                                Err(err) => break Err(err),
+                            };
                             break Ok(resp)
                         }
                         Err(e) => break Err(LlmCallError {
@@ -2226,6 +2612,27 @@ impl RuntimeTurnDriver {
         crate::ToolResult,
         u64,
     )> {
+        let mut prompt_forward_handle = None;
+        if !self.config.headless {
+            let (prompt_tx, mut prompt_rx) =
+                tokio::sync::mpsc::unbounded_channel::<crate::session::UserPrompt>();
+            self.session.set_prompt_sender(prompt_tx);
+            let event_tx_clone = event_tx.clone();
+            prompt_forward_handle = Some(tokio::spawn(async move {
+                while let Some(user_prompt) = prompt_rx.recv().await {
+                    if !event_tx_clone.is_closed() {
+                        let _ = event_tx_clone
+                            .send(AgentEvent::Prompt {
+                                question: user_prompt.question,
+                                options: user_prompt.options,
+                                response_tx: user_prompt.response_tx,
+                            })
+                            .await;
+                    }
+                }
+            }));
+        }
+
         let tool_provider = Arc::clone(self.session.tools());
         let plugins = Arc::clone(self.session.plugins());
         let manager = Arc::clone(&self.session_manager);
@@ -2255,7 +2662,9 @@ impl RuntimeTurnDriver {
                 }
             };
             let mut short_circuit: Option<crate::ToolResult> = None;
-            for directive in directives {
+            for emitted in directives {
+                let plugin_id = emitted.plugin_id;
+                let directive = emitted.value;
                 match directive {
                     crate::PluginDirective::CreateSession { request } => {
                         if let Err(err) = manager.create_session(*request).await {
@@ -2266,11 +2675,18 @@ impl RuntimeTurnDriver {
                     crate::PluginDirective::ReplaceToolArgs { args: replacement } => {
                         args = replacement;
                     }
-                    crate::PluginDirective::ShortCircuitTool { .. } => {
-                        short_circuit = directive.into_tool_result();
+                    crate::PluginDirective::ShortCircuitTool { result, success } => {
+                        short_circuit = Some(crate::ToolResult {
+                            success,
+                            result,
+                            images: Vec::new(),
+                        });
                     }
                     crate::PluginDirective::AbortTurn { message, .. } => {
                         short_circuit = Some(crate::ToolResult::err_fmt(message));
+                    }
+                    crate::PluginDirective::EmitEvents { events } => {
+                        emit_plugin_surface_events(event_tx, &plugin_id, events).await;
                     }
                     crate::PluginDirective::EnqueueMessages { .. } => {
                         short_circuit = Some(crate::ToolResult::err_fmt(
@@ -2284,7 +2700,7 @@ impl RuntimeTurnDriver {
                 continue;
             }
 
-            if (tool_name == "list_tools" || tool_name == "search_tools")
+            if tool_name == "search_tools"
                 && let Some(obj) = args.as_object_mut()
                 && !obj.contains_key("catalog")
             {
@@ -2317,10 +2733,11 @@ impl RuntimeTurnDriver {
             join_set.spawn(async move {
                 let (progress_tx, mut progress_rx) =
                     tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
+                let progress_event_tx = event_tx_clone.clone();
                 let progress_handle = tokio::spawn(async move {
                     while let Some(sandbox_msg) = progress_rx.recv().await {
                         if sandbox_msg.kind != "final" {
-                            let _ = event_tx_clone
+                            let _ = progress_event_tx
                                 .send(AgentEvent::Message {
                                     text: sandbox_msg.text,
                                     kind: sandbox_msg.kind,
@@ -2348,7 +2765,9 @@ impl RuntimeTurnDriver {
                 {
                     Ok(directives) => {
                         let mut final_result = result;
-                        for directive in directives {
+                        for emitted in directives {
+                            let plugin_id = emitted.plugin_id;
+                            let directive = emitted.value;
                             match directive {
                                 crate::PluginDirective::CreateSession { request } => {
                                     if let Err(err) = manager.create_session(*request).await {
@@ -2356,13 +2775,23 @@ impl RuntimeTurnDriver {
                                         break;
                                     }
                                 }
-                                crate::PluginDirective::ShortCircuitTool { .. } => {
-                                    if let Some(replacement) = directive.into_tool_result() {
-                                        final_result = replacement;
-                                    }
+                                crate::PluginDirective::ShortCircuitTool { result, success } => {
+                                    final_result = crate::ToolResult {
+                                        success,
+                                        result,
+                                        images: Vec::new(),
+                                    };
                                 }
                                 crate::PluginDirective::AbortTurn { message, .. } => {
                                     final_result = crate::ToolResult::err_fmt(message);
+                                }
+                                crate::PluginDirective::EmitEvents { events } => {
+                                    emit_plugin_surface_events(
+                                        &event_tx_clone,
+                                        &plugin_id,
+                                        events,
+                                    )
+                                        .await;
                                 }
                                 crate::PluginDirective::ReplaceToolArgs { .. }
                                 | crate::PluginDirective::EnqueueMessages { .. } => {
@@ -2402,42 +2831,71 @@ impl RuntimeTurnDriver {
                 )),
             }
         }
+        self.session.clear_prompt_sender();
+        if let Some(handle) = prompt_forward_handle {
+            let _ = handle.await;
+        }
         outcomes
     }
-}
 
-async fn forward_standard_stream_event(
-    event_tx: &mpsc::Sender<AgentEvent>,
-    stream_event: LlmStreamEvent,
-    text_streamed: &mut bool,
-    streamed_usage: &mut LlmUsage,
-) {
-    match stream_event {
-        LlmStreamEvent::Delta(delta) => {
-            if !delta.is_empty() {
-                *text_streamed = true;
-                crate::agent::send_event(event_tx, AgentEvent::TextDelta { content: delta }).await;
+    async fn forward_standard_stream_event(
+        &mut self,
+        event_tx: &mpsc::Sender<AgentEvent>,
+        stream_event: LlmStreamEvent,
+        text_streamed: &mut bool,
+        streamed_usage: &mut LlmUsage,
+    ) -> Result<(), LlmCallError> {
+        match stream_event {
+            LlmStreamEvent::Delta(delta) => {
+                if !delta.is_empty() {
+                    *text_streamed = true;
+                    let delta = self
+                        .transform_assistant_stream_chunk(event_tx, delta)
+                        .await?;
+                    if !delta.is_empty() {
+                        crate::agent::send_event(
+                            event_tx,
+                            AgentEvent::TextDelta { content: delta },
+                        )
+                        .await;
+                    }
+                }
             }
-        }
-        LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
-            if !text.is_empty() {
-                *text_streamed = true;
-                crate::agent::send_event(event_tx, AgentEvent::TextDelta { content: text }).await;
+            LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
+                if !text.is_empty() {
+                    *text_streamed = true;
+                    let text = self
+                        .transform_assistant_stream_chunk(event_tx, text)
+                        .await?;
+                    if !text.is_empty() {
+                        crate::agent::send_event(event_tx, AgentEvent::TextDelta { content: text })
+                            .await;
+                    }
+                }
             }
+            LlmStreamEvent::Part(LlmOutputPart::ToolCall { .. }) => {}
+            LlmStreamEvent::Usage(usage) => *streamed_usage = usage,
         }
-        LlmStreamEvent::Part(LlmOutputPart::ToolCall { .. }) => {}
-        LlmStreamEvent::Usage(usage) => *streamed_usage = usage,
+        Ok(())
     }
-}
 
-async fn drain_standard_stream_queue(
-    event_tx: &mpsc::Sender<AgentEvent>,
-    llm_stream_rx: &mut tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,
-    text_streamed: &mut bool,
-    streamed_usage: &mut LlmUsage,
-) {
-    while let Ok(stream_event) = llm_stream_rx.try_recv() {
-        forward_standard_stream_event(event_tx, stream_event, text_streamed, streamed_usage).await;
+    async fn drain_standard_stream_queue(
+        &mut self,
+        event_tx: &mpsc::Sender<AgentEvent>,
+        llm_stream_rx: &mut tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,
+        text_streamed: &mut bool,
+        streamed_usage: &mut LlmUsage,
+    ) -> Result<(), LlmCallError> {
+        while let Ok(stream_event) = llm_stream_rx.try_recv() {
+            self.forward_standard_stream_event(
+                event_tx,
+                stream_event,
+                text_streamed,
+                streamed_usage,
+            )
+            .await?;
+        }
+        Ok(())
     }
 }
 
@@ -2446,6 +2904,35 @@ fn response_usage_is_empty(usage: &LlmUsage) -> bool {
         && usage.output_tokens == 0
         && usage.cached_input_tokens == 0
         && usage.reasoning_tokens == 0
+}
+
+#[cfg(test)]
+async fn drain_standard_stream_queue(
+    event_tx: &mpsc::Sender<AgentEvent>,
+    llm_stream_rx: &mut tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,
+    text_streamed: &mut bool,
+    streamed_usage: &mut LlmUsage,
+) {
+    while let Ok(stream_event) = llm_stream_rx.try_recv() {
+        match stream_event {
+            LlmStreamEvent::Delta(delta) => {
+                if !delta.is_empty() {
+                    *text_streamed = true;
+                    crate::agent::send_event(event_tx, AgentEvent::TextDelta { content: delta })
+                        .await;
+                }
+            }
+            LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
+                if !text.is_empty() {
+                    *text_streamed = true;
+                    crate::agent::send_event(event_tx, AgentEvent::TextDelta { content: text })
+                        .await;
+                }
+            }
+            LlmStreamEvent::Part(LlmOutputPart::ToolCall { .. }) => {}
+            LlmStreamEvent::Usage(usage) => *streamed_usage = usage,
+        }
+    }
 }
 
 impl LashRuntime {
@@ -2764,14 +3251,40 @@ mod tests {
         runtime
     }
 
+    async fn standard_runtime_with_bridge(
+        transport: MockTransport,
+        turn_injection_bridge: crate::TurnInjectionBridge,
+    ) -> LashRuntime {
+        let tools: Arc<dyn crate::ToolProvider> = Arc::new(crate::ToolSet::new());
+        let plugins = crate::PluginHost::empty()
+            .build_session("root", None)
+            .expect("plugins");
+        let mut runtime = LashRuntime::from_state(
+            standard_test_config(),
+            crate::RuntimeServices::new_with_bridges(
+                tools,
+                plugins,
+                crate::PromptBridge::new(),
+                turn_injection_bridge,
+            ),
+            AgentStateEnvelope::default(),
+        )
+        .await
+        .expect("runtime");
+        runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
+        runtime
+    }
+
+    type RuntimeTestPluginBuilder = dyn Fn(
+            &crate::PluginSessionContext,
+        ) -> Result<Arc<dyn crate::SessionPlugin>, crate::PluginError>
+        + Send
+        + Sync;
+    type RuntimeExternalRegistrar =
+        dyn Fn(&mut crate::PluginRegistrar) -> Result<(), crate::PluginError> + Send + Sync;
+
     struct RuntimeTestPluginFactory {
-        build: Arc<
-            dyn Fn(
-                    &crate::PluginSessionContext,
-                ) -> Result<Arc<dyn crate::SessionPlugin>, crate::PluginError>
-                + Send
-                + Sync,
-        >,
+        build: Arc<RuntimeTestPluginBuilder>,
     }
 
     impl crate::PluginFactory for RuntimeTestPluginFactory {
@@ -2789,12 +3302,10 @@ mod tests {
 
     struct RuntimeTestPlugin {
         before_turn: Option<crate::plugin::BeforeTurnHook>,
+        checkpoint: Option<crate::plugin::CheckpointHook>,
         message_mutators: Vec<(crate::MessageMutatorHook, crate::plugin::MessageMutator)>,
-        external_registrar: Option<
-            Arc<
-                dyn Fn(&mut crate::PluginRegistrar) -> Result<(), crate::PluginError> + Send + Sync,
-            >,
-        >,
+        session_config_changed: Option<crate::plugin::SessionConfigChangedHook>,
+        external_registrar: Option<Arc<RuntimeExternalRegistrar>>,
     }
 
     impl crate::SessionPlugin for RuntimeTestPlugin {
@@ -2806,8 +3317,14 @@ mod tests {
             if let Some(hook) = &self.before_turn {
                 reg.before_turn(Arc::clone(hook));
             }
+            if let Some(hook) = &self.checkpoint {
+                reg.at_checkpoint(Arc::clone(hook));
+            }
             for (hook, mutator) in &self.message_mutators {
                 reg.register_message_mutator(*hook, Arc::clone(mutator))?;
+            }
+            if let Some(hook) = &self.session_config_changed {
+                reg.on_session_config_changed(Arc::clone(hook));
             }
             if let Some(register) = &self.external_registrar {
                 register(reg)?;
@@ -2835,6 +3352,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_config_change_hook_receives_context_window_updates() {
+        let observed = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let observed_hook = Arc::clone(&observed);
+        let plugin = Arc::new(RuntimeTestPluginFactory {
+            build: Arc::new(move |_| {
+                let observed = Arc::clone(&observed_hook);
+                Ok(Arc::new(RuntimeTestPlugin {
+                    before_turn: None,
+                    checkpoint: None,
+                    message_mutators: Vec::new(),
+                    session_config_changed: Some(Arc::new(move |ctx| {
+                        let observed = Arc::clone(&observed);
+                        Box::pin(async move {
+                            observed.lock().await.push((ctx.previous, ctx.current));
+                            Ok(())
+                        })
+                    })),
+                    external_registrar: None,
+                }))
+            }),
+        });
+        let transport = MockTransport::new(Vec::new());
+        let mut runtime = runtime_with_plugins(vec![plugin], transport).await;
+
+        runtime
+            .update_session_config(
+                Some(crate::Provider::Claude {
+                    access_token: "tok".into(),
+                    refresh_token: "ref".into(),
+                    expires_at: u64::MAX,
+                }),
+                Some("claude-opus-4-6".to_string()),
+                Some(None),
+                None,
+            )
+            .await;
+
+        let changes = observed.lock().await;
+        assert_eq!(changes.len(), 1);
+        let (previous, current) = &changes[0];
+        assert_eq!(
+            previous.provider_kind,
+            crate::provider::ProviderKind::OpenAiGeneric
+        );
+        assert_eq!(current.provider_kind, crate::provider::ProviderKind::Claude);
+        assert_eq!(current.model, "claude-opus-4-6");
+        assert_ne!(previous.context_window, current.context_window);
+    }
+
+    #[tokio::test]
     async fn plugin_before_turn_can_abort_and_inject_messages() {
         let plugin = Arc::new(RuntimeTestPluginFactory {
             build: Arc::new(|_| {
@@ -2855,7 +3422,9 @@ mod tests {
                             ])
                         })
                     })),
+                    checkpoint: None,
                     message_mutators: Vec::new(),
+                    session_config_changed: None,
                     external_registrar: None,
                 }))
             }),
@@ -2889,12 +3458,150 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bridge_checkpoint_injection_continues_standard_turn() {
+        let bridge = crate::TurnInjectionBridge::new();
+        bridge
+            .enqueue(vec![crate::PluginMessage {
+                role: crate::MessageRole::User,
+                content: "one more thing".to_string(),
+            }])
+            .expect("enqueue");
+        let transport = MockTransport::new(vec![
+            MockCall {
+                stream_events: Vec::new(),
+                response: Ok(LlmResponse {
+                    full_text: "First answer.".to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: "First answer.".to_string(),
+                    }],
+                    ..LlmResponse::default()
+                }),
+            },
+            MockCall {
+                stream_events: Vec::new(),
+                response: Ok(LlmResponse {
+                    full_text: "Second answer.".to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: "Second answer.".to_string(),
+                    }],
+                    ..LlmResponse::default()
+                }),
+            },
+        ]);
+        let mut runtime = standard_runtime_with_bridge(transport, bridge).await;
+
+        let turn = runtime
+            .run_turn_assembled(
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "hello".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    mode: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("turn");
+
+        assert!(turn.state.messages.iter().any(|message| {
+            message.role == MessageRole::User
+                && message
+                    .parts
+                    .iter()
+                    .any(|part| part.content == "one more thing")
+        }));
+        assert!(turn.state.messages.iter().any(|message| {
+            message.role == MessageRole::Assistant
+                && message
+                    .parts
+                    .iter()
+                    .any(|part| part.content.contains("Second answer."))
+        }));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_hook_can_inject_messages() {
+        let plugin = Arc::new(RuntimeTestPluginFactory {
+            build: Arc::new(|_| {
+                Ok(Arc::new(RuntimeTestPlugin {
+                    before_turn: None,
+                    checkpoint: Some(Arc::new(|ctx| {
+                        Box::pin(async move {
+                            if ctx.checkpoint == crate::CheckpointKind::BeforeCompletion {
+                                Ok(vec![crate::PluginDirective::EnqueueMessages {
+                                    messages: vec![crate::PluginMessage {
+                                        role: crate::MessageRole::System,
+                                        content: "checkpoint injected".to_string(),
+                                    }],
+                                }])
+                            } else {
+                                Ok(Vec::new())
+                            }
+                        })
+                    })),
+                    message_mutators: Vec::new(),
+                    session_config_changed: None,
+                    external_registrar: None,
+                }))
+            }),
+        });
+        let transport = MockTransport::new(vec![
+            MockCall {
+                stream_events: Vec::new(),
+                response: Ok(LlmResponse {
+                    full_text: "First answer.".to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: "First answer.".to_string(),
+                    }],
+                    ..LlmResponse::default()
+                }),
+            },
+            MockCall {
+                stream_events: Vec::new(),
+                response: Ok(LlmResponse {
+                    full_text: "Second answer.".to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: "Second answer.".to_string(),
+                    }],
+                    ..LlmResponse::default()
+                }),
+            },
+        ]);
+        let mut runtime = runtime_with_plugins(vec![plugin], transport).await;
+
+        let turn = runtime
+            .run_turn_assembled(
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "hello".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    mode: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("turn");
+
+        assert!(turn.state.messages.iter().any(|message| {
+            message.role == MessageRole::System
+                && message
+                    .parts
+                    .iter()
+                    .any(|part| part.content == "checkpoint injected")
+        }));
+    }
+
+    #[tokio::test]
     async fn external_invoke_can_create_session_from_current_snapshot() {
         let plugin = Arc::new(RuntimeTestPluginFactory {
             build: Arc::new(|_| {
                 Ok(Arc::new(RuntimeTestPlugin {
                     before_turn: None,
+                    checkpoint: None,
                     message_mutators: Vec::new(),
+                    session_config_changed: None,
                     external_registrar: Some(Arc::new(|reg| {
                         reg.register_external_op(
                             crate::ExternalOpDef {
@@ -3438,6 +4145,7 @@ mod tests {
             build: Arc::new(|_| {
                 Ok(Arc::new(RuntimeTestPlugin {
                     before_turn: None,
+                    checkpoint: None,
                     message_mutators: vec![(
                         crate::MessageMutatorHook::AfterTokenCount,
                         Arc::new(|_ctx, messages| {
@@ -3455,6 +4163,7 @@ mod tests {
                             })
                         }),
                     )],
+                    session_config_changed: None,
                     external_registrar: None,
                 }))
             }),
@@ -3604,6 +4313,94 @@ mod tests {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .contains("where did this go")
+        );
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    #[tokio::test]
+    async fn history_plugin_compacts_messages_when_model_change_shrinks_context_window() {
+        let transport = MockTransport::new(Vec::new());
+        let store = Arc::new(crate::store::Store::memory().expect("store"));
+        let base_provider: Arc<dyn crate::ToolProvider> =
+            Arc::new(crate::ToolSet::new() + crate::tools::StateStore::new(Vec::new()));
+        let plugin_host = crate::PluginHost::new(vec![Arc::new(
+            crate::BuiltinHistoryPluginFactory::new(Arc::clone(&store)),
+        )]);
+        let plugins = plugin_host.build_session("root", None).expect("plugins");
+        let mut toolset = crate::ToolSet::new() + Arc::clone(&base_provider);
+        for provider in plugins.tool_providers() {
+            toolset = toolset + Arc::clone(provider);
+        }
+        let tools: Arc<dyn crate::ToolProvider> = Arc::new(toolset);
+        let mut runtime = LashRuntime::from_state(
+            standard_test_config(),
+            crate::RuntimeServices::new(tools, Arc::clone(&plugins)),
+            AgentStateEnvelope {
+                agent_id: "root".to_string(),
+                execution_mode: ExecutionMode::Standard,
+                context_folding: ContextFoldingConfig::default(),
+                messages: vec![
+                    text_message("u1", MessageRole::User, &"oldest user".repeat(20)),
+                    text_message("a1", MessageRole::Assistant, &"oldest assistant".repeat(20)),
+                    text_message("u2", MessageRole::User, &"older user".repeat(20)),
+                    text_message("a2", MessageRole::Assistant, &"older assistant".repeat(20)),
+                    text_message("u3", MessageRole::User, &"recent user".repeat(20)),
+                    text_message("a3", MessageRole::Assistant, &"recent assistant".repeat(20)),
+                    text_message("u4", MessageRole::User, &"latest user".repeat(20)),
+                    text_message("a4", MessageRole::Assistant, &"latest assistant".repeat(20)),
+                ],
+                iteration: 4,
+                token_usage: TokenUsage::default(),
+                last_prompt_usage: Some(PromptUsage {
+                    prompt_context_tokens: 70_000,
+                    input_tokens: 70_000,
+                    cached_input_tokens: 0,
+                }),
+                ..AgentStateEnvelope::default()
+            },
+        )
+        .await
+        .expect("runtime");
+        runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
+
+        assert!(
+            !runtime
+                .state
+                .messages
+                .iter()
+                .any(|message| message.id == "__context_archive__")
+        );
+
+        runtime
+            .update_session_config(
+                Some(crate::Provider::GoogleOAuth {
+                    access_token: "tok".into(),
+                    refresh_token: "ref".into(),
+                    expires_at: u64::MAX,
+                    project_id: None,
+                }),
+                Some("gemini-2.5-flash-image".to_string()),
+                None,
+                None,
+            )
+            .await;
+
+        assert!(
+            runtime
+                .state
+                .messages
+                .iter()
+                .any(|message| message.id == "__context_archive__")
+        );
+        assert!(!runtime.state.messages.iter().any(|message| {
+            message
+                .parts
+                .iter()
+                .any(|part| part.content.contains("oldest user"))
+        }));
+        assert_eq!(
+            runtime.session_config_snapshot().context_window,
+            Some(32_768)
         );
     }
 

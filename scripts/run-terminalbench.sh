@@ -21,7 +21,8 @@ Options:
   --task-file <path>            Exact task names from a file (one per line, # comments allowed)
   --exclude-task <glob>         Task exclude pattern (repeatable)
   --model <model>               Model passed to lash (optional)
-  --execution-mode <mode>       Lash execution mode: repl|native-tools (required)
+  --variant <name>              Provider-native model variant passed to lash (optional)
+  --execution-mode <mode>       Lash execution mode: repl|standard (required)
   --jobs-dir <path>             Harbor jobs output dir (default: jobs)
   --job-name <name>             Harbor job name (optional)
   --n-concurrent <int>          Concurrent trials (default: 1)
@@ -43,8 +44,8 @@ Options:
 
 Examples:
   scripts/run-terminalbench.sh --sample --execution-mode repl
-  scripts/run-terminalbench.sh --full --execution-mode native-tools --task "git-*"
-  scripts/run-terminalbench.sh --sample --execution-mode native-tools --tasks regex-log,sqlite-with-gcov
+  scripts/run-terminalbench.sh --full --execution-mode standard --task "git-*"
+  scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,sqlite-with-gcov
   scripts/run-terminalbench.sh --sample --execution-mode repl --task chess-best-move --model gpt-5.3-codex
 EOF
 }
@@ -60,6 +61,7 @@ DATASET="terminal-bench-sample@2.0"
 JOBS_DIR="jobs"
 JOB_NAME=""
 MODEL=""
+VARIANT=""
 EXECUTION_MODE=""
 N_CONCURRENT="1"
 N_CONCURRENT_SET=0
@@ -157,6 +159,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --model)
       MODEL="${2:?missing value for --model}"
+      shift 2
+      ;;
+    --variant)
+      VARIANT="${2:?missing value for --variant}"
       shift 2
       ;;
     --execution-mode)
@@ -259,12 +265,16 @@ EOF
 fi
 
 if [[ -z "${EXECUTION_MODE}" ]]; then
-  echo "error: --execution-mode is required (expected repl|native-tools)" >&2
+  echo "error: --execution-mode is required (expected repl|standard)" >&2
   exit 2
 fi
 
-if [[ "${EXECUTION_MODE}" != "repl" && "${EXECUTION_MODE}" != "native-tools" ]]; then
-  echo "error: unsupported --execution-mode: ${EXECUTION_MODE} (expected repl|native-tools)" >&2
+if [[ "${EXECUTION_MODE}" == "native-tools" ]]; then
+  EXECUTION_MODE="standard"
+fi
+
+if [[ "${EXECUTION_MODE}" != "repl" && "${EXECUTION_MODE}" != "standard" ]]; then
+  echo "error: unsupported --execution-mode: ${EXECUTION_MODE} (expected repl|standard)" >&2
   exit 2
 fi
 
@@ -323,6 +333,7 @@ fi
 
 export LASH_BENCH_BINARY="${BINARY_PATH}"
 export LASH_BENCH_EXECUTION_MODE="${EXECUTION_MODE}"
+export LASH_BENCH_MODEL_VARIANT="${VARIANT}"
 
 if [[ -z "${LASH_PROMPT_REPLACE_IDENTITY:-}" ]]; then
   export LASH_PROMPT_REPLACE_IDENTITY="$(cat <<EOF

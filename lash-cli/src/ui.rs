@@ -7,9 +7,11 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::activity::{ActivityArtifact, ActivityBlock, ActivityKind, ActivityStatus};
+use crate::activity::{
+    ActivityArtifact, ActivityBlock, ActivityKind, ActivityStatus, PatchFilePreview,
+};
 use crate::app::{
-    App, DisplayBlock, SuggestionKind, TASK_TRAY_TWO_COL_MIN_INNER_WIDTH, TaskSnapshot,
+    App, DisplayBlock, QueuedTurn, SuggestionKind, TASK_TRAY_TWO_COL_MIN_INNER_WIDTH, TaskSnapshot,
 };
 use crate::markdown;
 use crate::theme;
@@ -26,11 +28,15 @@ fn input_height(app: &App, frame_width: u16) -> u16 {
     }
 }
 
+fn queue_preview_height(app: &App, frame_width: u16) -> u16 {
+    queue_preview_lines(app, frame_width).len() as u16
+}
+
 /// Exact history viewport height based on the same layout math used in draw().
 pub fn history_viewport_height(app: &App, frame_width: u16, frame_height: u16) -> usize {
     let strike_h = if app.running { 1 } else { 0 };
     let task_tray_h = app.task_tray_height(frame_width);
-    let queued_h: u16 = if app.has_queued_message() { 1 } else { 0 };
+    let queued_h = queue_preview_height(app, frame_width);
     let input_h = input_height(app, frame_width);
     let overhead = 1 + strike_h + task_tray_h + queued_h + input_h;
     frame_height.saturating_sub(overhead) as usize
@@ -42,7 +48,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     let strike_h = if app.running { 1 } else { 0 };
     let task_tray_h = app.task_tray_height(frame.area().width);
-    let queued_h: u16 = if app.has_queued_message() { 1 } else { 0 };
+    let queued_h = queue_preview_height(app, frame.area().width);
     let input_h = input_height(app, frame.area().width);
 
     let chunks = Layout::vertical([
@@ -50,7 +56,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Constraint::Min(3),              // [1] history
         Constraint::Length(strike_h),    // [2] strike zone (only when running)
         Constraint::Length(task_tray_h), // [3] task tray
-        Constraint::Length(queued_h),    // [4] queued message bar
+        Constraint::Length(queued_h),    // [4] pending input preview
         Constraint::Length(input_h),     // [5] input (dynamic height)
     ])
     .split(frame.area());
@@ -61,7 +67,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_strike_zone(frame, app, chunks[2]);
     }
     draw_task_tray(frame, app, chunks[3]);
-    draw_queued_message(frame, app, chunks[4]);
+    draw_queue_preview(frame, app, chunks[4]);
     if app.has_prompt() {
         draw_prompt(frame, app, chunks[5]);
     } else {
@@ -78,13 +84,17 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // ── Left-side segment widths (progressive: name → model → mode) ──
+    // ── Left-side segment widths (progressive: name → model → variant) ──
     let name_w = " lash".chars().count();
     let sep_w = theme::STATUS_SEP.chars().count();
     let model_w = app.model.chars().count();
+    let variant_w = app
+        .model_variant
+        .as_ref()
+        .map_or(0, |variant| sep_w + variant.chars().count());
     let left_1 = name_w;
     let left_2 = name_w + sep_w + model_w;
-    let left_3 = left_2;
+    let left_3 = left_2 + variant_w;
 
     // ── Right-side: token components ──
     let display_input_tokens = app.token_usage.input_tokens;
@@ -175,6 +185,17 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     if left_level >= 2 {
         spans.push(Span::styled(theme::STATUS_SEP, theme::status_separator()));
         spans.push(Span::styled(&app.model, theme::model_name()));
+        if left_level >= 3
+            && let Some(variant) = &app.model_variant
+        {
+            spans.push(Span::styled(theme::STATUS_SEP, theme::status_separator()));
+            spans.push(Span::styled(
+                variant.clone(),
+                Style::default()
+                    .fg(theme::SODIUM)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
     }
     // Padding between left and right
     let actual_left: usize = spans.iter().map(|s| s.width()).sum();
@@ -305,31 +326,6 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
             if lines.len() >= viewport_height + skip_lines {
                 break;
             }
-        }
-    }
-
-    // Bottom-align content when it doesn't fill the viewport (chat-style).
-    // Use visual row count (accounting for line wrapping) not logical line count.
-    if scroll == 0 {
-        let total_visual: usize = lines
-            .iter()
-            .map(|line| {
-                let w = line.width();
-                if viewport_width == 0 || w == 0 {
-                    1
-                } else {
-                    w.div_ceil(viewport_width)
-                }
-            })
-            .sum();
-        let pad_count = viewport_height.saturating_sub(total_visual);
-        if pad_count > 0 {
-            let mut padded = Vec::with_capacity(pad_count + lines.len());
-            for _ in 0..pad_count {
-                padded.push(Line::from(""));
-            }
-            padded.extend(lines);
-            lines = padded;
         }
     }
 
@@ -485,6 +481,9 @@ fn render_activity_artifact<'a>(
                 ]));
             }
         }
+        ActivityArtifact::PatchPreview { files, .. } => {
+            render_patch_preview(lines, files, viewport_width, indent, true);
+        }
         ActivityArtifact::TextPreview { title, text } => {
             if let Some(title) = title {
                 lines.push(Line::from(vec![
@@ -524,6 +523,124 @@ fn render_activity_artifact<'a>(
     }
 }
 
+fn patch_status_label(status: &str) -> &'static str {
+    match status {
+        "added" => "added",
+        "deleted" => "deleted",
+        "moved" => "moved",
+        _ => "edited",
+    }
+}
+
+fn render_patch_summary_line<'a>(
+    lines: &mut Vec<Line<'a>>,
+    prefix: &str,
+    file: &PatchFilePreview,
+    viewport_width: usize,
+) {
+    let mut spans = vec![
+        Span::styled(prefix.to_string(), theme::patch_frame()),
+        Span::styled(
+            patch_status_label(&file.status).to_string(),
+            theme::patch_label(),
+        ),
+        Span::raw(" "),
+    ];
+    let subject = match &file.from_path {
+        Some(from_path) => format!("{from_path} → {}", file.path),
+        None => file.path.clone(),
+    };
+    let counts = format!(" (+{} -{})", file.added, file.removed);
+    let available = viewport_width
+        .saturating_sub(UnicodeWidthStr::width(prefix))
+        .saturating_sub(UnicodeWidthStr::width(patch_status_label(&file.status)))
+        .saturating_sub(1 + UnicodeWidthStr::width(counts.as_str()));
+    spans.push(Span::styled(
+        truncate_to_display_width(&subject, available),
+        theme::assistant_text(),
+    ));
+    spans.push(Span::styled(" (".to_string(), theme::code_chrome()));
+    spans.push(Span::styled(format!("+{}", file.added), theme::patch_add()));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        format!("-{}", file.removed),
+        theme::patch_remove(),
+    ));
+    spans.push(Span::styled(")".to_string(), theme::code_chrome()));
+    lines.push(Line::from(spans));
+}
+
+fn render_patch_diff_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    prefix: &str,
+    diff: &str,
+    viewport_width: usize,
+) {
+    for diff_line in diff.lines() {
+        let style = if diff_line.starts_with("@@") {
+            theme::patch_hunk()
+        } else if diff_line.starts_with('+') && !diff_line.starts_with("+++ ") {
+            theme::patch_add()
+        } else if diff_line.starts_with('-') && !diff_line.starts_with("--- ") {
+            theme::patch_remove()
+        } else if diff_line.starts_with("+++ ") || diff_line.starts_with("--- ") {
+            theme::code_header()
+        } else {
+            theme::code_content()
+        };
+        push_wrapped_prefixed(
+            lines,
+            format!("{prefix}╎ "),
+            format!("{prefix}  "),
+            diff_line,
+            style,
+            viewport_width,
+        );
+    }
+}
+
+fn render_patch_preview<'a>(
+    lines: &mut Vec<Line<'a>>,
+    files: &[PatchFilePreview],
+    viewport_width: usize,
+    indent: &str,
+    include_diffs: bool,
+) {
+    for (idx, file) in files.iter().enumerate() {
+        let row_prefix = if idx + 1 == files.len() && !include_diffs {
+            format!("{indent}╰ ")
+        } else {
+            format!("{indent}├ ")
+        };
+        render_patch_summary_line(lines, &row_prefix, file, viewport_width);
+        if include_diffs && !file.diff.trim().is_empty() {
+            render_patch_diff_lines(lines, &format!("{indent}│ "), &file.diff, viewport_width);
+        }
+    }
+}
+
+fn render_patch_artifact<'a>(
+    lines: &mut Vec<Line<'a>>,
+    files: &[PatchFilePreview],
+    viewport_width: usize,
+    indent: &str,
+    include_diffs: bool,
+) {
+    if files.len() == 1 {
+        if include_diffs && !files[0].diff.trim().is_empty() {
+            render_patch_diff_lines(
+                lines,
+                &format!("{indent}│ "),
+                &files[0].diff,
+                viewport_width,
+            );
+        }
+        return;
+    }
+
+    render_patch_preview(lines, files, viewport_width, indent, include_diffs);
+}
+
 fn render_activity_block<'a>(
     activity: &'a ActivityBlock,
     expand_level: u8,
@@ -534,22 +651,51 @@ fn render_activity_block<'a>(
     let style = activity_style(activity.status);
     let prefix = if nested { "  " } else { "" };
     let (summary_prefix, summary_prefix_style, detail_prefix, detail_prefix_style) =
-        if activity.kind == ActivityKind::Exploration {
-            (
+        match activity.kind {
+            ActivityKind::Exploration => (
                 format!("{prefix}\u{251c}\u{2500} "),
                 Style::default()
                     .fg(theme::SODIUM)
                     .add_modifier(Modifier::BOLD),
                 format!("{prefix}\u{2502}  "),
                 Style::default().fg(theme::SODIUM),
-            )
-        } else {
-            (
+            ),
+            ActivityKind::Delegate => (
+                format!("{prefix}\u{251c}\u{2500} "),
+                Style::default()
+                    .fg(theme::LICHEN)
+                    .add_modifier(Modifier::BOLD),
+                format!("{prefix}\u{2502}  "),
+                Style::default().fg(theme::LICHEN),
+            ),
+            ActivityKind::TaskAction => (
+                format!("{prefix}\u{25c6} "),
+                Style::default()
+                    .fg(theme::LICHEN)
+                    .add_modifier(Modifier::BOLD),
+                format!("{}  ", prefix),
+                Style::default().fg(theme::LICHEN),
+            ),
+            ActivityKind::Edit => (
+                format!("{prefix}\u{256d}\u{2500} "),
+                if activity.status == ActivityStatus::Failed {
+                    theme::error().add_modifier(Modifier::BOLD)
+                } else {
+                    theme::patch_frame().add_modifier(Modifier::BOLD)
+                },
+                format!("{prefix}\u{2502}  "),
+                if activity.status == ActivityStatus::Failed {
+                    theme::error()
+                } else {
+                    theme::patch_frame()
+                },
+            ),
+            _ => (
                 format!("{}{} ", prefix, activity_icon(activity.status)),
                 style,
                 format!("{}  ", prefix),
                 theme::code_chrome(),
-            )
+            ),
         };
     let summary_text = truncate_to_display_width(
         &format!(
@@ -564,7 +710,12 @@ fn render_activity_block<'a>(
         Span::styled(summary_text, style),
     ]));
 
-    if expand_level >= 1 {
+    let hide_success_shell_details = matches!(
+        activity.kind,
+        ActivityKind::ShellCommand | ActivityKind::ShellInteraction
+    ) && activity.status != ActivityStatus::Failed;
+
+    if expand_level >= 1 && !hide_success_shell_details {
         for detail in &activity.detail_lines {
             lines.push(Line::from(vec![
                 Span::styled(detail_prefix.clone(), detail_prefix_style),
@@ -578,6 +729,12 @@ fn render_activity_block<'a>(
                 ),
             ]));
         }
+        if expand_level == 1
+            && let Some(ActivityArtifact::PatchPreview { files, .. }) = &activity.artifact
+        {
+            let indent = format!("{prefix}  ");
+            render_patch_artifact(lines, files, viewport_width, &indent, false);
+        }
         if activity.kind == ActivityKind::Parallel {
             for child in &activity.children {
                 lines.push(Line::from(vec![
@@ -590,8 +747,16 @@ fn render_activity_block<'a>(
 
     if expand_level >= 2 {
         if let Some(artifact) = &activity.artifact {
-            let indent = format!("{}  ", prefix);
-            render_activity_artifact(lines, artifact, viewport_width, &indent);
+            match artifact {
+                ActivityArtifact::PatchPreview { files, .. } => {
+                    let indent = format!("{prefix}  ");
+                    render_patch_artifact(lines, files, viewport_width, &indent, true);
+                }
+                _ => {
+                    let indent = format!("{}  ", prefix);
+                    render_activity_artifact(lines, artifact, viewport_width, &indent);
+                }
+            }
         }
         if activity.kind == ActivityKind::Parallel {
             for child in &activity.children {
@@ -884,6 +1049,9 @@ fn render_block<'a>(
         DisplayBlock::PlanContent(content) => {
             render_plan_block(content, lines, viewport_width);
         }
+        DisplayBlock::PluginPanel(panel) => {
+            render_panel_block(&panel.title, &panel.content, lines, viewport_width);
+        }
         DisplayBlock::Splash => {
             let chalk = theme::assistant_text();
             let sodium = Style::default().fg(theme::SODIUM);
@@ -934,15 +1102,24 @@ fn render_block<'a>(
 
 /// Render plan content as a bordered block with markdown inside.
 fn render_plan_block<'a>(content: &'a str, lines: &mut Vec<Line<'a>>, viewport_width: usize) {
-    let title = " PLAN ";
-    let title_w = UnicodeWidthStr::width(title);
+    render_panel_block("PLAN", content, lines, viewport_width);
+}
+
+fn render_panel_block<'a>(
+    title_text: &'a str,
+    content: &'a str,
+    lines: &mut Vec<Line<'a>>,
+    viewport_width: usize,
+) {
+    let title = format!(" {} ", title_text);
+    let title_w = UnicodeWidthStr::width(title.as_str());
     let fill_w = viewport_width.saturating_sub(3 + title_w); // ┌─ + title + ┐
 
     // Top border: ┌─ PLAN ─────────────────────────┐
     lines.push(Line::from(vec![
         Span::styled("\u{250c}\u{2500}", Style::default().fg(theme::ASH)),
         Span::styled(
-            title.to_string(),
+            title,
             Style::default()
                 .fg(theme::SODIUM)
                 .add_modifier(Modifier::BOLD),
@@ -1250,35 +1427,145 @@ fn draw_task_tray(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// Draw the queued message bar (1 line above the input, shown while agent is running).
-fn draw_queued_message(frame: &mut Frame, app: &App, area: Rect) {
-    let msg = match &app.queued_message {
-        Some(m) => m,
-        None => return,
-    };
+const QUEUE_SECTION_ITEM_LIMIT: usize = 2;
+const QUEUE_SECTION_WRAP_LIMIT: usize = 2;
+
+fn queue_preview_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+    if !app.has_queued_messages() || width < 12 {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    let inner_width = width as usize;
+    let pending_previews: Vec<String> =
+        app.pending_steers.iter().map(QueuedTurn::preview).collect();
+    let queued_previews: Vec<String> = app.queued_turns.iter().map(QueuedTurn::preview).collect();
+
+    if !pending_previews.is_empty() {
+        push_queue_section(
+            &mut lines,
+            inner_width,
+            "◆ after next tool/result · Esc sends now",
+            &pending_previews,
+            Style::default().fg(theme::SODIUM),
+            Style::default().fg(theme::CHALK_MID),
+        );
+    }
+
+    if !queued_previews.is_empty() {
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        push_queue_section(
+            &mut lines,
+            inner_width,
+            "◇ next full turn",
+            &queued_previews,
+            Style::default().fg(theme::LICHEN),
+            Style::default().fg(theme::CHALK_DIM),
+        );
+        lines.push(Line::from(vec![
+            Span::styled("  \u{2325}\u{2191} ", Style::default().fg(theme::ASH)),
+            Span::styled(
+                "edit last queued turn",
+                Style::default().fg(theme::ASH_TEXT),
+            ),
+        ]));
+    }
+
+    lines
+}
+
+fn push_queue_section(
+    lines: &mut Vec<Line<'static>>,
+    width: usize,
+    title: &str,
+    items: &[String],
+    header_style: Style,
+    item_style: Style,
+) {
+    let header = format!(
+        "{}{}",
+        title,
+        if items.len() > 1 {
+            format!(" · {}", items.len())
+        } else {
+            String::new()
+        }
+    );
+    for (start, end) in wrap_line(&header, 0, width.max(1)) {
+        lines.push(Line::from(Span::styled(
+            header[start..end].to_string(),
+            header_style,
+        )));
+    }
+
+    for item in items.iter().take(QUEUE_SECTION_ITEM_LIMIT) {
+        push_wrapped_queue_item(
+            lines,
+            width,
+            item,
+            item_style,
+            "  \u{21b3} ",
+            "    ",
+            QUEUE_SECTION_WRAP_LIMIT,
+        );
+    }
+
+    if items.len() > QUEUE_SECTION_ITEM_LIMIT {
+        lines.push(Line::from(vec![
+            Span::styled("    +", Style::default().fg(theme::ASH)),
+            Span::styled(
+                format!("{}", items.len() - QUEUE_SECTION_ITEM_LIMIT),
+                item_style,
+            ),
+            Span::styled(" more", Style::default().fg(theme::ASH_TEXT)),
+        ]));
+    }
+}
+
+fn push_wrapped_queue_item(
+    lines: &mut Vec<Line<'static>>,
+    width: usize,
+    text: &str,
+    style: Style,
+    first_prefix: &str,
+    continuation_prefix: &str,
+    max_lines: usize,
+) {
+    let collapsed = text.replace('\n', " ");
+    let segments = wrap_line(&collapsed, first_prefix.width(), width.max(1));
+    for (idx, (start, end)) in segments.into_iter().take(max_lines).enumerate() {
+        let prefix = if idx == 0 {
+            first_prefix
+        } else {
+            continuation_prefix
+        };
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), Style::default().fg(theme::ASH)),
+            Span::styled(collapsed[start..end].to_string(), style),
+        ]));
+    }
+    if wrap_line(&collapsed, first_prefix.width(), width.max(1)).len() > max_lines {
+        lines.push(Line::from(vec![Span::styled(
+            format!("{continuation_prefix}\u{2026}"),
+            Style::default().fg(theme::ASH_TEXT),
+        )]));
+    }
+}
+
+/// Draw the pending-input preview block above the input.
+fn draw_queue_preview(frame: &mut Frame, app: &App, area: Rect) {
     if area.height == 0 {
         return;
     }
+    let lines = queue_preview_lines(app, area.width);
+    if lines.is_empty() {
+        return;
+    }
 
-    let max_w = area.width.saturating_sub(6) as usize; // " ┆ " prefix + padding
-    let collapsed: String = msg
-        .chars()
-        .map(|c| if c == '\n' { ' ' } else { c })
-        .collect();
-    let truncated: String = collapsed.chars().take(max_w).collect();
-    let display = if collapsed.chars().count() > max_w {
-        format!("{}\u{2026}", truncated)
-    } else {
-        truncated
-    };
-
-    let line = Line::from(vec![
-        Span::styled(" \u{2506} ", Style::default().fg(theme::ASH)),
-        Span::styled(display, Style::default().fg(theme::CHALK_DIM)),
-        Span::styled("  \u{232b}", Style::default().fg(theme::ASH)),
-    ]);
     frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(theme::FORM_RAISED)),
+        Paragraph::new(lines).style(Style::default().bg(theme::FORM_RAISED)),
         area,
     );
 }
@@ -1339,7 +1626,23 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(input, area);
 
     // Session/cwd on the bottom border, right-aligned
-    let session_w = UnicodeWidthStr::width(app.session_name.as_str())
+    let badge_labels: Vec<&str> = app
+        .plugin_mode_indicators
+        .values()
+        .map(|label| label.as_str())
+        .collect();
+    let badges_w = if badge_labels.is_empty() {
+        0
+    } else {
+        badge_labels
+            .iter()
+            .map(|label| UnicodeWidthStr::width(*label))
+            .sum::<usize>()
+            + (badge_labels.len().saturating_sub(1) * 3)
+            + 3
+    };
+    let session_w = badges_w
+        + UnicodeWidthStr::width(app.session_name.as_str())
         + 3 // " · "
         + UnicodeWidthStr::width(app.cwd.as_str())
         + 2; // padding
@@ -1347,8 +1650,22 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         let x = area.x + area.width - session_w as u16;
         let y = area.y + area.height - 1;
         let session_area = Rect::new(x, y, session_w as u16, 1);
-        let session_line = Line::from(vec![
-            Span::styled(" ", Style::default().fg(theme::ASH)),
+        let mut session_spans = vec![Span::styled(" ", Style::default().fg(theme::ASH))];
+        if !badge_labels.is_empty() {
+            for (idx, label) in badge_labels.iter().enumerate() {
+                if idx > 0 {
+                    session_spans.push(Span::styled(" \u{b7} ", Style::default().fg(theme::ASH)));
+                }
+                session_spans.push(Span::styled(
+                    (*label).to_string(),
+                    Style::default()
+                        .fg(theme::SODIUM)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            session_spans.push(Span::styled(" \u{b7} ", Style::default().fg(theme::ASH)));
+        }
+        session_spans.extend([
             Span::styled(
                 app.session_name.as_str(),
                 Style::default().fg(theme::ASH_MID),
@@ -1357,6 +1674,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(app.cwd.as_str(), Style::default().fg(theme::ASH_TEXT)),
             Span::styled(" ", Style::default().fg(theme::ASH)),
         ]);
+        let session_line = Line::from(session_spans);
         frame.render_widget(
             Paragraph::new(session_line).style(theme::history_bg()),
             session_area,
@@ -1905,7 +2223,7 @@ mod tests {
         let mut app = App::new("model".into(), "session".into(), None);
         app.blocks.clear(); // avoid splash-specific influence on expectations
         app.input = "line1\nline2\nline3".into();
-        app.queued_message = Some("queued".into());
+        app.queue_turn(crate::app::QueuedTurn::new("queued".into(), Vec::new()));
         app.task_tray.push(crate::app::TaskSnapshot {
             id: "t1".into(),
             label: "Task".into(),
@@ -1919,11 +2237,256 @@ mod tests {
         let expected_overhead = 1u16 // status bar
             + if app.running { 1 } else { 0 }
             + app.task_tray_height(fw)
-            + 1u16 // queued bar
+            + queue_preview_height(&app, fw)
             + input_height(&app, fw);
 
         let got = history_viewport_height(&app, fw, fh);
         assert_eq!(got, fh.saturating_sub(expected_overhead) as usize);
+    }
+
+    #[test]
+    fn queue_preview_lines_distinguish_checkpoint_and_next_turn() {
+        let mut app = App::new("model".into(), "session".into(), None);
+        app.queue_pending_steer(QueuedTurn::new(
+            "tighten the current assertion".into(),
+            Vec::new(),
+        ));
+        app.queue_turn(QueuedTurn::new(
+            "run follow-up validation".into(),
+            Vec::new(),
+        ));
+
+        let rendered = queue_preview_lines(&app, 48)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("after next tool/result"))
+        );
+        assert!(rendered.iter().any(|line| line.contains("Esc sends now")));
+        assert!(rendered.iter().any(|line| line.contains("next full turn")));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("edit last queued turn"))
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("tighten the current assertion"))
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("run follow-up validation"))
+        );
+    }
+
+    #[test]
+    fn queue_preview_height_grows_for_two_queue_sections() {
+        let mut app = App::new("model".into(), "session".into(), None);
+        app.queue_pending_steer(QueuedTurn::new("checkpoint follow-up".into(), Vec::new()));
+        app.queue_turn(QueuedTurn::new("next turn".into(), Vec::new()));
+
+        assert!(queue_preview_height(&app, 64) > 1);
+    }
+
+    #[test]
+    fn successful_shell_activity_hides_redundant_detail_lines() {
+        let activity = ActivityBlock {
+            kind: ActivityKind::ShellCommand,
+            status: ActivityStatus::Completed,
+            tool_name: "exec_command".into(),
+            summary: "date '+%Y-%m-%d %H:%M:%S %Z'".into(),
+            detail_lines: vec![
+                "Command: date '+%Y-%m-%d %H:%M:%S %Z'".into(),
+                "Workdir: /home/sam/code/lash".into(),
+                "Exit code: 0".into(),
+            ],
+            duration_ms: 13,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: None,
+            children: Vec::new(),
+            extra: None,
+        };
+
+        let mut lines = Vec::new();
+        render_activity_block(&activity, 1, &mut lines, 80, false);
+
+        assert_eq!(
+            line_text(&lines[0]),
+            "+ date '+%Y-%m-%d %H:%M:%S %Z' · 13ms"
+        );
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn delegate_activity_renders_lichen_branch_lane() {
+        let activity = ActivityBlock {
+            kind: ActivityKind::Delegate,
+            status: ActivityStatus::Completed,
+            tool_name: "agent_call".into(),
+            summary: "delegate · inspect queue rendering".into(),
+            detail_lines: Vec::new(),
+            duration_ms: 7,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: None,
+            children: Vec::new(),
+            extra: None,
+        };
+
+        let mut lines = Vec::new();
+        render_activity_block(&activity, 1, &mut lines, 80, false);
+
+        assert_eq!(
+            line_text(&lines[0]),
+            "├─ delegate · inspect queue rendering · 7ms"
+        );
+    }
+
+    #[test]
+    fn task_activity_renders_diamond_marker() {
+        let activity = ActivityBlock {
+            kind: ActivityKind::TaskAction,
+            status: ActivityStatus::Completed,
+            tool_name: "update_task".into(),
+            summary: "task completed · 0007".into(),
+            detail_lines: Vec::new(),
+            duration_ms: 2,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: None,
+            children: Vec::new(),
+            extra: None,
+        };
+
+        let mut lines = Vec::new();
+        render_activity_block(&activity, 1, &mut lines, 80, false);
+
+        assert_eq!(line_text(&lines[0]), "◆ task completed · 0007 · 2ms");
+    }
+
+    #[test]
+    fn patch_activity_renders_revision_lane_and_file_slate() {
+        let activity = ActivityBlock {
+            kind: ActivityKind::Edit,
+            status: ActivityStatus::Completed,
+            tool_name: "apply_patch".into(),
+            summary: "edited lash-cli/src/ui.rs (+3 -1)".into(),
+            detail_lines: Vec::new(),
+            duration_ms: 15,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: Some(ActivityArtifact::PatchPreview {
+                files: vec![PatchFilePreview {
+                    path: "lash-cli/src/ui.rs".into(),
+                    from_path: None,
+                    status: "modified".into(),
+                    added: 3,
+                    removed: 1,
+                    diff: "--- a/lash-cli/src/ui.rs\n+++ b/lash-cli/src/ui.rs\n@@\n-old\n+new"
+                        .into(),
+                }],
+                total_added: 3,
+                total_removed: 1,
+            }),
+            children: Vec::new(),
+            extra: None,
+        };
+
+        let mut lines = Vec::new();
+        render_activity_block(&activity, 1, &mut lines, 80, false);
+
+        assert_eq!(
+            line_text(&lines[0]),
+            "╭─ edited lash-cli/src/ui.rs (+3 -1) · 15ms"
+        );
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn multi_file_patch_activity_keeps_compact_file_slate() {
+        let activity = ActivityBlock {
+            kind: ActivityKind::Edit,
+            status: ActivityStatus::Completed,
+            tool_name: "apply_patch".into(),
+            summary: "edited 2 files (+4 -1)".into(),
+            detail_lines: Vec::new(),
+            duration_ms: 15,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: Some(ActivityArtifact::PatchPreview {
+                files: vec![
+                    PatchFilePreview {
+                        path: "a.rs".into(),
+                        from_path: None,
+                        status: "modified".into(),
+                        added: 3,
+                        removed: 1,
+                        diff: String::new(),
+                    },
+                    PatchFilePreview {
+                        path: "b.rs".into(),
+                        from_path: None,
+                        status: "added".into(),
+                        added: 1,
+                        removed: 0,
+                        diff: String::new(),
+                    },
+                ],
+                total_added: 4,
+                total_removed: 1,
+            }),
+            children: Vec::new(),
+            extra: None,
+        };
+
+        let mut lines = Vec::new();
+        render_activity_block(&activity, 1, &mut lines, 80, false);
+
+        assert_eq!(line_text(&lines[0]), "╭─ edited 2 files (+4 -1) · 15ms");
+        assert_eq!(line_text(&lines[1]), "  ├ edited a.rs (+3 -1)");
+        assert_eq!(line_text(&lines[2]), "  ╰ added b.rs (+1 -0)");
+    }
+
+    #[test]
+    fn patch_activity_full_view_renders_colored_diff_lines() {
+        let activity = ActivityBlock {
+            kind: ActivityKind::Edit,
+            status: ActivityStatus::Completed,
+            tool_name: "apply_patch".into(),
+            summary: "edited lash-cli/src/ui.rs (+1 -1)".into(),
+            detail_lines: Vec::new(),
+            duration_ms: 8,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: Some(ActivityArtifact::PatchPreview {
+                files: vec![PatchFilePreview {
+                    path: "lash-cli/src/ui.rs".into(),
+                    from_path: Some("lash-cli/src/app.rs".into()),
+                    status: "moved".into(),
+                    added: 1,
+                    removed: 1,
+                    diff: "--- a/lash-cli/src/app.rs\n+++ b/lash-cli/src/ui.rs\n@@\n-old\n+new"
+                        .into(),
+                }],
+                total_added: 1,
+                total_removed: 1,
+            }),
+            children: Vec::new(),
+            extra: None,
+        };
+
+        let mut lines = Vec::new();
+        render_activity_block(&activity, 2, &mut lines, 80, false);
+
+        assert_eq!(line_text(&lines[1]), "  │ ╎ --- a/lash-cli/src/app.rs");
+        assert_eq!(line_text(&lines[5]), "  │ ╎ +new");
     }
 
     #[test]
@@ -2041,5 +2604,54 @@ mod tests {
 
         assert_eq!(line_text(&lines[0]), "├─ explored · 3ms");
         assert_eq!(line_text(&lines[1]), "│  read src/compone…");
+    }
+
+    #[test]
+    fn exploration_activity_height_matches_rendered_rows_when_truncated() {
+        let activity = ActivityBlock {
+            kind: ActivityKind::Exploration,
+            status: ActivityStatus::Completed,
+            tool_name: "read_file".into(),
+            summary: "explored a deeply nested workspace tree".into(),
+            detail_lines: vec!["read src/components/really_long_file_name.rs".into()],
+            duration_ms: 3,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: None,
+            children: Vec::new(),
+            extra: None,
+        };
+
+        let expected_height = DisplayBlock::Activity(activity.clone()).height(1, 20, 0);
+        let mut lines = Vec::new();
+        render_activity_block(&activity, 1, &mut lines, 20, false);
+
+        assert_eq!(expected_height, lines.len());
+    }
+
+    #[test]
+    fn exploration_activity_artifact_height_matches_rendered_rows() {
+        let activity = ActivityBlock {
+            kind: ActivityKind::Exploration,
+            status: ActivityStatus::Completed,
+            tool_name: "read_file".into(),
+            summary: "explored".into(),
+            detail_lines: vec!["read src/app.rs".into()],
+            duration_ms: 3,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: Some(ActivityArtifact::TextPreview {
+                title: Some("preview".into()),
+                text: "this is a long preview line that should wrap".into(),
+            }),
+            children: Vec::new(),
+            extra: None,
+        };
+
+        let expected_height = DisplayBlock::Activity(activity.clone()).height(2, 20, 0);
+        let mut lines = Vec::new();
+        render_activity_block(&activity, 2, &mut lines, 20, false);
+
+        assert_eq!(expected_height, lines.len());
     }
 }

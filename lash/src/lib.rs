@@ -5,6 +5,7 @@ pub mod embedded;
 pub mod instructions;
 pub mod llm;
 pub mod model_info;
+pub mod model_variant;
 pub mod oauth;
 pub mod plugin;
 pub mod provider;
@@ -19,6 +20,8 @@ pub mod text;
 pub mod tools;
 
 use std::path::PathBuf;
+
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Return the root data directory for lash.
 ///
@@ -47,6 +50,16 @@ pub fn lash_cache_dir() -> PathBuf {
     }
 }
 
+/// Return the preferred repo-local directory for lash artifacts.
+pub fn repo_local_lash_dir() -> PathBuf {
+    PathBuf::from(".agents").join("lash")
+}
+
+/// Return the legacy repo-local directory for lash artifacts.
+pub fn legacy_repo_local_lash_dir() -> PathBuf {
+    PathBuf::from(".lash")
+}
+
 // Re-exports
 pub use agent::message::MessageOrigin;
 pub use agent::{
@@ -65,19 +78,23 @@ pub use dynamic::{
     resolve_capability_projection, resolve_projection,
 };
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
-#[cfg(feature = "sqlite-store")]
+pub use model_variant::VariantRequestConfig;
 pub use plugin::{
-    BuiltinHistoryPluginFactory, BuiltinMemoryPluginFactory, builtin_dynamic_capability_defs,
-};
-pub use plugin::{
-    ExternalInvokeContext, ExternalInvokeError, ExternalOpDef, ExternalOpKind,
-    MessageMutatorContext, MessageMutatorHook, PluginDirective, PluginError, PluginFactory,
-    PluginHost, PluginMessage, PluginRegistrar, PluginSession, PluginSessionContext,
-    PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta,
+    AssistantResponseHookContext, AssistantResponseTransform, AssistantStreamHookContext,
+    AssistantStreamTransform, CheckpointHookContext, CheckpointKind, ExternalInvokeContext,
+    ExternalInvokeError, ExternalOpDef, ExternalOpKind, MessageMutatorContext, MessageMutatorHook,
+    PluginDirective, PluginError, PluginFactory, PluginHost, PluginMessage, PluginOwned,
+    PluginRegistrar, PluginSession, PluginSessionContext, PluginSessionSnapshot,
+    PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta, PluginSurfaceEvent,
     PromptContribution, PromptHookContext, RuntimeServices, SessionConfigOverrides,
     SessionCreateRequest, SessionHandle, SessionManager, SessionParam, SessionPlugin,
     SessionSnapshot, SessionStartPoint, SnapshotReader, SnapshotWriter, TurnHookContext,
     TurnResultHookContext,
+};
+#[cfg(feature = "sqlite-store")]
+pub use plugin::{
+    BuiltinHistoryPluginFactory, BuiltinMemoryPluginFactory, BuiltinPlanModePluginFactory,
+    BuiltinPlanTrackerPluginFactory, builtin_dynamic_capability_defs,
 };
 pub use provider::{LashConfig, Provider};
 pub use runtime::{
@@ -87,7 +104,9 @@ pub use runtime::{
     TerminationPolicy, TurnInput, TurnIssue, TurnStatus,
 };
 pub use sansio::{Effect, EffectId, LlmCallError, Response, TurnMachine, TurnMachineConfig};
-pub use session::{ExecResponse, Session, SessionError, UserPrompt};
+pub use session::{
+    ExecResponse, PromptBridge, Session, SessionError, TurnInjectionBridge, UserPrompt,
+};
 #[cfg(feature = "sqlite-store")]
 pub use store::{AgentState, Store, TaskEntry};
 pub use text::strip_repl_fragments;
@@ -285,7 +304,7 @@ impl ToolDefinition {
             return false;
         }
 
-        !matches!(self.name.as_str(), "batch" | "update_plan")
+        !matches!(self.name.as_str(), "ask" | "batch" | "update_plan")
     }
 
     pub fn description_for(&self, mode: ExecutionMode) -> String {

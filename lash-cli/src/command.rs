@@ -5,11 +5,14 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/clear", "Reset conversation"),
     ("/controls", "Show keyboard shortcuts"),
     ("/fork", "Open a forked session in a new terminal"),
+    ("/version", "Show Lash and lash-core versions"),
+    ("/info", "Show current session/runtime info"),
     ("/model", "Show or switch LLM model"),
+    ("/variant", "Show or switch model variant"),
     ("/mode", "Show current execution mode"),
-    ("/provider", "Open provider setup (in-app)"),
+    ("/provider", "Switch, add, or re-authenticate providers"),
     ("/login", "Sign in or reconfigure provider"),
-    ("/logout", "Remove stored credentials"),
+    ("/logout", "Remove stored credentials for active provider"),
     ("/retry", "Replay the previous turn payload"),
     ("/resume", "Resume a previous session"),
     ("/skills", "Browse loaded skills"),
@@ -38,7 +41,7 @@ pub fn completions(prefix: &str, skills: &SkillRegistry) -> Vec<(String, String)
 pub fn completion_inserts_space(cmd: &str, skills: &SkillRegistry) -> bool {
     matches!(
         cmd,
-        "/fork" | "/model" | "/mode" | "/resume" | "/tools" | "/caps" | "/reconfigure"
+        "/fork" | "/model" | "/variant" | "/mode" | "/resume" | "/tools" | "/caps" | "/reconfigure"
     ) || skills.get(cmd.trim_start_matches('/')).is_some()
 }
 
@@ -50,13 +53,19 @@ pub enum Command {
     Controls,
     /// Fork the current session into a new terminal (optional initial prompt)
     Fork(Option<String>),
+    /// Show Lash and lash-core versions
+    Version,
+    /// Show session/runtime metadata
+    Info,
     /// Show or switch LLM model
     Model(Option<String>),
+    /// Show or switch the provider-native variant for the active model
+    Variant(Option<String>),
     /// Show current execution mode or request a new-session change
     Mode(Option<String>),
     /// Show provider status and switch instructions
     ChangeProvider,
-    /// Remove stored credentials
+    /// Remove stored credentials for the active provider
     Logout,
     /// Replay the previous turn payload
     Retry,
@@ -97,7 +106,12 @@ pub fn parse(input: &str, skills: &SkillRegistry) -> Option<Command> {
         "fork" => Some(Command::Fork(
             arg.filter(|a| !a.is_empty()).map(|a| a.to_string()),
         )),
+        "version" => Some(Command::Version),
+        "info" => Some(Command::Info),
         "model" => Some(Command::Model(
+            arg.filter(|a| !a.is_empty()).map(|a| a.to_string()),
+        )),
+        "variant" => Some(Command::Variant(
             arg.filter(|a| !a.is_empty()).map(|a| a.to_string()),
         )),
         "mode" => Some(Command::Mode(
@@ -160,11 +174,17 @@ mod tests {
             Some(Command::ChangeProvider)
         ));
         assert!(matches!(parse("/retry", &skills), Some(Command::Retry)));
+        assert!(matches!(parse("/version", &skills), Some(Command::Version)));
+        assert!(matches!(parse("/info", &skills), Some(Command::Info)));
         assert!(matches!(parse("/quit", &skills), Some(Command::Exit)));
         assert!(matches!(parse("/?", &skills), Some(Command::Help)));
         assert!(matches!(
-            parse("/model gpt-5.4 high", &skills),
+            parse("/model gpt-5.4", &skills),
             Some(Command::Model(Some(_)))
+        ));
+        assert!(matches!(
+            parse("/variant high", &skills),
+            Some(Command::Variant(Some(_)))
         ));
         assert!(matches!(
             parse("/mode standard", &skills),
@@ -191,6 +211,7 @@ mod tests {
         for cmd in [
             "/fork",
             "/model",
+            "/variant",
             "/mode",
             "/resume",
             "/tools",
@@ -206,6 +227,8 @@ mod tests {
             "/login",
             "/logout",
             "/retry",
+            "/version",
+            "/info",
             "/skills",
             "/help",
             "/exit",

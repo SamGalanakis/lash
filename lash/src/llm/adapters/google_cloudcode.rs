@@ -7,6 +7,7 @@ use crate::llm::transport::{LlmTransport, LlmTransportError};
 use crate::llm::types::{
     LlmOutputPart, LlmPromptPart, LlmRequest, LlmResponse, LlmUsage, ModelSelection,
 };
+use crate::model_variant::VariantRequestConfig;
 use crate::provider::Provider;
 
 const CODE_ASSIST_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com";
@@ -324,11 +325,11 @@ impl LlmTransport for GoogleCloudCodeAdapter {
         match tier {
             "low" => Some(ModelSelection {
                 model: "gemini-3-flash-preview",
-                reasoning_effort: None,
+                variant: Some("low"),
             }),
             "medium" | "high" => Some(ModelSelection {
                 model: "gemini-3.1-pro-preview",
-                reasoning_effort: None,
+                variant: Some(if tier == "medium" { "medium" } else { "high" }),
             }),
             _ => None,
         }
@@ -407,6 +408,26 @@ impl LlmTransport for GoogleCloudCodeAdapter {
                 }
             }
         });
+        if let Some(variant) = req.model_variant.as_deref()
+            && let Some(config) =
+                crate::model_variant::request_config(provider, &req.model, variant)
+        {
+            match config {
+                VariantRequestConfig::GoogleThinkingLevel { level } => {
+                    request["request"]["thinkingConfig"] = json!({
+                        "includeThoughts": true,
+                        "thinkingLevel": level,
+                    });
+                }
+                VariantRequestConfig::GoogleThinkingBudget { budget_tokens } => {
+                    request["request"]["thinkingConfig"] = json!({
+                        "includeThoughts": true,
+                        "thinkingBudget": budget_tokens,
+                    });
+                }
+                _ => {}
+            }
+        }
         if !req.tools.is_empty() {
             request["request"]["tools"] = json!([{
                 "functionDeclarations": req
@@ -618,7 +639,7 @@ mod tests {
             attachments: vec![],
             tools: vec![],
             tool_choice: crate::llm::types::LlmToolChoice::Auto,
-            reasoning_effort: None,
+            model_variant: None,
             session_id: None,
             stream_events: None,
         };

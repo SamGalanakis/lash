@@ -54,8 +54,8 @@ impl BatchingTools {
             name: "batch".into(),
             description: vec![crate::ToolText::new(
                 format!(
-                    "Run 1-{} independent tool calls together. Good for multiple reads/searches or unrelated diagnostics. Do not use it for dependent steps or nested `batch`.",
-                    MAX_BATCH_CALLS
+                    "Execute 1-{max} independent tool calls concurrently to reduce latency. Prefer `batch` when you already know the arguments for several unrelated reads, searches, or diagnostics. Good fits: reading many files, grep/glob/read combinations, multiple shell commands, and other independent tool work. All calls start together; partial failures do not stop the rest. Do not use `batch` for dependent steps, ordered stateful mutations, or nested `batch`.",
+                    max = MAX_BATCH_CALLS
                 ),
                 [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
@@ -68,7 +68,7 @@ impl BatchingTools {
             }],
             returns: "dict".into(),
             examples: vec![crate::ToolText::new(
-                "batch(tool_calls=[{\"tool\":\"grep\",\"parameters\":{\"pattern\":\"TODO\",\"include\":\"src/**/*.rs\"}},{\"tool\":\"read_file\",\"parameters\":{\"path\":\"src/lib.rs\",\"limit\":200}}])",
+                "batch(tool_calls=[{\"tool\":\"grep\",\"parameters\":{\"pattern\":\"AgentEvent\",\"include\":\"src/**/*.rs\"}},{\"tool\":\"read_file\",\"parameters\":{\"path\":\"src/lib.rs\",\"limit\":200}}])",
                 [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             hidden: false,
@@ -387,6 +387,24 @@ mod tests {
         let wrapped = BatchingTools::with_mode(provider, crate::ExecutionMode::Standard);
         let defs = wrapped.definitions();
         assert_eq!(defs.iter().filter(|def| def.name == "batch").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn batch_definition_has_strong_parallel_guidance() {
+        let provider: Arc<dyn ToolProvider> = Arc::new(MockTools {
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let wrapped = BatchingTools::with_mode(provider, crate::ExecutionMode::Standard);
+        let batch = wrapped
+            .definitions()
+            .into_iter()
+            .find(|def| def.name == "batch")
+            .expect("batch definition");
+        let description = batch.description_for(crate::ExecutionMode::Standard);
+        assert!(description.contains("Execute 1-25 independent tool calls concurrently"));
+        assert!(description.contains("Prefer `batch`"));
+        assert!(description.contains("partial failures do not stop the rest"));
+        assert!(description.contains("Do not use `batch` for dependent steps"));
     }
 
     #[tokio::test]

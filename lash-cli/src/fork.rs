@@ -287,7 +287,7 @@ pub async fn fork_current_session(
     logger: &mut SessionLogger,
     provider: &lash_core::Provider,
     configured_model: &str,
-    reasoning_effort: Option<&str>,
+    model_variant: Option<&str>,
     toolset_hash: &str,
     dynamic_state: &DynamicStateSnapshot,
 ) -> Result<(String, String)> {
@@ -351,7 +351,7 @@ pub async fn fork_current_session(
         configured_model,
         execution_mode,
         context_folding,
-        reasoning_effort,
+        model_variant,
         toolset_hash,
         prompt_hash,
         snapshot_hash,

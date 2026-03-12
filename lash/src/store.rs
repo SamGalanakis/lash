@@ -230,12 +230,37 @@ impl Store {
         active_form: &str,
         metadata: &serde_json::Value,
     ) -> TaskEntry {
+        self.create_task_with_state(
+            id,
+            subject,
+            description,
+            "pending",
+            priority,
+            active_form,
+            "",
+            metadata,
+        )
+    }
+
+    /// Create a new task with explicit initial status/owner. Returns the created TaskEntry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_task_with_state(
+        &self,
+        id: &str,
+        subject: &str,
+        description: &str,
+        status: &str,
+        priority: &str,
+        active_form: &str,
+        owner: &str,
+        metadata: &serde_json::Value,
+    ) -> TaskEntry {
         let meta_str = serde_json::to_string(metadata).unwrap_or_else(|_| "{}".into());
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO tasks (id, subject, description, status, priority, active_form, metadata)
-             VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?6)",
-            params![id, subject, description, priority, active_form, meta_str],
+            "INSERT INTO tasks (id, subject, description, status, priority, active_form, owner, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, subject, description, status, priority, active_form, owner, meta_str],
         )
         .unwrap();
         drop(conn);

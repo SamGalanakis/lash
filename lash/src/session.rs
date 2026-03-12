@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -7,7 +7,8 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::embedded::{PythonRequest, PythonResponse, PythonRuntime};
 use crate::{
-    AgentCapabilities, RuntimeServices, SandboxMessage, ToolCallRecord, ToolImage, ToolProvider,
+    AgentCapabilities, PluginMessage, RuntimeServices, SandboxMessage, ToolCallRecord, ToolImage,
+    ToolProvider,
 };
 
 const REPL_SNAPSHOT_VERSION: u32 = 2;
@@ -59,6 +60,74 @@ pub struct UserPrompt {
     pub question: String,
     pub options: Vec<String>,
     pub response_tx: std::sync::mpsc::Sender<String>,
+}
+
+#[derive(Clone, Default)]
+pub struct PromptBridge {
+    sender: std::sync::Arc<std::sync::Mutex<Option<UnboundedSender<UserPrompt>>>>,
+}
+
+impl PromptBridge {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_sender(&self, tx: UnboundedSender<UserPrompt>) {
+        *self.sender.lock().expect("prompt bridge poisoned") = Some(tx);
+    }
+
+    pub fn clear_sender(&self) {
+        *self.sender.lock().expect("prompt bridge poisoned") = None;
+    }
+
+    pub async fn prompt(&self, question: String, options: Vec<String>) -> Result<String, String> {
+        let sender = self
+            .sender
+            .lock()
+            .map_err(|_| "prompt bridge poisoned".to_string())?
+            .clone()
+            .ok_or_else(|| "ask is unavailable in this session".to_string())?;
+        let (response_tx, response_rx) = std::sync::mpsc::channel::<String>();
+        sender
+            .send(UserPrompt {
+                question,
+                options,
+                response_tx,
+            })
+            .map_err(|_| "prompt channel closed".to_string())?;
+        tokio::task::spawn_blocking(move || response_rx.recv())
+            .await
+            .map_err(|err| format!("prompt wait task failed: {err}"))?
+            .map_err(|_| "prompt response channel closed".to_string())
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct TurnInjectionBridge {
+    queue: std::sync::Arc<std::sync::Mutex<VecDeque<PluginMessage>>>,
+}
+
+impl TurnInjectionBridge {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn enqueue(&self, messages: Vec<PluginMessage>) -> Result<(), String> {
+        let mut queue = self
+            .queue
+            .lock()
+            .map_err(|_| "turn injection bridge poisoned".to_string())?;
+        queue.extend(messages);
+        Ok(())
+    }
+
+    pub fn drain(&self) -> Result<Vec<PluginMessage>, String> {
+        let mut queue = self
+            .queue
+            .lock()
+            .map_err(|_| "turn injection bridge poisoned".to_string())?;
+        Ok(queue.drain(..).collect())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -167,6 +236,10 @@ impl Session {
         &self.services.plugins
     }
 
+    pub fn turn_injection_bridge(&self) -> &TurnInjectionBridge {
+        &self.services.turn_injection_bridge
+    }
+
     /// Set the message sender for streaming messages during execution.
     pub fn set_message_sender(&mut self, tx: UnboundedSender<SandboxMessage>) {
         self.message_tx = Some(tx);
@@ -179,11 +252,13 @@ impl Session {
 
     /// Set the prompt sender for forwarding user prompts during execution.
     pub fn set_prompt_sender(&mut self, tx: UnboundedSender<UserPrompt>) {
+        self.services.prompt_bridge.set_sender(tx.clone());
         self.prompt_tx = Some(tx);
     }
 
     /// Clear the prompt sender.
     pub fn clear_prompt_sender(&mut self) {
+        self.services.prompt_bridge.clear_sender();
         self.prompt_tx = None;
     }
 

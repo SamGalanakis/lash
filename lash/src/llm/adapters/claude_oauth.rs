@@ -7,6 +7,7 @@ use crate::llm::transport::{LlmTransport, LlmTransportError};
 use crate::llm::types::{
     LlmOutputPart, LlmPromptPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage, ModelSelection,
 };
+use crate::model_variant::VariantRequestConfig;
 use crate::provider::Provider;
 
 #[derive(Clone, Debug, Default)]
@@ -289,11 +290,11 @@ impl LlmTransport for ClaudeOAuthAdapter {
         match tier {
             "low" => Some(ModelSelection {
                 model: "claude-haiku-4-5",
-                reasoning_effort: None,
+                variant: Some("low"),
             }),
             "medium" | "high" => Some(ModelSelection {
                 model: "claude-sonnet-4-6",
-                reasoning_effort: None,
+                variant: Some(if tier == "medium" { "medium" } else { "high" }),
             }),
             _ => None,
         }
@@ -347,6 +348,15 @@ impl LlmTransport for ClaudeOAuthAdapter {
             "temperature": 0,
             "stream": stream_events.is_some(),
         });
+        if let Some(variant) = req.model_variant.as_deref()
+            && let Some(VariantRequestConfig::AnthropicThinkingBudget { budget_tokens }) =
+                crate::model_variant::request_config(provider, &req.model, variant)
+        {
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": budget_tokens,
+            });
+        }
         if !req.tools.is_empty() {
             body["tools"] = json!(
                 req.tools
@@ -637,7 +647,7 @@ mod tests {
             attachments: vec![],
             tools: vec![],
             tool_choice: crate::llm::types::LlmToolChoice::Auto,
-            reasoning_effort: None,
+            model_variant: None,
             session_id: None,
             stream_events: None,
         };

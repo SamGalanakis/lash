@@ -15,6 +15,7 @@ use crate::capabilities::AgentCapabilities;
 use crate::instructions::{FsInstructionSource, InstructionSource};
 use crate::llm::factory::adapter_for;
 use crate::llm::types::{LlmStreamEvent, LlmToolSpec};
+use crate::plugin::{CheckpointKind, PluginMessage, PluginSurfaceEvent};
 use crate::provider::{OPENAI_GENERIC_DEFAULT_BASE_URL, Provider};
 use crate::session::Session;
 
@@ -173,8 +174,8 @@ pub struct AgentConfig {
     pub max_context_tokens: Option<usize>,
     /// When true, use SubAgentStep prompt instead of CodeActStep
     pub sub_agent: bool,
-    /// Optional reasoning effort level (e.g. "medium", "high") for Codex
-    pub reasoning_effort: Option<String>,
+    /// Optional provider-native model variant (e.g. "high", "max", "xhigh").
+    pub model_variant: Option<String>,
     /// Optional host session ID propagated to provider request metadata.
     pub session_id: Option<String>,
     /// Optional turn limit. None = unlimited (default for root agent).
@@ -206,7 +207,7 @@ impl Default for AgentConfig {
             },
             max_context_tokens: None,
             sub_agent: false,
-            reasoning_effort: None,
+            model_variant: None,
             session_id: None,
             max_turns: None,
             include_soul: false,
@@ -292,6 +293,16 @@ pub enum AgentEvent {
         tool_calls: usize,
         iterations: usize,
         success: bool,
+    },
+    #[serde(rename = "injected_messages_committed")]
+    InjectedMessagesCommitted {
+        messages: Vec<PluginMessage>,
+        checkpoint: CheckpointKind,
+    },
+    #[serde(rename = "plugin_event")]
+    PluginEvent {
+        plugin_id: String,
+        event: PluginSurfaceEvent,
     },
     #[serde(rename = "done")]
     Done,
@@ -521,7 +532,7 @@ pub(crate) fn build_execution_preamble(
     if omitted_tool_count > 0 {
         let note = match mode {
             ExecutionMode::Repl => format!(
-                "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Use `T.list_tools()` / `T.search_tools(...)` to discover them, then call them via `T.<tool>(...)`."
+                "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Use `T.search_tools(...)` to discover them, or call `T.search_tools()` to browse the full active catalog, then call tools via `T.<tool>(...)`."
             ),
             ExecutionMode::Standard => {
                 format!(
@@ -833,6 +844,24 @@ pub(crate) fn parse_fence_line(
     out
 }
 
+/// Resolve and aggregate context-aware instructions discovered during this turn.
+/// We currently trigger this on successful `read_file` tool calls with a `path` argument.
+pub(crate) fn resolve_context_instructions(
+    source: &dyn InstructionSource,
+    tool_calls: &[crate::ToolCallRecord],
+) -> String {
+    let mut seen_paths = HashSet::new();
+    let read_paths: Vec<String> = tool_calls
+        .iter()
+        .filter(|tc| tc.success && tc.tool == "read_file")
+        .filter_map(|tc| tc.args.get("path").and_then(|v| v.as_str()))
+        .filter(|p| !p.is_empty())
+        .filter(|p| seen_paths.insert((*p).to_string()))
+        .map(str::to_string)
+        .collect();
+    source.context_instructions_for_reads(&read_paths)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1064,22 +1093,4 @@ mod tests {
             1
         );
     }
-}
-
-/// Resolve and aggregate context-aware instructions discovered during this turn.
-/// We currently trigger this on successful `read_file` tool calls with a `path` argument.
-pub(crate) fn resolve_context_instructions(
-    source: &dyn InstructionSource,
-    tool_calls: &[crate::ToolCallRecord],
-) -> String {
-    let mut seen_paths = HashSet::new();
-    let read_paths: Vec<String> = tool_calls
-        .iter()
-        .filter(|tc| tc.success && tc.tool == "read_file")
-        .filter_map(|tc| tc.args.get("path").and_then(|v| v.as_str()))
-        .filter(|p| !p.is_empty())
-        .filter(|p| seen_paths.insert((*p).to_string()))
-        .map(str::to_string)
-        .collect();
-    source.context_instructions_for_reads(&read_paths)
 }

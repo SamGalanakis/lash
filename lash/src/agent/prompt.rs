@@ -356,16 +356,27 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
             input.tool_list
         )),
         PromptSectionName::ErrorRecovery => Some(
-            "## Error Recovery\n\nTool failures raise `ToolError`; execution stops at the failing line.\n- Read the traceback and fix the cause before retrying\n- Do not repeat failing calls unchanged\n- If REPL state is corrupted, call `reset_repl()`"
-                .to_string(),
+            if matches!(input.execution_mode, ExecutionMode::Repl) {
+                "## Error Recovery\n\nTool failures raise `ToolError`; execution stops at the failing line.\n- Read the traceback and fix the cause before retrying\n- Do not repeat failing calls unchanged\n- If REPL state is corrupted, call `reset_repl()`"
+                    .to_string()
+            } else {
+                "## Error Recovery\n\nTool failures return structured errors.\n- Read the error carefully and fix the cause before retrying\n- Do not repeat failing calls unchanged\n- If a tool result is incomplete or ambiguous, inspect with other tools instead of guessing"
+                    .to_string()
+            },
         ),
-        PromptSectionName::Builtins => Some(builtins_section(
-            profile,
-            input.tool_names,
-            history_enabled(input),
-            memory_enabled(input),
-            skills_enabled(input),
-        )),
+        PromptSectionName::Builtins => {
+            if matches!(input.execution_mode, ExecutionMode::Repl) {
+                Some(builtins_section(
+                    profile,
+                    input.tool_names,
+                    history_enabled(input),
+                    memory_enabled(input),
+                    skills_enabled(input),
+                ))
+            } else {
+                None
+            }
+        }
         PromptSectionName::Memory => {
             let history_enabled = history_enabled(input);
             let memory_enabled = memory_enabled(input);
@@ -576,13 +587,13 @@ fn tool_guides(
             ),
         );
         chunks.push(
-            "**Agent lifecycle**\n`T.agent_result(id)` blocks until the agent finishes and returns its final result. The agent ID remains valid afterwards — you can call `T.agent_result(...)` again or use `T.agent_kill(...)` to clean up.\n`T.agent_output(id)` is non-blocking and drains intermediate streaming output; use it to monitor progress of a long-running agent before it completes."
+            "**Agent lifecycle**\n`T.agent_result(id)` blocks until the agent finishes and returns its final result. The agent ID remains valid afterwards — you can call `T.agent_result(...)` again or use `T.agent_kill(...)` to clean up. Delegate progress is surfaced by the runtime/UI rather than through a separate tool call."
                 .to_string(),
         );
     }
-    if tools.contains("create_task") {
+    if tools.contains("create_task") || tools.contains("start_task") {
         chunks.push(
-            "**Task management**\nFor multi-step work: create tasks, keep one in progress, and mark completion immediately. Use `T.create_task(subject=...)` (not `title`). For `T.update_task(...)`, valid statuses are `pending`, `in_progress`, `completed`, and `cancelled`."
+            "**Task management**\nFor multi-step work: create tasks, keep one in progress, and mark completion immediately. Use `T.start_task(subject=...)` for work you are starting now; use `T.claim_task(...)` only when adopting an existing queued task. Use `T.update_task(...)` to mark completion or other state changes. Valid statuses are `pending`, `in_progress`, `completed`, and `cancelled`."
                 .to_string(),
         );
     }
@@ -844,6 +855,29 @@ mod tests {
         assert!(text.contains("Group independent tool calls in the same response"));
         assert!(text.contains("Good fits: reading several files"));
         assert!(text.contains("Do not parallelize dependent steps"));
+    }
+
+    #[test]
+    fn standard_prompt_omits_repl_runtime_globals() {
+        let text = compose_system_prompt(PromptComposeInput {
+            profile: PromptProfile::RootInteractive,
+            execution_mode: crate::ExecutionMode::Standard,
+            context: "ctx",
+            tool_list: "tools",
+            tool_names: &["ask".to_string()],
+            has_history: false,
+            helper_bindings: &helpers_for(&AgentCapabilities::default()),
+            capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            plugin_prompt_sections: &[],
+            can_write: can_write(&AgentCapabilities::default()),
+            include_soul: false,
+            project_instructions: "",
+            overrides: &[],
+        });
+        assert!(!text.contains("## Runtime Globals"));
+        assert!(!text.contains("reset_repl()"));
+        assert!(!text.contains("done(value)"));
+        assert!(text.contains("Use only tools shown in Available Tools"));
     }
 
     #[test]

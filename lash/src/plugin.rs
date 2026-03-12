@@ -4,6 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::agent::PromptSectionName;
+use crate::llm::types::LlmResponse;
 use crate::runtime::{AssembledTurn, PromptUsage};
 use crate::{
     AgentCapabilities, AgentStateEnvelope, ContextFoldingConfig, ExecutionMode, MessageRole,
@@ -14,6 +15,13 @@ use serde::{Deserialize, Serialize};
 pub type PluginFuture<T> = Pin<Box<dyn Future<Output = Result<T, PluginError>> + Send>>;
 pub type TurnCommittedHook = Arc<dyn Fn(AssembledTurn) -> PluginFuture<()> + Send + Sync>;
 pub type SessionRestoredHook = Arc<dyn Fn(AgentStateEnvelope) -> PluginFuture<()> + Send + Sync>;
+pub type SessionConfigChangedHook =
+    Arc<dyn Fn(SessionConfigChangedContext) -> PluginFuture<()> + Send + Sync>;
+pub type SessionConfigMutator = Arc<
+    dyn Fn(SessionConfigChangedContext, AgentStateEnvelope) -> PluginFuture<AgentStateEnvelope>
+        + Send
+        + Sync,
+>;
 pub type ExternalInvokeFuture = Pin<Box<dyn Future<Output = ToolResult> + Send>>;
 pub type ExternalInvokeHandler =
     Arc<dyn Fn(ExternalInvokeContext, serde_json::Value) -> ExternalInvokeFuture + Send + Sync>;
@@ -25,12 +33,19 @@ pub type AfterToolCallHook =
     Arc<dyn Fn(ToolResultHookContext) -> PluginFuture<Vec<PluginDirective>> + Send + Sync>;
 pub type AfterTurnHook =
     Arc<dyn Fn(TurnResultHookContext) -> PluginFuture<Vec<PluginDirective>> + Send + Sync>;
+pub type CheckpointHook =
+    Arc<dyn Fn(CheckpointHookContext) -> PluginFuture<Vec<PluginDirective>> + Send + Sync>;
 pub type PromptContributor =
     Arc<dyn Fn(PromptHookContext) -> Result<Vec<PromptContribution>, PluginError> + Send + Sync>;
 pub type MessageMutator = Arc<
     dyn Fn(MessageMutatorContext, Vec<crate::Message>) -> PluginFuture<Vec<crate::Message>>
         + Send
         + Sync,
+>;
+pub type AssistantStreamHook =
+    Arc<dyn Fn(AssistantStreamHookContext) -> PluginFuture<AssistantStreamTransform> + Send + Sync>;
+pub type AssistantResponseHook = Arc<
+    dyn Fn(AssistantResponseHookContext) -> PluginFuture<AssistantResponseTransform> + Send + Sync,
 >;
 
 #[derive(Debug, thiserror::Error, Clone)]
@@ -57,7 +72,7 @@ pub struct SessionConfigOverrides {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
+    pub model_variant: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_mode: Option<ExecutionMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,6 +81,18 @@ pub struct SessionConfigOverrides {
     pub context_folding: Option<ContextFoldingConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionConfigSnapshot {
+    pub provider_kind: crate::provider::ProviderKind,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_variant: Option<String>,
+    pub execution_mode: ExecutionMode,
+    pub context_folding: ContextFoldingConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -81,6 +108,12 @@ pub enum SessionStartPoint {
 pub struct PluginMessage {
     pub role: MessageRole,
     pub content: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct PluginOwned<T> {
+    pub plugin_id: String,
+    pub value: T,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -100,6 +133,34 @@ pub struct PromptContribution {
     #[serde(default)]
     pub priority: i32,
     pub content: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PluginSurfaceEvent {
+    ModeIndicatorUpsert {
+        key: String,
+        label: String,
+    },
+    ModeIndicatorClear {
+        key: String,
+    },
+    PanelUpsert {
+        key: String,
+        title: String,
+        content: String,
+    },
+    PanelAppend {
+        key: String,
+        content: String,
+    },
+    PanelClear {
+        key: String,
+    },
+    Custom {
+        name: String,
+        payload: serde_json::Value,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -122,6 +183,9 @@ pub enum PluginDirective {
         result: serde_json::Value,
         success: bool,
     },
+    EmitEvents {
+        events: Vec<PluginSurfaceEvent>,
+    },
 }
 
 impl PluginDirective {
@@ -141,6 +205,10 @@ impl PluginDirective {
             }),
             _ => None,
         }
+    }
+
+    pub fn emit_events(events: Vec<PluginSurfaceEvent>) -> Self {
+        Self::EmitEvents { events }
     }
 }
 
@@ -174,6 +242,14 @@ pub struct TurnHookContext {
 }
 
 #[derive(Clone)]
+pub struct SessionConfigChangedContext {
+    pub session_id: String,
+    pub previous: SessionConfigSnapshot,
+    pub current: SessionConfigSnapshot,
+    pub host: Arc<dyn SessionManager>,
+}
+
+#[derive(Clone)]
 pub struct ToolCallHookContext {
     pub session_id: String,
     pub tool_name: String,
@@ -195,6 +271,21 @@ pub struct ToolResultHookContext {
 pub struct TurnResultHookContext {
     pub session_id: String,
     pub turn: AssembledTurn,
+    pub host: Arc<dyn SessionManager>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointKind {
+    AfterWork,
+    BeforeCompletion,
+}
+
+#[derive(Clone)]
+pub struct CheckpointHookContext {
+    pub session_id: String,
+    pub checkpoint: CheckpointKind,
+    pub state: SessionSnapshot,
     pub host: Arc<dyn SessionManager>,
 }
 
@@ -226,6 +317,32 @@ pub struct MessageMutatorContext {
     pub prompt_usage: Option<PromptUsage>,
     pub max_context_tokens: Option<usize>,
     pub context_folding: Option<ContextFoldingConfig>,
+}
+
+#[derive(Clone)]
+pub struct AssistantStreamHookContext {
+    pub session_id: String,
+    pub chunk: String,
+    pub host: Arc<dyn SessionManager>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AssistantStreamTransform {
+    pub chunk: String,
+    pub events: Vec<PluginSurfaceEvent>,
+}
+
+#[derive(Clone)]
+pub struct AssistantResponseHookContext {
+    pub session_id: String,
+    pub response: LlmResponse,
+    pub host: Arc<dyn SessionManager>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AssistantResponseTransform {
+    pub response: LlmResponse,
+    pub events: Vec<PluginSurfaceEvent>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -384,7 +501,8 @@ mod builtin;
 
 #[cfg(feature = "sqlite-store")]
 pub use builtin::{
-    BuiltinHistoryPluginFactory, BuiltinMemoryPluginFactory, builtin_dynamic_capability_defs,
+    BuiltinHistoryPluginFactory, BuiltinMemoryPluginFactory, BuiltinPlanModePluginFactory,
+    BuiltinPlanTrackerPluginFactory, builtin_dynamic_capability_defs,
 };
 
 #[cfg(test)]
@@ -579,6 +697,78 @@ mod tests {
             result.result.get("session_id").and_then(|v| v.as_str()),
             Some("root")
         );
+    }
+
+    #[tokio::test]
+    async fn plugin_host_can_invoke_external_for_registered_session() {
+        let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
+        let _session = host.build_session("root", None).expect("session");
+
+        let result = host
+            .invoke_external_for_session(
+                "root",
+                "mock.echo",
+                json!({"ok":true}),
+                Arc::new(MockSessionManager),
+            )
+            .await
+            .expect("invoke");
+        assert!(result.success);
+        assert_eq!(
+            result.result.get("session_id").and_then(|v| v.as_str()),
+            Some("root")
+        );
+        assert_eq!(
+            result
+                .result
+                .get("plugin_agent_id")
+                .and_then(|v| v.as_str()),
+            Some("root")
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_host_can_invoke_external_for_forked_session() {
+        let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
+        let root = host.build_session("root", None).expect("root");
+        let child = root.fork_for_agent("child").expect("child");
+
+        let result = host
+            .invoke_external_for_session(
+                "child",
+                "mock.echo",
+                json!({"ok":true}),
+                Arc::new(MockSessionManager),
+            )
+            .await
+            .expect("invoke");
+        assert!(result.success);
+        assert_eq!(
+            result.result.get("session_id").and_then(|v| v.as_str()),
+            Some("child")
+        );
+        assert_eq!(
+            result
+                .result
+                .get("plugin_agent_id")
+                .and_then(|v| v.as_str()),
+            Some("child")
+        );
+
+        drop(child);
+    }
+
+    #[test]
+    fn plugin_host_unregisters_sessions() {
+        let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
+        let _session = host.build_session("root", None).expect("session");
+        assert!(host.session("root").is_ok());
+        host.unregister_session("root").expect("unregister");
+        match host.session("root") {
+            Err(ExternalInvokeError::UnknownSession(id)) => assert_eq!(id, "root"),
+            Ok(_) => panic!("expected missing session"),
+            Err(other) => panic!("unexpected error: {other}"),
+        }
     }
 
     #[test]

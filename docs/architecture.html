@@ -727,7 +727,7 @@
         <div class="arch-card-desc">
           LashRuntime resolves provider/model, refreshes tokens, reads dynamic projection state from the active tool registry,
           injects only tools with <code>inject_into_prompt=true</code>, and appends discovery guidance for omitted tools
-          (<code>list_tools</code>/<code>search_tools</code>, <code>tools.&lt;tool&gt;</code>). Prompt assembly is execution-mode aware:
+          (<code>search_tools</code>, <code>tools.&lt;tool&gt;</code>). Prompt assembly is execution-mode aware:
           the same tool identity is projected into REPL help/docs or provider-native tool schemas depending on the active mode.
           Both execution paths are driven by a single synchronous state machine (<code>TurnMachine</code> in <code>lash/src/sansio.rs</code>)
           that emits I/O effects (<code>LlmCall</code>, <code>ToolCall</code>, <code>ExecCode</code>, <code>Sleep</code>) for the async host driver to fulfil.
@@ -875,7 +875,7 @@
             <p>
               In REPL mode, tools live under the <code>T</code> namespace (for example <code>T.read_file(...)</code>).
               Only <code>done(...)</code>, <code>ask(...)</code>, and <code>reset_repl()</code> remain bare globals.
-              Use <code>T.list_tools()</code> and <code>T.search_tools(...)</code> to discover prompt-omitted tools, and use <code>await</code> only for
+              Use <code>T.search_tools(...)</code> to discover prompt-omitted tools, or <code>T.search_tools()</code> to browse all active tools, and use <code>await</code> only for
               async tools such as shell handle methods and sub-agent result/output calls.
               Both discovery calls search the full current runtime tool catalog; there is no separate caller-supplied <code>catalog</code> parameter.
             </p>
@@ -895,7 +895,7 @@
 Let me check the config file.
 
 <span class="tag">&lt;repl&gt;</span>
-content = <span class="fn">read_file</span>(<span class="str">"src/config.rs"</span>)
+content = <span class="fn">T.read_file</span>(<span class="str">"src/config.rs"</span>)
 <span class="fn">print</span>(content[:200])
 <span class="tag">&lt;/repl&gt;</span></pre>
         </div>
@@ -938,9 +938,13 @@ I'll research the codebase structure in parallel.
 <span class="tag">&lt;repl&gt;</span>
 <span class="kw">import</span> asyncio
 
+models_agent, routes_agent = <span class="kw">await</span> asyncio.<span class="fn">gather</span>(
+    <span class="fn">T.agent_call</span>(<span class="str">"List all model structs in src/models/"</span>, intelligence=<span class="str">"low"</span>),
+    <span class="fn">T.agent_call</span>(<span class="str">"List all route handlers in src/routes/"</span>, intelligence=<span class="str">"low"</span>),
+)
 models, routes = <span class="kw">await</span> asyncio.<span class="fn">gather</span>(
-    <span class="fn">delegate_low</span>(<span class="str">"List all model structs in src/models/"</span>),
-    <span class="fn">delegate_low</span>(<span class="str">"List all route handlers in src/routes/"</span>),
+    <span class="fn">T.agent_result</span>(models_agent[<span class="str">"id"</span>]),
+    <span class="fn">T.agent_result</span>(routes_agent[<span class="str">"id"</span>]),
 )
 <span class="fn">print</span>(<span class="str">"Models:"</span>, models)
 <span class="fn">print</span>(<span class="str">"Routes:"</span>, routes)
@@ -1026,7 +1030,7 @@ models, routes = <span class="kw">await</span> asyncio.<span class="fn">gather</
             <h4>Tool Access</h4>
             <p>
               The runtime exposes the available tools as native tool call schemas. Use only the tools shown in Available Tools.
-              Prefer parallel independent calls in one turn when the arguments are already known. Use <code>batch</code> only as an optional fallback utility, not the default pattern.
+              Prefer parallel independent calls in one turn when the arguments are already known. Prefer <code>batch</code> when you already know the arguments for several unrelated reads, searches, shell commands, or diagnostics and want them started together.
               Never invent tool names or arguments.
             </p>
           </div>
@@ -1187,7 +1191,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
           </div>
           <div class="cell">
             <h4>Discovery</h4>
-            <p><code>list_tools</code> and <code>search_tools</code> let the model discover tools not injected into the prompt.</p>
+            <p><code>search_tools</code> lets the model discover tools not injected into the prompt. With no query, it returns the full active catalog.</p>
           </div>
         </div>
       </div>
@@ -1237,7 +1241,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
 
     <div class="legend" style="margin-top: 2px;">
       <span class="pill"><b>Prompt-visible</b> <code>inject_into_prompt=true</code></span>
-      <span class="pill"><b>Discoverable</b> <code>T.list_tools / T.search_tools / T.&lt;tool&gt;</code></span>
+      <span class="pill"><b>Discoverable</b> <code>T.search_tools / T.&lt;tool&gt;</code></span>
       <span class="pill"><b>Reconfigure</b> <code>/tools / /caps / /reconfigure</code></span>
       <span class="pill"><b>Unified Items</b> <code>text + refs + image + skill</code></span>
     </div>
@@ -1301,11 +1305,11 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
           </div>
           <div class="cell">
             <h4>Tasks</h4>
-            <p><code>tasks</code>, <code>tasks_summary</code>, <code>get_task</code>, <code>create_task</code>, <code>update_task</code>, <code>delete_task</code>, <code>claim_task</code>.</p>
+            <p><code>tasks</code>, <code>tasks_summary</code>, <code>get_task</code>, <code>create_task</code>, <code>start_task</code>, <code>update_task</code>, <code>delete_task</code>, <code>claim_task</code>.</p>
           </div>
           <div class="cell">
             <h4>Planning</h4>
-            <p><code>update_plan</code>. In-memory plan tracking for substantial multi-step work.</p>
+            <p><code>update_plan</code> plus <code>ask</code> in interactive standard sessions. In-memory plan tracking and targeted user clarification.</p>
           </div>
           <div class="cell">
             <h4>Delegation</h4>
@@ -1420,9 +1424,9 @@ results = <span class="fn">T.search_mem</span>(<span class="str">"naming convent
           <div class="example-label">Example &mdash; Recalling prior context (REPL)</div>
           <pre><span class="tag">&lt;repl&gt;</span>
 <span class="cm"># Find what the user asked about earlier</span>
-hits = <span class="fn">search_history</span>(<span class="str">"database migration"</span>, limit=5)
+hits = <span class="fn">T.search_history</span>(<span class="str">"database migration"</span>, limit=5)
 <span class="kw">for</span> h <span class="kw">in</span> hits:
-    <span class="fn">print</span>(h.turn, h.role, h.snippet)
+    <span class="fn">print</span>(h[<span class="str">"turn"</span>], h[<span class="str">"preview"</span>])
 <span class="tag">&lt;/repl&gt;</span></pre>
         </div>
 
@@ -1430,9 +1434,11 @@ hits = <span class="fn">search_history</span>(<span class="str">"database migrat
           <div class="example-label">Example &mdash; Delegating history recall (REPL)</div>
           <pre><span class="tag">&lt;repl&gt;</span>
 <span class="cm"># Use a cheap sub-agent to mine history</span>
-summary = <span class="kw">await</span> <span class="fn">delegate_low</span>(
-    <span class="str">"Search history for any database schema decisions and summarize them."</span>
+worker = <span class="kw">await</span> <span class="fn">T.agent_call</span>(
+    <span class="str">"Search history for any database schema decisions and summarize them."</span>,
+    intelligence=<span class="str">"low"</span>,
 )
+summary = <span class="kw">await</span> <span class="fn">T.agent_result</span>(worker[<span class="str">"id"</span>])
 <span class="fn">print</span>(summary)
 <span class="tag">&lt;/repl&gt;</span></pre>
         </div>
@@ -1461,8 +1467,8 @@ summary = <span class="kw">await</span> <span class="fn">delegate_low</span>(
         <div class="arch-card-title">Skill Discovery &amp; Loading</div>
         <div class="arch-card-desc">
           Skills are directory-based packages containing a <code>SKILL.md</code> manifest with description and instructions,
-          plus optional supporting files. They live in <code>~/.lash/skills/</code> (global) and <code>.lash/skills/</code> (project-local),
-          with project-local overriding global by name.
+          plus optional supporting files. They live in <code>~/.lash/skills/</code> (global) and <code>.agents/lash/skills/</code> (project-local),
+          with project-local overriding global by name. The legacy <code>.lash/skills/</code> path is still loaded as a fallback.
         </div>
         <div class="cell-grid cols-3">
           <div class="cell">
@@ -1494,17 +1500,17 @@ summary = <span class="kw">await</span> <span class="fn">delegate_low</span>(
           <div class="example-label">Example &mdash; Discovering skills (REPL)</div>
           <pre><span class="tag">&lt;repl&gt;</span>
 <span class="cm"># List all available skills</span>
-all_skills = <span class="fn">skills</span>()
-<span class="kw">for</span> s <span class="kw">in</span> all_skills:
-    <span class="fn">print</span>(s.name, <span class="str">"-"</span>, s.description)
+all_skills = <span class="fn">T.skills</span>()
+<span class="kw">for</span> s <span class="kw">in</span> all_skills[<span class="str">"items"</span>]:
+    <span class="fn">print</span>(s[<span class="str">"name"</span>], <span class="str">"-"</span>, s[<span class="str">"description"</span>])
 <span class="tag">&lt;/repl&gt;</span></pre>
         </div>
 
         <div class="example-block">
           <div class="example-label">Example &mdash; Loading and using a skill (REPL)</div>
           <pre><span class="tag">&lt;repl&gt;</span>
-skill = <span class="fn">load_skill</span>(<span class="str">"frontend-design"</span>)
-<span class="fn">print</span>(skill.instructions)
+skill = <span class="fn">T.load_skill</span>(<span class="str">"frontend-design"</span>)
+<span class="fn">print</span>(skill[<span class="str">"instructions"</span>])
 <span class="cm"># Agent now follows the skill's instructions</span>
 <span class="tag">&lt;/repl&gt;</span></pre>
         </div>
@@ -1529,7 +1535,7 @@ skill = <span class="fn">load_skill</span>(<span class="str">"frontend-design"</
           <div class="cell">
             <h4>Resolution Order</h4>
             <p>
-              <code>~/.lash/skills/</code> is scanned first (global), then <code>.lash/skills/</code> (project-local).
+              <code>~/.lash/skills/</code> is scanned first (global), then the repo-local paths with <code>.agents/lash/skills/</code> preferred over legacy <code>.lash/skills/</code>.
               Project-local skills override global skills with the same name.
             </p>
           </div>

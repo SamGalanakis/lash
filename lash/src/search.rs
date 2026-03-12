@@ -61,6 +61,62 @@ fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
+fn hybrid_token_match(query_token: &str, candidate_token: &str) -> bool {
+    query_token == candidate_token
+        || (query_token.len() >= 3
+            && candidate_token.len() >= 3
+            && (candidate_token.contains(query_token) || query_token.contains(candidate_token)))
+}
+
+fn hybrid_text_match(query_tokens: &[String], text: &str) -> bool {
+    if query_tokens.is_empty() {
+        return false;
+    }
+    let tokens = tokenize(text);
+    query_tokens.iter().any(|query| {
+        tokens
+            .iter()
+            .any(|candidate| hybrid_token_match(query, candidate))
+    })
+}
+
+fn hybrid_fallback_score(
+    query_tokens: &[String],
+    doc: &SearchDoc,
+    field_weights: &[(&'static str, f64)],
+) -> f64 {
+    let mut score = 0.0_f64;
+    for (field, weight) in field_weights {
+        if *weight <= 0.0 {
+            continue;
+        }
+        let text = doc
+            .fields
+            .get(field)
+            .map(String::as_str)
+            .unwrap_or_default();
+        if text.is_empty() {
+            continue;
+        }
+        let tokens = tokenize(text);
+        if tokens.is_empty() {
+            continue;
+        }
+        let hits = query_tokens
+            .iter()
+            .filter(|query| {
+                tokens
+                    .iter()
+                    .any(|candidate| hybrid_token_match(query, candidate))
+            })
+            .count() as f64;
+        if hits > 0.0 {
+            score += hits * *weight * 0.25;
+        }
+    }
+    score
+}
+
 fn bm25_scores(
     query_tokens: &[String],
     docs: &[SearchDoc],
@@ -162,8 +218,12 @@ fn field_hits(
             SearchMode::Literal => !query.is_empty() && value_lower.contains(&query_lower),
             SearchMode::Hybrid => {
                 if !query_tokens.is_empty() {
-                    let tokens: HashSet<String> = tokenize(value).into_iter().collect();
-                    query_tokens.iter().any(|t| tokens.contains(t))
+                    let tokens = tokenize(value);
+                    query_tokens.iter().any(|query| {
+                        tokens
+                            .iter()
+                            .any(|candidate| hybrid_token_match(query, candidate))
+                    })
                 } else if query.is_empty() {
                     true
                 } else {
@@ -193,6 +253,11 @@ pub(crate) fn rank_docs(
     let mut scores = vec![0.0_f64; docs.len()];
     if mode == SearchMode::Hybrid && !query_tokens.is_empty() {
         scores = bm25_scores(&query_tokens, docs, field_weights);
+        for (idx, score) in scores.iter_mut().enumerate() {
+            if *score <= 0.0 {
+                *score = hybrid_fallback_score(&query_tokens, &docs[idx], field_weights);
+            }
+        }
     }
     let regex_filter = match mode {
         SearchMode::Regex => compile_regex(regex.or(Some(query))),
@@ -229,7 +294,9 @@ pub(crate) fn rank_docs(
                 if query.is_empty() {
                     true
                 } else if !query_tokens.is_empty() {
-                    scores[idx] > 0.0 || haystack_lower.contains(&query_lower)
+                    scores[idx] > 0.0
+                        || haystack_lower.contains(&query_lower)
+                        || hybrid_text_match(&query_tokens, &haystack)
                 } else {
                     haystack_lower.contains(&query_lower)
                 }

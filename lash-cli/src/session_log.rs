@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -9,7 +10,8 @@ use lash_core::TokenUsage;
 use lash_core::agent::{Message, MessageRole, Part, PartKind, PruneState};
 
 use crate::activity::{ActivityKind, ActivityState, ActivityStatus, merge_exploration_activity};
-use crate::app::DisplayBlock;
+use crate::app::{DisplayBlock, render_plan_content_from_args};
+use crate::plugin_surface;
 use crate::replay::{AssistantReplay, push_assistant_text_block};
 use crate::util::{is_manual_interrupt_error, manual_interrupt_message};
 
@@ -30,6 +32,7 @@ pub struct LoadedSession {
     pub messages: Vec<Message>,
     pub blocks: Vec<DisplayBlock>,
     pub last_token_usage: TokenUsage,
+    pub plugin_mode_indicators: BTreeMap<String, String>,
 }
 
 pub struct SessionLogger {
@@ -177,10 +180,12 @@ fn should_flush_event(event_type: &str) -> bool {
         "tool_call"
             | "code_output"
             | "message"
+            | "injected_messages_committed"
             | "llm_request"
             | "llm_response"
             | "retry_status"
             | "sub_agent_done"
+            | "plugin_event"
             | "done"
             | "error"
             | "prompt"
@@ -326,6 +331,7 @@ pub fn load_session(filename: &str) -> Option<LoadedSession> {
     let mut assistant_replay = AssistantReplay::default();
     let mut last_token_usage = TokenUsage::default();
     let mut activity_state = ActivityState::default();
+    let mut plugin_mode_indicators = BTreeMap::new();
 
     for line in reader.lines() {
         let Ok(line) = line else {
@@ -416,6 +422,14 @@ pub fn load_session(filename: &str) -> Option<LoadedSession> {
                         }
                         blocks.push(DisplayBlock::Activity(activity));
                     }
+                    if success
+                        && name == "update_plan"
+                        && let Some(content) = render_plan_content_from_args(
+                            val.get("args").unwrap_or(&serde_json::Value::Null),
+                        )
+                    {
+                        blocks.push(DisplayBlock::PlanContent(content));
+                    }
                 }
             }
             "code_output" => {
@@ -499,6 +513,74 @@ pub fn load_session(filename: &str) -> Option<LoadedSession> {
                     push_assistant_text_block(&mut blocks, &text);
                 }
             }
+            "injected_messages_committed" => {
+                assistant_replay.flush(&mut blocks);
+                if let Some(messages_val) = val.get("messages")
+                    && let Ok(injected) = serde_json::from_value::<Vec<lash_core::PluginMessage>>(
+                        messages_val.clone(),
+                    )
+                {
+                    for message in injected {
+                        match message.role {
+                            MessageRole::User => {
+                                let msg_id = format!("m{}", messages.len());
+                                messages.push(Message {
+                                    id: msg_id.clone(),
+                                    role: MessageRole::User,
+                                    parts: vec![Part {
+                                        id: format!("{msg_id}.p0"),
+                                        kind: PartKind::Text,
+                                        content: message.content.clone(),
+                                        tool_call_id: None,
+                                        tool_name: None,
+                                        prune_state: PruneState::Intact,
+                                    }],
+                                    origin: None,
+                                });
+                                blocks.push(DisplayBlock::UserInput(message.content));
+                            }
+                            MessageRole::System => {
+                                let msg_id = format!("m{}", messages.len());
+                                messages.push(Message {
+                                    id: msg_id.clone(),
+                                    role: MessageRole::System,
+                                    parts: vec![Part {
+                                        id: format!("{msg_id}.p0"),
+                                        kind: PartKind::Text,
+                                        content: message.content.clone(),
+                                        tool_call_id: None,
+                                        tool_name: None,
+                                        prune_state: PruneState::Intact,
+                                    }],
+                                    origin: None,
+                                });
+                                blocks.push(DisplayBlock::SystemMessage(message.content));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            "plugin_event" => {
+                assistant_replay.flush(&mut blocks);
+                let Some(plugin_id) = val.get("plugin_id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let Some(event_value) = val.get("event").cloned() else {
+                    continue;
+                };
+                let Ok(event) =
+                    serde_json::from_value::<lash_core::PluginSurfaceEvent>(event_value)
+                else {
+                    continue;
+                };
+                let _ = plugin_surface::apply_surface_event(
+                    &mut blocks,
+                    &mut plugin_mode_indicators,
+                    plugin_id,
+                    event,
+                );
+            }
             "error" => {
                 assistant_replay.flush(&mut blocks);
                 if let Some(msg) = val.get("message").and_then(|v| v.as_str()) {
@@ -547,6 +629,7 @@ pub fn load_session(filename: &str) -> Option<LoadedSession> {
         messages,
         blocks,
         last_token_usage,
+        plugin_mode_indicators,
     })
 }
 
@@ -652,6 +735,100 @@ mod tests {
         assert!(contents.contains("\"type\":\"user_input\""));
         assert!(contents.contains("\"type\":\"tool_call\""));
         assert!(contents.contains("\"exec_command\""));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_session_replays_injected_messages_committed() {
+        let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
+        let path = sessions_dir().join(&filename);
+        std::fs::create_dir_all(sessions_dir()).unwrap();
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
+                "{\"type\":\"user_input\",\"content\":\"Hi\"}\n",
+                "{\"type\":\"injected_messages_committed\",\"messages\":[{\"role\":\"User\",\"content\":\"follow up\"},{\"role\":\"System\",\"content\":\"note\"}],\"checkpoint\":\"after_work\"}\n",
+                "{\"type\":\"done\"}\n"
+            ),
+        )
+        .unwrap();
+
+        let loaded = load_session(&filename).unwrap();
+        assert!(
+            loaded
+                .blocks
+                .iter()
+                .any(|block| matches!(block, DisplayBlock::UserInput(text) if text == "follow up"))
+        );
+        assert!(
+            loaded
+                .blocks
+                .iter()
+                .any(|block| matches!(block, DisplayBlock::SystemMessage(text) if text == "note"))
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_session_reconstructs_plan_block_from_update_plan_args() {
+        let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
+        let path = sessions_dir().join(&filename);
+        std::fs::create_dir_all(sessions_dir()).unwrap();
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
+                "{\"type\":\"tool_call\",\"name\":\"update_plan\",\"args\":{\"explanation\":\"Split tracker and mode.\",\"plan\":[{\"step\":\"Inspect runtime\",\"status\":\"completed\"},{\"step\":\"Refactor plugins\",\"status\":\"in_progress\"}]},\"result\":\"Plan updated\",\"success\":true,\"duration_ms\":0}\n",
+                "{\"type\":\"done\"}\n"
+            ),
+        )
+        .unwrap();
+
+        let loaded = load_session(&filename).unwrap();
+        assert!(loaded.blocks.iter().any(|block| {
+            matches!(
+                block,
+                DisplayBlock::PlanContent(content)
+                    if content.contains("Split tracker and mode.")
+                        && content.contains("1. [x] Inspect runtime")
+                        && content.contains("2. [-] Refactor plugins")
+            )
+        }));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_session_replays_plugin_panel_events() {
+        let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
+        let path = sessions_dir().join(&filename);
+        std::fs::create_dir_all(sessions_dir()).unwrap();
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
+                "{\"type\":\"plugin_event\",\"plugin_id\":\"plan_mode\",\"event\":{\"kind\":\"mode_indicator_upsert\",\"key\":\"mode\",\"label\":\"plan\"}}\n",
+                "{\"type\":\"plugin_event\",\"plugin_id\":\"plan_mode\",\"event\":{\"kind\":\"panel_upsert\",\"key\":\"proposed_plan:1\",\"title\":\"PROPOSED PLAN\",\"content\":\"1. Inspect\\n2. Patch\"}}\n",
+                "{\"type\":\"done\"}\n"
+            ),
+        )
+        .unwrap();
+
+        let loaded = load_session(&filename).unwrap();
+        assert_eq!(
+            loaded.plugin_mode_indicators.get("plan_mode:mode"),
+            Some(&"plan".to_string())
+        );
+        assert!(loaded.blocks.iter().any(|block| {
+            matches!(
+                block,
+                DisplayBlock::PluginPanel(panel)
+                    if panel.title == "PROPOSED PLAN" && panel.content.contains("Inspect")
+            )
+        }));
 
         let _ = std::fs::remove_file(path);
     }

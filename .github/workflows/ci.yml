@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Run workspace tests
+        run: cargo test --workspace --locked
+
+  build-release-assets:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset_name: lash-linux-x86_64.tar.gz
+            package_asset: true
+            linker: ""
+            apt_packages: protobuf-compiler
+            brew_packages: ""
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            asset_name: lash-linux-aarch64.tar.gz
+            package_asset: true
+            linker: aarch64-linux-gnu-gcc
+            apt_packages: protobuf-compiler gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            brew_packages: ""
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset_name: lash-macos-x86_64.tar.gz
+            package_asset: true
+            linker: ""
+            apt_packages: ""
+            brew_packages: protobuf llvm
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset_name: lash-macos-aarch64.tar.gz
+            package_asset: true
+            linker: ""
+            apt_packages: ""
+            brew_packages: protobuf llvm
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset_name: ""
+            package_asset: false
+            linker: ""
+            apt_packages: ""
+            brew_packages: ""
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt_packages }}
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install ${{ matrix.brew_packages }}
+
+      - name: Build release binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
+        run: cargo build --locked --release -p lash-cli --target ${{ matrix.target }}
+
+      - name: Package release artifact
+        if: matrix.package_asset
+        run: scripts/package-release.sh ${{ matrix.target }} ${{ matrix.asset_name }}
+
+      - name: Upload release artifact
+        if: matrix.package_asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: dist/${{ matrix.asset_name }}

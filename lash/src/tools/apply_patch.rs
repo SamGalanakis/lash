@@ -115,6 +115,10 @@ fn execute_apply_patch_sync(input: &str, workdir: Option<&str>) -> ToolResult {
         .map(PreparedChange::as_json)
         .collect::<Vec<_>>();
     let changed = prepared.len();
+    let (total_added, total_removed) = prepared.iter().fold((0usize, 0usize), |acc, change| {
+        let (added, removed) = change.line_delta();
+        (acc.0 + added, acc.1 + removed)
+    });
     let summary = format!(
         "Applied patch to {} file{}",
         changed,
@@ -132,6 +136,8 @@ fn execute_apply_patch_sync(input: &str, workdir: Option<&str>) -> ToolResult {
     ToolResult::ok(json!({
         "__type__": "patch_result",
         "summary": summary,
+        "added": total_added,
+        "removed": total_removed,
         "files": files,
         "diff": combined_diff,
     }))
@@ -379,21 +385,26 @@ fn parse_update_file_chunk(
 enum PreparedChange {
     Add {
         path: PathBuf,
+        display_path: String,
         contents: String,
         diff: String,
     },
     Delete {
         path: PathBuf,
+        display_path: String,
         diff: String,
     },
     Update {
         path: PathBuf,
+        display_path: String,
         contents: String,
         diff: String,
     },
     Move {
         from: PathBuf,
+        from_display_path: String,
         to: PathBuf,
+        display_path: String,
         contents: String,
         diff: String,
     },
@@ -409,31 +420,84 @@ impl PreparedChange {
         }
     }
 
+    fn line_delta(&self) -> (usize, usize) {
+        count_diff_delta(self.diff())
+    }
+
     fn as_json(&self) -> serde_json::Value {
+        let (added, removed) = self.line_delta();
         match self {
-            Self::Add { path, diff, .. } => json!({
-                "path": path.display().to_string(),
+            Self::Add {
+                display_path, diff, ..
+            } => json!({
+                "path": display_path,
                 "status": "added",
+                "added": added,
+                "removed": removed,
                 "diff": diff,
             }),
-            Self::Delete { path, diff } => json!({
-                "path": path.display().to_string(),
+            Self::Delete {
+                display_path, diff, ..
+            } => json!({
+                "path": display_path,
                 "status": "deleted",
+                "added": added,
+                "removed": removed,
                 "diff": diff,
             }),
-            Self::Update { path, diff, .. } => json!({
-                "path": path.display().to_string(),
+            Self::Update {
+                display_path, diff, ..
+            } => json!({
+                "path": display_path,
                 "status": "modified",
+                "added": added,
+                "removed": removed,
                 "diff": diff,
             }),
-            Self::Move { from, to, diff, .. } => json!({
-                "path": to.display().to_string(),
-                "from_path": from.display().to_string(),
+            Self::Move {
+                from_display_path,
+                display_path,
+                diff,
+                ..
+            } => json!({
+                "path": display_path,
+                "from_path": from_display_path,
                 "status": "moved",
+                "added": added,
+                "removed": removed,
                 "diff": diff,
             }),
         }
     }
+}
+
+fn count_diff_delta(diff: &str) -> (usize, usize) {
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for line in diff.lines() {
+        if line.starts_with("+++ ") || line.starts_with("--- ") || line.starts_with("@@") {
+            continue;
+        }
+        if line.starts_with('+') {
+            added += 1;
+        } else if line.starts_with('-') {
+            removed += 1;
+        }
+    }
+    (added, removed)
+}
+
+fn normalize_display_path(cwd: &Path, path: &Path) -> String {
+    let display = path.strip_prefix(cwd).unwrap_or(path).display().to_string();
+    let display = if display.is_empty() {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(".")
+            .to_string()
+    } else {
+        display
+    };
+    display.replace('\\', "/")
 }
 
 fn prepare_change(hunk: &Hunk, cwd: &Path) -> Result<PreparedChange, String> {
@@ -443,9 +507,11 @@ fn prepare_change(hunk: &Hunk, cwd: &Path) -> Result<PreparedChange, String> {
             if resolved.exists() {
                 return Err(format!("File already exists: {}", resolved.display()));
             }
-            let diff = compact_diff("", contents, &resolved.display().to_string(), 120);
+            let display_path = normalize_display_path(cwd, &resolved);
+            let diff = compact_diff("", contents, &display_path, 120);
             Ok(PreparedChange::Add {
                 path: resolved,
+                display_path,
                 contents: contents.clone(),
                 diff,
             })
@@ -454,9 +520,11 @@ fn prepare_change(hunk: &Hunk, cwd: &Path) -> Result<PreparedChange, String> {
             let resolved = resolve_path(cwd, path);
             let original = std::fs::read_to_string(&resolved)
                 .map_err(|err| format!("Failed to read {}: {err}", resolved.display()))?;
-            let diff = compact_diff(&original, "", &resolved.display().to_string(), 120);
+            let display_path = normalize_display_path(cwd, &resolved);
+            let diff = compact_diff(&original, "", &display_path, 120);
             Ok(PreparedChange::Delete {
                 path: resolved,
+                display_path,
                 diff,
             })
         }
@@ -471,22 +539,26 @@ fn prepare_change(hunk: &Hunk, cwd: &Path) -> Result<PreparedChange, String> {
                 .as_ref()
                 .map(|path| resolve_path(cwd, path))
                 .unwrap_or_else(|| resolved.clone());
+            let display_path = normalize_display_path(cwd, &target);
             let diff = compact_diff(
                 &applied.original_contents,
                 &applied.new_contents,
-                &target.display().to_string(),
+                &display_path,
                 120,
             );
             if let Some(dest) = move_path.as_ref() {
                 Ok(PreparedChange::Move {
+                    from_display_path: normalize_display_path(cwd, &resolved),
                     from: resolved,
                     to: resolve_path(cwd, dest),
+                    display_path,
                     contents: applied.new_contents,
                     diff,
                 })
             } else {
                 Ok(PreparedChange::Update {
                     path: resolved,
+                    display_path,
                     contents: applied.new_contents,
                     diff,
                 })
@@ -779,5 +851,32 @@ mod tests {
             std::fs::read_to_string(dir.path().join("new.txt")).unwrap(),
             "line\n"
         );
+    }
+
+    #[tokio::test]
+    async fn patch_result_uses_workdir_relative_display_paths() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("base.txt"), "old\n").unwrap();
+        let tool = ApplyPatchTool;
+        let result = tool
+            .execute(
+                "apply_patch",
+                &json!({
+                    "workdir": dir.path().to_str().unwrap(),
+                    "input": "*** Begin Patch\n*** Update File: base.txt\n@@\n-old\n+new\n*** End Patch"
+                }),
+            )
+            .await;
+
+        assert!(result.success);
+        let diff = result.result["diff"].as_str().expect("diff");
+        assert!(diff.contains("--- a/base.txt"));
+        assert!(diff.contains("+++ b/base.txt"));
+        assert!(!diff.contains("/tmp/"));
+        assert_eq!(result.result["files"][0]["path"], "base.txt");
+        assert_eq!(result.result["files"][0]["added"], 1);
+        assert_eq!(result.result["files"][0]["removed"], 1);
+        assert_eq!(result.result["added"], 1);
+        assert_eq!(result.result["removed"], 1);
     }
 }

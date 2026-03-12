@@ -163,7 +163,7 @@ pub struct LlmRequest {
     pub attachments: Vec<LlmAttachment>,
     pub tools: Vec<LlmToolSpec>,
     pub tool_choice: LlmToolChoice,
-    pub reasoning_effort: Option<String>,
+    pub model_variant: Option<String>,
     pub session_id: Option<String>,
     pub stream_events: Option<UnboundedSender<LlmStreamEvent>>,
 }
@@ -196,5 +196,5 @@ pub struct LlmResponse {
 #[derive(Clone, Debug)]
 pub struct ModelSelection {
     pub model: &'static str,
-    pub reasoning_effort: Option<&'static str>,
+    pub variant: Option<&'static str>,
 }

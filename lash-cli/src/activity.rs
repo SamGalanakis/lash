@@ -44,9 +44,33 @@ pub enum ActivityExtra {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActivityArtifact {
-    DiffPreview { title: String, diff: String },
-    TextPreview { title: Option<String>, text: String },
-    SourceList { title: String, items: Vec<String> },
+    DiffPreview {
+        title: String,
+        diff: String,
+    },
+    PatchPreview {
+        files: Vec<PatchFilePreview>,
+        total_added: usize,
+        total_removed: usize,
+    },
+    TextPreview {
+        title: Option<String>,
+        text: String,
+    },
+    SourceList {
+        title: String,
+        items: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PatchFilePreview {
+    pub path: String,
+    pub from_path: Option<String>,
+    pub status: String,
+    pub added: usize,
+    pub removed: usize,
+    pub diff: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,9 +108,6 @@ impl ActivityState {
         success: bool,
         duration_ms: u64,
     ) -> Vec<ActivityBlock> {
-        if name == "shell_command" {
-            return Vec::new();
-        }
         if name == "batch" {
             return self.blocks_for_batch(args, result, success, duration_ms);
         }
@@ -227,15 +248,22 @@ impl ActivityState {
                 if success && let Some(id) = tool_result_handle_id(&result) {
                     self.shell_handles.insert(id.to_string(), command.clone());
                 }
-                let mut detail_lines = vec![format!("Command: {}", inline_text(&command))];
-                if let Some(workdir) = tool_arg_str(&args, "workdir") {
-                    detail_lines.push(format!("Workdir: {}", workdir));
-                }
+                let detail_lines = if status == ActivityStatus::Failed {
+                    tool_arg_str(&args, "workdir")
+                        .map(|workdir| vec![format!("In {}", workdir)])
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 ActivityBlock {
                     kind: ActivityKind::ShellCommand,
                     status,
                     tool_name: name.to_string(),
-                    summary: format!("started {}", inline_text(&command)),
+                    summary: if status == ActivityStatus::Failed {
+                        format!("failed {}", inline_text(&command))
+                    } else {
+                        inline_text(&command)
+                    },
                     detail_lines,
                     duration_ms,
                     args,
@@ -263,15 +291,16 @@ impl ActivityState {
                 } else {
                     ActivityStatus::Completed
                 };
-                let mut detail_lines = vec![format!("Command: {}", inline_text(&command))];
-                if let Some(workdir) = tool_arg_str(&args, "workdir") {
-                    detail_lines.push(format!("Workdir: {}", workdir));
-                }
-                if let Some(exit_code) = exit_code {
-                    detail_lines.push(format!("Exit code: {}", exit_code));
-                }
-                if let Some(session_id) = running_session {
-                    detail_lines.push(format!("Session: {}", session_id));
+                let mut detail_lines = Vec::new();
+                if status == ActivityStatus::Failed {
+                    if let Some(exit_code) = exit_code {
+                        detail_lines.push(format!("Exited with {}", exit_code));
+                    }
+                    if let Some(workdir) = tool_arg_str(&args, "workdir") {
+                        detail_lines.push(format!("In {}", workdir));
+                    }
+                } else if let Some(session_id) = running_session {
+                    detail_lines.push(format!("Session {}", session_id));
                 }
                 let artifact = result
                     .get("output")
@@ -283,10 +312,8 @@ impl ActivityState {
                     });
                 let summary = if status == ActivityStatus::Failed {
                     format!("failed {}", inline_text(&command))
-                } else if result.get("session_id").is_some() {
-                    format!("started {}", inline_text(&command))
                 } else {
-                    format!("ran {}", inline_text(&command))
+                    inline_text(&command)
                 };
                 ActivityBlock {
                     kind: ActivityKind::ShellCommand,
@@ -326,15 +353,15 @@ impl ActivityState {
                 } else {
                     ActivityStatus::Completed
                 };
-                let mut detail_lines = vec![format!("Command: {}", inline_text(&command))];
                 let chars = tool_arg_str(&args, "chars").unwrap_or("");
+                let mut detail_lines = Vec::new();
                 if !chars.is_empty() {
-                    detail_lines.push(format!("Input: {}", inline_text(chars)));
+                    detail_lines.push(format!("Input {}", inline_text(chars)));
                 }
                 if let Some(exit_code) = exit_code {
-                    detail_lines.push(format!("Exit code: {}", exit_code));
+                    detail_lines.push(format!("Exited with {}", exit_code));
                 } else if !session_id.is_empty() {
-                    detail_lines.push(format!("Session: {}", session_id));
+                    detail_lines.push(format!("Session {}", session_id));
                 }
                 let artifact = result
                     .get("output")
@@ -347,11 +374,11 @@ impl ActivityState {
                 let summary = if status == ActivityStatus::Failed {
                     format!("failed {}", inline_text(&command))
                 } else if exit_code.is_some() {
-                    format!("ran {}", inline_text(&command))
+                    inline_text(&command)
                 } else if chars.is_empty() {
-                    format!("polled {}", inline_text(&command))
+                    format!("output · {}", inline_text(&command))
                 } else {
-                    format!("sent input · {}", inline_text(&command))
+                    format!("stdin → {}", inline_text(&command))
                 };
                 ActivityBlock {
                     kind: ActivityKind::ShellInteraction,
@@ -386,8 +413,12 @@ impl ActivityState {
                     kind: ActivityKind::ShellCommand,
                     status,
                     tool_name: name.to_string(),
-                    summary: format!("ran {}", inline_text(&command)),
-                    detail_lines: vec![format!("Command: {}", inline_text(&command))],
+                    summary: if status == ActivityStatus::Failed {
+                        format!("failed {}", inline_text(&command))
+                    } else {
+                        inline_text(&command)
+                    },
+                    detail_lines: Vec::new(),
                     duration_ms,
                     args,
                     result,
@@ -412,8 +443,8 @@ impl ActivityState {
                     kind: ActivityKind::ShellInteraction,
                     status,
                     tool_name: name.to_string(),
-                    summary: format!("read shell output · {}", inline_text(&command)),
-                    detail_lines: vec![format!("Command: {}", inline_text(&command))],
+                    summary: format!("output · {}", inline_text(&command)),
+                    detail_lines: Vec::new(),
                     duration_ms,
                     args,
                     result,
@@ -436,8 +467,12 @@ impl ActivityState {
                     kind: ActivityKind::ShellInteraction,
                     status,
                     tool_name: name.to_string(),
-                    summary: format!("sent shell input · {}", inline_text(&command)),
-                    detail_lines: vec![format!("Input: {}", input)],
+                    summary: format!("stdin → {}", inline_text(&command)),
+                    detail_lines: if status == ActivityStatus::Failed {
+                        vec![format!("Input {}", input)]
+                    } else {
+                        Vec::new()
+                    },
                     duration_ms,
                     args,
                     result,
@@ -456,8 +491,8 @@ impl ActivityState {
                     kind: ActivityKind::ShellInteraction,
                     status,
                     tool_name: name.to_string(),
-                    summary: format!("killed {}", inline_text(&command)),
-                    detail_lines: vec![format!("Command: {}", inline_text(&command))],
+                    summary: format!("stopped {}", inline_text(&command)),
+                    detail_lines: Vec::new(),
                     duration_ms,
                     args,
                     result,
@@ -479,8 +514,8 @@ impl ActivityState {
                     kind: ActivityKind::WebSearch,
                     status,
                     tool_name: name.to_string(),
-                    summary: format!("searched web {:?}", query),
-                    detail_lines: vec![format!("Query: {}", query)],
+                    summary: format!("web \"{}\"", inline_text(&query)),
+                    detail_lines: Vec::new(),
                     duration_ms,
                     args,
                     result,
@@ -496,8 +531,8 @@ impl ActivityState {
                     kind: ActivityKind::WebFetch,
                     status,
                     tool_name: name.to_string(),
-                    summary: format!("fetched {}", url),
-                    detail_lines: vec![format!("URL: {}", url)],
+                    summary: format!("fetch {}", display_url(&url)),
+                    detail_lines: Vec::new(),
                     duration_ms,
                     args,
                     result,
@@ -507,25 +542,21 @@ impl ActivityState {
                 }
             }
             "apply_patch" => {
-                let summary = result
-                    .get("summary")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string)
+                let artifact = patch_preview_artifact(&result);
+                let summary = patch_summary(&result)
+                    .or_else(|| {
+                        result
+                            .get("summary")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string)
+                    })
                     .unwrap_or_else(|| semantic_tool_summary(name, &args));
-                let artifact = result
-                    .get("diff")
-                    .and_then(|value| value.as_str())
-                    .filter(|diff| !diff.trim().is_empty())
-                    .map(|diff| ActivityArtifact::DiffPreview {
-                        title: "Diff".to_string(),
-                        diff: diff.to_string(),
-                    });
                 ActivityBlock {
                     kind: ActivityKind::Edit,
                     status,
                     tool_name: name.to_string(),
                     summary,
-                    detail_lines: patch_detail_lines(&result),
+                    detail_lines: Vec::new(),
                     duration_ms,
                     args,
                     result,
@@ -546,8 +577,8 @@ impl ActivityState {
                     kind: ActivityKind::Delegate,
                     status,
                     tool_name: name.to_string(),
-                    summary: format!("delegated {}", inline_text(&task)),
-                    detail_lines: vec![format!("Task: {}", task)],
+                    summary: format!("delegate · {}", inline_text(&task)),
+                    detail_lines: Vec::new(),
                     duration_ms,
                     args,
                     result,
@@ -565,7 +596,7 @@ impl ActivityState {
                     .map(str::to_string)
                     .or_else(|| self.agent_handles.remove(&handle_id))
                     .unwrap_or_else(|| handle_id.clone());
-                let mut detail_lines = vec![format!("Task: {}", task)];
+                let mut detail_lines = Vec::new();
                 if let Some(meta) = meta {
                     let tool_calls = meta.get("tool_calls").and_then(|value| value.as_u64());
                     let iterations = meta.get("iterations").and_then(|value| value.as_u64());
@@ -589,7 +620,7 @@ impl ActivityState {
                     kind: ActivityKind::Delegate,
                     status,
                     tool_name: name.to_string(),
-                    summary: format!("delegate result · {}", inline_text(&task)),
+                    summary: format!("delegate done · {}", inline_text(&task)),
                     detail_lines,
                     duration_ms,
                     args,
@@ -606,8 +637,8 @@ impl ActivityState {
                     kind: ActivityKind::Delegate,
                     status,
                     tool_name: name.to_string(),
-                    summary: format!("killed delegate {}", inline_text(&task)),
-                    detail_lines: vec![format!("Task: {}", task)],
+                    summary: format!("delegate stopped · {}", inline_text(&task)),
+                    detail_lines: Vec::new(),
                     duration_ms,
                     args,
                     result,
@@ -634,12 +665,8 @@ impl ActivityState {
                 kind: ActivityKind::TaskAction,
                 status,
                 tool_name: name.to_string(),
-                summary: result
-                    .get("summary")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("updated plan")
-                    .to_string(),
-                detail_lines: result
+                summary: plan_update_summary(&args),
+                detail_lines: args
                     .get("explanation")
                     .and_then(|value| value.as_str())
                     .map(|value| vec![value.to_string()])
@@ -651,20 +678,21 @@ impl ActivityState {
                 children: Vec::new(),
                 extra: None,
             },
-            "skills" | "search_skills" | "load_skill" | "read_skill_file" | "list_tools"
-            | "search_tools" => ActivityBlock {
-                kind: ActivityKind::SkillAction,
-                status,
-                tool_name: name.to_string(),
-                summary: semantic_tool_summary(name, &args),
-                detail_lines: Vec::new(),
-                duration_ms,
-                args,
-                artifact: text_preview_artifact(None, &result),
-                children: Vec::new(),
-                extra: None,
-                result,
-            },
+            "skills" | "search_skills" | "load_skill" | "read_skill_file" | "search_tools" => {
+                ActivityBlock {
+                    kind: ActivityKind::SkillAction,
+                    status,
+                    tool_name: name.to_string(),
+                    summary: semantic_tool_summary(name, &args),
+                    detail_lines: Vec::new(),
+                    duration_ms,
+                    args,
+                    artifact: text_preview_artifact(None, &result),
+                    children: Vec::new(),
+                    extra: None,
+                    result,
+                }
+            }
             _ => ActivityBlock {
                 kind: ActivityKind::GenericTool,
                 status,
@@ -679,6 +707,34 @@ impl ActivityState {
                 result,
             },
         }
+    }
+}
+
+fn plan_update_summary(args: &serde_json::Value) -> String {
+    let Some(items) = args.get("plan").and_then(|value| value.as_array()) else {
+        return "updated plan".to_string();
+    };
+    let completed = items
+        .iter()
+        .filter(|item| item.get("status").and_then(|value| value.as_str()) == Some("completed"))
+        .count();
+    let in_progress = items
+        .iter()
+        .filter(|item| item.get("status").and_then(|value| value.as_str()) == Some("in_progress"))
+        .count();
+    if in_progress > 0 {
+        format!(
+            "updated plan · {} steps, {} completed, {} in progress",
+            items.len(),
+            completed,
+            in_progress
+        )
+    } else {
+        format!(
+            "updated plan · {} steps, {} completed",
+            items.len(),
+            completed
+        )
     }
 }
 
@@ -731,8 +787,8 @@ pub fn semantic_tool_summary(name: &str, args: &Value) -> String {
         "glob" => glob_label(args),
         "ls" => format!("list {}", tool_arg_str(args, "path").unwrap_or(".")),
         "exec_command" => tool_arg_str(args, "cmd")
-            .map(|cmd| format!("run {}", inline_text(cmd)))
-            .unwrap_or_else(|| "run command".to_string()),
+            .map(inline_text)
+            .unwrap_or_else(|| "command".to_string()),
         "write_stdin" => tool_arg_str(args, "chars")
             .map(|chars| {
                 if chars.is_empty() {
@@ -750,26 +806,41 @@ pub fn semantic_tool_summary(name: &str, args: &Value) -> String {
         "shell_write" => "write to shell".to_string(),
         "shell_kill" => "kill shell".to_string(),
         "fetch_url" => tool_arg_str(args, "url")
-            .map(|url| format!("fetch {}", url))
+            .map(|url| format!("fetch {}", display_url(url)))
             .unwrap_or_else(|| "fetch url".to_string()),
         "search_web" => tool_arg_str(args, "query")
-            .map(|query| format!("search {:?}", query))
+            .map(|query| format!("web \"{}\"", inline_text(query)))
             .unwrap_or_else(|| "search web".to_string()),
         "agent_call" => tool_arg_str(args, "task")
             .or_else(|| tool_arg_str(args, "prompt"))
-            .map(|task| format!("delegate {}", inline_text(task)))
+            .map(|task| format!("delegate · {}", inline_text(task)))
             .unwrap_or_else(|| "delegate task".to_string()),
-        "agent_result" => "collect delegate result".to_string(),
-        "agent_output" => "stream delegate output".to_string(),
-        "agent_kill" => "kill delegate".to_string(),
+        "agent_result" => "delegate done".to_string(),
+        "agent_kill" => "delegate stopped".to_string(),
         "create_task" => tool_arg_str(args, "description")
             .or_else(|| tool_arg_str(args, "subject"))
-            .map(|desc| format!("create task {}", inline_text(desc)))
-            .unwrap_or_else(|| "create task".to_string()),
-        "update_task" | "claim_task" | "delete_task" | "get_task" => tool_arg_str(args, "id")
-            .map(|id| format!("{} {}", human_tool_name(name), id))
-            .unwrap_or_else(|| human_tool_name(name).to_string()),
-        "tasks" | "tasks_summary" | "list_tools" | "search_tools" | "search_skills" | "skills" => {
+            .map(|desc| format!("task created · {}", inline_text(desc)))
+            .unwrap_or_else(|| "task created".to_string()),
+        "update_task" => {
+            let id = tool_arg_str(args, "id").unwrap_or("task");
+            match tool_arg_str(args, "status") {
+                Some("completed") => format!("task completed · {}", id),
+                Some("in_progress") => format!("task in progress · {}", id),
+                Some("cancelled") => format!("task cancelled · {}", id),
+                Some("pending") => format!("task queued · {}", id),
+                _ => format!("task updated · {}", id),
+            }
+        }
+        "claim_task" => tool_arg_str(args, "id")
+            .map(|id| format!("task started · {}", id))
+            .unwrap_or_else(|| "task started".to_string()),
+        "delete_task" => tool_arg_str(args, "id")
+            .map(|id| format!("task deleted · {}", id))
+            .unwrap_or_else(|| "task deleted".to_string()),
+        "get_task" => tool_arg_str(args, "id")
+            .map(|id| format!("task {}", id))
+            .unwrap_or_else(|| "task".to_string()),
+        "tasks" | "tasks_summary" | "search_tools" | "search_skills" | "skills" => {
             human_tool_name(name).to_string()
         }
         "load_skill" | "read_skill_file" => tool_arg_str(args, "path")
@@ -927,34 +998,168 @@ fn tool_arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
-fn patch_detail_lines(result: &Value) -> Vec<String> {
-    result
+fn patch_preview_artifact(result: &Value) -> Option<ActivityArtifact> {
+    let files = result
         .get("files")
         .and_then(|value| value.as_array())
         .map(|files| {
             files
                 .iter()
-                .take(5)
                 .filter_map(|file| {
                     let path = file.get("path").and_then(|value| value.as_str())?;
                     let status = file
                         .get("status")
                         .and_then(|value| value.as_str())
-                        .unwrap_or("modified");
-                    let mut line = format!("{}: {}", capitalize(status), path);
-                    if let Some(from_path) = file.get("from_path").and_then(|value| value.as_str())
-                    {
-                        line.push_str(&format!(" (from {})", from_path));
-                    }
-                    Some(line)
+                        .unwrap_or("modified")
+                        .to_string();
+                    let from_path = file
+                        .get("from_path")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string);
+                    let diff = file
+                        .get("diff")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let (added, removed) = patch_file_counts(file, &diff);
+                    Some(PatchFilePreview {
+                        path: path.to_string(),
+                        from_path,
+                        status,
+                        added,
+                        removed,
+                        diff,
+                    })
                 })
                 .collect::<Vec<_>>()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    if files.is_empty() {
+        return result
+            .get("diff")
+            .and_then(|value| value.as_str())
+            .filter(|diff| !diff.trim().is_empty())
+            .map(|diff| ActivityArtifact::DiffPreview {
+                title: "Diff".to_string(),
+                diff: diff.to_string(),
+            });
+    }
+
+    let total_added = result
+        .get("added")
+        .and_then(|value| value.as_u64())
+        .map(|value| value as usize)
+        .unwrap_or_else(|| files.iter().map(|file| file.added).sum());
+    let total_removed = result
+        .get("removed")
+        .and_then(|value| value.as_u64())
+        .map(|value| value as usize)
+        .unwrap_or_else(|| files.iter().map(|file| file.removed).sum());
+
+    Some(ActivityArtifact::PatchPreview {
+        files,
+        total_added,
+        total_removed,
+    })
+}
+
+fn patch_summary(result: &Value) -> Option<String> {
+    let ActivityArtifact::PatchPreview {
+        files,
+        total_added,
+        total_removed,
+    } = patch_preview_artifact(result)?
+    else {
+        return None;
+    };
+
+    Some(if files.len() == 1 {
+        let file = &files[0];
+        let path = match &file.from_path {
+            Some(from_path) => format!("{from_path} → {}", file.path),
+            None => file.path.clone(),
+        };
+        format!(
+            "{} {} {}",
+            patch_status_verb(&file.status),
+            path,
+            patch_count_suffix(file.added, file.removed)
+        )
+    } else {
+        format!(
+            "{} {} files {}",
+            patch_group_verb(files.as_slice()),
+            files.len(),
+            patch_count_suffix(total_added, total_removed)
+        )
+    })
+}
+
+fn patch_group_verb(files: &[PatchFilePreview]) -> &'static str {
+    let Some(first) = files.first() else {
+        return "edited";
+    };
+    if files.iter().all(|file| file.status == first.status) {
+        patch_status_verb(&first.status)
+    } else {
+        "edited"
+    }
+}
+
+fn patch_status_verb(status: &str) -> &'static str {
+    match status {
+        "added" => "added",
+        "deleted" => "deleted",
+        "moved" => "moved",
+        _ => "edited",
+    }
+}
+
+fn patch_count_suffix(added: usize, removed: usize) -> String {
+    format!("(+{} -{})", added, removed)
+}
+
+fn patch_file_counts(file: &Value, diff: &str) -> (usize, usize) {
+    let added = file
+        .get("added")
+        .and_then(|value| value.as_u64())
+        .map(|value| value as usize);
+    let removed = file
+        .get("removed")
+        .and_then(|value| value.as_u64())
+        .map(|value| value as usize);
+    match (added, removed) {
+        (Some(added), Some(removed)) => (added, removed),
+        _ => count_diff_delta(diff),
+    }
+}
+
+fn count_diff_delta(diff: &str) -> (usize, usize) {
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for line in diff.lines() {
+        if line.starts_with("+++ ") || line.starts_with("--- ") || line.starts_with("@@") {
+            continue;
+        }
+        if line.starts_with('+') {
+            added += 1;
+        } else if line.starts_with('-') {
+            removed += 1;
+        }
+    }
+    (added, removed)
 }
 
 fn inline_text(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn display_url(url: &str) -> String {
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string()
 }
 
 fn human_tool_name(name: &str) -> &'static str {
@@ -975,7 +1180,6 @@ fn human_tool_name(name: &str) -> &'static str {
         "search_web" => "search web",
         "agent_call" => "delegate",
         "agent_result" => "delegate result",
-        "agent_output" => "delegate output",
         "agent_kill" => "kill delegate",
         "create_task" => "create task",
         "update_task" => "update task",
@@ -984,21 +1188,12 @@ fn human_tool_name(name: &str) -> &'static str {
         "get_task" => "task",
         "tasks" => "tasks",
         "tasks_summary" => "tasks summary",
-        "list_tools" => "list tools",
         "search_tools" => "search tools",
         "search_skills" => "search skills",
         "skills" => "skills",
         "load_skill" => "load skill",
         "read_skill_file" => "read skill file",
         _ => "tool",
-    }
-}
-
-fn capitalize(text: &str) -> String {
-    let mut chars = text.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
     }
 }
 
@@ -1077,5 +1272,114 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].kind, ActivityKind::Exploration);
         assert_eq!(blocks[1].kind, ActivityKind::Edit);
+    }
+
+    #[test]
+    fn apply_patch_summary_prefers_semantic_single_file_copy() {
+        let mut state = ActivityState::default();
+        let blocks = state.blocks_for_tool_call(
+            "apply_patch",
+            json!({}),
+            json!({
+                "__type__": "patch_result",
+                "summary": "Applied patch to 1 file",
+                "added": 3,
+                "removed": 1,
+                "files": [{
+                    "path": "lash-cli/src/ui.rs",
+                    "status": "modified",
+                    "added": 3,
+                    "removed": 1,
+                    "diff": "--- a/lash-cli/src/ui.rs\n+++ b/lash-cli/src/ui.rs\n@@\n-old\n+new"
+                }]
+            }),
+            true,
+            18,
+        );
+
+        assert_eq!(blocks[0].summary, "edited lash-cli/src/ui.rs (+3 -1)");
+        assert!(matches!(
+            blocks[0].artifact,
+            Some(ActivityArtifact::PatchPreview {
+                total_added: 3,
+                total_removed: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn apply_patch_summary_shows_move_arrow() {
+        let mut state = ActivityState::default();
+        let blocks = state.blocks_for_tool_call(
+            "apply_patch",
+            json!({}),
+            json!({
+                "__type__": "patch_result",
+                "summary": "Applied patch to 1 file",
+                "added": 2,
+                "removed": 2,
+                "files": [{
+                    "path": "new.rs",
+                    "from_path": "old.rs",
+                    "status": "moved",
+                    "added": 2,
+                    "removed": 2,
+                    "diff": "--- a/new.rs\n+++ b/new.rs\n@@\n-old\n+new"
+                }]
+            }),
+            true,
+            11,
+        );
+
+        assert_eq!(blocks[0].summary, "moved old.rs → new.rs (+2 -2)");
+    }
+
+    #[test]
+    fn exec_command_success_uses_plain_command_summary() {
+        let mut state = ActivityState::default();
+        let blocks = state.blocks_for_tool_call(
+            "exec_command",
+            json!({
+                "cmd": "date '+%Y-%m-%d %H:%M:%S %Z'",
+                "workdir": "/home/sam/code/lash"
+            }),
+            json!({
+                "output": "2026-03-12 17:11:12 CET",
+                "exit_code": 0
+            }),
+            true,
+            13,
+        );
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].summary, "date '+%Y-%m-%d %H:%M:%S %Z'");
+    }
+
+    #[test]
+    fn search_web_summary_keeps_query_in_primary_row() {
+        let mut state = ActivityState::default();
+        let blocks = state.blocks_for_tool_call(
+            "search_web",
+            json!({ "query": "ratatui queue preview" }),
+            json!({ "results": [] }),
+            true,
+            18,
+        );
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].summary, "web \"ratatui queue preview\"");
+        assert!(blocks[0].detail_lines.is_empty());
+    }
+
+    #[test]
+    fn update_task_summary_reflects_status_transition() {
+        assert_eq!(
+            semantic_tool_summary(
+                "update_task",
+                &json!({ "id": "0007", "status": "completed" })
+            ),
+            "task completed · 0007"
+        );
     }
 }

@@ -610,12 +610,6 @@ fn handle_function_call(
                 .resume(MontyObject::String(answer), print)
                 .map_err(|err| err.error.to_string());
         }
-        "list_tools" => {
-            let items = list_tools(state, args, &call.kwargs);
-            return call
-                .resume(items, print)
-                .map_err(|err| err.error.to_string());
-        }
         "search_tools" => {
             let payload = helper_payload(state, "search_tools", args, &call.kwargs)?;
             let catalog: Vec<Value> = state
@@ -864,45 +858,6 @@ fn call_payload(
     Ok(Value::Object(payload))
 }
 
-fn list_tools(
-    state: &RuntimeState,
-    args: &[MontyObject],
-    kwargs: &[(MontyObject, MontyObject)],
-) -> MontyObject {
-    let payload = call_payload(
-        "list_tools",
-        &[
-            crate::ToolParam::optional("query", "str"),
-            crate::ToolParam::optional("injected_only", "bool"),
-        ],
-        args,
-        kwargs,
-    )
-    .unwrap_or_else(|_| json!({}));
-    let query = payload
-        .get("query")
-        .and_then(Value::as_str)
-        .map(|value| value.to_ascii_lowercase());
-    let injected_only = payload.get("injected_only").and_then(Value::as_bool);
-    let items: Vec<Value> = state
-        .config
-        .discoverable_tools()
-        .iter()
-        .filter(|tool| match injected_only {
-            Some(flag) => tool.inject_into_prompt == flag,
-            None => true,
-        })
-        .filter(|tool| {
-            query.as_ref().is_none_or(|needle| {
-                tool.name.to_ascii_lowercase().contains(needle)
-                    || tool.description.to_ascii_lowercase().contains(needle)
-            })
-        })
-        .map(tool_info_compact)
-        .collect();
-    json_to_monty(Value::Array(items))
-}
-
 fn is_tool_namespace_object(value: &MontyObject) -> bool {
     matches!(
         value,
@@ -910,29 +865,6 @@ fn is_tool_namespace_object(value: &MontyObject) -> bool {
             if name == RuntimeConfig::TOOL_NAMESPACE_NAME
                 && *type_id == RuntimeConfig::TOOL_NAMESPACE_TYPE_ID
     )
-}
-
-fn tool_info_compact(tool: &crate::ProjectedToolDefinition) -> Value {
-    json!({
-        "name": tool.name,
-        "oneliner": tool.description.lines().next().unwrap_or("").trim(),
-        "signature": format!(
-            "{}({}) -> {}",
-            tool.name,
-            tool.params
-                .iter()
-                .map(|param| {
-                    if param.required {
-                        format!("{}: {}", param.name, param.r#type)
-                    } else {
-                        format!("{}?", param.name)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(", "),
-            if tool.returns.is_empty() { "any" } else { &tool.returns }
-        ),
-    })
 }
 
 fn tool_info_json(tool: &crate::ProjectedToolDefinition) -> Value {
@@ -1035,13 +967,7 @@ fn restore_runtime(data: &str) -> Result<MontyRepl<NoLimitTracker>, String> {
 fn is_async_tool(name: &str) -> bool {
     matches!(
         name,
-        "shell_wait"
-            | "shell_read"
-            | "shell_write"
-            | "shell_kill"
-            | "agent_result"
-            | "agent_output"
-            | "agent_kill"
+        "shell_wait" | "shell_read" | "shell_write" | "shell_kill" | "agent_result" | "agent_kill"
     )
 }
 
@@ -1192,6 +1118,7 @@ fn truncate_response(mut text: String) -> String {
 mod tests {
     use super::*;
     use crate::ToolProvider;
+    use std::f64::consts::{E, PI};
 
     // ── monty_to_json ──
 
@@ -1200,7 +1127,7 @@ mod tests {
         assert_eq!(monty_to_json(&MontyObject::None), Value::Null);
         assert_eq!(monty_to_json(&MontyObject::Bool(true)), Value::Bool(true));
         assert_eq!(monty_to_json(&MontyObject::Int(42)), json!(42));
-        assert_eq!(monty_to_json(&MontyObject::Float(3.14)), json!(3.14));
+        assert_eq!(monty_to_json(&MontyObject::Float(PI)), json!(PI));
         assert_eq!(
             monty_to_json(&MontyObject::String("hello".into())),
             json!("hello")
@@ -1254,7 +1181,7 @@ mod tests {
         ));
         assert!(matches!(json_to_monty(json!(42)), MontyObject::Int(42)));
         assert!(
-            matches!(json_to_monty(json!(3.14)), MontyObject::Float(f) if (f - 3.14).abs() < 1e-10)
+            matches!(json_to_monty(json!(PI)), MontyObject::Float(f) if (f - PI).abs() < 1e-10)
         );
         assert!(matches!(json_to_monty(json!("hi")), MontyObject::String(s) if s == "hi"));
     }
@@ -1286,7 +1213,7 @@ mod tests {
             MontyObject::None,
             MontyObject::Bool(false),
             MontyObject::Int(-7),
-            MontyObject::Float(2.718),
+            MontyObject::Float(E),
             MontyObject::String("round trip".into()),
             MontyObject::List(vec![MontyObject::Int(1), MontyObject::Int(2)]),
             MontyObject::Dict(
@@ -1519,16 +1446,8 @@ mod tests {
             ),
             // ls returns directory listing
             ("ls", json!(["src/", "Cargo.toml", "README.md"])),
-            // update_plan returns a structured plan payload
-            (
-                "update_plan",
-                json!({
-                    "__type__": "plan_update",
-                    "summary": "updated plan · 1 steps, 0 completed, 1 in progress",
-                    "explanation": "Planning the work.",
-                    "plan": [{"step": "Inspect renderer", "status": "in_progress"}]
-                }),
-            ),
+            // update_plan returns a text acknowledgement
+            ("update_plan", json!("Plan updated")),
         ];
 
         for (tool_name, result_value) in &result_shapes {
@@ -1618,12 +1537,12 @@ mod tests {
     /// Check if a JSON value looks like a serde tagged-enum wrapper
     /// (e.g. {"String": "..."} or {"Int": 42}).
     fn is_monty_tag(val: &Value) -> bool {
-        if let Some(obj) = val.as_object() {
-            if obj.len() == 1 {
-                let key = obj.keys().next().unwrap();
-                // MontyObject variant names are PascalCase
-                return key.chars().next().is_some_and(|c| c.is_ascii_uppercase());
-            }
+        if let Some(obj) = val.as_object()
+            && obj.len() == 1
+        {
+            let key = obj.keys().next().unwrap();
+            // MontyObject variant names are PascalCase
+            return key.chars().next().is_some_and(|c| c.is_ascii_uppercase());
         }
         false
     }

@@ -96,9 +96,11 @@ class LashAgent(BaseInstalledAgent):
 
     def create_run_agent_commands(self, instruction: str) -> list[ExecInput]:
         execution_mode = os.environ.get("LASH_BENCH_EXECUTION_MODE", "").strip()
-        if execution_mode not in {"repl", "native-tools"}:
+        if execution_mode == "native-tools":
+            execution_mode = "standard"
+        if execution_mode not in {"repl", "standard"}:
             raise ValueError(
-                "LASH_BENCH_EXECUTION_MODE must be set to 'repl' or 'native-tools'"
+                "LASH_BENCH_EXECUTION_MODE must be set to 'repl' or 'standard'"
             )
 
         env: dict[str, str] = {
@@ -130,6 +132,8 @@ class LashAgent(BaseInstalledAgent):
         model_flag = (
             f"--model {shlex.quote(self.model_name)} " if self.model_name else ""
         )
+        variant = os.environ.get("LASH_BENCH_MODEL_VARIANT", "").strip()
+        variant_flag = f"--variant {shlex.quote(variant)} " if variant else ""
         execution_mode_flag = f"--execution-mode {shlex.quote(execution_mode)} "
         prompt_flags = ""
         for env_key, section in (
@@ -162,7 +166,7 @@ class LashAgent(BaseInstalledAgent):
         return [
             ExecInput(
                 command=(
-                    f"lash {provider_flag}{model_flag}{execution_mode_flag}"
+                    f"lash {provider_flag}{model_flag}{variant_flag}{execution_mode_flag}"
                     f"{prompt_flags}--print {prompt}"
                 ),
                 env=env,

@@ -13,6 +13,7 @@ use serde_json::Value;
 
 use crate::agent::exec::ExecAccumulator;
 use crate::agent::message::IMAGE_REF_PREFIX;
+use crate::agent::message::MessageOrigin;
 use crate::agent::{
     AgentEvent, ErrorEnvelope, LLM_MAX_RETRIES, LLM_RETRY_DELAYS, Message, MessageRole, Part,
     PartKind, PromptComposeInput, PromptProfile, PromptSectionOverride, PruneState, TokenUsage,
@@ -24,7 +25,7 @@ use crate::instructions::InstructionSource;
 use crate::llm::types::{
     LlmAttachment, LlmOutputPart, LlmRequest, LlmResponse, LlmToolChoice, LlmToolSpec, LlmUsage,
 };
-use crate::{ExecutionMode, ToolCallRecord, ToolResult};
+use crate::{CheckpointKind, ExecutionMode, PluginMessage, ToolCallRecord, ToolResult};
 
 // ─── Public types ───
 
@@ -50,6 +51,11 @@ pub enum Effect {
     },
     /// Execute a REPL code block. Host returns `Response::ExecResult`.
     ExecCode { id: EffectId, code: String },
+    /// Run a host/plugin checkpoint before the machine continues or completes.
+    Checkpoint {
+        id: EffectId,
+        checkpoint: CheckpointKind,
+    },
     /// Retry backoff. Host returns `Response::Timeout`.
     Sleep { id: EffectId, duration: Duration },
     /// Fire-and-forget event (no response needed).
@@ -93,6 +99,11 @@ pub enum Response {
         id: EffectId,
         result: Result<crate::ExecResponse, String>,
     },
+    /// Checkpoint result with optional injected messages.
+    Checkpoint {
+        id: EffectId,
+        messages: Vec<PluginMessage>,
+    },
     /// Sleep completed.
     Timeout { id: EffectId },
 }
@@ -105,7 +116,7 @@ pub struct TurnMachineConfig {
     pub headless: bool,
     pub sub_agent: bool,
     pub include_soul: bool,
-    pub reasoning_effort: Option<String>,
+    pub model_variant: Option<String>,
     pub session_id: Option<String>,
     pub tool_list: String,
     pub tool_specs: Vec<LlmToolSpec>,
@@ -181,6 +192,11 @@ struct ReplTurnState {
     fence: FenceState,
 }
 
+enum CheckpointResume {
+    PrepareIteration,
+    Finish,
+}
+
 enum MachineState {
     PrepareIteration,
     WaitingLlm {
@@ -206,6 +222,11 @@ enum MachineState {
     },
     ProcessReplResult {
         repl: ReplTurnState,
+    },
+    WaitingCheckpoint {
+        effect_id: EffectId,
+        checkpoint: CheckpointKind,
+        on_empty: CheckpointResume,
     },
     Finished,
 }
@@ -259,6 +280,14 @@ impl TurnMachine {
         matches!(self.state, MachineState::Finished)
     }
 
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+
+    pub fn iteration(&self) -> usize {
+        self.iteration
+    }
+
     fn next_id(&mut self) -> EffectId {
         let id = EffectId(self.next_effect_id);
         self.next_effect_id += 1;
@@ -267,6 +296,11 @@ impl TurnMachine {
 
     fn emit(&mut self, event: AgentEvent) {
         self.pending_effects.push_back(Effect::Emit(event));
+    }
+
+    pub fn fail_turn(&mut self, event: AgentEvent) {
+        self.emit(event);
+        self.finish();
     }
 
     fn finish(&mut self) {
@@ -370,7 +404,7 @@ impl TurnMachine {
             } else {
                 LlmToolChoice::None
             },
-            reasoning_effort: self.config.reasoning_effort.clone(),
+            model_variant: self.config.model_variant.clone(),
             session_id: self.config.session_id.clone(),
             // The host is responsible for wiring up stream_events
             stream_events: None,
@@ -530,7 +564,96 @@ impl TurnMachine {
                 duration_ms,
             } => self.handle_tool_result(id, call_id, tool_name, result, duration_ms),
             Response::ExecResult { id, result } => self.handle_exec_result(id, result),
+            Response::Checkpoint { id, messages } => self.handle_checkpoint(id, messages),
             Response::Timeout { id } => self.handle_timeout(id),
+        }
+    }
+
+    fn request_checkpoint(&mut self, checkpoint: CheckpointKind, on_empty: CheckpointResume) {
+        let id = self.next_id();
+        self.state = MachineState::WaitingCheckpoint {
+            effect_id: id,
+            checkpoint,
+            on_empty,
+        };
+        self.pending_effects
+            .push_back(Effect::Checkpoint { id, checkpoint });
+    }
+
+    fn append_checkpoint_messages(&mut self, plugin_messages: &[PluginMessage]) {
+        let base_len = self.messages.len();
+        let appended = plugin_messages
+            .iter()
+            .filter(|message| matches!(message.role, MessageRole::User | MessageRole::System))
+            .enumerate()
+            .map(|(offset, message)| {
+                let message_id = format!("m{}", base_len + offset);
+                Message {
+                    id: message_id.clone(),
+                    role: message.role,
+                    parts: vec![Part {
+                        id: format!("{message_id}.p0"),
+                        kind: PartKind::Text,
+                        content: message.content.clone(),
+                        tool_call_id: None,
+                        tool_name: None,
+                        prune_state: PruneState::Intact,
+                    }],
+                    origin: Some(MessageOrigin::Plugin {
+                        plugin_id: "plugin".to_string(),
+                    }),
+                }
+            })
+            .collect::<Vec<_>>();
+        self.messages.extend(appended);
+    }
+
+    fn handle_checkpoint(&mut self, id: EffectId, messages: Vec<PluginMessage>) {
+        let (effect_id, checkpoint, on_empty) =
+            match std::mem::replace(&mut self.state, MachineState::Finished) {
+                MachineState::WaitingCheckpoint {
+                    effect_id,
+                    checkpoint,
+                    on_empty,
+                } => (effect_id, checkpoint, on_empty),
+                other => {
+                    self.state = other;
+                    return;
+                }
+            };
+        if effect_id != id {
+            self.state = MachineState::WaitingCheckpoint {
+                effect_id,
+                checkpoint,
+                on_empty,
+            };
+            return;
+        }
+
+        if !messages.is_empty() {
+            self.append_checkpoint_messages(&messages);
+            if matches!(checkpoint, CheckpointKind::BeforeCompletion) {
+                self.iteration += 1;
+                if self.termination.should_force_exit_after_grace_turn() {
+                    self.finish();
+                    return;
+                }
+                self.termination.maybe_schedule_turn_limit_final(
+                    self.iteration,
+                    self.run_offset,
+                    self.config.max_turns,
+                    &mut self.messages,
+                );
+            }
+            self.state = MachineState::PrepareIteration;
+            return;
+        }
+
+        match on_empty {
+            CheckpointResume::PrepareIteration => {
+                self.state = MachineState::PrepareIteration;
+            }
+            CheckpointResume::Finish => self.finish(),
         }
     }
 
@@ -677,7 +800,7 @@ impl TurnMachine {
                 }],
                 origin: None,
             });
-            self.finish();
+            self.request_checkpoint(CheckpointKind::BeforeCompletion, CheckpointResume::Finish);
             return;
         }
 
@@ -894,7 +1017,10 @@ impl TurnMachine {
             return;
         }
 
-        self.state = MachineState::PrepareIteration;
+        self.request_checkpoint(
+            CheckpointKind::AfterWork,
+            CheckpointResume::PrepareIteration,
+        );
     }
 
     // ─── REPL path ───
@@ -1277,7 +1403,7 @@ impl TurnMachine {
                 parts: asst_parts,
                 origin: None,
             });
-            self.finish();
+            self.request_checkpoint(CheckpointKind::BeforeCompletion, CheckpointResume::Finish);
             return;
         }
 
@@ -1356,7 +1482,7 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
                 self.state = MachineState::PrepareIteration;
                 return;
             }
-            self.finish();
+            self.request_checkpoint(CheckpointKind::BeforeCompletion, CheckpointResume::Finish);
             return;
         }
         self.termination.reset_pure_prose_streak();
@@ -1487,7 +1613,10 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
             &mut self.messages,
         );
 
-        self.state = MachineState::PrepareIteration;
+        self.request_checkpoint(
+            CheckpointKind::AfterWork,
+            CheckpointResume::PrepareIteration,
+        );
     }
 
     fn handle_timeout(&mut self, _id: EffectId) {
@@ -1535,7 +1664,7 @@ mod tests {
             headless: false,
             sub_agent: false,
             include_soul: false,
-            reasoning_effort: None,
+            model_variant: None,
             session_id: None,
             tool_list: String::new(),
             tool_specs: Vec::new(),
@@ -1596,6 +1725,13 @@ mod tests {
         })
     }
 
+    fn find_checkpoint(effects: &[Effect]) -> Option<(EffectId, CheckpointKind)> {
+        effects.iter().find_map(|e| match e {
+            Effect::Checkpoint { id, checkpoint } => Some((*id, *checkpoint)),
+            _ => None,
+        })
+    }
+
     // ─── Standard tests ───
 
     #[test]
@@ -1618,6 +1754,14 @@ mod tests {
                 }],
                 ..LlmResponse::default()
             }),
+        });
+
+        let effects = drain_effects(&mut machine);
+        let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
+        assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
+        machine.handle_response(Response::Checkpoint {
+            id: checkpoint_id,
+            messages: Vec::new(),
         });
 
         let effects = drain_effects(&mut machine);
@@ -1676,7 +1820,14 @@ mod tests {
             duration_ms: 10,
         });
 
-        // Should loop back to PrepareIteration → new LlmCall
+        let effects = drain_effects(&mut machine);
+        let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
+        assert_eq!(checkpoint, CheckpointKind::AfterWork);
+        machine.handle_response(Response::Checkpoint {
+            id: checkpoint_id,
+            messages: Vec::new(),
+        });
+
         let effects = drain_effects(&mut machine);
         let llm_id2 = find_llm_call(&effects);
         assert!(
@@ -1695,6 +1846,14 @@ mod tests {
                 }],
                 ..LlmResponse::default()
             }),
+        });
+
+        let effects = drain_effects(&mut machine);
+        let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
+        assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
+        machine.handle_response(Response::Checkpoint {
+            id: checkpoint_id,
+            messages: Vec::new(),
         });
 
         let effects = drain_effects(&mut machine);
@@ -1919,8 +2078,114 @@ mod tests {
         });
 
         let effects = drain_effects(&mut machine);
+        let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
+        assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
+        machine.handle_response(Response::Checkpoint {
+            id: checkpoint_id,
+            messages: Vec::new(),
+        });
+
+        let effects = drain_effects(&mut machine);
         assert!(find_done(&effects).is_some());
         assert!(machine.is_done());
+    }
+
+    #[test]
+    fn standard_checkpoint_messages_continue_turn_before_completion() {
+        let config = test_config(ExecutionMode::Standard);
+        let msgs = vec![user_message("hello")];
+        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+
+        let effects = drain_effects(&mut machine);
+        let llm_id = *find_llm_call(&effects).expect("should emit LlmCall");
+
+        machine.handle_response(Response::LlmComplete {
+            id: llm_id,
+            text_streamed: false,
+            result: Ok(LlmResponse {
+                full_text: "Hello there!".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "Hello there!".to_string(),
+                }],
+                ..LlmResponse::default()
+            }),
+        });
+
+        let effects = drain_effects(&mut machine);
+        let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
+        assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
+
+        machine.handle_response(Response::Checkpoint {
+            id: checkpoint_id,
+            messages: vec![PluginMessage {
+                role: MessageRole::User,
+                content: "one more thing".to_string(),
+            }],
+        });
+
+        let effects = drain_effects(&mut machine);
+        assert!(find_llm_call(&effects).is_some());
+        assert!(machine.messages().iter().any(|message| {
+            message.role == MessageRole::User
+                && message
+                    .parts
+                    .iter()
+                    .any(|part| part.content == "one more thing")
+        }));
+    }
+
+    #[test]
+    fn repl_checkpoint_after_work_continues_turn() {
+        let config = test_config(ExecutionMode::Repl);
+        let msgs = vec![user_message("run some code")];
+        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+
+        let effects = drain_effects(&mut machine);
+        let llm_id = *find_llm_call(&effects).expect("llm call");
+
+        let cont =
+            machine.handle_llm_delta(llm_id, "Here's the code:\n<repl>\nprint('hi')\n</repl>\n");
+        assert!(!cont);
+
+        let effects = drain_effects(&mut machine);
+        let (exec_id, _) = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::ExecCode { id, code } => Some((*id, code.clone())),
+                _ => None,
+            })
+            .expect("exec");
+
+        machine.handle_response(Response::ExecResult {
+            id: exec_id,
+            result: Ok(crate::ExecResponse {
+                output: "hi\n".to_string(),
+                response: String::new(),
+                tool_calls: Vec::new(),
+                images: Vec::new(),
+                error: None,
+                duration_ms: 1,
+            }),
+        });
+        machine.handle_response(Response::LlmComplete {
+            id: llm_id,
+            text_streamed: false,
+            result: Ok(LlmResponse::default()),
+        });
+
+        let effects = drain_effects(&mut machine);
+        let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
+        assert_eq!(checkpoint, CheckpointKind::AfterWork);
+        machine.handle_response(Response::Checkpoint {
+            id: checkpoint_id,
+            messages: vec![PluginMessage {
+                role: MessageRole::User,
+                content: "keep going".to_string(),
+            }],
+        });
+
+        let effects = drain_effects(&mut machine);
+        assert!(find_llm_call(&effects).is_some());
     }
 
     #[test]
@@ -1975,6 +2240,14 @@ mod tests {
         });
 
         let effects = drain_effects(&mut machine);
+        let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
+        assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
+        machine.handle_response(Response::Checkpoint {
+            id: checkpoint_id,
+            messages: Vec::new(),
+        });
+
+        let effects = drain_effects(&mut machine);
         assert!(find_done(&effects).is_some());
     }
 
@@ -2022,6 +2295,14 @@ mod tests {
                 },
                 ..LlmResponse::default()
             }),
+        });
+
+        let effects = drain_effects(&mut machine);
+        let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
+        assert_eq!(checkpoint, CheckpointKind::AfterWork);
+        machine.handle_response(Response::Checkpoint {
+            id: checkpoint_id,
+            messages: Vec::new(),
         });
 
         let effects = drain_effects(&mut machine);
@@ -2075,6 +2356,14 @@ mod tests {
         machine.handle_response(Response::ExecResult {
             id: exec_effect.unwrap(),
             result: Err("NameError: name 'bad_code' is not defined".to_string()),
+        });
+
+        let effects = drain_effects(&mut machine);
+        let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
+        assert_eq!(checkpoint, CheckpointKind::AfterWork);
+        machine.handle_response(Response::Checkpoint {
+            id: checkpoint_id,
+            messages: Vec::new(),
         });
 
         let effects = drain_effects(&mut machine);

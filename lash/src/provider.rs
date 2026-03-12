@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -12,11 +13,15 @@ fn default_base_url() -> String {
     OPENAI_GENERIC_DEFAULT_BASE_URL.to_string()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ProviderKind {
+    #[serde(rename = "claude")]
     Claude,
+    #[serde(rename = "codex")]
     Codex,
+    #[serde(rename = "google_oauth")]
     GoogleOAuth,
+    #[serde(rename = "openai-generic")]
     OpenAiGeneric,
 }
 
@@ -112,7 +117,8 @@ impl RuntimeSettings {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LashConfig {
-    pub provider: Provider,
+    pub active_provider: ProviderKind,
+    pub providers: BTreeMap<ProviderKind, Provider>,
     #[serde(default, skip_serializing_if = "AuxiliarySecrets::is_empty")]
     pub auxiliary_secrets: AuxiliarySecrets,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -173,16 +179,26 @@ impl Provider {
         adapter_for(self).default_root_model()
     }
 
-    /// Recommended reasoning effort for a specific model on this provider.
-    pub fn reasoning_effort_for_model(&self, model: &str) -> Option<&str> {
-        adapter_for(self).reasoning_effort_for_model(model)
+    /// Supported provider-native variants for a specific model.
+    pub fn supported_variants(&self, model: &str) -> &'static [&'static str] {
+        crate::model_variant::supported_variants(self, model)
     }
 
-    /// Built-in model for an agent intelligence tier. Returns (model_name, optional_reasoning_effort).
+    /// Recommended default variant for a specific model on this provider.
+    pub fn default_model_variant(&self, model: &str) -> Option<&str> {
+        crate::model_variant::default_variant(self, model)
+    }
+
+    /// Validate a provider-native variant for a model.
+    pub fn validate_variant(&self, model: &str, variant: &str) -> Result<(), String> {
+        crate::model_variant::validate(self, model, variant)
+    }
+
+    /// Built-in model for an agent intelligence tier. Returns (model_name, optional_variant).
     pub fn default_agent_model(&self, tier: &str) -> Option<(&str, Option<&str>)> {
         adapter_for(self)
             .default_agent_model(tier)
-            .map(|m| (m.model, m.reasoning_effort))
+            .map(|m| (m.model, m.variant))
     }
 
     /// Resolve model name: strip "anthropic/" prefix for direct Claude API.
@@ -291,12 +307,76 @@ impl Provider {
 
 impl LashConfig {
     pub fn new(provider: Provider) -> Self {
+        let kind = provider.kind();
+        let mut providers = BTreeMap::new();
+        providers.insert(kind, provider);
         Self {
-            provider,
+            active_provider: kind,
+            providers,
             auxiliary_secrets: AuxiliarySecrets::default(),
             agent_models: None,
             runtime: RuntimeSettings::default(),
         }
+    }
+
+    pub fn active_provider(&self) -> &Provider {
+        self.providers
+            .get(&self.active_provider)
+            .expect("active provider missing from config")
+    }
+
+    pub fn active_provider_mut(&mut self) -> &mut Provider {
+        self.providers
+            .get_mut(&self.active_provider)
+            .expect("active provider missing from config")
+    }
+
+    pub fn active_provider_kind(&self) -> ProviderKind {
+        self.active_provider
+    }
+
+    pub fn set_active_provider_kind(&mut self, kind: ProviderKind) -> Result<(), String> {
+        if !self.providers.contains_key(&kind) {
+            return Err(format!("provider `{}` is not configured", kind.id()));
+        }
+        self.active_provider = kind;
+        Ok(())
+    }
+
+    pub fn provider(&self, kind: ProviderKind) -> Option<&Provider> {
+        self.providers.get(&kind)
+    }
+
+    pub fn provider_kinds(&self) -> Vec<ProviderKind> {
+        self.providers.keys().copied().collect()
+    }
+
+    pub fn has_provider(&self, kind: ProviderKind) -> bool {
+        self.providers.contains_key(&kind)
+    }
+
+    pub fn upsert_provider(&mut self, provider: Provider) {
+        let kind = provider.kind();
+        self.providers.insert(kind, provider);
+    }
+
+    pub fn remove_provider(&mut self, kind: ProviderKind) -> Option<Provider> {
+        let removed = self.providers.remove(&kind)?;
+        if self.providers.is_empty() {
+            return Some(removed);
+        }
+        if self.active_provider == kind {
+            self.active_provider = *self
+                .providers
+                .keys()
+                .next()
+                .expect("providers should be non-empty after removal");
+        }
+        Some(removed)
+    }
+
+    pub fn provider_count(&self) -> usize {
+        self.providers.len()
     }
 
     fn config_path() -> PathBuf {
@@ -308,6 +388,7 @@ impl LashConfig {
         let path = Self::config_path();
         if let Ok(data) = std::fs::read_to_string(&path)
             && let Ok(config) = serde_json::from_str::<Self>(&data)
+            && config.providers.contains_key(&config.active_provider)
         {
             return Some(config);
         }
@@ -363,12 +444,14 @@ impl LashConfig {
 /// Used by the agent loop after token refresh.
 pub fn save_provider(provider: &Provider) -> Result<(), std::io::Error> {
     let mut config = LashConfig::load().unwrap_or_else(|| LashConfig {
-        provider: provider.clone(),
+        active_provider: provider.kind(),
+        providers: BTreeMap::from([(provider.kind(), provider.clone())]),
         auxiliary_secrets: AuxiliarySecrets::default(),
         agent_models: None,
         runtime: RuntimeSettings::default(),
     });
-    config.provider = provider.clone();
+    config.upsert_provider(provider.clone());
+    config.active_provider = provider.kind();
     config.save()
 }
 
@@ -421,16 +504,31 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_for_model() {
-        assert_eq!(codex().reasoning_effort_for_model("gpt-5.4"), Some("high"));
+    fn supported_variants_follow_provider_rules() {
         assert_eq!(
-            codex().reasoning_effort_for_model("gpt-5.3-codex"),
+            codex().supported_variants("gpt-5.4"),
+            &["minimal", "low", "medium", "high"]
+        );
+        assert_eq!(
+            codex().supported_variants("gpt-5.3-codex"),
+            &["low", "medium", "high", "xhigh"]
+        );
+        assert_eq!(codex().default_model_variant("gpt-5.4"), Some("medium"));
+        assert_eq!(
+            claude().supported_variants("claude-sonnet-4-6"),
+            &["low", "medium", "high", "max"]
+        );
+        assert_eq!(
+            claude().default_model_variant("claude-sonnet-4-6"),
             Some("high")
         );
-        assert_eq!(codex().reasoning_effort_for_model("gpt-5.1-codex"), None);
         assert_eq!(
-            openai_generic().reasoning_effort_for_model("anthropic/claude-sonnet-4.6"),
-            None
+            google_oauth().supported_variants("gemini-3.1-pro-preview"),
+            &["low", "medium", "high"]
+        );
+        assert_eq!(
+            openai_generic().supported_variants("anthropic/claude-sonnet-4.6"),
+            &["none", "minimal", "low", "medium", "high", "xhigh"]
         );
     }
 
@@ -439,15 +537,15 @@ mod tests {
         let p = claude();
         assert_eq!(
             p.default_agent_model("low"),
-            Some(("claude-haiku-4-5", None))
+            Some(("claude-haiku-4-5", Some("low")))
         );
         assert_eq!(
             p.default_agent_model("medium"),
-            Some(("claude-sonnet-4-6", None))
+            Some(("claude-sonnet-4-6", Some("medium")))
         );
         assert_eq!(
             p.default_agent_model("high"),
-            Some(("claude-sonnet-4-6", None))
+            Some(("claude-sonnet-4-6", Some("high")))
         );
     }
 
@@ -464,13 +562,30 @@ mod tests {
         let p = codex();
         let (m, re) = p.default_agent_model("low").unwrap();
         assert_eq!(m, "gpt-5.3-codex-spark");
-        assert_eq!(re, None);
+        assert_eq!(re, Some("low"));
         let (m, re) = p.default_agent_model("medium").unwrap();
         assert_eq!(m, "gpt-5.4");
         assert_eq!(re, Some("medium"));
         let (m, re) = p.default_agent_model("high").unwrap();
         assert_eq!(m, "gpt-5.4");
         assert_eq!(re, Some("high"));
+    }
+
+    #[test]
+    fn default_agent_model_google_oauth() {
+        let p = google_oauth();
+        assert_eq!(
+            p.default_agent_model("low"),
+            Some(("gemini-3-flash-preview", Some("low")))
+        );
+        assert_eq!(
+            p.default_agent_model("medium"),
+            Some(("gemini-3.1-pro-preview", Some("medium")))
+        );
+        assert_eq!(
+            p.default_agent_model("high"),
+            Some(("gemini-3.1-pro-preview", Some("high")))
+        );
     }
 
     #[test]
@@ -591,10 +706,13 @@ mod tests {
     #[test]
     fn rejects_unknown_top_level_config_fields() {
         let raw = serde_json::json!({
-            "provider": {
-                "type": "openai-generic",
-                "api_key": "k",
-                "base_url": "https://openrouter.ai/api/v1"
+            "active_provider": "openai-generic",
+            "providers": {
+                "openai-generic": {
+                    "type": "openai-generic",
+                    "api_key": "k",
+                    "base_url": "https://openrouter.ai/api/v1"
+                }
             },
             "tavily_api_key": "legacy-key"
         });
@@ -606,10 +724,13 @@ mod tests {
     #[test]
     fn auxiliary_secrets_preserved() {
         let raw = serde_json::json!({
-            "provider": {
-                "type": "openai-generic",
-                "api_key": "k",
-                "base_url": "https://openrouter.ai/api/v1"
+            "active_provider": "openai-generic",
+            "providers": {
+                "openai-generic": {
+                    "type": "openai-generic",
+                    "api_key": "k",
+                    "base_url": "https://openrouter.ai/api/v1"
+                }
             },
             "auxiliary_secrets": {
                 "tavily_api_key": "new-key"
@@ -623,10 +744,13 @@ mod tests {
     #[test]
     fn runtime_context_folding_preserved() {
         let raw = serde_json::json!({
-            "provider": {
-                "type": "openai-generic",
-                "api_key": "k",
-                "base_url": "https://openrouter.ai/api/v1"
+            "active_provider": "openai-generic",
+            "providers": {
+                "openai-generic": {
+                    "type": "openai-generic",
+                    "api_key": "k",
+                    "base_url": "https://openrouter.ai/api/v1"
+                }
             },
             "runtime": {
                 "context_folding": {
@@ -639,5 +763,27 @@ mod tests {
         let cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
         assert_eq!(cfg.context_folding().soft_limit_pct, 45);
         assert_eq!(cfg.context_folding().hard_limit_pct, 58);
+    }
+
+    #[test]
+    fn switches_and_updates_saved_providers() {
+        let mut cfg = LashConfig::new(codex());
+        cfg.upsert_provider(claude());
+        cfg.set_active_provider_kind(ProviderKind::Claude)
+            .expect("switch provider");
+
+        assert_eq!(cfg.active_provider().kind(), ProviderKind::Claude);
+        assert!(cfg.has_provider(ProviderKind::Codex));
+        assert!(cfg.has_provider(ProviderKind::Claude));
+        assert_eq!(cfg.provider_count(), 2);
+    }
+
+    #[test]
+    fn removing_active_provider_promotes_another_saved_provider() {
+        let mut cfg = LashConfig::new(codex());
+        cfg.upsert_provider(claude());
+        let removed = cfg.remove_provider(ProviderKind::Codex).expect("removed");
+        assert_eq!(removed.kind(), ProviderKind::Codex);
+        assert_eq!(cfg.active_provider().kind(), ProviderKind::Claude);
     }
 }

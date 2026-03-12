@@ -13,6 +13,8 @@ pub struct ToolSetDeps {
     pub store: Option<Arc<crate::store::Store>>,
     pub tavily_api_key: Option<String>,
     pub skill_dirs: Option<Vec<PathBuf>>,
+    pub prompt_bridge: Option<crate::PromptBridge>,
+    pub headless: bool,
 }
 
 /// A composable set of tools supporting set-algebra operators.
@@ -46,12 +48,17 @@ impl ToolSet {
             + super::Glob
             + super::Grep
             + super::Ls
-            + super::UpdatePlanTool::new()
     }
 
     /// Default tools for a concrete execution mode.
     pub fn defaults_for(mode: ExecutionMode, deps: ToolSetDeps) -> Self {
         let mut set = Self::core_for(mode);
+
+        if matches!(mode, ExecutionMode::Standard)
+            && let Some(prompt_bridge) = deps.prompt_bridge.clone()
+        {
+            set = set + super::AskTool::new(prompt_bridge, deps.headless);
+        }
 
         #[cfg(feature = "sqlite-store")]
         if let Some(ref store) = deps.store {
@@ -274,6 +281,28 @@ mod tests {
         assert!(repl_defs.contains("shell"));
         assert!(repl_defs.contains("shell_wait"));
         assert!(!repl_defs.contains("exec_command"));
+    }
+
+    #[test]
+    fn standard_defaults_include_ask_only_for_interactive_sessions() {
+        let prompt_bridge = crate::PromptBridge::new();
+        let interactive = ToolSet::standard_defaults(ToolSetDeps {
+            prompt_bridge: Some(prompt_bridge.clone()),
+            ..Default::default()
+        });
+        let headless = ToolSet::standard_defaults(ToolSetDeps {
+            prompt_bridge: Some(prompt_bridge),
+            headless: true,
+            ..Default::default()
+        });
+        let repl = ToolSet::repl_defaults(ToolSetDeps {
+            prompt_bridge: Some(crate::PromptBridge::new()),
+            ..Default::default()
+        });
+
+        assert!(interactive.definitions().iter().any(|d| d.name == "ask"));
+        assert!(!headless.definitions().iter().any(|d| d.name == "ask"));
+        assert!(!repl.definitions().iter().any(|d| d.name == "ask"));
     }
 
     #[test]

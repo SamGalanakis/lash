@@ -46,9 +46,6 @@ pub trait LlmTransport: Send + Sync {
     fn requires_streaming(&self) -> bool {
         false
     }
-    fn reasoning_effort_for_model(&self, _model: &str) -> Option<&'static str> {
-        None
-    }
     fn normalize_model(&self, model: &str) -> String;
     fn context_lookup_model(&self, model: &str) -> String;
 

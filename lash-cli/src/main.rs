@@ -5,6 +5,7 @@ mod event;
 mod fork;
 mod input_items;
 mod markdown;
+mod plugin_surface;
 mod prompt_overrides;
 mod replay;
 mod resume;
@@ -25,7 +26,6 @@ pub extern "C" fn uuid_generate_time_safe(_out: *mut u8) -> i32 {
 }
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -33,7 +33,7 @@ use clap::Parser;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
 use lash_core::agent::{Message, MessageRole};
-use lash_core::provider::{LashConfig, OPENAI_GENERIC_DEFAULT_BASE_URL, Provider};
+use lash_core::provider::{LashConfig, OPENAI_GENERIC_DEFAULT_BASE_URL, Provider, ProviderKind};
 use lash_core::tools::{
     AgentCall, BatchingTools, FilteredTools, SwitchableTools, ToolSet, ToolSetDeps,
 };
@@ -43,13 +43,23 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use app::{App, DisplayBlock};
+use app::{App, DisplayBlock, QueuedTurn};
 use event::AppEvent;
 use input_items::{build_items_from_editor_input, insert_inline_marker};
 use prompt_overrides::resolve_prompt_overrides;
 use session_log::SessionLogger;
 
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const ROOT_SESSION_ID: &str = "root";
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\n",
+    "lash-core ",
+    env!("CARGO_PKG_VERSION")
+);
+
 #[derive(Parser)]
+#[command(name = "lash", version = APP_VERSION, long_version = LONG_VERSION)]
 struct Args {
     /// OpenAI-generic API key (optional — use --provider to configure interactively)
     #[arg(long, env = "OPENAI_GENERIC_API_KEY")]
@@ -62,6 +72,10 @@ struct Args {
     /// Model name (defaults per provider: Claude/Codex/OpenAI-generic/Google OAuth)
     #[arg(long)]
     model: Option<String>,
+
+    /// Provider-native model variant (for example: high, max, xhigh)
+    #[arg(long)]
+    variant: Option<String>,
 
     /// Execution backend (`repl` or `standard`, default: `standard`)
     #[arg(long = "execution-mode")]
@@ -98,6 +112,10 @@ struct Args {
     /// Delete all lash data (~/.lash/ and ~/.cache/lash/) and exit
     #[arg(long)]
     reset: bool,
+
+    /// Print current runtime/config info and exit
+    #[arg(long)]
+    info: bool,
 
     /// Run headlessly: execute prompt, print response to stdout, exit
     #[arg(short = 'p', long = "print")]
@@ -241,22 +259,49 @@ async fn main() -> anyhow::Result<()> {
 
     // Resolve config before TUI init (may need interactive terminal)
     let existing_config = LashConfig::load();
+    if args.info
+        && existing_config.is_none()
+        && args.api_key.is_none()
+        && std::env::var("ANTHROPIC_API_KEY").is_err()
+    {
+        let execution_mode =
+            ensure_supported_execution_mode(match args.execution_mode.as_deref() {
+                Some(raw) => parse_execution_mode(raw).map_err(anyhow::Error::msg)?,
+                None => ExecutionMode::Standard,
+            })
+            .map_err(anyhow::Error::msg)?;
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| ".".to_string());
+        println!("{}", info_text_unconfigured(execution_mode, &cwd));
+        return Ok(());
+    }
     let mut lash_config = if args.provider || existing_config.is_none() {
         if let Some(ref key) = args.api_key {
-            // Shortcut: env var or --api-key creates OpenAI-generic provider directly
-            let mut cfg = LashConfig::new(Provider::OpenAiGeneric {
+            // Shortcut: env var or --api-key activates OpenAI-generic directly.
+            let provider = Provider::OpenAiGeneric {
                 api_key: key.clone(),
                 base_url: args.base_url.clone(),
-            });
+            };
+            let mut cfg = existing_config
+                .clone()
+                .unwrap_or_else(|| LashConfig::new(provider.clone()));
+            cfg.upsert_provider(provider.clone());
+            let _ = cfg.set_active_provider_kind(provider.kind());
             cfg.set_tavily_api_key(args.tavily_api_key.clone());
             cfg
         } else if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-            // ANTHROPIC_API_KEY env var → use as direct Claude bearer token
-            let mut cfg = LashConfig::new(Provider::Claude {
+            // ANTHROPIC_API_KEY env var → activate direct Claude bearer token.
+            let provider = Provider::Claude {
                 access_token: key,
                 refresh_token: String::new(),
                 expires_at: u64::MAX,
-            });
+            };
+            let mut cfg = existing_config
+                .clone()
+                .unwrap_or_else(|| LashConfig::new(provider.clone()));
+            cfg.upsert_provider(provider.clone());
+            let _ = cfg.set_active_provider_kind(provider.kind());
             cfg.set_tavily_api_key(args.tavily_api_key.clone());
             cfg
         } else {
@@ -266,7 +311,7 @@ async fn main() -> anyhow::Result<()> {
         // SAFETY: else branch means existing_config.is_some() (checked above)
         #[allow(clippy::unnecessary_unwrap)]
         let mut c = existing_config.unwrap();
-        if c.provider.ensure_fresh().await? {
+        if c.active_provider_mut().ensure_fresh().await? {
             c.save()?; // persist refreshed tokens
         }
         c
@@ -290,18 +335,30 @@ async fn main() -> anyhow::Result<()> {
     let requested_model = args
         .model
         .clone()
-        .unwrap_or_else(|| lash_config.provider.default_model().to_string());
+        .unwrap_or_else(|| lash_config.active_provider().default_model().to_string());
     let selection = parse_model_selection(&requested_model).map_err(anyhow::Error::msg)?;
-    validate_model_selection(&lash_config.provider, &selection, args.model.is_some())
-        .map_err(anyhow::Error::msg)?;
-    if args.model.is_none() && !model_known_in_catalog(&lash_config.provider, &selection.model) {
+    validate_model_selection(
+        lash_config.active_provider(),
+        &selection,
+        args.model.is_some(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    if args.model.is_none()
+        && !model_known_in_catalog(lash_config.active_provider(), &selection.model)
+    {
         eprintln!(
             "warning: model `{}` is not in local catalog for {}; continuing (default model)",
             selection.model,
-            lash_config.provider.label()
+            lash_config.active_provider().label()
         );
     }
     let model = selection.model.clone();
+    let model_variant = resolve_model_variant(
+        lash_config.active_provider(),
+        &model,
+        args.variant.as_deref(),
+    )
+    .map_err(anyhow::Error::msg)?;
     let execution_mode = ensure_supported_execution_mode(match args.execution_mode.as_deref() {
         Some(raw) => parse_execution_mode(raw).map_err(anyhow::Error::msg)?,
         None => ExecutionMode::Standard,
@@ -343,13 +400,8 @@ async fn main() -> anyhow::Result<()> {
     };
     let config = AgentConfig {
         model: model.clone(),
-        provider: lash_config.provider.clone(),
-        reasoning_effort: selection.reasoning_effort.clone().or_else(|| {
-            lash_config
-                .provider
-                .reasoning_effort_for_model(&model)
-                .map(str::to_string)
-        }),
+        provider: lash_config.active_provider().clone(),
+        model_variant,
         session_id: run_session_id.clone(),
         llm_log_path,
         headless,
@@ -372,9 +424,12 @@ async fn main() -> anyhow::Result<()> {
 
     let skill_dirs = vec![
         lash_core::lash_home().join("skills"),
-        PathBuf::from(".lash").join("skills"),
+        lash_core::legacy_repo_local_lash_dir().join("skills"),
+        lash_core::repo_local_lash_dir().join("skills"),
     ];
     let tavily_key = lash_config.tavily_api_key().unwrap_or_default().to_string();
+    let prompt_bridge = PromptBridge::new();
+    let turn_injection_bridge = TurnInjectionBridge::new();
     let base_all = ToolSet::defaults_for(
         execution_mode,
         ToolSetDeps {
@@ -385,12 +440,16 @@ async fn main() -> anyhow::Result<()> {
                 Some(tavily_key)
             },
             skill_dirs: Some(skill_dirs),
+            prompt_bridge: Some(prompt_bridge.clone()),
+            headless: args.print_prompt.is_some(),
         },
     );
     let base_provider: Arc<dyn ToolProvider> = Arc::new(base_all);
     let plugin_host = PluginHost::new(vec![
         Arc::new(BuiltinHistoryPluginFactory::new(Arc::clone(&store))),
         Arc::new(BuiltinMemoryPluginFactory::new(Arc::clone(&store))),
+        Arc::new(BuiltinPlanTrackerPluginFactory),
+        Arc::new(BuiltinPlanModePluginFactory),
         Arc::new(fork::ForkPluginFactory),
     ]);
     let root_plugins = plugin_host.build_session("root", None)?;
@@ -482,11 +541,37 @@ async fn main() -> anyhow::Result<()> {
         &serde_json::to_vec(&dynamic_tools_provider.definitions())
             .unwrap_or_else(|_| b"[]".to_vec()),
     );
-    let initial_reasoning_effort = config.reasoning_effort.clone();
+    if args.info {
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| ".".to_string());
+        println!(
+            "{}",
+            info_text(
+                lash_config.active_provider(),
+                &model,
+                config.model_variant.as_deref(),
+                execution_mode,
+                lash_config.active_provider().context_window(&model),
+                dynamic_tools_provider.definitions().len(),
+                &toolset_hash,
+                context_folding,
+                &cwd,
+                None,
+            )
+        );
+        return Ok(());
+    }
+    let initial_model_variant = config.model_variant.clone();
     let runtime_config: RuntimeConfig = config.clone().into();
     let runtime = LashRuntime::from_state(
         runtime_config,
-        RuntimeServices::new(dynamic_tools_provider, root_plugins),
+        RuntimeServices::new_with_bridges(
+            dynamic_tools_provider,
+            root_plugins,
+            prompt_bridge,
+            turn_injection_bridge.clone(),
+        ),
         AgentStateEnvelope {
             agent_id: "root".to_string(),
             execution_mode,
@@ -526,15 +611,17 @@ async fn main() -> anyhow::Result<()> {
     let result = run_app(
         terminal,
         runtime,
+        plugin_host,
         Arc::clone(&dynamic_tools),
+        turn_injection_bridge,
         &mut logger,
         &args,
-        lash_config.provider.clone(),
+        lash_config.active_provider().clone(),
         model,
         session_name,
         Arc::clone(&store),
         toolset_hash,
-        initial_reasoning_effort,
+        initial_model_variant,
         execution_mode,
     )
     .await;
@@ -665,8 +752,10 @@ fn controls_text() -> String {
     [
         "Controls:",
         "  Esc                Cancel agent (while running)",
-        "  Enter              Queue message (while running)",
-        "  Backspace          Unqueue last (while running)",
+        "  Enter              Submit; inject at next checkpoint while running",
+        "  Tab                Queue next turn; submit plain draft when idle",
+        "  Alt+Up             Edit last queued turn",
+        "  Shift+Tab          Toggle persistent plan mode",
         "  Ctrl+U / Ctrl+D    Scroll half-page up / down",
         "  PgUp / PgDn        Scroll page up / down",
         "  Shift+Enter        Insert newline",
@@ -685,7 +774,6 @@ fn controls_text() -> String {
 #[derive(Debug, Clone)]
 struct ModelSelection {
     model: String,
-    reasoning_effort: Option<String>,
 }
 
 fn parse_model_selection(input: &str) -> Result<ModelSelection, String> {
@@ -698,24 +786,20 @@ fn parse_model_selection(input: &str) -> Result<ModelSelection, String> {
     match parts.as_slice() {
         [model] => Ok(ModelSelection {
             model: (*model).to_string(),
-            reasoning_effort: None,
         }),
-        [model, effort] => {
-            let e = effort.to_ascii_lowercase();
-            if matches!(e.as_str(), "low" | "medium" | "high") {
-                Ok(ModelSelection {
-                    model: (*model).to_string(),
-                    reasoning_effort: Some(e),
-                })
-            } else {
-                Err(
-                    "If you provide a second token it must be reasoning effort: low|medium|high."
-                        .to_string(),
-                )
-            }
-        }
-        _ => Err("Model input must be `<model>` or `<model> <effort>`.".to_string()),
+        _ => Err("Model input must be a single `<model>` token.".to_string()),
     }
+}
+
+fn parse_variant_input(input: &str) -> Result<String, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("Variant cannot be empty.".to_string());
+    }
+    if trimmed.contains(char::is_whitespace) {
+        return Err("Variant must be a single token.".to_string());
+    }
+    Ok(trimmed.to_ascii_lowercase())
 }
 
 fn parse_execution_mode(input: &str) -> Result<ExecutionMode, String> {
@@ -782,11 +866,6 @@ fn validate_model_selection(
     if selection.model.contains(char::is_whitespace) {
         return Err("Model names cannot contain spaces.".to_string());
     }
-    if selection.reasoning_effort.is_some() && !matches!(provider, Provider::Codex { .. }) {
-        return Err(
-            "Reasoning suffix (low|medium|high) is only supported on Codex provider.".into(),
-        );
-    }
     if strict_catalog_check
         && !model_known_in_catalog(provider, &selection.model)
         && std::env::var("LASH_ALLOW_UNKNOWN_MODELS").ok().as_deref() != Some("1")
@@ -799,6 +878,45 @@ Set `LASH_ALLOW_UNKNOWN_MODELS=1` to bypass this check.",
         ));
     }
     Ok(())
+}
+
+fn resolve_model_variant(
+    provider: &Provider,
+    model: &str,
+    requested: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(raw) = requested else {
+        return Ok(provider.default_model_variant(model).map(str::to_string));
+    };
+    let variant = parse_variant_input(raw)?;
+    if variant == "default" {
+        return Ok(provider.default_model_variant(model).map(str::to_string));
+    }
+    provider.validate_variant(model, &variant)?;
+    Ok(Some(variant))
+}
+
+fn variant_lines(provider: &Provider, model: &str, current_variant: Option<&str>) -> Vec<String> {
+    let supported = provider.supported_variants(model);
+    let mut lines = Vec::new();
+    if supported.is_empty() {
+        lines.push(format!(
+            "`{}` on {} does not expose configurable variants.",
+            model,
+            provider.label()
+        ));
+        return lines;
+    }
+    lines.push(format!(
+        "Current variant: `{}`",
+        current_variant.unwrap_or("(none)")
+    ));
+    if let Some(default_variant) = provider.default_model_variant(model) {
+        lines.push(format!("Recommended default: `{}`", default_variant));
+    }
+    lines.push(format!("Available variants: {}", supported.join(", ")));
+    lines.push("Usage: `/variant <name>` or `/variant default`".to_string());
+    lines
 }
 
 fn hash12(bytes: &[u8]) -> String {
@@ -828,7 +946,7 @@ struct ReplayManifest {
     provider: String,
     configured_model: String,
     resolved_model: String,
-    reasoning_effort: Option<String>,
+    model_variant: Option<String>,
     toolset_hash: String,
     prompt_hash: Option<String>,
     snapshot_hash: Option<String>,
@@ -843,18 +961,18 @@ fn persist_root_agent_state(
     configured_model: &str,
     execution_mode: ExecutionMode,
     context_folding: ContextFoldingConfig,
-    reasoning_effort: Option<&str>,
+    model_variant: Option<&str>,
     toolset_hash: &str,
     prompt_hash: Option<String>,
     snapshot_hash: Option<String>,
 ) {
     let manifest = ReplayManifest {
-        version: 1,
+        version: 2,
         saved_at: chrono::Utc::now().to_rfc3339(),
         provider: provider.id().to_string(),
         configured_model: configured_model.to_string(),
         resolved_model: provider.resolve_model(configured_model),
-        reasoning_effort: reasoning_effort.map(str::to_string),
+        model_variant: model_variant.map(str::to_string),
         toolset_hash: toolset_hash.to_string(),
         prompt_hash,
         snapshot_hash,
@@ -870,7 +988,7 @@ fn persist_root_agent_state(
             "soft_limit_pct": context_folding.soft_limit_pct,
             "hard_limit_pct": context_folding.hard_limit_pct,
         },
-        "reasoning_effort": manifest.reasoning_effort,
+        "model_variant": manifest.model_variant,
         "toolset_hash": manifest.toolset_hash,
         "prompt_hash": manifest.prompt_hash,
         "snapshot_hash": manifest.snapshot_hash,
@@ -917,20 +1035,87 @@ fn push_system_message(app: &mut App, msg: impl Into<String>) {
     app.scroll_to_bottom();
 }
 
+fn version_text() -> String {
+    format!("lash {}\nlash-core {}", APP_VERSION, lash_core::VERSION)
+}
+
+fn info_text_unconfigured(execution_mode: ExecutionMode, cwd: &str) -> String {
+    [
+        format!("lash: {}", APP_VERSION),
+        format!("lash-core: {}", lash_core::VERSION),
+        "provider: (not configured)".to_string(),
+        "configured model: (not configured)".to_string(),
+        "resolved model: (not configured)".to_string(),
+        format!("execution mode: {}", execution_mode_label(execution_mode)),
+        "context window: unknown".to_string(),
+        format!("cwd: {}", cwd),
+        "session: (not started)".to_string(),
+    ]
+    .join("\n")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn info_text(
+    provider: &Provider,
+    configured_model: &str,
+    model_variant: Option<&str>,
+    execution_mode: ExecutionMode,
+    context_window: Option<u64>,
+    tool_count: usize,
+    toolset_hash: &str,
+    context_folding: ContextFoldingConfig,
+    cwd: &str,
+    session_name: Option<&str>,
+) -> String {
+    let resolved_model = provider.resolve_model(configured_model);
+    let mut lines = vec![
+        format!("lash: {}", APP_VERSION),
+        format!("lash-core: {}", lash_core::VERSION),
+        format!("provider: {} ({})", provider.label(), provider.id()),
+        format!("configured model: {}", configured_model),
+        format!("resolved model: {}", resolved_model),
+        format!("execution mode: {}", execution_mode_label(execution_mode)),
+    ];
+
+    if let Some(variant) = model_variant {
+        lines.push(format!("variant: {}", variant));
+    }
+    if let Some(window) = context_window {
+        lines.push(format!("context window: {}", window));
+    } else {
+        lines.push("context window: unknown".to_string());
+    }
+
+    lines.extend([
+        format!(
+            "context folding: soft={}%, hard={}%",
+            context_folding.soft_limit_pct, context_folding.hard_limit_pct
+        ),
+        format!("tools: {} (hash {})", tool_count, toolset_hash),
+        format!("cwd: {}", cwd),
+        format!("session: {}", session_name.unwrap_or("(not started)")),
+    ]);
+
+    lines.join("\n")
+}
+
 /// Build the help text shown by /help.
 fn help_text(skills: &skill::SkillRegistry) -> String {
     let mut lines = vec![
         "Commands:".to_string(),
         "  /clear, /new       Reset conversation".to_string(),
         "  /fork [prompt]     Open a forked session in a new terminal".to_string(),
+        "  /version           Show Lash and lash-core versions".to_string(),
+        "  /info              Show current runtime/session info".to_string(),
         "  /model [name]      Show or switch LLM model".to_string(),
+        "  /variant [name]    Show or switch provider-native model variant".to_string(),
         format!(
             "  /mode [name]       Show current execution mode; new session required to change {}",
             execution_mode_usage()
         ),
-        "  /provider          Open provider setup (in-app)".to_string(),
+        "  /provider          Switch, add, or re-authenticate providers".to_string(),
         "  /login             Sign in or reconfigure provider".to_string(),
-        "  /logout            Remove stored credentials".to_string(),
+        "  /logout            Remove stored credentials for active provider".to_string(),
         "  /retry             Replay the previous turn payload".to_string(),
         "  /resume [name]     Browse or load a previous session".to_string(),
         "  /skills            Browse loaded skills".to_string(),
@@ -973,6 +1158,10 @@ fn help_text(skills: &skill::SkillRegistry) -> String {
         String::new(),
         "Shortcuts:".to_string(),
         "  Esc                Cancel agent (while running)".to_string(),
+        "  Enter              Submit; inject at next checkpoint while running".to_string(),
+        "  Tab                Queue next turn; submit plain draft when idle".to_string(),
+        "  Alt+Up             Edit last queued turn".to_string(),
+        "  Shift+Tab          Toggle persistent plan mode".to_string(),
         "  Ctrl+U / Ctrl+D    Scroll half-page up / down".to_string(),
         "  PgUp / PgDn        Scroll page up / down".to_string(),
         "  Shift+Enter        Insert newline".to_string(),
@@ -989,11 +1178,67 @@ fn help_text(skills: &skill::SkillRegistry) -> String {
     lines.join("\n")
 }
 
+fn plan_mode_enabled_from_result(result: ToolResult) -> Result<bool, String> {
+    if !result.success {
+        return Err(result.result.to_string());
+    }
+    result
+        .result
+        .get("enabled")
+        .and_then(|value| value.as_bool())
+        .ok_or_else(|| "plan mode API response missing `enabled`".to_string())
+}
+
+async fn plan_mode_status(
+    plugin_host: &PluginHost,
+    session_manager: Arc<dyn SessionManager>,
+) -> Result<bool, String> {
+    let result = plugin_host
+        .invoke_external_for_session(
+            ROOT_SESSION_ID,
+            "plan_mode.status",
+            serde_json::json!({}),
+            session_manager,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    plan_mode_enabled_from_result(result)
+}
+
+async fn plan_mode_toggle(
+    plugin_host: &PluginHost,
+    session_manager: Arc<dyn SessionManager>,
+) -> Result<bool, String> {
+    let result = plugin_host
+        .invoke_external_for_session(
+            ROOT_SESSION_ID,
+            "plan_mode.toggle",
+            serde_json::json!({}),
+            session_manager,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    plan_mode_enabled_from_result(result)
+}
+
+async fn sync_plan_mode(
+    app: &mut App,
+    plugin_host: &PluginHost,
+    session_manager: Arc<dyn SessionManager>,
+) {
+    match plan_mode_status(plugin_host, session_manager).await {
+        Ok(enabled) => app.set_plan_mode_enabled(enabled),
+        Err(err) => push_system_message(app, format!("Failed to read plan mode: {}", err)),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_app(
     mut terminal: DefaultTerminal,
     runtime: LashRuntime,
+    plugin_host: PluginHost,
     dynamic_tools: Arc<DynamicToolProvider>,
+    turn_injection_bridge: TurnInjectionBridge,
     logger: &mut SessionLogger,
     args: &Args,
     mut provider: Provider,
@@ -1001,20 +1246,24 @@ async fn run_app(
     session_name: String,
     store: Arc<Store>,
     mut toolset_hash: String,
-    initial_reasoning_effort: Option<String>,
+    initial_model_variant: Option<String>,
     initial_execution_mode: ExecutionMode,
 ) -> anyhow::Result<()> {
     let mut app = App::new(model, session_name, Some(store.clone()));
     app.context_window = provider.context_window(&app.model);
-    let mut current_reasoning_effort = initial_reasoning_effort.or_else(|| {
+    let mut current_model_variant = initial_model_variant.or_else(|| {
         provider
-            .reasoning_effort_for_model(&app.model)
+            .default_model_variant(&app.model)
             .map(str::to_string)
     });
+    app.set_model_variant(current_model_variant.clone());
     let mut current_execution_mode = initial_execution_mode;
     app.load_history();
     let mut history: Vec<Message> = Vec::new();
     let mut turn_counter: usize = 0;
+    let mut session_manager = runtime
+        .session_manager()
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let mut runtime = Some(runtime);
     let mut current_context_folding = runtime
         .as_ref()
@@ -1093,6 +1342,8 @@ async fn run_app(
     let mut active_stream_id: u64 = 0;
     let mut pending_clear_after_return = false;
 
+    sync_plan_mode(&mut app, &plugin_host, Arc::clone(&session_manager)).await;
+
     if let Some(filename) = args.resume.as_deref() {
         if let Err(err) = resume::load_resumed_session(
             filename,
@@ -1102,7 +1353,7 @@ async fn run_app(
             &mut turn_counter,
             &mut current_execution_mode,
             &provider,
-            &mut current_reasoning_effort,
+            &mut current_model_variant,
             &dynamic_tools,
             &mut desired_dynamic,
         )
@@ -1110,6 +1361,16 @@ async fn run_app(
         {
             push_system_message(&mut app, err);
         } else {
+            if let Some(rt) = runtime.as_ref() {
+                match rt.session_manager() {
+                    Ok(manager) => session_manager = manager,
+                    Err(err) => push_system_message(
+                        &mut app,
+                        format!("Failed to refresh session manager: {}", err),
+                    ),
+                }
+            }
+            sync_plan_mode(&mut app, &plugin_host, Arc::clone(&session_manager)).await;
             toolset_hash = hash12(
                 &serde_json::to_vec(&dynamic_tools.definitions())
                     .unwrap_or_else(|_| b"[]".to_vec()),
@@ -1179,6 +1440,8 @@ async fn run_app(
                         turn_counter = 0;
                         app.token_usage = TokenUsage::default();
                         app.running = false;
+                        app.set_plan_mode_enabled(false);
+                        app.set_model_variant(current_model_variant.clone());
                         runtime_return_rx = None;
                         cancel_token = None;
                         pending_clear_after_return = false;
@@ -1263,7 +1526,7 @@ async fn run_app(
                         &app.model,
                         persisted_execution_mode,
                         persisted_context_folding,
-                        current_reasoning_effort.as_deref(),
+                        current_model_variant.as_deref(),
                         &toolset_hash,
                         latest_user_prompt_hash(&history),
                         snapshot_hash,
@@ -1273,8 +1536,15 @@ async fn run_app(
                     }
                     runtime_return_rx = None;
                     cancel_token = None;
+                    let leftover_injections =
+                        turn_injection_bridge.drain().unwrap_or_else(|_| Vec::new());
+                    if !leftover_injections.is_empty() {
+                        while let Some(turn) = app.pending_steers.pop_front() {
+                            app.queue_turn(turn);
+                        }
+                    }
 
-                    if let Some(queued) = app.take_queued_message() {
+                    if let Some((queued, was_pending)) = app.take_next_queued_turn() {
                         if let Err(e) = apply_pending_reconfigure(
                             &dynamic_tools,
                             &mut desired_dynamic,
@@ -1290,7 +1560,7 @@ async fn run_app(
                                     e
                                 ),
                             );
-                            app.queue_message(queued);
+                            app.requeue_front(queued, was_pending);
                             continue;
                         }
                         toolset_hash = hash12(
@@ -1298,10 +1568,10 @@ async fn run_app(
                                 .unwrap_or_else(|_| b"[]".to_vec()),
                         );
                         let (items, image_blobs) =
-                            build_items_from_editor_input(&queued, Vec::new());
+                            build_items_from_editor_input(&queued.text, queued.images.clone());
                         let turn_input = make_turn_input(&mut app, items, image_blobs);
                         send_user_message(
-                            queued.clone(),
+                            queued.text.clone(),
                             turn_input.clone(),
                             &mut app,
                             logger,
@@ -1313,7 +1583,7 @@ async fn run_app(
                             &app_tx,
                         );
                         last_turn = Some(TurnReplayPayload {
-                            display_input: queued,
+                            display_input: queued.text,
                             turn_input,
                             execution_mode: current_execution_mode,
                         });
@@ -1379,6 +1649,16 @@ async fn run_app(
                     && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'o'))
                 {
                     app.toggle_full_expand();
+                    continue;
+                }
+
+                if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Up {
+                    if let Some((turn, _was_pending)) = app.take_last_queued_turn() {
+                        app.input = turn.text;
+                        app.cursor_pos = app.input.len();
+                        app.pending_images = turn.images;
+                        app.update_suggestions();
+                    }
                     continue;
                 }
 
@@ -1518,13 +1798,31 @@ async fn run_app(
                                     &mut turn_counter,
                                     &mut current_execution_mode,
                                     &provider,
-                                    &mut current_reasoning_effort,
+                                    &mut current_model_variant,
                                     &dynamic_tools,
                                     &mut desired_dynamic,
                                 )
                                 .await
                                 {
                                     Ok(()) => {
+                                        if let Some(rt) = runtime.as_ref() {
+                                            match rt.session_manager() {
+                                                Ok(manager) => session_manager = manager,
+                                                Err(err) => push_system_message(
+                                                    &mut app,
+                                                    format!(
+                                                        "Failed to refresh session manager: {}",
+                                                        err
+                                                    ),
+                                                ),
+                                            }
+                                        }
+                                        sync_plan_mode(
+                                            &mut app,
+                                            &plugin_host,
+                                            Arc::clone(&session_manager),
+                                        )
+                                        .await;
                                         toolset_hash = hash12(
                                             &serde_json::to_vec(&dynamic_tools.definitions())
                                                 .unwrap_or_else(|_| b"[]".to_vec()),
@@ -1568,10 +1866,78 @@ async fn run_app(
                 }
 
                 match key.code {
+                    KeyCode::BackTab => {
+                        match plan_mode_toggle(&plugin_host, Arc::clone(&session_manager)).await {
+                            Ok(enabled) => {
+                                app.set_plan_mode_enabled(enabled);
+                                push_system_message(
+                                    &mut app,
+                                    if enabled {
+                                        "Plan mode enabled."
+                                    } else {
+                                        "Plan mode disabled."
+                                    },
+                                );
+                            }
+                            Err(err) => push_system_message(
+                                &mut app,
+                                format!("Failed to toggle plan mode: {}", err),
+                            ),
+                        }
+                    }
                     // Tab: complete selected suggestion
                     KeyCode::Tab if app.has_suggestions() => {
                         app.complete_suggestion();
                         app.update_suggestions();
+                    }
+                    KeyCode::Tab => {
+                        let input = app.take_input();
+                        let images = app.take_images();
+                        app.update_suggestions();
+                        let queued = QueuedTurn::new(input.clone(), images);
+                        let trimmed = input.trim_start();
+                        if queued.is_empty() || trimmed.starts_with('!') || trimmed.starts_with('/')
+                        {
+                            app.input = input;
+                            app.cursor_pos = app.input.len();
+                            app.pending_images = queued.images;
+                            continue;
+                        }
+                        if app.running {
+                            app.queue_turn(queued);
+                            continue;
+                        }
+                        if runtime.is_none() {
+                            push_system_message(
+                                &mut app,
+                                "Runtime is still finalizing the previous turn. Please retry in a moment.",
+                            );
+                            app.input = queued.text;
+                            app.cursor_pos = app.input.len();
+                            app.pending_images = queued.images;
+                            continue;
+                        }
+
+                        let (items, image_blobs) =
+                            build_items_from_editor_input(&queued.text, queued.images);
+                        let turn_input = make_turn_input(&mut app, items, image_blobs);
+                        send_user_message(
+                            queued.text.clone(),
+                            turn_input.clone(),
+                            &mut app,
+                            logger,
+                            &mut runtime,
+                            &mut history,
+                            &mut runtime_return_rx,
+                            &mut cancel_token,
+                            &mut active_stream_id,
+                            &app_tx,
+                        );
+                        last_turn = Some(TurnReplayPayload {
+                            display_input: queued.text,
+                            turn_input,
+                            execution_mode: current_execution_mode,
+                        });
                     }
                     // Up/Down: navigate suggestions when popup is visible
                     KeyCode::Up if app.has_suggestions() => {
@@ -1591,14 +1957,51 @@ async fn run_app(
                         }
 
                         let input = app.take_input();
+                        let images = app.take_images();
                         app.update_suggestions();
-                        if input.is_empty() && app.pending_images.is_empty() {
+                        let queued = QueuedTurn::new(input.clone(), images);
+                        if queued.is_empty() {
                             continue;
                         }
 
                         if app.running {
-                            // Queue for later — skip slash commands, just buffer
-                            app.queue_message(input);
+                            let trimmed = queued.text.trim_start();
+                            if trimmed.starts_with('/') || trimmed.starts_with('!') {
+                                push_system_message(
+                                    &mut app,
+                                    "Host commands cannot be injected into the active turn. Wait for completion or use `Tab` to queue a normal next turn.",
+                                );
+                                app.input = queued.text;
+                                app.cursor_pos = app.input.len();
+                                app.pending_images = queued.images;
+                                continue;
+                            }
+                            if !queued.images.is_empty() {
+                                push_system_message(
+                                    &mut app,
+                                    "Current-turn injection does not support images yet. Use `Tab` to queue an image-bearing next turn.",
+                                );
+                                app.input = queued.text;
+                                app.cursor_pos = app.input.len();
+                                app.pending_images = queued.images;
+                                continue;
+                            }
+                            let injection = PluginMessage {
+                                role: MessageRole::User,
+                                content: queued.text.clone(),
+                            };
+                            match turn_injection_bridge.enqueue(vec![injection]) {
+                                Ok(()) => app.queue_pending_steer(queued),
+                                Err(err) => {
+                                    push_system_message(
+                                        &mut app,
+                                        format!("Failed to queue current-turn injection: {}", err),
+                                    );
+                                    app.input = queued.text;
+                                    app.cursor_pos = app.input.len();
+                                    app.pending_images = queued.images;
+                                }
+                            }
                             continue;
                         }
                         if runtime.is_none() {
@@ -1606,14 +2009,18 @@ async fn run_app(
                                 &mut app,
                                 "Runtime is still finalizing the previous turn. Please retry in a moment.",
                             );
+                            app.input = queued.text;
+                            app.cursor_pos = app.input.len();
+                            app.pending_images = queued.images;
                             continue;
                         }
 
                         // Shell escape: !command
-                        if let Some(cmd_str) = input.strip_prefix('!') {
+                        if let Some(cmd_str) = queued.text.strip_prefix('!') {
                             let cmd_str = cmd_str.trim();
                             if !cmd_str.is_empty() {
-                                app.blocks.push(DisplayBlock::UserInput(input.clone()));
+                                app.blocks
+                                    .push(DisplayBlock::UserInput(queued.text.clone()));
                                 app.invalidate_height_cache();
 
                                 use tokio::process::Command as TokioCommand;
@@ -1669,11 +2076,12 @@ async fn run_app(
                         }
 
                         // Try slash command
-                        if let Some(cmd) = command::parse(&input, &app.skills) {
+                        if let Some(cmd) = command::parse(&queued.text, &app.skills) {
                             match cmd {
                                 command::Command::Exit => break,
                                 command::Command::Clear => {
                                     app.clear();
+                                    app.set_model_variant(current_model_variant.clone());
                                     history.clear();
                                     turn_counter = 0;
                                     last_turn = None;
@@ -1695,6 +2103,22 @@ async fn run_app(
                                             plugin_snapshot: None,
                                             repl_snapshot: None,
                                         });
+                                        match rt.session_manager() {
+                                            Ok(manager) => session_manager = manager,
+                                            Err(err) => push_system_message(
+                                                &mut app,
+                                                format!(
+                                                    "Failed to refresh session manager: {}",
+                                                    err
+                                                ),
+                                            ),
+                                        }
+                                        sync_plan_mode(
+                                            &mut app,
+                                            &plugin_host,
+                                            Arc::clone(&session_manager),
+                                        )
+                                        .await;
                                         pending_clear_after_return = false;
                                     } else {
                                         // Runtime is still being reclaimed from a just-finished
@@ -1702,27 +2126,46 @@ async fn run_app(
                                         pending_clear_after_return = true;
                                     }
                                 }
+                                command::Command::Version => {
+                                    push_system_message(&mut app, version_text());
+                                }
+                                command::Command::Info => {
+                                    let model = app.model.clone();
+                                    let context_window = app.context_window;
+                                    let cwd = app.cwd.clone();
+                                    let session_name = app.session_name.clone();
+                                    push_system_message(
+                                        &mut app,
+                                        info_text(
+                                            &provider,
+                                            &model,
+                                            current_model_variant.as_deref(),
+                                            current_execution_mode,
+                                            context_window,
+                                            dynamic_tools.definitions().len(),
+                                            &toolset_hash,
+                                            current_context_folding,
+                                            &cwd,
+                                            Some(&session_name),
+                                        ),
+                                    );
+                                }
                                 command::Command::Model(new_model) => {
                                     let Some(new_model) = new_model else {
                                         let mut lines = vec![
                                             format!("Current model: `{}`", app.model),
                                             format!("Provider: {}", provider.label()),
                                         ];
-                                        if let Some(effort) = current_reasoning_effort.as_deref() {
-                                            lines.push(format!("Reasoning effort: `{}`", effort));
-                                        }
+                                        lines.extend(variant_lines(
+                                            &provider,
+                                            &app.model,
+                                            current_model_variant.as_deref(),
+                                        ));
                                         if let Some(window) = app.context_window {
                                             lines.push(format!("Context window: {}", window));
                                         }
-                                        lines.push(
-                                            "Usage: `/model <name>` or `/model <name> <low|medium|high>`".to_string(),
-                                        );
-                                        if !matches!(provider, Provider::Codex { .. }) {
-                                            lines.push(
-                                                "Reasoning suffixes are only supported on the Codex provider."
-                                                    .to_string(),
-                                            );
-                                        }
+                                        lines.push("Usage: `/model <name>`".to_string());
+                                        lines.push("Use `/variant` to inspect or change the active variant.".to_string());
                                         push_system_message(&mut app, lines.join("\n"));
                                         continue;
                                     };
@@ -1745,22 +2188,30 @@ async fn run_app(
                                         );
                                         continue;
                                     }
-                                    let reasoning_effort =
-                                        selection.reasoning_effort.clone().or_else(|| {
-                                            provider
-                                                .reasoning_effort_for_model(&selection.model)
-                                                .map(str::to_string)
-                                        });
+                                    let model_variant = provider
+                                        .default_model_variant(&selection.model)
+                                        .map(str::to_string);
                                     if let Some(rt) = runtime.as_mut() {
-                                        rt.set_model(selection.model.clone());
-                                        rt.set_reasoning_effort(reasoning_effort.clone());
+                                        rt.update_session_config(
+                                            None,
+                                            Some(selection.model.clone()),
+                                            Some(model_variant.clone()),
+                                            None,
+                                        )
+                                        .await;
                                     }
-                                    current_reasoning_effort = reasoning_effort;
+                                    current_model_variant = model_variant;
                                     app.context_window = provider.context_window(&selection.model);
                                     app.model = selection.model.clone();
+                                    app.set_model_variant(current_model_variant.clone());
                                     let mut msg = format!("Model set to `{}`", app.model);
-                                    if let Some(effort) = current_reasoning_effort.as_deref() {
-                                        msg.push_str(&format!(" (reasoning=`{}`)", effort));
+                                    if let Some(variant) = current_model_variant.as_deref() {
+                                        msg.push_str(&format!("\nVariant reset to `{}`", variant));
+                                        msg.push_str("\nUse `/variant` to pick a different provider-native preset.");
+                                    } else {
+                                        msg.push_str(
+                                            "\nThis model does not expose configurable variants.",
+                                        );
                                     }
                                     if let Some(window) = app.context_window {
                                         msg.push_str(&format!("\nContext window: {}", window));
@@ -1768,6 +2219,61 @@ async fn run_app(
                                         msg.push_str("\nContext window: unknown in local catalog.");
                                     }
                                     push_system_message(&mut app, msg);
+                                }
+                                command::Command::Variant(new_variant) => {
+                                    let Some(new_variant) = new_variant else {
+                                        let mut lines = vec![
+                                            format!("Current model: `{}`", app.model),
+                                            format!("Provider: {}", provider.label()),
+                                        ];
+                                        lines.extend(variant_lines(
+                                            &provider,
+                                            &app.model,
+                                            current_model_variant.as_deref(),
+                                        ));
+                                        push_system_message(&mut app, lines.join("\n"));
+                                        continue;
+                                    };
+                                    let variant = match resolve_model_variant(
+                                        &provider,
+                                        &app.model,
+                                        Some(new_variant.as_str()),
+                                    ) {
+                                        Ok(variant) => variant,
+                                        Err(err) => {
+                                            push_system_message(
+                                                &mut app,
+                                                format!("Variant rejected: {}", err),
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    if let Some(rt) = runtime.as_mut() {
+                                        rt.update_session_config(
+                                            None,
+                                            None,
+                                            Some(variant.clone()),
+                                            None,
+                                        )
+                                        .await;
+                                    }
+                                    current_model_variant = variant;
+                                    app.set_model_variant(current_model_variant.clone());
+                                    let mut lines = vec![format!("Model: `{}`", app.model)];
+                                    if let Some(variant) = current_model_variant.as_deref() {
+                                        lines.push(format!("Variant set to `{}`", variant));
+                                    } else {
+                                        lines.push(
+                                            "Variant reset to provider default `(none)`."
+                                                .to_string(),
+                                        );
+                                    }
+                                    lines.extend(variant_lines(
+                                        &provider,
+                                        &app.model,
+                                        current_model_variant.as_deref(),
+                                    ));
+                                    push_system_message(&mut app, lines.join("\n"));
                                 }
                                 command::Command::Mode(new_mode) => {
                                     let Some(new_mode) = new_mode else {
@@ -1835,7 +2341,10 @@ async fn run_app(
 
                                     match setup_result {
                                         Ok(mut new_cfg) => {
-                                            if let Err(e) = new_cfg.provider.ensure_fresh().await {
+                                            let previous_kind = provider.kind();
+                                            if let Err(e) =
+                                                new_cfg.active_provider_mut().ensure_fresh().await
+                                            {
                                                 push_system_message(
                                                     &mut app,
                                                     format!(
@@ -1854,7 +2363,7 @@ async fn run_app(
                                                     ),
                                                 );
                                             }
-                                            provider = new_cfg.provider.clone();
+                                            provider = new_cfg.active_provider().clone();
                                             let new_model = provider.default_model().to_string();
                                             let selection = match parse_model_selection(&new_model)
                                             {
@@ -1892,28 +2401,40 @@ async fn run_app(
                                                     ),
                                                 );
                                             }
-                                            let reasoning_effort =
-                                                selection.reasoning_effort.clone().or_else(|| {
-                                                    provider
-                                                        .reasoning_effort_for_model(
-                                                            &selection.model,
-                                                        )
-                                                        .map(str::to_string)
-                                                });
+                                            let model_variant = provider
+                                                .default_model_variant(&selection.model)
+                                                .map(str::to_string);
                                             if let Some(rt) = runtime.as_mut() {
-                                                rt.set_provider(provider.clone());
-                                                rt.set_model(selection.model.clone());
-                                                rt.set_reasoning_effort(reasoning_effort.clone());
+                                                rt.update_session_config(
+                                                    Some(provider.clone()),
+                                                    Some(selection.model.clone()),
+                                                    Some(model_variant.clone()),
+                                                    None,
+                                                )
+                                                .await;
                                             }
-                                            current_reasoning_effort = reasoning_effort;
+                                            current_model_variant = model_variant;
                                             app.context_window =
                                                 provider.context_window(&selection.model);
                                             app.model = selection.model.clone();
+                                            app.set_model_variant(current_model_variant.clone());
+                                            let saved_kinds = new_cfg
+                                                .provider_kinds()
+                                                .into_iter()
+                                                .map(ProviderKind::cli_label)
+                                                .collect::<Vec<_>>()
+                                                .join(", ");
                                             push_system_message(
                                                 &mut app,
                                                 format!(
-                                                    "Provider updated: {}\nModel set to default: `{}`",
+                                                    "Provider {}: {}\nSaved providers: {}\nModel set to default: `{}`",
+                                                    if provider.kind() == previous_kind {
+                                                        "reauthenticated"
+                                                    } else {
+                                                        "switched"
+                                                    },
                                                     provider.label(),
+                                                    saved_kinds,
                                                     selection.model
                                                 ),
                                             );
@@ -1937,18 +2458,62 @@ async fn run_app(
                                         }
                                     }
                                 }
-                                command::Command::Logout => match LashConfig::clear() {
-                                    Ok(()) => push_system_message(
-                                        &mut app,
-                                        "Credentials removed from disk.\n\n\
-This running session may continue using in-memory credentials.\n\
-Use `/provider` or `/login` to sign in again without restarting.",
-                                    ),
-                                    Err(e) => push_system_message(
-                                        &mut app,
-                                        format!("Failed to remove credentials: {}", e),
-                                    ),
-                                },
+                                command::Command::Logout => {
+                                    let active_kind = provider.kind();
+                                    match LashConfig::load() {
+                                        Some(mut cfg) => {
+                                            if !cfg.has_provider(active_kind) {
+                                                push_system_message(
+                                                    &mut app,
+                                                    "The active provider is not stored on disk.",
+                                                );
+                                                continue;
+                                            }
+                                            if cfg.provider_count() == 1 {
+                                                match LashConfig::clear() {
+                                                    Ok(()) => push_system_message(
+                                                        &mut app,
+                                                        format!(
+                                                            "Removed stored credentials for {}.\n\nThis running session may continue using in-memory credentials.\nUse `/provider` or `/login` to sign in again without restarting.",
+                                                            active_kind.cli_label()
+                                                        ),
+                                                    ),
+                                                    Err(e) => push_system_message(
+                                                        &mut app,
+                                                        format!(
+                                                            "Failed to remove credentials: {}",
+                                                            e
+                                                        ),
+                                                    ),
+                                                }
+                                            } else {
+                                                cfg.remove_provider(active_kind);
+                                                let next_kind = cfg.active_provider_kind();
+                                                match cfg.save() {
+                                                    Ok(()) => push_system_message(
+                                                        &mut app,
+                                                        format!(
+                                                            "Removed stored credentials for {}.\nNew sessions will default to {}.\n\nThis running session may continue using in-memory credentials.",
+                                                            active_kind.cli_label(),
+                                                            next_kind.cli_label()
+                                                        ),
+                                                    ),
+                                                    Err(e) => push_system_message(
+                                                        &mut app,
+                                                        format!(
+                                                            "Failed to save updated provider registry: {}",
+                                                            e
+                                                        ),
+                                                    ),
+                                                }
+                                            }
+                                        }
+                                        None => push_system_message(
+                                            &mut app,
+                                            "No stored provider credentials found.",
+                                        ),
+                                    }
+                                }
                                 command::Command::Retry => {
                                     if let Some(previous) = last_turn.clone() {
                                         if let Err(e) = apply_pending_reconfigure(
@@ -2009,7 +2574,7 @@ Use `/provider` or `/login` to sign in again without restarting.",
                                         logger,
                                         &provider,
                                         &app.model,
-                                        current_reasoning_effort.as_deref(),
+                                        current_model_variant.as_deref(),
                                         &toolset_hash,
                                         &current_dynamic_state,
                                     )
@@ -2078,7 +2643,7 @@ Use `/provider` or `/login` to sign in again without restarting.",
                                             &mut turn_counter,
                                             &mut current_execution_mode,
                                             &provider,
-                                            &mut current_reasoning_effort,
+                                            &mut current_model_variant,
                                             &dynamic_tools,
                                             &mut desired_dynamic,
                                         )
@@ -2086,6 +2651,24 @@ Use `/provider` or `/login` to sign in again without restarting.",
                                         {
                                             Ok(()) => {
                                                 last_turn = None;
+                                                if let Some(rt) = runtime.as_ref() {
+                                                    match rt.session_manager() {
+                                                        Ok(manager) => session_manager = manager,
+                                                        Err(err) => push_system_message(
+                                                            &mut app,
+                                                            format!(
+                                                                "Failed to refresh session manager: {}",
+                                                                err
+                                                            ),
+                                                        ),
+                                                    }
+                                                }
+                                                sync_plan_mode(
+                                                    &mut app,
+                                                    &plugin_host,
+                                                    Arc::clone(&session_manager),
+                                                )
+                                                .await;
                                                 toolset_hash = hash12(
                                                     &serde_json::to_vec(
                                                         &dynamic_tools.definitions(),
@@ -2520,7 +3103,7 @@ Use `/provider` or `/login` to sign in again without restarting.",
                                     if items.is_empty() {
                                         app.blocks.push(DisplayBlock::SystemMessage(
                                             "No skills found.\n\
-                                             Add skill directories to ~/.lash/skills/ or .lash/skills/\n\
+                                             Add skill directories to ~/.lash/skills/ or .agents/lash/skills/\n\
                                              Each skill is a directory with a SKILL.md file."
                                                 .to_string(),
                                         ));
@@ -2613,11 +3196,11 @@ Use `/provider` or `/login` to sign in again without restarting.",
                             &serde_json::to_vec(&dynamic_tools.definitions())
                                 .unwrap_or_else(|_| b"[]".to_vec()),
                         );
-                        let images = app.take_images();
-                        let (items, image_blobs) = build_items_from_editor_input(&input, images);
+                        let (items, image_blobs) =
+                            build_items_from_editor_input(&queued.text, queued.images);
                         let turn_input = make_turn_input(&mut app, items, image_blobs);
                         send_user_message(
-                            input.clone(),
+                            queued.text.clone(),
                             turn_input.clone(),
                             &mut app,
                             logger,
@@ -2629,21 +3212,13 @@ Use `/provider` or `/login` to sign in again without restarting.",
                             &app_tx,
                         );
                         last_turn = Some(TurnReplayPayload {
-                            display_input: input,
+                            display_input: queued.text,
                             turn_input,
                             execution_mode: current_execution_mode,
                         });
                     }
                     KeyCode::Backspace => {
-                        if app.input.is_empty() && app.has_queued_message() {
-                            // Pop queued message back to editor
-                            if let Some(msg) = app.take_queued_message() {
-                                app.input = msg;
-                                app.cursor_pos = app.input.len();
-                            }
-                        } else {
-                            app.backspace();
-                        }
+                        app.backspace();
                         app.update_suggestions();
                     }
                     KeyCode::Delete => {
@@ -3204,5 +3779,12 @@ mod tests {
             .collect();
         assert_eq!(kinds, vec!["text", "image", "text", "file", "text"]);
         assert_eq!(image_blobs.len(), 1);
+    }
+
+    #[test]
+    fn controls_text_mentions_alt_up_queue_edit_binding() {
+        let controls = controls_text();
+        assert!(controls.contains("Alt+Up             Edit last queued turn"));
+        assert!(!controls.contains("Backspace          Restore last next-turn draft"));
     }
 }

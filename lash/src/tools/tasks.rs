@@ -32,19 +32,32 @@ impl TaskStore {
         } else {
             t.owner.clone()
         };
-        json!({
-            "__type__": "task",
-            "id": t.id,
-            "subject": t.subject,
-            "description": t.description,
-            "status": t.status,
-            "priority": t.priority,
-            "active_form": t.active_form,
-            "owner": owner_display,
-            "blocks": t.blocks,
-            "blocked_by": t.blocked_by,
-            "metadata": t.metadata,
-        })
+        let mut obj = serde_json::Map::from_iter([
+            ("__type__".to_string(), json!("task")),
+            ("id".to_string(), json!(t.id)),
+            ("subject".to_string(), json!(t.subject)),
+            ("status".to_string(), json!(t.status)),
+            ("priority".to_string(), json!(t.priority)),
+        ]);
+        if !t.description.is_empty() {
+            obj.insert("description".to_string(), json!(t.description));
+        }
+        if !t.active_form.is_empty() {
+            obj.insert("active_form".to_string(), json!(t.active_form));
+        }
+        if !owner_display.is_empty() {
+            obj.insert("owner".to_string(), json!(owner_display));
+        }
+        if !t.blocks.is_empty() {
+            obj.insert("blocks".to_string(), json!(t.blocks));
+        }
+        if !t.blocked_by.is_empty() {
+            obj.insert("blocked_by".to_string(), json!(t.blocked_by));
+        }
+        if !t.metadata.as_object().is_some_and(|map| map.is_empty()) && !t.metadata.is_null() {
+            obj.insert("metadata".to_string(), t.metadata.clone());
+        }
+        serde_json::Value::Object(obj)
     }
 
     fn execute_create(&self, args: &serde_json::Value) -> ToolResult {
@@ -58,6 +71,10 @@ impl TaskStore {
             .get("description")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        let status = args
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("pending");
         let priority = args
             .get("priority")
             .and_then(|v| v.as_str())
@@ -74,13 +91,43 @@ impl TaskStore {
                 priority
             ));
         }
+        if !matches!(
+            status,
+            "pending" | "in_progress" | "completed" | "cancelled"
+        ) {
+            return Self::err(format!(
+                "Invalid status '{}': must be pending, in_progress, completed, or cancelled",
+                status
+            ));
+        }
 
         let id = self.store.next_task_id();
-        let entry =
-            self.store
-                .create_task(&id, subject, description, priority, active_form, &metadata);
+        let owner = if status == "in_progress" {
+            caller.as_str()
+        } else {
+            ""
+        };
+        let entry = self.store.create_task_with_state(
+            &id,
+            subject,
+            description,
+            status,
+            priority,
+            active_form,
+            owner,
+            &metadata,
+        );
 
         ToolResult::ok(Self::task_to_json(&entry, &caller))
+    }
+
+    fn execute_start(&self, args: &serde_json::Value) -> ToolResult {
+        let mut payload = args.clone();
+        let Some(obj) = payload.as_object_mut() else {
+            return Self::err("Invalid parameters: expected object");
+        };
+        obj.insert("status".to_string(), json!("in_progress"));
+        self.execute_create(&payload)
     }
 
     fn execute_tasks(&self, args: &serde_json::Value) -> ToolResult {
@@ -227,7 +274,54 @@ impl ToolProvider for TaskStore {
             ToolDefinition {
                 name: "create_task".into(),
                 description: vec![crate::ToolText::new(
-                    "Create a new task. Required field: `subject` (not `title`). Returns the Task object.",
+                    "Create a new task. Required field: `subject` (not `title`). Use this for queued or not-yet-started work; for work you are starting now, prefer `start_task(...)`. Returns the Task object.",
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
+                )],
+                params: vec![
+                    ToolParam::typed("subject", "str"),
+                    ToolParam {
+                        name: "description".into(),
+                        r#type: "str".into(),
+                        description: "Detailed description of what needs to be done".into(),
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "status".into(),
+                        r#type: "str".into(),
+                        description:
+                            "pending, in_progress, completed, or cancelled (default: pending)"
+                                .into(),
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "priority".into(),
+                        r#type: "str".into(),
+                        description: "high, medium, or low (default: medium)".into(),
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "active_form".into(),
+                        r#type: "str".into(),
+                        description:
+                            "Present-continuous label shown in spinner (e.g. 'Fixing auth')".into(),
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "metadata".into(),
+                        r#type: "dict".into(),
+                        description: "Arbitrary key/value metadata".into(),
+                        required: false,
+                    },
+                ],
+                returns: "Task".into(),
+                examples: vec![],
+                hidden: false,
+                inject_into_prompt: false,
+            },
+            ToolDefinition {
+                name: "start_task".into(),
+                description: vec![crate::ToolText::new(
+                    "Create a new task and immediately mark it `in_progress` for the current agent. Use this as the default way to begin substantial work.",
                     [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                 )],
                 params: vec![
@@ -366,7 +460,7 @@ impl ToolProvider for TaskStore {
             ToolDefinition {
                 name: "claim_task".into(),
                 description: vec![crate::ToolText::new(
-                    "Claim a task and mark it `in_progress`. If `id` is omitted, claim the next available task.",
+                    "Claim an existing unclaimed task and mark it `in_progress`. Use this for adopting queued work; for a brand-new task, prefer `start_task(...)`.",
                     [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                 )],
                 params: vec![ToolParam {
@@ -383,7 +477,7 @@ impl ToolProvider for TaskStore {
             ToolDefinition {
                 name: "delete_task".into(),
                 description: vec![crate::ToolText::new(
-                    "Permanently remove a task.",
+                    "Permanently remove a task. This is mainly for cleanup or tiny smoke-test hygiene; normal workflow should usually keep the task and mark it completed or cancelled.",
                     [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                 )],
                 params: vec![ToolParam::typed("id", "str")],
@@ -410,6 +504,7 @@ impl ToolProvider for TaskStore {
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
         match name {
             "create_task" => self.execute_create(args),
+            "start_task" => self.execute_start(args),
             "tasks" => self.execute_tasks(args),
             "get_task" => self.execute_get(args),
             "update_task" => self.execute_update(args),
@@ -441,6 +536,61 @@ mod tests {
         let task = &result.result;
         assert_eq!(task["subject"], "Fix bug");
         assert_eq!(task["status"], "pending");
+    }
+
+    #[tokio::test]
+    async fn test_create_task_can_start_in_progress() {
+        let store = make_store();
+        let result = store
+            .execute(
+                "create_task",
+                &json!({
+                    "__agent_id__": "root",
+                    "subject": "Fix bug",
+                    "status": "in_progress"
+                }),
+            )
+            .await;
+        assert!(result.success);
+        let task = &result.result;
+        assert_eq!(task["subject"], "Fix bug");
+        assert_eq!(task["status"], "in_progress");
+        assert_eq!(task["owner"], "you");
+    }
+
+    #[tokio::test]
+    async fn test_start_task_starts_in_progress() {
+        let store = make_store();
+        let result = store
+            .execute(
+                "start_task",
+                &json!({
+                    "__agent_id__": "root",
+                    "subject": "Fix bug"
+                }),
+            )
+            .await;
+        assert!(result.success);
+        let task = &result.result;
+        assert_eq!(task["subject"], "Fix bug");
+        assert_eq!(task["status"], "in_progress");
+        assert_eq!(task["owner"], "you");
+    }
+
+    #[tokio::test]
+    async fn test_task_json_omits_empty_fields() {
+        let store = make_store();
+        let result = store
+            .execute("create_task", &json!({"subject": "Fix bug"}))
+            .await;
+        assert!(result.success);
+        let task = result.result.as_object().expect("task object");
+        assert!(!task.contains_key("owner"));
+        assert!(!task.contains_key("blocks"));
+        assert!(!task.contains_key("blocked_by"));
+        assert!(!task.contains_key("metadata"));
+        assert!(!task.contains_key("description"));
+        assert!(!task.contains_key("active_form"));
     }
 
     #[tokio::test]

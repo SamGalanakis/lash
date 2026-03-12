@@ -2,16 +2,21 @@
 
 AI coding agent with a persistent Monty-backed `repl` runtime or `standard` tool-calling execution mode, `apply_patch`-based file editing, and a host-friendly runtime API for TUI and headless frontends.
 
-## Setup
+## Install
 
 ```bash
-cat > ~/.local/bin/lash << 'SCRIPT'
-#!/bin/bash
-cargo build --release --manifest-path ~/code/lash/Cargo.toml 2>/dev/null
-exec ~/code/lash/target/release/lash "$@"
-SCRIPT
-chmod +x ~/.local/bin/lash
+curl -fsSL https://raw.githubusercontent.com/SamGalanakis/lash/main/install_lash.sh | bash
 ```
+
+Install a pinned release instead:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SamGalanakis/lash/main/install_lash.sh | LASH_VERSION=v0.2.0 bash
+```
+
+The installer downloads the latest prebuilt GitHub release asset for your platform, verifies `SHA256SUMS`, and installs `lash` to `~/.local/bin` by default.
+
+From a local checkout, run `./install_lash.sh`.
 
 ## Runtime Modes
 
@@ -73,7 +78,7 @@ lash --prompt-disable "section"
 
 Skills are modular directories that extend lash with specialized knowledge and workflows.
 
-Skill directories: `~/.lash/skills/` (global) and `.lash/skills/` (project-local, overrides global).
+Skill directories: `~/.lash/skills/` (global) and `.agents/lash/skills/` (repo-local, overrides global). The legacy `.lash/skills/` path is still loaded as a fallback.
 
 Each skill is a directory containing a `SKILL.md` with YAML frontmatter (`name`, `description`) and a markdown body. Supporting files (scripts, references, templates) are included alongside.
 
@@ -83,9 +88,13 @@ Each skill is a directory containing a `SKILL.md` with YAML frontmatter (`name`,
     SKILL.md          # required: frontmatter + instructions
     scripts/foo.py    # optional supporting files
     references/bar.md
+
+.agents/lash/skills/
+  repo-local-skill/
+    SKILL.md
 ```
 
-Use `/skills` to browse, `/<skill-name>` to invoke, or call `load_skill("name")` from REPL/standard execution.
+Use `/skills` to browse, `/<skill-name>` to invoke, or call `T.load_skill("name")` in `repl` / `load_skill("name")` in `standard`.
 
 ## Terminal Bench
 
@@ -143,11 +152,13 @@ Across both `repl` and `standard`, lash now renders active history as one cache-
 
 ## Planning
 
-Planning is handled by the native `update_plan` tool.
+Planning is split between a native checklist tool and a separate plan mode.
 
-- The agent updates a short in-memory plan instead of writing a hidden plan file.
-- The TUI renders the current plan directly from tool results.
-- `update_plan` is for substantial multi-step work; small tasks should usually just be executed.
+- `update_plan` is a checklist tool for substantial multi-step execution work.
+- Plan mode is a separate plugin-backed collaboration mode for planning-only turns.
+- Plan mode is prompt-guided rather than command-classifier-driven: it allows non-mutating exploration, encourages exploration before questioning, and expects the final official plan in a `<proposed_plan>...</proposed_plan>` block.
+- The TUI renders the current checklist from `update_plan` calls instead of a hidden plan file.
+- Plugin-backed collaboration modes can now emit generic mode badges and bordered history panels, so plan mode owns its proposed-plan rendering without hard-coded core UI types.
 
 ## Keyboard Shortcuts
 
@@ -159,6 +170,7 @@ Planning is handled by the native `update_plan` tool.
 | `PgUp` / `PgDn` | Scroll full page |
 | `Ctrl+V` | Paste image as inline `[Image #n]` |
 | `Ctrl+Shift+V` | Paste text only |
+| `Shift+Tab` | Toggle persistent plan mode |
 | `Ctrl+Y` | Copy last response |
 | `Ctrl+O` | Cycle tool expansion level |
 | `Alt+O` | Full expansion (code + stdout) |
@@ -305,23 +317,22 @@ Tools define `inject_into_prompt: bool` (`lash/src/lib.rs`).
 
 Runtime discovery is available via:
 
-- `T.list_tools(...)` in `repl`, `list_tools(...)` in `standard`
-- `T.search_tools(query, mode="hybrid", ...)` in `repl`, `search_tools(query, mode="hybrid", ...)` in `standard`
+- `T.search_tools(query?, mode="hybrid", ...)` in `repl`, `search_tools(query?, mode="hybrid", ...)` in `standard`
 
 The `repl` executor exposes tools through the `T` namespace (for example `T.read_file(...)`, `T.search_tools(...)`).
-Only runtime control calls remain bare globals in `repl`: `done(...)`, `ask(...)`, and `reset_repl()`.
-Use `T.list_tools(...)` and `T.search_tools(...)` to discover prompt-omitted tools at runtime. `list_tools` is compact-only and returns `name`, `oneliner`, and `signature`.
+Only runtime control calls remain bare globals in `repl`: `done(...)`, `ask(...)`, and `reset_repl()`. In interactive `standard` sessions, `ask(...)` is also exposed as a native tool.
+Use `T.search_tools(...)` to discover prompt-omitted tools at runtime. Pass a focused query for ranked results, or call `T.search_tools()` with no query to browse the full active tool catalog.
 Both discovery calls always search the full current runtime tool catalog; callers do not pass a separate `catalog` argument.
 
 ### Default Native-Tools Surface
 
 With the default capability profile, `standard` can call:
 
-- Core read: `read_file`, `glob`, `grep`, `ls`, `list_tools`, `search_tools`
+- Core read: `read_file`, `glob`, `grep`, `ls`, `search_tools`
 - Core write: `apply_patch`
 - Shell: `exec_command`, `write_stdin`
-- Tasks: `tasks`, `tasks_summary`, `get_task`, `create_task`, `update_task`, `delete_task`, `claim_task`
-- Planning: `update_plan`
+- Tasks: `tasks`, `tasks_summary`, `get_task`, `create_task`, `start_task`, `update_task`, `delete_task`, `claim_task`
+- Planning: `update_plan`, `ask` (interactive sessions only), plan mode
 - Delegation: `agent_call`, `agent_result`, `agent_output`, `agent_kill`
 - History: `search_history`
 - Memory: `search_mem`, `mem_set`, `mem_get`, `mem_delete`, `mem_all`
@@ -329,7 +340,7 @@ With the default capability profile, `standard` can call:
 - Web, when Tavily is configured: `search_web`, `fetch_url`
 - Native-tools only: `batch`
 
-This is the callable default surface, not the prompt-injected subset. Lash still injects only a smaller prompt-visible tool list and relies on `T.list_tools(...)` / `T.search_tools(...)` in `repl`, or `list_tools(...)` / `search_tools(...)` in `standard`, for discovery of omitted tools across the full active runtime tool set.
+This is the callable default surface, not the prompt-injected subset. Lash still injects only a smaller prompt-visible tool list and relies on `T.search_tools(...)` in `repl`, or `search_tools(...)` in `standard`, for discovery of omitted tools across the full active runtime tool set.
 
 `search_history(...)` searches all prior completed turns persisted by the runtime, not just turns folded out of the active prompt window.
 For delegation, low-tier sub-agents use this standard surface by default even when the parent session is in `repl`.

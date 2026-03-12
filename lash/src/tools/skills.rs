@@ -9,7 +9,7 @@ use super::run_blocking;
 
 #[derive(Clone)]
 pub struct SkillStore {
-    skill_dirs: Vec<PathBuf>, // [~/.lash/skills, .lash/skills] — later overrides earlier
+    skill_dirs: Vec<PathBuf>, // [~/.lash/skills, legacy .lash/skills, preferred .agents/lash/skills]
 }
 
 struct SkillEntry {

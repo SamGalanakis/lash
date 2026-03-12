@@ -1,13 +1,16 @@
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use lash_core::{AgentEvent, Store, TokenUsage};
+use lash_core::{AgentEvent, MessageRole, PluginMessage, Store, TokenUsage};
 
 use crate::activity::{
-    ActivityBlock, ActivityKind, ActivityState, ActivityStatus, merge_exploration_activity,
+    ActivityBlock, ActivityKind, ActivityState, ActivityStatus, PatchFilePreview,
+    merge_exploration_activity,
 };
 use crate::command;
 use crate::markdown;
+use crate::plugin_surface;
 use crate::replay::push_assistant_text_block;
 use crate::skill::SkillRegistry;
 use crate::util::{is_manual_interrupt_error, manual_interrupt_message};
@@ -34,6 +37,14 @@ pub struct TaskSnapshot {
     pub is_blocked: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginPanelBlock {
+    pub plugin_id: String,
+    pub key: String,
+    pub title: String,
+    pub content: String,
+}
+
 pub const TASK_TRAY_TWO_COL_MIN_INNER_WIDTH: usize = 88;
 
 /// State for an active agent prompt dialog.
@@ -49,6 +60,34 @@ pub struct PromptState {
     /// True when Shift+Tab has been pressed to edit extra text.
     pub editing_extra: bool,
     pub response_tx: std::sync::mpsc::Sender<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueuedTurn {
+    pub text: String,
+    pub images: Vec<Vec<u8>>,
+}
+
+impl QueuedTurn {
+    pub fn new(text: String, images: Vec<Vec<u8>>) -> Self {
+        Self { text, images }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty() && self.images.is_empty()
+    }
+
+    pub fn preview(&self) -> String {
+        let collapsed = self.text.replace('\n', " ").trim().to_string();
+        if !collapsed.is_empty() {
+            return collapsed;
+        }
+        match self.images.len() {
+            0 => String::new(),
+            1 => "[1 image]".to_string(),
+            n => format!("[{} images]", n),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -82,6 +121,7 @@ pub enum DisplayBlock {
     SystemMessage(String),
     /// Rendered plan content from update_plan (bordered markdown).
     PlanContent(String),
+    PluginPanel(PluginPanelBlock),
     /// Sub-agent completion result with token stats.
     SubAgentResult {
         task: String,
@@ -119,6 +159,78 @@ fn wrapped_text_height(text: &str, width: usize, prefix_chars: usize) -> usize {
     h
 }
 
+fn activity_artifact_height(
+    artifact: &crate::activity::ActivityArtifact,
+    indent_width: usize,
+    width: usize,
+    expand_level: u8,
+) -> usize {
+    match artifact {
+        crate::activity::ActivityArtifact::DiffPreview { diff, .. } => {
+            1 + wrapped_text_height(diff, width, indent_width + 2)
+        }
+        crate::activity::ActivityArtifact::PatchPreview { files, .. } => {
+            patch_preview_height(files, indent_width, width, expand_level >= 2)
+        }
+        crate::activity::ActivityArtifact::TextPreview { title, text } => {
+            usize::from(title.is_some())
+                + text
+                    .lines()
+                    .take(12)
+                    .map(|line| wrapped_text_height(line, width, indent_width + 2))
+                    .sum::<usize>()
+        }
+        crate::activity::ActivityArtifact::SourceList { items, .. } => {
+            1 + items
+                .iter()
+                .map(|item| wrapped_text_height(item, width, indent_width + 2))
+                .sum::<usize>()
+        }
+    }
+}
+
+fn patch_file_heading(file: &PatchFilePreview) -> String {
+    let subject = match &file.from_path {
+        Some(from_path) => format!("{from_path} → {}", file.path),
+        None => file.path.clone(),
+    };
+    format!(
+        "{} {} (+{} -{})",
+        match file.status.as_str() {
+            "added" => "added",
+            "deleted" => "deleted",
+            "moved" => "moved",
+            _ => "edited",
+        },
+        subject,
+        file.added,
+        file.removed
+    )
+}
+
+fn patch_preview_height(
+    files: &[PatchFilePreview],
+    indent_width: usize,
+    width: usize,
+    include_diffs: bool,
+) -> usize {
+    files
+        .iter()
+        .map(|file| {
+            let mut height =
+                wrapped_text_height(&patch_file_heading(file), width, indent_width + 2);
+            if include_diffs && !file.diff.trim().is_empty() {
+                height += file
+                    .diff
+                    .lines()
+                    .map(|line| wrapped_text_height(line, width, indent_width + 4))
+                    .sum::<usize>();
+            }
+            height
+        })
+        .sum()
+}
+
 /// Fast, coarse token estimate used only for live UI counters while streaming.
 fn estimate_tokens_from_char_count(chars: i64) -> i64 {
     if chars <= 0 { 0 } else { (chars + 3) / 4 }
@@ -154,48 +266,16 @@ impl DisplayBlock {
                 }
             }
             DisplayBlock::Activity(activity) => {
-                let (summary_prefix_chars, detail_prefix_chars) =
-                    if activity.kind == ActivityKind::Exploration {
-                        (3, 3)
-                    } else {
-                        (2, 2)
-                    };
-                let mut h = wrapped_text_height(
-                    &format!(
-                        "{} · {}",
-                        activity.summary,
-                        crate::util::format_duration_ms(activity.duration_ms)
-                    ),
-                    width,
-                    summary_prefix_chars,
-                );
+                let mut h = 1; // summary is truncated to one rendered row
                 if expand_level >= 1 {
-                    h += activity
-                        .detail_lines
-                        .iter()
-                        .map(|detail| wrapped_text_height(detail, width, detail_prefix_chars))
-                        .sum::<usize>();
+                    h += activity.detail_lines.len();
                     if activity.kind == ActivityKind::Parallel {
-                        h += activity
-                            .children
-                            .iter()
-                            .map(|child| wrapped_text_height(&child.summary, width, 4))
-                            .sum::<usize>();
+                        h += activity.children.len();
                     }
                 }
                 if expand_level >= 2 {
                     if let Some(artifact) = &activity.artifact {
-                        h += match artifact {
-                            crate::activity::ActivityArtifact::DiffPreview { diff, .. } => {
-                                wrapped_text_height(diff, width, 4)
-                            }
-                            crate::activity::ActivityArtifact::TextPreview { text, .. } => {
-                                wrapped_text_height(text, width, 4)
-                            }
-                            crate::activity::ActivityArtifact::SourceList { items, .. } => {
-                                items.len()
-                            }
-                        };
+                        h += activity_artifact_height(artifact, 2, width, expand_level);
                     }
                     if activity.kind == ActivityKind::Parallel {
                         h += activity
@@ -204,28 +284,21 @@ impl DisplayBlock {
                             .map(|child| {
                                 let mut child_h = 0usize;
                                 if !child.summary.is_empty() {
-                                    child_h += wrapped_text_height(&child.summary, width, 4);
+                                    child_h += 1;
                                 }
                                 if let Some(artifact) = &child.artifact {
-                                    child_h += match artifact {
-                                        crate::activity::ActivityArtifact::DiffPreview {
-                                            diff,
-                                            ..
-                                        } => wrapped_text_height(diff, width, 6),
-                                        crate::activity::ActivityArtifact::TextPreview {
-                                            text,
-                                            ..
-                                        } => wrapped_text_height(text, width, 6),
-                                        crate::activity::ActivityArtifact::SourceList {
-                                            items,
-                                            ..
-                                        } => items.len(),
-                                    };
+                                    child_h +=
+                                        activity_artifact_height(artifact, 4, width, expand_level);
                                 }
                                 child_h
                             })
                             .sum::<usize>();
                     }
+                } else if expand_level >= 1
+                    && let Some(crate::activity::ActivityArtifact::PatchPreview { files, .. }) =
+                        &activity.artifact
+                {
+                    h += patch_preview_height(files, 2, width, false);
                 }
                 h
             }
@@ -259,6 +332,9 @@ impl DisplayBlock {
             DisplayBlock::PlanContent(s) => {
                 // borders (2) + title line is part of top border + markdown content height
                 2 + markdown::markdown_height(s, width.saturating_sub(2))
+            }
+            DisplayBlock::PluginPanel(panel) => {
+                2 + markdown::markdown_height(&panel.content, width.saturating_sub(2))
             }
             DisplayBlock::Splash => {
                 // Splash fills the entire viewport (centered content + top/bottom padding)
@@ -321,8 +397,10 @@ pub struct App {
     pub skill_picker: Vec<(String, String)>,
     /// Currently selected skill index.
     pub skill_picker_idx: usize,
-    /// Message queued while agent is running, sent on completion.
-    pub queued_message: Option<String>,
+    /// Priority follow-ups entered with Enter while a turn is running.
+    pub pending_steers: VecDeque<QueuedTurn>,
+    /// FIFO drafts explicitly queued for later turns.
+    pub queued_turns: VecDeque<QueuedTurn>,
     /// Active agent prompt (ask() dialog).
     pub prompt: Option<PromptState>,
     /// Whether the terminal window is currently focused.
@@ -331,6 +409,8 @@ pub struct App {
     pub token_usage: TokenUsage,
     /// Context window size for the current model (from models.dev).
     pub context_window: Option<u64>,
+    /// Active provider-native variant for the current model, if any.
+    pub model_variant: Option<String>,
     /// Latest completed model usage for context accounting.
     pub last_response_usage: TokenUsage,
     /// Estimated output character count from live streaming chunks.
@@ -339,6 +419,8 @@ pub struct App {
     pub live_output_tokens_estimate: i64,
     /// Unique session name (e.g. "alpine-canyon").
     pub session_name: String,
+    /// Active plugin-owned mode indicators rendered in the input chrome.
+    pub plugin_mode_indicators: BTreeMap<String, String>,
     /// Current working directory with ~ substitution.
     pub cwd: String,
     /// Store handle for reading task data (shared with agent).
@@ -449,15 +531,18 @@ impl App {
             skills: SkillRegistry::load(),
             skill_picker: Vec::new(),
             skill_picker_idx: 0,
-            queued_message: None,
+            pending_steers: VecDeque::new(),
+            queued_turns: VecDeque::new(),
             prompt: None,
             focused: true,
             token_usage: TokenUsage::default(),
             context_window,
+            model_variant: None,
             last_response_usage: TokenUsage::default(),
             live_output_chars_estimate: 0,
             live_output_tokens_estimate: 0,
             session_name,
+            plugin_mode_indicators: BTreeMap::new(),
             cwd,
             store,
             task_tray: Vec::new(),
@@ -513,6 +598,34 @@ impl App {
         self.pending_text.clear();
     }
 
+    fn commit_injected_messages(&mut self, messages: &[PluginMessage]) {
+        self.flush_pending_text();
+        for message in messages {
+            match message.role {
+                MessageRole::User => {
+                    if self
+                        .pending_steers
+                        .front()
+                        .is_some_and(|turn| turn.text == message.content)
+                    {
+                        self.pending_steers.pop_front();
+                    }
+                    self.blocks
+                        .push(DisplayBlock::UserInput(message.content.clone()));
+                }
+                MessageRole::System => {
+                    self.blocks
+                        .push(DisplayBlock::SystemMessage(message.content.clone()));
+                }
+                _ => continue,
+            }
+        }
+        if !messages.is_empty() {
+            self.invalidate_height_cache();
+            self.scroll_to_bottom();
+        }
+    }
+
     /// Process an agent event, updating display blocks.
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
@@ -554,7 +667,7 @@ impl App {
                     self.active_delegate = None;
                 }
                 let plan_content = if success && name == "update_plan" {
-                    render_plan_content_from_result(&result)
+                    render_plan_content_from_args(&args)
                 } else {
                     None
                 };
@@ -703,6 +816,21 @@ impl App {
                 self.live_output_chars_estimate = 0;
                 self.live_output_tokens_estimate = 0;
             }
+            AgentEvent::PluginEvent { plugin_id, event } => {
+                let mutation = plugin_surface::apply_surface_event(
+                    &mut self.blocks,
+                    &mut self.plugin_mode_indicators,
+                    &plugin_id,
+                    event,
+                );
+                if mutation.blocks_changed {
+                    self.invalidate_height_cache();
+                    self.scroll_to_bottom();
+                }
+                if mutation.indicators_changed {
+                    self.dirty = true;
+                }
+            }
             AgentEvent::SubAgentDone {
                 task,
                 usage,
@@ -734,6 +862,9 @@ impl App {
                 self.invalidate_height_cache();
                 self.scroll_to_bottom();
             }
+            AgentEvent::InjectedMessagesCommitted { messages, .. } => {
+                self.commit_injected_messages(&messages);
+            }
             AgentEvent::LlmResponse { .. } => {}
             AgentEvent::Prompt { .. } => {
                 // Handled by the main event loop, not here
@@ -741,18 +872,56 @@ impl App {
         }
     }
 
-    /// Set (or replace) the queued message.
-    pub fn queue_message(&mut self, msg: String) {
-        self.queued_message = Some(msg);
+    pub fn queue_pending_steer(&mut self, turn: QueuedTurn) {
+        if turn.is_empty() {
+            return;
+        }
+        self.pending_steers.push_back(turn);
     }
 
-    /// Take the queued message, clearing it.
-    pub fn take_queued_message(&mut self) -> Option<String> {
-        self.queued_message.take()
+    pub fn queue_turn(&mut self, turn: QueuedTurn) {
+        if turn.is_empty() {
+            return;
+        }
+        self.queued_turns.push_back(turn);
     }
 
-    pub fn has_queued_message(&self) -> bool {
-        self.queued_message.is_some()
+    pub fn requeue_front(&mut self, turn: QueuedTurn, pending: bool) {
+        if turn.is_empty() {
+            return;
+        }
+        if pending {
+            self.pending_steers.push_front(turn);
+        } else {
+            self.queued_turns.push_front(turn);
+        }
+    }
+
+    pub fn take_next_queued_turn(&mut self) -> Option<(QueuedTurn, bool)> {
+        self.queued_turns.pop_front().map(|turn| (turn, false))
+    }
+
+    pub fn take_last_queued_turn(&mut self) -> Option<(QueuedTurn, bool)> {
+        self.queued_turns.pop_back().map(|turn| (turn, false))
+    }
+
+    pub fn has_queued_messages(&self) -> bool {
+        !self.pending_steers.is_empty() || !self.queued_turns.is_empty()
+    }
+
+    pub fn set_plan_mode_enabled(&mut self, enabled: bool) {
+        let key = plugin_surface::surface_key("plan_mode", "mode");
+        if enabled {
+            self.plugin_mode_indicators.insert(key, "plan".to_string());
+        } else {
+            self.plugin_mode_indicators.remove(&key);
+        }
+        self.dirty = true;
+    }
+
+    pub fn set_model_variant(&mut self, model_variant: Option<String>) {
+        self.model_variant = model_variant;
+        self.dirty = true;
     }
 
     /// Reset conversation to initial splash screen.
@@ -764,7 +933,8 @@ impl App {
         self.clear_status();
         self.pending_images.clear();
         self.streaming_output.clear();
-        self.queued_message = None;
+        self.pending_steers.clear();
+        self.queued_turns.clear();
         self.task_tray.clear();
         self.active_delegate = None;
         self.activity_state.reset();
@@ -772,6 +942,8 @@ impl App {
         self.last_response_usage = TokenUsage::default();
         self.live_output_chars_estimate = 0;
         self.live_output_tokens_estimate = 0;
+        self.model_variant = None;
+        self.plugin_mode_indicators.clear();
         self.invalidate_height_cache();
     }
 
@@ -1641,17 +1813,14 @@ pub fn format_tokens(n: i64) -> String {
     }
 }
 
-fn render_plan_content_from_result(result: &serde_json::Value) -> Option<String> {
-    if result.get("__type__").and_then(|value| value.as_str()) != Some("plan_update") {
-        return None;
-    }
-    let items = result.get("plan").and_then(|value| value.as_array())?;
+pub(crate) fn render_plan_content_from_args(args: &serde_json::Value) -> Option<String> {
+    let items = args.get("plan").and_then(|value| value.as_array())?;
     if items.is_empty() {
         return None;
     }
 
     let mut lines = Vec::new();
-    if let Some(explanation) = result
+    if let Some(explanation) = args
         .get("explanation")
         .and_then(|value| value.as_str())
         .map(str::trim)
@@ -1786,9 +1955,8 @@ mod tests {
     // ── DisplayBlock::height ──
 
     #[test]
-    fn renders_plan_content_from_update_plan_result() {
-        let content = render_plan_content_from_result(&serde_json::json!({
-            "__type__": "plan_update",
+    fn renders_plan_content_from_update_plan_args() {
+        let content = render_plan_content_from_args(&serde_json::json!({
             "explanation": "Found the renderer.",
             "plan": [
                 {"step":"Inspect UI", "status":"completed"},
@@ -1960,6 +2128,35 @@ mod tests {
     }
 
     #[test]
+    fn plugin_panel_events_upsert_and_clear_blocks() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        app.handle_agent_event(AgentEvent::PluginEvent {
+            plugin_id: "plan_mode".into(),
+            event: lash_core::PluginSurfaceEvent::PanelUpsert {
+                key: "proposed_plan:1".into(),
+                title: "PROPOSED PLAN".into(),
+                content: "1. Inspect\n2. Patch".into(),
+            },
+        });
+        assert!(matches!(
+            app.blocks.last(),
+            Some(DisplayBlock::PluginPanel(panel)) if panel.title == "PROPOSED PLAN"
+        ));
+
+        app.handle_agent_event(AgentEvent::PluginEvent {
+            plugin_id: "plan_mode".into(),
+            event: lash_core::PluginSurfaceEvent::PanelClear {
+                key: "proposed_plan:1".into(),
+            },
+        });
+        assert!(
+            !app.blocks
+                .iter()
+                .any(|block| matches!(block, DisplayBlock::PluginPanel(_)))
+        );
+    }
+
+    #[test]
     fn cancelled_error_renders_as_system_message() {
         let mut app = App::new("test-model".into(), "test".into(), None);
         app.handle_agent_event(AgentEvent::Error {
@@ -1975,6 +2172,60 @@ mod tests {
         assert!(matches!(
             app.blocks.last(),
             Some(DisplayBlock::SystemMessage(msg)) if msg == "Manually interrupted."
+        ));
+    }
+
+    #[test]
+    fn queued_turns_are_fifo_and_skip_pending_injections() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        app.queue_turn(QueuedTurn::new("queued-1".into(), Vec::new()));
+        app.queue_turn(QueuedTurn::new("queued-2".into(), Vec::new()));
+        app.queue_pending_steer(QueuedTurn::new("next-1".into(), Vec::new()));
+        app.queue_pending_steer(QueuedTurn::new("next-2".into(), Vec::new()));
+
+        let order: Vec<(String, bool)> = std::iter::from_fn(|| app.take_next_queued_turn())
+            .map(|(turn, was_pending)| (turn.text, was_pending))
+            .collect();
+
+        assert_eq!(
+            order,
+            vec![("queued-1".into(), false), ("queued-2".into(), false),]
+        );
+        assert_eq!(app.pending_steers.len(), 2);
+    }
+
+    #[test]
+    fn take_last_queued_turn_restores_explicit_queue_only() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        app.queue_pending_steer(QueuedTurn::new("next".into(), Vec::new()));
+        app.queue_turn(QueuedTurn::new("queued".into(), vec![vec![1, 2, 3]]));
+
+        let (turn, was_pending) = app.take_last_queued_turn().expect("queued turn");
+        assert_eq!(turn.text, "queued");
+        assert_eq!(turn.images, vec![vec![1, 2, 3]]);
+        assert!(!was_pending);
+
+        assert!(app.take_last_queued_turn().is_none());
+        assert_eq!(app.pending_steers.len(), 1);
+    }
+
+    #[test]
+    fn injected_messages_commit_render_user_blocks_and_clear_pending_preview() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        app.queue_pending_steer(QueuedTurn::new("follow up".into(), Vec::new()));
+
+        app.handle_agent_event(AgentEvent::InjectedMessagesCommitted {
+            messages: vec![PluginMessage {
+                role: MessageRole::User,
+                content: "follow up".into(),
+            }],
+            checkpoint: lash_core::CheckpointKind::AfterWork,
+        });
+
+        assert!(app.pending_steers.is_empty());
+        assert!(matches!(
+            app.blocks.last(),
+            Some(DisplayBlock::UserInput(text)) if text == "follow up"
         ));
     }
 
@@ -2283,6 +2534,7 @@ mod tests {
             DisplayBlock::Error(_) => "Error",
             DisplayBlock::SystemMessage(_) => "SystemMessage",
             DisplayBlock::PlanContent(_) => "PlanContent",
+            DisplayBlock::PluginPanel(_) => "PluginPanel",
             DisplayBlock::SubAgentResult { .. } => "SubAgentResult",
             DisplayBlock::Splash => "Splash",
         }

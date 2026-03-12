@@ -1,5 +1,6 @@
 mod agent_call;
 mod apply_patch;
+mod ask;
 mod batch;
 mod fetch_url;
 mod filtered;
@@ -21,6 +22,7 @@ mod web_search;
 
 pub use agent_call::AgentCall;
 pub use apply_patch::ApplyPatchTool;
+pub use ask::AskTool;
 pub use batch::BatchingTools;
 pub use fetch_url::FetchUrl;
 pub use filtered::FilteredTools;

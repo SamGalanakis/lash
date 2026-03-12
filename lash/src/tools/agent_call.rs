@@ -41,7 +41,7 @@ impl Tier {
     }
 }
 
-fn pick_model_and_reasoning(
+fn pick_model_and_variant(
     config: &AgentConfig,
     models: &Option<AgentModels>,
     tier: &Tier,
@@ -50,45 +50,36 @@ fn pick_model_and_reasoning(
         match tier {
             Tier::Low => {
                 if let Some(ref q) = m.low {
-                    let effort = config
-                        .provider
-                        .reasoning_effort_for_model(q)
-                        .map(str::to_string);
-                    return (q.clone(), effort);
+                    let variant = config.provider.default_model_variant(q).map(str::to_string);
+                    return (q.clone(), variant);
                 }
             }
             Tier::Medium => {
                 if let Some(ref b) = m.medium {
-                    let effort = config
-                        .provider
-                        .reasoning_effort_for_model(b)
-                        .map(str::to_string);
-                    return (b.clone(), effort);
+                    let variant = config.provider.default_model_variant(b).map(str::to_string);
+                    return (b.clone(), variant);
                 }
             }
             Tier::High => {
                 if let Some(ref t) = m.high {
-                    let effort = config
-                        .provider
-                        .reasoning_effort_for_model(t)
-                        .map(str::to_string);
-                    return (t.clone(), effort);
+                    let variant = config.provider.default_model_variant(t).map(str::to_string);
+                    return (t.clone(), variant);
                 }
             }
         }
     }
 
-    if let Some((model, effort)) = config.provider.default_agent_model(tier.as_str()) {
-        return (model.to_string(), effort.map(str::to_string));
+    if let Some((model, variant)) = config.provider.default_agent_model(tier.as_str()) {
+        return (model.to_string(), variant.map(str::to_string));
     }
 
     let model = config.model.clone();
-    let effort = config
+    let variant = config
         .provider
-        .reasoning_effort_for_model(&model)
+        .default_model_variant(&model)
         .map(str::to_string)
-        .or_else(|| config.reasoning_effort.clone());
-    (model, effort)
+        .or_else(|| config.model_variant.clone());
+    (model, variant)
 }
 
 /// A running sub-agent managed by AgentCall.
@@ -117,7 +108,7 @@ impl EventSink for ChannelEventSink {
 }
 
 /// Single agent-call tool that spawns sub-agents at different intelligence tiers.
-/// Returns a handle immediately; use agent_result/agent_output/agent_kill to interact.
+/// Returns a handle immediately; use agent_result/agent_kill to interact.
 pub struct AgentCall {
     tools: Arc<dyn ToolProvider>,
     plugins: Arc<PluginSession>,
@@ -146,8 +137,7 @@ impl AgentCall {
     }
 
     fn build_agent_config(&self, tier: &Tier) -> AgentConfig {
-        let (model, reasoning_effort) =
-            pick_model_and_reasoning(&self.config, &self.agent_models, tier);
+        let (model, model_variant) = pick_model_and_variant(&self.config, &self.agent_models, tier);
         let capabilities = if matches!(tier, Tier::Low) {
             self.config
                 .capabilities
@@ -164,7 +154,7 @@ impl AgentCall {
         AgentConfig {
             capabilities,
             model,
-            reasoning_effort,
+            model_variant,
             session_id: self.config.session_id.clone(),
             provider: self.config.provider.clone(),
             sub_agent: true,
@@ -184,15 +174,9 @@ impl AgentCall {
         mut snapshot: DynamicStateSnapshot,
     ) -> DynamicStateSnapshot {
         // Default policy: no file mutation tools and no nested delegation in low tier.
-        let denied: HashSet<&str> = [
-            "apply_patch",
-            "agent_call",
-            "agent_result",
-            "agent_output",
-            "agent_kill",
-        ]
-        .into_iter()
-        .collect();
+        let denied: HashSet<&str> = ["apply_patch", "agent_call", "agent_result", "agent_kill"]
+            .into_iter()
+            .collect();
 
         snapshot
             .tools
@@ -240,7 +224,7 @@ impl AgentCall {
                 .filter(|name| {
                     !matches!(
                         name.as_str(),
-                        "agent_call" | "agent_result" | "agent_output" | "agent_kill"
+                        "agent_call" | "agent_result" | "agent_kill" | "ask"
                     )
                 })
                 .collect();
@@ -256,7 +240,8 @@ impl AgentCall {
                     &self.config,
                     self.agent_models.clone(),
                     self.cancel.clone(),
-                ),
+                )
+                - "ask",
         )
     }
 
@@ -548,20 +533,6 @@ impl AgentCall {
         ToolResult::ok(result)
     }
 
-    /// Drain accumulated output without waiting (non-blocking).
-    fn agent_output(&self, id: &str) -> ToolResult {
-        let agents = self.agents.lock().unwrap();
-        match agents.get(id) {
-            Some(a) => {
-                let mut buf = a.buffer.lock().unwrap();
-                let output = buf.clone();
-                buf.clear();
-                ToolResult::ok(json!(output))
-            }
-            None => ToolResult::err_fmt(format_args!("No agent with id: {id}")),
-        }
-    }
-
     /// Cancel a running agent.
     async fn agent_kill(&self, id: &str) -> ToolResult {
         let cancel = {
@@ -598,11 +569,11 @@ impl ToolProvider for AgentCall {
                 name: "agent_call".into(),
                 description: vec![
                     crate::ToolText::new(
-                        r#"Spawn a sub-agent for scoped work and return a handle. Use `await agent_result(handle["id"])`, `await agent_output(handle["id"])`, or `await agent_kill(handle["id"])` with the returned id. Use `intelligence="low"` for fast read-only work; medium/high inherit the parent execution mode and parent history/memory read-only."#,
+                        r#"Spawn a sub-agent for scoped work and return a handle. Use `await agent_result(handle["id"])` or `await agent_kill(handle["id"])` with the returned id. Use `intelligence="low"` for fast read-only work; medium/high inherit the parent execution mode and parent history/memory read-only."#,
                         [crate::ExecutionMode::Repl],
                     ),
                     crate::ToolText::new(
-                        r#"Spawn a sub-agent for scoped work and return a handle. Use `agent_result(id)`, `agent_output(id)`, or `agent_kill(id)` with the returned id. Use `intelligence="low"` for fast read-only work; medium/high inherit the parent execution mode and parent history/memory read-only."#,
+                        r#"Spawn a sub-agent for scoped work and return a handle. Use `agent_result(id)` or `agent_kill(id)` with the returned id. Use `intelligence="low"` for fast read-only work; medium/high inherit the parent execution mode and parent history/memory read-only."#,
                         [crate::ExecutionMode::Standard],
                     ),
                 ],
@@ -627,10 +598,6 @@ impl ToolProvider for AgentCall {
                         [crate::ExecutionMode::Repl],
                     ),
                     crate::ToolText::new(
-                        "text = await agent_output(handle[\"id\"])",
-                        [crate::ExecutionMode::Repl],
-                    ),
-                    crate::ToolText::new(
                         "handle = agent_call(prompt=\"Summarize the auth flow\", intelligence=\"low\")",
                         [crate::ExecutionMode::Standard],
                     ),
@@ -652,21 +619,6 @@ impl ToolProvider for AgentCall {
                     ToolParam::optional("timeout", "float"),
                 ],
                 returns: "dict".into(),
-                examples: vec![],
-                hidden: false,
-        inject_into_prompt: false,
-            },
-            ToolDefinition {
-                name: "agent_output".into(),
-                description: vec![crate::ToolText::new(
-                    "Read and drain buffered output from a running sub-agent. Non-blocking; returns an empty string if nothing new is available.",
-                    [
-                        crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::Standard,
-                    ],
-                )],
-                params: vec![ToolParam::typed("id", "str")],
-                returns: "str".into(),
                 examples: vec![],
                 hidden: false,
         inject_into_prompt: false,
@@ -699,13 +651,6 @@ impl ToolProvider for AgentCall {
                 };
                 let timeout = args.get("timeout").and_then(|v| v.as_f64());
                 self.agent_result(id, timeout, None).await
-            }
-            "agent_output" => {
-                let id = match require_str(args, "id") {
-                    Ok(s) => s,
-                    Err(e) => return e,
-                };
-                self.agent_output(id)
             }
             "agent_kill" => {
                 let id = match require_str(args, "id") {
@@ -759,15 +704,15 @@ mod tests {
             ..Default::default()
         };
 
-        let (m_low, r_low) = pick_model_and_reasoning(&config, &None, &Tier::Low);
+        let (m_low, r_low) = pick_model_and_variant(&config, &None, &Tier::Low);
         assert_eq!(m_low, "gpt-5.3-codex-spark");
         assert_eq!(r_low, None);
 
-        let (m_mid, r_mid) = pick_model_and_reasoning(&config, &None, &Tier::Medium);
+        let (m_mid, r_mid) = pick_model_and_variant(&config, &None, &Tier::Medium);
         assert_eq!(m_mid, "gpt-5.4");
         assert_eq!(r_mid.as_deref(), Some("medium"));
 
-        let (m_high, r_high) = pick_model_and_reasoning(&config, &None, &Tier::High);
+        let (m_high, r_high) = pick_model_and_variant(&config, &None, &Tier::High);
         assert_eq!(m_high, "gpt-5.4");
         assert_eq!(r_high.as_deref(), Some("high"));
     }
@@ -785,7 +730,7 @@ mod tests {
             high: Some("gpt-5.4".to_string()),
         });
 
-        let (m, r) = pick_model_and_reasoning(&config, &models, &Tier::High);
+        let (m, r) = pick_model_and_variant(&config, &models, &Tier::High);
         assert_eq!(m, "gpt-5.4");
         assert_eq!(r.as_deref(), Some("high"));
     }

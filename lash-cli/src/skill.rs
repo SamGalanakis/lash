@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 /// A skill loaded from a markdown file with YAML frontmatter.
 pub struct Skill {
     pub name: String,
@@ -56,8 +54,9 @@ pub struct SkillRegistry {
 }
 
 impl SkillRegistry {
-    /// Load skills from global (~/.lash/skills/) and project-local (.lash/skills/) directories.
-    /// Project-local skills override global ones by name.
+    /// Load skills from global (~/.lash/skills/) and repo-local directories.
+    /// Repo-local skills override global ones by name, with `.agents/lash/skills/` preferred
+    /// over the legacy `.lash/skills/` path.
     pub fn load() -> Self {
         let mut skills = Vec::new();
 
@@ -65,8 +64,12 @@ impl SkillRegistry {
         let global_dir = lash_core::lash_home().join("skills");
         Self::load_dir(&global_dir, &mut skills);
 
-        // Project-local skills (override global by name)
-        let local_dir = PathBuf::from(".lash").join("skills");
+        // Legacy repo-local skills
+        let legacy_local_dir = lash_core::legacy_repo_local_lash_dir().join("skills");
+        Self::load_dir(&legacy_local_dir, &mut skills);
+
+        // Preferred repo-local skills (override global + legacy by name)
+        let local_dir = lash_core::repo_local_lash_dir().join("skills");
         Self::load_dir(&local_dir, &mut skills);
 
         skills.sort_by(|a, b| a.name.cmp(&b.name));

@@ -108,14 +108,7 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
         description: "Core file navigation and discovery.",
         prompt_section: None,
         helper_bindings: &[],
-        tools: &[
-            "read_file",
-            "glob",
-            "grep",
-            "ls",
-            "list_tools",
-            "search_tools",
-        ],
+        tools: &["read_file", "glob", "grep", "ls", "search_tools"],
         enabled_by_default: true,
     },
     CapabilityDefinition {
@@ -155,6 +148,7 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
             "tasks_summary",
             "get_task",
             "create_task",
+            "start_task",
             "update_task",
             "delete_task",
             "claim_task",
@@ -165,9 +159,11 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
         id: CapabilityId::Planning,
         name: "Planning",
         description: "Native plan tracking for substantial multi-step work.",
-        prompt_section: None,
+        prompt_section: Some(
+            "## Planning\n\nUse `update_plan` for substantial multi-step work, not for trivial or single-step requests. Keep plans short, concrete, and easy to verify. There should be at most one `in_progress` step at a time; mark completed work promptly and keep the next active step current while you work. Do not restate the full plan after calling `update_plan`; the runtime already surfaces it. `update_plan` is a checklist tool for normal execution turns, not for plan mode.",
+        ),
         helper_bindings: &[],
-        tools: &["update_plan"],
+        tools: &["update_plan", "ask"],
         enabled_by_default: true,
     },
     CapabilityDefinition {
@@ -178,7 +174,7 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
             "## Delegation\n\nUse `agent_call` for scoped sub-tasks. Prefer low-intelligence delegates for read-only lookup/summarization work, and avoid overlapping file edits across concurrent delegates.",
         ),
         helper_bindings: &[],
-        tools: &["agent_call", "agent_result", "agent_output", "agent_kill"],
+        tools: &["agent_call", "agent_result", "agent_kill"],
         enabled_by_default: true,
     },
     CapabilityDefinition {

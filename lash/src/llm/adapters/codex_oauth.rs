@@ -346,25 +346,17 @@ impl LlmTransport for CodexOAuthAdapter {
         match tier {
             "low" => Some(ModelSelection {
                 model: "gpt-5.3-codex-spark",
-                reasoning_effort: None,
+                variant: Some("low"),
             }),
             "medium" => Some(ModelSelection {
                 model: "gpt-5.4",
-                reasoning_effort: Some("medium"),
+                variant: Some("medium"),
             }),
             "high" => Some(ModelSelection {
                 model: "gpt-5.4",
-                reasoning_effort: Some("high"),
+                variant: Some("high"),
             }),
             _ => None,
-        }
-    }
-
-    fn reasoning_effort_for_model(&self, model: &str) -> Option<&'static str> {
-        if matches!(model, "gpt-5.4" | "gpt-5.3-codex") {
-            Some("high")
-        } else {
-            None
         }
     }
 
@@ -422,7 +414,7 @@ impl LlmTransport for CodexOAuthAdapter {
             "store": false,
             "instructions": "",
         });
-        if let Some(effort) = req.reasoning_effort {
+        if let Some(effort) = req.model_variant {
             body["reasoning"] = json!({"effort": effort});
         }
         if !req.tools.is_empty() {
@@ -733,7 +725,7 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
             attachments: vec![],
             tools: vec![],
             tool_choice: crate::llm::types::LlmToolChoice::None,
-            reasoning_effort: None,
+            model_variant: None,
             session_id: None,
             stream_events: None,
         };

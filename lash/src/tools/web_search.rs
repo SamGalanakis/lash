@@ -23,7 +23,7 @@ impl ToolProvider for WebSearch {
         vec![ToolDefinition {
             name: "search_web".into(),
             description: vec![crate::ToolText::new(
-                "Search the web via Tavily. Returns `{results: [...], answer?: str}` where each result has `title`, `url`, and `content`.",
+                "Search the web for candidate sources. Returns `{results, answer?}` with snippet text; use `fetch_url` when you need the page itself.",
                 [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             params: vec![

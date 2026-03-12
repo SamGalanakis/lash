@@ -39,7 +39,7 @@ pub async fn load_resumed_session(
     turn_counter: &mut usize,
     execution_mode: &mut ExecutionMode,
     provider: &Provider,
-    current_reasoning_effort: &mut Option<String>,
+    current_model_variant: &mut Option<String>,
     dynamic_tools: &Arc<DynamicToolProvider>,
     desired_dynamic: &mut DynamicStateSnapshot,
 ) -> Result<(), String> {
@@ -49,6 +49,7 @@ pub async fn load_resumed_session(
     *history = loaded.messages;
     app.blocks = loaded.blocks;
     app.last_response_usage = loaded.last_token_usage;
+    app.plugin_mode_indicators = loaded.plugin_mode_indicators;
     app.blocks.push(DisplayBlock::SystemMessage(format!(
         "Resumed: {}",
         filename
@@ -61,7 +62,7 @@ pub async fn load_resumed_session(
         turn_counter,
         execution_mode,
         provider,
-        current_reasoning_effort,
+        current_model_variant,
         dynamic_tools,
         desired_dynamic,
     )
@@ -80,7 +81,7 @@ pub async fn restore_agent_state(
     turn_counter: &mut usize,
     execution_mode: &mut ExecutionMode,
     provider: &Provider,
-    current_reasoning_effort: &mut Option<String>,
+    current_model_variant: &mut Option<String>,
     dynamic_tools: &Arc<DynamicToolProvider>,
     desired_dynamic: &mut DynamicStateSnapshot,
 ) {
@@ -126,22 +127,24 @@ pub async fn restore_agent_state(
             app.model = restored_model.to_string();
             app.context_window = provider.context_window(&app.model);
             if let Some(rt) = runtime.as_mut() {
-                rt.set_model(app.model.clone());
+                rt.update_session_config(None, Some(app.model.clone()), None, None)
+                    .await;
             }
         }
-        *current_reasoning_effort = config_value
+        *current_model_variant = config_value
             .as_ref()
             .and_then(|v| {
                 v.get("manifest")
-                    .and_then(|m| m.get("reasoning_effort"))
+                    .and_then(|m| m.get("model_variant").or_else(|| m.get("reasoning_effort")))
                     .and_then(|m| m.as_str())
                     .map(str::to_string)
             })
             .or_else(|| {
                 provider
-                    .reasoning_effort_for_model(&app.model)
+                    .default_model_variant(&app.model)
                     .map(str::to_string)
             });
+        app.set_model_variant(current_model_variant.clone());
         let requested_execution_mode = config_value
             .as_ref()
             .and_then(|v| {
@@ -180,7 +183,8 @@ pub async fn restore_agent_state(
         if matches!(restored_execution_mode, ExecutionMode::Repl) {
             if let Some(ref repl_snapshot) = state.repl_snapshot {
                 if let Some(rt) = runtime.as_mut() {
-                    rt.set_context_folding(restored_context_folding);
+                    rt.update_session_config(None, None, None, Some(restored_context_folding))
+                        .await;
                     match rt.restore_repl(repl_snapshot).await {
                         Ok(()) => {
                             app.blocks.push(DisplayBlock::SystemMessage(
@@ -229,7 +233,8 @@ pub async fn restore_agent_state(
         }
 
         if let Some(rt) = runtime.as_mut() {
-            rt.set_reasoning_effort(current_reasoning_effort.clone());
+            rt.update_session_config(None, None, Some(current_model_variant.clone()), None)
+                .await;
             rt.set_capabilities(lash_core::agent_capabilities_from_profile(
                 &dynamic_tools.profile(),
             ));
