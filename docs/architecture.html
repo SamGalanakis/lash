@@ -739,7 +739,7 @@
           </div>
           <div class="cell">
             <h4>Execution Mode</h4>
-            <p><code>repl</code> and <code>native-tools</code> use different model-output contracts, but both flow back into the same <code>AssembledTurn</code> host result.</p>
+            <p><code>repl</code> and <code>standard</code> use different model-output contracts, but both flow back into the same <code>AssembledTurn</code> host result.</p>
           </div>
           <div class="cell">
             <h4>Context Control</h4>
@@ -788,7 +788,7 @@
             <p>
               <code>PrepareIteration</code> &rarr; assembles prompt, applies context folding, emits <code>LlmCall</code>.<br>
               <code>WaitingLlm</code> &rarr; awaiting provider response (REPL mode processes streaming deltas via <code>handle_llm_delta</code>).<br>
-              <code>WaitingTools</code> &rarr; native-tools mode, parallel tool calls in flight.<br>
+              <code>WaitingTools</code> &rarr; standard mode, parallel tool calls in flight.<br>
               <code>WaitingExec</code> &rarr; REPL mode, sandbox executing a code block.<br>
               <code>WaitingRetry</code> &rarr; backoff sleep before LLM retry.<br>
               <code>Finished</code> &rarr; terminal.
@@ -819,7 +819,7 @@
    │─────────────────────────&gt;│ (parses tool calls / fence)
    │                            │
    │  poll_effect()             │
-   │&lt;── ToolCall { id, ... } ──│ state = WaitingTools  (native-tools)
+   │&lt;── ToolCall { id, ... } ──│ state = WaitingTools  (standard)
    │&lt;── ExecCode { id, code } ─│ state = WaitingExec   (repl)
    │&lt;── Emit(AgentEvent) ──────│ (fire-and-forget, keep polling)
    │                            │
@@ -919,11 +919,13 @@ pub struct Config {
 I'll add the timeout field.
 
 <span class="tag">&lt;repl&gt;</span>
-<span class="fn">edit_file</span>(
-    <span class="str">"src/config.rs"</span>,
-    find=<span class="str">"pub host: String,"</span>,
-    replace=<span class="str">"pub host: String,\n    pub timeout_ms: u64,"</span>
-)
+<span class="fn">T.apply_patch</span>(<span class="str">"""*** Begin Patch
+*** Update File: src/config.rs
+@@
+-    pub host: String,
++    pub host: String,
++    pub timeout_ms: u64,
+*** End Patch"""</span>)
 <span class="fn">done</span>(<span class="str">"Added `timeout_ms: u64` field to the Config struct."</span>)
 <span class="tag">&lt;/repl&gt;</span></pre>
         </div>
@@ -1024,7 +1026,7 @@ models, routes = <span class="kw">await</span> asyncio.<span class="fn">gather</
             <h4>Tool Access</h4>
             <p>
               The runtime exposes the available tools as native tool call schemas. Use only the tools shown in Available Tools.
-              Prefer parallel independent calls in one turn. If <code>batch</code> is available, prefer it for 2+ independent calls.
+              Prefer parallel independent calls in one turn when the arguments are already known. Use <code>batch</code> only as an optional fallback utility, not the default pattern.
               Never invent tool names or arguments.
             </p>
           </div>
@@ -1098,10 +1100,8 @@ I'll read both files at once.
 
 <span class="cm">── turn 2: edit based on content ──</span>
 <span class="role">assistant:</span>
-<span class="kw">tool_call:</span> <span class="fn">edit_file</span>
-  <span class="str">path</span>: "src/config.rs"
-  <span class="str">old_text</span>: "pub host: String,"
-  <span class="str">new_text</span>: "pub host: String,\n    pub timeout_ms: u64,"
+<span class="kw">tool_call:</span> <span class="fn">apply_patch</span>
+  <span class="str">patch</span>: "*** Begin Patch\n*** Update File: src/config.rs\n@@\n-    pub host: String,\n+    pub host: String,\n+    pub timeout_ms: u64,\n*** End Patch"
 
 <span class="cm">── turn 3: final answer ──</span>
 <span class="role">assistant:</span>
@@ -1112,7 +1112,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
           <div class="example-label">Example &mdash; Batch tool (when available)</div>
           <pre><span class="role">assistant:</span>
 <span class="kw">tool_call:</span> <span class="fn">batch</span>
-  <span class="str">invocations</span>:
+  <span class="str">tool_calls</span>:
     - <span class="fn">read_file</span> { <span class="str">path</span>: "src/config.rs" }
     - <span class="fn">read_file</span> { <span class="str">path</span>: "src/main.rs" }
     - <span class="fn">grep</span>    { <span class="str">pattern</span>: "timeout", <span class="str">path</span>: "src/" }</pre>
@@ -1179,7 +1179,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="cell-grid cols-3">
           <div class="cell">
             <h4>Core Tools</h4>
-            <p><code>read_file</code>, <code>edit_file</code>, <code>write_file</code>, <code>find_replace</code>, <code>shell</code>, <code>glob</code>, <code>grep</code>, <code>ls</code>.</p>
+            <p><code>read_file</code>, <code>apply_patch</code>, <code>exec_command</code>, <code>write_stdin</code>, <code>shell</code>, <code>shell_wait</code>, <code>shell_read</code>, <code>shell_write</code>, <code>shell_kill</code>, <code>glob</code>, <code>grep</code>, <code>ls</code>, <code>update_plan</code>.</p>
           </div>
           <div class="cell">
             <h4>Reconfigure</h4>
@@ -1187,7 +1187,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
           </div>
           <div class="cell">
             <h4>Discovery</h4>
-            <p><code>list_tools</code>, <code>search_tools</code>, and <code>help(tool_name)</code> let the model discover tools not injected into the prompt.</p>
+            <p><code>list_tools</code> and <code>search_tools</code> let the model discover tools not injected into the prompt.</p>
           </div>
         </div>
       </div>
@@ -1197,12 +1197,12 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="arch-card-title">Sub-Agent Orchestration</div>
         <div class="arch-card-desc">
           <code>agent_call</code> forks parent dynamic state per sub-agent. Sub-agents share the same filesystem/worktree
-          but get isolated tool/capability state. Low tier sub-agents are filtered (no write/delegation tools) and always execute in <code>native-tools</code>; medium/high inherit the parent session's execution mode. REPL-only setup (<code>done(...)</code> wrappers, history/memory tool registration) only applies when the child actually runs in <code>repl</code>.
+          but get isolated tool/capability state. Low tier sub-agents are filtered (no write/delegation tools) and always execute in <code>standard</code>; medium/high inherit the parent session's execution mode. REPL-only setup (<code>done(...)</code> wrappers, history/memory tool registration) only applies when the child actually runs in <code>repl</code>.
         </div>
         <div class="cell-grid cols-3">
           <div class="cell">
             <h4>Tiers</h4>
-            <p>Low (read-only lookup, forced native-tools), medium (general), high (full capability). Each tier has a filtered tool set.</p>
+            <p>Low (read-only lookup, forced standard), medium (general), high (full capability). Each tier has a filtered tool set.</p>
           </div>
           <div class="cell">
             <h4>Recall Pattern</h4>
@@ -1293,11 +1293,11 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
           </div>
           <div class="cell">
             <h4>Core Write</h4>
-            <p><code>write_file</code>, <code>edit_file</code>, <code>find_replace</code>. File mutation tools.</p>
+            <p><code>apply_patch</code>. File mutation tool.</p>
           </div>
           <div class="cell">
             <h4>Shell</h4>
-            <p><code>shell</code>, <code>shell_wait</code>, <code>shell_read</code>, <code>shell_write</code>, <code>shell_kill</code>. Process handles.</p>
+            <p><code>exec_command</code> and <code>write_stdin</code> in standard mode, plus <code>shell</code>, <code>shell_wait</code>, <code>shell_read</code>, <code>shell_write</code>, <code>shell_kill</code> in REPL mode.</p>
           </div>
           <div class="cell">
             <h4>Tasks</h4>
@@ -1305,7 +1305,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
           </div>
           <div class="cell">
             <h4>Planning</h4>
-            <p><code>enter_plan_mode</code>, <code>exit_plan_mode</code>. Interactive plan lifecycle.</p>
+            <p><code>update_plan</code>. In-memory plan tracking for substantial multi-step work.</p>
           </div>
           <div class="cell">
             <h4>Delegation</h4>
@@ -1348,7 +1348,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="arch-card-title">Persistent Key-Value Memory</div>
         <div class="arch-card-desc">
           Memory is persistent key-value storage across context pruning. Use it to store durable decisions,
-          conventions, and project-specific knowledge. Accessed via host tool calls (<code>T.mem_set</code>, <code>T.mem_get</code>, <code>T.mem_delete</code>, <code>T.search_mem</code>) in REPL mode, or the bare tool names in native-tools mode.
+          conventions, and project-specific knowledge. Accessed via host tool calls (<code>T.mem_set</code>, <code>T.mem_get</code>, <code>T.mem_delete</code>, <code>T.search_mem</code>) in REPL mode, or the bare tool names in standard mode.
         </div>
         <div class="cell-grid cols-2">
           <div class="cell">
@@ -1576,7 +1576,7 @@ skill = <span class="fn">load_skill</span>(<span class="str">"frontend-design"</
         <div class="step">
           <span class="step-num">04</span>
           <strong>Mode Exec</strong>
-          <p>Execution diverges here: persistent Monty REPL for <code>repl</code>, provider-native tool loop for <code>native-tools</code>.</p>
+          <p>Execution diverges here: persistent Monty REPL for <code>repl</code>, provider-native tool loop for <code>standard</code>.</p>
         </div>
         <div class="step">
           <span class="step-num">05</span>

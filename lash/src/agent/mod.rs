@@ -505,6 +505,7 @@ pub(crate) fn build_execution_preamble(
     let mut prompt_tools: Vec<_> = all_tools
         .iter()
         .filter(|t| t.inject_into_prompt)
+        .filter(|t| !t.description_for(mode).is_empty())
         .cloned()
         .collect();
     if matches!(mode, ExecutionMode::Repl) {
@@ -513,7 +514,10 @@ pub(crate) fn build_execution_preamble(
         }
     }
     let mut tool_list = ToolDefinition::format_tool_docs(&prompt_tools, mode);
-    let omitted_tool_count = all_tools.iter().filter(|t| !t.inject_into_prompt).count();
+    let omitted_tool_count = all_tools
+        .iter()
+        .filter(|t| !t.inject_into_prompt || t.description_for(mode).is_empty())
+        .count();
     if omitted_tool_count > 0 {
         let note = match mode {
             ExecutionMode::Repl => format!(
@@ -530,6 +534,7 @@ pub(crate) fn build_execution_preamble(
     let tool_specs = if matches!(mode, ExecutionMode::Standard) {
         all_tools
             .iter()
+            .filter(|tool| !tool.description_for(ExecutionMode::Standard).is_empty())
             .map(|tool| LlmToolSpec {
                 name: tool.name.clone(),
                 description: tool.description_for(ExecutionMode::Standard),
@@ -549,9 +554,7 @@ pub(crate) fn build_execution_preamble(
         .as_ref()
         .map(|p| p.prompt_sections.clone())
         .unwrap_or_default();
-    let can_write = tool_names
-        .iter()
-        .any(|name| matches!(name.as_str(), "write_file" | "edit_file" | "find_replace"));
+    let can_write = tool_names.iter().any(|name| name == "apply_patch");
     let history_enabled = tool_names.iter().any(|name| name == "search_history")
         || helper_bindings.contains("search_history");
     let instruction_source = Arc::clone(&config.instruction_source);

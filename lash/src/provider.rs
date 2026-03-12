@@ -207,6 +207,10 @@ impl Provider {
         })
     }
 
+    pub fn input_usage_excludes_cached_tokens(&self) -> bool {
+        matches!(self, Provider::Claude { .. })
+    }
+
     /// Validate model syntax and local catalog availability for this provider.
     pub fn validate_model(&self, model: &str) -> Result<(), String> {
         let m = model.trim();

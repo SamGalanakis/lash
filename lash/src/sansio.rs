@@ -4,7 +4,7 @@
 //! execution modes. The host event loop drives the machine by calling
 //! `poll_effect()` and feeding responses back via `handle_response()`.
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,16 +16,15 @@ use crate::agent::message::IMAGE_REF_PREFIX;
 use crate::agent::{
     AgentEvent, ErrorEnvelope, LLM_MAX_RETRIES, LLM_RETRY_DELAYS, Message, MessageRole, Part,
     PartKind, PromptComposeInput, PromptProfile, PromptSectionOverride, PruneState, TokenUsage,
-    TurnTerminationPolicyState, apply_context_folding, build_assistant_parts,
-    compose_system_prompt, format_tool_result_content, is_malformed_assistant_output,
-    log_llm_debug, make_error_event, parse_fence_line, render_transcript_prompt,
-    resolve_context_instructions, truncate_raw_error,
+    TurnTerminationPolicyState, build_assistant_parts, compose_system_prompt,
+    format_tool_result_content, is_malformed_assistant_output, log_llm_debug, make_error_event,
+    parse_fence_line, render_transcript_prompt, resolve_context_instructions, truncate_raw_error,
 };
 use crate::instructions::InstructionSource;
 use crate::llm::types::{
     LlmAttachment, LlmOutputPart, LlmRequest, LlmResponse, LlmToolChoice, LlmToolSpec, LlmUsage,
 };
-use crate::{ContextFoldingConfig, ExecutionMode, ToolCallRecord, ToolResult};
+use crate::{ExecutionMode, ToolCallRecord, ToolResult};
 
 // ─── Public types ───
 
@@ -102,8 +101,6 @@ pub enum Response {
 pub struct TurnMachineConfig {
     pub execution_mode: ExecutionMode,
     pub model: String,
-    pub context_folding: ContextFoldingConfig,
-    pub max_context_tokens: usize,
     pub max_turns: Option<usize>,
     pub headless: bool,
     pub sub_agent: bool,
@@ -200,7 +197,7 @@ enum MachineState {
         fence: Option<FenceState>,
     },
     WaitingTools {
-        pending: HashSet<EffectId>,
+        pending: HashMap<EffectId, Value>,
         completed: Vec<CompletedToolCall>,
         assistant_text: String,
     },
@@ -227,7 +224,6 @@ pub struct TurnMachine {
     iteration: usize,
     run_offset: usize,
     cumulative_usage: TokenUsage,
-    last_input_tokens: usize,
     termination: TurnTerminationPolicyState,
 }
 
@@ -254,7 +250,6 @@ impl TurnMachine {
             iteration: run_offset,
             run_offset,
             cumulative_usage: TokenUsage::default(),
-            last_input_tokens: 0,
             termination: TurnTerminationPolicyState::new(),
         }
     }
@@ -306,15 +301,6 @@ impl TurnMachine {
     // ─── State transitions ───
 
     fn prepare_iteration(&mut self) {
-        // Context folding
-        let fold = apply_context_folding(
-            &mut self.messages,
-            self.last_input_tokens,
-            self.config.max_context_tokens,
-            self.config.context_folding,
-            self.config.history_enabled,
-        );
-
         self.emit(AgentEvent::LlmRequest {
             iteration: self.iteration,
             message_count: self.messages.len(),
@@ -333,7 +319,10 @@ impl TurnMachine {
             context: "",
             tool_list: &self.config.tool_list,
             tool_names: &self.config.tool_names,
-            has_history: fold.has_archived_history,
+            has_history: self
+                .messages
+                .iter()
+                .any(|message| message.id == "__context_archive__"),
             helper_bindings: &self.config.helper_bindings,
             capability_prompt_sections: &self.config.capability_prompt_sections,
             plugin_prompt_sections: &self.config.plugin_prompt_sections,
@@ -609,7 +598,6 @@ impl TurnMachine {
             cached_input_tokens: llm_response.usage.cached_input_tokens,
             reasoning_tokens: llm_response.usage.reasoning_tokens,
         };
-        self.last_input_tokens = usage.input_tokens as usize;
         self.cumulative_usage.add(&usage);
         self.emit(AgentEvent::TokenUsage {
             iteration: self.iteration,
@@ -707,7 +695,7 @@ impl TurnMachine {
             });
         }
 
-        let mut pending = HashSet::new();
+        let mut pending = HashMap::new();
         for (call_id, tool_name, input_json) in &tool_calls {
             assistant_parts.push(Part {
                 id: format!("{}.p{}", asst_id, assistant_parts.len()),
@@ -721,7 +709,7 @@ impl TurnMachine {
             let args =
                 serde_json::from_str::<Value>(input_json).unwrap_or_else(|_| serde_json::json!({}));
             let effect_id = self.next_id();
-            pending.insert(effect_id);
+            pending.insert(effect_id, args.clone());
             self.pending_effects.push_back(Effect::ToolCall {
                 id: effect_id,
                 call_id: call_id.clone(),
@@ -755,7 +743,14 @@ impl TurnMachine {
         duration_ms: u64,
     ) {
         // Emit the event first (borrows self.pending_effects, not self.state)
-        let args_val = serde_json::json!({});
+        let args_val = if let MachineState::WaitingTools { pending, .. } = &self.state {
+            pending
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
         self.emit(AgentEvent::ToolCall {
             name: tool_name.clone(),
             args: args_val.clone(),
@@ -768,11 +763,11 @@ impl TurnMachine {
             pending, completed, ..
         } = &mut self.state
         {
-            pending.remove(&id);
+            let completed_args = pending.remove(&id).unwrap_or_else(|| serde_json::json!({}));
             completed.push(CompletedToolCall {
                 call_id,
                 tool_name,
-                args: args_val,
+                args: completed_args,
                 result,
                 duration_ms,
             });
@@ -962,7 +957,6 @@ impl TurnMachine {
                     cached_input_tokens: llm_response.usage.cached_input_tokens,
                     reasoning_tokens: llm_response.usage.reasoning_tokens,
                 };
-                self.last_input_tokens = usage.input_tokens as usize;
                 self.cumulative_usage.add(&usage);
                 self.emit(AgentEvent::TokenUsage {
                     iteration: self.iteration,
@@ -1537,8 +1531,6 @@ mod tests {
         TurnMachineConfig {
             execution_mode: mode,
             model: "test-model".to_string(),
-            context_folding: ContextFoldingConfig::default(),
-            max_context_tokens: 200_000,
             max_turns: None,
             headless: false,
             sub_agent: false,
@@ -1707,6 +1699,70 @@ mod tests {
 
         let effects = drain_effects(&mut machine);
         assert!(find_done(&effects).is_some());
+    }
+
+    #[test]
+    fn standard_tool_results_preserve_original_args() {
+        let config = test_config(ExecutionMode::Standard);
+        let msgs = vec![user_message("what time is it")];
+        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+
+        let effects = drain_effects(&mut machine);
+        let llm_id = *find_llm_call(&effects).expect("should emit LlmCall");
+
+        machine.handle_response(Response::LlmComplete {
+            id: llm_id,
+            text_streamed: false,
+            result: Ok(LlmResponse {
+                parts: vec![LlmOutputPart::ToolCall {
+                    call_id: "tc1".to_string(),
+                    tool_name: "exec_command".to_string(),
+                    input_json: r#"{"cmd":"date","workdir":"/tmp"}"#.to_string(),
+                }],
+                ..LlmResponse::default()
+            }),
+        });
+
+        let effects = drain_effects(&mut machine);
+        let (tool_id, call_id, tool_name, args) = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::ToolCall {
+                    id,
+                    call_id,
+                    tool_name,
+                    args,
+                } => Some((*id, call_id.clone(), tool_name.clone(), args.clone())),
+                _ => None,
+            })
+            .expect("should emit ToolCall effect");
+        assert_eq!(args, serde_json::json!({"cmd":"date","workdir":"/tmp"}));
+
+        machine.handle_response(Response::ToolResult {
+            id: tool_id,
+            call_id,
+            tool_name,
+            result: crate::ToolResult::ok(serde_json::json!({
+                "output": "ok",
+                "exit_code": 0,
+                "timed_out": false,
+                "duration_ms": 1
+            })),
+            duration_ms: 1,
+        });
+
+        let effects = drain_effects(&mut machine);
+        let tool_event = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::Emit(AgentEvent::ToolCall { args, .. }) => Some(args.clone()),
+                _ => None,
+            })
+            .expect("should emit ToolCall event");
+        assert_eq!(
+            tool_event,
+            serde_json::json!({"cmd":"date","workdir":"/tmp"})
+        );
     }
 
     #[test]

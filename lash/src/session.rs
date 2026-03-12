@@ -121,6 +121,7 @@ impl Session {
                 .tools()
                 .definitions()
                 .into_iter()
+                .filter(|def| !def.description_for(crate::ExecutionMode::Repl).is_empty())
                 .map(|def| def.project(crate::ExecutionMode::Repl))
                 .collect();
             let tools_json = serde_json::to_string(&defs).unwrap_or_else(|_| "[]".to_string());
@@ -399,6 +400,7 @@ impl Session {
             .tools()
             .definitions()
             .into_iter()
+            .filter(|def| !def.description_for(crate::ExecutionMode::Repl).is_empty())
             .map(|def| def.project(crate::ExecutionMode::Repl))
             .collect();
         let tools_json = serde_json::to_string(&defs).unwrap_or_else(|_| "[]".to_string());

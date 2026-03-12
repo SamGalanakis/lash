@@ -1413,12 +1413,12 @@ mod tests {
 
     // ── All core tool definitions survive the call_payload round-trip ──
 
-    /// For every tool in ToolSet::core(), verify that its params can be
+    /// For every REPL core tool, verify that its params can be
     /// fed through call_payload and produce a valid JSON payload (no panics,
     /// no errors from the serialization layer).
     #[test]
     fn all_core_tool_params_round_trip_through_call_payload() {
-        let toolset = crate::tools::ToolSet::core();
+        let toolset = crate::tools::ToolSet::core_for(crate::ExecutionMode::Repl);
         let defs = toolset.definitions();
         assert!(!defs.is_empty(), "core toolset should have tools");
 
@@ -1468,6 +1468,26 @@ mod tests {
     fn all_core_tool_results_survive_parse_tool_reply() {
         // Realistic result shapes that tools return
         let result_shapes: Vec<(&str, Value)> = vec![
+            // exec_command returns structured output
+            (
+                "exec_command",
+                json!({
+                    "wall_time_seconds": 0.12,
+                    "exit_code": 0,
+                    "original_token_count": 3,
+                    "output": "/tmp\n"
+                }),
+            ),
+            // write_stdin returns structured output
+            (
+                "write_stdin",
+                json!({
+                    "wall_time_seconds": 0.03,
+                    "session_id": 12,
+                    "original_token_count": 2,
+                    "output": "partial output\n"
+                }),
+            ),
             // shell returns a handle dict
             ("shell", json!({"id": "proc_abc", "pid": 12345})),
             // shell_wait returns output string
@@ -1480,12 +1500,16 @@ mod tests {
             ("shell_kill", Value::Null),
             // read_file returns file content
             ("read_file", json!("fn main() {}\n")),
-            // write_file returns confirmation
-            ("write_file", json!("wrote 42 bytes")),
-            // edit_file returns confirmation
-            ("edit_file", json!("applied 1 edit")),
-            // find_replace returns confirmation
-            ("find_replace", json!("replaced 3 occurrences")),
+            // apply_patch returns a structured patch result
+            (
+                "apply_patch",
+                json!({
+                    "__type__": "patch_result",
+                    "summary": "Applied patch to 1 file",
+                    "files": [{"path": "src/lib.rs", "status": "modified", "diff": "@@"}],
+                    "diff": "@@"
+                }),
+            ),
             // glob returns file list
             ("glob", json!(["src/main.rs", "src/lib.rs"])),
             // grep returns matches
@@ -1495,8 +1519,16 @@ mod tests {
             ),
             // ls returns directory listing
             ("ls", json!(["src/", "Cargo.toml", "README.md"])),
-            // plan_mode returns confirmation
-            ("plan_mode", json!("entered plan mode")),
+            // update_plan returns a structured plan payload
+            (
+                "update_plan",
+                json!({
+                    "__type__": "plan_update",
+                    "summary": "updated plan · 1 steps, 0 completed, 1 in progress",
+                    "explanation": "Planning the work.",
+                    "plan": [{"step": "Inspect renderer", "status": "in_progress"}]
+                }),
+            ),
         ];
 
         for (tool_name, result_value) in &result_shapes {

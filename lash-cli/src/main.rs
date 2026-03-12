@@ -1,3 +1,4 @@
+mod activity;
 mod app;
 mod command;
 mod event;
@@ -374,15 +375,18 @@ async fn main() -> anyhow::Result<()> {
         PathBuf::from(".lash").join("skills"),
     ];
     let tavily_key = lash_config.tavily_api_key().unwrap_or_default().to_string();
-    let base_all = ToolSet::defaults(ToolSetDeps {
-        store: Some(Arc::clone(&store)),
-        tavily_api_key: if tavily_key.is_empty() {
-            None
-        } else {
-            Some(tavily_key)
+    let base_all = ToolSet::defaults_for(
+        execution_mode,
+        ToolSetDeps {
+            store: Some(Arc::clone(&store)),
+            tavily_api_key: if tavily_key.is_empty() {
+                None
+            } else {
+                Some(tavily_key)
+            },
+            skill_dirs: Some(skill_dirs),
         },
-        skill_dirs: Some(skill_dirs),
-    });
+    );
     let base_provider: Arc<dyn ToolProvider> = Arc::new(base_all);
     let plugin_host = PluginHost::new(vec![
         Arc::new(BuiltinHistoryPluginFactory::new(Arc::clone(&store))),
@@ -589,7 +593,6 @@ async fn run_headless(mut runtime: LashRuntime, prompt: String) -> anyhow::Resul
                 items,
                 image_blobs,
                 mode: Some(RunMode::Normal),
-                plan_file: None,
             },
             &sink,
             CancellationToken::new(),
@@ -922,7 +925,7 @@ fn help_text(skills: &skill::SkillRegistry) -> String {
         "  /fork [prompt]     Open a forked session in a new terminal".to_string(),
         "  /model [name]      Show or switch LLM model".to_string(),
         format!(
-            "  /mode [name]       Show or switch execution mode {}",
+            "  /mode [name]       Show current execution mode; new session required to change {}",
             execution_mode_usage()
         ),
         "  /provider          Open provider setup (in-app)".to_string(),
@@ -1271,34 +1274,7 @@ async fn run_app(
                     runtime_return_rx = None;
                     cancel_token = None;
 
-                    if app.plan_approved {
-                        let turn_input = TurnInput {
-                            items: Vec::new(),
-                            image_blobs: HashMap::new(),
-                            mode: Some(RunMode::Normal),
-                            plan_file: app
-                                .plan_file
-                                .as_ref()
-                                .map(|path| path.to_string_lossy().to_string()),
-                        };
-                        send_user_message(
-                            String::new(),
-                            turn_input.clone(),
-                            &mut app,
-                            logger,
-                            &mut runtime,
-                            &mut history,
-                            &mut runtime_return_rx,
-                            &mut cancel_token,
-                            &mut active_stream_id,
-                            &app_tx,
-                        );
-                        last_turn = Some(TurnReplayPayload {
-                            display_input: String::new(),
-                            turn_input,
-                            execution_mode: current_execution_mode,
-                        });
-                    } else if let Some(queued) = app.take_queued_message() {
+                    if let Some(queued) = app.take_queued_message() {
                         if let Err(e) = apply_pending_reconfigure(
                             &dynamic_tools,
                             &mut desired_dynamic,
@@ -1711,6 +1687,7 @@ async fn run_app(
                                             messages: history.clone(),
                                             iteration: turn_counter,
                                             token_usage: app.token_usage.clone(),
+                                            last_prompt_usage: None,
                                             execution_mode: current_execution_mode,
                                             task_state: None,
                                             subagent_state: None,
@@ -1797,7 +1774,7 @@ async fn run_app(
                                         push_system_message(
                                             &mut app,
                                             format!(
-                                                "Current execution mode: `{}`\nUsage: `/mode {}`",
+                                                "Current execution mode: `{}`\nThis is locked for the current session.\nStart a new session to use a different mode.\nUsage: `/mode {}`",
                                                 execution_mode_label(current_execution_mode),
                                                 execution_mode_usage()
                                             ),
@@ -1816,17 +1793,25 @@ async fn run_app(
                                             continue;
                                         }
                                     };
-                                    current_execution_mode = new_mode;
-                                    if let Some(rt) = runtime.as_mut() {
-                                        rt.set_execution_mode(new_mode);
+                                    if new_mode == current_execution_mode {
+                                        push_system_message(
+                                            &mut app,
+                                            format!(
+                                                "Execution mode is already `{}`.\nThis is locked for the current session.",
+                                                execution_mode_label(current_execution_mode)
+                                            ),
+                                        );
+                                    } else {
+                                        push_system_message(
+                                            &mut app,
+                                            format!(
+                                                "Execution mode is locked for the current session (`{}`).\nStart a new session with `--mode {}` to use `{}`.",
+                                                execution_mode_label(current_execution_mode),
+                                                execution_mode_label(new_mode),
+                                                execution_mode_label(new_mode)
+                                            ),
+                                        );
                                     }
-                                    push_system_message(
-                                        &mut app,
-                                        format!(
-                                            "Execution mode set to `{}`",
-                                            execution_mode_label(new_mode)
-                                        ),
-                                    );
                                 }
                                 command::Command::ChangeProvider => {
                                     paused.store(true, Ordering::Relaxed);
@@ -1988,9 +1973,6 @@ Use `/provider` or `/login` to sign in again without restarting.",
                                                 .unwrap_or_else(|_| b"[]".to_vec()),
                                         );
                                         current_execution_mode = previous.execution_mode;
-                                        if let Some(rt) = runtime.as_mut() {
-                                            rt.set_execution_mode(previous.execution_mode);
-                                        }
                                         send_user_message(
                                             previous.display_input.clone(),
                                             previous.turn_input.clone(),
@@ -2751,48 +2733,10 @@ Use `/provider` or `/login` to sign in again without restarting.",
                         response_tx,
                     });
                 } else {
-                    // Detect plan mode tool calls
-                    if let AgentEvent::ToolCall {
-                        ref name,
-                        success,
-                        ref result,
-                        ..
-                    } = event
-                        && name == "enter_plan_mode"
-                        && success
-                        && let Some(pf) = result.get("plan_file").and_then(|v| v.as_str())
-                    {
-                        app.mode = app::Mode::Plan;
-                        app.plan_file = Some(PathBuf::from(pf));
-                    }
-                    // Detect plan approval from final message
-                    if let AgentEvent::Message { ref text, ref kind } = event
-                        && kind == "final"
-                        && text.starts_with("Plan approved")
-                    {
-                        app.plan_approved = true;
-                    }
-
                     let is_done = matches!(event, AgentEvent::Done);
                     logger.log_event(&event);
                     app.handle_agent_event(event);
                     if is_done {
-                        // Display plan content if plan file was modified
-                        if app.mode == app::Mode::Plan
-                            && let Some(ref plan_path) = app.plan_file
-                        {
-                            let new_mtime = std::fs::metadata(plan_path)
-                                .ok()
-                                .and_then(|m| m.modified().ok());
-                            if new_mtime != app.plan_file_mtime && plan_path.exists() {
-                                app.plan_file_mtime = new_mtime;
-                                if let Ok(content) = std::fs::read_to_string(plan_path) {
-                                    app.blocks.push(DisplayBlock::PlanContent(content));
-                                    app.invalidate_height_cache();
-                                    app.scroll_to_bottom();
-                                }
-                            }
-                        }
                         if !app.focused {
                             notify_done();
                         }
@@ -2808,28 +2752,20 @@ Use `/provider` or `/login` to sign in again without restarting.",
 
     // Save input history
     app.save_history();
+    logger.flush()?;
 
     Ok(())
 }
 
 fn make_turn_input(
-    app: &mut App,
+    _app: &mut App,
     items: Vec<InputItem>,
     image_blobs: HashMap<String, Vec<u8>>,
 ) -> TurnInput {
-    let mode = match app.mode {
-        app::Mode::Normal => RunMode::Normal,
-        app::Mode::Plan => RunMode::Plan,
-    };
-    let plan_file = match app.mode {
-        app::Mode::Plan => Some(app.ensure_plan_file().display().to_string()),
-        app::Mode::Normal => app.plan_file.as_ref().map(|p| p.display().to_string()),
-    };
     TurnInput {
         items,
         image_blobs,
-        mode: Some(mode),
-        plan_file,
+        mode: Some(RunMode::Normal),
     }
 }
 
@@ -2999,24 +2935,12 @@ fn send_user_message(
     app: &mut App,
     logger: &mut SessionLogger,
     runtime: &mut Option<LashRuntime>,
-    history: &mut Vec<Message>,
+    _history: &mut Vec<Message>,
     runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
     cancel_token: &mut Option<CancellationToken>,
     active_stream_id: &mut u64,
     app_tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
-    // Soft-reset on plan approval: drain LLM message context, keep REPL state
-    if app.plan_approved {
-        app.plan_approved = false;
-        app.mode = app::Mode::Normal;
-        if let Some(rt) = runtime {
-            let mut state = rt.export_state();
-            state.messages.clear();
-            rt.set_state(state);
-        }
-        history.clear();
-    }
-
     if !display_input.is_empty() {
         app.blocks
             .push(DisplayBlock::UserInput(display_input.clone()));
@@ -3037,7 +2961,6 @@ fn send_user_message(
         mode = ?turn_input.mode,
         items = turn_input.items.len(),
         images = turn_input.image_blobs.len(),
-        has_plan_file = turn_input.plan_file.is_some(),
         "dispatching runtime turn"
     );
     let (return_tx, return_rx) = tokio::sync::oneshot::channel();

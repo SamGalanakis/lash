@@ -19,3 +19,23 @@ pub fn format_duration_ms(ms: u64) -> String {
         format!("{}h {}m", h, m)
     }
 }
+
+pub fn manual_interrupt_message() -> &'static str {
+    "Manually interrupted."
+}
+
+pub fn is_manual_interrupt_error(message: &str, code: Option<&str>) -> bool {
+    if code.is_some_and(|code| matches!(code, "cancelled" | "canceled")) {
+        return true;
+    }
+
+    let normalized = message
+        .trim()
+        .trim_end_matches(['.', '!', '?'])
+        .to_ascii_lowercase();
+
+    matches!(
+        normalized.as_str(),
+        "cancelled" | "canceled" | "llm error: cancelled" | "llm error: canceled"
+    )
+}

@@ -7,6 +7,7 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::activity::{ActivityArtifact, ActivityBlock, ActivityKind, ActivityStatus};
 use crate::app::{
     App, DisplayBlock, SuggestionKind, TASK_TRAY_TWO_COL_MIN_INNER_WIDTH, TaskSnapshot,
 };
@@ -77,15 +78,13 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let is_plan = app.mode == crate::app::Mode::Plan;
-
     // ── Left-side segment widths (progressive: name → model → mode) ──
     let name_w = " lash".chars().count();
     let sep_w = theme::STATUS_SEP.chars().count();
     let model_w = app.model.chars().count();
     let left_1 = name_w;
     let left_2 = name_w + sep_w + model_w;
-    let left_3 = left_2 + if is_plan { sep_w + 4 } else { 0 };
+    let left_3 = left_2;
 
     // ── Right-side: token components ──
     let display_input_tokens = app.token_usage.input_tokens;
@@ -177,16 +176,6 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(theme::STATUS_SEP, theme::status_separator()));
         spans.push(Span::styled(&app.model, theme::model_name()));
     }
-    if left_level >= 3 && is_plan {
-        spans.push(Span::styled(theme::STATUS_SEP, theme::status_separator()));
-        spans.push(Span::styled(
-            "PLAN",
-            Style::default()
-                .fg(theme::SODIUM)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-
     // Padding between left and right
     let actual_left: usize = spans.iter().map(|s| s.width()).sum();
     let total_right = right_w(right_idx);
@@ -288,31 +277,35 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // Render live streaming tool output (e.g. bash)
+    // Render live streaming tool output.
+    // Delegate output gets its own branch lane so it doesn't blend into normal shell output.
     if !app.streaming_output.is_empty() && lines.len() < viewport_height + skip_lines {
-        for line in &app.streaming_output {
+        let delegate_stream = app.active_delegate.is_some();
+        for (idx, line) in app.streaming_output.iter().enumerate() {
+            let (prefix, prefix_style, content_style) = if delegate_stream {
+                let prefix = if idx == 0 {
+                    "\u{251c}\u{2500} "
+                } else {
+                    "\u{2502}  "
+                };
+                (
+                    prefix,
+                    Style::default()
+                        .fg(theme::SODIUM)
+                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme::CHALK_MID),
+                )
+            } else {
+                ("\u{2502} ", theme::code_chrome(), theme::code_content())
+            };
             lines.push(Line::from(vec![
-                Span::styled("\u{2502} ", theme::code_chrome()),
-                Span::styled(line.as_str(), theme::code_content()),
+                Span::styled(prefix, prefix_style),
+                Span::styled(line.as_str(), content_style),
             ]));
             if lines.len() >= viewport_height + skip_lines {
                 break;
             }
         }
-    }
-
-    // Render active delegate indicator
-    if let Some((ref name, ref task, ref started)) = app.active_delegate
-        && lines.len() < viewport_height + skip_lines
-    {
-        render_delegate_line(
-            app.tick,
-            name,
-            task,
-            started.elapsed(),
-            &mut lines,
-            viewport_width,
-        );
     }
 
     // Bottom-align content when it doesn't fill the viewport (chat-style).
@@ -390,29 +383,15 @@ fn truncate_to_display_width(text: &str, max_width: usize) -> String {
     out
 }
 
-fn tool_arg_str<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
-    args.get(key)
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-}
-
-fn tool_arg_u64(args: &serde_json::Value, key: &str) -> Option<u64> {
-    args.get(key).and_then(|v| v.as_u64())
-}
-
-fn inline_text(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 fn human_tool_name(name: &str) -> &'static str {
     match name {
         "read_file" => "read",
-        "write_file" => "write",
-        "edit_file" => "edit",
-        "find_replace" => "replace",
+        "apply_patch" => "patch",
         "grep" => "grep",
         "glob" => "glob",
         "ls" => "list",
+        "exec_command" => "run",
+        "write_stdin" => "write stdin",
         "shell" => "shell",
         "shell_wait" => "wait",
         "shell_read" => "read shell",
@@ -437,9 +416,8 @@ fn human_tool_name(name: &str) -> &'static str {
         "skills" => "list skills",
         "load_skill" => "load skill",
         "read_skill_file" => "read skill file",
-        "batch" => "parallel",
-        "enter_plan_mode" => "enter plan mode",
-        "exit_plan_mode" => "exit plan mode",
+        "batch" => "batch",
+        "update_plan" => "update plan",
         _ => "tool",
     }
 }
@@ -451,221 +429,9 @@ fn tool_group_name(name: &str) -> String {
     }
 }
 
-fn summarize_batch_result(result: &serde_json::Value) -> Option<String> {
-    let results = result.get("results").and_then(|v| v.as_array())?;
-    if results.is_empty() {
-        return result
-            .get("summary")
-            .and_then(|v| v.get("total_calls"))
-            .and_then(|v| v.as_u64())
-            .map(|count| {
-                format!(
-                    "parallel · {} call{}",
-                    count,
-                    if count == 1 { "" } else { "s" }
-                )
-            });
-    }
-
-    let mut counts: Vec<(String, usize)> = Vec::new();
-    for entry in results {
-        let Some(tool) = entry.get("tool").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let key = tool_group_name(tool);
-        if let Some((last, count)) = counts.last_mut()
-            && *last == key
-        {
-            *count += 1;
-            continue;
-        }
-        counts.push((tool_group_name(tool), 1));
-    }
-
-    if counts.is_empty() {
-        return None;
-    }
-
-    let mut parts = counts
-        .into_iter()
-        .map(|(label, count)| {
-            if count > 1 {
-                format!("{label}\u{00d7}{count}")
-            } else {
-                label
-            }
-        })
-        .collect::<Vec<_>>();
-    let extra = parts.len().saturating_sub(3);
-    parts.truncate(3);
-    let mut summary = format!("parallel · {}", parts.join(", "));
-    if extra > 0 {
-        summary.push_str(&format!(", +{} more", extra));
-    }
-    Some(summary)
-}
-
-fn tool_display_label(name: &str, args: &serde_json::Value, result: &serde_json::Value) -> String {
-    match name {
-        "batch" => summarize_batch_result(result).unwrap_or_else(|| "parallel".to_string()),
-        "read_file" => {
-            let mut label = tool_arg_str(args, "path")
-                .map(|path| format!("read {}", path))
-                .unwrap_or_else(|| "read file".to_string());
-            if let Some(offset) = tool_arg_u64(args, "offset")
-                && offset > 1
-            {
-                label.push_str(&format!(" @{}", offset));
-            }
-            label
-        }
-        "write_file" => tool_arg_str(args, "path")
-            .map(|path| format!("write {}", path))
-            .unwrap_or_else(|| "write file".to_string()),
-        "edit_file" | "find_replace" => tool_arg_str(args, "path")
-            .map(|path| format!("edit {}", path))
-            .unwrap_or_else(|| "edit file".to_string()),
-        "grep" => {
-            let pattern = tool_arg_str(args, "pattern").unwrap_or("pattern");
-            let mut label = format!("grep {:?}", pattern);
-            if let Some(path) = tool_arg_str(args, "path") {
-                label.push_str(&format!(" in {}", path));
-            }
-            label
-        }
-        "glob" => {
-            let pattern = tool_arg_str(args, "pattern").unwrap_or("*");
-            let mut label = format!("glob {}", pattern);
-            if let Some(path) = tool_arg_str(args, "path") {
-                label.push_str(&format!(" in {}", path));
-            }
-            label
-        }
-        "ls" => format!("list {}", tool_arg_str(args, "path").unwrap_or(".")),
-        "shell" => tool_arg_str(args, "command")
-            .map(|cmd| format!("shell {}", inline_text(cmd)))
-            .unwrap_or_else(|| "shell".to_string()),
-        "shell_wait" => "wait for shell".to_string(),
-        "shell_read" => "read shell output".to_string(),
-        "shell_write" => "write to shell".to_string(),
-        "shell_kill" => "kill shell".to_string(),
-        "fetch_url" => tool_arg_str(args, "url")
-            .map(|url| format!("fetch {}", url))
-            .unwrap_or_else(|| "fetch url".to_string()),
-        "search_web" => tool_arg_str(args, "query")
-            .map(|query| format!("search {:?}", query))
-            .unwrap_or_else(|| "search web".to_string()),
-        "agent_call" => tool_arg_str(args, "task")
-            .map(|task| format!("delegate {}", inline_text(task)))
-            .unwrap_or_else(|| "delegate task".to_string()),
-        "agent_result" => "collect agent result".to_string(),
-        "agent_output" => "stream agent output".to_string(),
-        "agent_kill" => "kill agent".to_string(),
-        "create_task" => tool_arg_str(args, "description")
-            .map(|desc| format!("create task {}", inline_text(desc)))
-            .unwrap_or_else(|| "create task".to_string()),
-        "update_task" | "claim_task" | "delete_task" | "get_task" => tool_arg_str(args, "id")
-            .map(|id| format!("{} {}", human_tool_name(name), id))
-            .unwrap_or_else(|| human_tool_name(name).to_string()),
-        "tasks" | "tasks_summary" | "list_tools" | "search_tools" | "search_skills" | "skills" => {
-            human_tool_name(name).to_string()
-        }
-        "load_skill" | "read_skill_file" => tool_arg_str(args, "path")
-            .map(|path| format!("{} {}", human_tool_name(name), path))
-            .unwrap_or_else(|| human_tool_name(name).to_string()),
-        _ => name.replace('_', " "),
-    }
-}
-
-/// Build a ghost fold summary for a group of tool calls starting at `idx`.
-/// `idx` should point to the first (non-continuation) ToolCall in a group.
-/// Scans forward through contiguous ToolCall/CodeBlock/CodeOutput blocks,
-/// collecting tool names and durations.
-/// Returns `(summary_string, any_failed)`.
-fn build_ghost_fold_summary(blocks: &[DisplayBlock], idx: usize) -> (String, bool) {
-    let mut groups: Vec<(String, usize)> = Vec::new();
-    let mut total_ms = 0u64;
-    let mut any_failed = false;
-
-    // Include the block at idx itself
-    if let DisplayBlock::ToolCall {
-        name,
-        args,
-        result,
-        success,
-        duration_ms,
-        ..
-    } = &blocks[idx]
-        && !crate::app::tool_call_hidden(name, *success)
-    {
-        total_ms += *duration_ms;
-        if !*success {
-            any_failed = true;
-        }
-        groups.push((tool_display_label(name, args, result), 1));
-    }
-
-    // Scan forward from idx+1
-    for b in &blocks[idx + 1..] {
-        match b {
-            DisplayBlock::CodeBlock { .. } | DisplayBlock::CodeOutput { .. } => continue,
-            DisplayBlock::ToolCall {
-                name,
-                args,
-                result,
-                success,
-                duration_ms,
-                ..
-            } => {
-                if crate::app::tool_call_hidden(name, *success) {
-                    continue;
-                }
-                total_ms += *duration_ms;
-                if !*success {
-                    any_failed = true;
-                }
-                let label = tool_display_label(name, args, result);
-                if let Some((last_name, count)) = groups.last_mut()
-                    && *last_name == label
-                {
-                    *count += 1;
-                } else {
-                    groups.push((label, 1));
-                }
-            }
-            _ => break,
-        }
-    }
-
-    if groups.is_empty() {
-        return (String::new(), any_failed);
-    }
-
-    let total_tools: usize = groups.iter().map(|(_, c)| c).sum();
-    let group_text = groups
-        .iter()
-        .map(|(name, count)| {
-            if *count > 1 {
-                format!("{}\u{00d7}{}", name, count)
-            } else {
-                name.clone()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let summary = format!(
-        "+ {} tool{} \u{b7} {} \u{b7} {}",
-        total_tools,
-        if total_tools != 1 { "s" } else { "" },
-        group_text,
-        crate::util::format_duration_ms(total_ms)
-    );
-    (summary, any_failed)
-}
-
 /// Build a ghost fold summary for a group of code blocks starting at `idx`.
 /// `idx` should point to the first (non-continuation) CodeBlock in a group.
-/// Scans forward through contiguous CodeBlock/ToolCall/CodeOutput blocks.
+/// Scans forward through contiguous CodeBlock/Activity/CodeOutput blocks.
 fn build_code_fold_summary(blocks: &[DisplayBlock], idx: usize) -> String {
     let mut block_count = 0usize;
     let mut line_count = 0usize;
@@ -676,7 +442,7 @@ fn build_code_fold_summary(blocks: &[DisplayBlock], idx: usize) -> String {
                 block_count += 1;
                 line_count += code.lines().count().max(1);
             }
-            DisplayBlock::ToolCall { .. } | DisplayBlock::CodeOutput { .. } => continue,
+            DisplayBlock::Activity(_) | DisplayBlock::CodeOutput { .. } => continue,
             _ => break,
         }
     }
@@ -688,6 +454,200 @@ fn build_code_fold_summary(blocks: &[DisplayBlock], idx: usize) -> String {
         line_count,
         if line_count != 1 { "s" } else { "" }
     )
+}
+
+fn activity_style(status: ActivityStatus) -> Style {
+    match status {
+        ActivityStatus::Completed => theme::tool_success(),
+        ActivityStatus::Failed => theme::tool_failure(),
+    }
+}
+
+fn activity_icon(status: ActivityStatus) -> &'static str {
+    match status {
+        ActivityStatus::Completed => "+",
+        ActivityStatus::Failed => "\u{00d7}",
+    }
+}
+
+fn push_wrapped_prefixed<'a>(
+    lines: &mut Vec<Line<'a>>,
+    prefix: String,
+    continuation: String,
+    text: &str,
+    style: Style,
+    width: usize,
+) {
+    let available = width.saturating_sub(UnicodeWidthStr::width(prefix.as_str()));
+    if available == 0 {
+        lines.push(Line::from(Span::styled(prefix, style)));
+        return;
+    }
+    let mut first = true;
+    let mut start = 0usize;
+    let mut col = 0usize;
+    for (idx, ch) in text.char_indices() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if col + w > available && col > 0 {
+            let shown_prefix = if first {
+                prefix.clone()
+            } else {
+                continuation.clone()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(shown_prefix, style),
+                Span::styled(text[start..idx].to_string(), style),
+            ]));
+            first = false;
+            start = idx;
+            col = w;
+        } else {
+            col += w;
+        }
+    }
+    let shown_prefix = if first { prefix } else { continuation };
+    lines.push(Line::from(vec![
+        Span::styled(shown_prefix, style),
+        Span::styled(text[start..].to_string(), style),
+    ]));
+}
+
+fn render_activity_artifact<'a>(
+    lines: &mut Vec<Line<'a>>,
+    artifact: &ActivityArtifact,
+    viewport_width: usize,
+    indent: &str,
+) {
+    match artifact {
+        ActivityArtifact::DiffPreview { title, diff } => {
+            lines.push(Line::from(vec![
+                Span::styled(indent.to_string(), theme::code_chrome()),
+                Span::styled(format!("{}:", title), theme::code_header()),
+            ]));
+            for line in diff.lines() {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{}  ", indent), theme::code_chrome()),
+                    Span::styled(line.to_string(), theme::code_content()),
+                ]));
+            }
+        }
+        ActivityArtifact::TextPreview { title, text } => {
+            if let Some(title) = title {
+                lines.push(Line::from(vec![
+                    Span::styled(indent.to_string(), theme::code_chrome()),
+                    Span::styled(format!("{}:", title), theme::code_header()),
+                ]));
+            }
+            let prefix = format!("{}  ", indent);
+            for line in text.lines().take(12) {
+                push_wrapped_prefixed(
+                    lines,
+                    prefix.clone(),
+                    prefix.clone(),
+                    line,
+                    theme::system_output(),
+                    viewport_width,
+                );
+            }
+        }
+        ActivityArtifact::SourceList { title, items } => {
+            lines.push(Line::from(vec![
+                Span::styled(indent.to_string(), theme::code_chrome()),
+                Span::styled(format!("{}:", title), theme::code_header()),
+            ]));
+            for item in items {
+                let prefix = format!("{}  ", indent);
+                push_wrapped_prefixed(
+                    lines,
+                    prefix.clone(),
+                    prefix,
+                    item,
+                    theme::system_output(),
+                    viewport_width,
+                );
+            }
+        }
+    }
+}
+
+fn render_activity_block<'a>(
+    activity: &'a ActivityBlock,
+    expand_level: u8,
+    lines: &mut Vec<Line<'a>>,
+    viewport_width: usize,
+    nested: bool,
+) {
+    let style = activity_style(activity.status);
+    let prefix = if nested { "  " } else { "" };
+    let (summary_prefix, summary_prefix_style, detail_prefix, detail_prefix_style) =
+        if activity.kind == ActivityKind::Exploration {
+            (
+                format!("{prefix}\u{251c}\u{2500} "),
+                Style::default()
+                    .fg(theme::SODIUM)
+                    .add_modifier(Modifier::BOLD),
+                format!("{prefix}\u{2502}  "),
+                Style::default().fg(theme::SODIUM),
+            )
+        } else {
+            (
+                format!("{}{} ", prefix, activity_icon(activity.status)),
+                style,
+                format!("{}  ", prefix),
+                theme::code_chrome(),
+            )
+        };
+    let summary_text = truncate_to_display_width(
+        &format!(
+            "{} \u{b7} {}",
+            activity.summary,
+            crate::util::format_duration_ms(activity.duration_ms)
+        ),
+        viewport_width.saturating_sub(UnicodeWidthStr::width(summary_prefix.as_str())),
+    );
+    lines.push(Line::from(vec![
+        Span::styled(summary_prefix, summary_prefix_style),
+        Span::styled(summary_text, style),
+    ]));
+
+    if expand_level >= 1 {
+        for detail in &activity.detail_lines {
+            lines.push(Line::from(vec![
+                Span::styled(detail_prefix.clone(), detail_prefix_style),
+                Span::styled(
+                    truncate_to_display_width(
+                        detail,
+                        viewport_width
+                            .saturating_sub(UnicodeWidthStr::width(detail_prefix.as_str())),
+                    ),
+                    Style::default().fg(theme::ASH_TEXT),
+                ),
+            ]));
+        }
+        if activity.kind == ActivityKind::Parallel {
+            for child in &activity.children {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{}  \u{2514} ", prefix), theme::code_chrome()),
+                    Span::styled(child.summary.clone(), activity_style(child.status)),
+                ]));
+            }
+        }
+    }
+
+    if expand_level >= 2 {
+        if let Some(artifact) = &activity.artifact {
+            let indent = format!("{}  ", prefix);
+            render_activity_artifact(lines, artifact, viewport_width, &indent);
+        }
+        if activity.kind == ActivityKind::Parallel {
+            for child in &activity.children {
+                if let Some(artifact) = &child.artifact {
+                    let indent = format!("{}    ", prefix);
+                    render_activity_artifact(lines, artifact, viewport_width, &indent);
+                }
+            }
+        }
+    }
 }
 
 fn render_block<'a>(
@@ -828,57 +788,8 @@ fn render_block<'a>(
                 }
             }
         }
-        DisplayBlock::ToolCall {
-            name,
-            args,
-            result,
-            success,
-            duration_ms,
-            continuation,
-        } => {
-            if crate::app::tool_call_hidden(name, *success) {
-                return;
-            }
-            match expand_level {
-                0 => {
-                    if *continuation {
-                        // Absorbed into the ghost fold summary — hidden
-                    } else {
-                        // Ghost fold: build summary scanning forward
-                        let (summary, any_failed) = build_ghost_fold_summary(blocks, idx);
-                        if summary.is_empty() {
-                            return;
-                        }
-                        let summary = truncate_to_display_width(&summary, viewport_width);
-                        lines.push(Line::from(Span::styled(
-                            summary,
-                            if any_failed {
-                                theme::tool_failure()
-                            } else {
-                                theme::tool_success()
-                            },
-                        )));
-                    }
-                }
-                _ => {
-                    // Level 1 and 2: individual tool call lines
-                    let icon = if *success { "+" } else { "\u{00d7}" };
-                    let style = if *success {
-                        theme::tool_success()
-                    } else {
-                        theme::tool_failure()
-                    };
-                    lines.push(Line::from(Span::styled(
-                        format!(
-                            "{} {} \u{b7} {}",
-                            icon,
-                            tool_display_label(name, args, result),
-                            crate::util::format_duration_ms(*duration_ms)
-                        ),
-                        style,
-                    )));
-                }
-            }
+        DisplayBlock::Activity(activity) => {
+            render_activity_block(activity, expand_level, lines, viewport_width, false);
         }
         DisplayBlock::CodeOutput { output, error } => {
             if expand_level >= 2 && !output.is_empty() {
@@ -977,7 +888,9 @@ fn render_block<'a>(
                 tool_calls,
                 crate::app::format_tokens(usage.total()),
             );
-            let max_task_w = viewport_width.saturating_sub(3 + stats_str.chars().count());
+            let label = "delegate \u{b7} ";
+            let max_task_w = viewport_width
+                .saturating_sub(3 + label.chars().count() + stats_str.chars().count());
             let task_display: String = task.chars().take(max_task_w).collect();
             let truncated = task.chars().count() > max_task_w;
             let task_final = if truncated {
@@ -987,18 +900,30 @@ fn render_block<'a>(
             };
 
             lines.push(Line::from(vec![
-                Span::styled(format!("{} ", connector), Style::default().fg(theme::ASH)),
+                Span::styled(
+                    format!("{} ", connector),
+                    Style::default()
+                        .fg(theme::SODIUM)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "delegate",
+                    Style::default()
+                        .fg(theme::SODIUM)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" \u{b7} ", Style::default().fg(theme::ASH_MID)),
                 Span::styled(task_final, Style::default().fg(theme::CHALK_MID)),
                 Span::styled(stats_str, Style::default().fg(theme::CHALK_DIM)),
             ]));
 
             let (status_label, status_style) = if *success {
-                ("\u{2514}\u{2500} Done", Style::default().fg(theme::LICHEN))
+                ("done", Style::default().fg(theme::LICHEN))
             } else {
-                ("\u{2514}\u{2500} Failed", Style::default().fg(theme::ERROR))
+                ("failed", Style::default().fg(theme::ERROR))
             };
             lines.push(Line::from(vec![
-                Span::styled(status_connector, Style::default().fg(theme::ASH)),
+                Span::styled(status_connector, Style::default().fg(theme::SODIUM)),
                 Span::styled(status_label, status_style),
             ]));
         }
@@ -1113,84 +1038,11 @@ fn render_plan_block<'a>(content: &'a str, lines: &mut Vec<Line<'a>>, viewport_w
     )));
 }
 
-// ── Delegate running indicator ───────────────────────────────────────
-
-/// Render an animated line showing a running delegate sub-agent.
-/// Format: `  ╲─ delegate_deep · Do a thorough investigation of th…   12.3s`
-fn render_delegate_line<'a>(
-    tick: usize,
-    name: &'a str,
-    task: &'a str,
-    elapsed: std::time::Duration,
-    lines: &mut Vec<Line<'a>>,
-    viewport_width: usize,
-) {
-    const ANGLES: &[char] = &['\u{2572}', '\u{2500}', '\u{2571}', '\u{2502}']; // ╲ ─ ╱ │
-    let idx = (tick / 2) % ANGLES.len();
-    let trail_idx = (idx + ANGLES.len() - 1) % ANGLES.len();
-    let lead = ANGLES[idx];
-    let trail = ANGLES[trail_idx];
-
-    // Format elapsed time
-    let secs = elapsed.as_secs_f64();
-    let time_str = if secs >= 60.0 {
-        format!("{:.0}m{:.0}s", (secs / 60.0).floor(), secs % 60.0)
-    } else {
-        format!("{:.1}s", secs)
-    };
-
-    // Fixed-width parts: "  " + trail + lead + "─ " + name + " · " + ... + "  " + time
-    // prefix: 2 + 1 + 1 + 2 = 6, separator: 3, time suffix: 2 + time_str.len()
-    let prefix_w = 6;
-    let name_w = name.len();
-    let sep_w = 3; // " · "
-    let time_w = 2 + time_str.len(); // "  " + time
-    let fixed_w = prefix_w + name_w + sep_w + time_w;
-
-    let task_max = viewport_width.saturating_sub(fixed_w);
-    let task_chars: String = task.chars().take(task_max).collect();
-    let task_display = if task.chars().count() > task_max {
-        // Replace last char with ellipsis
-        let mut truncated: String = task.chars().take(task_max.saturating_sub(1)).collect();
-        truncated.push('\u{2026}');
-        truncated
-    } else {
-        task_chars
-    };
-
-    lines.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled(trail.to_string(), Style::default().fg(theme::ASH_TEXT)),
-        Span::styled(
-            format!("{}\u{2500} ", lead),
-            Style::default()
-                .fg(theme::SODIUM)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(name, Style::default().fg(theme::CHALK_MID)),
-        Span::styled(" \u{b7} ", Style::default().fg(theme::ASH)),
-        Span::styled(task_display, Style::default().fg(theme::ASH_TEXT)),
-        Span::styled(
-            format!("  {}", time_str),
-            Style::default().fg(theme::ASH_MID),
-        ),
-    ]));
-}
-
 // ── Strike zone ─────────────────────────────────────────────────────
-// The brand slash rotating in place — a tight 2-char animation where
-// the lead character glows sodium and the trail fades to ash. Status
-// text follows on the same line. One line, focused, no noise.
+// The brand slash rotates during normal work. Delegate work switches to
+// a fixed branch marker so sub-agent activity reads as a separate lane.
 
 fn draw_strike_zone(frame: &mut Frame, app: &App, area: Rect) {
-    // Suppress the normal spinner when a delegate is running — the delegate
-    // line in the history area serves as the activity indicator.
-    if app.active_delegate.is_some() {
-        let paragraph = Paragraph::new(Line::from("")).style(theme::history_bg());
-        frame.render_widget(paragraph, area);
-        return;
-    }
-
     // Four angles of the slash mark rotating in place
     const ANGLES: &[char] = &['╲', '─', '╱', '│'];
     // Divide tick by 2 → 200ms per angle, 800ms full rotation
@@ -1200,22 +1052,64 @@ fn draw_strike_zone(frame: &mut Frame, app: &App, area: Rect) {
     let lead = ANGLES[idx];
     let trail = ANGLES[trail_idx];
 
-    let status = app.status_text.as_deref().unwrap_or("");
+    let delegate_active = app.active_delegate.is_some();
+    let (status, details, elapsed) = if let Some((_, task, started)) = &app.active_delegate {
+        (
+            "delegate".to_string(),
+            Some(task.clone()),
+            Some(started.elapsed()),
+        )
+    } else {
+        (
+            app.status_text.clone().unwrap_or_default(),
+            app.status_detail.clone(),
+            app.status_started_at.map(|started| started.elapsed()),
+        )
+    };
 
-    let mut spans = vec![
-        Span::raw("  "),
-        Span::styled(trail.to_string(), Style::default().fg(theme::ASH_TEXT)),
-        Span::styled(
-            lead.to_string(),
-            Style::default()
-                .fg(theme::SODIUM)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
+    let mut spans = if delegate_active {
+        vec![
+            Span::raw("  "),
+            Span::styled(
+                "\u{251c}\u{2500}",
+                Style::default()
+                    .fg(theme::SODIUM)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]
+    } else {
+        vec![
+            Span::raw("  "),
+            Span::styled(trail.to_string(), Style::default().fg(theme::ASH_TEXT)),
+            Span::styled(
+                lead.to_string(),
+                Style::default()
+                    .fg(theme::SODIUM)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]
+    };
 
     if !status.is_empty() {
         spans.push(Span::styled(
             format!("  {}", status),
+            Style::default().fg(theme::ASH_MID),
+        ));
+    }
+    if let Some(details) = details
+        && !details.is_empty()
+    {
+        spans.push(Span::styled(
+            format!(" \u{b7} {}", truncate_to_display_width(&details, 48)),
+            Style::default().fg(theme::ASH_TEXT),
+        ));
+    }
+    if let Some(elapsed) = elapsed {
+        spans.push(Span::styled(
+            format!(
+                "  {}",
+                crate::util::format_duration_ms(elapsed.as_millis() as u64)
+            ),
             Style::default().fg(theme::ASH_MID),
         ));
     }
@@ -2132,7 +2026,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_display_label_replaces_batch_with_parallel_summary() {
+    fn tool_display_label_replaces_batch_with_batched_tools_summary() {
         let label = tool_display_label(
             "batch",
             &serde_json::json!({}),
@@ -2144,9 +2038,83 @@ mod tests {
                 ]
             }),
         );
-        assert!(label.starts_with("parallel · "));
-        assert!(!label.contains("batch"));
+        assert!(label.starts_with("batched tools · "));
+        assert!(label.contains("batched tools"));
         assert!(label.contains("read"));
         assert!(label.contains("grep"));
+    }
+
+    #[test]
+    fn subagent_result_renders_delegate_label() {
+        let block = DisplayBlock::SubAgentResult {
+            task: "Inspect the skills system".into(),
+            usage: TokenUsage {
+                input_tokens: 800,
+                output_tokens: 200,
+                cached_input_tokens: 0,
+                reasoning_tokens: 0,
+            },
+            tool_calls: 3,
+            iterations: 2,
+            success: true,
+            is_last: true,
+        };
+
+        let blocks = [block];
+        let mut lines = Vec::new();
+        render_block(&blocks, 0, 1, &mut lines, 80, 20);
+
+        assert_eq!(
+            line_text(&lines[0]),
+            "└─ delegate · Inspect the skills system · 2 turns · 3 tool uses · 1.0k tokens"
+        );
+        assert_eq!(line_text(&lines[1]), "   done");
+    }
+
+    #[test]
+    fn exploration_activity_renders_branch_lane() {
+        let activity = ActivityBlock {
+            kind: ActivityKind::Exploration,
+            status: ActivityStatus::Completed,
+            tool_name: "read_file".into(),
+            summary: "explored".into(),
+            detail_lines: vec!["list .".into(), "read src/main.rs".into()],
+            duration_ms: 3,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: None,
+            children: Vec::new(),
+            extra: None,
+        };
+
+        let mut lines = Vec::new();
+        render_activity_block(&activity, 1, &mut lines, 80, false);
+
+        assert_eq!(line_text(&lines[0]), "├─ explored · 3ms");
+        assert_eq!(line_text(&lines[1]), "│  list .");
+        assert_eq!(line_text(&lines[2]), "│  read src/main.rs");
+    }
+
+    #[test]
+    fn exploration_activity_wraps_detail_lines() {
+        let activity = ActivityBlock {
+            kind: ActivityKind::Exploration,
+            status: ActivityStatus::Completed,
+            tool_name: "read_file".into(),
+            summary: "explored".into(),
+            detail_lines: vec!["read src/components/really_long_file_name.rs".into()],
+            duration_ms: 3,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: None,
+            children: Vec::new(),
+            extra: None,
+        };
+
+        let mut lines = Vec::new();
+        render_activity_block(&activity, 1, &mut lines, 20, false);
+
+        assert_eq!(line_text(&lines[0]), "├─ explored · 3ms");
+        assert_eq!(line_text(&lines[1]), "│  read src/compone…");
     }
 }

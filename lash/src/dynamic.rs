@@ -565,7 +565,6 @@ impl ToolProvider for DynamicToolProvider {
     fn dynamic_generation(&self) -> Option<u64> {
         Some(self.generation())
     }
-
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
         self.execute_streaming(name, args, None).await
     }
@@ -754,16 +753,10 @@ mod tests {
             DynamicCapabilityDef {
                 id: "planning".to_string(),
                 name: "Planning".to_string(),
-                description: "Plan mode tools".to_string(),
+                description: "Plan tracking tools".to_string(),
                 prompt_section: Some("plan section".to_string()),
-                helper_bindings: BTreeSet::from([
-                    "enter_plan_mode".to_string(),
-                    "exit_plan_mode".to_string(),
-                ]),
-                tool_names: BTreeSet::from([
-                    "enter_plan_mode".to_string(),
-                    "exit_plan_mode".to_string(),
-                ]),
+                helper_bindings: BTreeSet::new(),
+                tool_names: BTreeSet::from(["update_plan".to_string()]),
                 enabled_by_default: true,
             },
         );

@@ -3,10 +3,14 @@ use std::sync::Arc;
 
 use lash_core::{AgentEvent, Store, TokenUsage};
 
+use crate::activity::{
+    ActivityBlock, ActivityKind, ActivityState, ActivityStatus, merge_exploration_activity,
+};
 use crate::command;
 use crate::markdown;
 use crate::replay::push_assistant_text_block;
 use crate::skill::SkillRegistry;
+use crate::util::{is_manual_interrupt_error, manual_interrupt_message};
 
 /// Find the byte offset within `line` that corresponds to a given display column.
 /// If the target column exceeds the line's display width, returns line.len().
@@ -31,12 +35,6 @@ pub struct TaskSnapshot {
 }
 
 pub const TASK_TRAY_TWO_COL_MIN_INNER_WIDTH: usize = 88;
-
-#[derive(Clone, Copy, PartialEq)]
-pub enum Mode {
-    Normal,
-    Plan,
-}
 
 /// State for an active agent prompt dialog.
 pub struct PromptState {
@@ -69,16 +67,7 @@ pub enum DisplayBlock {
         /// If true, this block is a continuation of a prior code-block group.
         continuation: bool,
     },
-    ToolCall {
-        name: String,
-        args: serde_json::Value,
-        result: serde_json::Value,
-        success: bool,
-        duration_ms: u64,
-        /// If true, this block is a continuation of a prior tool-call group.
-        /// In collapsed mode it is hidden; the group leader shows a summary.
-        continuation: bool,
-    },
+    Activity(ActivityBlock),
     CodeOutput {
         output: String,
         error: Option<String>,
@@ -91,7 +80,7 @@ pub enum DisplayBlock {
     Error(String),
     /// Informational message from the system (e.g. /help output).
     SystemMessage(String),
-    /// Rendered plan content from plan mode (bordered markdown).
+    /// Rendered plan content from update_plan (bordered markdown).
     PlanContent(String),
     /// Sub-agent completion result with token stats.
     SubAgentResult {
@@ -135,10 +124,6 @@ fn estimate_tokens_from_char_count(chars: i64) -> i64 {
     if chars <= 0 { 0 } else { (chars + 3) / 4 }
 }
 
-pub(crate) fn tool_call_hidden(name: &str, success: bool) -> bool {
-    success && matches!(name, "enter_plan_mode" | "exit_plan_mode")
-}
-
 impl DisplayBlock {
     /// Number of visual lines this block takes when rendered at `width` columns.
     /// `viewport_height` is needed for Splash centering; pass 0 for non-Splash blocks.
@@ -168,22 +153,81 @@ impl DisplayBlock {
                     }
                 }
             }
-            DisplayBlock::ToolCall {
-                name,
-                success,
-                continuation,
-                ..
-            } => {
-                if tool_call_hidden(name, *success) {
-                    return 0;
-                }
-                match expand_level {
-                    0 => {
-                        // Ghost fold: first in group = 1 (summary line), continuation = 0 (absorbed)
-                        if *continuation { 0 } else { 1 }
+            DisplayBlock::Activity(activity) => {
+                let (summary_prefix_chars, detail_prefix_chars) =
+                    if activity.kind == ActivityKind::Exploration {
+                        (3, 3)
+                    } else {
+                        (2, 2)
+                    };
+                let mut h = wrapped_text_height(
+                    &format!(
+                        "{} · {}",
+                        activity.summary,
+                        crate::util::format_duration_ms(activity.duration_ms)
+                    ),
+                    width,
+                    summary_prefix_chars,
+                );
+                if expand_level >= 1 {
+                    h += activity
+                        .detail_lines
+                        .iter()
+                        .map(|detail| wrapped_text_height(detail, width, detail_prefix_chars))
+                        .sum::<usize>();
+                    if activity.kind == ActivityKind::Parallel {
+                        h += activity
+                            .children
+                            .iter()
+                            .map(|child| wrapped_text_height(&child.summary, width, 4))
+                            .sum::<usize>();
                     }
-                    _ => 1, // Level 1 and 2: individual tool call lines
                 }
+                if expand_level >= 2 {
+                    if let Some(artifact) = &activity.artifact {
+                        h += match artifact {
+                            crate::activity::ActivityArtifact::DiffPreview { diff, .. } => {
+                                wrapped_text_height(diff, width, 4)
+                            }
+                            crate::activity::ActivityArtifact::TextPreview { text, .. } => {
+                                wrapped_text_height(text, width, 4)
+                            }
+                            crate::activity::ActivityArtifact::SourceList { items, .. } => {
+                                items.len()
+                            }
+                        };
+                    }
+                    if activity.kind == ActivityKind::Parallel {
+                        h += activity
+                            .children
+                            .iter()
+                            .map(|child| {
+                                let mut child_h = 0usize;
+                                if !child.summary.is_empty() {
+                                    child_h += wrapped_text_height(&child.summary, width, 4);
+                                }
+                                if let Some(artifact) = &child.artifact {
+                                    child_h += match artifact {
+                                        crate::activity::ActivityArtifact::DiffPreview {
+                                            diff,
+                                            ..
+                                        } => wrapped_text_height(diff, width, 6),
+                                        crate::activity::ActivityArtifact::TextPreview {
+                                            text,
+                                            ..
+                                        } => wrapped_text_height(text, width, 6),
+                                        crate::activity::ActivityArtifact::SourceList {
+                                            items,
+                                            ..
+                                        } => items.len(),
+                                    };
+                                }
+                                child_h
+                            })
+                            .sum::<usize>();
+                    }
+                }
+                h
             }
             DisplayBlock::CodeOutput { output, error } => {
                 let mut h = 0;
@@ -237,8 +281,10 @@ pub struct App {
     pub input_history_idx: Option<usize>,
     /// Spinner frame counter
     pub tick: usize,
-    /// Latest progress message — shown on status bar next to spinner
+    /// Latest progress message shown in the live status row.
     pub status_text: Option<String>,
+    pub status_detail: Option<String>,
+    pub status_started_at: Option<std::time::Instant>,
     /// Buffered TextDelta — rendered live as streaming text, flushed as AssistantText on Done.
     /// Discarded when a CodeBlock arrives (it was intermediate thinking with code fences).
     pub pending_text: String,
@@ -291,12 +337,6 @@ pub struct App {
     pub live_output_chars_estimate: i64,
     /// Estimated output tokens from live streamed chunks before final usage arrives.
     pub live_output_tokens_estimate: i64,
-    /// Current mode: Normal (read-write) or Plan (explore-only).
-    pub mode: Mode,
-    /// Path to the plan file for this session (generated on first plan entry).
-    pub plan_file: Option<PathBuf>,
-    /// Last modification time of the plan file, for change detection.
-    pub plan_file_mtime: Option<std::time::SystemTime>,
     /// Unique session name (e.g. "alpine-canyon").
     pub session_name: String,
     /// Current working directory with ~ substitution.
@@ -309,13 +349,55 @@ pub struct App {
     pub task_all_done_at: Option<std::time::Instant>,
     /// Active delegate sub-agent: (name, task description, started_at).
     pub active_delegate: Option<(String, String, std::time::Instant)>,
-    /// Set when exit_plan_mode is approved — triggers soft context reset on next turn.
-    pub plan_approved: bool,
+    /// Handle state used to derive semantic activity rows from raw tool calls.
+    pub activity_state: ActivityState,
     /// Whether mouse capture is currently active (temporarily released during shift+mouse for native selection).
     pub mouse_captured: bool,
 }
 
 impl App {
+    fn set_status(
+        &mut self,
+        header: impl Into<String>,
+        details: Option<String>,
+        reset_timer: bool,
+    ) {
+        let header = header.into();
+        let changed =
+            self.status_text.as_deref() != Some(header.as_str()) || self.status_detail != details;
+        self.status_text = Some(header);
+        self.status_detail = details;
+        if changed || reset_timer || self.status_started_at.is_none() {
+            self.status_started_at = Some(std::time::Instant::now());
+        }
+    }
+
+    fn clear_status(&mut self) {
+        self.status_text = None;
+        self.status_detail = None;
+        self.status_started_at = None;
+    }
+
+    fn push_activity_block(&mut self, activity: ActivityBlock) {
+        if let Some(DisplayBlock::Activity(existing)) = self.blocks.last_mut()
+            && existing.kind == ActivityKind::Exploration
+            && activity.kind == ActivityKind::Exploration
+            && existing.status == ActivityStatus::Completed
+            && activity.status == ActivityStatus::Completed
+            && merge_exploration_activity(existing, activity.clone())
+        {
+            self.invalidate_height_cache();
+            return;
+        }
+        self.blocks.push(DisplayBlock::Activity(activity));
+        self.invalidate_height_cache();
+    }
+
+    fn push_plan_content(&mut self, content: String) {
+        self.blocks.push(DisplayBlock::PlanContent(content));
+        self.invalidate_height_cache();
+    }
+
     pub fn new(model: String, session_name: String, store: Option<Arc<Store>>) -> Self {
         let context_window = lash_core::model_info::context_window(&model);
         let cwd = {
@@ -334,7 +416,7 @@ impl App {
             input: String::new(),
             cursor_pos: 0,
             scroll_offset: 0,
-            expand_level: 0,
+            expand_level: 1,
             running: false,
             model,
             iteration: 0,
@@ -342,6 +424,8 @@ impl App {
             input_history_idx: None,
             tick: 0,
             status_text: None,
+            status_detail: None,
+            status_started_at: None,
             pending_text: String::new(),
             suggestions: Vec::new(),
             suggestion_idx: 0,
@@ -373,16 +457,13 @@ impl App {
             last_response_usage: TokenUsage::default(),
             live_output_chars_estimate: 0,
             live_output_tokens_estimate: 0,
-            mode: Mode::Normal,
-            plan_file: None,
-            plan_file_mtime: None,
             session_name,
             cwd,
             store,
             task_tray: Vec::new(),
             task_all_done_at: None,
             active_delegate: None,
-            plan_approved: false,
+            activity_state: ActivityState::default(),
             mouse_captured: true,
         }
     }
@@ -411,14 +492,14 @@ impl App {
     }
 
     /// Check whether a new CodeBlock belongs to an existing code-block group.
-    /// Returns `true` if there is a prior CodeBlock with only ToolCall /
-    /// CodeOutput blocks between it and the end (no user-facing
-    /// boundary like AssistantText, Error, UserInput, etc.).
+    /// Returns `true` if there is a prior CodeBlock with only Activity / CodeOutput
+    /// blocks between it and the end (no user-facing boundary like AssistantText,
+    /// Error, UserInput, etc.).
     fn is_code_continuation(&self) -> bool {
         for block in self.blocks.iter().rev() {
             match block {
                 DisplayBlock::CodeBlock { .. } => return true,
-                DisplayBlock::ToolCall { .. } | DisplayBlock::CodeOutput { .. } => continue,
+                DisplayBlock::Activity(_) | DisplayBlock::CodeOutput { .. } => continue,
                 _ => return false,
             }
         }
@@ -446,7 +527,7 @@ impl App {
                 self.scroll_to_bottom();
             }
             AgentEvent::CodeBlock { code } => {
-                self.status_text = Some("code".into());
+                self.set_status("writing code", None, true);
                 self.flush_pending_text();
                 let trimmed = code.trim_matches('\n');
                 if !trimmed.is_empty() {
@@ -467,27 +548,39 @@ impl App {
                 duration_ms,
                 ..
             } => {
-                self.status_text = Some(name.clone());
+                self.flush_pending_text();
                 self.streaming_output.clear();
                 if name.starts_with("delegate_") {
                     self.active_delegate = None;
                 }
-                let is_task_tool = matches!(
-                    name.as_str(),
-                    "create_task" | "update_task" | "claim_task" | "delete_task"
-                );
-                let continuation =
-                    matches!(self.blocks.last(), Some(DisplayBlock::ToolCall { .. }));
-                self.blocks.push(DisplayBlock::ToolCall {
-                    name,
+                let plan_content = if success && name == "update_plan" {
+                    render_plan_content_from_result(&result)
+                } else {
+                    None
+                };
+                let activities = self.activity_state.blocks_for_tool_call(
+                    &name,
                     args,
                     result,
                     success,
                     duration_ms,
-                    continuation,
-                });
-                self.invalidate_height_cache();
-                if is_task_tool {
+                );
+                let has_task_activity = activities
+                    .iter()
+                    .any(|activity| activity.kind == ActivityKind::TaskAction);
+                if let Some(activity) = activities.last() {
+                    let detail = activity.detail_lines.first().cloned();
+                    self.set_status(activity.summary.clone(), detail, true);
+                } else {
+                    self.set_status(name.clone(), None, true);
+                }
+                for activity in activities {
+                    self.push_activity_block(activity);
+                }
+                if let Some(content) = plan_content {
+                    self.push_plan_content(content);
+                }
+                if has_task_activity {
                     self.refresh_tasks();
                 }
                 self.scroll_to_bottom();
@@ -495,7 +588,7 @@ impl App {
             AgentEvent::CodeOutput { output, error } => {
                 let error = error.filter(|value| !value.trim().is_empty());
                 if error.is_some() {
-                    self.status_text = Some("execution_failed".into());
+                    self.set_status("execution failed", None, true);
                 }
                 if error.is_some() || !output.is_empty() {
                     self.blocks.push(DisplayBlock::CodeOutput { output, error });
@@ -517,6 +610,11 @@ impl App {
                             .unwrap_or("")
                             .to_string();
                         self.active_delegate = Some((name, task, std::time::Instant::now()));
+                        let details = self
+                            .active_delegate
+                            .as_ref()
+                            .map(|(_, task, _)| task.clone());
+                        self.set_status("delegating", details, true);
                     }
                     self.scroll_to_bottom();
                 } else if kind == "tool_output" {
@@ -525,21 +623,18 @@ impl App {
                     // - shell + sub-agent result streams can render text to the TUI
                     let is_delegate_stream = matches!(
                         self.status_text.as_deref(),
-                        Some("agent_call") | Some("agent_result")
+                        Some("delegating") | Some("delegate")
                     );
                     if is_delegate_stream {
                         self.live_output_chars_estimate += text.chars().count() as i64;
                         self.live_output_tokens_estimate =
                             estimate_tokens_from_char_count(self.live_output_chars_estimate);
                     }
-                    let stream_active = matches!(
-                        self.status_text.as_deref(),
-                        Some("shell_wait")
-                            | Some("shell")
-                            | Some("shell_read")
-                            | Some("agent_call")
-                            | Some("agent_result")
-                    );
+                    let stream_active = self.active_delegate.is_some()
+                        || self
+                            .status_text
+                            .as_deref()
+                            .is_some_and(|status| status.contains("shell"));
                     if self.show_live_tool_output && stream_active {
                         self.streaming_output.push(text);
                         self.scroll_to_bottom();
@@ -556,7 +651,7 @@ impl App {
             AgentEvent::LlmRequest { iteration, .. } => {
                 self.flush_pending_text();
                 self.iteration = iteration + 1;
-                self.status_text = Some("thinking".into());
+                self.set_status("thinking", None, true);
                 self.live_output_chars_estimate = 0;
                 self.live_output_tokens_estimate = 0;
             }
@@ -570,24 +665,35 @@ impl App {
                 if reason.chars().count() > 60 {
                     reason_short.push_str("...");
                 }
-                self.status_text = Some(format!(
-                    "Retrying in {}s (attempt {}/{}): {}",
-                    wait_seconds, attempt, max_attempts, reason_short
-                ));
+                self.set_status(
+                    "retrying",
+                    Some(format!(
+                        "in {}s · attempt {}/{} · {}",
+                        wait_seconds, attempt, max_attempts, reason_short
+                    )),
+                    true,
+                );
                 self.scroll_to_bottom();
             }
             AgentEvent::Done => {
                 self.flush_pending_text();
                 self.running = false;
-                self.status_text = None;
+                self.clear_status();
                 self.streaming_output.clear();
                 self.active_delegate = None;
                 self.live_output_chars_estimate = 0;
                 self.live_output_tokens_estimate = 0;
                 self.scroll_to_bottom();
             }
-            AgentEvent::Error { message, .. } => {
-                self.blocks.push(DisplayBlock::Error(message));
+            AgentEvent::Error { message, envelope } => {
+                let code = envelope.as_ref().and_then(|err| err.code.as_deref());
+                if is_manual_interrupt_error(&message, code) {
+                    self.blocks.push(DisplayBlock::SystemMessage(
+                        manual_interrupt_message().to_string(),
+                    ));
+                } else {
+                    self.blocks.push(DisplayBlock::Error(message));
+                }
                 self.invalidate_height_cache();
                 self.scroll_to_bottom();
             }
@@ -655,43 +761,18 @@ impl App {
         self.scroll_offset = 0;
         self.follow_output = true;
         self.pending_text.clear();
-        self.status_text = None;
+        self.clear_status();
         self.pending_images.clear();
         self.streaming_output.clear();
         self.queued_message = None;
         self.task_tray.clear();
         self.active_delegate = None;
+        self.activity_state.reset();
         self.token_usage = TokenUsage::default();
         self.last_response_usage = TokenUsage::default();
         self.live_output_chars_estimate = 0;
         self.live_output_tokens_estimate = 0;
         self.invalidate_height_cache();
-    }
-
-    /// Ensure a plan file path exists, creating the directory and returning the path.
-    /// Generated on first call per session; subsequent calls return the same path.
-    pub fn ensure_plan_file(&mut self) -> PathBuf {
-        if let Some(ref path) = self.plan_file {
-            return path.clone();
-        }
-
-        // Detect git repo root by walking up from cwd
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let base = find_git_root(&cwd)
-            .map(|root| root.join(".lash"))
-            .unwrap_or_else(lash_core::lash_home);
-        let plans_dir = base.join("plans");
-        let _ = std::fs::create_dir_all(&plans_dir);
-
-        // Generate slug: YYYYMMDD_HHMMSS-adjective-noun
-        let now = chrono::Local::now();
-        let timestamp = now.format("%Y%m%d_%H%M%S");
-        let slug = generate_plan_slug();
-        let filename = format!("{}-{}.md", timestamp, slug);
-        let path = plans_dir.join(filename);
-
-        self.plan_file = Some(path.clone());
-        path
     }
 
     /// Toggle expand level 0↔1 (ghost fold ↔ compact plus) with scroll anchoring.
@@ -968,9 +1049,7 @@ impl App {
         };
         // Include live streaming output lines
         let streaming_height = self.streaming_output.len();
-        // Include active delegate indicator line
-        let delegate_height = if self.active_delegate.is_some() { 1 } else { 0 };
-        block_height + pending_height + streaming_height + delegate_height
+        block_height + pending_height + streaming_height
     }
 
     /// Which line (0-indexed) the cursor is on in multi-line input.
@@ -1562,42 +1641,38 @@ pub fn format_tokens(n: i64) -> String {
     }
 }
 
-/// Walk up from a directory looking for a `.git/` directory.
-fn find_git_root(start: &std::path::Path) -> Option<PathBuf> {
-    let mut dir = start.to_path_buf();
-    loop {
-        if dir.join(".git").exists() {
-            return Some(dir);
-        }
-        if !dir.pop() {
-            return None;
-        }
+fn render_plan_content_from_result(result: &serde_json::Value) -> Option<String> {
+    if result.get("__type__").and_then(|value| value.as_str()) != Some("plan_update") {
+        return None;
     }
-}
+    let items = result.get("plan").and_then(|value| value.as_array())?;
+    if items.is_empty() {
+        return None;
+    }
 
-/// Generate a readable slug like "swift-falcon" from small word lists.
-fn generate_plan_slug() -> String {
-    const ADJECTIVES: &[&str] = &[
-        "swift", "bold", "calm", "dark", "keen", "warm", "cool", "fair", "deep", "wild", "soft",
-        "pure", "vast", "slim", "rare", "firm", "lean", "rich", "true", "wise", "fast", "safe",
-        "full", "neat", "open", "flat", "pale", "dry", "raw", "new",
-    ];
-    const NOUNS: &[&str] = &[
-        "falcon", "ember", "coral", "prism", "ridge", "cedar", "bloom", "frost", "stone", "grain",
-        "drift", "spark", "forge", "shade", "crest", "brook", "flint", "moss", "peak", "dust",
-        "glow", "wave", "pine", "iron", "salt", "bone", "mist", "clay", "sage", "arch",
-    ];
+    let mut lines = Vec::new();
+    if let Some(explanation) = result
+        .get("explanation")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(explanation.to_string());
+        lines.push(String::new());
+    }
 
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    std::time::SystemTime::now().hash(&mut hasher);
-    std::process::id().hash(&mut hasher);
-    let h = hasher.finish();
+    for (idx, item) in items.iter().enumerate() {
+        let step = item.get("step").and_then(|value| value.as_str())?;
+        let status = item.get("status").and_then(|value| value.as_str())?;
+        let marker = match status {
+            "completed" => "[x]",
+            "in_progress" => "[-]",
+            _ => "[ ]",
+        };
+        lines.push(format!("{}. {} {}", idx + 1, marker, step));
+    }
 
-    let adj = ADJECTIVES[(h as usize) % ADJECTIVES.len()];
-    let noun = NOUNS[((h >> 16) as usize) % NOUNS.len()];
-    format!("{}-{}", adj, noun)
+    Some(lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -1711,48 +1786,19 @@ mod tests {
     // ── DisplayBlock::height ──
 
     #[test]
-    fn display_block_tool_call_height() {
-        let block = DisplayBlock::ToolCall {
-            name: "read_file".into(),
-            args: serde_json::json!({}),
-            result: serde_json::json!(null),
-            success: true,
-            duration_ms: 50,
-            continuation: false,
-        };
-        // Level 0: first in group = 1 (ghost fold summary)
-        assert_eq!(block.height(0, 80, 0), 1);
-        // Level 1: individual line
-        assert_eq!(block.height(1, 80, 0), 1);
-        // Level 2: individual line
-        assert_eq!(block.height(2, 80, 0), 1);
-
-        let cont = DisplayBlock::ToolCall {
-            name: "read_file".into(),
-            args: serde_json::json!({}),
-            result: serde_json::json!(null),
-            success: true,
-            duration_ms: 50,
-            continuation: true,
-        };
-        assert_eq!(cont.height(0, 80, 0), 0); // absorbed into ghost fold
-        assert_eq!(cont.height(1, 80, 0), 1); // visible at level 1
-        assert_eq!(cont.height(2, 80, 0), 1); // visible at level 2
-    }
-
-    #[test]
-    fn successful_plan_mode_tool_calls_are_hidden() {
-        let block = DisplayBlock::ToolCall {
-            name: "enter_plan_mode".into(),
-            args: serde_json::json!({}),
-            result: serde_json::json!({"plan_file":"/tmp/plan.md"}),
-            success: true,
-            duration_ms: 10,
-            continuation: false,
-        };
-        assert_eq!(block.height(0, 80, 0), 0);
-        assert_eq!(block.height(1, 80, 0), 0);
-        assert_eq!(block.height(2, 80, 0), 0);
+    fn renders_plan_content_from_update_plan_result() {
+        let content = render_plan_content_from_result(&serde_json::json!({
+            "__type__": "plan_update",
+            "explanation": "Found the renderer.",
+            "plan": [
+                {"step":"Inspect UI", "status":"completed"},
+                {"step":"Patch layout", "status":"in_progress"}
+            ]
+        }))
+        .expect("plan content");
+        assert!(content.contains("Found the renderer."));
+        assert!(content.contains("1. [x] Inspect UI"));
+        assert!(content.contains("2. [-] Patch layout"));
     }
 
     #[test]
@@ -1849,6 +1895,31 @@ mod tests {
     }
 
     #[test]
+    fn tool_call_flushes_intermediate_stream_text_immediately() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        app.blocks.clear();
+
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: "I’m checking the rendering path first.".into(),
+        });
+        app.handle_agent_event(AgentEvent::ToolCall {
+            name: "read_file".into(),
+            args: serde_json::json!({"path":"lash-cli/src/app.rs"}),
+            result: serde_json::json!("ok"),
+            success: true,
+            duration_ms: 1,
+        });
+
+        assert!(app.pending_text.is_empty());
+        assert!(matches!(
+            app.blocks.first(),
+            Some(DisplayBlock::AssistantText(text))
+                if text == "I’m checking the rendering path first."
+        ));
+        assert!(matches!(app.blocks.get(1), Some(DisplayBlock::Activity(_))));
+    }
+
+    #[test]
     fn token_usage_resets_live_token_estimate() {
         let mut app = App::new("test-model".into(), "test".into(), None);
         app.handle_agent_event(AgentEvent::TextDelta {
@@ -1885,6 +1956,25 @@ mod tests {
         assert!(matches!(
             app.blocks.last(),
             Some(DisplayBlock::AssistantText(text)) if text == "final output"
+        ));
+    }
+
+    #[test]
+    fn cancelled_error_renders_as_system_message() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        app.handle_agent_event(AgentEvent::Error {
+            message: "LLM error: cancelled".into(),
+            envelope: Some(lash_core::agent::ErrorEnvelope {
+                kind: "llm_provider".into(),
+                code: Some("cancelled".into()),
+                user_message: "LLM error: cancelled".into(),
+                raw: None,
+            }),
+        });
+
+        assert!(matches!(
+            app.blocks.last(),
+            Some(DisplayBlock::SystemMessage(msg)) if msg == "Manually interrupted."
         ));
     }
 
@@ -1929,14 +2019,7 @@ mod tests {
             code: "let x = 1;\nlet y = 2;\nlet z = 3;\nprintln!();\nlet a = 4;\nlet b = 5;".into(),
             continuation: false,
         });
-        app.blocks.push(DisplayBlock::ToolCall {
-            name: "read_file".into(),
-            args: serde_json::json!({}),
-            result: serde_json::json!(null),
-            success: true,
-            duration_ms: 50,
-            continuation: false,
-        });
+        app.blocks.push(DisplayBlock::Activity(dummy_activity()));
         app.blocks.push(DisplayBlock::AssistantText(
             "Response 2 - another reply that is a bit longer".into(),
         ));
@@ -1953,6 +2036,7 @@ mod tests {
 
         let width = 80;
         let vh = 24;
+        app.expand_level = 0;
 
         // Build the height cache (level 0 = ghost fold)
         app.ensure_height_cache_pub(width, vh);
@@ -1963,10 +2047,11 @@ mod tests {
             "height cache should be populated"
         );
 
-        // Simulate scrolling up: place scroll at the start of block 4 (AssistantText "Response 2")
-        // First, find where block 4 starts
+        // Simulate scrolling up near AssistantText "Response 2" and ensure the same
+        // anchored block stays visible across expand/collapse.
         let cache = app.height_cache_snapshot().to_vec();
         let block4_start = cache[3]; // cumulative height after first 4 blocks (0-indexed)
+        let anchor_idx = cache.partition_point(|&cum| cum <= block4_start);
         app.scroll_offset = block4_start;
         app.follow_output = false;
 
@@ -1975,12 +2060,11 @@ mod tests {
         assert_eq!(app.expand_level, 1);
 
         let new_cache = app.height_cache_snapshot().to_vec();
-        let new_block4_start = new_cache[3];
+        let new_anchor_idx = new_cache.partition_point(|&cum| cum <= app.scroll_offset);
 
-        // The scroll should now point to the same block (block 4)
         assert_eq!(
-            app.scroll_offset, new_block4_start,
-            "scroll should track block 4 start after expanding to level 1"
+            new_anchor_idx, anchor_idx,
+            "scroll should keep the same anchored block after expanding to level 1"
         );
 
         // Cycle back to level 0
@@ -1988,11 +2072,11 @@ mod tests {
         assert_eq!(app.expand_level, 0);
 
         let final_cache = app.height_cache_snapshot().to_vec();
-        let final_block4_start = final_cache[3];
+        let final_anchor_idx = final_cache.partition_point(|&cum| cum <= app.scroll_offset);
 
         assert_eq!(
-            app.scroll_offset, final_block4_start,
-            "scroll should track block 4 start after collapsing back to level 0"
+            final_anchor_idx, anchor_idx,
+            "scroll should keep the same anchored block after collapsing back to level 0"
         );
     }
 
@@ -2010,14 +2094,7 @@ mod tests {
             code: "let x = 1;\nlet y = 2;\nlet z = 3;\nprintln!();\nlet a = 4;\nlet b = 5;".into(),
             continuation: false,
         });
-        app.blocks.push(DisplayBlock::ToolCall {
-            name: "read_file".into(),
-            args: serde_json::json!({}),
-            result: serde_json::json!(null),
-            success: true,
-            duration_ms: 50,
-            continuation: false,
-        });
+        app.blocks.push(DisplayBlock::Activity(dummy_activity()));
         app.blocks.push(DisplayBlock::AssistantText(
             "Response 2 - another reply".into(),
         ));
@@ -2033,7 +2110,7 @@ mod tests {
         let cache = app.height_cache_snapshot().to_vec();
 
         // Scroll to block 5 (AssistantText "Response 2", index 5 with Splash at 0)
-        let block5_start = cache[4]; // after Splash + UserInput + AssistantText + CodeBlock + ToolCall
+        let block5_start = cache[4]; // after Splash + UserInput + AssistantText + CodeBlock + Activity
         app.scroll_offset = block5_start;
         app.follow_output = false;
 
@@ -2147,5 +2224,83 @@ mod tests {
             app.scroll_offset, new_block3_start,
             "scroll should track block 3 even with stale cache"
         );
+    }
+
+    #[test]
+    fn handle_tool_call_merges_contiguous_exploration_activity() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        app.blocks.clear();
+
+        app.handle_agent_event(AgentEvent::ToolCall {
+            name: "grep".into(),
+            args: serde_json::json!({"pattern": "ctx", "path": "lash-cli/src"}),
+            result: serde_json::json!("match"),
+            success: true,
+            duration_ms: 10,
+        });
+        app.handle_agent_event(AgentEvent::ToolCall {
+            name: "read_file".into(),
+            args: serde_json::json!({"path": "lash-cli/src/ui.rs"}),
+            result: serde_json::json!("==> lash-cli/src/ui.rs <==\nline"),
+            success: true,
+            duration_ms: 5,
+        });
+
+        assert_eq!(app.blocks.len(), 1);
+        match &app.blocks[0] {
+            DisplayBlock::Activity(activity) => {
+                assert_eq!(activity.kind, ActivityKind::Exploration);
+                assert!(activity.summary.contains("explored"));
+                assert_eq!(activity.children.len(), 1);
+                assert!(
+                    activity
+                        .detail_lines
+                        .iter()
+                        .any(|line| line.contains("Search"))
+                );
+                assert!(
+                    activity
+                        .detail_lines
+                        .iter()
+                        .any(|line| line.contains("Read"))
+                );
+            }
+            other => panic!(
+                "expected activity block, got {:?}",
+                other_variant_name(other)
+            ),
+        }
+    }
+
+    fn other_variant_name(block: &DisplayBlock) -> &'static str {
+        match block {
+            DisplayBlock::UserInput(_) => "UserInput",
+            DisplayBlock::AssistantText(_) => "AssistantText",
+            DisplayBlock::CodeBlock { .. } => "CodeBlock",
+            DisplayBlock::Activity(_) => "Activity",
+            DisplayBlock::CodeOutput { .. } => "CodeOutput",
+            DisplayBlock::ShellOutput { .. } => "ShellOutput",
+            DisplayBlock::Error(_) => "Error",
+            DisplayBlock::SystemMessage(_) => "SystemMessage",
+            DisplayBlock::PlanContent(_) => "PlanContent",
+            DisplayBlock::SubAgentResult { .. } => "SubAgentResult",
+            DisplayBlock::Splash => "Splash",
+        }
+    }
+
+    fn dummy_activity() -> ActivityBlock {
+        ActivityBlock {
+            kind: ActivityKind::Exploration,
+            status: ActivityStatus::Completed,
+            tool_name: "read_file".into(),
+            summary: "explored".into(),
+            detail_lines: vec!["read lash-cli/src/app.rs".into()],
+            duration_ms: 50,
+            args: serde_json::json!({}),
+            result: serde_json::Value::Null,
+            artifact: None,
+            children: Vec::new(),
+            extra: None,
+        }
     }
 }

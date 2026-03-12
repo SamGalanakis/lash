@@ -6,7 +6,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/controls", "Show keyboard shortcuts"),
     ("/fork", "Open a forked session in a new terminal"),
     ("/model", "Show or switch LLM model"),
-    ("/mode", "Show or switch execution mode"),
+    ("/mode", "Show current execution mode"),
     ("/provider", "Open provider setup (in-app)"),
     ("/login", "Sign in or reconfigure provider"),
     ("/logout", "Remove stored credentials"),
@@ -52,7 +52,7 @@ pub enum Command {
     Fork(Option<String>),
     /// Show or switch LLM model
     Model(Option<String>),
-    /// Show or switch execution mode
+    /// Show current execution mode or request a new-session change
     Mode(Option<String>),
     /// Show provider status and switch instructions
     ChangeProvider,

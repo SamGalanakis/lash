@@ -9,28 +9,29 @@ use crate::agent::message::IMAGE_REF_PREFIX;
 use crate::agent::message::MessageOrigin;
 use crate::agent::{
     AgentConfig, AgentEvent, Message, MessageRole, Part, PartKind, PromptSectionOverride,
-    PruneState, TokenUsage, build_execution_preamble, make_error_event, transport_stream_events,
+    PruneState, TokenUsage, apply_context_folding, build_execution_preamble, make_error_event,
+    transport_stream_events,
 };
 use crate::capabilities::AgentCapabilities;
 use crate::instructions::{FsInstructionSource, InstructionSource};
 use crate::llm::factory::adapter_for;
 use crate::llm::transport::LlmTransport;
 use crate::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
+use crate::plugin::{MessageMutatorContext, MessageMutatorHook};
 use crate::provider::Provider;
 use crate::sansio::{Effect, LlmCallError, Response, TurnMachine, TurnMachineConfig};
 use crate::strip_repl_fragments;
 use crate::{
-    CapabilityId, ContextFoldingConfig, ExecutionMode, ExternalInvokeError, PluginMessage,
-    PluginSessionSnapshot, PromptHookContext, RuntimeServices, SandboxMessage, Session,
-    SessionConfigOverrides, SessionCreateRequest, SessionError, SessionHandle, SessionManager,
-    SessionSnapshot, SessionStartPoint, ToolCallRecord, TurnHookContext, TurnResultHookContext,
+    ContextFoldingConfig, ExecutionMode, ExternalInvokeError, PluginMessage, PluginSessionSnapshot,
+    PromptHookContext, RuntimeServices, SandboxMessage, Session, SessionConfigOverrides,
+    SessionCreateRequest, SessionError, SessionHandle, SessionManager, SessionSnapshot,
+    SessionStartPoint, ToolCallRecord, TurnHookContext, TurnResultHookContext,
 };
 
 /// Runtime execution mode for a turn.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum RunMode {
     Normal,
-    Plan,
 }
 
 /// Host-provided per-turn input.
@@ -52,14 +53,20 @@ pub struct TurnInput {
     pub image_blobs: HashMap<String, Vec<u8>>,
     #[serde(default)]
     pub mode: Option<RunMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan_file: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 enum NormalizedItem {
     Text(String),
     Image(Vec<u8>),
+}
+
+/// Exact prompt-usage snapshot from the most recent completed LLM call.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PromptUsage {
+    pub prompt_context_tokens: usize,
+    pub input_tokens: usize,
+    pub cached_input_tokens: usize,
 }
 
 /// Serializable host-owned session envelope.
@@ -76,6 +83,8 @@ pub struct AgentStateEnvelope {
     pub iteration: usize,
     #[serde(default)]
     pub token_usage: TokenUsage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt_usage: Option<PromptUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_state: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -97,6 +106,7 @@ impl Default for AgentStateEnvelope {
             messages: Vec::new(),
             iteration: 0,
             token_usage: TokenUsage::default(),
+            last_prompt_usage: None,
             task_state: None,
             subagent_state: None,
             replay_manifest: None,
@@ -279,6 +289,26 @@ fn default_llm_factory() -> LlmFactory {
     Arc::new(|provider| adapter_for(provider))
 }
 
+fn normalize_prompt_usage(provider: &Provider, usage: &TokenUsage) -> Option<PromptUsage> {
+    let input_tokens = usage.input_tokens.max(0) as usize;
+    let cached_input_tokens = usage.cached_input_tokens.max(0) as usize;
+    if input_tokens == 0 && cached_input_tokens == 0 {
+        return None;
+    }
+
+    let prompt_context_tokens = if provider.input_usage_excludes_cached_tokens() {
+        input_tokens.saturating_add(cached_input_tokens)
+    } else {
+        input_tokens
+    };
+
+    Some(PromptUsage {
+        prompt_context_tokens,
+        input_tokens,
+        cached_input_tokens,
+    })
+}
+
 #[derive(Default)]
 struct TurnAssembler {
     final_message: Option<String>,
@@ -286,6 +316,7 @@ struct TurnAssembler {
     tool_calls: Vec<ToolCallRecord>,
     code_outputs: Vec<CodeOutputRecord>,
     token_usage: TokenUsage,
+    last_llm_usage: Option<TokenUsage>,
     issues: Vec<TurnIssue>,
     saw_done: bool,
     saw_tool_failure: bool,
@@ -327,8 +358,11 @@ impl TurnAssembler {
             AgentEvent::Message { text, kind } if kind == "final" => {
                 self.final_message = Some(text.clone());
             }
-            AgentEvent::TokenUsage { cumulative, .. } => {
+            AgentEvent::TokenUsage {
+                usage, cumulative, ..
+            } => {
                 self.token_usage = cumulative.clone();
+                self.last_llm_usage = Some(usage.clone());
             }
             AgentEvent::Error { message, envelope } => {
                 let (kind, code) = if let Some(envelope) = envelope {
@@ -412,6 +446,10 @@ impl TurnAssembler {
             code_outputs: self.code_outputs,
             errors: issues,
         }
+    }
+
+    fn last_llm_usage(&self) -> Option<&TokenUsage> {
+        self.last_llm_usage.as_ref()
     }
 }
 
@@ -833,7 +871,130 @@ fn append_plugin_messages(messages: &mut Vec<Message>, plugin_messages: &[Plugin
     messages.extend(new_messages);
 }
 
+fn normalize_message_ids(messages: &mut [Message]) {
+    for (msg_idx, message) in messages.iter_mut().enumerate() {
+        if message.id != "__context_archive__" {
+            message.id = format!("m{msg_idx}");
+        }
+        if message.parts.is_empty() {
+            message.parts.push(Part {
+                id: String::new(),
+                kind: PartKind::Text,
+                content: String::new(),
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: PruneState::Intact,
+            });
+        }
+        let message_id = message.id.clone();
+        for (part_idx, part) in message.parts.iter_mut().enumerate() {
+            part.id = format!("{message_id}.p{part_idx}");
+        }
+    }
+}
+
+async fn run_message_mutator(
+    plugins: Arc<crate::PluginSession>,
+    ctx: MessageMutatorContext,
+    mut messages: Vec<Message>,
+) -> Result<Vec<Message>, RuntimeError> {
+    messages = plugins
+        .mutate_messages(ctx, messages)
+        .await
+        .map_err(|err| RuntimeError {
+            code: "plugin_message_mutator".to_string(),
+            message: err.to_string(),
+        })?;
+    normalize_message_ids(&mut messages);
+    Ok(messages)
+}
+
+type PreparedMutator = Option<(Arc<crate::PluginSession>, MessageMutatorContext)>;
+type PreparedMessages = (PreparedMutator, Vec<Message>);
+
 impl LashRuntime {
+    fn history_enabled(&self) -> bool {
+        let Some(session) = self.session.as_ref() else {
+            return false;
+        };
+        let tool_names: Vec<String> = session
+            .tools()
+            .definitions()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        let helper_bindings = session
+            .tools()
+            .dynamic_projection()
+            .map(|projection| projection.helper_bindings)
+            .unwrap_or_default();
+        tool_names.iter().any(|name| name == "search_history")
+            || helper_bindings.contains("search_history")
+    }
+
+    fn max_context_tokens(&self, model: &str) -> usize {
+        self.config
+            .max_context_tokens
+            .or_else(|| {
+                self.config
+                    .provider
+                    .context_window(model)
+                    .map(|v| v as usize)
+            })
+            .unwrap_or(200_000)
+    }
+
+    fn prepare_message_mutation(
+        &self,
+        hook: MessageMutatorHook,
+        messages: Vec<Message>,
+        turn: Option<AssembledTurn>,
+        prompt_usage: Option<PromptUsage>,
+        max_context_tokens: Option<usize>,
+        context_folding: Option<ContextFoldingConfig>,
+    ) -> Result<PreparedMessages, RuntimeError> {
+        let has_mutator = self
+            .session
+            .as_ref()
+            .expect("lash runtime session must be available")
+            .plugins()
+            .has_message_mutator(hook);
+        if !has_mutator {
+            return Ok((None, messages));
+        }
+        let manager = self.runtime_session_manager().map_err(|err| RuntimeError {
+            code: "plugin_session_manager".to_string(),
+            message: err.to_string(),
+        })?;
+        let plugins = self
+            .session
+            .as_ref()
+            .expect("lash runtime session must be available")
+            .plugins()
+            .clone();
+        let mut state = self.export_state();
+        state.messages = messages.clone();
+        if let Some(prompt_usage) = prompt_usage.clone() {
+            state.last_prompt_usage = Some(prompt_usage);
+        }
+        Ok((
+            Some((
+                plugins,
+                MessageMutatorContext {
+                    hook,
+                    session_id: self.state.agent_id.clone(),
+                    state,
+                    host: manager,
+                    turn,
+                    prompt_usage,
+                    max_context_tokens,
+                    context_folding,
+                },
+            )),
+            messages,
+        ))
+    }
+
     /// Build a runtime from host-provided state + tools.
     pub async fn from_state(
         config: RuntimeConfig,
@@ -860,7 +1021,6 @@ impl LashRuntime {
         if state.context_folding.is_default() && !config.context_folding.is_default() {
             state.context_folding = config.context_folding;
         }
-        services.tools.set_execution_mode(state.execution_mode);
         let mut session = Session::new(
             services,
             &state.agent_id,
@@ -922,13 +1082,11 @@ impl LashRuntime {
 
     /// Replace the host-owned state envelope.
     pub fn set_state(&mut self, state: AgentStateEnvelope) {
-        if let Some(session) = self.session.as_ref() {
-            session.tools().set_execution_mode(state.execution_mode);
-            if let Some(snapshot) = state.plugin_snapshot.as_ref()
-                && let Err(err) = session.plugins().restore(snapshot)
-            {
-                tracing::warn!("failed to restore plugin snapshot in set_state: {err}");
-            }
+        if let Some(session) = self.session.as_ref()
+            && let Some(snapshot) = state.plugin_snapshot.as_ref()
+            && let Err(err) = session.plugins().restore(snapshot)
+        {
+            tracing::warn!("failed to restore plugin snapshot in set_state: {err}");
         }
         self.state = state;
     }
@@ -951,15 +1109,6 @@ impl LashRuntime {
     /// Update session ID metadata on the runtime config.
     pub fn set_session_id(&mut self, session_id: Option<String>) {
         self.config.session_id = session_id;
-    }
-
-    /// Update execution mode on the runtime and persisted envelope.
-    pub fn set_execution_mode(&mut self, execution_mode: ExecutionMode) {
-        self.state.execution_mode = execution_mode;
-        self.config.execution_mode = execution_mode;
-        if let Some(session) = self.session.as_ref() {
-            session.tools().set_execution_mode(execution_mode);
-        }
     }
 
     /// Update context folding policy on the runtime and persisted envelope.
@@ -1045,9 +1194,11 @@ impl LashRuntime {
         events: &dyn EventSink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
+        let previous_prompt_usage = self.state.last_prompt_usage.clone();
         let normalized = match self.normalize_input_items(&input.items, &input.image_blobs) {
             Ok(items) => items,
             Err(e) => {
+                self.state.last_prompt_usage = None;
                 let mut assembler = TurnAssembler::default();
                 let error_event = AgentEvent::Error {
                     message: e.clone(),
@@ -1078,65 +1229,8 @@ impl LashRuntime {
                 RunMode::Normal
             }
         });
-        let plan_file = input
-            .plan_file
-            .clone()
-            .unwrap_or_else(|| ".lash_plan".into());
         let mode_msg = match mode {
-            RunMode::Plan => Some(format!(
-                "## Plan Mode\n\n\
-                You are in PLAN mode. Think, explore, and design — do NOT execute changes.\n\n\
-                **Rules:**\n\
-                - READ-ONLY: Do not modify project files or run destructive commands\n\
-                - You MAY use: read_file, glob, grep, ls, web_search, fetch_url, agent_call\n\
-                - You MUST NOT use: edit_file, find_replace, write_file (except the plan file), or shell with write commands\n\
-                - Exception: Write your plan to `{}` using write_file\n\n\
-                **Workflow:**\n\
-                1. Understand the request and note key assumptions\n\
-                2. Explore the codebase — read files, search for patterns, understand architecture\n\
-                3. Design your approach — consider tradeoffs, identify risks\n\
-                4. Write a clear, step-by-step plan to the plan file\n\n\
-                When the user switches back to normal mode, you will execute the plan.",
-                plan_file
-            )),
-            RunMode::Normal => input.plan_file.as_ref().and_then(|path| {
-                let plan_content = std::fs::read_to_string(path).unwrap_or_default();
-                if plan_content.is_empty() {
-                    None
-                } else {
-                    let mut available = Vec::new();
-                    if self.capabilities.enabled(CapabilityId::History) {
-                        available.push(
-                            "- `search_history(\"query\", mode=\"hybrid\")` — search planning exploration"
-                                .to_string(),
-                        );
-                        available.push(
-                            "- Prior user requests are included in turn history results".to_string(),
-                        );
-                    }
-                    if self.capabilities.enabled(CapabilityId::Memory) {
-                        available
-                            .push("- `mem_get(...)`, `mem_all()`, and `search_mem(...)` — persistent memory".to_string());
-                    }
-                    let available_context = if available.is_empty() {
-                        "No persisted planning context capabilities are enabled for this agent."
-                            .to_string()
-                    } else {
-                        available.join("\n")
-                    };
-                    Some(format!(
-                        "## Executing Plan\n\n\
-                        You are executing a plan from a previous planning session. \
-                        Use available context from this agent configuration.\n\n\
-                        **Plan file:** `{}`\n\n\
-                        ---\n{}\n---\n\n\
-                        **Available context:**\n\
-                        {}\n\n\
-                        Execute the plan step by step.",
-                        path, plan_content, available_context
-                    ))
-                }
-            }),
+            RunMode::Normal => None,
         };
         if let Some(content) = mode_msg {
             let sys_id = format!("m{}", messages.len());
@@ -1204,8 +1298,55 @@ impl LashRuntime {
             origin: None,
         });
 
-        self.stream_prepared_turn(messages, user_images_png, events, cancel)
-            .await
+        if let Some(prompt_usage) = previous_prompt_usage.clone() {
+            let max_context_tokens = LashRuntime::max_context_tokens(self, &self.config.model);
+            let hard_budget =
+                max_context_tokens * usize::from(self.state.context_folding.hard_limit_pct) / 100;
+            if prompt_usage.prompt_context_tokens >= hard_budget {
+                let has_mutator = self
+                    .session
+                    .as_ref()
+                    .expect("lash runtime session must be available")
+                    .plugins()
+                    .has_message_mutator(MessageMutatorHook::AfterTokenCount);
+                if has_mutator {
+                    let input_messages = std::mem::take(&mut messages);
+                    let (prepared, input_messages) = self.prepare_message_mutation(
+                        MessageMutatorHook::AfterTokenCount,
+                        input_messages,
+                        None,
+                        Some(prompt_usage),
+                        Some(max_context_tokens),
+                        Some(self.state.context_folding),
+                    )?;
+                    if let Some((plugins, ctx)) = prepared {
+                        messages = run_message_mutator(plugins, ctx, input_messages).await?;
+                    } else {
+                        messages = input_messages;
+                    }
+                } else {
+                    apply_context_folding(
+                        &mut messages,
+                        prompt_usage.prompt_context_tokens,
+                        max_context_tokens,
+                        self.state.context_folding,
+                        self.history_enabled(),
+                    );
+                    normalize_message_ids(&mut messages);
+                }
+            }
+        }
+
+        self.state.last_prompt_usage = None;
+
+        self.stream_prepared_turn(
+            messages,
+            user_images_png,
+            previous_prompt_usage,
+            events,
+            cancel,
+        )
+        .await
     }
 
     /// Run a single turn and return only the assembled terminal result.
@@ -1222,9 +1363,24 @@ impl LashRuntime {
         &mut self,
         mut messages: Vec<Message>,
         images_png: Vec<Vec<u8>>,
+        previous_prompt_usage: Option<PromptUsage>,
         events: &dyn EventSink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
+        let input_messages = std::mem::take(&mut messages);
+        let (prepared, input_messages) = self.prepare_message_mutation(
+            MessageMutatorHook::BeforeTurn,
+            input_messages,
+            None,
+            previous_prompt_usage,
+            None,
+            Some(self.state.context_folding),
+        )?;
+        if let Some((plugins, ctx)) = prepared {
+            messages = run_message_mutator(plugins, ctx, input_messages).await?;
+        } else {
+            messages = input_messages;
+        }
         let manager = self.runtime_session_manager().map_err(|err| RuntimeError {
             code: "plugin_session_manager".to_string(),
             message: err.to_string(),
@@ -1378,6 +1534,9 @@ impl LashRuntime {
             self.state.token_usage = assembler.token_usage.clone();
         }
 
+        let last_prompt_usage = assembler
+            .last_llm_usage()
+            .and_then(|usage| normalize_prompt_usage(&self.config.provider, usage));
         let mut assembled = assembler.finish(
             self.state.clone(),
             cancel_state.is_cancelled(),
@@ -1385,6 +1544,21 @@ impl LashRuntime {
             &self.sanitizer,
             &self.termination,
         );
+        assembled.state.last_prompt_usage = last_prompt_usage.clone();
+        let (prepared, input_messages) = self.prepare_message_mutation(
+            MessageMutatorHook::AfterTurn,
+            assembled.state.messages.clone(),
+            Some(assembled.clone()),
+            last_prompt_usage.clone(),
+            None,
+            Some(self.state.context_folding),
+        )?;
+        if let Some((plugins, ctx)) = prepared {
+            assembled.state.messages = run_message_mutator(plugins, ctx, input_messages).await?;
+        } else {
+            assembled.state.messages = input_messages;
+        }
+        self.state = assembled.state.clone();
         if let Some(session) = self.session.as_ref() {
             let plugins = Arc::clone(session.plugins());
             let manager = self.runtime_session_manager().map_err(|err| RuntimeError {
@@ -1496,7 +1670,11 @@ impl RuntimeTurnDriver {
                         .capabilities
                         .enabled_tools
                         .iter()
-                        .filter(|tool| available_defs.iter().any(|def| def.name == tool.as_str()))
+                        .filter(|tool| {
+                            available_defs.iter().any(|def| {
+                                def.name == tool.as_str()
+                            })
+                        })
                         .cloned()
                         .collect(),
                     helper_bindings: BTreeSet::new(),
@@ -1544,8 +1722,7 @@ impl RuntimeTurnDriver {
         );
         self.config = agent_config.into();
 
-        let max_context = self.max_context_tokens(&preamble.model);
-        let machine_config = self.machine_config(preamble, max_context, ExecutionMode::Repl);
+        let machine_config = self.machine_config(preamble, ExecutionMode::Repl);
         let mut machine = TurnMachine::new(machine_config, messages, images, run_offset);
 
         loop {
@@ -1631,8 +1808,7 @@ impl RuntimeTurnDriver {
         );
         self.config = agent_config.into();
 
-        let max_context = self.max_context_tokens(&preamble.model);
-        let machine_config = self.machine_config(preamble, max_context, ExecutionMode::Standard);
+        let machine_config = self.machine_config(preamble, ExecutionMode::Standard);
         let mut machine = TurnMachine::new(machine_config, messages, images, run_offset);
 
         loop {
@@ -1756,14 +1932,11 @@ impl RuntimeTurnDriver {
     fn machine_config(
         &self,
         preamble: crate::agent::ExecutionPreamble,
-        max_context_tokens: usize,
         execution_mode: ExecutionMode,
     ) -> TurnMachineConfig {
         TurnMachineConfig {
             execution_mode,
             model: preamble.model,
-            context_folding: self.config.context_folding,
-            max_context_tokens,
             max_turns: self.config.max_turns,
             headless: self.config.headless,
             sub_agent: self.config.sub_agent,
@@ -1785,18 +1958,6 @@ impl RuntimeTurnDriver {
             llm_log_path: self.config.llm_log_path.clone(),
             agent_id: self.agent_id.clone(),
         }
-    }
-
-    fn max_context_tokens(&self, model: &str) -> usize {
-        self.config
-            .max_context_tokens
-            .or_else(|| {
-                self.config
-                    .provider
-                    .context_window(model)
-                    .map(|v| v as usize)
-            })
-            .unwrap_or(200_000)
     }
 
     async fn run_exec_code(
@@ -2483,6 +2644,22 @@ mod tests {
         AgentStateEnvelope::default()
     }
 
+    fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
+        Message {
+            id: id.to_string(),
+            role,
+            parts: vec![Part {
+                id: format!("{id}.p0"),
+                kind: PartKind::Text,
+                content: content.to_string(),
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: PruneState::Intact,
+            }],
+            origin: None,
+        }
+    }
+
     #[derive(Clone, Default)]
     struct RecordingSink {
         events: Arc<Mutex<Vec<AgentEvent>>>,
@@ -2612,6 +2789,7 @@ mod tests {
 
     struct RuntimeTestPlugin {
         before_turn: Option<crate::plugin::BeforeTurnHook>,
+        message_mutators: Vec<(crate::MessageMutatorHook, crate::plugin::MessageMutator)>,
         external_registrar: Option<
             Arc<
                 dyn Fn(&mut crate::PluginRegistrar) -> Result<(), crate::PluginError> + Send + Sync,
@@ -2627,6 +2805,9 @@ mod tests {
         fn register(&self, reg: &mut crate::PluginRegistrar) -> Result<(), crate::PluginError> {
             if let Some(hook) = &self.before_turn {
                 reg.before_turn(Arc::clone(hook));
+            }
+            for (hook, mutator) in &self.message_mutators {
+                reg.register_message_mutator(*hook, Arc::clone(mutator))?;
             }
             if let Some(register) = &self.external_registrar {
                 register(reg)?;
@@ -2674,6 +2855,7 @@ mod tests {
                             ])
                         })
                     })),
+                    message_mutators: Vec::new(),
                     external_registrar: None,
                 }))
             }),
@@ -2689,7 +2871,6 @@ mod tests {
                     }],
                     image_blobs: HashMap::new(),
                     mode: None,
-                    plan_file: None,
                 },
                 CancellationToken::new(),
             )
@@ -2713,6 +2894,7 @@ mod tests {
             build: Arc::new(|_| {
                 Ok(Arc::new(RuntimeTestPlugin {
                     before_turn: None,
+                    message_mutators: Vec::new(),
                     external_registrar: Some(Arc::new(|reg| {
                         reg.register_external_op(
                             crate::ExternalOpDef {
@@ -3022,7 +3204,6 @@ mod tests {
                     }],
                     image_blobs: HashMap::new(),
                     mode: None,
-                    plan_file: None,
                 },
                 &sink,
                 CancellationToken::new(),
@@ -3076,7 +3257,6 @@ mod tests {
                     }],
                     image_blobs: HashMap::new(),
                     mode: None,
-                    plan_file: None,
                 },
                 CancellationToken::new(),
             )
@@ -3124,7 +3304,6 @@ mod tests {
                     }],
                     image_blobs: HashMap::new(),
                     mode: None,
-                    plan_file: None,
                 },
                 CancellationToken::new(),
             )
@@ -3134,6 +3313,214 @@ mod tests {
         assert_eq!(turn.token_usage.input_tokens, 12);
         assert_eq!(turn.token_usage.output_tokens, 4);
         assert_eq!(turn.token_usage.cached_input_tokens, 1);
+    }
+
+    #[test]
+    fn normalize_prompt_usage_counts_cached_tokens_for_claude() {
+        let usage = TokenUsage {
+            input_tokens: 80,
+            output_tokens: 0,
+            cached_input_tokens: 20,
+            reasoning_tokens: 0,
+        };
+        let prompt_usage = normalize_prompt_usage(
+            &Provider::Claude {
+                access_token: "token".into(),
+                refresh_token: "refresh".into(),
+                expires_at: 0,
+            },
+            &usage,
+        )
+        .expect("prompt usage");
+        assert_eq!(prompt_usage.prompt_context_tokens, 100);
+    }
+
+    #[test]
+    fn normalize_prompt_usage_uses_input_tokens_for_openai_compatible() {
+        let usage = TokenUsage {
+            input_tokens: 80,
+            output_tokens: 0,
+            cached_input_tokens: 20,
+            reasoning_tokens: 0,
+        };
+        let prompt_usage = normalize_prompt_usage(
+            &Provider::OpenAiGeneric {
+                api_key: "key".into(),
+                base_url: "https://example.invalid/v1".into(),
+            },
+            &usage,
+        )
+        .expect("prompt usage");
+        assert_eq!(prompt_usage.prompt_context_tokens, 80);
+    }
+
+    #[tokio::test]
+    async fn context_compaction_uses_previous_prompt_usage_across_turns() {
+        let transport = MockTransport::new(vec![MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: "compacted".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "compacted".to_string(),
+                }],
+                usage: LlmUsage {
+                    input_tokens: 20,
+                    output_tokens: 5,
+                    cached_input_tokens: 0,
+                    reasoning_tokens: 0,
+                },
+                ..LlmResponse::default()
+            }),
+        }]);
+        let mut runtime = standard_runtime_with_transport(transport).await;
+        runtime.set_state(AgentStateEnvelope {
+            agent_id: "root".to_string(),
+            execution_mode: ExecutionMode::Standard,
+            context_folding: ContextFoldingConfig::default(),
+            messages: vec![
+                text_message("u1", MessageRole::User, &"oldest user".repeat(20)),
+                text_message("a1", MessageRole::Assistant, &"oldest assistant".repeat(20)),
+                text_message("u2", MessageRole::User, &"older user".repeat(20)),
+                text_message("a2", MessageRole::Assistant, &"older assistant".repeat(20)),
+                text_message("u3", MessageRole::User, &"recent user".repeat(20)),
+                text_message("a3", MessageRole::Assistant, &"recent assistant".repeat(20)),
+                text_message("u4", MessageRole::User, &"latest user".repeat(20)),
+                text_message("a4", MessageRole::Assistant, &"latest assistant".repeat(20)),
+            ],
+            iteration: 4,
+            token_usage: TokenUsage::default(),
+            last_prompt_usage: Some(PromptUsage {
+                prompt_context_tokens: 70,
+                input_tokens: 70,
+                cached_input_tokens: 0,
+            }),
+            ..AgentStateEnvelope::default()
+        });
+        runtime.config.max_context_tokens = Some(100);
+
+        let turn = runtime
+            .run_turn_assembled(
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "new request".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    mode: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("turn");
+
+        assert!(
+            turn.state
+                .messages
+                .iter()
+                .any(|message| message.id == "__context_archive__")
+        );
+        assert!(!turn.state.messages.iter().any(|message| {
+            message
+                .parts
+                .iter()
+                .any(|part| part.content.contains("oldest user"))
+        }));
+        assert!(turn.state.messages.iter().any(|message| {
+            message
+                .parts
+                .iter()
+                .any(|part| part.content.contains("new request"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn after_token_count_mutator_can_rewrite_prompt_messages() {
+        let plugin = Arc::new(RuntimeTestPluginFactory {
+            build: Arc::new(|_| {
+                Ok(Arc::new(RuntimeTestPlugin {
+                    before_turn: None,
+                    message_mutators: vec![(
+                        crate::MessageMutatorHook::AfterTokenCount,
+                        Arc::new(|_ctx, messages| {
+                            Box::pin(async move {
+                                let current_user =
+                                    messages.last().cloned().expect("current user message");
+                                Ok(vec![
+                                    text_message(
+                                        "plugin",
+                                        MessageRole::System,
+                                        "plugin compaction summary",
+                                    ),
+                                    current_user,
+                                ])
+                            })
+                        }),
+                    )],
+                    external_registrar: None,
+                }))
+            }),
+        });
+        let transport = MockTransport::new(vec![MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: "mutated".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "mutated".to_string(),
+                }],
+                usage: LlmUsage {
+                    input_tokens: 15,
+                    output_tokens: 5,
+                    cached_input_tokens: 0,
+                    reasoning_tokens: 0,
+                },
+                ..LlmResponse::default()
+            }),
+        }]);
+        let mut runtime = runtime_with_plugins(vec![plugin], transport).await;
+        runtime.set_state(AgentStateEnvelope {
+            agent_id: "root".to_string(),
+            execution_mode: ExecutionMode::Standard,
+            context_folding: ContextFoldingConfig::default(),
+            messages: vec![
+                text_message("u1", MessageRole::User, "obsolete history"),
+                text_message("a1", MessageRole::Assistant, "obsolete response"),
+            ],
+            iteration: 1,
+            token_usage: TokenUsage::default(),
+            last_prompt_usage: Some(PromptUsage {
+                prompt_context_tokens: 70,
+                input_tokens: 70,
+                cached_input_tokens: 0,
+            }),
+            ..AgentStateEnvelope::default()
+        });
+        runtime.config.max_context_tokens = Some(100);
+
+        let turn = runtime
+            .run_turn_assembled(
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "fresh request".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    mode: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("turn");
+
+        assert!(turn.state.messages.iter().any(|message| {
+            message
+                .parts
+                .iter()
+                .any(|part| part.content.contains("plugin compaction summary"))
+        }));
+        assert!(!turn.state.messages.iter().any(|message| {
+            message
+                .parts
+                .iter()
+                .any(|part| part.content.contains("obsolete history"))
+        }));
     }
 
     #[cfg(feature = "sqlite-store")]
@@ -3179,7 +3566,6 @@ mod tests {
                     }],
                     image_blobs: HashMap::new(),
                     mode: None,
-                    plan_file: None,
                 },
                 CancellationToken::new(),
             )

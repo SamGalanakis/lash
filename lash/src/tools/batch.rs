@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::RwLock;
 use std::time::Instant;
 
 use crate::{
@@ -12,7 +11,7 @@ const MAX_BATCH_CALLS: usize = 25;
 #[derive(Clone)]
 pub struct BatchingTools {
     inner: Arc<dyn ToolProvider>,
-    execution_mode: Arc<RwLock<ExecutionMode>>,
+    execution_mode: ExecutionMode,
 }
 
 #[derive(Clone, Debug)]
@@ -42,15 +41,12 @@ impl BatchingTools {
     pub fn with_mode(inner: Arc<dyn ToolProvider>, execution_mode: ExecutionMode) -> Self {
         Self {
             inner,
-            execution_mode: Arc::new(RwLock::new(execution_mode)),
+            execution_mode,
         }
     }
 
     fn current_mode(&self) -> ExecutionMode {
-        *self
-            .execution_mode
-            .read()
-            .expect("batching tools mode lock poisoned")
+        self.execution_mode
     }
 
     fn batch_definition() -> ToolDefinition {
@@ -58,7 +54,7 @@ impl BatchingTools {
             name: "batch".into(),
             description: vec![crate::ToolText::new(
                 format!(
-                    "Run 1-{} independent tool calls concurrently. Use it for parallel reads, searches, and unrelated diagnostics. Do not batch dependent steps or nest `batch`.",
+                    "Run 1-{} independent tool calls together. Good for multiple reads/searches or unrelated diagnostics. Do not use it for dependent steps or nested `batch`.",
                     MAX_BATCH_CALLS
                 ),
                 [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
@@ -76,7 +72,7 @@ impl BatchingTools {
                 [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             hidden: false,
-            inject_into_prompt: true,
+            inject_into_prompt: false,
         }
     }
 
@@ -333,14 +329,6 @@ impl ToolProvider for BatchingTools {
         }
         self.inner.execute_streaming(name, args, progress).await
     }
-
-    fn set_execution_mode(&self, execution_mode: ExecutionMode) {
-        *self
-            .execution_mode
-            .write()
-            .expect("batching tools mode lock poisoned") = execution_mode;
-        self.inner.set_execution_mode(execution_mode);
-    }
 }
 
 #[cfg(test)]
@@ -528,8 +516,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plan_mode_tools_are_not_batchable() {
-        let provider: Arc<dyn ToolProvider> = Arc::new(crate::tools::PlanMode::new());
+    async fn update_plan_is_not_batchable() {
+        let provider: Arc<dyn ToolProvider> = Arc::new(crate::tools::UpdatePlanTool::new());
         let wrapped = BatchingTools::with_mode(provider, crate::ExecutionMode::Standard);
 
         let result = wrapped
@@ -537,7 +525,14 @@ mod tests {
                 "batch",
                 &serde_json::json!({
                     "tool_calls": [
-                        { "tool": "enter_plan_mode", "parameters": {} }
+                        {
+                            "tool": "update_plan",
+                            "parameters": {
+                                "plan": [
+                                    {"step": "Inspect code", "status": "in_progress"}
+                                ]
+                            }
+                        }
                     ]
                 }),
             )

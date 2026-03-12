@@ -1,6 +1,6 @@
 # lash
 
-AI coding agent with a persistent Monty-backed `repl` runtime or native tool-calling execution mode, hashline-safe file editing, and a host-friendly runtime API for TUI and headless frontends.
+AI coding agent with a persistent Monty-backed `repl` runtime or `standard` tool-calling execution mode, `apply_patch`-based file editing, and a host-friendly runtime API for TUI and headless frontends.
 
 ## Setup
 
@@ -18,7 +18,7 @@ chmod +x ~/.local/bin/lash
 `lash`/`lash-core` support two execution backends:
 
 - `repl` (default): a persistent Monty-backed sandbox that executes agent-written Python-like code with host-call boundaries for tools.
-- `native-tools`: provider-native tool calling without the REPL sandbox.
+- `standard`: provider-native tool calling without the REPL sandbox.
 
 Both backends are driven by a single sans-IO state machine (`TurnMachine` in `lash/src/sansio.rs`). All protocol logic (prompt assembly, fence parsing, retry/backoff, context folding, turn limits) lives in the synchronous machine; the async `LashRuntime` host driver in `lash/src/runtime.rs` fulfils I/O effects. This makes the core turn logic independently testable without a tokio runtime.
 
@@ -49,7 +49,7 @@ lash                               # start interactive TUI session
 lash -p "summarize this repo"      # headless mode: run one prompt and print result
 lash --print "summarize this repo"  # same, long form
 lash --model gpt-5.4               # override model
-lash --execution-mode native-tools # use provider-native tool calling instead of the repl sandbox
+lash --execution-mode standard # use provider-native tool calling instead of the repl sandbox
 lash --no-mouse                    # disable mouse (re-enables terminal text selection)
 lash --provider                    # force provider setup flow
 lash --reset                       # delete ~/.lash and ~/.cache/lash, then exit
@@ -85,13 +85,13 @@ Each skill is a directory containing a `SKILL.md` with YAML frontmatter (`name`,
     references/bar.md
 ```
 
-Use `/skills` to browse, `/<skill-name>` to invoke, or call `load_skill("name")` from REPL/native-tools execution.
+Use `/skills` to browse, `/<skill-name>` to invoke, or call `load_skill("name")` from REPL/standard execution.
 
 ## Terminal Bench
 
 Use `scripts/run-terminalbench.sh` to run Harbor + Terminal Bench 2 with the in-repo lash adapter.
 
-By default it runs `terminal-bench-sample@2.0`, builds a glibc-compatible binary in `target-bookworm/release/lash`, and uses your local `~/.lash/config.json` inside benchmark containers (so OAuth/OpenAI-generic config is reused). You must specify `--execution-mode repl` or `--execution-mode native-tools` explicitly.
+By default it runs `terminal-bench-sample@2.0`, builds a glibc-compatible binary in `target-bookworm/release/lash`, and uses your local `~/.lash/config.json` inside benchmark containers (so OAuth/OpenAI-generic config is reused). You must specify `--execution-mode repl` or `--execution-mode standard` explicitly.
 
 The Harbor adapter also appends benchmark-specific guidelines to lash's `guidelines` prompt section for these runs. That overlay makes exact verifier compliance explicit: match required final state exactly, clean up temporary artifacts, and self-verify ports/files/processes before finishing. Override it with `LASH_BENCH_PROMPT_APPEND_GUIDELINES` if needed.
 
@@ -99,11 +99,11 @@ For exact task batches, use `--tasks a,b,c` or `--task-file path.txt`. The runne
 
 ```bash
 scripts/run-terminalbench.sh --sample --execution-mode repl
-scripts/run-terminalbench.sh --full --execution-mode native-tools --task "git-*"
+scripts/run-terminalbench.sh --full --execution-mode standard --task "git-*"
 scripts/run-terminalbench.sh --sample --execution-mode repl --task chess-best-move --model gpt-5.4
-scripts/run-terminalbench.sh --sample --execution-mode native-tools --tasks regex-log,sqlite-with-gcov
-scripts/run-terminalbench.sh --sample --execution-mode native-tools --task-file bench/tasks.txt
-scripts/run-terminalbench.sh --sample --execution-mode native-tools --build-mode host
+scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,sqlite-with-gcov
+scripts/run-terminalbench.sh --sample --execution-mode standard --task-file bench/tasks.txt
+scripts/run-terminalbench.sh --sample --execution-mode standard --build-mode host
 ```
 
 ## Slash Commands
@@ -113,7 +113,7 @@ scripts/run-terminalbench.sh --sample --execution-mode native-tools --build-mode
 | `/clear`, `/new` | Reset conversation |
 | `/controls` | Show keyboard shortcuts |
 | `/model [name]` | Show current model or switch LLM model |
-| `/mode [name]` | Show current execution mode or switch modes (`repl` or `native-tools`) |
+| `/mode [name]` | Show the current execution mode (`repl` or `standard`) for this session |
 | `/provider` | Open provider setup in-app |
 | `/login` | Alias for `/provider` |
 | `/logout` | Remove stored credentials from disk |
@@ -128,8 +128,8 @@ scripts/run-terminalbench.sh --sample --execution-mode native-tools --build-mode
 
 `/logout` only clears persisted config. The active session may continue with in-memory credentials until you switch provider or restart.
 
-`repl` is the default execution mode and is always available. `native-tools` uses provider-native tool calling with the same lash tool definitions, but it does not preserve arbitrary REPL locals across turns.
-Low-intelligence sub-agents spawned with `agent_call(..., intelligence="low")` always run in `native-tools`; medium/high sub-agents inherit the parent session's execution mode.
+`repl` is the default execution mode and is always available. `standard` uses provider-native tool calling with a concrete toolset selected at session start, so it does not preserve arbitrary REPL locals across turns.
+Low-intelligence sub-agents spawned with `agent_call(..., intelligence="low")` always run in `standard`; medium/high sub-agents inherit the parent session's execution mode.
 
 Context folding is batched and cache-friendly. Lash keeps the prompt stable until the hard watermark is hit, then folds old history back to the soft watermark with one stable archive marker instead of mutating prompt status every turn. Defaults are `50%` soft and `60%` hard. Override them with:
 
@@ -137,19 +137,17 @@ Context folding is batched and cache-friendly. Lash keeps the prompt stable unti
 lash --context-fold-soft-pct 45 --context-fold-hard-pct 58
 ```
 
-`batch` is native-tools-only. Use it for 2-25 independent tool calls when you already know the arguments up front; it runs those calls concurrently and returns a structured per-call result summary.
+`batch` is standard-only. Use it for 2-25 independent tool calls when you already know the arguments up front; it runs those calls concurrently and returns a structured per-call result summary.
 
-Across both `repl` and `native-tools`, lash now renders active history as one cache-friendly chronological transcript inside a single user prompt, paired with a stable system prompt. The internal turn state and structured tool/code records are still preserved for execution and folding, but provider requests no longer depend on replaying provider-specific conversational role sequences.
+Across both `repl` and `standard`, lash now renders active history as one cache-friendly chronological transcript inside a single user prompt, paired with a stable system prompt. The internal turn state and structured tool/code records are still preserved for execution and folding, but provider requests no longer depend on replaying provider-specific conversational role sequences.
 
-## Plan Mode
+## Planning
 
-Plan mode is a first-class runtime mode used for plan-then-execute workflows.
+Planning is handled by the native `update_plan` tool.
 
-- The agent enters plan mode by calling `enter_plan_mode`.
-- The TUI switches to plan mode and allocates a plan file in `.lash/plans/`.
-- Runtime injects plan-mode guardrails (read/explore/design, no project file edits) and points the model at that plan file.
-- `exit_plan_mode` returns plan content for user approval.
-- After approval, lash clears message history for a fresh execution phase while preserving the active execution state where applicable (for example REPL state in `repl` mode).
+- The agent updates a short in-memory plan instead of writing a hidden plan file.
+- The TUI renders the current plan directly from tool results.
+- `update_plan` is for substantial multi-step work; small tasks should usually just be executed.
 
 ## Keyboard Shortcuts
 
@@ -266,7 +264,7 @@ This preserves interleaving and intent, e.g. text -> image -> text -> file refer
 High-level contract:
 
 - `AssembledTurn` is stable across execution modes.
-- `native-tools` is a subset of the `repl` result shape at this level.
+- `standard` is a subset of the `repl` result shape at this level.
 - REPL-only detail is represented by `code_outputs`, which is empty for native tool-calling turns.
 - The `batch` tool is an optimization at the execution layer only; batched work still folds back into the same high-level turn contract.
 
@@ -302,13 +300,13 @@ Tools define `inject_into_prompt: bool` (`lash/src/lib.rs`).
 
 - `inject_into_prompt=true`: tool appears directly in the LLM system prompt.
 - `inject_into_prompt=false`: tool is omitted from prompt for brevity, but still callable at runtime.
-- Tool identity is shared across execution modes, but tool `description` and `examples` are mode-scoped.
+- Most tool identity is shared across execution modes, but mode-specific toolsets can expose different shell surfaces (`exec_command`/`write_stdin` in `standard`, `shell*` in `repl`).
 - The runtime exposes one callable tool namespace. Prompt injection only controls which tools are described up front.
 
 Runtime discovery is available via:
 
-- `T.list_tools(...)` in `repl`, `list_tools(...)` in `native-tools`
-- `T.search_tools(query, mode="hybrid", ...)` in `repl`, `search_tools(query, mode="hybrid", ...)` in `native-tools`
+- `T.list_tools(...)` in `repl`, `list_tools(...)` in `standard`
+- `T.search_tools(query, mode="hybrid", ...)` in `repl`, `search_tools(query, mode="hybrid", ...)` in `standard`
 
 The `repl` executor exposes tools through the `T` namespace (for example `T.read_file(...)`, `T.search_tools(...)`).
 Only runtime control calls remain bare globals in `repl`: `done(...)`, `ask(...)`, and `reset_repl()`.
@@ -317,13 +315,13 @@ Both discovery calls always search the full current runtime tool catalog; caller
 
 ### Default Native-Tools Surface
 
-With the default capability profile, `native-tools` can call:
+With the default capability profile, `standard` can call:
 
 - Core read: `read_file`, `glob`, `grep`, `ls`, `list_tools`, `search_tools`
-- Core write: `write_file`, `edit_file`, `find_replace`
-- Shell: `shell`, `shell_wait`, `shell_read`, `shell_write`, `shell_kill`
+- Core write: `apply_patch`
+- Shell: `exec_command`, `write_stdin`
 - Tasks: `tasks`, `tasks_summary`, `get_task`, `create_task`, `update_task`, `delete_task`, `claim_task`
-- Planning: `enter_plan_mode`, `exit_plan_mode`
+- Planning: `update_plan`
 - Delegation: `agent_call`, `agent_result`, `agent_output`, `agent_kill`
 - History: `search_history`
 - Memory: `search_mem`, `mem_set`, `mem_get`, `mem_delete`, `mem_all`
@@ -331,14 +329,14 @@ With the default capability profile, `native-tools` can call:
 - Web, when Tavily is configured: `search_web`, `fetch_url`
 - Native-tools only: `batch`
 
-This is the callable default surface, not the prompt-injected subset. Lash still injects only a smaller prompt-visible tool list and relies on `T.list_tools(...)` / `T.search_tools(...)` in `repl`, or `list_tools(...)` / `search_tools(...)` in `native-tools`, for discovery of omitted tools across the full active runtime tool set.
+This is the callable default surface, not the prompt-injected subset. Lash still injects only a smaller prompt-visible tool list and relies on `T.list_tools(...)` / `T.search_tools(...)` in `repl`, or `list_tools(...)` / `search_tools(...)` in `standard`, for discovery of omitted tools across the full active runtime tool set.
 
 `search_history(...)` searches all prior completed turns persisted by the runtime, not just turns folded out of the active prompt window.
-For delegation, low-tier sub-agents use this native-tools surface by default even when the parent session is in `repl`.
+For delegation, low-tier sub-agents use this standard surface by default even when the parent session is in `repl`.
 
 ## Filesystem Listing Output
 
-`T.glob(...)` / `T.ls(...)` in `repl`, and `glob(...)` / `ls(...)` in `native-tools`, return a typed envelope rather than plain path/tree strings:
+`T.glob(...)` / `T.ls(...)` in `repl`, and `glob(...)` / `ls(...)` in `standard`, return a typed envelope rather than plain path/tree strings:
 
 ```json
 {

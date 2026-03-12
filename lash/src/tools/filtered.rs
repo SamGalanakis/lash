@@ -54,3 +54,43 @@ impl ToolProvider for FilteredTools {
         self.inner.execute_streaming(name, args, progress).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[async_trait::async_trait]
+    impl ToolProvider for MockTool {
+        fn definitions(&self) -> Vec<ToolDefinition> {
+            vec![ToolDefinition {
+                name: "probe".into(),
+                description: vec![crate::ToolText::new(
+                    "probe",
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
+                )],
+                params: vec![],
+                returns: "str".into(),
+                examples: vec![],
+                hidden: false,
+                inject_into_prompt: true,
+            }]
+        }
+
+        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
+            ToolResult::ok(serde_json::json!("ok"))
+        }
+    }
+
+    struct MockTool;
+
+    #[tokio::test]
+    async fn filtered_tools_reject_unlisted_tools() {
+        let inner: Arc<dyn ToolProvider> = Arc::new(MockTool);
+        let filtered = FilteredTools::new(inner, BTreeSet::from(["probe".to_string()]));
+
+        let result = filtered.execute("other", &serde_json::json!({})).await;
+
+        assert!(!result.success);
+        assert_eq!(result.result, serde_json::json!("Unknown tool: other"));
+    }
+}

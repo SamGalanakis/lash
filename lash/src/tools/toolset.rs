@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::capabilities::{CapabilityId, tools_for_capability};
-use crate::{ProgressSender, ToolDefinition, ToolProvider, ToolResult};
+use crate::{ExecutionMode, ProgressSender, ToolDefinition, ToolProvider, ToolResult};
 
 /// Dependencies for constructing the default tool set.
 #[derive(Default)]
@@ -18,7 +18,7 @@ pub struct ToolSetDeps {
 /// A composable set of tools supporting set-algebra operators.
 ///
 /// ```rust,ignore
-/// let tools = ToolSet::defaults(deps) + my_custom_tool - "shell";
+/// let tools = ToolSet::standard_defaults(deps) + my_custom_tool - "exec_command";
 /// ```
 pub struct ToolSet {
     tools: BTreeMap<String, (ToolDefinition, Arc<dyn ToolProvider>)>,
@@ -32,23 +32,26 @@ impl ToolSet {
         }
     }
 
-    /// Core zero-dependency tools.
-    pub fn core() -> Self {
+    /// Core zero-dependency tools for a concrete execution mode.
+    pub fn core_for(mode: ExecutionMode) -> Self {
+        let shell_provider: Arc<dyn ToolProvider> = match mode {
+            ExecutionMode::Standard => Arc::new(super::StandardShell::new()),
+            ExecutionMode::Repl => Arc::new(super::ReplShell::new()),
+        };
+
         Self::new()
-            + super::Shell::new()
+            + shell_provider
             + super::ReadFile::new()
-            + super::WriteFile
-            + super::EditFile
-            + super::FindReplace
+            + super::ApplyPatchTool
             + super::Glob
             + super::Grep
             + super::Ls
-            + super::PlanMode::new()
+            + super::UpdatePlanTool::new()
     }
 
-    /// Default tools: core + store/web/skills based on provided deps.
-    pub fn defaults(deps: ToolSetDeps) -> Self {
-        let mut set = Self::core();
+    /// Default tools for a concrete execution mode.
+    pub fn defaults_for(mode: ExecutionMode, deps: ToolSetDeps) -> Self {
+        let mut set = Self::core_for(mode);
 
         #[cfg(feature = "sqlite-store")]
         if let Some(ref store) = deps.store {
@@ -65,6 +68,14 @@ impl ToolSet {
         }
 
         set
+    }
+
+    pub fn standard_defaults(deps: ToolSetDeps) -> Self {
+        Self::defaults_for(ExecutionMode::Standard, deps)
+    }
+
+    pub fn repl_defaults(deps: ToolSetDeps) -> Self {
+        Self::defaults_for(ExecutionMode::Repl, deps)
     }
 
     fn insert_provider(mut self, provider: impl ToolProvider) -> Self {
@@ -162,7 +173,6 @@ impl ToolProvider for ToolSet {
 mod tests {
     use super::*;
     use crate::ToolParam;
-
     struct MockAlpha;
 
     #[async_trait::async_trait]
@@ -239,6 +249,31 @@ mod tests {
         async fn execute(&self, name: &str, _args: &serde_json::Value) -> ToolResult {
             ToolResult::ok(serde_json::json!(format!("{name}_result")))
         }
+    }
+
+    #[test]
+    fn mode_specific_core_toolsets_expose_different_shell_surfaces() {
+        let standard = ToolSet::core_for(crate::ExecutionMode::Standard);
+        let repl = ToolSet::core_for(crate::ExecutionMode::Repl);
+
+        let standard_defs = standard
+            .definitions()
+            .into_iter()
+            .map(|def| def.name)
+            .collect::<std::collections::BTreeSet<_>>();
+        let repl_defs = repl
+            .definitions()
+            .into_iter()
+            .map(|def| def.name)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(standard_defs.contains("exec_command"));
+        assert!(standard_defs.contains("write_stdin"));
+        assert!(!standard_defs.contains("shell"));
+
+        assert!(repl_defs.contains("shell"));
+        assert!(repl_defs.contains("shell_wait"));
+        assert!(!repl_defs.contains("exec_command"));
     }
 
     #[test]

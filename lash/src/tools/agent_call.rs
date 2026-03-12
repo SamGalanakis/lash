@@ -185,9 +185,7 @@ impl AgentCall {
     ) -> DynamicStateSnapshot {
         // Default policy: no file mutation tools and no nested delegation in low tier.
         let denied: HashSet<&str> = [
-            "write_file",
-            "edit_file",
-            "find_replace",
+            "apply_patch",
             "agent_call",
             "agent_result",
             "agent_output",
@@ -382,7 +380,7 @@ impl AgentCall {
         let run_handle = tokio::spawn(async move {
             let sink = ChannelEventSink { tx: event_tx };
             let turn = runtime
-                .stream_prepared_turn(messages, vec![], &sink, agent_cancel)
+                .stream_prepared_turn(messages, vec![], None, &sink, agent_cancel)
                 .await;
             (runtime, turn)
         });
@@ -600,11 +598,11 @@ impl ToolProvider for AgentCall {
                 name: "agent_call".into(),
                 description: vec![
                     crate::ToolText::new(
-                        r#"Spawn a sub-agent and return a handle. Use `await agent_result(handle["id"])`, `await agent_output(handle["id"])`, and `await agent_kill(handle["id"])`. Use `intelligence="low"` for fast read-only work; low-tier sub-agents always run in standard mode. Medium/high inherit the parent execution mode and receive parent history/memory read-only."#,
+                        r#"Spawn a sub-agent for scoped work and return a handle. Use `await agent_result(handle["id"])`, `await agent_output(handle["id"])`, or `await agent_kill(handle["id"])` with the returned id. Use `intelligence="low"` for fast read-only work; medium/high inherit the parent execution mode and parent history/memory read-only."#,
                         [crate::ExecutionMode::Repl],
                     ),
                     crate::ToolText::new(
-                        r#"Spawn a sub-agent and return a handle. Use `agent_result(id)`, `agent_output(id)`, and `agent_kill(id)` with that ID. Use `intelligence="low"` for fast read-only work; low-tier sub-agents always run in standard mode. Medium/high inherit the parent execution mode and receive parent history/memory read-only."#,
+                        r#"Spawn a sub-agent for scoped work and return a handle. Use `agent_result(id)`, `agent_output(id)`, or `agent_kill(id)` with the returned id. Use `intelligence="low"` for fast read-only work; medium/high inherit the parent execution mode and parent history/memory read-only."#,
                         [crate::ExecutionMode::Standard],
                     ),
                 ],
@@ -839,9 +837,9 @@ mod tests {
                     inject_into_prompt: true,
                 },
                 ToolDefinition {
-                    name: "write_file".into(),
+                    name: "apply_patch".into(),
                     description: vec![crate::ToolText::new(
-                        "mock write",
+                        "mock patch",
                         [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                     )],
                     params: vec![],
@@ -884,7 +882,7 @@ mod tests {
         assert!(!tool_names.iter().any(|n| n == "agent_call"));
         assert!(tool_names.iter().any(|n| n == "mock_base"));
         assert!(tool_names.iter().any(|n| n == "read_file"));
-        assert!(!tool_names.iter().any(|n| n == "write_file"));
+        assert!(!tool_names.iter().any(|n| n == "apply_patch"));
     }
 
     #[test]
@@ -899,7 +897,7 @@ mod tests {
             .collect();
         assert!(medium_names.iter().any(|n| n == "agent_call"));
         assert!(medium_names.iter().any(|n| n == "mock_base"));
-        assert!(medium_names.iter().any(|n| n == "write_file"));
+        assert!(medium_names.iter().any(|n| n == "apply_patch"));
 
         let high_tools = agent_call.session_tools_for_tier(&Tier::High);
         let high_names: Vec<String> = high_tools
@@ -909,7 +907,7 @@ mod tests {
             .collect();
         assert!(high_names.iter().any(|n| n == "agent_call"));
         assert!(high_names.iter().any(|n| n == "mock_base"));
-        assert!(high_names.iter().any(|n| n == "write_file"));
+        assert!(high_names.iter().any(|n| n == "apply_patch"));
     }
 
     #[test]

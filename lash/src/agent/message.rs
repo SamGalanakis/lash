@@ -100,12 +100,21 @@ fn render_part_for_chat(role: MessageRole, part: &Part) -> String {
         },
         MessageRole::Assistant => match part.kind {
             PartKind::Code => format!("<repl>\n{}\n</repl>", rendered),
-            PartKind::Prose | PartKind::Text | PartKind::ToolCall | PartKind::ToolResult => {
-                rendered
-            }
+            PartKind::ToolCall => render_assistant_tool_call(part, &rendered),
+            PartKind::Prose | PartKind::Text | PartKind::ToolResult => rendered,
             _ => rendered,
         },
         MessageRole::User => rendered,
+    }
+}
+
+fn render_assistant_tool_call(part: &Part, rendered: &str) -> String {
+    let tool_name = part.tool_name.as_deref().unwrap_or("tool");
+    let trimmed = rendered.trim();
+    if trimmed.is_empty() || trimmed == "{}" {
+        format!("{tool_name}()")
+    } else {
+        format!("{tool_name}({trimmed})")
     }
 }
 
@@ -322,5 +331,38 @@ mod tests {
 
         assert!(text.contains("=== Turn 2 ===\nUser:\nsecond"));
         assert!(!text.contains("=== Turn 2 ===\nUser:\nsecond\n\nAssistant (Lash, continuing this transcript):\n[No assistant content recorded]"));
+    }
+
+    #[test]
+    fn render_transcript_prompt_preserves_tool_name_for_assistant_tool_calls() {
+        let msgs = vec![
+            Message {
+                id: "m0".to_string(),
+                role: MessageRole::User,
+                parts: vec![part(PartKind::Text, "what time is it")],
+                origin: None,
+            },
+            Message {
+                id: "m1".to_string(),
+                role: MessageRole::Assistant,
+                parts: vec![Part {
+                    id: "m1.p0".to_string(),
+                    kind: PartKind::ToolCall,
+                    content: r#"{"cmd":"date"}"#.to_string(),
+                    tool_call_id: Some("tc1".to_string()),
+                    tool_name: Some("exec_command".to_string()),
+                    prune_state: PruneState::Intact,
+                }],
+                origin: None,
+            },
+        ];
+
+        let rendered = render_transcript_prompt(&msgs, "", "");
+        let text = match &rendered.user_prompt[0] {
+            LlmPromptPart::Text(text) => text,
+            LlmPromptPart::Image(_) => panic!("expected text prompt"),
+        };
+
+        assert!(text.contains(r#"exec_command({"cmd":"date"})"#));
     }
 }

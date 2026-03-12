@@ -70,20 +70,21 @@ pub use plugin::{
     BuiltinHistoryPluginFactory, BuiltinMemoryPluginFactory, builtin_dynamic_capability_defs,
 };
 pub use plugin::{
-    ExternalInvokeContext, ExternalInvokeError, ExternalOpDef, ExternalOpKind, PluginDirective,
-    PluginError, PluginFactory, PluginHost, PluginMessage, PluginRegistrar, PluginSession,
-    PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry,
-    PluginSnapshotMeta, PromptContribution, PromptHookContext, RuntimeServices,
-    SessionConfigOverrides, SessionCreateRequest, SessionHandle, SessionManager, SessionParam,
-    SessionPlugin, SessionSnapshot, SessionStartPoint, SnapshotReader, SnapshotWriter,
-    TurnHookContext, TurnResultHookContext,
+    ExternalInvokeContext, ExternalInvokeError, ExternalOpDef, ExternalOpKind,
+    MessageMutatorContext, MessageMutatorHook, PluginDirective, PluginError, PluginFactory,
+    PluginHost, PluginMessage, PluginRegistrar, PluginSession, PluginSessionContext,
+    PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta,
+    PromptContribution, PromptHookContext, RuntimeServices, SessionConfigOverrides,
+    SessionCreateRequest, SessionHandle, SessionManager, SessionParam, SessionPlugin,
+    SessionSnapshot, SessionStartPoint, SnapshotReader, SnapshotWriter, TurnHookContext,
+    TurnResultHookContext,
 };
 pub use provider::{LashConfig, Provider};
 pub use runtime::{
     AgentStateEnvelope, AssembledTurn, AssistantOutput, CodeOutputRecord, DoneReason, EventSink,
     ExecutionSummary, HostProfile, InputItem, LashRuntime, NoopEventSink, OutputState,
-    PathResolver, RunMode, RuntimeConfig, RuntimeError, SanitizerPolicy, TerminationPolicy,
-    TurnInput, TurnIssue, TurnStatus,
+    PathResolver, PromptUsage, RunMode, RuntimeConfig, RuntimeError, SanitizerPolicy,
+    TerminationPolicy, TurnInput, TurnIssue, TurnStatus,
 };
 pub use sansio::{Effect, EffectId, LlmCallError, Response, TurnMachine, TurnMachineConfig};
 pub use session::{ExecResponse, Session, SessionError, UserPrompt};
@@ -284,10 +285,7 @@ impl ToolDefinition {
             return false;
         }
 
-        !matches!(
-            self.name.as_str(),
-            "batch" | "enter_plan_mode" | "exit_plan_mode"
-        )
+        !matches!(self.name.as_str(), "batch" | "update_plan")
     }
 
     pub fn description_for(&self, mode: ExecutionMode) -> String {
@@ -603,7 +601,6 @@ pub struct ToolCallRecord {
 #[async_trait::async_trait]
 pub trait ToolProvider: Send + Sync + 'static {
     fn definitions(&self) -> Vec<ToolDefinition>;
-    fn set_execution_mode(&self, _execution_mode: ExecutionMode) {}
     fn dynamic_projection(&self) -> Option<crate::dynamic::ResolvedProjection> {
         None
     }

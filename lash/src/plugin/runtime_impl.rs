@@ -6,6 +6,12 @@ use tokio::task::JoinSet;
 use super::*;
 use crate::dynamic::DynamicCapabilityDef;
 
+#[derive(Clone)]
+struct RegisteredMessageMutator {
+    plugin_id: String,
+    hook: MessageMutator,
+}
+
 pub struct PluginRegistrar {
     tool_names: BTreeSet<String>,
     tool_providers: Vec<Arc<dyn ToolProvider>>,
@@ -16,9 +22,11 @@ pub struct PluginRegistrar {
     before_tool_call_hooks: Vec<BeforeToolCallHook>,
     after_tool_call_hooks: Vec<AfterToolCallHook>,
     after_turn_hooks: Vec<AfterTurnHook>,
+    message_mutators: BTreeMap<MessageMutatorHook, RegisteredMessageMutator>,
     turn_committed_hooks: Vec<TurnCommittedHook>,
     session_restored_hooks: Vec<SessionRestoredHook>,
     external_ops: BTreeMap<String, RegisteredExternalOp>,
+    registering_plugin_id: Option<String>,
 }
 
 impl PluginRegistrar {
@@ -33,9 +41,11 @@ impl PluginRegistrar {
             before_tool_call_hooks: Vec::new(),
             after_tool_call_hooks: Vec::new(),
             after_turn_hooks: Vec::new(),
+            message_mutators: BTreeMap::new(),
             turn_committed_hooks: Vec::new(),
             session_restored_hooks: Vec::new(),
             external_ops: BTreeMap::new(),
+            registering_plugin_id: None,
         }
     }
 
@@ -91,6 +101,27 @@ impl PluginRegistrar {
 
     pub fn after_turn(&mut self, hook: AfterTurnHook) {
         self.after_turn_hooks.push(hook);
+    }
+
+    pub fn register_message_mutator(
+        &mut self,
+        hook_name: MessageMutatorHook,
+        hook: MessageMutator,
+    ) -> Result<(), PluginError> {
+        let plugin_id = self.registering_plugin_id.clone().ok_or_else(|| {
+            PluginError::Registration("missing registering plugin id".to_string())
+        })?;
+        if let Some(existing) = self.message_mutators.get(&hook_name) {
+            return Err(PluginError::Registration(format!(
+                "duplicate message mutator for `{}`: `{}` conflicts with `{}`",
+                hook_name.as_str(),
+                plugin_id,
+                existing.plugin_id
+            )));
+        }
+        self.message_mutators
+            .insert(hook_name, RegisteredMessageMutator { plugin_id, hook });
+        Ok(())
     }
 
     pub fn on_turn_committed(&mut self, hook: TurnCommittedHook) {
@@ -152,7 +183,9 @@ impl PluginHost {
         let mut reg = PluginRegistrar::new();
         for factory in self.factories() {
             let plugin = factory.build(&ctx)?;
+            reg.registering_plugin_id = Some(plugin.id().to_string());
             plugin.register(&mut reg)?;
+            reg.registering_plugin_id = None;
             plugins.push(plugin);
         }
 
@@ -168,6 +201,7 @@ impl PluginHost {
             before_tool_call_hooks: reg.before_tool_call_hooks,
             after_tool_call_hooks: reg.after_tool_call_hooks,
             after_turn_hooks: reg.after_turn_hooks,
+            message_mutators: reg.message_mutators,
             turn_committed_hooks: reg.turn_committed_hooks,
             session_restored_hooks: reg.session_restored_hooks,
             external_ops: reg.external_ops,
@@ -203,6 +237,7 @@ pub struct PluginSession {
     before_tool_call_hooks: Vec<BeforeToolCallHook>,
     after_tool_call_hooks: Vec<AfterToolCallHook>,
     after_turn_hooks: Vec<AfterTurnHook>,
+    message_mutators: BTreeMap<MessageMutatorHook, RegisteredMessageMutator>,
     turn_committed_hooks: Vec<TurnCommittedHook>,
     session_restored_hooks: Vec<SessionRestoredHook>,
     external_ops: BTreeMap<String, RegisteredExternalOp>,
@@ -307,6 +342,21 @@ impl PluginSession {
             directives.extend(hook(ctx.clone()).await?);
         }
         Ok(directives)
+    }
+
+    pub async fn mutate_messages(
+        &self,
+        ctx: MessageMutatorContext,
+        messages: Vec<crate::Message>,
+    ) -> Result<Vec<crate::Message>, PluginError> {
+        let Some(mutator) = self.message_mutators.get(&ctx.hook) else {
+            return Ok(messages);
+        };
+        (mutator.hook)(ctx, messages).await
+    }
+
+    pub fn has_message_mutator(&self, hook: MessageMutatorHook) -> bool {
+        self.message_mutators.contains_key(&hook)
     }
 
     pub async fn on_turn_committed(&self, turn: &AssembledTurn) {

@@ -8,8 +8,10 @@ use lash_core::AgentEvent;
 use lash_core::TokenUsage;
 use lash_core::agent::{Message, MessageRole, Part, PartKind, PruneState};
 
+use crate::activity::{ActivityKind, ActivityState, ActivityStatus, merge_exploration_activity};
 use crate::app::DisplayBlock;
 use crate::replay::{AssistantReplay, push_assistant_text_block};
+use crate::util::{is_manual_interrupt_error, manual_interrupt_message};
 
 pub struct SessionInfo {
     pub filename: String,
@@ -132,13 +134,14 @@ impl SessionLogger {
 
     pub fn log_user_input(&mut self, input: &str) {
         if !self.pending_turn.is_empty() {
-            self.pending_turn.clear();
+            self.flush_pending_turn();
         }
         self.pending_turn.push(serde_json::json!({
             "type": "user_input",
             "ts": chrono::Local::now().to_rfc3339(),
             "content": input,
         }));
+        self.flush_pending_turn();
     }
 
     pub fn log_event(&mut self, event: &AgentEvent) {
@@ -156,10 +159,32 @@ impl SessionLogger {
                 .to_string();
         }
         self.pending_turn.push(value);
-        if event_type == "done" {
+        if should_flush_event(&event_type) {
             self.flush_pending_turn();
         }
     }
+}
+
+impl Drop for SessionLogger {
+    fn drop(&mut self) {
+        self.flush_pending_turn();
+    }
+}
+
+fn should_flush_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "tool_call"
+            | "code_output"
+            | "message"
+            | "llm_request"
+            | "llm_response"
+            | "retry_status"
+            | "sub_agent_done"
+            | "done"
+            | "error"
+            | "prompt"
+    )
 }
 
 impl SessionInfo {
@@ -300,6 +325,7 @@ pub fn load_session(filename: &str) -> Option<LoadedSession> {
     let mut sub_agent_count: usize = 0;
     let mut assistant_replay = AssistantReplay::default();
     let mut last_token_usage = TokenUsage::default();
+    let mut activity_state = ActivityState::default();
 
     for line in reader.lines() {
         let Ok(line) = line else {
@@ -372,15 +398,24 @@ pub fn load_session(filename: &str) -> Option<LoadedSession> {
                         .get("result")
                         .cloned()
                         .unwrap_or(serde_json::Value::Null);
-                    let continuation = matches!(blocks.last(), Some(DisplayBlock::ToolCall { .. }));
-                    blocks.push(DisplayBlock::ToolCall {
-                        name: name.to_string(),
+                    for activity in activity_state.blocks_for_tool_call(
+                        name,
                         args,
                         result,
                         success,
                         duration_ms,
-                        continuation,
-                    });
+                    ) {
+                        if let Some(DisplayBlock::Activity(existing)) = blocks.last_mut()
+                            && existing.kind == ActivityKind::Exploration
+                            && activity.kind == ActivityKind::Exploration
+                            && existing.status == ActivityStatus::Completed
+                            && activity.status == ActivityStatus::Completed
+                            && merge_exploration_activity(existing, activity.clone())
+                        {
+                            continue;
+                        }
+                        blocks.push(DisplayBlock::Activity(activity));
+                    }
                 }
             }
             "code_output" => {
@@ -467,7 +502,17 @@ pub fn load_session(filename: &str) -> Option<LoadedSession> {
             "error" => {
                 assistant_replay.flush(&mut blocks);
                 if let Some(msg) = val.get("message").and_then(|v| v.as_str()) {
-                    blocks.push(DisplayBlock::Error(msg.to_string()));
+                    let code = val
+                        .get("envelope")
+                        .and_then(|v| v.get("code"))
+                        .and_then(|v| v.as_str());
+                    if is_manual_interrupt_error(msg, code) {
+                        blocks.push(DisplayBlock::SystemMessage(
+                            manual_interrupt_message().to_string(),
+                        ));
+                    } else {
+                        blocks.push(DisplayBlock::Error(msg.to_string()));
+                    }
                 }
             }
             _ => {}
@@ -508,6 +553,8 @@ pub fn load_session(filename: &str) -> Option<LoadedSession> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lash_core::AgentEvent;
+    use serde_json::json;
 
     #[test]
     fn load_session_reconstructs_streamed_assistant_blocks() {
@@ -557,6 +604,54 @@ mod tests {
         let blocks = loaded.blocks;
         assert!(matches!(blocks.first(), Some(DisplayBlock::UserInput(text)) if text == "Hi"));
         assert_eq!(blocks.len(), 1);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_session_maps_cancelled_error_to_system_message() {
+        let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
+        let path = sessions_dir().join(&filename);
+        std::fs::create_dir_all(sessions_dir()).unwrap();
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
+                "{\"type\":\"user_input\",\"content\":\"Hi\"}\n",
+                "{\"type\":\"error\",\"message\":\"LLM error: cancelled\",\"envelope\":{\"kind\":\"llm_provider\",\"code\":\"cancelled\",\"user_message\":\"LLM error: cancelled\"}}\n",
+                "{\"type\":\"done\"}\n"
+            ),
+        )
+        .unwrap();
+
+        let loaded = load_session(&filename).unwrap();
+        assert!(matches!(
+            loaded.blocks.get(1),
+            Some(DisplayBlock::SystemMessage(msg)) if msg == "Manually interrupted."
+        ));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn logger_flushes_tool_calls_before_done() {
+        let mut logger =
+            SessionLogger::new("gpt-test", Some("s1".to_string()), "demo".to_string()).unwrap();
+        let path = sessions_dir().join(logger.filename());
+
+        logger.log_user_input("What time is it?");
+        logger.log_event(&AgentEvent::ToolCall {
+            name: "exec_command".to_string(),
+            args: json!({"cmd": "date"}),
+            result: json!({"wall_time_seconds": 0.01, "exit_code": 0, "output": "Thu\n"}),
+            success: true,
+            duration_ms: 0,
+        });
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("\"type\":\"user_input\""));
+        assert!(contents.contains("\"type\":\"tool_call\""));
+        assert!(contents.contains("\"exec_command\""));
 
         let _ = std::fs::remove_file(path);
     }

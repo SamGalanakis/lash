@@ -252,6 +252,7 @@ pub async fn restore_agent_state(
                 messages: history.clone(),
                 iteration: *turn_counter,
                 token_usage: app.token_usage.clone(),
+                last_prompt_usage: None,
                 execution_mode: restored_execution_mode,
                 task_state: None,
                 subagent_state: None,

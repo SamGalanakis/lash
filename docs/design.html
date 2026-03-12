@@ -1210,7 +1210,7 @@
         <div class="type-sample-mono">
           <span class="tm-prompt">&#x2590;</span> fix the auth timeout in login.rs<br>
           <span style="color:var(--ghost-bar)">&#x2590;</span> I'll look at the auth flow and fix the timeout.<br>
-          <span style="color:var(--ash-mid)">&#x25b6; code 3L &middot; + edit_file &middot; 0.2s</span><br>
+          <span style="color:var(--ash-mid)">&#x25b6; code 3L &middot; + apply_patch &middot; 0.2s</span><br>
           <span style="color:var(--ghost-bar)">&#x2590;</span> Done. Timeout increased to 30s.
         </div>
       </div>
@@ -1269,11 +1269,11 @@
           <div class="t-line"><span class="t-code-chrome">&#x25b6; code 3L &middot; + read_file &middot; 0.1s</span></div>
           <div class="t-line"><span class="t-ghost-bar">&#x2590;</span> <span class="t-assistant">The timeout is hardcoded to 5s on line 42. I'll</span></div>
           <div class="t-line"><span class="t-ghost-bar">&#x2590;</span> <span class="t-assistant">increase it to 30s and add a config option.</span></div>
-          <div class="t-line"><span class="t-code-chrome">&#x25b6; code 8L &middot; + edit_file &middot; 0.2s</span></div>
+          <div class="t-line"><span class="t-code-chrome">&#x25b6; code 8L &middot; + apply_patch &middot; 0.2s</span></div>
           <div class="t-line">&nbsp;</div>
           <div class="t-line"><span class="t-user-bar">&#x2590;</span> <span class="t-user-text">run the tests</span></div>
           <div class="t-line"><span class="t-ghost-bar">&#x2590;</span> <span class="t-assistant">Running the test suite now.</span></div>
-          <div class="t-line"><span class="t-code-chrome">&#x25b6; code 1L &middot; + shell &middot; cargo test &middot; 4.3s</span></div>
+          <div class="t-line"><span class="t-code-chrome">&#x25b6; code 1L &middot; + exec_command &middot; cargo test &middot; 4.3s</span></div>
           <div class="t-line"><span class="t-ghost-bar">&#x2590;</span> <span class="t-assistant">All 47 tests pass.</span></div>
           <div class="t-line"><span class="t-prompt">&#x276f;</span> <span style="opacity:0.3">_</span></div>
         </div>

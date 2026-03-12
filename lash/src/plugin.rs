@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::agent::PromptSectionName;
-use crate::runtime::AssembledTurn;
+use crate::runtime::{AssembledTurn, PromptUsage};
 use crate::{
     AgentCapabilities, AgentStateEnvelope, ContextFoldingConfig, ExecutionMode, MessageRole,
     ToolProvider, ToolResult, TurnInput,
@@ -27,6 +27,11 @@ pub type AfterTurnHook =
     Arc<dyn Fn(TurnResultHookContext) -> PluginFuture<Vec<PluginDirective>> + Send + Sync>;
 pub type PromptContributor =
     Arc<dyn Fn(PromptHookContext) -> Result<Vec<PromptContribution>, PluginError> + Send + Sync>;
+pub type MessageMutator = Arc<
+    dyn Fn(MessageMutatorContext, Vec<crate::Message>) -> PluginFuture<Vec<crate::Message>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Debug, thiserror::Error, Clone)]
 pub enum PluginError {
@@ -191,6 +196,36 @@ pub struct TurnResultHookContext {
     pub session_id: String,
     pub turn: AssembledTurn,
     pub host: Arc<dyn SessionManager>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageMutatorHook {
+    BeforeTurn,
+    AfterTokenCount,
+    AfterTurn,
+}
+
+impl MessageMutatorHook {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BeforeTurn => "before_turn",
+            Self::AfterTokenCount => "after_token_count",
+            Self::AfterTurn => "after_turn",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct MessageMutatorContext {
+    pub hook: MessageMutatorHook,
+    pub session_id: String,
+    pub state: SessionSnapshot,
+    pub host: Arc<dyn SessionManager>,
+    pub turn: Option<AssembledTurn>,
+    pub prompt_usage: Option<PromptUsage>,
+    pub max_context_tokens: Option<usize>,
+    pub context_folding: Option<ContextFoldingConfig>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -360,8 +395,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        AgentStateEnvelope, ContextFoldingConfig, DynamicCapabilityDef, ExecutionMode, ToolParam,
-        TurnInput,
+        AgentStateEnvelope, ContextFoldingConfig, DynamicCapabilityDef, ExecutionMode,
+        ToolDefinition, ToolParam, TurnInput,
     };
 
     struct MockToolProvider;
@@ -565,5 +600,80 @@ mod tests {
         let services = RuntimeServices::tools_only(tools, "root").expect("services");
         assert_eq!(services.plugins.agent_id(), "root");
         assert!(services.plugins.tool_providers().is_empty());
+    }
+
+    struct MutatorPluginFactory {
+        plugin_id: &'static str,
+        hook: MessageMutatorHook,
+    }
+
+    impl PluginFactory for MutatorPluginFactory {
+        fn id(&self) -> &'static str {
+            self.plugin_id
+        }
+
+        fn build(
+            &self,
+            _ctx: &PluginSessionContext,
+        ) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+            Ok(Arc::new(MutatorPlugin {
+                plugin_id: self.plugin_id,
+                hook: self.hook,
+            }))
+        }
+    }
+
+    struct MutatorPlugin {
+        plugin_id: &'static str,
+        hook: MessageMutatorHook,
+    }
+
+    impl SessionPlugin for MutatorPlugin {
+        fn id(&self) -> &'static str {
+            self.plugin_id
+        }
+
+        fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
+            reg.register_message_mutator(
+                self.hook,
+                Arc::new(|_ctx, messages| Box::pin(async move { Ok(messages) })),
+            )
+        }
+    }
+
+    #[test]
+    fn duplicate_message_mutator_hooks_are_rejected() {
+        let host = PluginHost::new(vec![
+            Arc::new(MutatorPluginFactory {
+                plugin_id: "mutator-a",
+                hook: MessageMutatorHook::AfterTokenCount,
+            }),
+            Arc::new(MutatorPluginFactory {
+                plugin_id: "mutator-b",
+                hook: MessageMutatorHook::AfterTokenCount,
+            }),
+        ]);
+        let err = match host.build_session("root", None) {
+            Ok(_) => panic!("duplicate mutator"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("duplicate message mutator"));
+        assert!(err.to_string().contains("mutator-a"));
+        assert!(err.to_string().contains("mutator-b"));
+    }
+
+    #[test]
+    fn different_message_mutator_hooks_can_coexist() {
+        let host = PluginHost::new(vec![
+            Arc::new(MutatorPluginFactory {
+                plugin_id: "mutator-before",
+                hook: MessageMutatorHook::BeforeTurn,
+            }),
+            Arc::new(MutatorPluginFactory {
+                plugin_id: "mutator-after",
+                hook: MessageMutatorHook::AfterTurn,
+            }),
+        ]);
+        host.build_session("root", None).expect("session");
     }
 }

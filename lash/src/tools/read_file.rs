@@ -122,7 +122,7 @@ fn execute_read_file_sync(path_str: &str, offset: usize, limit: Option<usize>) -
     // Binary detection
     if is_likely_binary(path) {
         return ToolResult::err_fmt(format_args!(
-            "Binary file detected: {path_str}. Use `read_image` for images, or `shell` (`file`, `strings`, `xxd`) for binary inspection."
+            "Binary file detected: {path_str}. Use `read_image` for images, or the available command-execution tools (`exec_command` / `shell`) for binary inspection."
         ));
     }
 

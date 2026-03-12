@@ -294,9 +294,9 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
         PromptSectionName::ExecutionContract => Some(format!(
             "{}\n{}",
             if matches!(input.execution_mode, ExecutionMode::Repl) {
-                "## Execution Contract\n\nYour output can include prose and `<repl>` blocks.\n- Pure prose with no `<repl>` block is a valid final answer when no execution is needed\n- If you open `<repl>`, the turn is not finished when `</repl>` is reached\n- `<repl>` blocks execute immediately when `</repl>` is reached\n- After a `<repl>` block executes, lash continues in a new internal turn with the execution output\n- After you have used `<repl>` in a turn, do not end with prose alone; continue until you call `done(...)` inside `<repl>`\n- Do not assume prose after a `<repl>` block will be shown to the user unless you pass it to `done(...)`\n- Maximum one `<repl>` block per response\n- Do not emit additional `<repl>` blocks in the same response after one has closed\n- For direct conversational requests (greetings, small talk, time/date, simple Q&A), respond in prose and do not open `<repl>`\n- Variables persist across turns\n- `print(...)` output is model-visible only\n\n### REPL Language\n\nThe REPL runs a lightweight Python dialect (not CPython). It supports:\n- Functions (`def`, `lambda`, `async def`), closures, `*args`/`**kwargs`\n- Control flow: `if`/`elif`/`else`, `for`, `while`, `try`/`except`/`finally`, `raise`\n- Data types: `int`, `float`, `bool`, `str`, `bytes`, `list`, `tuple`, `dict`, `set`, `frozenset`, `None`\n- Comprehensions (list, dict, set), f-strings, unpacking, chained comparisons\n- `await` for async tool helpers; `asyncio.gather(...)` for parallel calls (only `asyncio.gather` and `asyncio.run` are available — `asyncio.sleep`, `asyncio.create_task`, and other asyncio APIs are not supported)\n- Builtins: `len`, `range`, `enumerate`, `zip`, `map`, `filter`, `sorted`, `reversed`, `min`, `max`, `sum`, `all`, `any`, `abs`, `round`, `isinstance`, `type`, `print`, `repr`, `hash`, `id`, `int()`, `str()`, `list()`, etc.\n- Limited modules: `re`, `os.getenv`, `pathlib.Path`\n\nNot supported: `class`, `yield`/generators, `with`/context managers, `del`, decorators, `match`/`case`, walrus `:=`, `import` of arbitrary modules, standard library (`json`, `collections`, `itertools`, etc.), `open()`/file I/O.\n\nFor tasks requiring unsupported features, write a script file and run it via `T.shell(\"python3 script.py\")`."
+                "## Execution Contract\n\nYour output can include prose and `<repl>` blocks.\n- Use prose only when no execution is needed\n- `<repl>` executes immediately when `</repl>` is reached\n- After you use `<repl>`, continue until you call `done(...)`\n- Do not assume prose after `</repl>` is user-visible unless you pass it to `done(...)`\n- Maximum one `<repl>` block per response\n- For direct conversational requests that need no tools, respond in prose only\n- `print(...)` output is model-visible only\n\n### REPL Language\n\nThe REPL is a small Python-like runtime for tool orchestration.\n- Supports ordinary control flow, lists/dicts/sets, comprehensions, f-strings, and `await`\n- Use `asyncio.gather(...)` only for supported async tool helpers\n- Limited modules: `re`, `os.getenv`, `pathlib.Path`\n- No arbitrary imports, `open()`, classes, generators, context managers, or broad standard-library access\n- If you need unsupported features, use the appropriate host tool instead of trying to emulate them inside the REPL"
             } else {
-                "## Execution Contract\n\nUse direct tool calls when execution is needed.\n- Do not emit `<repl>` blocks or Python code\n- Call tools directly with valid arguments\n- When several tool calls are independent, emit them together in the same response instead of serializing them across turns\n- Use serial tool calls only when later arguments depend on earlier tool results or when ordering is required for correctness\n- Avoid unnecessary prose between independent tool calls; optimize for completing the task with as few tool rounds as possible\n- After tool results are returned, continue with the next tool calls or final answer\n- For direct conversational requests that need no tools, respond in prose only"
+                "## Execution Contract\n\nUse direct tool calls when execution is needed.\n- Do not emit `<repl>` blocks or Python code\n- Call tools directly with valid arguments\n- Group independent tool calls in the same response; serialize only when later arguments depend on earlier results\n- Avoid filler prose between tool calls\n- Keep going until the task is complete; do not stop after inspection or partial progress\n- If you are unsure, inspect or validate more instead of guessing\n- For direct conversational requests that need no tools, respond in prose only"
             },
             if matches!(input.execution_mode, ExecutionMode::Repl) {
                 if profile.is_headless() {
@@ -331,17 +331,10 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
         )),
         PromptSectionName::ToolAccess => Some(
             if matches!(input.execution_mode, ExecutionMode::Repl) {
-                "## Tool Access\n\n- `T` is the tool namespace. Call tools as `T.<tool>(...)` (for example `T.read_file(...)`)\n- Tools are not exposed as bare globals; use `T.` consistently to avoid shadowing and accidental rebinding\n- Runtime control calls stay global: `done(...)`, `ask(...)` (interactive only), and `reset_repl()`\n- There is no `tools` module, no implicit imports, and no wrapper classes; work with plain dict/list/primitive values\n- Call sync tools directly through `T.`; use explicit `await` only for async tools such as `T.shell_wait(...)`, `T.shell_read(...)`, `T.shell_write(...)`, `T.shell_kill(...)`, `T.agent_result(...)`, `T.agent_output(...)`, and `T.agent_kill(...)`\n- Use `asyncio.gather(...)` only for those async `T.` calls"
+                "## Tool Access\n\n- `T` is the tool namespace. Call tools as `T.<tool>(...)`\n- Tools are not exposed as bare globals; use `T.` consistently to avoid shadowing and accidental rebinding\n- Runtime control calls stay global: `done(...)`, `ask(...)` (interactive only), and `reset_repl()`\n- There is no `tools` module, no implicit imports, and no wrapper classes; work with plain dict/list/primitive values\n- Call sync tools directly through `T.`; use explicit `await` only for async `T.` calls\n- Use `asyncio.gather(...)` only for supported async `T.` calls"
                     .to_string()
             } else {
-                format!(
-                    "## Tool Access\n\n- The runtime will expose the available tools as direct tool calls\n- Use only the tools shown in Available Tools\n- Prefer parallel independent tool calls in one assistant turn when the model/provider supports multiple calls\n- Good candidates for one-turn parallel calls: reading several files, multiple searches, independent inspections, and unrelated diagnostics\n- Do not parallelize dependent steps, ordered stateful edits, or operations whose arguments depend on prior output\n- Never invent tool names or arguments that are not described{}",
-                    if input.tool_names.iter().any(|name| name == "batch") {
-                        "\n- If `batch` is available and you need 2 or more independent tool calls, prefer `batch` over spacing those calls across multiple turns"
-                    } else {
-                        ""
-                    }
-                )
+                "## Tool Access\n\n- The runtime exposes only the listed tools\n- Use only tools shown in Available Tools\n- Group independent calls in one response when the provider supports it\n- Good fits: reading several files, multiple searches, and unrelated diagnostics\n- Do not parallelize dependent steps or ordered stateful work\n- Never invent tool names or arguments".to_string()
             },
         ),
         PromptSectionName::ToolGuides => {
@@ -359,7 +352,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
             }
         }
         PromptSectionName::AvailableTools => Some(format!(
-            "## Available Tools\n\n{}\n\nUse `T.list_tools()` / `T.search_tools(...)` to rediscover signatures and descriptions.",
+            "## Available Tools\n\n{}\n\nUse the discovery utilities available in this environment to rediscover signatures and descriptions when needed.",
             input.tool_list
         )),
         PromptSectionName::ErrorRecovery => Some(
@@ -418,12 +411,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
             }
         }
         PromptSectionName::Guidelines => Some(format!(
-            "## Guidelines\n\n- Bias toward concrete execution over planning chatter\n- For substantial scripts/workflows, create files and run them with host tooling\n- Use isolated environments only when required dependencies are missing\n- Avoid redundant file reads when values already exist in variables\n- Never speculate about files you have not read\n- Be concise and action-oriented\n{}\n{}\n{}",
-            if profile == PromptProfile::RootInteractive {
-                "- In interactive mode, when a concrete deliverable is requested, prefer completing it in the current response over reconnaissance-only steps"
-            } else {
-                ""
-            },
+            "## Guidelines\n\n- Bias toward concrete execution over planning chatter\n- Keep going until the request is resolved; do not stop at reconnaissance when a concrete deliverable is requested\n- Validate the smallest relevant thing first, then broaden if needed\n- Do not fix unrelated failures uncovered during validation; report them instead\n- For substantial scripts/workflows, create files and run them with host tooling\n- Use isolated environments only when required dependencies are missing\n- Avoid redundant file reads when values already exist in variables\n- Never speculate about files you have not read\n- Be concise and action-oriented\n{}\n{}",
             if !input.can_write {
                 "- This agent is read-only: do not modify files; focus on inspection, lookup, and summarization"
             } else {
@@ -534,7 +522,7 @@ fn tool_guides(
 
     if tools.contains("ls") || tools.contains("read_file") || tools.contains("glob") {
         chunks.push(
-            "**Orient -> Read -> Act**\n1. `T.ls()` / `T.glob()` and inspect `result[\"items\"]` (each item has `path`, `kind`, `size_bytes`, `modified_at`, optional `lines`)\n2. `T.read_file(...)` / `T.grep(...)` for content-level context before editing\n3. `T.edit_file(...)` for changes, `T.write_file(...)` for new files"
+            "**Orient -> Read -> Act**\n1. `T.ls()` / `T.glob()` and inspect `result[\"items\"]` (each item has `path`, `kind`, `size_bytes`, `modified_at`, optional `lines`)\n2. `T.read_file(...)` / `T.grep(...)` for content-level context before mutating files\n3. Apply focused changes only after you understand the surrounding code"
                 .to_string(),
         );
     }
@@ -544,26 +532,13 @@ fn tool_guides(
                 .to_string(),
         );
     }
-    if tools.contains("edit_file") {
-        chunks.push(
-            "**Hashline edits**\n`T.read_file(...)` returns `LINE:HASH|text` where HASH is an 8-character hex value (example: `42:a5c1d2e3|...`). Always read first, then edit using those anchors."
-                .to_string(),
-        );
-    }
-    if tools.contains("find_replace") {
-        chunks.push("**T.find_replace(...)** performs exact text substitution and is best for straightforward renames/typo fixes.".to_string());
-    }
     if tools.contains("glob") {
         chunks.push(
             "**glob/ls output**\n`T.glob(...)` and `T.ls(...)` both return `{ \"__type__\": \"path_entries\", \"items\": [...], \"truncated\": ... }`. Read paths from `result[\"items\"]`, not `result[\"entries\"]`. `T.glob(...)` sorts `items` by modification time (newest first); `T.ls(...)` sorts `items` alphabetically by path. If `truncated` is non-null, rerun with `limit=None` when needed."
                 .to_string(),
         );
     }
-    if tools.contains("shell") {
-        chunks.push(
-            "**Shell handles**\n`proc = T.shell(cmd)` returns a plain handle dict. Use `await T.shell_wait(proc)`, `await T.shell_read(proc)`, `await T.shell_write(proc, input)`, and `await T.shell_kill(proc)`.\n- `T.shell_wait` blocks until the process exits and returns all output — use this for commands that terminate.\n- `T.shell_read` is non-blocking and drains only the output accumulated so far (returns empty string if none). Use it to poll long-running processes."
-                .to_string(),
-        );
+    if tools.contains("shell") || tools.contains("exec_command") {
         chunks.push(
             "**Git safety**\nDo not revert user changes you did not make. Avoid destructive git commands unless explicitly requested."
                 .to_string(),
@@ -608,12 +583,6 @@ fn tool_guides(
     if tools.contains("create_task") {
         chunks.push(
             "**Task management**\nFor multi-step work: create tasks, keep one in progress, and mark completion immediately. Use `T.create_task(subject=...)` (not `title`). For `T.update_task(...)`, valid statuses are `pending`, `in_progress`, `completed`, and `cancelled`."
-                .to_string(),
-        );
-    }
-    if tools.contains("batch") {
-        chunks.push(
-            "**Batching**\nUse `T.batch(tool_calls=[...])` for 2-25 independent tool calls when you already know the arguments up front. Good fits: reading several files, multiple searches, or unrelated diagnostics. Do not batch dependent steps and do not nest `batch` inside `batch`."
                 .to_string(),
         );
     }
@@ -783,9 +752,8 @@ mod tests {
                 "There is no `tools` module, no implicit imports, and no wrapper classes"
             )
         );
-        assert!(
-            text.contains("use explicit `await` only for async tools such as `T.shell_wait(...)`")
-        );
+        assert!(text.contains("use explicit `await` only for async `T.` calls"));
+        assert!(text.contains("Do not revert user changes you did not make"));
     }
 
     #[test]
@@ -873,19 +841,19 @@ mod tests {
             project_instructions: "",
             overrides: &[],
         });
-        assert!(text.contains("emit them together in the same response"));
-        assert!(text.contains("Good candidates for one-turn parallel calls"));
+        assert!(text.contains("Group independent tool calls in the same response"));
+        assert!(text.contains("Good fits: reading several files"));
         assert!(text.contains("Do not parallelize dependent steps"));
     }
 
     #[test]
-    fn standard_prompt_prefers_batch_when_available() {
+    fn prompt_strengthens_completion_and_validation_rules() {
         let text = compose_system_prompt(PromptComposeInput {
             profile: PromptProfile::RootInteractive,
             execution_mode: crate::ExecutionMode::Standard,
             context: "ctx",
             tool_list: "tools",
-            tool_names: &["batch".to_string()],
+            tool_names: &[],
             has_history: false,
             helper_bindings: &helpers_for(&AgentCapabilities::default()),
             capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
@@ -895,11 +863,10 @@ mod tests {
             project_instructions: "",
             overrides: &[],
         });
-        assert!(text.contains("prefer `batch`"));
-        assert!(
-            text.contains("Prefer parallel independent tool calls in one assistant turn")
-                || text.contains("Prefer parallel independent tool calls")
-        );
+        assert!(text.contains("Keep going until the task is complete"));
+        assert!(text.contains("inspect or validate more instead of guessing"));
+        assert!(text.contains("Validate the smallest relevant thing first"));
+        assert!(text.contains("Do not fix unrelated failures uncovered during validation"));
     }
 
     #[test]

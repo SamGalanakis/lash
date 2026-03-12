@@ -121,19 +121,21 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
     CapabilityDefinition {
         id: CapabilityId::CoreWrite,
         name: "Core Write",
-        description: "Core file mutation tools.",
+        description: "Primary file mutation tool.",
         prompt_section: None,
         helper_bindings: &[],
-        tools: &["write_file", "edit_file", "find_replace"],
+        tools: &["apply_patch"],
         enabled_by_default: true,
     },
     CapabilityDefinition {
         id: CapabilityId::Shell,
         name: "Shell",
-        description: "Shell execution and process handles.",
+        description: "Command execution and interactive process handles.",
         prompt_section: None,
         helper_bindings: &[],
         tools: &[
+            "exec_command",
+            "write_stdin",
             "shell",
             "shell_wait",
             "shell_read",
@@ -162,10 +164,10 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
     CapabilityDefinition {
         id: CapabilityId::Planning,
         name: "Planning",
-        description: "Interactive plan mode lifecycle tools.",
+        description: "Native plan tracking for substantial multi-step work.",
         prompt_section: None,
-        helper_bindings: &["enter_plan_mode", "exit_plan_mode"],
-        tools: &["enter_plan_mode", "exit_plan_mode"],
+        helper_bindings: &[],
+        tools: &["update_plan"],
         enabled_by_default: true,
     },
     CapabilityDefinition {
@@ -291,7 +293,10 @@ mod tests {
             .iter()
             .map(|n| ToolDefinition {
                 name: (*n).to_string(),
-                description: vec![],
+                description: vec![crate::ToolText::new(
+                    "test",
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
+                )],
                 params: vec![],
                 returns: "any".to_string(),
                 examples: vec![],
@@ -331,5 +336,13 @@ mod tests {
                 .enabled_capabilities
                 .contains(&CapabilityId::Memory)
         );
+    }
+
+    #[test]
+    fn unavailable_tools_are_not_resolved() {
+        let defs = vec![];
+        let caps = AgentCapabilities::default();
+        let resolved = resolve_features(&caps, &defs);
+        assert!(!resolved.effective_tools.contains("shell"));
     }
 }

@@ -1065,15 +1065,21 @@ impl Store {
                 .and_then(|v| v.as_object())
                 .and_then(|obj| obj.get("path"))
                 .and_then(|v| v.as_str());
-            if let Some(path) = path {
-                match tool {
-                    "read_file" | "glob" | "grep" => {
-                        files_read.insert(path.to_string());
-                    }
-                    "write_file" | "edit_file" | "find_replace" => {
+            if let Some(path) = path
+                && matches!(tool, "read_file" | "glob" | "grep")
+            {
+                files_read.insert(path.to_string());
+            }
+            if tool == "apply_patch"
+                && let Some(files) = tc
+                    .get("result")
+                    .and_then(|v| v.get("files"))
+                    .and_then(|v| v.as_array())
+            {
+                for file in files {
+                    if let Some(path) = file.get("path").and_then(|v| v.as_str()) {
                         files_written.insert(path.to_string());
                     }
-                    _ => {}
                 }
             }
         }

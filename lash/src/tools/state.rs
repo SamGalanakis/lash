@@ -438,12 +438,12 @@ mod tests {
     fn tool_search_uses_catalog() {
         let p = provider();
         let result = p.search_tools(&json!({
-            "query":"write",
+            "query":"patch",
             "mode":"hybrid",
             "limit":10,
             "catalog":[
                 {"name":"read_file","description":"Read file","examples":[],"inject_into_prompt":true},
-                {"name":"write_file","description":"Write file","examples":[],"inject_into_prompt":true}
+                {"name":"apply_patch","description":"Apply structured patch","examples":[],"inject_into_prompt":true}
             ]
         }));
         assert!(result.success);
@@ -451,7 +451,7 @@ mod tests {
         assert!(!items.is_empty());
         assert_eq!(
             items[0].get("name").and_then(|v| v.as_str()),
-            Some("write_file")
+            Some("apply_patch")
         );
     }
 
