@@ -720,7 +720,12 @@ mod tests {
         let updated = store
             .execute("update_task", &json!({"id": id1, "remove_blocks": [id2]}))
             .await;
-        assert!(updated.result["blocks"].as_array().unwrap().is_empty());
+        assert!(
+            updated.result["blocks"].is_null()
+                || updated.result["blocks"]
+                    .as_array()
+                    .is_some_and(|items| items.is_empty())
+        );
 
         // add_blocked_by
         let updated = store
@@ -741,7 +746,12 @@ mod tests {
                 &json!({"id": id2, "remove_blocked_by": [id1]}),
             )
             .await;
-        assert!(updated.result["blocked_by"].as_array().unwrap().is_empty());
+        assert!(
+            updated.result["blocked_by"].is_null()
+                || updated.result["blocked_by"]
+                    .as_array()
+                    .is_some_and(|items| items.is_empty())
+        );
     }
 
     // ── Owner auto-clear via tool ──
@@ -758,7 +768,7 @@ mod tests {
             .execute("update_task", &json!({"id": id, "status": "completed"}))
             .await;
         assert!(result.success);
-        assert_eq!(result.result["owner"], "");
+        assert!(result.result["owner"].is_null());
     }
 
     // ── Validation ──

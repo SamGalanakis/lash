@@ -668,15 +668,15 @@ mod tests {
         let p = google_oauth();
         assert_eq!(
             p.default_agent_model("low"),
-            Some(("gemini-3-flash-preview", None))
+            Some(("gemini-3-flash-preview", Some("low")))
         );
         assert_eq!(
             p.default_agent_model("medium"),
-            Some(("gemini-3.1-pro-preview", None))
+            Some(("gemini-3.1-pro-preview", Some("medium")))
         );
         assert_eq!(
             p.default_agent_model("high"),
-            Some(("gemini-3.1-pro-preview", None))
+            Some(("gemini-3.1-pro-preview", Some("high")))
         );
     }
 

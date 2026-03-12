@@ -50,19 +50,19 @@ fn pick_model_and_variant(
         match tier {
             Tier::Low => {
                 if let Some(ref q) = m.low {
-                    let variant = config.provider.default_model_variant(q).map(str::to_string);
+                    let variant = preferred_override_variant(&config.provider, q, tier);
                     return (q.clone(), variant);
                 }
             }
             Tier::Medium => {
                 if let Some(ref b) = m.medium {
-                    let variant = config.provider.default_model_variant(b).map(str::to_string);
+                    let variant = preferred_override_variant(&config.provider, b, tier);
                     return (b.clone(), variant);
                 }
             }
             Tier::High => {
                 if let Some(ref t) = m.high {
-                    let variant = config.provider.default_model_variant(t).map(str::to_string);
+                    let variant = preferred_override_variant(&config.provider, t, tier);
                     return (t.clone(), variant);
                 }
             }
@@ -80,6 +80,18 @@ fn pick_model_and_variant(
         .map(str::to_string)
         .or_else(|| config.model_variant.clone());
     (model, variant)
+}
+
+fn preferred_override_variant(
+    provider: &crate::Provider,
+    model: &str,
+    tier: &Tier,
+) -> Option<String> {
+    let tier_variant = tier.as_str();
+    if provider.supported_variants(model).contains(&tier_variant) {
+        return Some(tier_variant.to_string());
+    }
+    provider.default_model_variant(model).map(str::to_string)
 }
 
 /// A running sub-agent managed by AgentCall.
@@ -706,7 +718,7 @@ mod tests {
 
         let (m_low, r_low) = pick_model_and_variant(&config, &None, &Tier::Low);
         assert_eq!(m_low, "gpt-5.3-codex-spark");
-        assert_eq!(r_low, None);
+        assert_eq!(r_low.as_deref(), Some("low"));
 
         let (m_mid, r_mid) = pick_model_and_variant(&config, &None, &Tier::Medium);
         assert_eq!(m_mid, "gpt-5.4");

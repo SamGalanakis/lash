@@ -139,8 +139,9 @@ impl ShellRuntime {
         cmd.current_dir(workdir)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .process_group(0);
+            .stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        cmd.process_group(0);
         cmd.spawn().map_err(|e| format!("Failed to spawn: {e}"))
     }
 
