@@ -1,6 +1,7 @@
 /target/
 /dist/
 target-bookworm/
+target-bullseye/
 *.pdb
 .env
 .env.*
