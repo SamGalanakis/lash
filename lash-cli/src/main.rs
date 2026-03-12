@@ -2736,10 +2736,8 @@ Use `/provider` or `/login` to sign in again without restarting.",
                     let is_done = matches!(event, AgentEvent::Done);
                     logger.log_event(&event);
                     app.handle_agent_event(event);
-                    if is_done {
-                        if !app.focused {
-                            notify_done();
-                        }
+                    if is_done && !app.focused {
+                        notify_done();
                     }
                 }
             }

@@ -383,52 +383,6 @@ fn truncate_to_display_width(text: &str, max_width: usize) -> String {
     out
 }
 
-fn human_tool_name(name: &str) -> &'static str {
-    match name {
-        "read_file" => "read",
-        "apply_patch" => "patch",
-        "grep" => "grep",
-        "glob" => "glob",
-        "ls" => "list",
-        "exec_command" => "run",
-        "write_stdin" => "write stdin",
-        "shell" => "shell",
-        "shell_wait" => "wait",
-        "shell_read" => "read shell",
-        "shell_write" => "write shell",
-        "shell_kill" => "kill shell",
-        "fetch_url" => "fetch",
-        "search_web" => "search",
-        "agent_call" => "delegate",
-        "agent_result" => "collect agent",
-        "agent_output" => "stream agent",
-        "agent_kill" => "kill agent",
-        "create_task" => "create task",
-        "update_task" => "update task",
-        "claim_task" => "claim task",
-        "delete_task" => "delete task",
-        "tasks" => "list tasks",
-        "tasks_summary" => "task summary",
-        "get_task" => "get task",
-        "list_tools" => "list tools",
-        "search_tools" => "search tools",
-        "search_skills" => "search skills",
-        "skills" => "list skills",
-        "load_skill" => "load skill",
-        "read_skill_file" => "read skill file",
-        "batch" => "batch",
-        "update_plan" => "update plan",
-        _ => "tool",
-    }
-}
-
-fn tool_group_name(name: &str) -> String {
-    match human_tool_name(name) {
-        "tool" => name.replace('_', " "),
-        label => label.to_string(),
-    }
-}
-
 /// Build a ghost fold summary for a group of code blocks starting at `idx`.
 /// `idx` should point to the first (non-continuation) CodeBlock in a group.
 /// Scans forward through contiguous CodeBlock/Activity/CodeOutput blocks.
@@ -2013,35 +1967,6 @@ mod tests {
             format_context_usage(&TokenUsage::default(), 1_050_000),
             None
         );
-    }
-
-    #[test]
-    fn tool_display_label_uses_semantic_read_summary() {
-        let label = tool_display_label(
-            "read_file",
-            &serde_json::json!({"path":"src/main.rs","offset":40}),
-            &serde_json::Value::Null,
-        );
-        assert_eq!(label, "read src/main.rs @40");
-    }
-
-    #[test]
-    fn tool_display_label_replaces_batch_with_batched_tools_summary() {
-        let label = tool_display_label(
-            "batch",
-            &serde_json::json!({}),
-            &serde_json::json!({
-                "results": [
-                    {"tool":"read_file","parameters":{"path":"src/main.rs"}},
-                    {"tool":"read_file","parameters":{"path":"Cargo.toml"}},
-                    {"tool":"grep","parameters":{"pattern":"ctx","path":"lash-cli/src"}}
-                ]
-            }),
-        );
-        assert!(label.starts_with("batched tools · "));
-        assert!(label.contains("batched tools"));
-        assert!(label.contains("read"));
-        assert!(label.contains("grep"));
     }
 
     #[test]
