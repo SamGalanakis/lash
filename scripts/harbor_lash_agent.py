@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shlex
 import json
+import tomllib
 from pathlib import Path
 
 from harbor.agents.installed.base import BaseInstalledAgent, ExecInput
@@ -14,8 +15,9 @@ from harbor.models.trial.paths import EnvironmentPaths
 from harbor.utils.templating import render_prompt_template
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_LASH_BINARY = REPO_ROOT / "target" / "release" / "lash"
-OPTIONAL_LIBS_DIR = REPO_ROOT / "bench" / "libs"
+DEFAULT_LASH_BINARY = (
+    REPO_ROOT / "target-bullseye" / "release" / "lash"
+)
 HOST_LASH_CONFIG = Path.home() / ".lash" / "config.json"
 
 REMOTE_HOME = "/installed-agent/home"
@@ -32,6 +34,8 @@ BENCHMARK_GUIDELINES_APPEND = """## Benchmark Constraints
 - Avoid broad rewrites or speculative reimplementation unless the task clearly requires them.
 - Prefer the shortest path to a passing verifier over a more ambitious or polished solution.
 - Before finishing, remove temporary/debug artifacts that are not part of the required final state.
+- Do not restore, reset, or clean away the required final state after you have verified it. The verifier checks the environment you leave behind.
+- If verification requires creating the exact final artifact or service state, leave that successful state intact.
 - Before finishing, re-read the task and verify each concrete requirement against the current environment.
 - If the task implies that a service, VM, server, or port must be reachable, verify it yourself before stopping.
 - If a service, VM, or port must be reachable, do not stop until you have confirmed the exact port/protocol works from the environment.
@@ -44,6 +48,25 @@ BENCHMARK_GUIDELINES_APPEND = """## Benchmark Constraints
 
 
 class LashAgent(BaseInstalledAgent):
+    def version(self) -> str | None:
+        version = super().version()
+        if version is not None:
+            return version
+
+        cargo_toml = REPO_ROOT / "Cargo.toml"
+        try:
+            with cargo_toml.open("rb") as f:
+                workspace = tomllib.load(f).get("workspace", {})
+        except (FileNotFoundError, tomllib.TOMLDecodeError):
+            return None
+
+        package = workspace.get("package")
+        if isinstance(package, dict):
+            version_value = package.get("version")
+            if isinstance(version_value, str):
+                return version_value
+        return None
+
     @staticmethod
     def name() -> str:
         return "lash"
@@ -53,14 +76,7 @@ class LashAgent(BaseInstalledAgent):
         return Path(__file__).resolve().parent / "install-lash.sh.j2"
 
     async def setup(self, environment: BaseEnvironment) -> None:
-        await environment.exec(
-            command=f"mkdir -p /installed-agent/libs {REMOTE_HOME} {REMOTE_LASH_HOME}"
-        )
-
-        # Optional host-provided libs are disabled by default because they may
-        # be ABI-incompatible with task images (e.g. older glibc in benchmark containers).
-        use_optional_libs = os.environ.get("LASH_BENCH_USE_OPTIONAL_LIBS") == "1"
-        self._use_optional_libs = use_optional_libs
+        await environment.exec(command=f"mkdir -p {REMOTE_HOME} {REMOTE_LASH_HOME}")
 
         binary_path = Path(os.environ.get("LASH_BENCH_BINARY", str(DEFAULT_LASH_BINARY)))
         if not binary_path.exists():
@@ -72,14 +88,6 @@ class LashAgent(BaseInstalledAgent):
             source_path=str(binary_path),
             target_path="/installed-agent/lash",
         )
-
-        if use_optional_libs and OPTIONAL_LIBS_DIR.exists():
-            for lib in OPTIONAL_LIBS_DIR.iterdir():
-                if lib.is_file():
-                    await environment.upload_file(
-                        source_path=str(lib),
-                        target_path=f"/installed-agent/libs/{lib.name}",
-                    )
 
         if HOST_LASH_CONFIG.exists():
             await environment.upload_file(
@@ -112,9 +120,6 @@ class LashAgent(BaseInstalledAgent):
                 "LASH_LLM_STREAM_TIMEOUT_SECS", "300"
             ),
         }
-
-        if getattr(self, "_use_optional_libs", False):
-            env["LD_LIBRARY_PATH"] = "/installed-agent/libs"
 
         for key in (
             "OPENROUTER_API_KEY",

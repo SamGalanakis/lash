@@ -100,9 +100,9 @@ Use `/skills` to browse, `/<skill-name>` to invoke, or call `T.load_skill("name"
 
 Use `scripts/run-terminalbench.sh` to run Harbor + Terminal Bench 2 with the in-repo lash adapter.
 
-By default it runs `terminal-bench-sample@2.0`, builds a glibc-compatible binary in `target-bookworm/release/lash`, and uses your local `~/.lash/config.json` inside benchmark containers (so OAuth/OpenAI-generic config is reused). You must specify `--execution-mode repl` or `--execution-mode standard` explicitly.
+By default it runs `terminal-bench-sample@2.0`, builds a benchmark binary in `target-bullseye/release/lash` using `rust:1-bullseye`, and uses your local `~/.lash/config.json` inside benchmark containers (so OAuth/OpenAI-generic config is reused). You must specify `--execution-mode repl` or `--execution-mode standard` explicitly.
 
-The Harbor adapter also appends benchmark-specific guidelines to lash's `guidelines` prompt section for these runs. That overlay makes exact verifier compliance explicit: match required final state exactly, clean up temporary artifacts, and self-verify ports/files/processes before finishing. Override it with `LASH_BENCH_PROMPT_APPEND_GUIDELINES` if needed.
+The Harbor adapter also appends benchmark-specific guidelines to lash's `guidelines` prompt section for these runs. That overlay makes exact verifier compliance explicit: match required final state exactly, self-verify ports/files/processes before finishing, and do not undo the final working state after verification. Override it with `LASH_BENCH_PROMPT_APPEND_GUIDELINES` if needed.
 
 For exact task batches, use `--tasks a,b,c` or `--task-file path.txt`. The runner will set Harbor concurrency to the full explicit task count unless you override `--n-concurrent`, and it prints a per-task summary from the job artifacts after the run.
 
@@ -112,7 +112,6 @@ scripts/run-terminalbench.sh --full --execution-mode standard --task "git-*"
 scripts/run-terminalbench.sh --sample --execution-mode repl --task chess-best-move --model gpt-5.4
 scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,sqlite-with-gcov
 scripts/run-terminalbench.sh --sample --execution-mode standard --task-file bench/tasks.txt
-scripts/run-terminalbench.sh --sample --execution-mode standard --build-mode host
 ```
 
 ## Slash Commands

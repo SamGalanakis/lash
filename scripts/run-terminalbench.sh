@@ -31,9 +31,7 @@ Options:
   --env <name>                  Harbor environment backend (default: docker)
   --registry-url <url>          Dataset registry URL
                                 (default: https://raw.githubusercontent.com/laude-institute/harbor/main/registry.json)
-  --build-mode <mode>           Binary build mode: docker-bookworm|host
-                                (default: docker-bookworm)
-  --no-build                    Skip building lash binary (uses existing path for selected mode)
+  --no-build                    Skip building the benchmark binary
   --debug                       Enable Harbor debug logging
   --no-debug                    Disable Harbor debug logging (default)
   --delete                      Delete benchmark environments after run
@@ -69,7 +67,6 @@ ATTEMPTS="1"
 TIMEOUT_MULT="1.0"
 ENV_BACKEND="docker"
 REGISTRY_URL="https://raw.githubusercontent.com/laude-institute/harbor/main/registry.json"
-BUILD_MODE="docker-bookworm"
 DO_BUILD=1
 DELETE_AFTER_RUN=1
 REQUIRE_CONFIG=1
@@ -198,10 +195,6 @@ while [[ $# -gt 0 ]]; do
       REGISTRY_URL="${2:?missing value for --registry-url}"
       shift 2
       ;;
-    --build-mode)
-      BUILD_MODE="${2:?missing value for --build-mode}"
-      shift 2
-      ;;
     --no-build)
       DO_BUILD=0
       shift
@@ -248,10 +241,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 require_cmd harbor
-if [[ "${DO_BUILD}" -eq 1 ]]; then
-  require_cmd cargo
-fi
-if [[ "${BUILD_MODE}" == "docker-bookworm" || "${ENV_BACKEND}" == "docker" ]]; then
+if [[ "${DO_BUILD}" -eq 1 || "${ENV_BACKEND}" == "docker" ]]; then
   require_cmd docker
 fi
 
@@ -286,44 +276,27 @@ if [[ ${#EXACT_TASKS[@]} -gt 0 && "${N_CONCURRENT_SET}" -eq 0 ]]; then
   N_CONCURRENT="${#EXACT_TASKS[@]}"
 fi
 
-build_host_binary() {
-  echo "==> Building lash release binary on host" >&2
-  cargo build --release --manifest-path "${REPO_ROOT}/Cargo.toml" --bin lash >/dev/null
-  echo "${REPO_ROOT}/target/release/lash"
-}
-
-build_bookworm_binary() {
-  local target_dir="${REPO_ROOT}/target-bookworm"
+build_benchmark_binary() {
+  local target_dir="${REPO_ROOT}/target-bullseye"
+  local image="rust:1-bullseye"
   mkdir -p "${target_dir}"
-  echo "==> Building lash release binary in rust:1-bookworm (glibc-compatible)" >&2
+  echo "==> Building lash benchmark binary in rust:1-bullseye" >&2
   docker run --rm -u root \
     -v "${REPO_ROOT}:/work" \
     -w /work \
-    rust:1-bookworm \
+    "${image}" \
     bash -lc \
-      'apt-get update >/dev/null &&
+      '. /usr/local/cargo/env &&
+       apt-get update >/dev/null &&
        apt-get install -y protobuf-compiler zstd python3-dev >/dev/null &&
-       . /usr/local/cargo/env &&
-       CARGO_TARGET_DIR=/work/target-bookworm cargo build --release --manifest-path /work/Cargo.toml --bin lash &&
-       chown -R $(stat -c "%u:%g" /work) /work/target-bookworm' >/dev/null
-  echo "${REPO_ROOT}/target-bookworm/release/lash"
+       CARGO_TARGET_DIR=/work/target-bullseye cargo build --release --manifest-path /work/Cargo.toml --bin lash &&
+       chown -R $(stat -c "%u:%g" /work) /work/target-bullseye' >/dev/null
+  echo "${REPO_ROOT}/target-bullseye/release/lash"
 }
 
-if [[ "${BUILD_MODE}" != "docker-bookworm" && "${BUILD_MODE}" != "host" ]]; then
-  echo "error: unsupported --build-mode: ${BUILD_MODE} (expected docker-bookworm|host)" >&2
-  exit 2
-fi
-
-if [[ "${BUILD_MODE}" == "host" ]]; then
-  BINARY_PATH="${REPO_ROOT}/target/release/lash"
-  if [[ "${DO_BUILD}" -eq 1 ]]; then
-    BINARY_PATH="$(build_host_binary)"
-  fi
-else
-  BINARY_PATH="${REPO_ROOT}/target-bookworm/release/lash"
-  if [[ "${DO_BUILD}" -eq 1 ]]; then
-    BINARY_PATH="$(build_bookworm_binary)"
-  fi
+BINARY_PATH="${REPO_ROOT}/target-bullseye/release/lash"
+if [[ "${DO_BUILD}" -eq 1 ]]; then
+  BINARY_PATH="$(build_benchmark_binary)"
 fi
 
 if [[ ! -x "${BINARY_PATH}" ]]; then
