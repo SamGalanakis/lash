@@ -1326,15 +1326,18 @@ async fn run_app(
         }
     });
 
-    // SIGTERM handler for graceful shutdown
-    let sigterm_tx = app_tx.clone();
-    tokio::spawn(async move {
-        use tokio::signal::unix::{SignalKind, signal};
-        if let Ok(mut sig) = signal(SignalKind::terminate()) {
-            sig.recv().await;
-            let _ = sigterm_tx.send(AppEvent::Quit);
-        }
-    });
+    #[cfg(unix)]
+    {
+        // SIGTERM handler for graceful shutdown
+        let sigterm_tx = app_tx.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            if let Ok(mut sig) = signal(SignalKind::terminate()) {
+                sig.recv().await;
+                let _ = sigterm_tx.send(AppEvent::Quit);
+            }
+        });
+    }
 
     // Oneshot for receiving runtime back after a run completes
     let mut runtime_return_rx: Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>> = None;
