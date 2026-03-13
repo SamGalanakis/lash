@@ -1301,7 +1301,7 @@ dependencies = [
 
 [[package]]
 name = "lash-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "lash-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "base64",
@@ -1354,7 +1354,7 @@ dependencies = [
 
 [[package]]
 name = "lashlang"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "compact_str 0.9.0",
  "criterion",
@@ -3605,7 +3605,7 @@ checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
 
 [[package]]
 name = "xtask"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "xxhash-rust"
