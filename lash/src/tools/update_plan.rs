@@ -77,7 +77,7 @@ impl ToolProvider for UpdatePlanTool {
             returns: "str".into(),
             examples: vec![
                 crate::ToolText::new(
-                    "update_plan(explanation=\"I found the main renderer.\", steps=[{\"label\":\"Inspect renderer\", \"status\":\"completed\"}, {\"label\":\"Patch layout\", \"status\":\"in_progress\"}, {\"label\":\"Run tests\", \"status\":\"pending\"}])",
+                    "call update_plan { explanation: \"I found the main renderer.\", steps: [{ label: \"Inspect renderer\", status: \"completed\" }, { label: \"Patch layout\", status: \"in_progress\" }, { label: \"Run tests\", status: \"pending\" }] }",
                     [crate::ExecutionMode::Repl],
                 ),
                 crate::ToolText::new(
@@ -105,11 +105,7 @@ fn execute_update_plan(state: &Arc<Mutex<PlanState>>, args: &serde_json::Value) 
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    let Some(raw_plan) = args
-        .get("steps")
-        .or_else(|| args.get("plan"))
-        .and_then(|value| value.as_array())
-    else {
+    let Some(raw_plan) = args.get("steps").and_then(|value| value.as_array()) else {
         return ToolResult::err_fmt("Missing required parameter: steps");
     };
     if raw_plan.is_empty() {
@@ -125,7 +121,6 @@ fn execute_update_plan(state: &Arc<Mutex<PlanState>>, args: &serde_json::Value) 
         };
         let Some(step) = object
             .get("label")
-            .or_else(|| object.get("step"))
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -230,23 +225,6 @@ mod tests {
                 .as_str()
                 .is_some_and(|value| value.contains("at most one in_progress"))
         );
-    }
-
-    #[tokio::test]
-    async fn update_plan_accepts_legacy_plan_and_step_aliases() {
-        let tool = UpdatePlanTool::new();
-        let result = tool
-            .execute(
-                "update_plan",
-                &json!({
-                    "plan":[
-                        {"step":"Inspect code","status":"completed"},
-                        {"step":"Patch UI","status":"in_progress"}
-                    ]
-                }),
-            )
-            .await;
-        assert!(result.success);
     }
 
     #[test]

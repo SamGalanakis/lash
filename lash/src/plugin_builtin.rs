@@ -8,7 +8,7 @@ use crate::dynamic::DynamicCapabilityDef;
 use crate::instructions::InstructionSource;
 use crate::search::{SearchDoc, SearchMode, limit_from_args, rank_docs, truncate_preview};
 use crate::store::{HistoryTurnRecord, MemRecord, Store};
-use crate::tools::{UpdatePlanTool, run_blocking};
+use crate::tools::{INTERNAL_TOOL_CATALOG_ARG, UpdatePlanTool, run_blocking};
 use crate::{ExecutionMode, ToolDefinition, ToolParam, ToolText};
 
 use super::*;
@@ -237,6 +237,31 @@ fn plan_mode_tool_allowed(tool_name: &str, args: &serde_json::Value) -> bool {
             }),
         _ => false,
     }
+}
+
+fn plan_mode_tool_discoverable(tool_name: &str) -> bool {
+    tool_name == "batch" || plan_mode_tool_allowed(tool_name, &serde_json::Value::Null)
+}
+
+fn filter_plan_mode_search_catalog(args: &serde_json::Value) -> Option<serde_json::Value> {
+    let mut replacement = args.as_object()?.clone();
+    let filtered = replacement
+        .get(INTERNAL_TOOL_CATALOG_ARG)?
+        .as_array()?
+        .iter()
+        .filter(|entry| {
+            entry
+                .get("name")
+                .and_then(|value| value.as_str())
+                .is_some_and(plan_mode_tool_discoverable)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    replacement.insert(
+        INTERNAL_TOOL_CATALOG_ARG.to_string(),
+        serde_json::Value::Array(filtered),
+    );
+    Some(serde_json::Value::Object(replacement))
 }
 
 const PROPOSED_PLAN_OPEN: &str = "<proposed_plan>";
@@ -1354,7 +1379,15 @@ impl SessionPlugin for PlanModePlugin {
                     .lock()
                     .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?
                     .enabled;
-                if !enabled || plan_mode_tool_allowed(&ctx.tool_name, &ctx.args) {
+                if !enabled {
+                    return Ok(Vec::new());
+                }
+                if ctx.tool_name == "search_tools"
+                    && let Some(args) = filter_plan_mode_search_catalog(&ctx.args)
+                {
+                    return Ok(vec![PluginDirective::ReplaceToolArgs { args }]);
+                }
+                if plan_mode_tool_allowed(&ctx.tool_name, &ctx.args) {
                     return Ok(Vec::new());
                 }
                 Ok(vec![PluginDirective::AbortTurn {
@@ -1819,9 +1852,9 @@ mod tests {
                 "update_plan",
                 &json!({
                     "explanation": "Mapped the runtime/plugin seam.",
-                    "plan": [
-                        {"step":"Inspect planning hooks","status":"completed"},
-                        {"step":"Split plugin ownership","status":"in_progress"}
+                    "steps": [
+                        {"label":"Inspect planning hooks","status":"completed"},
+                        {"label":"Split plugin ownership","status":"in_progress"}
                     ]
                 }),
             )
@@ -1848,9 +1881,9 @@ mod tests {
             .execute(
                 "update_plan",
                 &json!({
-                    "plan": [
-                        {"step":"Inspect planning hooks","status":"completed"},
-                        {"step":"Split plugin ownership","status":"completed"}
+                    "steps": [
+                        {"label":"Inspect planning hooks","status":"completed"},
+                        {"label":"Split plugin ownership","status":"completed"}
                     ]
                 }),
             )
@@ -1998,6 +2031,36 @@ mod tests {
             .await
             .expect("before_tool_call");
         assert!(allowed.is_empty());
+
+        let search_filtered = session
+            .before_tool_call(ToolCallHookContext {
+                session_id: "root".to_string(),
+                tool_name: "search_tools".to_string(),
+                args: json!({
+                    "__tool_catalog": [
+                        {"name":"search_tools","description":"Discover tools","examples":[],"inject_into_prompt":true},
+                        {"name":"update_plan","description":"Update the checklist plan","examples":[],"inject_into_prompt":true},
+                        {"name":"read_file","description":"Read files","examples":[],"inject_into_prompt":true}
+                    ]
+                }),
+                host: Arc::clone(&manager),
+            })
+            .await
+            .expect("before_tool_call");
+        assert!(search_filtered.iter().any(|emitted| matches!(
+            &emitted.value,
+            PluginDirective::ReplaceToolArgs { args }
+                if args
+                    .get(INTERNAL_TOOL_CATALOG_ARG)
+                    .and_then(|value| value.as_array())
+                    .is_some_and(|items| {
+                        items.iter().all(|entry| {
+                            entry.get("name")
+                                .and_then(|value| value.as_str())
+                                != Some("update_plan")
+                        })
+                    })
+        )));
 
         let checklist_blocked = session
             .before_tool_call(ToolCallHookContext {

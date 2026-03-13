@@ -574,7 +574,7 @@
     </div>
     <div class="doc-meta">
       Lash Agent Framework<br>
-      Rust + Lash REPL Runtime<br>
+      Rust + Lashlang Runtime<br>
       2026
     </div>
   </header>
@@ -584,7 +584,7 @@
     <button class="tab-btn active" data-tab="overview">Overview</button>
     <button class="tab-btn" data-tab="host">Host Interface</button>
     <button class="tab-btn" data-tab="agent">Runtime Core</button>
-    <button class="tab-btn" data-tab="repl">REPL Mode</button>
+    <button class="tab-btn" data-tab="repl">Lashlang</button>
     <button class="tab-btn" data-tab="native">Native Tools</button>
     <button class="tab-btn" data-tab="tools">Tools</button>
     <button class="tab-btn" data-tab="capabilities">Capabilities</button>
@@ -727,7 +727,7 @@
         <div class="arch-card-desc">
           LashRuntime resolves provider/model, refreshes tokens, reads dynamic projection state from the active tool registry,
           injects only tools with <code>inject_into_prompt=true</code>, and appends discovery guidance for omitted tools
-          (<code>search_tools</code>, <code>tools.&lt;tool&gt;</code>). Prompt assembly is execution-mode aware:
+          (<code>search_tools</code>). Prompt assembly is execution-mode aware:
           the same tool identity is projected into REPL help/docs or provider-native tool schemas depending on the active mode.
           Both execution paths are driven by a single synchronous state machine (<code>TurnMachine</code> in <code>lash/src/sansio.rs</code>)
           that emits I/O effects (<code>LlmCall</code>, <code>ToolCall</code>, <code>ExecCode</code>, <code>Sleep</code>) for the async host driver to fulfil.
@@ -832,137 +832,197 @@
   </div>
 
   <!-- ═══════════════════════════════════════════════════ -->
-  <!-- TAB: REPL Mode                                      -->
+  <!-- TAB: Lashlang                                       -->
   <!-- ═══════════════════════════════════════════════════ -->
   <div class="tab-panel" id="tab-repl">
     <div class="section-header">
       <span class="section-number">04</span>
-      <span class="section-title">REPL Mode</span>
-      <span class="section-desc">Persistent REPL execution with state across turns.</span>
+      <span class="section-title">Lashlang</span>
+      <span class="section-desc">The REPL language, execution VM, and the host contract that lets lash treat code execution as a first-class runtime path.</span>
     </div>
 
     <div class="arch-grid">
       <div class="arch-card">
         <div class="arch-card-tag tag-repl"><span class="dot"></span>Execution Contract</div>
-        <div class="arch-card-title">REPL Execution Model</div>
+        <div class="arch-card-title">Language Pipeline</div>
         <div class="arch-card-desc">
-          The session spins up the REPL runtime, registers tool definitions/capabilities,
-          and executes <code>&lt;repl&gt;</code> blocks in a persistent namespace. The model may emit prose
-          plus at most one <code>&lt;repl&gt;</code> block per turn.
+          <code>lashlang</code> is a standalone crate. The host can use <code>lex</code>, <code>parse</code>,
+          <code>compile_program</code>, <code>execute_compiled</code>, and <code>profile_compiled</code> directly,
+          or the convenience <code>execute</code> wrapper that turns parse and runtime failures into a single
+          <code>ExecuteError</code> boundary.
         </div>
+        <div class="cell-grid cols-3">
+          <div class="cell">
+            <h4>Lexer + Parser</h4>
+            <p>
+              <code>lexer.rs</code> tokenizes a compact surface language with reserved words like
+              <code>call</code>, <code>observe</code>, <code>finish</code>, and <code>parallel</code>.
+              <code>parser.rs</code> builds an AST over assignments, control flow, records, lists,
+              ternaries, tool calls, and completion.
+            </p>
+          </div>
+          <div class="cell">
+            <h4>Compiler</h4>
+            <p>
+              The compiler in <code>runtime.rs</code> lowers AST nodes into a compact chunk/slot form.
+              It resolves builtins, tracks locals through slot tables, and recognizes the dedicated
+              parallel-call execution shape before the VM runs.
+            </p>
+          </div>
+          <div class="cell">
+            <h4>Execution</h4>
+            <p>
+              The VM returns <code>ExecutionOutcome::Continued</code> or <code>ExecutionOutcome::Finished(Value)</code>.
+              Profiling is optional and produces instruction/builtin timing stats without changing the execution contract.
+            </p>
+          </div>
+          <div class="cell">
+            <h4>Parallel Rules</h4>
+            <p>
+              <code>parallel { ... }</code> can execute independent branches concurrently. Branches may only merge if
+              they assign disjoint names, and <code>finish</code> is rejected inside a parallel branch.
+            </p>
+          </div>
+          <div class="cell">
+            <h4>Error Model</h4>
+            <p>
+              Parse errors expose precise spans and expected-token context. Runtime failures stay compact:
+              unknown names, type/value errors, bad builtin usage, non-list iteration, or illegal parallel control flow.
+            </p>
+          </div>
+          <div class="cell">
+            <h4>Test Surface</h4>
+            <p>
+              The crate is covered by both example-style language tests and property tests for parser stability,
+              snapshot round-trips, tool result shape, truthiness, builtins, and parallel behavior.
+            </p>
+          </div>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Surface Language Example</div>
+          <pre><span class="tag">&lt;repl&gt;</span>
+config = <span class="kw">call</span> read_file { path: <span class="str">"src/config.rs"</span> }
+summary = config.ok ? slice(config.value, 0, 80) : config.error
+<span class="kw">observe</span> summary
+<span class="tag">&lt;/repl&gt;</span></pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Public Entry Points</div>
+          <pre><span class="role">crate exports</span>
+lex(source)
+parse(source)
+compile_program(program)
+execute_compiled(program, state, host)
+profile_compiled(program, state, host)
+execute(source, state, host)</pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">State + Snapshot</div>
+          <pre><span class="role">State</span>
+globals: Record
+
+<span class="role">Snapshot</span>
+globals: Record
+
+snapshot() -&gt; persisted repl state
+from_snapshot(...) -&gt; restored globals</pre>
+        </div>
+      </div>
+
+      <div class="arch-card">
+        <div class="arch-card-tag tag-repl"><span class="dot"></span>Value Model</div>
+        <div class="arch-card-title">Values, Records, and Host Calls</div>
+        <div class="arch-card-desc">
+          The runtime uses a deliberately small value model: scalars, lists, and symbol-backed records.
+          Tool calls are bridged through the host trait rather than being baked into the VM, which keeps the
+          language reusable outside the lash CLI.
+        </div>
+        <div class="cell-grid cols-3" style="margin-top: 20px;">
+          <div class="cell">
+            <h4>Values</h4>
+            <p><code>Value</code> covers null, bool, number, string, list, and record. The same type is used for locals, builtin inputs, tool outputs, and <code>finish</code> results.</p>
+          </div>
+          <div class="cell">
+            <h4>Records</h4>
+            <p><code>Record</code> preserves insertion order while also indexing keys through interned symbols. That keeps field access fast and snapshots deterministic.</p>
+          </div>
+          <div class="cell">
+            <h4>ToolHost</h4>
+            <p><code>ToolHost::call</code> executes host tools. <code>ToolHost::observe</code> is optional and defaults to no-op, which lets embedders ignore observation without forking the runtime.</p>
+          </div>
+          <div class="cell">
+            <h4>Tool Result Shape</h4>
+            <p>Host tool failures do not throw through the surface language. Tool calls resolve to records like <code>{ ok: true, value }</code> or <code>{ ok: false, error }</code>.</p>
+          </div>
+          <div class="cell">
+            <h4>Builtins</h4>
+            <p>Builtins cover formatting, string/list helpers, indexing, JSON conversion, numeric coercion, truthiness-aware conditionals, and utility helpers like <code>len</code>, <code>slice</code>, and <code>format</code>.</p>
+          </div>
+          <div class="cell">
+            <h4>Truthiness</h4>
+            <p>Control flow uses bounded truthiness rules pinned by tests, rather than inheriting Python or JavaScript semantics by accident.</p>
+          </div>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Host Contract</div>
+          <pre><span class="role">trait ToolHost</span>
+call(name, args: Record) -&gt; Result&lt;Value, ToolHostError&gt;
+observe(value: &amp;Value) -&gt; Result&lt;(), ToolHostError&gt;
+
+<span class="role">tool result convention</span>
+{ ok: true, value: ... }
+{ ok: false, error: ... }</pre>
+        </div>
+      </div>
+
+      <div class="arch-card">
+        <div class="arch-card-tag tag-repl"><span class="dot"></span>Host Integration</div>
+        <div class="arch-card-title">REPL Turn Cycle Inside Lash</div>
+        <div class="arch-card-desc">
+          Lash embeds <code>lashlang</code> as one execution mode. The session exposes the active tool surface,
+          executes at most one <code>&lt;repl&gt;</code> block per assistant turn, and reinjects observations,
+          tool results, and runtime errors as hidden feedback for the next internal step.
+        </div>
+
         <div class="cell-grid cols-2">
           <div class="cell">
             <h4>Contract Rules</h4>
             <p>
               <code>&lt;repl&gt;</code> blocks execute immediately when <code>&lt;/repl&gt;</code> is reached.
-              Maximum one block per response. After execution, lash continues in a new internal turn with execution output.
-              Once a turn has executed <code>&lt;repl&gt;</code>, it must continue until <code>done(...)</code> is called inside <code>&lt;repl&gt;</code>.
-              Variables persist across turns. <code>print(...)</code> output is model-visible only.
+              Variables persist across turns. <code>observe expr</code> emits hidden feedback for the next model step,
+              and a block can do setup work without ending the user-visible turn.
             </p>
           </div>
           <div class="cell">
             <h4>Termination</h4>
             <p>
-              <code>done(value)</code> ends the turn and returns control. It may only be called inside <code>&lt;repl&gt;</code>.
-              If a turn never opened <code>&lt;repl&gt;</code>, plain prose can still finish the turn.
-              After any REPL execution, only <code>done(...)</code> can terminate the turn.
-              In interactive mode, call <code>done(...)</code> only when the final user-facing answer is ready.
-              In headless mode, call <code>done(...)</code> only after the task is fully completed.
+              <code>finish expr</code> always ends the turn, even when the rendered text is empty.
+              <code>observe expr</code> never ends the turn. In headless mode, the task must eventually terminate
+              through <code>finish ...</code> rather than prose alone.
             </p>
           </div>
           <div class="cell">
             <h4>Tool Access</h4>
             <p>
-              In REPL mode, tools live under the <code>T</code> namespace (for example <code>T.read_file(...)</code>).
-              Only <code>done(...)</code>, <code>ask(...)</code>, and <code>reset_repl()</code> remain bare globals.
-              Use <code>T.search_tools(...)</code> to discover prompt-omitted tools, or <code>T.search_tools()</code> to browse all active tools, and use <code>await</code> only for
-              async tools such as shell handle methods and sub-agent result/output calls.
-              Both discovery calls search the full current runtime tool catalog; there is no separate caller-supplied <code>catalog</code> parameter.
+              In REPL mode, tools are called with <code>call tool_name { ... }</code>. Use <code>call search_tools {}</code>
+              only when the needed tool is not already listed in the prompt. There is no <code>T</code> namespace or Python async layer.
             </p>
           </div>
           <div class="cell">
             <h4>Error Recovery</h4>
             <p>
-              Tool failures raise <code>ToolError</code>; execution stops at the failing line.
-              Read the traceback, fix the cause, retry. If REPL state is corrupted, call <code>reset_repl()</code>.
+              Parse errors include line/column context and runtime errors stay short and source-oriented.
+              The intended recovery loop is: shrink the block, inspect with <code>observe</code>, then retry a narrower validated step.
             </p>
           </div>
         </div>
 
-        <div class="example-block">
-          <div class="example-label">Example &mdash; Reading a file</div>
-          <pre><span class="role">assistant:</span>
-Let me check the config file.
-
-<span class="tag">&lt;repl&gt;</span>
-content = <span class="fn">T.read_file</span>(<span class="str">"src/config.rs"</span>)
-<span class="fn">print</span>(content[:200])
-<span class="tag">&lt;/repl&gt;</span></pre>
-        </div>
-
-        <div class="example-block">
-          <div class="example-label">Lash reinjects &rarr; next internal turn</div>
-          <pre><span class="role">system (reinjection):</span>
-<span class="out">[code output]
-use serde::Deserialize;
-
-#[derive(Deserialize)]
-pub struct Config {
-    pub port: u16,
-    pub host: String,
-}</span></pre>
-        </div>
-
-        <div class="example-block">
-          <div class="example-label">Example &mdash; Edit + completion</div>
-          <pre><span class="role">assistant:</span>
-I'll add the timeout field.
-
-<span class="tag">&lt;repl&gt;</span>
-<span class="fn">T.apply_patch</span>(<span class="str">"""*** Begin Patch
-*** Update File: src/config.rs
-@@
--    pub host: String,
-+    pub host: String,
-+    pub timeout_ms: u64,
-*** End Patch"""</span>)
-<span class="fn">done</span>(<span class="str">"Added `timeout_ms: u64` field to the Config struct."</span>)
-<span class="tag">&lt;/repl&gt;</span></pre>
-        </div>
-
-        <div class="example-block">
-          <div class="example-label">Example &mdash; Sub-agent delegation</div>
-          <pre><span class="role">assistant:</span>
-I'll research the codebase structure in parallel.
-
-<span class="tag">&lt;repl&gt;</span>
-<span class="kw">import</span> asyncio
-
-models_agent, routes_agent = <span class="kw">await</span> asyncio.<span class="fn">gather</span>(
-    <span class="fn">T.agent_call</span>(<span class="str">"List all model structs in src/models/"</span>, intelligence=<span class="str">"low"</span>),
-    <span class="fn">T.agent_call</span>(<span class="str">"List all route handlers in src/routes/"</span>, intelligence=<span class="str">"low"</span>),
-)
-models, routes = <span class="kw">await</span> asyncio.<span class="fn">gather</span>(
-    <span class="fn">T.agent_result</span>(models_agent[<span class="str">"id"</span>]),
-    <span class="fn">T.agent_result</span>(routes_agent[<span class="str">"id"</span>]),
-)
-<span class="fn">print</span>(<span class="str">"Models:"</span>, models)
-<span class="fn">print</span>(<span class="str">"Routes:"</span>, routes)
-<span class="tag">&lt;/repl&gt;</span></pre>
-        </div>
-      </div>
-
-      <div class="arch-card">
-        <div class="arch-card-tag tag-repl"><span class="dot"></span>Reinjection</div>
-        <div class="arch-card-title">REPL Turn Cycle</div>
-        <div class="arch-card-desc">
-          After each <code>&lt;repl&gt;</code> block executes, the model sees code output, tool output, and errors
-          as typed feedback parts on the following turn. REPL locals persist across turns and can be
-          snapshotted for resume.
-        </div>
-
         <div class="sequence-block">
-          <pre>  <span class="role">Host</span>          <span class="role">Runtime</span>         <span class="role">Agent</span>           <span class="role">REPL Runtime</span>
+          <pre>  <span class="role">Host</span>          <span class="role">Runtime</span>         <span class="role">Agent</span>           <span class="role">Lashlang</span>
    │               │                │                │
    │──TurnInput──▶│                │                │
    │               │──assemble──▶  │                │
@@ -971,20 +1031,26 @@ models, routes = <span class="kw">await</span> asyncio.<span class="fn">gather</
    │               │                │                │◀───────┘
    │               │◀──reinjection──│◀──output───────│
    │               │──assemble──▶  │                │
-   │               │                │──done(...)────▶│
+   │               │                │──finish(...)──▶│
    │◀──Assembled───│                │                │
    │    Turn       │                │                │</pre>
         </div>
 
-        <div class="cell-grid cols-2" style="margin-top: 20px;">
-          <div class="cell">
-            <h4>State Persistence</h4>
-            <p>Python locals persist across turns within the same session. The REPL namespace can be snapshotted and restored on session resume.</p>
-          </div>
-          <div class="cell">
-            <h4>Headless Constraint</h4>
-            <p>In headless mode, prose-only turns are invalid. The model must always execute via <code>&lt;repl&gt;</code> and finish with <code>done(...)</code>.</p>
-          </div>
+        <div class="example-block">
+          <div class="example-label">Example &mdash; Edit + completion</div>
+          <pre><span class="role">assistant:</span>
+I'll add the timeout field.
+
+<span class="tag">&lt;repl&gt;</span>
+patch = <span class="kw">call</span> apply_patch { patch: <span class="str">"""*** Begin Patch
+*** Update File: src/config.rs
+@@
+-    pub host: String,
++    pub host: String,
++    pub timeout_ms: u64,
+*** End Patch"""</span> }
+<span class="kw">finish</span> <span class="str">"Added `timeout_ms: u64` field to the Config struct."</span>
+<span class="tag">&lt;/repl&gt;</span></pre>
         </div>
       </div>
     </div>
@@ -1191,7 +1257,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
           </div>
           <div class="cell">
             <h4>Discovery</h4>
-            <p><code>search_tools</code> lets the model discover tools not injected into the prompt. With no query, it returns the full active catalog.</p>
+            <p><code>search_tools</code> is for genuine discovery of tools not injected into the prompt. With no query, it returns the full active catalog.</p>
           </div>
         </div>
       </div>
@@ -1201,7 +1267,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="arch-card-title">Sub-Agent Orchestration</div>
         <div class="arch-card-desc">
           <code>agent_call</code> forks parent dynamic state per sub-agent. Sub-agents share the same filesystem/worktree
-          but get isolated tool/capability state. Low tier sub-agents are filtered (no write/delegation tools) and always execute in <code>standard</code>; medium/high inherit the parent session's execution mode. REPL-only setup (<code>done(...)</code> wrappers, history/memory tool registration) only applies when the child actually runs in <code>repl</code>.
+          but get isolated tool/capability state. Low tier sub-agents are filtered (no write/delegation tools) and always execute in <code>standard</code>; medium/high inherit the parent session's execution mode. REPL-specific setup only applies when the child actually runs in <code>repl</code>.
         </div>
         <div class="cell-grid cols-3">
           <div class="cell">
@@ -1241,7 +1307,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
 
     <div class="legend" style="margin-top: 2px;">
       <span class="pill"><b>Prompt-visible</b> <code>inject_into_prompt=true</code></span>
-      <span class="pill"><b>Discoverable</b> <code>T.search_tools / T.&lt;tool&gt;</code></span>
+      <span class="pill"><b>Discoverable</b> <code>search_tools</code></span>
       <span class="pill"><b>Reconfigure</b> <code>/tools / /caps / /reconfigure</code></span>
       <span class="pill"><b>Unified Items</b> <code>text + refs + image + skill</code></span>
     </div>
@@ -1271,7 +1337,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
             <h4>Structure</h4>
             <p>
               Each <code>CapabilityDefinition</code> has an id, name, description, optional prompt section,
-              runtime-call bindings (REPL globals), and a list of tool names it controls.
+              runtime bindings, and a list of tool names it controls.
             </p>
           </div>
           <div class="cell">
@@ -1348,22 +1414,22 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="arch-card-title">Persistent Key-Value Memory</div>
         <div class="arch-card-desc">
           Memory is persistent key-value storage across context pruning. Use it to store durable decisions,
-          conventions, and project-specific knowledge. Accessed via host tool calls (<code>T.mem_set</code>, <code>T.mem_get</code>, <code>T.mem_delete</code>, <code>T.search_mem</code>) in REPL mode, or the bare tool names in standard mode.
+          conventions, and project-specific knowledge. In REPL mode, call the memory tools with <code>call ... { ... }</code>; in standard mode they are native tool calls.
         </div>
         <div class="cell-grid cols-2">
           <div class="cell">
             <h4>Tool API</h4>
             <p>
-              <code>T.mem_set(key, description, value=None)</code> &mdash; store/update in REPL<br>
-              <code>T.mem_get(key)</code> &mdash; retrieve or <code>None</code> in REPL<br>
-              <code>T.mem_delete(key)</code> &mdash; remove in REPL<br>
-              <code>T.search_mem(query, mode, regex, limit, keys)</code> &mdash; search in REPL
+              <code>call mem_set { key, description, value }</code> &mdash; store/update in REPL<br>
+              <code>call mem_get { key }</code> &mdash; retrieve or <code>null</code> in REPL<br>
+              <code>call mem_delete { key }</code> &mdash; remove in REPL<br>
+              <code>call search_mem { query, mode, regex, limit, keys }</code> &mdash; search in REPL
             </p>
           </div>
           <div class="cell">
             <h4>Availability</h4>
             <p>
-              <code>search_mem(query, mode="hybrid", regex=None, limit=10, keys=None)</code> is available in both execution modes, but REPL calls it as <code>T.search_mem(...)</code>.
+              <code>search_mem</code> is available in both execution modes, but REPL calls it as <code>call search_mem { ... }</code>.
             </p>
           </div>
         </div>
@@ -1371,16 +1437,16 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="example-block">
           <div class="example-label">Example &mdash; Storing a convention (REPL)</div>
           <pre><span class="tag">&lt;repl&gt;</span>
-<span class="fn">T.mem_set</span>(<span class="str">"repo_convention"</span>, <span class="str">"Use snake_case for tool names"</span>)
+memory_write = <span class="kw">call</span> mem_set { key: <span class="str">"repo_convention"</span>, description: <span class="str">"Use snake_case for tool names"</span> }
+<span class="kw">observe</span> memory_write
 <span class="tag">&lt;/repl&gt;</span></pre>
         </div>
 
         <div class="example-block">
           <div class="example-label">Example &mdash; Searching memory (REPL)</div>
           <pre><span class="tag">&lt;repl&gt;</span>
-results = <span class="fn">T.search_mem</span>(<span class="str">"naming convention"</span>)
-<span class="kw">for</span> r <span class="kw">in</span> results:
-    <span class="fn">print</span>(r.key, r.description)
+results = <span class="kw">call</span> search_mem { query: <span class="str">"naming convention"</span> }
+<span class="kw">observe</span> results
 <span class="tag">&lt;/repl&gt;</span></pre>
         </div>
 
@@ -1420,22 +1486,16 @@ results = <span class="fn">T.search_mem</span>(<span class="str">"naming convent
           <div class="example-label">Example &mdash; Recalling prior context (REPL)</div>
           <pre><span class="tag">&lt;repl&gt;</span>
 <span class="cm"># Find what the user asked about earlier</span>
-hits = <span class="fn">T.search_history</span>(<span class="str">"database migration"</span>, limit=5)
-<span class="kw">for</span> h <span class="kw">in</span> hits:
-    <span class="fn">print</span>(h[<span class="str">"turn"</span>], h[<span class="str">"preview"</span>])
+hits = <span class="kw">call</span> search_history { query: <span class="str">"database migration"</span>, limit: 5 }
+<span class="kw">observe</span> hits
 <span class="tag">&lt;/repl&gt;</span></pre>
         </div>
 
         <div class="example-block">
           <div class="example-label">Example &mdash; Delegating history recall (REPL)</div>
           <pre><span class="tag">&lt;repl&gt;</span>
-<span class="cm"># Use a cheap sub-agent to mine history</span>
-worker = <span class="kw">await</span> <span class="fn">T.agent_call</span>(
-    <span class="str">"Search history for any database schema decisions and summarize them."</span>,
-    intelligence=<span class="str">"low"</span>,
-)
-summary = <span class="kw">await</span> <span class="fn">T.agent_result</span>(worker[<span class="str">"id"</span>])
-<span class="fn">print</span>(summary)
+worker = <span class="kw">call</span> agent_call { prompt: <span class="str">"Search history for any database schema decisions and summarize them."</span>, intelligence: <span class="str">"low"</span> }
+<span class="kw">observe</span> worker
 <span class="tag">&lt;/repl&gt;</span></pre>
         </div>
       </div>
@@ -1486,7 +1546,7 @@ summary = <span class="kw">await</span> <span class="fn">T.agent_result</span>(w
           <div class="cell">
             <h4>Loading</h4>
             <p>
-              <code>load_skill(name)</code> returns the full skill definition including instructions and file listing.
+              <code>load_skill</code> loads the named skill and returns its instructions plus bundled file listing.
               The agent then follows the skill's instructions to complete the requested workflow.
             </p>
           </div>
@@ -1495,19 +1555,16 @@ summary = <span class="kw">await</span> <span class="fn">T.agent_result</span>(w
         <div class="example-block">
           <div class="example-label">Example &mdash; Discovering skills (REPL)</div>
           <pre><span class="tag">&lt;repl&gt;</span>
-<span class="cm"># List all available skills</span>
-all_skills = <span class="fn">T.skills</span>()
-<span class="kw">for</span> s <span class="kw">in</span> all_skills[<span class="str">"items"</span>]:
-    <span class="fn">print</span>(s[<span class="str">"name"</span>], <span class="str">"-"</span>, s[<span class="str">"description"</span>])
+results = <span class="kw">call</span> search_skills { query: <span class="str">"ui component library"</span>, limit: 5 }
+<span class="kw">observe</span> results
 <span class="tag">&lt;/repl&gt;</span></pre>
         </div>
 
         <div class="example-block">
           <div class="example-label">Example &mdash; Loading and using a skill (REPL)</div>
           <pre><span class="tag">&lt;repl&gt;</span>
-skill = <span class="fn">T.load_skill</span>(<span class="str">"frontend-design"</span>)
-<span class="fn">print</span>(skill[<span class="str">"instructions"</span>])
-<span class="cm"># Agent now follows the skill's instructions</span>
+skill = <span class="kw">call</span> load_skill { name: <span class="str">"frontend-design"</span> }
+<span class="kw">observe</span> skill
 <span class="tag">&lt;/repl&gt;</span></pre>
         </div>
 
@@ -1538,7 +1595,7 @@ skill = <span class="fn">T.load_skill</span>(<span class="str">"frontend-design"
           <div class="cell">
             <h4>File Access</h4>
             <p>
-              <code>read_skill_file(skill_name, file_path)</code> reads supporting files bundled with the skill,
+              <code>read_skill_file(name, path)</code> reads supporting files bundled with the skill,
               such as templates, schemas, or reference code.
             </p>
           </div>

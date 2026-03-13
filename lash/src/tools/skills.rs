@@ -140,11 +140,7 @@ impl SkillStore {
     }
 
     fn execute_read_skill_file(&self, args: &serde_json::Value) -> ToolResult {
-        let skill_name = match args
-            .get("name")
-            .or_else(|| args.get("skill_name"))
-            .and_then(|v| v.as_str())
-        {
+        let skill_name = match args.get("name").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s,
             _ => return ToolResult::err(json!("Missing required parameter: name")),
         };
@@ -296,28 +292,6 @@ mod tests {
             .await;
         assert!(result.success);
         assert_eq!(result.result.as_str(), Some("hello\n"));
-    }
-
-    #[tokio::test]
-    async fn read_skill_file_accepts_legacy_skill_name_alias() {
-        let dir = TempDir::new().expect("tmp");
-        let skill_dir = dir.path().join("demo-skill");
-        std::fs::create_dir_all(&skill_dir).expect("skill dir");
-        std::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: demo\ndescription: demo skill\n---\n\nbody\n",
-        )
-        .expect("skill");
-        std::fs::write(skill_dir.join("extra.txt"), "hello\n").expect("extra");
-        let store = make_store(dir.path());
-
-        let result = store
-            .execute(
-                "read_skill_file",
-                &json!({"skill_name":"demo","path":"extra.txt"}),
-            )
-            .await;
-        assert!(result.success);
     }
 
     #[test]

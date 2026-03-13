@@ -141,12 +141,7 @@ impl Record {
         self.insert_symbolized(symbol, symbol_name(symbol), value)
     }
 
-    fn insert_symbolized(
-        &mut self,
-        symbol: Symbol,
-        name: Arc<str>,
-        value: Value,
-    ) -> Option<Value> {
+    fn insert_symbolized(&mut self, symbol: Symbol, name: Arc<str>, value: Value) -> Option<Value> {
         if let Some(index) = self.position_for(symbol) {
             return Some(std::mem::replace(&mut self.entries[index].value, value));
         }
@@ -172,9 +167,7 @@ impl Record {
         if let Some(index) = &self.index {
             return index.get(&symbol).copied();
         }
-        self.entries
-            .iter()
-            .position(|entry| entry.symbol == symbol)
+        self.entries.iter().position(|entry| entry.symbol == symbol)
     }
 
     fn rebuild_index(&mut self) {
@@ -758,7 +751,11 @@ fn build_stats<const N: usize>(
             })
         })
         .collect::<Vec<_>>();
-    stats.sort_by(|a, b| b.total_ns.cmp(&a.total_ns).then_with(|| b.count.cmp(&a.count)));
+    stats.sort_by(|a, b| {
+        b.total_ns
+            .cmp(&a.total_ns)
+            .then_with(|| b.count.cmp(&a.count))
+    });
     stats
 }
 
@@ -771,7 +768,11 @@ fn merge_stats(target: &mut Vec<ProfileStat>, source: &[ProfileStat]) {
             target.push(stat.clone());
         }
     }
-    target.sort_by(|a, b| b.total_ns.cmp(&a.total_ns).then_with(|| b.count.cmp(&a.count)));
+    target.sort_by(|a, b| {
+        b.total_ns
+            .cmp(&a.total_ns)
+            .then_with(|| b.count.cmp(&a.count))
+    });
 }
 
 struct Compiler {
@@ -1083,7 +1084,8 @@ impl Compiler {
             Expr::String(value) => Ok(PureExpr::Const(Value::String(value.clone().into()))),
             Expr::Variable(name) => Ok(PureExpr::Slot(self.push_slot(name))),
             Expr::List(items) => Ok(PureExpr::List(
-                items.iter()
+                items
+                    .iter()
                     .map(|item| self.compile_pure_expr(item))
                     .collect::<Result<Vec<_>, _>>()?
                     .into_boxed_slice(),
@@ -1393,13 +1395,11 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             Instruction::LoadName(name) => {
                 let slot_name = &self.chunk.slot_names[name];
-                let value = self
-                    .slots
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| RuntimeError::UndefinedVariable {
+                let value = self.slots.get(name).cloned().ok_or_else(|| {
+                    RuntimeError::UndefinedVariable {
                         name: slot_name.clone(),
-                    })?;
+                    }
+                })?;
                 self.stack.push(value);
             }
             Instruction::StoreName(name) => {
@@ -1423,7 +1423,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             Instruction::Field(field) => {
                 let target = self.pop_stack()?;
-                self.stack.push(read_field(target, &self.chunk.names[field])?);
+                self.stack
+                    .push(read_field(target, &self.chunk.names[field])?);
             }
             Instruction::Index => {
                 let index = self.pop_stack()?;
@@ -1487,26 +1488,22 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             Instruction::AddAssign(slot) => {
                 let right = self.pop_stack()?;
                 let slot_name = &self.chunk.slot_names[slot];
-                let left = self
-                    .slots
-                    .get(slot)
-                    .cloned()
-                    .ok_or_else(|| RuntimeError::UndefinedVariable {
+                let left = self.slots.get(slot).cloned().ok_or_else(|| {
+                    RuntimeError::UndefinedVariable {
                         name: slot_name.clone(),
-                    })?;
+                    }
+                })?;
                 self.slots.assign(slot, add_values(left, right)?);
                 self.record_assignment(slot);
             }
             Instruction::AppendAssign(slot) => {
                 let item = self.pop_stack()?;
                 let slot_name = &self.chunk.slot_names[slot];
-                let current = self
-                    .slots
-                    .get(slot)
-                    .cloned()
-                    .ok_or_else(|| RuntimeError::UndefinedVariable {
+                let current = self.slots.get(slot).cloned().ok_or_else(|| {
+                    RuntimeError::UndefinedVariable {
                         name: slot_name.clone(),
-                    })?;
+                    }
+                })?;
                 let value = match current {
                     Value::List(items) => {
                         let mut values = Vec::with_capacity(items.len() + 1);
@@ -1637,7 +1634,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             );
             vec![left, right]
         } else {
-            calls.par_iter()
+            calls
+                .par_iter()
                 .map(|call| Self::run_prepared_call(self.chunk, call, self.host))
                 .collect()
         };
@@ -1808,11 +1806,7 @@ struct LoopRestore {
 
 fn is_pure_expr(expr: &Expr) -> bool {
     match expr {
-        Expr::Null
-        | Expr::Bool(_)
-        | Expr::Number(_)
-        | Expr::String(_)
-        | Expr::Variable(_) => true,
+        Expr::Null | Expr::Bool(_) | Expr::Number(_) | Expr::String(_) | Expr::Variable(_) => true,
         Expr::List(items) => items.iter().all(is_pure_expr),
         Expr::Record(entries) => entries.iter().all(|(_, value)| is_pure_expr(value)),
         Expr::ToolCall(_) => false,
@@ -1837,14 +1831,17 @@ fn eval_pure_expr(
 ) -> Result<Value, RuntimeError> {
     match expr {
         PureExpr::Const(value) => Ok(value.clone()),
-        PureExpr::Slot(slot) => slots
-            .get(*slot)
-            .cloned()
-            .ok_or_else(|| RuntimeError::UndefinedVariable {
-                name: slot_names[*slot].clone(),
-            }),
+        PureExpr::Slot(slot) => {
+            slots
+                .get(*slot)
+                .cloned()
+                .ok_or_else(|| RuntimeError::UndefinedVariable {
+                    name: slot_names[*slot].clone(),
+                })
+        }
         PureExpr::List(items) => Ok(Value::List(
-            items.iter()
+            items
+                .iter()
                 .map(|item| eval_pure_expr(item, slots, names, slot_names))
                 .collect::<Result<Vec<_>, _>>()?
                 .into(),
@@ -2036,7 +2033,9 @@ fn execute_builtin(
         }
         Builtin::Trim => {
             expect_arg_count("trim", values, 1)?;
-            Ok(Value::String(coerce_string(&values[0])?.trim().to_string().into()))
+            Ok(Value::String(
+                coerce_string(&values[0])?.trim().to_string().into(),
+            ))
         }
         Builtin::Slice => {
             expect_arg_count("slice", values, 3)?;
@@ -2111,7 +2110,11 @@ fn read_field(value: Value, field: &Name) -> Result<Value, RuntimeError> {
             .unwrap_or(Value::Null)),
         Value::Null => Ok(Value::Null),
         _ => Err(RuntimeError::TypeError {
-            message: format!("can't read `.{}` from {}", field.text, value_type_name(&value)),
+            message: format!(
+                "can't read `.{}` from {}",
+                field.text,
+                value_type_name(&value)
+            ),
         }),
     }
 }
@@ -2354,7 +2357,9 @@ fn from_json(value: serde_json::Value) -> Value {
             Value::List(values.into_iter().map(from_json).collect::<Vec<_>>().into())
         }
         serde_json::Value::Object(map) => Value::Record(Arc::new(
-            map.into_iter().map(|(key, value)| (key, from_json(value))).collect(),
+            map.into_iter()
+                .map(|(key, value)| (key, from_json(value)))
+                .collect(),
         )),
     }
 }
@@ -2678,7 +2683,10 @@ mod tests {
             record["fmt_value"],
             Value::String("{\"a\":1.0}".to_string().into())
         );
-        assert_eq!(record["fmt"], Value::String("x=1,y=true".to_string().into()));
+        assert_eq!(
+            record["fmt"],
+            Value::String("x=1,y=true".to_string().into())
+        );
     }
 
     #[test]
@@ -2810,7 +2818,7 @@ mod tests {
         assert_eq!(to_json(&Value::Bool(true)), serde_json::Value::Bool(true));
         assert_eq!(
             to_json(&Value::String("x".to_string().into())),
-            serde_json::Value::String("x".to_string().into())
+            serde_json::Value::String("x".to_string())
         );
         assert_eq!(
             to_json(&Value::List(vec![Value::Number(1.0)].into())),

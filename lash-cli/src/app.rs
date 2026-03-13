@@ -618,7 +618,7 @@ impl App {
         }
         if !messages.is_empty() {
             self.invalidate_height_cache();
-            self.scroll_to_bottom();
+            self.keep_latest_user_block_visible();
         }
     }
 
@@ -758,6 +758,7 @@ impl App {
                 self.set_status("thinking", Some("waiting for first token".into()), true);
                 self.live_output_chars_estimate = 0;
                 self.live_output_tokens_estimate = 0;
+                self.keep_latest_user_block_visible();
             }
             AgentEvent::RetryStatus {
                 wait_seconds,
@@ -919,7 +920,7 @@ impl App {
             {
                 *block = DisplayBlock::UserInput(text.to_string());
                 self.invalidate_height_cache();
-                self.scroll_to_bottom();
+                self.keep_latest_user_block_visible();
                 return true;
             }
         }
@@ -1053,6 +1054,57 @@ impl App {
         }
         // We'll clamp this in rendering when we know viewport height
         self.scroll_offset = usize::MAX;
+    }
+
+    /// Keep the latest user-authored block visible while following output.
+    ///
+    /// Before the first visible assistant output arrives, prefer the start of a
+    /// tall prompt so the user can still read what they just sent while the
+    /// live status row renders beneath the history pane.
+    pub fn keep_latest_user_block_visible(&mut self) {
+        if !self.follow_output {
+            return;
+        }
+
+        let Some(last_idx) = self.blocks.iter().rposition(|block| {
+            matches!(
+                block,
+                DisplayBlock::UserInput(_) | DisplayBlock::PendingUserInput { .. }
+            )
+        }) else {
+            self.scroll_to_bottom();
+            return;
+        };
+
+        if self.height_cache_width == 0 || self.height_cache_vh == 0 {
+            self.scroll_to_bottom();
+            return;
+        }
+
+        let width = self.height_cache_width;
+        let viewport_height = self.height_cache_vh;
+        self.ensure_height_cache(width, viewport_height);
+
+        let total_height = self.total_content_height(width, viewport_height);
+        let max_scroll = total_height.saturating_sub(viewport_height);
+        let block_start = if last_idx == 0 {
+            0
+        } else {
+            self.height_cache[last_idx - 1]
+        };
+        let block_end = self.height_cache[last_idx];
+        let block_height = block_end.saturating_sub(block_start);
+
+        let awaiting_first_visible_output = self.running
+            && self.pending_text.is_empty()
+            && self.streaming_output.is_empty()
+            && self.live_output_chars_estimate == 0;
+
+        self.scroll_offset = if awaiting_first_visible_output && block_height >= viewport_height {
+            block_start.min(max_scroll)
+        } else {
+            block_end.saturating_sub(viewport_height).min(max_scroll)
+        };
     }
 
     /// Public accessor to pre-warm the height cache before an immutable borrow (e.g. draw).
@@ -1709,7 +1761,10 @@ pub fn format_tokens(n: i64) -> String {
 }
 
 pub(crate) fn render_plan_content_from_args(args: &serde_json::Value) -> Option<String> {
-    let items = args.get("plan").and_then(|value| value.as_array())?;
+    let items = args
+        .get("steps")
+        .or_else(|| args.get("plan"))
+        .and_then(|value| value.as_array())?;
     if items.is_empty() {
         return None;
     }
@@ -1726,7 +1781,10 @@ pub(crate) fn render_plan_content_from_args(args: &serde_json::Value) -> Option<
     }
 
     for (idx, item) in items.iter().enumerate() {
-        let step = item.get("step").and_then(|value| value.as_str())?;
+        let step = item
+            .get("label")
+            .or_else(|| item.get("step"))
+            .and_then(|value| value.as_str())?;
         let status = item.get("status").and_then(|value| value.as_str())?;
         let marker = match status {
             "completed" => "[x]",
@@ -2184,6 +2242,67 @@ mod tests {
             app.blocks.last(),
             Some(DisplayBlock::UserInput(text)) if text == "queued text"
         ));
+    }
+
+    #[test]
+    fn keep_latest_user_block_visible_shows_prompt_start_before_first_token() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.blocks.clear();
+        for idx in 0..6 {
+            app.blocks
+                .push(DisplayBlock::AssistantText(format!("history {idx}")));
+        }
+        app.blocks.push(DisplayBlock::UserInput(
+            [
+                "first line",
+                "second line",
+                "third line",
+                "fourth line",
+                "fifth line",
+                "sixth line",
+            ]
+            .join("\n"),
+        ));
+        app.running = true;
+        app.follow_output = true;
+
+        let width = 32usize;
+        let viewport_height = 4usize;
+        app.ensure_height_cache_pub(width, viewport_height);
+        app.scroll_offset = usize::MAX;
+
+        app.keep_latest_user_block_visible();
+
+        let cache = app.height_cache_snapshot().to_vec();
+        let last_idx = app.blocks.len() - 1;
+        let block_start = cache[last_idx - 1];
+        assert_eq!(app.scroll_offset, block_start);
+    }
+
+    #[test]
+    fn keep_latest_user_block_visible_keeps_short_prompt_bottom_aligned() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.blocks.clear();
+        for idx in 0..6 {
+            app.blocks
+                .push(DisplayBlock::AssistantText(format!("history {idx}")));
+        }
+        app.blocks
+            .push(DisplayBlock::UserInput("short prompt".into()));
+        app.running = true;
+        app.follow_output = true;
+
+        let width = 32usize;
+        let viewport_height = 4usize;
+        app.ensure_height_cache_pub(width, viewport_height);
+        app.scroll_offset = usize::MAX;
+
+        app.keep_latest_user_block_visible();
+
+        let cache = app.height_cache_snapshot().to_vec();
+        let last_idx = app.blocks.len() - 1;
+        let block_end = cache[last_idx];
+        assert_eq!(app.scroll_offset, block_end.saturating_sub(viewport_height));
     }
 
     #[test]

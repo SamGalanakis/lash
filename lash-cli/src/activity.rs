@@ -695,7 +695,11 @@ impl ActivityState {
 }
 
 fn plan_update_summary(args: &serde_json::Value) -> String {
-    let Some(items) = args.get("plan").and_then(|value| value.as_array()) else {
+    let Some(items) = args
+        .get("steps")
+        .or_else(|| args.get("plan"))
+        .and_then(|value| value.as_array())
+    else {
         return "updated plan".to_string();
     };
     let completed = items

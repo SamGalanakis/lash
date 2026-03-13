@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::capabilities::{AgentCapabilities, CAPABILITY_DEFINITIONS, CapabilityId};
+use crate::tools::{INTERNAL_TOOL_CATALOG_ARG, project_tool_catalog};
 use crate::{ProgressSender, ToolDefinition, ToolProvider, ToolResult};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -579,8 +580,9 @@ impl ToolProvider for DynamicToolProvider {
             let state = self.state.read().expect("dynamic state lock poisoned");
             let allowed = state.resolved.effective_tools.contains(name);
             let adapter_id = state.tools.get(name).map(|s| s.adapter_id.clone());
-            let catalog = if name == "search_tools" && args.get("catalog").is_none() {
-                Some(
+            let catalog = if name == "search_tools" && args.get(INTERNAL_TOOL_CATALOG_ARG).is_none()
+            {
+                Some(project_tool_catalog(
                     state
                         .tools
                         .values()
@@ -590,20 +592,10 @@ impl ToolProvider for DynamicToolProvider {
                                 .effective_tools
                                 .contains(&spec.definition.name)
                         })
-                        .map(|spec| {
-                            let projected = spec.definition.project(crate::ExecutionMode::Standard);
-                            serde_json::json!({
-                                "name": projected.name,
-                                "description": projected.description,
-                                "params": projected.params,
-                                "returns": projected.returns,
-                                "examples": projected.examples,
-                                "inject_into_prompt": projected.inject_into_prompt,
-                                "hidden": projected.hidden,
-                            })
-                        })
+                        .map(|spec| spec.definition.clone())
                         .collect::<Vec<_>>(),
-                )
+                    crate::ExecutionMode::Standard,
+                ))
             } else {
                 None
             };
@@ -632,7 +624,10 @@ impl ToolProvider for DynamicToolProvider {
 
         let payload = if let Some(catalog) = catalog {
             let mut object = args.as_object().cloned().unwrap_or_default();
-            object.insert("catalog".to_string(), serde_json::Value::Array(catalog));
+            object.insert(
+                INTERNAL_TOOL_CATALOG_ARG.to_string(),
+                serde_json::Value::Array(catalog),
+            );
             serde_json::Value::Object(object)
         } else {
             args.clone()

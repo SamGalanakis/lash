@@ -24,6 +24,7 @@ use crate::plugin::{
 use crate::provider::Provider;
 use crate::sansio::{Effect, LlmCallError, Response, TurnMachine, TurnMachineConfig};
 use crate::strip_repl_fragments;
+use crate::tools::{INTERNAL_TOOL_CATALOG_ARG, project_tool_catalog};
 use crate::{
     CheckpointKind, ContextFoldingConfig, ExecutionMode, ExternalInvokeError, PluginMessage,
     PluginSessionSnapshot, PromptHookContext, RuntimeServices, SandboxMessage, Session,
@@ -2651,6 +2652,21 @@ impl RuntimeTurnDriver {
         let mut join_set = tokio::task::JoinSet::new();
         let mut immediate = Vec::new();
         for (eid, call_id, tool_name, mut args) in pending_tools {
+            if tool_name == "search_tools" && args.get(INTERNAL_TOOL_CATALOG_ARG).is_none() {
+                if !args.is_object() {
+                    args = serde_json::Value::Object(serde_json::Map::new());
+                }
+                let obj = args
+                    .as_object_mut()
+                    .expect("search_tools args should be normalized to an object");
+                let catalog =
+                    project_tool_catalog(tool_provider.definitions(), ExecutionMode::Standard);
+                obj.insert(
+                    INTERNAL_TOOL_CATALOG_ARG.to_string(),
+                    serde_json::Value::Array(catalog),
+                );
+            }
+
             let directives = match plugins
                 .before_tool_call(crate::plugin::ToolCallHookContext {
                     session_id: self.agent_id.clone(),
@@ -2710,31 +2726,6 @@ impl RuntimeTurnDriver {
             if let Some(result) = short_circuit {
                 immediate.push((eid, call_id, tool_name, args, result, 0));
                 continue;
-            }
-
-            if tool_name == "search_tools"
-                && let Some(obj) = args.as_object_mut()
-                && !obj.contains_key("catalog")
-            {
-                let catalog: Vec<serde_json::Value> = tool_provider
-                    .definitions()
-                    .into_iter()
-                    .filter(|d| !d.hidden)
-                    .filter(|d| !d.description_for(ExecutionMode::Standard).is_empty())
-                    .map(|d| {
-                        let p = d.project(ExecutionMode::Standard);
-                        serde_json::json!({
-                            "name": p.name,
-                            "description": p.description,
-                            "params": p.params,
-                            "returns": p.returns,
-                            "examples": p.examples,
-                            "hidden": p.hidden,
-                            "inject_into_prompt": p.inject_into_prompt,
-                        })
-                    })
-                    .collect();
-                obj.insert("catalog".to_string(), serde_json::Value::Array(catalog));
             }
 
             let provider = Arc::clone(&tool_provider);

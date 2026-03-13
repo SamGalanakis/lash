@@ -822,7 +822,7 @@ fn parse_execution_mode(input: &str) -> Result<ExecutionMode, String> {
 }
 
 fn execution_mode_usage() -> &'static str {
-    if lash_core::python_runtime_available() {
+    if lash_core::execution_mode_supported(ExecutionMode::Repl) {
         "<repl|standard>"
     } else {
         "<standard>"
@@ -3590,10 +3590,10 @@ fn send_user_message(
         app.blocks
             .push(DisplayBlock::UserInput(display_input.clone()));
         app.invalidate_height_cache();
-        app.scroll_to_bottom();
     }
     app.running = true;
     app.iteration = 0;
+    app.keep_latest_user_block_visible();
 
     if !display_input.is_empty() {
         logger.log_user_input(&display_input);

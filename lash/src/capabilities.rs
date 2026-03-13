@@ -165,7 +165,7 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
         name: "Skills",
         description: "Skill discovery and loading.",
         prompt_section: Some(
-            "### Skills\nWhen the user requests a skill-based workflow, use `search_skills(...)` to discover the right skill, then `load_skill(name)` and follow the skill instructions.",
+            "### Skills\nWhen the user requests a skill-based workflow, use `search_skills(...)` to discover the right skill, then load it and follow the skill instructions.",
         ),
         helper_bindings: &["search_skills"],
         tools: &["load_skill", "read_skill_file", "search_skills"],

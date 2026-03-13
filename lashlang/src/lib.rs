@@ -7,9 +7,9 @@ pub use ast::{BinaryOp, CallExpr, Expr, Program, Stmt, UnaryOp};
 pub use lexer::{LexError, Span, Token, TokenKind, lex};
 pub use parser::{ParseError, parse};
 pub use runtime::{
-    CompiledProgram, ExecutionOutcome, ProfileReport, ProfileStat, Record, RuntimeError,
-    Snapshot, State, ToolHost, ToolHostError, Value, compile_program, execute_compiled,
-    execute_program, profile_compiled,
+    CompiledProgram, ExecutionOutcome, ProfileReport, ProfileStat, Record, RuntimeError, Snapshot,
+    State, ToolHost, ToolHostError, Value, compile_program, execute_compiled, execute_program,
+    profile_compiled,
 };
 
 pub fn execute<H: ToolHost>(
