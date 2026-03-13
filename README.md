@@ -74,6 +74,8 @@ lash --prompt-append-file "section=path/to/file.md"
 lash --prompt-disable "section"
 ```
 
+Project instructions are loaded through the prompt-context plugin. By default it loads global `AGENT.md` plus repo-local `AGENTS.md` / `CLAUDE.md`, and that file set is configurable in `lash-core` through `InstructionLoaderConfig`. The same plugin also owns the stable environment/project context block, so those sections stay in sync with runtime prompt assembly.
+
 ## Skills
 
 Skills are modular directories that extend lash with specialized knowledge and workflows.
@@ -94,7 +96,7 @@ Each skill is a directory containing a `SKILL.md` with YAML frontmatter (`name`,
     SKILL.md
 ```
 
-Use `/skills` to browse, `/<skill-name>` to invoke, or call `T.load_skill("name")` in `repl` / `load_skill("name")` in `standard`.
+Use `/skills` to browse, `/<skill-name>` to invoke, `call load_skill { name: "..." }` inside `repl`, or `load_skill(...)` in `standard`.
 
 ## Terminal Bench
 
@@ -311,16 +313,20 @@ Tools define `inject_into_prompt: bool` (`lash/src/lib.rs`).
 - `inject_into_prompt=true`: tool appears directly in the LLM system prompt.
 - `inject_into_prompt=false`: tool is omitted from prompt for brevity, but still callable at runtime.
 - Most tool identity is shared across execution modes, but mode-specific toolsets can expose different shell surfaces (`exec_command`/`write_stdin` in `standard`, `shell*` in `repl`).
-- The runtime exposes one callable tool namespace. Prompt injection only controls which tools are described up front.
+- Prompt injection only controls which tools are described up front. It does not change the active runtime catalog.
 
-Runtime discovery is available via:
+In `repl`, tools are called through `lashlang`:
 
-- `T.search_tools(query?, mode="hybrid", ...)` in `repl`, `search_tools(query?, mode="hybrid", ...)` in `standard`
+```txt
+files = call glob { pattern: "src/**/*.rs" }
+tool_catalog = call search_tools {}
+observe files
+finish tool_catalog
+```
 
-The `repl` executor exposes tools through the `T` namespace (for example `T.read_file(...)`, `T.search_tools(...)`).
-Only runtime control calls remain bare globals in `repl`: `done(...)`, `ask(...)`, and `reset_repl()`. In interactive `standard` sessions, `ask(...)` is also exposed as a native tool.
-Use `T.search_tools(...)` to discover prompt-omitted tools at runtime. Pass a focused query for ranked results, or call `T.search_tools()` with no query to browse the full active tool catalog.
-Both discovery calls always search the full current runtime tool catalog; callers do not pass a separate `catalog` argument.
+In `standard`, tools are provider-native tool calls.
+
+Use `search_tools` only when the tool you need is not already listed in Available Tools. With no query, it returns the full active tool catalog; with a focused query, it returns ranked matches. Both modes search the same live runtime catalog.
 
 ### Default Standard Surface
 
@@ -337,14 +343,14 @@ With the default capability profile, `standard` can call:
 - Web, when Tavily is configured: `search_web`, `fetch_url`
 - Native-tools only: `batch`
 
-This is the callable default surface, not the prompt-injected subset. Lash still injects only a smaller prompt-visible tool list and relies on `T.search_tools(...)` in `repl`, or `search_tools(...)` in `standard`, for discovery of omitted tools across the full active runtime tool set.
+This is the callable default surface, not the prompt-injected subset. Lash injects a smaller prompt-visible list and relies on `search_tools` only for genuine discovery of omitted tools.
 
 `search_history(...)` searches all prior completed turns persisted by the runtime, not just turns folded out of the active prompt window.
 For delegation, low-tier sub-agents use this standard surface by default even when the parent session is in `repl`.
 
 ## Filesystem Listing Output
 
-`T.glob(...)` / `T.ls(...)` in `repl`, and `glob(...)` / `ls(...)` in `standard`, return a typed envelope rather than plain path/tree strings:
+`call glob { ... }` / `call ls { ... }` in `repl`, and `glob(...)` / `ls(...)` in `standard`, return a typed envelope rather than plain path/tree strings:
 
 ```json
 {

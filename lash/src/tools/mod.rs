@@ -42,6 +42,8 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub(crate) const INTERNAL_TOOL_CATALOG_ARG: &str = "__tool_catalog";
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct PathEntry {
     pub path: String,
@@ -144,6 +146,28 @@ pub(crate) fn parse_optional_usize_arg(
             Ok(Some(n))
         }
     }
+}
+
+pub(crate) fn project_tool_catalog(
+    definitions: impl IntoIterator<Item = crate::ToolDefinition>,
+    mode: crate::ExecutionMode,
+) -> Vec<serde_json::Value> {
+    definitions
+        .into_iter()
+        .filter(|d| !d.hidden && !d.description_for(mode).is_empty())
+        .map(|d| {
+            let p = d.project(mode);
+            serde_json::json!({
+                "name": p.name,
+                "description": p.description,
+                "params": p.params,
+                "returns": p.returns,
+                "examples": p.examples,
+                "inject_into_prompt": p.inject_into_prompt,
+                "hidden": d.hidden,
+            })
+        })
+        .collect()
 }
 
 /// Read a file to string, or return ToolResult::err.

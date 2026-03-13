@@ -60,7 +60,9 @@ impl ToolHost for TestHost {
                 }
                 std::thread::sleep(Duration::from_millis(50));
                 self.active.fetch_sub(1, Ordering::SeqCst);
-                Ok(Value::String(expect_string(args, "value")?.to_string().into()))
+                Ok(Value::String(
+                    expect_string(args, "value")?.to_string().into(),
+                ))
             }
             _ => Err(ToolHostError::new(format!("unknown tool: {name}"))),
         }
@@ -383,7 +385,10 @@ fn arithmetic_and_string_builtins_coerce_scalars() {
     let record = value.as_record().expect("expected record");
     assert_eq!(record["total"], Value::Number(3.0));
     assert_eq!(record["scaled"], Value::Number(6.0));
-    assert_eq!(record["joined"], Value::String("a-2-true".to_string().into()));
+    assert_eq!(
+        record["joined"],
+        Value::String("a-2-true".to_string().into())
+    );
     assert_eq!(
         record["split_num"],
         Value::List(

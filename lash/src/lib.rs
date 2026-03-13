@@ -127,10 +127,6 @@ pub enum ExecutionMode {
     Standard,
 }
 
-pub fn python_runtime_available() -> bool {
-    true
-}
-
 pub fn execution_mode_supported(mode: ExecutionMode) -> bool {
     match mode {
         ExecutionMode::Repl | ExecutionMode::Standard => true,

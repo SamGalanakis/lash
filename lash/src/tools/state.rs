@@ -7,7 +7,7 @@ use serde_json::json;
 use crate::search::{SearchDoc, SearchMode, limit_from_args, rank_docs};
 use crate::{ToolDefinition, ToolParam, ToolPromptContext, ToolProvider, ToolResult};
 
-use super::run_blocking;
+use super::{INTERNAL_TOOL_CATALOG_ARG, project_tool_catalog, run_blocking};
 
 type SkillCatalogEntry = (String, String, usize);
 type SkillCatalogCache = Arc<RwLock<Option<Vec<SkillCatalogEntry>>>>;
@@ -118,28 +118,13 @@ impl StateStore {
         skills
     }
 
-    fn fallback_tool_catalog(&self) -> Vec<serde_json::Value> {
-        self.definitions()
-            .into_iter()
-            .filter(|d| !d.hidden && !d.description_for(crate::ExecutionMode::Standard).is_empty())
-            .map(|d| {
-                let p = d.project(crate::ExecutionMode::Standard);
-                json!({
-                    "name": p.name,
-                    "description": p.description,
-                    "examples": p.examples,
-                    "inject_into_prompt": p.inject_into_prompt,
-                    "hidden": d.hidden,
-                })
-            })
-            .collect()
-    }
-
     fn tool_catalog(&self, args: &serde_json::Value) -> Vec<serde_json::Value> {
-        args.get("catalog")
+        args.get(INTERNAL_TOOL_CATALOG_ARG)
             .and_then(|v| v.as_array())
             .cloned()
-            .unwrap_or_else(|| self.fallback_tool_catalog())
+            .unwrap_or_else(|| {
+                project_tool_catalog(self.definitions(), crate::ExecutionMode::Standard)
+            })
     }
 
     fn search_tools(&self, args: &serde_json::Value) -> ToolResult {
@@ -328,13 +313,15 @@ impl ToolProvider for StateStore {
             returns: "list".into(),
             examples: vec![
                 crate::ToolText::new(
-                    "search_tools(query=\"task planning\")",
-                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
+                    "call search_tools { query: \"task planning\" }",
+                    [crate::ExecutionMode::Repl],
                 ),
                 crate::ToolText::new(
-                    "search_tools()",
-                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
+                    "search_tools(query=\"task planning\")",
+                    [crate::ExecutionMode::Standard],
                 ),
+                crate::ToolText::new("call search_tools {}", [crate::ExecutionMode::Repl]),
+                crate::ToolText::new("search_tools()", [crate::ExecutionMode::Standard]),
             ],
             hidden: false,
             inject_into_prompt: false,
@@ -354,12 +341,20 @@ impl ToolProvider for StateStore {
             returns: "list[SkillSummary]".into(),
             examples: vec![
                 crate::ToolText::new(
+                    "call search_skills { query: \"benchmarking\" }",
+                    [crate::ExecutionMode::Repl],
+                ),
+                crate::ToolText::new(
                     "search_skills(query=\"benchmarking\")",
-                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
+                    [crate::ExecutionMode::Standard],
+                ),
+                crate::ToolText::new(
+                    "call search_skills {}",
+                    [crate::ExecutionMode::Repl],
                 ),
                 crate::ToolText::new(
                     "search_skills()",
-                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
+                    [crate::ExecutionMode::Standard],
                 ),
             ],
             hidden: false,
@@ -410,13 +405,13 @@ mod tests {
     }
 
     #[test]
-    fn tool_search_uses_catalog() {
+    fn tool_search_uses_internal_catalog() {
         let p = provider();
         let result = p.search_tools(&json!({
             "query":"patch",
             "mode":"hybrid",
             "limit":10,
-            "catalog":[
+            "__tool_catalog":[
                 {"name":"read_file","description":"Read file","examples":[],"inject_into_prompt":true},
                 {"name":"apply_patch","description":"Apply structured patch","examples":[],"inject_into_prompt":true}
             ]
@@ -447,7 +442,7 @@ mod tests {
     fn search_tools_lists_all_without_query() {
         let p = provider();
         let result = p.search_tools(&json!({
-            "catalog":[
+            "__tool_catalog":[
                 {"name":"search_tools","description":"Discover tools","examples":[],"inject_into_prompt":true},
                 {"name":"read_file","description":"Read file","examples":[],"inject_into_prompt":true}
             ]
@@ -473,7 +468,7 @@ mod tests {
             "query":"asking users",
             "mode":"hybrid",
             "limit":10,
-            "catalog":[
+            "__tool_catalog":[
                 {"name":"ask","description":"Pause and ask the user a targeted question, then wait for the answer before continuing.","examples":[],"inject_into_prompt":true},
                 {"name":"read_file","description":"Read file contents from disk.","examples":[],"inject_into_prompt":true}
             ]
