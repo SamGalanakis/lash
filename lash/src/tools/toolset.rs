@@ -54,9 +54,7 @@ impl ToolSet {
     pub fn defaults_for(mode: ExecutionMode, deps: ToolSetDeps) -> Self {
         let mut set = Self::core_for(mode);
 
-        if matches!(mode, ExecutionMode::Standard)
-            && let Some(prompt_bridge) = deps.prompt_bridge.clone()
-        {
+        if let Some(prompt_bridge) = deps.prompt_bridge.clone() {
             set = set + super::AskTool::new(prompt_bridge, deps.headless);
         }
 
@@ -284,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_defaults_include_ask_only_for_interactive_sessions() {
+    fn defaults_include_ask_only_for_interactive_sessions() {
         let prompt_bridge = crate::PromptBridge::new();
         let interactive = ToolSet::standard_defaults(ToolSetDeps {
             prompt_bridge: Some(prompt_bridge.clone()),
@@ -299,10 +297,16 @@ mod tests {
             prompt_bridge: Some(crate::PromptBridge::new()),
             ..Default::default()
         });
+        let repl_headless = ToolSet::repl_defaults(ToolSetDeps {
+            prompt_bridge: Some(crate::PromptBridge::new()),
+            headless: true,
+            ..Default::default()
+        });
 
         assert!(interactive.definitions().iter().any(|d| d.name == "ask"));
         assert!(!headless.definitions().iter().any(|d| d.name == "ask"));
-        assert!(!repl.definitions().iter().any(|d| d.name == "ask"));
+        assert!(repl.definitions().iter().any(|d| d.name == "ask"));
+        assert!(!repl_headless.definitions().iter().any(|d| d.name == "ask"));
     }
 
     #[test]

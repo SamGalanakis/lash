@@ -25,10 +25,14 @@ pub enum TokenKind {
     RBracket,
     Comma,
     Colon,
+    Question,
     Dot,
+    Bang,
     Equal,
     DoubleEqual,
     BangEqual,
+    AndAnd,
+    OrOr,
     Less,
     LessEqual,
     Greater,
@@ -44,6 +48,7 @@ pub enum TokenKind {
     In,
     Parallel,
     Finish,
+    Observe,
     Call,
     And,
     Or,
@@ -99,6 +104,7 @@ impl<'a> Lexer<'a> {
                 ']' => self.single(TokenKind::RBracket),
                 ',' => self.single(TokenKind::Comma),
                 ':' => self.single(TokenKind::Colon),
+                '?' => self.single(TokenKind::Question),
                 '.' => self.single(TokenKind::Dot),
                 '+' => self.single(TokenKind::Plus),
                 '-' => self.single(TokenKind::Minus),
@@ -106,20 +112,9 @@ impl<'a> Lexer<'a> {
                 '/' => self.single(TokenKind::Slash),
                 '%' => self.single(TokenKind::Percent),
                 '=' => self.double_or_single('=', TokenKind::DoubleEqual, TokenKind::Equal),
-                '!' => {
-                    self.bump();
-                    if self.consume_if('=') {
-                        Token {
-                            kind: TokenKind::BangEqual,
-                            span: Span {
-                                start: offset,
-                                end: offset + 2,
-                            },
-                        }
-                    } else {
-                        return Err(LexError::UnexpectedChar { ch, offset });
-                    }
-                }
+                '!' => self.double_or_single('=', TokenKind::BangEqual, TokenKind::Bang),
+                '&' => self.required_double('&', TokenKind::AndAnd)?,
+                '|' => self.required_double('|', TokenKind::OrOr)?,
                 '<' => self.double_or_single('=', TokenKind::LessEqual, TokenKind::Less),
                 '>' => self.double_or_single('=', TokenKind::GreaterEqual, TokenKind::Greater),
                 '"' => self.string()?,
@@ -205,6 +200,20 @@ impl<'a> Lexer<'a> {
         Err(LexError::UnterminatedString { offset: start })
     }
 
+    fn required_double(&mut self, expected: char, kind: TokenKind) -> Result<Token, LexError> {
+        let (start, ch) = self.bump().expect("double token requires input");
+        if !self.consume_if(expected) {
+            return Err(LexError::UnexpectedChar { ch, offset: start });
+        }
+        Ok(Token {
+            kind,
+            span: Span {
+                start,
+                end: start + ch.len_utf8() + expected.len_utf8(),
+            },
+        })
+    }
+
     fn ident_or_keyword(&mut self) -> Token {
         let (start, _) = self.peek().expect("identifier requires input");
         let mut end = start;
@@ -223,6 +232,7 @@ impl<'a> Lexer<'a> {
             "in" => TokenKind::In,
             "parallel" => TokenKind::Parallel,
             "finish" => TokenKind::Finish,
+            "observe" => TokenKind::Observe,
             "call" => TokenKind::Call,
             "and" => TokenKind::And,
             "or" => TokenKind::Or,
@@ -307,13 +317,11 @@ mod tests {
 
     #[test]
     fn lexes_all_token_classes_and_comments() {
-        let tokens = lex(
-            r#"
+        let tokens = lex(r#"
             # comment
-            if else for in parallel finish call and or not true false null
-            name _x a1 "hi\n\t\"\\\r\q" 12 3.5 { } ( ) [ ] , : . = == != < <= > >= + - * / %
-            "#,
-        )
+            if else for in parallel finish observe call and or not true false null
+            name _x a1 "hi\n\t\"\\\r\q" 12 3.5 { } ( ) [ ] , : ? . ! = == != && || < <= > >= + - * / %
+            "#)
         .expect("lexing should succeed");
 
         let kinds: Vec<_> = tokens.into_iter().map(|token| token.kind).collect();
@@ -326,6 +334,7 @@ mod tests {
                 TokenKind::In,
                 TokenKind::Parallel,
                 TokenKind::Finish,
+                TokenKind::Observe,
                 TokenKind::Call,
                 TokenKind::And,
                 TokenKind::Or,
@@ -347,10 +356,14 @@ mod tests {
                 TokenKind::RBracket,
                 TokenKind::Comma,
                 TokenKind::Colon,
+                TokenKind::Question,
                 TokenKind::Dot,
+                TokenKind::Bang,
                 TokenKind::Equal,
                 TokenKind::DoubleEqual,
                 TokenKind::BangEqual,
+                TokenKind::AndAnd,
+                TokenKind::OrOr,
                 TokenKind::Less,
                 TokenKind::LessEqual,
                 TokenKind::Greater,
@@ -367,9 +380,6 @@ mod tests {
 
     #[test]
     fn rejects_unexpected_characters() {
-        let err = lex("!").expect_err("lexing should fail");
-        assert_eq!(err, LexError::UnexpectedChar { ch: '!', offset: 0 });
-
         let err = lex("@").expect_err("lexing should fail");
         assert_eq!(err, LexError::UnexpectedChar { ch: '@', offset: 0 });
     }

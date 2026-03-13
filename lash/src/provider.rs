@@ -513,7 +513,7 @@ mod tests {
             codex().supported_variants("gpt-5.3-codex"),
             &["low", "medium", "high", "xhigh"]
         );
-        assert_eq!(codex().default_model_variant("gpt-5.4"), Some("medium"));
+        assert_eq!(codex().default_model_variant("gpt-5.4"), Some("high"));
         assert_eq!(
             claude().supported_variants("claude-sonnet-4-6"),
             &["low", "medium", "high", "max"]

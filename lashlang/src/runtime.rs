@@ -77,6 +77,10 @@ pub struct Snapshot {
 
 pub trait ToolHost: Sync {
     fn call(&self, name: &str, args: &Record) -> Result<Value, ToolHostError>;
+
+    fn observe(&self, _value: &Value) -> Result<(), ToolHostError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -170,6 +174,15 @@ impl<'a, H: ToolHost> Executor<'a, H> {
             }
             Stmt::Call(call) => {
                 let _ = self.eval_tool_call(call)?;
+                Ok(Flow::Continue)
+            }
+            Stmt::Observe(expr) => {
+                let value = self.eval_expr(expr)?;
+                self.host
+                    .observe(&value)
+                    .map_err(|err| RuntimeError::ValueError {
+                        message: format!("observe failed: {err}"),
+                    })?;
                 Ok(Flow::Continue)
             }
             Stmt::If {
@@ -345,6 +358,17 @@ impl<'a, H: ToolHost> Executor<'a, H> {
                     },
                 }
             }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                if self.eval_condition(condition)? {
+                    self.eval_expr(then_expr)
+                } else {
+                    self.eval_expr(else_expr)
+                }
+            }
             Expr::Binary { left, op, right } => self.eval_binary(left, *op, right),
         }
     }
@@ -361,14 +385,14 @@ impl<'a, H: ToolHost> Executor<'a, H> {
                 if !lhs {
                     return Ok(Value::Bool(false));
                 }
-                return Ok(Value::Bool(self.eval_condition(right)?));
+                Ok(Value::Bool(self.eval_condition(right)?))
             }
             BinaryOp::Or => {
                 let lhs = self.eval_condition(left)?;
                 if lhs {
                     return Ok(Value::Bool(true));
                 }
-                return Ok(Value::Bool(self.eval_condition(right)?));
+                Ok(Value::Bool(self.eval_condition(right)?))
             }
             BinaryOp::Add => {
                 let lhs = self.eval_expr(left)?;
@@ -606,19 +630,26 @@ impl<'a, H: ToolHost> Executor<'a, H> {
                     })?;
                 Ok(from_json(parsed))
             }
-            "json_stringify" => {
-                expect_arg_count(name, &values, 1)?;
-                Ok(Value::String(
-                    serde_json::to_string(&to_json(&values[0])).expect("json serialization failed"),
-                ))
-            }
             "format" => {
                 if values.is_empty() {
                     return Err(RuntimeError::TypeError {
                         message: "`format` requires at least a template string".to_string(),
                     });
                 }
-                let template = as_string(&values[0])?;
+                if values.len() == 1 {
+                    return Ok(Value::String(stringify_value(&values[0])?));
+                }
+                let template = match &values[0] {
+                    Value::String(value) => value.as_str(),
+                    other => {
+                        return Err(RuntimeError::TypeError {
+                            message: format!(
+                                "`format` template must be a string, got {}",
+                                value_type_name(other)
+                            ),
+                        });
+                    }
+                };
                 Ok(Value::String(apply_format(template, &values[1..])?))
             }
             _ => Err(RuntimeError::UnknownBuiltin {
@@ -735,7 +766,7 @@ fn as_number(value: &Value) -> Result<f64, RuntimeError> {
     match value {
         Value::Number(value) => Ok(*value),
         _ => Err(RuntimeError::TypeError {
-            message: "expected a number".to_string(),
+            message: format!("expected a number, got {}", value_type_name(value)),
         }),
     }
 }
@@ -744,7 +775,7 @@ fn as_string(value: &Value) -> Result<&str, RuntimeError> {
     match value {
         Value::String(value) => Ok(value),
         _ => Err(RuntimeError::TypeError {
-            message: "expected a string".to_string(),
+            message: format!("expected a string, got {}", value_type_name(value)),
         }),
     }
 }
@@ -771,6 +802,8 @@ fn add_values(left: Value, right: Value) -> Result<Value, RuntimeError> {
     match (left, right) {
         (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + b)),
         (Value::String(a), Value::String(b)) => Ok(Value::String(a + &b)),
+        (Value::String(a), other) => Ok(Value::String(a + &stringify_value(&other)?)),
+        (other, Value::String(b)) => Ok(Value::String(stringify_value(&other)? + &b)),
         (Value::List(mut a), Value::List(b)) => {
             a.extend(b);
             Ok(Value::List(a))
@@ -801,10 +834,19 @@ fn stringify_value(value: &Value) -> Result<String, RuntimeError> {
         Value::Null => Ok("null".to_string()),
         Value::Bool(value) => Ok(value.to_string()),
         Value::Number(value) => Ok(value.to_string()),
-        Value::List(_) | Value::Record(_) => Ok(
-            serde_json::to_string(&to_json(value))
-                .expect("value json serialization should succeed"),
-        ),
+        Value::List(_) | Value::Record(_) => Ok(serde_json::to_string(&to_json(value))
+            .expect("value json serialization should succeed")),
+    }
+}
+
+fn value_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::List(_) => "list",
+        Value::Record(_) => "record",
     }
 }
 
@@ -942,14 +984,16 @@ mod tests {
     #[test]
     fn stmt_call_and_tool_results_cover_success_and_error() {
         exec("call echo { value: 1 } finish 1").expect("statement call should succeed");
-        let missing = exec("bad = call missing {} finish bad").expect("missing tool should be wrapped");
+        let missing =
+            exec("bad = call missing {} finish bad").expect("missing tool should be wrapped");
         assert_eq!(
             missing.as_record().expect("result should be a record")["ok"],
             Value::Bool(false)
         );
 
-        let value = exec("ok = call echo { value: 7 } bad = call err {} finish { ok: ok, bad: bad }")
-            .expect("tool call program should succeed");
+        let value =
+            exec("ok = call echo { value: 7 } bad = call err {} finish { ok: ok, bad: bad }")
+                .expect("tool call program should succeed");
         let record = value.as_record().expect("expected record");
         assert_eq!(record["ok"].as_record().unwrap()["ok"], Value::Bool(true));
         assert_eq!(record["bad"].as_record().unwrap()["ok"], Value::Bool(false));
@@ -963,7 +1007,7 @@ mod tests {
             xs = ["a", "b"]
             ok = false and missing
             alt = true or missing
-            finish [rec.nested.name, xs[1], "abc"[2], -1, not false, ok, alt]
+            finish [rec.nested.name, xs[1], "abc"[2], -1, not false, !false, ok, alt]
             "#,
         )
         .expect("program should succeed");
@@ -975,6 +1019,7 @@ mod tests {
                 Value::String("b".to_string()),
                 Value::String("c".to_string()),
                 Value::Number(-1.0),
+                Value::Bool(true),
                 Value::Bool(true),
                 Value::Bool(false),
                 Value::Bool(true),
@@ -1063,6 +1108,12 @@ mod tests {
         let value = exec("finish \"a\" + \"b\"").expect("string add should succeed");
         assert_eq!(value, Value::String("ab".to_string()));
 
+        let value = exec("finish \"a\" + 1").expect("string coercion should succeed");
+        assert_eq!(value, Value::String("a1".to_string()));
+
+        let value = exec("finish 1 + \"b\"").expect("string coercion should succeed");
+        assert_eq!(value, Value::String("1b".to_string()));
+
         let err = exec("finish 1 + true").expect_err("bad add should fail");
         assert!(matches!(err, RuntimeError::TypeError { .. }));
 
@@ -1099,7 +1150,7 @@ mod tests {
               to_i_s: to_int("4"),
               to_f_n: to_float(1),
               to_f_s: to_float("2.5"),
-              json_s: json_stringify({ a: 1 }),
+              fmt_value: format({ a: 1 }),
               fmt: format("x={0},y={1}", 1, true)
             }
             "#,
@@ -1113,6 +1164,10 @@ mod tests {
         assert_eq!(record["slice_s"], Value::String("bc".to_string()));
         assert_eq!(record["to_i_n"], Value::Number(3.0));
         assert_eq!(record["to_f_s"], Value::Number(2.5));
+        assert_eq!(
+            record["fmt_value"],
+            Value::String("{\"a\":1.0}".to_string())
+        );
         assert_eq!(record["fmt"], Value::String("x=1,y=true".to_string()));
     }
 
@@ -1136,7 +1191,6 @@ mod tests {
             ("finish to_float(\"x\")", "to_float"),
             ("finish json_parse(\"{\")", "json_parse"),
             ("finish format()", "format"),
-            ("finish format(1)", "format"),
             ("finish format(\"{1}\", \"x\")", "format"),
             ("finish no_such_builtin()", "no_such_builtin"),
         ];
@@ -1175,11 +1229,15 @@ mod tests {
         stack.restore_temporary("global", restore);
         assert_eq!(stack.get("global"), Some(&Value::Number(1.0)));
 
-        stack.locals.push(Record::from([("x".to_string(), Value::Number(1.0))]));
+        stack
+            .locals
+            .push(Record::from([("x".to_string(), Value::Number(1.0))]));
         stack.restore_temporary("x", BindingRestore { previous: None });
         assert_eq!(stack.get("x"), None);
 
-        stack.locals.push(Record::from([("other".to_string(), Value::Number(5.0))]));
+        stack
+            .locals
+            .push(Record::from([("other".to_string(), Value::Number(5.0))]));
         stack.restore_temporary("missing", BindingRestore { previous: None });
         assert_eq!(stack.get("other"), Some(&Value::Number(5.0)));
         assert_eq!(stack.get("missing"), None);
@@ -1191,26 +1249,38 @@ mod tests {
         assert!(expect_arg_count("x", &[], 1).is_err());
         assert_eq!(as_number(&Value::Number(1.0)).expect("number"), 1.0);
         assert!(as_number(&Value::Bool(true)).is_err());
-        assert_eq!(as_string(&Value::String("x".to_string())).expect("string"), "x");
+        assert_eq!(
+            as_string(&Value::String("x".to_string())).expect("string"),
+            "x"
+        );
         assert!(as_string(&Value::Bool(true)).is_err());
         assert_eq!(as_index(&Value::Number(2.0)).expect("index"), 2);
 
         assert_eq!(
-            compare_numbers(Value::Number(1.0), Value::Number(2.0), |a, b| a < b)
-                .expect("compare"),
+            compare_numbers(Value::Number(1.0), Value::Number(2.0), |a, b| a < b).expect("compare"),
             Value::Bool(true)
         );
         assert_eq!(
             add_values(Value::Number(1.0), Value::Number(2.0)).expect("add"),
             Value::Number(3.0)
         );
-        assert_eq!(success(Value::Number(1.0)).as_record().unwrap()["ok"], Value::Bool(true));
+        assert_eq!(
+            add_values(Value::String("a".to_string()), Value::Bool(true)).expect("concat"),
+            Value::String("atrue".to_string())
+        );
+        assert_eq!(
+            success(Value::Number(1.0)).as_record().unwrap()["ok"],
+            Value::Bool(true)
+        );
         assert_eq!(
             error_value("x".to_string()).as_record().unwrap()["error"],
             Value::String("x".to_string())
         );
         assert_eq!(stringify_value(&Value::Null).expect("stringify"), "null");
-        assert_eq!(apply_format("a{0}b", &[Value::Number(1.0)]).expect("format"), "a1b");
+        assert_eq!(
+            apply_format("a{0}b", &[Value::Number(1.0)]).expect("format"),
+            "a1b"
+        );
         assert_eq!(
             apply_format("{999999999999999999999999999999999999}", &[])
                 .expect_err("overflow slot should fail"),
@@ -1222,6 +1292,7 @@ mod tests {
             apply_format("{x}", &[]).expect("invalid brace pattern should pass through"),
             "{x}"
         );
+        assert_eq!(value_type_name(&Value::Record(Record::new())), "record");
     }
 
     #[test]

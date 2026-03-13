@@ -23,7 +23,8 @@ use crate::agent::{
 };
 use crate::instructions::InstructionSource;
 use crate::llm::types::{
-    LlmAttachment, LlmOutputPart, LlmRequest, LlmResponse, LlmToolChoice, LlmToolSpec, LlmUsage,
+    LlmAttachment, LlmOutputPart, LlmPromptPart, LlmRequest, LlmResponse, LlmToolChoice,
+    LlmToolSpec, LlmUsage,
 };
 use crate::{CheckpointKind, ExecutionMode, PluginMessage, ToolCallRecord, ToolResult};
 
@@ -380,20 +381,24 @@ impl TurnMachine {
 
         let is_standard = matches!(self.config.execution_mode, ExecutionMode::Standard);
 
+        let attachments: Vec<LlmAttachment> = rendered_prompt
+            .image_indices
+            .into_iter()
+            .filter_map(|idx| all_images.get(idx))
+            .map(|(mime, data)| LlmAttachment {
+                mime: mime.clone(),
+                data: data.clone(),
+            })
+            .collect();
+        let mut user_prompt = rendered_prompt.user_prompt;
+        user_prompt.extend((0..attachments.len()).map(LlmPromptPart::Image));
+
         let llm_request = LlmRequest {
             model: self.config.model.clone(),
             system_prompt,
-            user_prompt: rendered_prompt.user_prompt,
+            user_prompt,
             messages: Vec::new(),
-            attachments: rendered_prompt
-                .image_indices
-                .into_iter()
-                .filter_map(|idx| all_images.get(idx))
-                .map(|(mime, data)| LlmAttachment {
-                    mime: mime.clone(),
-                    data: data.clone(),
-                })
-                .collect(),
+            attachments,
             tools: if is_standard {
                 self.config.tool_specs.clone()
             } else {
@@ -1329,6 +1334,19 @@ impl TurnMachine {
                 if !r.output.is_empty() {
                     repl.fence.acc.combined_output.push_str(&r.output);
                 }
+                for observation in r.observations {
+                    if !observation.is_empty() {
+                        if !repl.fence.acc.combined_output.is_empty()
+                            && !repl.fence.acc.combined_output.ends_with('\n')
+                        {
+                            repl.fence.acc.combined_output.push('\n');
+                        }
+                        repl.fence.acc.combined_output.push_str(&observation);
+                        if !repl.fence.acc.combined_output.ends_with('\n') {
+                            repl.fence.acc.combined_output.push('\n');
+                        }
+                    }
+                }
                 if !r.response.is_empty() {
                     repl.fence.acc.final_response = r.response;
                 }
@@ -1425,7 +1443,7 @@ impl TurnMachine {
             if self.config.headless {
                 let sys_id = format!("m{}", self.messages.len());
                 let guidance = "Headless mode requires execution via <repl>. \
-Prose-only output is not a valid step. Continue with concrete tool execution; call done(...) only from inside <repl> when fully complete.";
+Prose-only output is not a valid step. Continue with concrete tool execution; use `finish ...` only from inside <repl> when fully complete.";
                 self.messages.push(Message {
                     id: sys_id.clone(),
                     role: MessageRole::System,
@@ -1458,7 +1476,7 @@ Prose-only output is not a valid step. Continue with concrete tool execution; ca
             }
             if repl_execution_started {
                 let sys_id = format!("m{}", self.messages.len());
-                let guidance = "You have already used <repl> in this turn. Do not stop with prose alone. Continue working and call done(...) inside <repl> when the final user-facing answer is ready.";
+                let guidance = "You have already used <repl> in this turn. Do not stop with prose alone. Continue working and use `finish ...` inside <repl> when the final user-facing answer is ready.";
                 self.messages.push(Message {
                     id: sys_id.clone(),
                     role: MessageRole::System,
@@ -1767,6 +1785,56 @@ mod tests {
         let effects = drain_effects(&mut machine);
         assert!(find_done(&effects).is_some());
         assert!(machine.is_done());
+    }
+
+    #[test]
+    fn llm_request_includes_image_prompt_parts_for_attached_images() {
+        let config = test_config(ExecutionMode::Standard);
+        let msgs = vec![Message {
+            id: "m0".to_string(),
+            role: MessageRole::User,
+            parts: vec![
+                Part {
+                    id: "m0.p0".to_string(),
+                    kind: PartKind::Text,
+                    content: "__LASH_IMAGE_IDX:0".to_string(),
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: PruneState::Intact,
+                },
+                Part {
+                    id: "m0.p1".to_string(),
+                    kind: PartKind::Text,
+                    content: "explain this".to_string(),
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: PruneState::Intact,
+                },
+            ],
+            origin: None,
+        }];
+        let mut machine = TurnMachine::new(config, msgs, vec![vec![1, 2, 3]], 0);
+
+        let effects = drain_effects(&mut machine);
+        let request = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::LlmCall { request, .. } => Some(request),
+                _ => None,
+            })
+            .expect("llm call");
+
+        assert_eq!(request.attachments.len(), 1);
+        assert!(request.user_prompt.iter().any(|part| matches!(
+            part,
+            LlmPromptPart::Text(text) if text.contains("[Image attached]") && text.contains("explain this")
+        )));
+        assert!(
+            request
+                .user_prompt
+                .iter()
+                .any(|part| matches!(part, LlmPromptPart::Image(0)))
+        );
     }
 
     #[test]
@@ -2160,6 +2228,7 @@ mod tests {
             id: exec_id,
             result: Ok(crate::ExecResponse {
                 output: "hi\n".to_string(),
+                observations: Vec::new(),
                 response: String::new(),
                 tool_calls: Vec::new(),
                 images: Vec::new(),
@@ -2216,6 +2285,7 @@ mod tests {
             id: exec_id,
             result: Ok(crate::ExecResponse {
                 output: "hi\n".to_string(),
+                observations: Vec::new(),
                 response: "done".to_string(),
                 tool_calls: Vec::new(),
                 images: Vec::new(),
@@ -2276,6 +2346,7 @@ mod tests {
             id: exec_id,
             result: Ok(crate::ExecResponse {
                 output: "hi\n".to_string(),
+                observations: Vec::new(),
                 response: String::new(),
                 tool_calls: Vec::new(),
                 images: Vec::new(),
@@ -2373,6 +2444,74 @@ mod tests {
             has_llm_call,
             "should loop to next iteration after exec error"
         );
+    }
+
+    #[test]
+    fn repl_observations_feed_back_without_visible_code_output() {
+        let config = test_config(ExecutionMode::Repl);
+        let msgs = vec![user_message("inspect a value")];
+        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+
+        let effects = drain_effects(&mut machine);
+        let llm_id = *find_llm_call(&effects).unwrap();
+
+        let cont = machine.handle_llm_delta(llm_id, "Check it:\n<repl>\nobserve value\n</repl>\n");
+        assert!(!cont);
+
+        let effects = drain_effects(&mut machine);
+        let exec_id = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::ExecCode { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("exec effect");
+
+        machine.handle_response(Response::ExecResult {
+            id: exec_id,
+            result: Ok(crate::ExecResponse {
+                output: String::new(),
+                observations: vec!["value={\"ok\":true}".to_string()],
+                response: String::new(),
+                tool_calls: Vec::new(),
+                images: Vec::new(),
+                error: None,
+                duration_ms: 1,
+            }),
+        });
+        machine.handle_response(Response::LlmComplete {
+            id: llm_id,
+            text_streamed: false,
+            result: Ok(LlmResponse::default()),
+        });
+
+        let effects = drain_effects(&mut machine);
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Emit(AgentEvent::CodeOutput { .. })))
+        );
+        let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
+        assert_eq!(checkpoint, CheckpointKind::AfterWork);
+        machine.handle_response(Response::Checkpoint {
+            id: checkpoint_id,
+            messages: Vec::new(),
+        });
+
+        let messages = machine.messages();
+        let system_output = messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, MessageRole::System))
+            .and_then(|message| {
+                message
+                    .parts
+                    .iter()
+                    .find(|part| matches!(part.kind, PartKind::Output))
+            })
+            .map(|part| part.content.clone())
+            .expect("system output feedback");
+        assert!(system_output.contains("value={\"ok\":true}"));
     }
 
     #[test]

@@ -2,7 +2,11 @@
 set -euo pipefail
 
 repo="${LASH_REPO:-SamGalanakis/lash}"
-version="${LASH_VERSION:-}"
+embedded_version="__LASH_RELEASE_VERSION__"
+if [[ "${embedded_version}" == "__LASH_RELEASE_VERSION__" ]]; then
+  embedded_version=""
+fi
+version="${LASH_VERSION:-${embedded_version}}"
 install_dir="${LASH_INSTALL_DIR:-$HOME/.local/bin}"
 
 usage() {
@@ -16,7 +20,7 @@ Usage:
 
 Environment:
   LASH_REPO         GitHub repo in owner/name form (default: SamGalanakis/lash)
-  LASH_VERSION      Release tag to install; defaults to the latest GitHub release
+  LASH_VERSION      Release tag to install; defaults to the embedded release tag when present, otherwise the latest GitHub release
   LASH_INSTALL_DIR  Destination directory for the lash binary (default: ~/.local/bin)
 EOF
 }
@@ -43,6 +47,24 @@ require_cmd curl
 require_cmd tar
 require_cmd mktemp
 require_cmd install
+
+download() {
+  local url="$1"
+  local output_path="$2"
+  local description="$3"
+
+  if curl -fsSL "${url}" -o "${output_path}"; then
+    return
+  fi
+
+  if [[ -n "${version}" ]]; then
+    echo "failed to download ${description} for release ${version} from ${repo}" >&2
+  else
+    echo "failed to download ${description} from the latest GitHub release for ${repo}" >&2
+    echo "publish a v* tag first if this repository does not have a release yet" >&2
+  fi
+  exit 1
+}
 
 detect_os() {
   case "$(uname -s)" in
@@ -97,8 +119,8 @@ archive_path="${tmp_dir}/${asset_name}"
 checksums_path="${tmp_dir}/SHA256SUMS"
 
 echo "Downloading ${asset_name} from ${repo}..."
-curl -fsSL "${base_url}/${asset_name}" -o "${archive_path}"
-curl -fsSL "${base_url}/SHA256SUMS" -o "${checksums_path}"
+download "${base_url}/${asset_name}" "${archive_path}" "${asset_name}"
+download "${base_url}/SHA256SUMS" "${checksums_path}" "SHA256SUMS"
 
 expected_line="$(awk -v asset="${asset_name}" '$2 == asset { print }' "${checksums_path}")"
 if [[ -z "${expected_line}" ]]; then

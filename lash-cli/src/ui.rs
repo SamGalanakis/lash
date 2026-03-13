@@ -838,6 +838,91 @@ fn render_block<'a>(
                 }
             }
         }
+        DisplayBlock::PendingUserInput {
+            text,
+            inject_at_checkpoint,
+        } => {
+            if idx > 0 && !matches!(blocks[idx - 1], DisplayBlock::Splash) {
+                lines.push(Line::from(""));
+            }
+            let marker_style = if *inject_at_checkpoint {
+                Style::default().fg(theme::SODIUM)
+            } else {
+                Style::default().fg(theme::LICHEN)
+            };
+            let text_style = theme::user_input().add_modifier(Modifier::DIM);
+            let prefix_w = 2;
+            let cap = viewport_width.saturating_sub(prefix_w);
+            let mut is_first = true;
+
+            for line in text.lines() {
+                if cap == 0 || line.is_empty() {
+                    let prefix = if is_first {
+                        Span::styled(
+                            if *inject_at_checkpoint {
+                                "◆ "
+                            } else {
+                                "◇ "
+                            },
+                            marker_style,
+                        )
+                    } else {
+                        Span::raw("  ")
+                    };
+                    is_first = false;
+                    lines.push(Line::from(vec![
+                        prefix,
+                        Span::styled(line.to_string(), text_style),
+                    ]));
+                } else {
+                    let mut seg_start = 0;
+                    let mut col = 0;
+                    for (byte_idx, ch) in line.char_indices() {
+                        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+                        if col + w > cap && col > 0 {
+                            let prefix = if is_first {
+                                Span::styled(
+                                    if *inject_at_checkpoint {
+                                        "◆ "
+                                    } else {
+                                        "◇ "
+                                    },
+                                    marker_style,
+                                )
+                            } else {
+                                Span::raw("  ")
+                            };
+                            is_first = false;
+                            lines.push(Line::from(vec![
+                                prefix,
+                                Span::styled(line[seg_start..byte_idx].to_string(), text_style),
+                            ]));
+                            seg_start = byte_idx;
+                            col = w;
+                        } else {
+                            col += w;
+                        }
+                    }
+                    let prefix = if is_first {
+                        Span::styled(
+                            if *inject_at_checkpoint {
+                                "◆ "
+                            } else {
+                                "◇ "
+                            },
+                            marker_style,
+                        )
+                    } else {
+                        Span::raw("  ")
+                    };
+                    is_first = false;
+                    lines.push(Line::from(vec![
+                        prefix,
+                        Span::styled(line[seg_start..].to_string(), text_style),
+                    ]));
+                }
+            }
+        }
         DisplayBlock::AssistantText(text) => {
             let prefix_w = 2; // "■ " or "  " is 2 columns
             let rendered =
@@ -1197,6 +1282,7 @@ fn draw_strike_zone(frame: &mut Frame, app: &App, area: Rect) {
             app.status_started_at.map(|started| started.elapsed()),
         )
     };
+    let details = effective_status_detail(app, &status, details, elapsed);
 
     let mut spans = if delegate_active {
         vec![
@@ -1247,6 +1333,28 @@ fn draw_strike_zone(frame: &mut Frame, app: &App, area: Rect) {
 
     let paragraph = Paragraph::new(Line::from(spans)).style(theme::history_bg());
     frame.render_widget(paragraph, area);
+}
+
+fn effective_status_detail(
+    app: &App,
+    status: &str,
+    details: Option<String>,
+    elapsed: Option<std::time::Duration>,
+) -> Option<String> {
+    if details.as_deref() != Some("waiting for first token") {
+        return details;
+    }
+    if status != "thinking" || !app.pending_text.is_empty() || app.live_output_chars_estimate > 0 {
+        return details;
+    }
+    let secs = elapsed.map(|d| d.as_secs()).unwrap_or(0);
+    if secs >= 120 {
+        Some("still waiting on the model; no visible output yet".into())
+    } else if secs >= 30 {
+        Some("model is still reasoning; no visible output yet".into())
+    } else {
+        details
+    }
 }
 
 fn draw_task_tray(frame: &mut Frame, app: &App, area: Rect) {
@@ -2653,5 +2761,66 @@ mod tests {
         render_activity_block(&activity, 2, &mut lines, 20, false);
 
         assert_eq!(expected_height, lines.len());
+    }
+
+    #[test]
+    fn thinking_status_shows_long_wait_detail_after_30s() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        app.status_text = Some("thinking".into());
+        app.status_detail = Some("waiting for first token".into());
+        app.status_started_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(35));
+
+        assert_eq!(
+            effective_status_detail(
+                &app,
+                "thinking",
+                app.status_detail.clone(),
+                app.status_started_at.map(|started| started.elapsed()),
+            )
+            .as_deref(),
+            Some("model is still reasoning; no visible output yet")
+        );
+    }
+
+    #[test]
+    fn thinking_status_shows_very_long_wait_detail_after_120s() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        app.status_text = Some("thinking".into());
+        app.status_detail = Some("waiting for first token".into());
+        app.status_started_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(125));
+
+        assert_eq!(
+            effective_status_detail(
+                &app,
+                "thinking",
+                app.status_detail.clone(),
+                app.status_started_at.map(|started| started.elapsed()),
+            )
+            .as_deref(),
+            Some("still waiting on the model; no visible output yet")
+        );
+    }
+
+    #[test]
+    fn thinking_status_keeps_original_detail_once_output_starts() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        app.status_text = Some("thinking".into());
+        app.status_detail = Some("waiting for first token".into());
+        app.status_started_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(125));
+        app.pending_text = "partial reply".into();
+
+        assert_eq!(
+            effective_status_detail(
+                &app,
+                "thinking",
+                app.status_detail.clone(),
+                app.status_started_at.map(|started| started.elapsed()),
+            )
+            .as_deref(),
+            Some("waiting for first token")
+        );
     }
 }
