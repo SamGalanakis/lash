@@ -11,7 +11,7 @@ pub enum ActivityKind {
     WebFetch,
     Edit,
     Delegate,
-    TaskAction,
+    PlanUpdate,
     SkillAction,
     Parallel,
     GenericTool,
@@ -647,22 +647,8 @@ impl ActivityState {
                     extra: None,
                 }
             }
-            "create_task" | "update_task" | "claim_task" | "delete_task" | "get_task" | "tasks"
-            | "tasks_summary" => ActivityBlock {
-                kind: ActivityKind::TaskAction,
-                status,
-                tool_name: name.to_string(),
-                summary: semantic_tool_summary(name, &args),
-                detail_lines: Vec::new(),
-                duration_ms,
-                args,
-                result,
-                artifact: None,
-                children: Vec::new(),
-                extra: None,
-            },
             "update_plan" => ActivityBlock {
-                kind: ActivityKind::TaskAction,
+                kind: ActivityKind::PlanUpdate,
                 status,
                 tool_name: name.to_string(),
                 summary: plan_update_summary(&args),
@@ -678,21 +664,19 @@ impl ActivityState {
                 children: Vec::new(),
                 extra: None,
             },
-            "skills" | "search_skills" | "load_skill" | "read_skill_file" | "search_tools" => {
-                ActivityBlock {
-                    kind: ActivityKind::SkillAction,
-                    status,
-                    tool_name: name.to_string(),
-                    summary: semantic_tool_summary(name, &args),
-                    detail_lines: Vec::new(),
-                    duration_ms,
-                    args,
-                    artifact: text_preview_artifact(None, &result),
-                    children: Vec::new(),
-                    extra: None,
-                    result,
-                }
-            }
+            "search_skills" | "load_skill" | "read_skill_file" | "search_tools" => ActivityBlock {
+                kind: ActivityKind::SkillAction,
+                status,
+                tool_name: name.to_string(),
+                summary: semantic_tool_summary(name, &args),
+                detail_lines: Vec::new(),
+                duration_ms,
+                args,
+                artifact: text_preview_artifact(None, &result),
+                children: Vec::new(),
+                extra: None,
+                result,
+            },
             _ => ActivityBlock {
                 kind: ActivityKind::GenericTool,
                 status,
@@ -817,32 +801,7 @@ pub fn semantic_tool_summary(name: &str, args: &Value) -> String {
             .unwrap_or_else(|| "delegate task".to_string()),
         "agent_result" => "delegate done".to_string(),
         "agent_kill" => "delegate stopped".to_string(),
-        "create_task" => tool_arg_str(args, "description")
-            .or_else(|| tool_arg_str(args, "subject"))
-            .map(|desc| format!("task created · {}", inline_text(desc)))
-            .unwrap_or_else(|| "task created".to_string()),
-        "update_task" => {
-            let id = tool_arg_str(args, "id").unwrap_or("task");
-            match tool_arg_str(args, "status") {
-                Some("completed") => format!("task completed · {}", id),
-                Some("in_progress") => format!("task in progress · {}", id),
-                Some("cancelled") => format!("task cancelled · {}", id),
-                Some("pending") => format!("task queued · {}", id),
-                _ => format!("task updated · {}", id),
-            }
-        }
-        "claim_task" => tool_arg_str(args, "id")
-            .map(|id| format!("task started · {}", id))
-            .unwrap_or_else(|| "task started".to_string()),
-        "delete_task" => tool_arg_str(args, "id")
-            .map(|id| format!("task deleted · {}", id))
-            .unwrap_or_else(|| "task deleted".to_string()),
-        "get_task" => tool_arg_str(args, "id")
-            .map(|id| format!("task {}", id))
-            .unwrap_or_else(|| "task".to_string()),
-        "tasks" | "tasks_summary" | "search_tools" | "search_skills" | "skills" => {
-            human_tool_name(name).to_string()
-        }
+        "search_tools" | "search_skills" => human_tool_name(name).to_string(),
         "load_skill" | "read_skill_file" => tool_arg_str(args, "path")
             .map(|path| format!("{} {}", human_tool_name(name), path))
             .unwrap_or_else(|| human_tool_name(name).to_string()),
@@ -1181,16 +1140,8 @@ fn human_tool_name(name: &str) -> &'static str {
         "agent_call" => "delegate",
         "agent_result" => "delegate result",
         "agent_kill" => "kill delegate",
-        "create_task" => "create task",
-        "update_task" => "update task",
-        "claim_task" => "claim task",
-        "delete_task" => "delete task",
-        "get_task" => "task",
-        "tasks" => "tasks",
-        "tasks_summary" => "tasks summary",
         "search_tools" => "search tools",
         "search_skills" => "search skills",
-        "skills" => "skills",
         "load_skill" => "load skill",
         "read_skill_file" => "read skill file",
         _ => "tool",
@@ -1370,16 +1321,5 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].summary, "web \"ratatui queue preview\"");
         assert!(blocks[0].detail_lines.is_empty());
-    }
-
-    #[test]
-    fn update_task_summary_reflects_status_transition() {
-        assert_eq!(
-            semantic_tool_summary(
-                "update_task",
-                &json!({ "id": "0007", "status": "completed" })
-            ),
-            "task completed · 0007"
-        );
     }
 }

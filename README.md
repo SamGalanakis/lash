@@ -1,6 +1,6 @@
 # lash
 
-AI coding agent with a persistent Monty-backed `repl` runtime or `standard` tool-calling execution mode, `apply_patch`-based file editing, and a host-friendly runtime API for TUI and headless frontends.
+AI coding agent with a persistent `repl` runtime or `standard` tool-calling execution mode, `apply_patch`-based file editing, and a host-friendly runtime API for TUI and headless frontends.
 
 ## Install
 
@@ -22,7 +22,7 @@ From a local checkout, run `./install_lash.sh`.
 
 `lash`/`lash-core` support two execution backends:
 
-- `repl` (default): a persistent Monty-backed sandbox that executes agent-written Python-like code with host-call boundaries for tools.
+- `repl` (default): a persistent `lashlang` runtime that executes agent-written workflow code with host-call boundaries for tools.
 - `standard`: provider-native tool calling without the REPL sandbox.
 
 Both backends are driven by a single sans-IO state machine (`TurnMachine` in `lash/src/sansio.rs`). All protocol logic (prompt assembly, fence parsing, retry/backoff, context folding, turn limits) lives in the synchronous machine; the async `LashRuntime` host driver in `lash/src/runtime.rs` fulfils I/O effects. This makes the core turn logic independently testable without a tokio runtime.
@@ -151,13 +151,12 @@ Across both `repl` and `standard`, lash now renders active history as one cache-
 
 ## Planning
 
-Planning is split between a native checklist tool and a separate plan mode.
+Planning now has one durable checklist tool and one optional planning-only mode.
 
-- `update_plan` is a checklist tool for substantial multi-step execution work.
-- Plan mode is a separate plugin-backed collaboration mode for planning-only turns.
-- Plan mode is prompt-guided rather than command-classifier-driven: it allows non-mutating exploration, encourages exploration before questioning, and expects the final official plan in a `<proposed_plan>...</proposed_plan>` block.
-- The TUI renders the current checklist from `update_plan` calls instead of a hidden plan file.
-- Plugin-backed collaboration modes can now emit generic mode badges and bordered history panels, so plan mode owns its proposed-plan rendering without hard-coded core UI types.
+- `update_plan` is for substantial multi-step execution work.
+- Keep plans short, concrete, and easy to verify.
+- The TUI renders the current checklist directly from `update_plan` calls.
+- Plan mode remains a separate plugin-owned surface for planning-only turns and proposed-plan rendering.
 
 ## Keyboard Shortcuts
 
@@ -323,19 +322,18 @@ Only runtime control calls remain bare globals in `repl`: `done(...)`, `ask(...)
 Use `T.search_tools(...)` to discover prompt-omitted tools at runtime. Pass a focused query for ranked results, or call `T.search_tools()` with no query to browse the full active tool catalog.
 Both discovery calls always search the full current runtime tool catalog; callers do not pass a separate `catalog` argument.
 
-### Default Native-Tools Surface
+### Default Standard Surface
 
 With the default capability profile, `standard` can call:
 
 - Core read: `read_file`, `glob`, `grep`, `ls`, `search_tools`
 - Core write: `apply_patch`
 - Shell: `exec_command`, `write_stdin`
-- Tasks: `tasks`, `tasks_summary`, `get_task`, `create_task`, `start_task`, `update_task`, `delete_task`, `claim_task`
-- Planning: `update_plan`, `ask` (interactive sessions only), plan mode
-- Delegation: `agent_call`, `agent_result`, `agent_output`, `agent_kill`
+- Planning: `update_plan`, `ask` (interactive sessions only)
+- Delegation: `agent_call`, `agent_result`, `agent_kill`
 - History: `search_history`
 - Memory: `search_mem`, `mem_set`, `mem_get`, `mem_delete`, `mem_all`
-- Skills: `skills`, `load_skill`, `read_skill_file`, `search_skills`
+- Skills: `load_skill`, `read_skill_file`, `search_skills`
 - Web, when Tavily is configured: `search_web`, `fetch_url`
 - Native-tools only: `batch`
 

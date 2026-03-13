@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use lash_core::agent::{Message, MessageRole, Part, PartKind, PruneState};
 use lash_core::{
-    AgentStateEnvelope, ContextFoldingConfig, DynamicStateSnapshot, DynamicToolProvider,
-    ExecutionMode, LashRuntime, Provider, Store,
+    AgentStateEnvelope, CachedModelCatalog, ContextFoldingConfig, DynamicStateSnapshot,
+    DynamicToolProvider, ExecutionMode, LashRuntime, Provider, Store,
 };
 
 use crate::app::{App, DisplayBlock};
@@ -42,6 +42,7 @@ pub async fn load_resumed_session(
     current_model_variant: &mut Option<String>,
     dynamic_tools: &Arc<DynamicToolProvider>,
     desired_dynamic: &mut DynamicStateSnapshot,
+    model_catalog: &CachedModelCatalog,
 ) -> Result<(), String> {
     let Some(loaded) = session_log::load_session(filename) else {
         return Err(format!("Could not load: {}", filename));
@@ -65,8 +66,9 @@ pub async fn load_resumed_session(
         current_model_variant,
         dynamic_tools,
         desired_dynamic,
+        model_catalog,
     )
-    .await;
+    .await?;
     app.invalidate_height_cache();
     app.scroll_to_bottom();
     Ok(())
@@ -84,14 +86,15 @@ pub async fn restore_agent_state(
     current_model_variant: &mut Option<String>,
     dynamic_tools: &Arc<DynamicToolProvider>,
     desired_dynamic: &mut DynamicStateSnapshot,
-) {
+    model_catalog: &CachedModelCatalog,
+) -> Result<(), String> {
     let stem = jsonl_filename.trim_end_matches(".jsonl");
     let db_filename = format!("{}.db", stem);
     let db_path = session_log::sessions_dir().join(&db_filename);
 
     if !db_path.exists() {
         push_history_system_message(history, repl_reset_message());
-        return;
+        return Ok(());
     }
 
     let resume_store = match Store::open(&db_path) {
@@ -100,7 +103,7 @@ pub async fn restore_agent_state(
             app.blocks.push(DisplayBlock::SystemMessage(
                 "Could not open session database.".to_string(),
             ));
-            return;
+            return Ok(());
         }
     };
 
@@ -124,11 +127,46 @@ pub async fn restore_agent_state(
             })
             .filter(|model| !model.is_empty())
         {
+            provider
+                .validate_model_name(restored_model)
+                .map_err(|err| {
+                    format!(
+                        "Cannot resume session with model `{}`: {}",
+                        restored_model, err
+                    )
+                })?;
+            let restored_context_window = config_value
+                .as_ref()
+                .and_then(|v| {
+                    v.get("manifest")
+                        .and_then(|m| m.get("context_window"))
+                        .and_then(|m| m.as_u64())
+                })
+                .or_else(|| {
+                    let snapshot = model_catalog.snapshot();
+                    provider
+                        .resolve_model_spec(restored_model, &snapshot)
+                        .ok()
+                        .map(|spec| spec.context_window())
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "Cannot resume session with model `{}`: no context-window entry was saved and the supplied model catalog does not contain it.",
+                        restored_model
+                    )
+            })?;
             app.model = restored_model.to_string();
-            app.context_window = provider.context_window(&app.model);
+            app.context_window = Some(restored_context_window);
+            app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
             if let Some(rt) = runtime.as_mut() {
-                rt.update_session_config(None, Some(app.model.clone()), None, None)
-                    .await;
+                rt.update_session_config(
+                    None,
+                    Some(app.model.clone()),
+                    None,
+                    Some(restored_context_window as usize),
+                    None,
+                )
+                .await;
             }
         }
         *current_model_variant = config_value
@@ -183,8 +221,14 @@ pub async fn restore_agent_state(
         if matches!(restored_execution_mode, ExecutionMode::Repl) {
             if let Some(ref repl_snapshot) = state.repl_snapshot {
                 if let Some(rt) = runtime.as_mut() {
-                    rt.update_session_config(None, None, None, Some(restored_context_folding))
-                        .await;
+                    rt.update_session_config(
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(restored_context_folding),
+                    )
+                    .await;
                     match rt.restore_repl(repl_snapshot).await {
                         Ok(()) => {
                             app.blocks.push(DisplayBlock::SystemMessage(
@@ -233,7 +277,7 @@ pub async fn restore_agent_state(
         }
 
         if let Some(rt) = runtime.as_mut() {
-            rt.update_session_config(None, None, Some(current_model_variant.clone()), None)
+            rt.update_session_config(None, None, Some(current_model_variant.clone()), None, None)
                 .await;
             rt.set_capabilities(lash_core::agent_capabilities_from_profile(
                 &dynamic_tools.profile(),
@@ -269,4 +313,5 @@ pub async fn restore_agent_state(
     } else if matches!(*execution_mode, ExecutionMode::Repl) {
         push_history_system_message(history, repl_reset_message());
     }
+    Ok(())
 }

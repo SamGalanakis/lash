@@ -123,13 +123,11 @@ pub struct TurnMachineConfig {
     pub tool_specs: Vec<LlmToolSpec>,
     pub tool_names: Vec<String>,
     pub helper_bindings: BTreeSet<String>,
-    pub capability_prompt_sections: Vec<String>,
-    pub plugin_prompt_sections: Vec<String>,
+    pub guide_sections: Vec<String>,
+    pub plugin_prompt_contributions: Vec<crate::PromptContribution>,
+    pub turn_prompt_sections: Vec<String>,
     pub can_write: bool,
-    pub history_enabled: bool,
-    pub project_instructions: String,
     pub prompt_overrides: Vec<PromptSectionOverride>,
-    pub base_context: String,
     pub instruction_source: Arc<dyn InstructionSource>,
     pub llm_log_path: Option<PathBuf>,
     pub agent_id: String,
@@ -354,13 +352,9 @@ impl TurnMachine {
             context: "",
             tool_list: &self.config.tool_list,
             tool_names: &self.config.tool_names,
-            has_history: self
-                .messages
-                .iter()
-                .any(|message| message.id == "__context_archive__"),
             helper_bindings: &self.config.helper_bindings,
-            capability_prompt_sections: &self.config.capability_prompt_sections,
-            plugin_prompt_sections: &self.config.plugin_prompt_sections,
+            guide_sections: &self.config.guide_sections,
+            plugin_prompt_contributions: &self.config.plugin_prompt_contributions,
             can_write: self.config.can_write,
             include_soul,
             project_instructions: "",
@@ -373,11 +367,8 @@ impl TurnMachine {
             .chain(self.tool_images.iter())
             .map(|(mime, data)| (mime.clone(), data.clone()))
             .collect();
-        let rendered_prompt = render_transcript_prompt(
-            &self.messages,
-            &self.config.base_context,
-            &self.config.project_instructions,
-        );
+        let rendered_prompt =
+            render_transcript_prompt(&self.messages, &self.config.turn_prompt_sections);
 
         let is_standard = matches!(self.config.execution_mode, ExecutionMode::Standard);
 
@@ -497,10 +488,7 @@ impl TurnMachine {
                 fence.code_executed = true;
             }
 
-            if transition_to_exec.is_some()
-                || fence.code_executed
-                || !fence.acc.final_response.is_empty()
-            {
+            if transition_to_exec.is_some() || fence.code_executed || fence.acc.finished {
                 break;
             }
         }
@@ -534,7 +522,7 @@ impl TurnMachine {
             stop_stream_processing,
             ..
         } = &mut self.state
-            && (f.code_executed || !f.acc.final_response.is_empty())
+            && (f.code_executed || f.acc.finished)
         {
             *stop_stream_processing = true;
             return false;
@@ -1104,7 +1092,7 @@ impl TurnMachine {
                 );
 
                 // If we already executed code mid-stream, go to processing
-                if fence.code_executed || !fence.acc.final_response.is_empty() {
+                if fence.code_executed || fence.acc.finished {
                     self.emit(AgentEvent::LlmResponse {
                         iteration: self.iteration,
                         content: fence.response.clone(),
@@ -1165,12 +1153,12 @@ impl TurnMachine {
                                 return;
                             }
                         }
-                        if fence.code_executed || !fence.acc.final_response.is_empty() {
+                        if fence.code_executed || fence.acc.finished {
                             break;
                         }
                     }
 
-                    if fence.code_executed || !fence.acc.final_response.is_empty() {
+                    if fence.code_executed || fence.acc.finished {
                         self.emit(AgentEvent::LlmResponse {
                             iteration: self.iteration,
                             content: fence.response.clone(),
@@ -1347,9 +1335,8 @@ impl TurnMachine {
                         }
                     }
                 }
-                if !r.response.is_empty() {
-                    repl.fence.acc.final_response = r.response;
-                }
+                repl.fence.acc.finished = r.finished;
+                repl.fence.acc.final_response = r.response;
                 if let Some(raw_error) = r.error {
                     repl.fence.acc.exec_error = Some(raw_error);
                     repl.fence.acc.had_failure = true;
@@ -1388,6 +1375,7 @@ impl TurnMachine {
             && fence.acc.tool_calls.is_empty()
             && fence.acc.combined_output.is_empty()
             && !fence.acc.had_failure
+            && !fence.acc.finished
         {
             self.emit(make_error_event(
                 "llm_provider",
@@ -1408,11 +1396,13 @@ impl TurnMachine {
         }
 
         // done() = stop signal
-        if !fence.acc.final_response.is_empty() {
-            self.emit(AgentEvent::Message {
-                text: fence.acc.final_response.clone(),
-                kind: "final".to_string(),
-            });
+        if fence.acc.finished {
+            if !fence.acc.final_response.is_empty() {
+                self.emit(AgentEvent::Message {
+                    text: fence.acc.final_response.clone(),
+                    kind: "final".to_string(),
+                });
+            }
             let mid = format!("m{}", self.messages.len());
             let asst_parts = build_assistant_parts(&mid, &fence.prose_parts, &fence.code_parts);
             self.messages.push(Message {
@@ -1665,10 +1655,12 @@ mod tests {
     use crate::agent::{Message, MessageRole, Part, PartKind, PruneState};
 
     struct NullInstructionSource;
+
     impl InstructionSource for NullInstructionSource {
         fn system_instructions(&self) -> String {
             String::new()
         }
+
         fn context_instructions_for_reads(&self, _paths: &[String]) -> String {
             String::new()
         }
@@ -1688,13 +1680,11 @@ mod tests {
             tool_specs: Vec::new(),
             tool_names: Vec::new(),
             helper_bindings: BTreeSet::new(),
-            capability_prompt_sections: Vec::new(),
-            plugin_prompt_sections: Vec::new(),
+            guide_sections: Vec::new(),
+            plugin_prompt_contributions: Vec::new(),
+            turn_prompt_sections: Vec::new(),
             can_write: false,
-            history_enabled: false,
-            project_instructions: String::new(),
             prompt_overrides: Vec::new(),
-            base_context: String::new(),
             instruction_source: Arc::new(NullInstructionSource),
             llm_log_path: None,
             agent_id: "test".to_string(),
@@ -2230,6 +2220,7 @@ mod tests {
                 output: "hi\n".to_string(),
                 observations: Vec::new(),
                 response: String::new(),
+                finished: false,
                 tool_calls: Vec::new(),
                 images: Vec::new(),
                 error: None,
@@ -2287,6 +2278,7 @@ mod tests {
                 output: "hi\n".to_string(),
                 observations: Vec::new(),
                 response: "done".to_string(),
+                finished: true,
                 tool_calls: Vec::new(),
                 images: Vec::new(),
                 error: None,
@@ -2348,6 +2340,7 @@ mod tests {
                 output: "hi\n".to_string(),
                 observations: Vec::new(),
                 response: String::new(),
+                finished: false,
                 tool_calls: Vec::new(),
                 images: Vec::new(),
                 error: None,
@@ -2473,6 +2466,7 @@ mod tests {
                 output: String::new(),
                 observations: vec!["value={\"ok\":true}".to_string()],
                 response: String::new(),
+                finished: false,
                 tool_calls: Vec::new(),
                 images: Vec::new(),
                 error: None,

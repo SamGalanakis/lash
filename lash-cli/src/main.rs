@@ -322,27 +322,27 @@ async fn main() -> anyhow::Result<()> {
     if args.print_prompt.is_none() {
         lash_config.save()?;
     }
+    let model_catalog = models_dev_catalog().map_err(anyhow::Error::msg)?;
+    if let Err(err) = model_catalog
+        .refresh_if_stale(lash_core::model_info::DEFAULT_REFRESH_INTERVAL)
+        .await
+    {
+        eprintln!("warning: failed to refresh models.dev catalog: {err}");
+    }
 
     let requested_model = args
         .model
         .clone()
         .unwrap_or_else(|| lash_config.active_provider().default_model().to_string());
     let selection = parse_model_selection(&requested_model).map_err(anyhow::Error::msg)?;
-    validate_model_selection(
+    validate_model_selection(lash_config.active_provider(), &selection)
+        .map_err(anyhow::Error::msg)?;
+    let resolved_model_spec = resolve_model_selection(
         lash_config.active_provider(),
         &selection,
-        args.model.is_some(),
+        model_catalog.as_ref(),
     )
     .map_err(anyhow::Error::msg)?;
-    if args.model.is_none()
-        && !model_known_in_catalog(lash_config.active_provider(), &selection.model)
-    {
-        eprintln!(
-            "warning: model `{}` is not in local catalog for {}; continuing (default model)",
-            selection.model,
-            lash_config.active_provider().label()
-        );
-    }
     let model = selection.model.clone();
     let model_variant = resolve_model_variant(
         lash_config.active_provider(),
@@ -389,20 +389,23 @@ async fn main() -> anyhow::Result<()> {
             .map(|start| start.session_id.clone())
             .or_else(|| Some(uuid::Uuid::new_v4().to_string()))
     };
+    let instruction_source: Arc<dyn InstructionSource> = Arc::new(FsInstructionSource::new());
     let config = AgentConfig {
         model: model.clone(),
         provider: lash_config.active_provider().clone(),
         model_variant,
+        max_context_tokens: Some(resolved_model_spec.context_window() as usize),
         session_id: run_session_id.clone(),
         llm_log_path,
         headless,
         prompt_overrides,
         execution_mode,
         context_folding,
+        instruction_source: Arc::clone(&instruction_source),
         ..Default::default()
     };
 
-    // Build store (SQLite-backed archive + tasks)
+    // Build store (SQLite-backed archive)
     let db_path = if let Some(filename) = args.resume.as_deref() {
         sessions_dir.join(format!("{}.db", filename.trim_end_matches(".jsonl")))
     } else {
@@ -437,6 +440,10 @@ async fn main() -> anyhow::Result<()> {
     );
     let base_provider: Arc<dyn ToolProvider> = Arc::new(base_all);
     let plugin_host = PluginHost::new(vec![
+        Arc::new(BuiltinPromptContextPluginFactory::new(
+            Arc::clone(&instruction_source),
+            PromptContextPluginConfig::default(),
+        )),
         Arc::new(BuiltinHistoryPluginFactory::new(Arc::clone(&store))),
         Arc::new(BuiltinMemoryPluginFactory::new(Arc::clone(&store))),
         Arc::new(BuiltinPlanTrackerPluginFactory),
@@ -543,7 +550,7 @@ async fn main() -> anyhow::Result<()> {
                 &model,
                 config.model_variant.as_deref(),
                 execution_mode,
-                lash_config.active_provider().context_window(&model),
+                Some(resolved_model_spec.context_window()),
                 dynamic_tools_provider.definitions().len(),
                 &toolset_hash,
                 context_folding,
@@ -609,7 +616,9 @@ async fn main() -> anyhow::Result<()> {
         &args,
         lash_config.active_provider().clone(),
         model,
+        resolved_model_spec.context_window(),
         session_name,
+        model_catalog,
         Arc::clone(&store),
         toolset_hash,
         initial_model_variant,
@@ -767,6 +776,14 @@ struct ModelSelection {
     model: String,
 }
 
+fn models_dev_catalog() -> Result<Arc<CachedModelCatalog>, String> {
+    CachedModelCatalog::models_dev(
+        Arc::new(FileModelCatalogStore::default_models_dev()),
+        Some(Arc::new(ModelsDevHttpSource::default_models_dev())),
+    )
+    .map(Arc::new)
+}
+
 fn parse_model_selection(input: &str) -> Result<ModelSelection, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -842,33 +859,35 @@ fn resolve_context_folding(
     .validate()
 }
 
-fn model_known_in_catalog(provider: &Provider, model: &str) -> bool {
-    provider.context_window(model).is_some()
+fn validate_model_selection(provider: &Provider, selection: &ModelSelection) -> Result<(), String> {
+    provider
+        .validate_model_name(&selection.model)
+        .map_err(|err| {
+            let normalized = provider.resolve_model(&selection.model);
+            if normalized != selection.model {
+                format!("{err}\nResolved provider model ID: `{normalized}`")
+            } else {
+                err
+            }
+        })
 }
 
-fn validate_model_selection(
+fn resolve_model_selection(
     provider: &Provider,
     selection: &ModelSelection,
-    strict_catalog_check: bool,
-) -> Result<(), String> {
-    if selection.model.trim().is_empty() {
-        return Err("Model cannot be empty.".to_string());
-    }
-    if selection.model.contains(char::is_whitespace) {
-        return Err("Model names cannot contain spaces.".to_string());
-    }
-    if strict_catalog_check
-        && !model_known_in_catalog(provider, &selection.model)
-        && std::env::var("LASH_ALLOW_UNKNOWN_MODELS").ok().as_deref() != Some("1")
-    {
-        return Err(format!(
-            "Model `{}` is not in the local catalog for {}. \
-Set `LASH_ALLOW_UNKNOWN_MODELS=1` to bypass this check.",
-            selection.model,
-            provider.label(),
-        ));
-    }
-    Ok(())
+    catalog: &CachedModelCatalog,
+) -> Result<ResolvedModelSpec, String> {
+    let snapshot = catalog.snapshot();
+    provider
+        .resolve_model_spec(&selection.model, &snapshot)
+        .map_err(|err| {
+            let normalized = provider.resolve_model(&selection.model);
+            if normalized != selection.model {
+                format!("{err}\nResolved provider model ID: `{normalized}`")
+            } else {
+                err
+            }
+        })
 }
 
 fn resolve_model_variant(
@@ -937,6 +956,7 @@ struct ReplayManifest {
     provider: String,
     configured_model: String,
     resolved_model: String,
+    context_window: u64,
     model_variant: Option<String>,
     toolset_hash: String,
     prompt_hash: Option<String>,
@@ -950,6 +970,7 @@ fn persist_root_agent_state(
     dynamic_state: &DynamicStateSnapshot,
     provider: &Provider,
     configured_model: &str,
+    context_window: u64,
     execution_mode: ExecutionMode,
     context_folding: ContextFoldingConfig,
     model_variant: Option<&str>,
@@ -958,11 +979,12 @@ fn persist_root_agent_state(
     snapshot_hash: Option<String>,
 ) {
     let manifest = ReplayManifest {
-        version: 2,
+        version: 3,
         saved_at: chrono::Utc::now().to_rfc3339(),
         provider: provider.id().to_string(),
         configured_model: configured_model.to_string(),
         resolved_model: provider.resolve_model(configured_model),
+        context_window,
         model_variant: model_variant.map(str::to_string),
         toolset_hash: toolset_hash.to_string(),
         prompt_hash,
@@ -974,6 +996,7 @@ fn persist_root_agent_state(
         "provider": manifest.provider,
         "configured_model": manifest.configured_model,
         "resolved_model": manifest.resolved_model,
+        "context_window": manifest.context_window,
         "execution_mode": execution_mode_label(execution_mode),
         "context_folding": {
             "soft_limit_pct": context_folding.soft_limit_pct,
@@ -1234,14 +1257,17 @@ async fn run_app(
     args: &Args,
     mut provider: Provider,
     model: String,
+    initial_context_window: u64,
     session_name: String,
+    model_catalog: Arc<CachedModelCatalog>,
     store: Arc<Store>,
     mut toolset_hash: String,
     initial_model_variant: Option<String>,
     initial_execution_mode: ExecutionMode,
 ) -> anyhow::Result<()> {
-    let mut app = App::new(model, session_name, Some(store.clone()));
-    app.context_window = provider.context_window(&app.model);
+    let mut app = App::new(model, session_name);
+    app.context_window = Some(initial_context_window);
+    app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
     let mut current_model_variant = initial_model_variant.or_else(|| {
         provider
             .default_model_variant(&app.model)
@@ -1350,6 +1376,7 @@ async fn run_app(
             &mut current_model_variant,
             &dynamic_tools,
             &mut desired_dynamic,
+            model_catalog.as_ref(),
         )
         .await
         {
@@ -1518,6 +1545,8 @@ async fn run_app(
                         &persisted_dynamic_state,
                         &provider,
                         &app.model,
+                        app.context_window
+                            .expect("app context_window must be set before persisting state"),
                         persisted_execution_mode,
                         persisted_context_folding,
                         current_model_variant.as_deref(),
@@ -1795,6 +1824,7 @@ async fn run_app(
                                     &mut current_model_variant,
                                     &dynamic_tools,
                                     &mut desired_dynamic,
+                                    model_catalog.as_ref(),
                                 )
                                 .await
                                 {
@@ -2177,8 +2207,7 @@ async fn run_app(
                                             continue;
                                         }
                                     };
-                                    if let Err(e) =
-                                        validate_model_selection(&provider, &selection, true)
+                                    if let Err(e) = validate_model_selection(&provider, &selection)
                                     {
                                         push_system_message(
                                             &mut app,
@@ -2186,6 +2215,20 @@ async fn run_app(
                                         );
                                         continue;
                                     }
+                                    let resolved_model_spec = match resolve_model_selection(
+                                        &provider,
+                                        &selection,
+                                        model_catalog.as_ref(),
+                                    ) {
+                                        Ok(spec) => spec,
+                                        Err(err) => {
+                                            push_system_message(
+                                                &mut app,
+                                                format!("Model rejected: {}", err),
+                                            );
+                                            continue;
+                                        }
+                                    };
                                     let model_variant = provider
                                         .default_model_variant(&selection.model)
                                         .map(str::to_string);
@@ -2194,12 +2237,15 @@ async fn run_app(
                                             None,
                                             Some(selection.model.clone()),
                                             Some(model_variant.clone()),
+                                            Some(resolved_model_spec.context_window() as usize),
                                             None,
                                         )
                                         .await;
                                     }
                                     current_model_variant = model_variant;
-                                    app.context_window = provider.context_window(&selection.model);
+                                    app.context_window = Some(resolved_model_spec.context_window());
+                                    app.context_usage_excludes_cached_input =
+                                        provider.input_usage_excludes_cached_tokens();
                                     app.model = selection.model.clone();
                                     app.set_model_variant(current_model_variant.clone());
                                     let mut msg = format!("Model set to `{}`", app.model);
@@ -2213,8 +2259,6 @@ async fn run_app(
                                     }
                                     if let Some(window) = app.context_window {
                                         msg.push_str(&format!("\nContext window: {}", window));
-                                    } else {
-                                        msg.push_str("\nContext window: unknown in local catalog.");
                                     }
                                     push_system_message(&mut app, msg);
                                 }
@@ -2251,6 +2295,7 @@ async fn run_app(
                                             None,
                                             None,
                                             Some(variant.clone()),
+                                            None,
                                             None,
                                         )
                                         .await;
@@ -2362,6 +2407,20 @@ async fn run_app(
                                                 );
                                             }
                                             provider = new_cfg.active_provider().clone();
+                                            if let Err(err) = model_catalog
+                                                .refresh_if_stale(
+                                                    lash_core::model_info::DEFAULT_REFRESH_INTERVAL,
+                                                )
+                                                .await
+                                            {
+                                                push_system_message(
+                                                    &mut app,
+                                                    format!(
+                                                        "Warning: failed to refresh models.dev catalog: {}",
+                                                        err
+                                                    ),
+                                                );
+                                            }
                                             let new_model = provider.default_model().to_string();
                                             let selection = match parse_model_selection(&new_model)
                                             {
@@ -2377,9 +2436,9 @@ async fn run_app(
                                                     continue;
                                                 }
                                             };
-                                            if let Err(e) = validate_model_selection(
-                                                &provider, &selection, false,
-                                            ) {
+                                            if let Err(e) =
+                                                validate_model_selection(&provider, &selection)
+                                            {
                                                 push_system_message(
                                                     &mut app,
                                                     format!(
@@ -2389,16 +2448,23 @@ async fn run_app(
                                                 );
                                                 continue;
                                             }
-                                            if !model_known_in_catalog(&provider, &selection.model)
-                                            {
-                                                push_system_message(
-                                                    &mut app,
-                                                    format!(
-                                                        "Warning: provider default model `{}` is not in local catalog; continuing.",
-                                                        selection.model
-                                                    ),
-                                                );
-                                            }
+                                            let resolved_model_spec = match resolve_model_selection(
+                                                &provider,
+                                                &selection,
+                                                model_catalog.as_ref(),
+                                            ) {
+                                                Ok(spec) => spec,
+                                                Err(err) => {
+                                                    push_system_message(
+                                                        &mut app,
+                                                        format!(
+                                                            "Provider default model failed validation: {}",
+                                                            err
+                                                        ),
+                                                    );
+                                                    continue;
+                                                }
+                                            };
                                             let model_variant = provider
                                                 .default_model_variant(&selection.model)
                                                 .map(str::to_string);
@@ -2407,13 +2473,17 @@ async fn run_app(
                                                     Some(provider.clone()),
                                                     Some(selection.model.clone()),
                                                     Some(model_variant.clone()),
+                                                    Some(resolved_model_spec.context_window()
+                                                        as usize),
                                                     None,
                                                 )
                                                 .await;
                                             }
                                             current_model_variant = model_variant;
                                             app.context_window =
-                                                provider.context_window(&selection.model);
+                                                Some(resolved_model_spec.context_window());
+                                            app.context_usage_excludes_cached_input =
+                                                provider.input_usage_excludes_cached_tokens();
                                             app.model = selection.model.clone();
                                             app.set_model_variant(current_model_variant.clone());
                                             let saved_kinds = new_cfg
@@ -2572,6 +2642,9 @@ async fn run_app(
                                         logger,
                                         &provider,
                                         &app.model,
+                                        app.context_window.expect(
+                                            "app context_window must be set before forking",
+                                        ),
                                         current_model_variant.as_deref(),
                                         &toolset_hash,
                                         &current_dynamic_state,
@@ -2644,6 +2717,7 @@ async fn run_app(
                                             &mut current_model_variant,
                                             &dynamic_tools,
                                             &mut desired_dynamic,
+                                            model_catalog.as_ref(),
                                         )
                                         .await
                                         {
@@ -3277,11 +3351,6 @@ async fn run_app(
                     app.tick += 1;
                     app.dirty = true;
                 }
-                // Auto-dismiss task tray after countdown
-                if app.task_all_done_at.is_some() {
-                    app.dirty = true; // keep redrawing for countdown
-                    app.maybe_dismiss_task_tray();
-                }
             }
             AppEvent::Agent { stream_id, event } => {
                 if stream_id != active_stream_id {
@@ -3728,7 +3797,7 @@ mod tests {
 
     #[test]
     fn insert_inline_marker_adds_spaces_when_touching_text() {
-        let mut app = App::new("model".into(), "session".into(), None);
+        let mut app = App::new("model".into(), "session".into());
         app.input = "hello world".into();
         app.cursor_pos = 5;
         insert_inline_marker(&mut app, "[Image #1]");
@@ -3737,7 +3806,7 @@ mod tests {
 
     #[test]
     fn insert_inline_marker_keeps_existing_spacing() {
-        let mut app = App::new("model".into(), "session".into(), None);
+        let mut app = App::new("model".into(), "session".into());
         app.input = "hello ".into();
         app.cursor_pos = app.input.len();
         insert_inline_marker(&mut app, "[Image #1]");

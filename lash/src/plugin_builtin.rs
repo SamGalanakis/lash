@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 
+use crate::agent::PromptSectionName;
 use crate::dynamic::DynamicCapabilityDef;
+use crate::instructions::InstructionSource;
 use crate::search::{SearchDoc, SearchMode, limit_from_args, rank_docs, truncate_preview};
 use crate::store::{HistoryTurnRecord, MemRecord, Store};
 use crate::tools::{UpdatePlanTool, run_blocking};
@@ -17,6 +19,40 @@ fn agent_id(args: &serde_json::Value) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or("root")
         .to_string()
+}
+
+fn build_prompt_environment_context() -> String {
+    let mut parts = Vec::new();
+
+    if let Ok(cwd) = std::env::current_dir() {
+        parts.push(format!("Working directory: {}", cwd.display()));
+
+        if cwd.join(".git").exists() {
+            parts.push("Git repository: yes".to_string());
+        }
+
+        if let Ok(entries) = std::fs::read_dir(&cwd) {
+            let mut names: Vec<String> = entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if entry.file_type().map(|ty| ty.is_dir()).unwrap_or(false) {
+                        format!("{name}/")
+                    } else {
+                        name
+                    }
+                })
+                .filter(|name| !name.starts_with('.'))
+                .collect();
+            names.sort();
+            if !names.is_empty() {
+                parts.push(format!("Top-level entries: {}", names.join(", ")));
+            }
+        }
+    }
+
+    parts.push("REPL third-party packages: none".to_string());
+    parts.join("\n")
 }
 
 fn current_turn_index(turn: &AssembledTurn) -> i64 {
@@ -33,7 +69,7 @@ fn history_capability_def() -> DynamicCapabilityDef {
         name: "History".to_string(),
         description: "Persistent turn history and retrieval.".to_string(),
         prompt_section: Some(
-            "## History\n\nPrior turns can be searched with `search_history(...)` when earlier context is actually needed."
+            "### History\nPrior turns can be searched with `search_history(...)` when earlier context is actually needed."
                 .to_string(),
         ),
         helper_bindings: BTreeSet::from(["search_history".to_string()]),
@@ -48,7 +84,7 @@ fn memory_capability_def() -> DynamicCapabilityDef {
         name: "Memory".to_string(),
         description: "Persistent key-value memory and retrieval.".to_string(),
         prompt_section: Some(
-            "## Memory\n\nUse `mem_set`, `mem_get`, `mem_delete`, `mem_all`, and `search_mem(...)` for durable decisions that should survive context pruning."
+            "### Memory\nUse `mem_set`, `mem_get`, `mem_delete`, `mem_all`, and `search_mem(...)` for durable decisions that should survive context pruning."
                 .to_string(),
         ),
         helper_bindings: BTreeSet::from([
@@ -184,10 +220,9 @@ Only produce at most one `<proposed_plan>` block per turn, and only when you are
 
 fn plan_mode_tool_allowed(tool_name: &str, args: &serde_json::Value) -> bool {
     match tool_name {
-        "ask" | "fetch_url" | "get_task" | "glob" | "grep" | "ls" | "mem_all" | "mem_get"
-        | "read_file" | "read_skill_file" | "search_history" | "search_mem" | "search_skills"
-        | "search_tools" | "search_web" | "skills" | "tasks" | "tasks_summary" | "exec_command"
-        | "write_stdin" => true,
+        "ask" | "fetch_url" | "glob" | "grep" | "ls" | "mem_all" | "mem_get" | "read_file"
+        | "read_skill_file" | "search_history" | "search_mem" | "search_skills"
+        | "search_tools" | "search_web" | "exec_command" | "write_stdin" => true,
         "batch" => args
             .get("tool_calls")
             .and_then(|value| value.as_array())
@@ -860,6 +895,91 @@ impl PluginFactory for HistoryPluginFactory {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PromptContextPluginConfig {
+    pub include_environment: bool,
+    pub include_project_instructions: bool,
+}
+
+impl Default for PromptContextPluginConfig {
+    fn default() -> Self {
+        Self {
+            include_environment: true,
+            include_project_instructions: true,
+        }
+    }
+}
+
+pub struct PromptContextPluginFactory {
+    base_context: String,
+    project_instructions: String,
+    config: PromptContextPluginConfig,
+}
+
+impl PromptContextPluginFactory {
+    pub fn new(
+        instruction_source: Arc<dyn InstructionSource>,
+        config: PromptContextPluginConfig,
+    ) -> Self {
+        Self {
+            base_context: build_prompt_environment_context(),
+            project_instructions: instruction_source.system_instructions(),
+            config,
+        }
+    }
+}
+
+impl PluginFactory for PromptContextPluginFactory {
+    fn id(&self) -> &'static str {
+        "prompt_context"
+    }
+
+    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        Ok(Arc::new(PromptContextPlugin {
+            base_context: self.base_context.clone(),
+            project_instructions: self.project_instructions.clone(),
+            config: self.config.clone(),
+        }))
+    }
+}
+
+struct PromptContextPlugin {
+    base_context: String,
+    project_instructions: String,
+    config: PromptContextPluginConfig,
+}
+
+impl SessionPlugin for PromptContextPlugin {
+    fn id(&self) -> &'static str {
+        "prompt_context"
+    }
+
+    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
+        let base_context = self.base_context.clone();
+        let project_instructions = self.project_instructions.clone();
+        let config = self.config.clone();
+        reg.register_prompt_contributor(Arc::new(move |_ctx| {
+            let mut contributions = Vec::new();
+            if config.include_environment && !base_context.trim().is_empty() {
+                contributions.push(PromptContribution {
+                    section: PromptSectionName::Environment,
+                    priority: 0,
+                    content: base_context.clone(),
+                });
+            }
+            if config.include_project_instructions && !project_instructions.trim().is_empty() {
+                contributions.push(PromptContribution {
+                    section: PromptSectionName::ProjectInstructions,
+                    priority: 0,
+                    content: project_instructions.clone(),
+                });
+            }
+            Ok(contributions)
+        }));
+        Ok(())
+    }
+}
+
 struct HistoryPlugin {
     store: Arc<Store>,
     tools: Arc<HistoryTools>,
@@ -874,6 +994,23 @@ impl SessionPlugin for HistoryPlugin {
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
         reg.register_tool_provider(Arc::clone(&self.tools) as Arc<dyn ToolProvider>)?;
         reg.register_capability(history_capability_def())?;
+        reg.register_turn_prompt_contributor(Arc::new(|ctx| {
+            Box::pin(async move {
+                let has_archived_history = ctx
+                    .state
+                    .messages
+                    .iter()
+                    .any(|message| message.id == "__context_archive__");
+                Ok(if has_archived_history {
+                    vec![TurnPromptContribution {
+                        priority: 0,
+                        content: "Older turns were archived outside the active context. Use `search_history(...)` only when older context actually matters.".to_string(),
+                    }]
+                } else {
+                    Vec::new()
+                })
+            })
+        }));
 
         let store = Arc::clone(&self.store);
         let agent_id = self.agent_id.clone();
@@ -908,7 +1045,6 @@ impl SessionPlugin for HistoryPlugin {
                     prompt_usage.prompt_context_tokens,
                     max_context as usize,
                     state.context_folding,
-                    true,
                 );
                 Ok(state)
             })
@@ -1473,10 +1609,12 @@ pub use HistoryPluginFactory as BuiltinHistoryPluginFactory;
 pub use MemoryPluginFactory as BuiltinMemoryPluginFactory;
 pub use PlanModePluginFactory as BuiltinPlanModePluginFactory;
 pub use PlanTrackerPluginFactory as BuiltinPlanTrackerPluginFactory;
+pub use PromptContextPluginFactory as BuiltinPromptContextPluginFactory;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instructions::InstructionSource;
     use crate::plugin::ToolCallHookContext;
     use crate::{
         AgentStateEnvelope, AssembledTurn, AssistantOutput, ContextFoldingConfig, DoneReason,
@@ -1486,6 +1624,20 @@ mod tests {
     };
 
     struct MockSessionManager;
+
+    struct StaticInstructionSource {
+        text: String,
+    }
+
+    impl InstructionSource for StaticInstructionSource {
+        fn system_instructions(&self) -> String {
+            self.text.clone()
+        }
+
+        fn context_instructions_for_reads(&self, _read_paths: &[String]) -> String {
+            String::new()
+        }
+    }
 
     #[async_trait::async_trait]
     impl SessionManager for MockSessionManager {
@@ -1570,6 +1722,80 @@ mod tests {
             code_outputs: Vec::new(),
             errors: Vec::new(),
         }
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    #[tokio::test]
+    async fn history_plugin_emits_turn_prompt_note_only_when_archive_marker_exists() {
+        let store = Arc::new(Store::memory().expect("store"));
+        let host = PluginHost::new(vec![Arc::new(BuiltinHistoryPluginFactory::new(store))]);
+        let session = host.build_session("root", None).expect("session");
+        let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
+
+        let empty = session
+            .collect_turn_prompt_contributions(TurnHookContext {
+                session_id: "root".to_string(),
+                state: AgentStateEnvelope::default(),
+                host: Arc::clone(&manager),
+            })
+            .await
+            .expect("turn prompt");
+        assert!(empty.is_empty());
+
+        let mut state = AgentStateEnvelope::default();
+        state.messages.push(crate::Message {
+            id: "__context_archive__".to_string(),
+            role: MessageRole::System,
+            parts: vec![crate::Part {
+                id: "archive.p0".to_string(),
+                kind: crate::PartKind::Text,
+                content: "archived".to_string(),
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: crate::PruneState::Intact,
+            }],
+            origin: None,
+        });
+        let contributions = session
+            .collect_turn_prompt_contributions(TurnHookContext {
+                session_id: "root".to_string(),
+                state,
+                host: manager,
+            })
+            .await
+            .expect("turn prompt");
+        assert_eq!(contributions.len(), 1);
+        assert!(
+            contributions[0]
+                .content
+                .contains("Older turns were archived")
+        );
+    }
+
+    #[test]
+    fn prompt_context_plugin_contributes_environment_and_project_instruction_sections() {
+        let host = PluginHost::new(vec![Arc::new(BuiltinPromptContextPluginFactory::new(
+            Arc::new(StaticInstructionSource {
+                text: "Repo rules".to_string(),
+            }),
+            PromptContextPluginConfig::default(),
+        ))]);
+        let session = host.build_session("root", None).expect("session");
+        let contributions = session
+            .collect_prompt_contributions(PromptHookContext {
+                session_id: "root".to_string(),
+                host: Arc::new(MockSessionManager),
+            })
+            .expect("prompt contributions");
+
+        assert!(contributions.iter().any(|contribution| {
+            contribution.section == PromptSectionName::Environment
+                && contribution.content.contains("Working directory:")
+        }));
+        assert!(contributions.iter().any(|contribution| {
+            contribution.section == PromptSectionName::ProjectInstructions
+                && contribution.content == "Repo rules"
+        }));
     }
 
     #[tokio::test]

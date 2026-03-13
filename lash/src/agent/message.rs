@@ -150,8 +150,7 @@ struct TranscriptTurn {
 
 pub fn render_transcript_prompt(
     msgs: &[Message],
-    base_context: &str,
-    project_instructions: &str,
+    turn_prompt_sections: &[String],
 ) -> RenderedPrompt {
     let mut image_indices = Vec::new();
     let mut turns = Vec::new();
@@ -188,16 +187,6 @@ pub fn render_transcript_prompt(
     }
 
     let mut text = String::new();
-    if !base_context.trim().is_empty() {
-        text.push_str("Project:\n");
-        text.push_str(base_context.trim());
-        text.push_str("\n\n");
-    }
-    if !project_instructions.trim().is_empty() {
-        text.push_str("Project Instructions:\n");
-        text.push_str(project_instructions.trim());
-        text.push_str("\n\n");
-    }
     text.push_str(
         "History:\nThis is a chronological transcript. `Assistant` refers to Lash, and you are continuing as the same agent.\n\n",
     );
@@ -220,6 +209,16 @@ pub fn render_transcript_prompt(
             text.push('\n');
         }
         text.push('\n');
+    }
+    let turn_prompt_sections = turn_prompt_sections
+        .iter()
+        .map(|section| section.trim())
+        .filter(|section| !section.is_empty())
+        .collect::<Vec<_>>();
+    if !turn_prompt_sections.is_empty() {
+        text.push_str("Runtime Notes:\n");
+        text.push_str(&turn_prompt_sections.join("\n\n"));
+        text.push_str("\n\n");
     }
     text.push_str(
         "Continue from the latest turn as Lash.\nIf the task is complete, provide the final answer.\nOtherwise produce the next valid step for this runtime.",
@@ -269,14 +268,12 @@ mod tests {
             },
         ];
 
-        let rendered = render_transcript_prompt(&msgs, "ctx", "rules");
+        let rendered = render_transcript_prompt(&msgs, &[]);
         let text = match &rendered.user_prompt[0] {
             LlmPromptPart::Text(text) => text,
             LlmPromptPart::Image(_) => panic!("expected text prompt"),
         };
 
-        assert!(text.contains("Project:\nctx"));
-        assert!(text.contains("Project Instructions:\nrules"));
         assert!(text.contains("=== Turn 1 ===\nUser:\nfirst"));
         assert!(text.contains("Assistant (Lash, continuing this transcript):\nreply one"));
         assert!(text.contains("=== Turn 2 ===\nUser:\nsecond"));
@@ -291,7 +288,7 @@ mod tests {
             origin: None,
         }];
 
-        let rendered = render_transcript_prompt(&msgs, "", "");
+        let rendered = render_transcript_prompt(&msgs, &[]);
         assert_eq!(rendered.image_indices, vec![3]);
         let text = match &rendered.user_prompt[0] {
             LlmPromptPart::Text(text) => text,
@@ -323,7 +320,7 @@ mod tests {
             },
         ];
 
-        let rendered = render_transcript_prompt(&msgs, "", "");
+        let rendered = render_transcript_prompt(&msgs, &[]);
         let text = match &rendered.user_prompt[0] {
             LlmPromptPart::Text(text) => text,
             LlmPromptPart::Image(_) => panic!("expected text prompt"),
@@ -357,12 +354,36 @@ mod tests {
             },
         ];
 
-        let rendered = render_transcript_prompt(&msgs, "", "");
+        let rendered = render_transcript_prompt(&msgs, &[]);
         let text = match &rendered.user_prompt[0] {
             LlmPromptPart::Text(text) => text,
             LlmPromptPart::Image(_) => panic!("expected text prompt"),
         };
 
         assert!(text.contains(r#"exec_command({"cmd":"date"})"#));
+    }
+
+    #[test]
+    fn render_transcript_prompt_appends_runtime_notes_before_continue_line() {
+        let msgs = vec![Message {
+            id: "m0".to_string(),
+            role: MessageRole::User,
+            parts: vec![part(PartKind::Text, "hi")],
+            origin: None,
+        }];
+
+        let rendered = render_transcript_prompt(&msgs, &["Archived note".to_string()]);
+        let text = match &rendered.user_prompt[0] {
+            LlmPromptPart::Text(text) => text,
+            LlmPromptPart::Image(_) => panic!("expected text prompt"),
+        };
+
+        let notes_idx = text
+            .find("Runtime Notes:\nArchived note")
+            .expect("runtime notes");
+        let continue_idx = text
+            .find("Continue from the latest turn as Lash.")
+            .expect("continue line");
+        assert!(notes_idx < continue_idx);
     }
 }

@@ -125,12 +125,10 @@ impl ClaudeOAuthAdapter {
         LlmUsage {
             input_tokens: Self::parse_i64(value.get("input_tokens")),
             output_tokens: Self::parse_i64(value.get("output_tokens")),
-            cached_input_tokens: Self::parse_i64(
-                value
-                    .get("cache_read_input_tokens")
-                    .or_else(|| value.get("cached_input_tokens"))
-                    .or_else(|| value.get("cached_tokens")),
-            ),
+            cached_input_tokens: Self::parse_i64(value.get("cache_read_input_tokens"))
+                + Self::parse_i64(value.get("cache_creation_input_tokens"))
+                + Self::parse_i64(value.get("cached_input_tokens"))
+                + Self::parse_i64(value.get("cached_tokens")),
             reasoning_tokens: Self::parse_i64(
                 value
                     .get("reasoning_tokens")
@@ -519,7 +517,7 @@ mod tests {
         let mut usage = LlmUsage::default();
 
         ClaudeOAuthAdapter::process_sse_event(
-            r#"{"type":"message_start","message":{"usage":{"input_tokens":120,"cache_read_input_tokens":80}}}"#,
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":120,"cache_read_input_tokens":80,"cache_creation_input_tokens":40}}}"#,
             &mut full,
             &mut deltas,
             &mut usage,
@@ -543,7 +541,7 @@ mod tests {
         assert_eq!(full, "Hello");
         assert_eq!(usage.input_tokens, 120);
         assert_eq!(usage.output_tokens, 12);
-        assert_eq!(usage.cached_input_tokens, 80);
+        assert_eq!(usage.cached_input_tokens, 120);
     }
 
     #[test]

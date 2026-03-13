@@ -1,8 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use lash_core::{AgentEvent, MessageRole, PluginMessage, Store, TokenUsage};
+use lash_core::{AgentEvent, MessageRole, PluginMessage, TokenUsage};
 
 use crate::activity::{
     ActivityBlock, ActivityKind, ActivityState, ActivityStatus, PatchFilePreview,
@@ -28,15 +27,6 @@ fn byte_pos_at_display_col(line: &str, target_col: usize) -> usize {
     line.len()
 }
 
-#[derive(Clone, Debug)]
-pub struct TaskSnapshot {
-    pub id: String,
-    pub label: String,
-    pub status: String,
-    pub owner: String,
-    pub is_blocked: bool,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginPanelBlock {
     pub plugin_id: String,
@@ -44,8 +34,6 @@ pub struct PluginPanelBlock {
     pub title: String,
     pub content: String,
 }
-
-pub const TASK_TRAY_TWO_COL_MIN_INNER_WIDTH: usize = 88;
 
 /// State for an active agent prompt dialog.
 pub struct PromptState {
@@ -414,6 +402,8 @@ pub struct App {
     pub token_usage: TokenUsage,
     /// Context window size for the current model (from models.dev).
     pub context_window: Option<u64>,
+    /// Whether provider-reported input tokens exclude cached prompt tokens.
+    pub context_usage_excludes_cached_input: bool,
     /// Active provider-native variant for the current model, if any.
     pub model_variant: Option<String>,
     /// Latest completed model usage for context accounting.
@@ -428,12 +418,6 @@ pub struct App {
     pub plugin_mode_indicators: BTreeMap<String, String>,
     /// Current working directory with ~ substitution.
     pub cwd: String,
-    /// Store handle for reading task data (shared with agent).
-    pub store: Option<Arc<Store>>,
-    /// Snapshots for the persistent task tray (bottom panel).
-    pub task_tray: Vec<TaskSnapshot>,
-    /// When all tasks completed — used for auto-dismiss countdown.
-    pub task_all_done_at: Option<std::time::Instant>,
     /// Active delegate sub-agent: (name, task description, started_at).
     pub active_delegate: Option<(String, String, std::time::Instant)>,
     /// Handle state used to derive semantic activity rows from raw tool calls.
@@ -465,6 +449,14 @@ impl App {
         self.status_started_at = None;
     }
 
+    fn mark_first_token_arrived(&mut self) {
+        if self.status_text.as_deref() == Some("thinking")
+            && self.status_detail.as_deref() == Some("waiting for first token")
+        {
+            self.set_status("responding", None, true);
+        }
+    }
+
     fn push_activity_block(&mut self, activity: ActivityBlock) {
         if let Some(DisplayBlock::Activity(existing)) = self.blocks.last_mut()
             && existing.kind == ActivityKind::Exploration
@@ -485,8 +477,7 @@ impl App {
         self.invalidate_height_cache();
     }
 
-    pub fn new(model: String, session_name: String, store: Option<Arc<Store>>) -> Self {
-        let context_window = lash_core::model_info::context_window(&model);
+    pub fn new(model: String, session_name: String) -> Self {
         let cwd = {
             let home = std::env::var("HOME").unwrap_or_default();
             let dir = std::env::current_dir()
@@ -541,7 +532,8 @@ impl App {
             prompt: None,
             focused: true,
             token_usage: TokenUsage::default(),
-            context_window,
+            context_window: None,
+            context_usage_excludes_cached_input: false,
             model_variant: None,
             last_response_usage: TokenUsage::default(),
             live_output_chars_estimate: 0,
@@ -549,9 +541,6 @@ impl App {
             session_name,
             plugin_mode_indicators: BTreeMap::new(),
             cwd,
-            store,
-            task_tray: Vec::new(),
-            task_all_done_at: None,
             active_delegate: None,
             activity_state: ActivityState::default(),
             mouse_captured: true,
@@ -637,6 +626,7 @@ impl App {
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::TextDelta { content } => {
+                self.mark_first_token_arrived();
                 self.live_output_chars_estimate += content.chars().count() as i64;
                 self.live_output_tokens_estimate =
                     estimate_tokens_from_char_count(self.live_output_chars_estimate);
@@ -685,9 +675,6 @@ impl App {
                     success,
                     duration_ms,
                 );
-                let has_task_activity = activities
-                    .iter()
-                    .any(|activity| activity.kind == ActivityKind::TaskAction);
                 if let Some(activity) = activities.last() {
                     let detail = activity.detail_lines.first().cloned();
                     self.set_status(activity.summary.clone(), detail, true);
@@ -699,9 +686,6 @@ impl App {
                 }
                 if let Some(content) = plan_content {
                     self.push_plan_content(content);
-                }
-                if has_task_activity {
-                    self.refresh_tasks();
                 }
                 self.scroll_to_bottom();
             }
@@ -968,7 +952,6 @@ impl App {
         self.streaming_output.clear();
         self.pending_steers.clear();
         self.queued_turns.clear();
-        self.task_tray.clear();
         self.active_delegate = None;
         self.activity_state.reset();
         self.token_usage = TokenUsage::default();
@@ -1047,130 +1030,6 @@ impl App {
             let clamped_skip = anchor_skip.min(new_block_height.saturating_sub(1));
             self.scroll_offset = new_block_start + clamped_skip;
         }
-    }
-
-    /// Refresh the task list display block from the Store.
-    pub fn refresh_tasks(&mut self) {
-        let store = match &self.store {
-            Some(s) => s,
-            None => return,
-        };
-
-        let all_tasks = store.list_tasks(None, None);
-        if all_tasks.is_empty() {
-            self.task_tray.clear();
-            self.invalidate_height_cache();
-            return;
-        }
-
-        let mut snapshots: Vec<TaskSnapshot> = all_tasks
-            .iter()
-            .map(|t| {
-                let is_blocked = !t.blocked_by.is_empty()
-                    && t.blocked_by.iter().any(|bid| {
-                        all_tasks.iter().any(|bt| {
-                            bt.id == *bid && bt.status != "completed" && bt.status != "cancelled"
-                        })
-                    });
-                let label = if t.status == "in_progress" && !t.active_form.is_empty() {
-                    t.active_form.clone()
-                } else {
-                    t.subject.clone()
-                };
-                TaskSnapshot {
-                    id: t.id.clone(),
-                    label,
-                    status: t.status.clone(),
-                    // "root" is the primary agent identity; showing it adds noise.
-                    owner: if t.owner == "root" {
-                        String::new()
-                    } else {
-                        t.owner.clone()
-                    },
-                    is_blocked,
-                }
-            })
-            .collect();
-
-        // Sort: in_progress first, then pending, then completed/cancelled. Within group, by ID.
-        snapshots.sort_by(|a, b| {
-            fn status_order(s: &str) -> u8 {
-                match s {
-                    "in_progress" => 0,
-                    "pending" => 1,
-                    "completed" => 2,
-                    "cancelled" => 3,
-                    _ => 4,
-                }
-            }
-            status_order(&a.status)
-                .cmp(&status_order(&b.status))
-                .then_with(|| a.id.cmp(&b.id))
-        });
-
-        // Track when all tasks become completed for auto-dismiss.
-        let all_done = snapshots
-            .iter()
-            .all(|t| t.status == "completed" || t.status == "cancelled");
-        if all_done {
-            if self.task_all_done_at.is_none() {
-                self.task_all_done_at = Some(std::time::Instant::now());
-            }
-        } else {
-            self.task_all_done_at = None;
-        }
-
-        self.task_tray = snapshots;
-        self.invalidate_height_cache();
-    }
-
-    /// Auto-dismiss the task tray 5s after all tasks complete. Returns true if dismissed.
-    pub fn maybe_dismiss_task_tray(&mut self) -> bool {
-        if let Some(done_at) = self.task_all_done_at
-            && done_at.elapsed() >= std::time::Duration::from_secs(5)
-        {
-            self.task_tray.clear();
-            self.task_all_done_at = None;
-            self.invalidate_height_cache();
-            return true;
-        }
-        false
-    }
-
-    /// Seconds remaining before the task tray auto-dismisses (None if not counting down).
-    pub fn task_dismiss_remaining(&self) -> Option<u64> {
-        self.task_all_done_at
-            .map(|done_at| 5u64.saturating_sub(done_at.elapsed().as_secs()))
-    }
-
-    /// Height of the persistent task tray (0 when empty, dynamic based on width).
-    /// Includes 1-line pad above, top/bottom borders, task rows, and optional progress bar.
-    pub fn task_tray_height(&self, width: u16) -> u16 {
-        if self.task_tray.is_empty() {
-            return 0;
-        }
-
-        let active: Vec<&TaskSnapshot> = self
-            .task_tray
-            .iter()
-            .filter(|t| t.status != "completed" && t.status != "cancelled")
-            .collect();
-
-        let task_rows = if active.is_empty() {
-            1 // "all completed" row
-        } else {
-            let inner_w = (width as usize).saturating_sub(4); // "│ " + content + " │"
-            let two_col = active.len() >= 4 && inner_w >= TASK_TRAY_TWO_COL_MIN_INNER_WIDTH;
-            if two_col {
-                active.len().div_ceil(2)
-            } else {
-                active.len()
-            }
-        };
-
-        let has_progress = self.task_tray.len() >= 2;
-        // 1 (pad) + 1 (top border) + task_rows + (1 if progress bar) + 1 (bottom border)
-        1 + 1 + task_rows as u16 + u16::from(has_progress) + 1
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
@@ -2029,7 +1888,7 @@ mod tests {
 
     #[test]
     fn text_delta_accumulates_raw() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         app.handle_agent_event(AgentEvent::TextDelta {
             content: "\n\nfirst\n".into(),
         });
@@ -2044,7 +1903,7 @@ mod tests {
 
     #[test]
     fn text_delta_code_fence_preserved() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         app.handle_agent_event(AgentEvent::TextDelta {
             content: "text\n\n```python\n".into(),
         });
@@ -2057,7 +1916,7 @@ mod tests {
 
     #[test]
     fn text_delta_updates_live_token_estimate() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         app.handle_agent_event(AgentEvent::LlmRequest {
             iteration: 0,
             message_count: 0,
@@ -2074,8 +1933,23 @@ mod tests {
     }
 
     #[test]
+    fn first_text_delta_clears_waiting_for_first_token_status() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.handle_agent_event(AgentEvent::LlmRequest {
+            iteration: 0,
+            message_count: 0,
+            tool_list: String::new(),
+        });
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: "hello".into(),
+        });
+        assert_eq!(app.status_text.as_deref(), Some("responding"));
+        assert_eq!(app.status_detail, None);
+    }
+
+    #[test]
     fn llm_request_sets_waiting_for_first_token_status() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         app.handle_agent_event(AgentEvent::LlmRequest {
             iteration: 0,
             message_count: 0,
@@ -2090,7 +1964,7 @@ mod tests {
 
     #[test]
     fn llm_request_flushes_intermediate_stream_text() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         app.handle_agent_event(AgentEvent::TextDelta {
             content: "Let me continue testing.".into(),
         });
@@ -2115,7 +1989,7 @@ mod tests {
 
     #[test]
     fn tool_call_flushes_intermediate_stream_text_immediately() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         app.blocks.clear();
 
         app.handle_agent_event(AgentEvent::TextDelta {
@@ -2140,7 +2014,7 @@ mod tests {
 
     #[test]
     fn token_usage_resets_live_token_estimate() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         app.handle_agent_event(AgentEvent::TextDelta {
             content: "abcdefgh".into(),
         });
@@ -2167,7 +2041,7 @@ mod tests {
 
     #[test]
     fn final_message_event_is_rendered() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         app.handle_agent_event(AgentEvent::Message {
             text: "final output".into(),
             kind: "final".into(),
@@ -2180,7 +2054,7 @@ mod tests {
 
     #[test]
     fn plugin_panel_events_upsert_and_clear_blocks() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         app.handle_agent_event(AgentEvent::PluginEvent {
             plugin_id: "plan_mode".into(),
             event: lash_core::PluginSurfaceEvent::PanelUpsert {
@@ -2209,7 +2083,7 @@ mod tests {
 
     #[test]
     fn cancelled_error_renders_as_system_message() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         app.handle_agent_event(AgentEvent::Error {
             message: "LLM error: cancelled".into(),
             envelope: Some(lash_core::agent::ErrorEnvelope {
@@ -2228,7 +2102,7 @@ mod tests {
 
     #[test]
     fn queued_turns_are_fifo_and_skip_pending_injections() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         app.queue_turn(QueuedTurn::new("queued-1".into(), Vec::new()));
         app.queue_turn(QueuedTurn::new("queued-2".into(), Vec::new()));
         app.queue_pending_steer(QueuedTurn::new("next-1".into(), Vec::new()));
@@ -2247,7 +2121,7 @@ mod tests {
 
     #[test]
     fn take_last_queued_turn_restores_explicit_queue_only() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         app.queue_pending_steer(QueuedTurn::new("next".into(), Vec::new()));
         app.queue_turn(QueuedTurn::new("queued".into(), vec![vec![1, 2, 3]]));
 
@@ -2262,7 +2136,7 @@ mod tests {
 
     #[test]
     fn injected_messages_commit_render_user_blocks_and_clear_pending_preview() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         let turn = QueuedTurn::new("follow up".into(), Vec::new());
         app.queue_pending_steer(turn.clone());
         app.preview_queued_turn(&turn, true);
@@ -2284,7 +2158,7 @@ mod tests {
 
     #[test]
     fn previewed_pending_user_turn_is_visible_immediately() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         let turn = QueuedTurn::new("follow up now".into(), Vec::new());
 
         app.queue_pending_steer(turn.clone());
@@ -2301,7 +2175,7 @@ mod tests {
 
     #[test]
     fn commit_pending_user_preview_promotes_existing_block() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         let turn = QueuedTurn::new("queued text".into(), Vec::new());
         app.preview_queued_turn(&turn, false);
 
@@ -2340,7 +2214,7 @@ mod tests {
 
     #[test]
     fn toggle_code_expand_preserves_scroll_position() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         // Remove the Splash block
         app.blocks.clear();
 
@@ -2416,7 +2290,7 @@ mod tests {
 
     #[test]
     fn toggle_code_expand_preserves_scroll_with_splash() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         // App starts with Splash at index 0 - keep it!
 
         // Add blocks after Splash
@@ -2472,7 +2346,7 @@ mod tests {
 
     #[test]
     fn toggle_code_expand_follow_output_stays_at_bottom() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         app.blocks.clear();
 
         app.blocks.push(DisplayBlock::UserInput("Message 1".into()));
@@ -2516,7 +2390,7 @@ mod tests {
 
     #[test]
     fn toggle_code_expand_stale_cache() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         app.blocks.clear();
 
         app.blocks.push(DisplayBlock::UserInput("Message 1".into()));
@@ -2562,7 +2436,7 @@ mod tests {
 
     #[test]
     fn handle_tool_call_merges_contiguous_exploration_activity() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         app.blocks.clear();
 
         app.handle_agent_event(AgentEvent::ToolCall {

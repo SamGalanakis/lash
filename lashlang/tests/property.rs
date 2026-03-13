@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use lashlang::{Record, Snapshot, State, ToolHost, ToolHostError, Value, execute, parse};
+use lashlang::{
+    ExecutionOutcome, Record, Snapshot, State, ToolHost, ToolHostError, Value, execute, parse,
+};
 use proptest::prelude::*;
 
 #[derive(Default)]
@@ -14,6 +16,13 @@ impl ToolHost for DeterministicHost {
             "fail" => Err(ToolHostError::new("fail")),
             _ => Err(ToolHostError::new(format!("unknown tool: {name}"))),
         }
+    }
+}
+
+fn finished(outcome: ExecutionOutcome) -> Value {
+    match outcome {
+        ExecutionOutcome::Finished(value) => value,
+        ExecutionOutcome::Continued => panic!("expected `finish`"),
     }
 }
 
@@ -46,13 +55,16 @@ impl GenValue {
             Self::Null => Value::Null,
             Self::Bool(value) => Value::Bool(*value),
             Self::Number(value) => Value::Number(*value as f64),
-            Self::String(value) => Value::String(value.clone()),
-            Self::List(values) => Value::List(values.iter().map(Self::to_value).collect()),
+            Self::String(value) => Value::String(value.clone().into()),
+            Self::List(values) => {
+                Value::List(values.iter().map(Self::to_value).collect::<Vec<_>>().into())
+            }
             Self::Record(entries) => Value::Record(
                 entries
                     .iter()
                     .map(|(key, value)| (key.clone(), value.to_value()))
-                    .collect(),
+                    .collect::<lashlang::Record>()
+                    .into(),
             ),
         }
     }
@@ -84,7 +96,24 @@ impl GenValue {
 }
 
 fn ident_strategy() -> impl Strategy<Value = String> {
-    ("[a-z_][a-z0-9_]{0,10}").prop_map(|s| s)
+    "[a-z_][a-z0-9_]{0,10}".prop_filter("reserved lashlang keyword", |ident| {
+        !matches!(
+            ident.as_str(),
+            "if" | "else"
+                | "for"
+                | "in"
+                | "parallel"
+                | "finish"
+                | "observe"
+                | "call"
+                | "true"
+                | "false"
+                | "null"
+                | "and"
+                | "or"
+                | "not"
+        )
+    })
 }
 
 fn gen_value_strategy() -> impl Strategy<Value = GenValue> {
@@ -155,8 +184,10 @@ proptest! {
         let host = DeterministicHost;
         let mut state = State::new();
 
-        let actual = execute(&source, &mut state, &host)
-            .expect("generated value program should execute");
+        let actual = finished(
+            execute(&source, &mut state, &host)
+                .expect("generated value program should execute")
+        );
 
         prop_assert_eq!(actual, expected.clone());
         prop_assert_eq!(state.globals().get(&ident), Some(&expected));
@@ -202,8 +233,10 @@ proptest! {
         let snapshot: Snapshot = serde_json::from_slice(&blob).expect("snapshot decode");
         restored = State::from_snapshot(snapshot);
 
-        let fresh_value = execute(&source, &mut fresh, &host).expect("fresh execution");
-        let restored_value = execute(&source, &mut restored, &host).expect("restored execution");
+        let fresh_value = finished(execute(&source, &mut fresh, &host).expect("fresh execution"));
+        let restored_value = finished(
+            execute(&source, &mut restored, &host).expect("restored execution")
+        );
 
         prop_assert_eq!(fresh_value, restored_value);
         prop_assert_eq!(fresh.globals(), restored.globals());
@@ -217,7 +250,7 @@ proptest! {
         let host = DeterministicHost;
         let mut state = State::new();
 
-        let result = execute(&source, &mut state, &host).expect("tool call should succeed");
+        let result = finished(execute(&source, &mut state, &host).expect("tool call should succeed"));
         let record = result.as_record().expect("tool result should be a record");
 
         prop_assert_eq!(record.get("ok"), Some(&Value::Bool(true)));
@@ -240,7 +273,7 @@ proptest! {
         let host = DeterministicHost;
         let mut state = State::new();
 
-        let actual = execute(&source, &mut state, &host).expect("ternary execution");
+        let actual = finished(execute(&source, &mut state, &host).expect("ternary execution"));
 
         prop_assert_eq!(actual, expected);
     }

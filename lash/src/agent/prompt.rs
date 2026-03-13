@@ -1,7 +1,8 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
 
 use crate::ExecutionMode;
+use crate::plugin::PromptContribution;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -150,10 +151,9 @@ pub struct PromptComposeInput<'a> {
     pub context: &'a str,
     pub tool_list: &'a str,
     pub tool_names: &'a [String],
-    pub has_history: bool,
     pub helper_bindings: &'a BTreeSet<String>,
-    pub capability_prompt_sections: &'a [String],
-    pub plugin_prompt_sections: &'a [String],
+    pub guide_sections: &'a [String],
+    pub plugin_prompt_contributions: &'a [PromptContribution],
     pub can_write: bool,
     pub include_soul: bool,
     pub project_instructions: &'a str,
@@ -179,21 +179,12 @@ fn memory_enabled(input: &PromptComposeInput<'_>) -> bool {
         })
 }
 
-fn skills_enabled(input: &PromptComposeInput<'_>) -> bool {
-    has_helper(input, "search_skills")
-        || input.tool_names.iter().any(|name| {
-            matches!(
-                name.as_str(),
-                "skills" | "load_skill" | "read_skill_file" | "search_skills"
-            )
-        })
-}
-
 pub fn compose_system_prompt(input: PromptComposeInput<'_>) -> String {
     let mut sections: HashMap<PromptSectionName, Option<String>> = HashMap::new();
     for section in PromptSectionName::ALL {
         sections.insert(section, default_section(section, &input));
     }
+    apply_prompt_contributions(&mut sections, input.plugin_prompt_contributions);
     apply_overrides(&mut sections, input.overrides);
 
     PromptSectionName::ALL
@@ -233,6 +224,31 @@ fn apply_overrides(
                 } else {
                     format!("{}\n\n{}", existing, ov.content)
                 });
+            }
+        }
+    }
+}
+
+fn apply_prompt_contributions(
+    sections: &mut HashMap<PromptSectionName, Option<String>>,
+    contributions: &[PromptContribution],
+) {
+    for contribution in contributions {
+        let content = contribution.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        let entry = sections.entry(contribution.section).or_insert(None);
+        match entry {
+            Some(existing) if existing.trim().is_empty() => {
+                *existing = content.to_string();
+            }
+            Some(existing) => {
+                existing.push_str("\n\n");
+                existing.push_str(content);
+            }
+            None => {
+                *entry = Some(content.to_string());
             }
         }
     }
@@ -294,7 +310,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
         PromptSectionName::ExecutionContract => Some(format!(
             "{}\n{}",
             if matches!(input.execution_mode, ExecutionMode::Repl) {
-                "## Execution Contract\n\nYour output can include prose and `<repl>` blocks.\n- Use prose only when no execution is needed\n- `<repl>` executes immediately when `</repl>` is reached\n- After you use `<repl>`, continue until you end with `finish ...`\n- Do not assume prose after `</repl>` is user-visible unless you pass it via `finish ...`\n- Maximum one `<repl>` block per response\n- For direct conversational requests that need no tools, respond in prose only\n- The REPL has no `print`; use `observe expr` for intermediate inspection and `finish \"...\"` for the final answer\n- Prefer small REPL blocks over giant one-shot programs\n- Validate one or two steps, inspect intermediate outputs, then extend the workflow\n- Only `observe expr` creates intermediate execution feedback for the next model step; ordinary assignments are silent\n- The user should see only final prose or `finish ...` output, not intermediate observations\n\n### REPL Language\n\nThe REPL is `lashlang`, a small workflow language for tool orchestration.\n- Values are null, booleans, numbers, strings, lists, and records\n- Assign with `name = expr`\n- Call tools with `call tool_name { arg: expr }`\n- Use `observe expr` to inspect a value without ending execution\n- Control flow is limited to statement `if`, `for`, `parallel`, and `finish`\n- Use ternary expressions for inline branching: `cond ? yes : no`\n- Boolean negation supports both `!cond` and `not cond`\n- Boolean conjunction/disjunction support both `&&` / `||` and `and` / `or`\n- Tool results are records like `{ ok: true, value: ... }` or `{ ok: false, error: ... }`\n- Access the wrapped payload via `.value` only when `result.ok` is true\n- Do not assume every `value` is a record: many tools return strings, numbers, or lists directly\n- There are no imports, classes, methods, exceptions, comprehensions, or arbitrary standard library access\n- Use builtins like `len(...)`, `empty(...)`, `contains(...)`, `slice(...)`, `json_parse(...)`, and `format(...)`\n- `format(value)` stringifies a single value; `format(\"...\", args...)` formats with placeholders\n- String `+` concatenation auto-stringifies when either side is already a string\n- `format(...)` already stringifies records/lists/errors for display; do not wrap values in `json_stringify(...)`\n- If you need unsupported features, use the appropriate host tool instead of emulating them inside the REPL"
+                "## Execution Contract\n\nYour output can include prose and `<repl>` blocks.\n- Use prose only when no execution is needed\n- `<repl>` executes immediately when `</repl>` is reached\n- `finish expr` ends the turn, even when the value renders as empty text\n- `observe expr` does not end the turn; it sends hidden feedback to the next model step\n- A `<repl>` block may also do work silently and continue without `finish` or `observe`\n- Do not assume prose after `</repl>` is user-visible unless you pass it via `finish ...`\n- Maximum one `<repl>` block per response\n- For direct conversational requests that need no tools, respond in prose only\n- The REPL has no `print`; use `observe expr` for intermediate inspection and `finish ...` for the final answer\n- Prefer small REPL blocks over giant one-shot programs\n- Validate one or two steps, inspect intermediate outputs, then extend the workflow\n- Only `observe expr` creates intermediate execution feedback for the next model step; ordinary assignments are silent\n- The user should see only final prose or `finish ...` output, not intermediate observations\n\n### REPL Language\n\nThe REPL is `lashlang`, a small workflow language for tool orchestration.\n- Values are null, booleans, numbers, strings, lists, and records\n- Assign with `name = expr`\n- Call tools with `call tool_name { arg: expr }`\n- Use `observe expr` to inspect a value and continue execution\n- Use `finish expr` to end the turn and return a final answer\n- Control flow is limited to statement `if`, `for`, `parallel`, and `finish`\n- Use ternary expressions for inline branching: `cond ? yes : no`\n- Boolean negation supports both `!cond` and `not cond`\n- Boolean conjunction/disjunction support both `&&` / `||` and `and` / `or`\n- Tool results are records like `{ ok: true, value: ... }` or `{ ok: false, error: ... }`\n- Access the wrapped payload via `.value` only when `result.ok` is true\n- Do not assume every `value` is a record: many tools return strings, numbers, or lists directly\n- There are no imports, classes, methods, exceptions, comprehensions, or arbitrary standard library access\n- Use builtins like `len(...)`, `empty(...)`, `contains(...)`, `slice(...)`, `json_parse(...)`, and `format(...)`\n- `format(value)` stringifies a single value; `format(\"...\", args...)` formats with placeholders\n- String `+` concatenation auto-stringifies when either side is already a string\n- `format(...)` already stringifies records/lists/errors for display; do not wrap values in `json_stringify(...)`\n- If you need unsupported features, use the appropriate host tool instead of emulating them inside the REPL"
             } else {
                 "## Execution Contract\n\nUse direct tool calls when execution is needed.\n- Do not emit `<repl>` blocks or Python code\n- Call tools directly with valid arguments\n- Group independent tool calls in the same response; serialize only when later arguments depend on earlier results\n- Avoid filler prose between tool calls\n- Keep going until the task is complete; do not stop after inspection or partial progress\n- If you are unsure, inspect or validate more instead of guessing\n- For direct conversational requests that need no tools, respond in prose only"
             },
@@ -302,7 +318,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
                 if profile.is_headless() {
                     "- In headless mode, prose-only turns are invalid; execute via `<repl>`"
                 } else {
-                    "- In interactive mode, prose-only is fine only if you never opened `<repl>`; after any REPL execution, finish with `finish ...`"
+                    "- In interactive mode, prose-only is fine only if you never opened `<repl>`; after REPL execution, use `observe ...` to continue or `finish ...` when your final answer is ready"
                 }
             } else if profile.is_headless() {
                 "- In headless mode, keep calling tools until the task is complete, then return a final answer without extra commentary."
@@ -321,7 +337,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
                 if profile.is_headless() {
                     "- Headless: call `finish ...` only after the task is fully completed"
                 } else {
-                    "- Interactive: after any REPL execution, call `finish ...` only when your final user-facing answer is ready"
+                    "- Interactive: `finish ...` ends the turn; otherwise the turn may continue after `observe ...` or silent REPL work"
                 }
             } else if profile.is_headless() {
                 "- Headless: do not stop on prose-only intermediate steps."
@@ -331,30 +347,21 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
         )),
         PromptSectionName::ToolAccess => Some(
             if matches!(input.execution_mode, ExecutionMode::Repl) {
-                "## Tool Access\n\n- Call tools as `call tool_name { arg: expr }`\n- Tool results are wrapped records; read `result.ok`, `result.value`, and `result.error`\n- Interactive prompting is available as `call ask { question: \"...\", options: [\"a\", \"b\"] }`\n- There is no `T` namespace, no imports, no methods, and no wrapper classes; work with plain records/lists/primitives\n- Use `parallel { ... }` for independent tool calls"
+                "## Tool Access\n\n- Call tools as `call tool_name { arg: expr }`\n- Tool results are wrapped records; read `result.ok`, `result.value`, and `result.error`\n- There is no `T` namespace, no imports, no methods, and no wrapper classes; work with plain records/lists/primitives\n- Use `parallel { ... }` for independent tool calls"
                     .to_string()
             } else {
                 "## Tool Access\n\n- The runtime exposes only the listed tools\n- Use only tools shown in Available Tools\n- Group independent calls in one response when the provider supports it\n- Good fits: reading several files, multiple searches, and unrelated diagnostics\n- Do not parallelize dependent steps or ordered stateful work\n- Never invent tool names or arguments".to_string()
             },
         ),
         PromptSectionName::ToolGuides => {
-            let guide = tool_guides(
-                input.tool_names,
-                history_enabled(input),
-                memory_enabled(input),
-                skills_enabled(input),
-                input.capability_prompt_sections,
-            );
-            if guide.is_empty() {
+            let guides = render_guide_sections(input.guide_sections);
+            if guides.is_empty() {
                 None
             } else {
-                Some(format!("## Tool Guide\n\n{}", guide))
+                Some(format!("## Tool Guide\n\n{}", guides))
             }
         }
-        PromptSectionName::AvailableTools => Some(format!(
-            "## Available Tools\n\n{}\n\nUse the discovery utilities available in this environment to rediscover signatures and descriptions when needed.",
-            input.tool_list
-        )),
+        PromptSectionName::AvailableTools => Some(format!("## Available Tools\n\n{}", input.tool_list)),
         PromptSectionName::ErrorRecovery => Some(
             if matches!(input.execution_mode, ExecutionMode::Repl) {
                 "## Error Recovery\n\nTool failures return error records from `call`.\n- Inspect `result.ok` / `result.error` and fix the cause before retrying\n- Do not repeat failing calls unchanged\n- If a REPL program fails, shrink the block, use `observe expr` on the next uncertain value, and rerun a smaller `<repl>` block before expanding again\n- When a workflow is uncertain, validate the next small step instead of writing the whole program at once"
@@ -371,7 +378,6 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
                     input.tool_names,
                     history_enabled(input),
                     memory_enabled(input),
-                    skills_enabled(input),
                 ))
             } else {
                 None
@@ -382,7 +388,6 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
             let memory_enabled = memory_enabled(input);
             if history_enabled || memory_enabled {
                 Some(memory_section(
-                    input.has_history,
                     profile.is_subagent(),
                     history_enabled,
                     memory_enabled,
@@ -408,19 +413,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
                 ))
             }
         }
-        PromptSectionName::PluginExtensions => {
-            let sections: Vec<String> = input
-                .plugin_prompt_sections
-                .iter()
-                .map(|section| section.trim().to_string())
-                .filter(|section| !section.is_empty())
-                .collect();
-            if sections.is_empty() {
-                None
-            } else {
-                Some(sections.join("\n\n"))
-            }
-        }
+        PromptSectionName::PluginExtensions => None,
         PromptSectionName::Guidelines => Some(format!(
             "## Guidelines\n\n- Bias toward concrete execution over planning chatter\n- Keep going until the request is resolved; do not stop at reconnaissance when a concrete deliverable is requested\n- Validate the smallest relevant thing first, then broaden if needed\n- Do not fix unrelated failures uncovered during validation; report them instead\n- For substantial scripts/workflows, create files and run them with host tooling\n- Use isolated environments only when required dependencies are missing\n- Avoid redundant file reads when values already exist in variables\n- Never speculate about files you have not read\n- Be concise and action-oriented\n{}\n{}",
             if !input.can_write {
@@ -442,7 +435,6 @@ fn builtins_section(
     _tool_names: &[String],
     _history_enabled: bool,
     _memory_enabled: bool,
-    _skills_enabled: bool,
 ) -> String {
     let mut lines = vec![
         "## Runtime Globals".to_string(),
@@ -450,21 +442,21 @@ fn builtins_section(
         "- `observe expr`".to_string(),
         "- `finish expr`".to_string(),
     ];
-    if profile.is_headless() {
-        lines.push("- `call ask { ... }` is unavailable in headless mode".to_string());
-    } else {
-        lines.push("- `call ask { question: \"...\", options: [...] }`".to_string());
-    }
+    let _ = profile;
     lines.push("- Builtins: `len`, `empty`, `contains`, `slice`, `json_parse`, `format`, `to_string`, `to_int`, `to_float`".to_string());
     lines.join("\n")
 }
 
-fn memory_section(
-    has_history: bool,
-    is_subagent: bool,
-    history_enabled: bool,
-    memory_enabled: bool,
-) -> String {
+fn render_guide_sections(sections: &[String]) -> String {
+    sections
+        .iter()
+        .map(|section| section.trim())
+        .filter(|section| !section.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn memory_section(is_subagent: bool, history_enabled: bool, memory_enabled: bool) -> String {
     let title = if history_enabled && memory_enabled {
         "## Memory & History"
     } else if memory_enabled {
@@ -479,12 +471,6 @@ fn memory_section(
                 .to_string(),
         );
         lines.push("- Retrieve memory with `mem_get`, `mem_all`, and `search_mem`".to_string());
-    }
-    if history_enabled && has_history {
-        lines.push(
-            "- Pruned prior turns can be searched with `search_history` when older context matters"
-                .to_string(),
-        );
     }
     if is_subagent {
         if history_enabled && memory_enabled {
@@ -519,109 +505,12 @@ fn memory_api_section() -> String {
     .join("\n")
 }
 
-fn tool_guides(
-    tool_names: &[String],
-    history_enabled: bool,
-    memory_enabled: bool,
-    skills_enabled: bool,
-    dynamic_prompt_sections: &[String],
-) -> String {
-    let tools: HashSet<&str> = tool_names.iter().map(String::as_str).collect();
-    let mut chunks = Vec::new();
-
-    if tools.contains("ls") || tools.contains("read_file") || tools.contains("glob") {
-        chunks.push(
-            "**Orient -> Read -> Act**\n1. Use `ls` / `glob` and inspect `result.items` (each item has `path`, `kind`, `size_bytes`, `modified_at`, optional `lines`)\n2. Use `read_file` / `grep` for content-level context before mutating files\n3. Apply focused changes only after you understand the surrounding code"
-                .to_string(),
-        );
-    }
-    if tools.contains("read_file") {
-        chunks.push(
-            "**Image reads**\nIf `read_file` on an image returns an `[Image: ...]` marker, that marker is metadata only. Use the attached image context to describe what is visibly present; do not just repeat the marker text."
-                .to_string(),
-        );
-    }
-    if tools.contains("glob") {
-        chunks.push(
-            "**glob/ls output**\n`glob` and `ls` both return `{ \"__type__\": \"path_entries\", \"items\": [...], \"truncated\": ... }`. Read paths from `result.items`, not `result.entries`. `glob` sorts `items` by modification time (newest first); `ls` sorts `items` alphabetically by path. If `truncated` is non-null, rerun with `limit=None` when needed."
-                .to_string(),
-        );
-    }
-    if tools.contains("shell") || tools.contains("exec_command") {
-        chunks.push(
-            "**Git safety**\nDo not revert user changes you did not make. Avoid destructive git commands unless explicitly requested."
-                .to_string(),
-        );
-    }
-    if tools.contains("shell") {
-        chunks.push(
-            "**REPL shell shapes**\n`call shell { ... }` returns a handle record in `result.value` with an `id` field. `call shell_wait { id: handle.value.id }` returns the command output as a plain string in `result.value`, not `{ stdout: ... }`. Example:\n`proc = call shell { command: \"date\" }`\n`out = call shell_wait { id: proc.value.id }`\n`finish format(\"It is {0}\", out.value)`"
-                .to_string(),
-        );
-    }
-    if tools.contains("ask") {
-        chunks.push(
-            "**Interactive ask**\n`call ask { question: \"...\", options: [...] }` pauses execution and shows a real interactive prompt to the user. It still returns the normal wrapped tool result, so on success read the answer from `result.value`. Example:\n`resp = call ask { question: \"Deploy where?\", options: [\"staging\", \"prod\"] }`\n`finish(resp.ok ? format(\"Deploying to {0}\", resp.value) : format(\"Prompt failed: {0}\", resp.error))`"
-                .to_string(),
-        );
-    }
-    if tools.contains("delegate_task")
-        || tools.contains("delegate_deep")
-        || tools.contains("delegate_search")
-    {
-        chunks.push(
-            "**Delegation tiers**\nUse low-cost delegates for read-only lookup/summarization tasks, and stronger delegates for edits/refactors. Avoid concurrent delegates editing the same file."
-                .to_string(),
-        );
-    }
-    if tools.contains("agent_call") {
-        let heading = if history_enabled || memory_enabled {
-            "History recall pattern"
-        } else {
-            "Context recall pattern"
-        };
-        let recall_line = if history_enabled && memory_enabled {
-            "When prior context likely matters, use a low-intelligence (read-only) `agent_call` to summarize relevant `search_history` / memory results quickly, then continue execution."
-        } else if history_enabled {
-            "When prior context likely matters, use a low-intelligence (read-only) `agent_call` to summarize relevant `search_history` results quickly, then continue execution."
-        } else if memory_enabled {
-            "When prior context likely matters, use a low-intelligence (read-only) `agent_call` to summarize relevant memory results quickly, then continue execution."
-        } else {
-            "When prior context likely matters, use a low-intelligence (read-only) `agent_call` to summarize relevant context quickly, then continue execution."
-        };
-        chunks.push(
-            format!(
-                "**{}**\n{}\nDo not delegate straightforward local file/image inspection that you can do directly with available tools.",
-                heading,
-                recall_line
-            ),
-        );
-        chunks.push(
-            "**Agent lifecycle**\n`agent_result(id)` blocks until the agent finishes and returns its final result. The agent ID remains valid afterwards — you can call `agent_result` again or use `agent_kill` to clean up. Delegate progress is surfaced by the runtime/UI rather than through a separate tool call."
-                .to_string(),
-        );
-    }
-    if tools.contains("create_task") || tools.contains("start_task") {
-        chunks.push(
-            "**Task management**\nFor multi-step work: create tasks, keep one in progress, and mark completion immediately. Use `start_task(subject=...)` for work you are starting now; use `claim_task(...)` only when adopting an existing queued task. Use `update_task(...)` to mark completion or other state changes. Valid statuses are `pending`, `in_progress`, `completed`, and `cancelled`."
-                .to_string(),
-        );
-    }
-    if tools.contains("agent_call") || skills_enabled {
-        for section in dynamic_prompt_sections {
-            if !section.trim().is_empty() {
-                chunks.push(section.clone());
-            }
-        }
-    }
-    chunks.join("\n\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::capabilities::{
-        AgentCapabilities, CapabilityId, capability_def, helper_bindings_for_capability,
+        AgentCapabilities, CapabilityId, helper_bindings_for_capability,
+        prompt_sections_for_capabilities,
     };
 
     fn helpers_for(caps: &AgentCapabilities) -> BTreeSet<String> {
@@ -635,10 +524,21 @@ mod tests {
     }
 
     fn prompt_sections_for(caps: &AgentCapabilities) -> Vec<String> {
-        caps.enabled_capabilities
+        let available_tools = caps
+            .enabled_capabilities
             .iter()
-            .filter_map(|id| capability_def(*id).and_then(|d| d.prompt_section.map(str::to_string)))
-            .collect()
+            .flat_map(|id| {
+                crate::capabilities::tools_for_capability(*id)
+                    .iter()
+                    .copied()
+            })
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        prompt_sections_for_capabilities(
+            &caps.enabled_capabilities,
+            &helpers_for(caps),
+            &available_tools,
+        )
     }
 
     fn can_write(caps: &AgentCapabilities) -> bool {
@@ -678,10 +578,9 @@ mod tests {
             context: "ctx",
             tool_list: "tools",
             tool_names: &[],
-            has_history: false,
             helper_bindings: &helpers_for(&AgentCapabilities::default()),
-            capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
-            plugin_prompt_sections: &[],
+            guide_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            plugin_prompt_contributions: &[],
             can_write: can_write(&AgentCapabilities::default()),
             include_soul: false,
             project_instructions: "",
@@ -705,10 +604,9 @@ mod tests {
             context: "ctx",
             tool_list: "tools",
             tool_names: &[],
-            has_history: false,
             helper_bindings: &helper_bindings,
-            capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
-            plugin_prompt_sections: &[],
+            guide_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            plugin_prompt_contributions: &[],
             can_write: can_write(&AgentCapabilities::default()),
             include_soul: false,
             project_instructions: "",
@@ -738,10 +636,9 @@ mod tests {
             context: "ctx",
             tool_list: "tools",
             tool_names: &[],
-            has_history: false,
             helper_bindings: &helper_bindings,
-            capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
-            plugin_prompt_sections: &[],
+            guide_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            plugin_prompt_contributions: &[],
             can_write: can_write(&AgentCapabilities::default()),
             include_soul: false,
             project_instructions: "",
@@ -762,10 +659,9 @@ mod tests {
                 "agent_call".to_string(),
                 "ask".to_string(),
             ],
-            has_history: false,
             helper_bindings: &helpers_for(&AgentCapabilities::default()),
-            capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
-            plugin_prompt_sections: &[],
+            guide_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            plugin_prompt_contributions: &[],
             can_write: can_write(&AgentCapabilities::default()),
             include_soul: false,
             project_instructions: "",
@@ -787,36 +683,77 @@ mod tests {
             )
         );
         assert!(text.contains("Use `parallel { ... }` for independent tool calls"));
-        assert!(text.contains("`call shell { ... }` returns a handle record"));
+        assert!(!text.contains("The runtime exposes only the listed tools"));
+    }
+
+    #[test]
+    fn repl_prompt_explains_observe_vs_finish_in_interactive_mode() {
+        let text = compose_system_prompt(PromptComposeInput {
+            profile: PromptProfile::RootInteractive,
+            execution_mode: crate::ExecutionMode::Repl,
+            context: "ctx",
+            tool_list: "tools",
+            tool_names: &["search_tools".to_string()],
+            helper_bindings: &helpers_for(&AgentCapabilities::default()),
+            guide_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            plugin_prompt_contributions: &[],
+            can_write: can_write(&AgentCapabilities::default()),
+            include_soul: false,
+            project_instructions: "",
+            overrides: &[],
+        });
         assert!(text.contains(
-            "`call shell_wait { id: handle.value.id }` returns the command output as a plain string"
+            "use `observe ...` to continue or `finish ...` when your final answer is ready"
         ));
-        assert!(text.contains("`call ask { question: \"...\", options: [...] }` pauses execution"));
-        assert!(text.contains("on success read the answer from `result.value`"));
-        assert!(text.contains("Do not revert user changes you did not make"));
+        assert!(text.contains("`finish ...` ends the turn; otherwise the turn may continue"));
+        assert!(text.contains("## Available Tools"));
     }
 
     #[test]
     fn skills_not_mentioned_when_skills_capability_disabled() {
         let caps = AgentCapabilities::default().disable(CapabilityId::Skills);
-        let tools = vec!["load_skill".to_string(), "skills".to_string()];
+        let tools = vec!["load_skill".to_string(), "search_skills".to_string()];
         let text = compose_system_prompt(PromptComposeInput {
             profile: PromptProfile::RootInteractive,
             execution_mode: crate::ExecutionMode::Repl,
             context: "ctx",
             tool_list: "tools",
             tool_names: &tools,
-            has_history: false,
             helper_bindings: &helpers_for(&caps),
-            capability_prompt_sections: &prompt_sections_for(&caps),
-            plugin_prompt_sections: &[],
+            guide_sections: &prompt_sections_for(&caps),
+            plugin_prompt_contributions: &[],
             can_write: can_write(&caps),
             include_soul: false,
             project_instructions: "",
             overrides: &[],
         });
         assert!(!text.contains("search_skills("));
-        assert!(!text.contains("## Skills"));
+        assert!(!text.contains("### Skills"));
+    }
+
+    #[test]
+    fn guide_sections_render_inside_tool_guide_section() {
+        let guides = vec![
+            "### First Guide\nFirst details.".to_string(),
+            "### Second Guide\nSecond details.".to_string(),
+        ];
+        let text = compose_system_prompt(PromptComposeInput {
+            profile: PromptProfile::RootInteractive,
+            execution_mode: crate::ExecutionMode::Repl,
+            context: "ctx",
+            tool_list: "tools",
+            tool_names: &[],
+            helper_bindings: &helpers_for(&AgentCapabilities::default()),
+            guide_sections: &guides,
+            plugin_prompt_contributions: &[],
+            can_write: can_write(&AgentCapabilities::default()),
+            include_soul: false,
+            project_instructions: "",
+            overrides: &[],
+        });
+        assert!(text.contains("## Tool Guide"));
+        assert!(text.contains("### First Guide"));
+        assert!(text.contains("Second details."));
     }
 
     #[test]
@@ -828,10 +765,9 @@ mod tests {
             context: "ctx",
             tool_list: "tools",
             tool_names: &[],
-            has_history: false,
             helper_bindings: &helpers_for(&caps),
-            capability_prompt_sections: &prompt_sections_for(&caps),
-            plugin_prompt_sections: &[],
+            guide_sections: &prompt_sections_for(&caps),
+            plugin_prompt_contributions: &[],
             can_write: can_write(&caps),
             include_soul: false,
             project_instructions: "",
@@ -851,10 +787,9 @@ mod tests {
             context: "ctx",
             tool_list: "tools",
             tool_names: &["agent_call".to_string()],
-            has_history: false,
             helper_bindings: &helpers_for(&caps),
-            capability_prompt_sections: &sections,
-            plugin_prompt_sections: &[],
+            guide_sections: &sections,
+            plugin_prompt_contributions: &[],
             can_write: can_write(&caps),
             include_soul: false,
             project_instructions: "",
@@ -872,10 +807,9 @@ mod tests {
             context: "ctx",
             tool_list: "tools",
             tool_names: &[],
-            has_history: false,
             helper_bindings: &helpers_for(&AgentCapabilities::default()),
-            capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
-            plugin_prompt_sections: &[],
+            guide_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            plugin_prompt_contributions: &[],
             can_write: can_write(&AgentCapabilities::default()),
             include_soul: false,
             project_instructions: "",
@@ -894,10 +828,9 @@ mod tests {
             context: "ctx",
             tool_list: "tools",
             tool_names: &["ask".to_string()],
-            has_history: false,
             helper_bindings: &helpers_for(&AgentCapabilities::default()),
-            capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
-            plugin_prompt_sections: &[],
+            guide_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            plugin_prompt_contributions: &[],
             can_write: can_write(&AgentCapabilities::default()),
             include_soul: false,
             project_instructions: "",
@@ -917,10 +850,9 @@ mod tests {
             context: "ctx",
             tool_list: "tools",
             tool_names: &[],
-            has_history: false,
             helper_bindings: &helpers_for(&AgentCapabilities::default()),
-            capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
-            plugin_prompt_sections: &[],
+            guide_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            plugin_prompt_contributions: &[],
             can_write: can_write(&AgentCapabilities::default()),
             include_soul: false,
             project_instructions: "",
@@ -940,10 +872,9 @@ mod tests {
             context: "ctx",
             tool_list: "tools",
             tool_names: &["read_file".to_string()],
-            has_history: true,
             helper_bindings: &helpers_for(&AgentCapabilities::default()),
-            capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
-            plugin_prompt_sections: &[],
+            guide_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            plugin_prompt_contributions: &[],
             can_write: can_write(&AgentCapabilities::default()),
             include_soul: true,
             project_instructions: "project rules",
@@ -966,10 +897,9 @@ mod tests {
             context: "ctx",
             tool_list: "tools",
             tool_names: &[],
-            has_history: true,
             helper_bindings: &helpers_for(&AgentCapabilities::default()),
-            capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
-            plugin_prompt_sections: &[],
+            guide_sections: &prompt_sections_for(&AgentCapabilities::default()),
+            plugin_prompt_contributions: &[],
             can_write: can_write(&AgentCapabilities::default()),
             include_soul: false,
             project_instructions: "",

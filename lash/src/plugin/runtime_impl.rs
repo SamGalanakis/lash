@@ -25,6 +25,7 @@ pub struct PluginRegistrar {
     capability_defs: BTreeMap<String, DynamicCapabilityDef>,
     prompt_sections: Vec<String>,
     prompt_contributors: Vec<PromptContributor>,
+    turn_prompt_contributors: Vec<RegisteredHook<TurnPromptContributor>>,
     before_turn_hooks: Vec<RegisteredHook<BeforeTurnHook>>,
     before_tool_call_hooks: Vec<RegisteredHook<BeforeToolCallHook>>,
     after_tool_call_hooks: Vec<RegisteredHook<AfterToolCallHook>>,
@@ -49,6 +50,7 @@ impl PluginRegistrar {
             capability_defs: BTreeMap::new(),
             prompt_sections: Vec::new(),
             prompt_contributors: Vec::new(),
+            turn_prompt_contributors: Vec::new(),
             before_turn_hooks: Vec::new(),
             before_tool_call_hooks: Vec::new(),
             after_tool_call_hooks: Vec::new(),
@@ -102,6 +104,16 @@ impl PluginRegistrar {
 
     pub fn register_prompt_contributor(&mut self, contributor: PromptContributor) {
         self.prompt_contributors.push(contributor);
+    }
+
+    pub fn register_turn_prompt_contributor(&mut self, contributor: TurnPromptContributor) {
+        self.turn_prompt_contributors.push(RegisteredHook {
+            plugin_id: self
+                .registering_plugin_id
+                .clone()
+                .unwrap_or_else(|| "__unknown__".to_string()),
+            hook: contributor,
+        });
     }
 
     pub fn before_turn(&mut self, hook: BeforeTurnHook) {
@@ -280,6 +292,7 @@ impl PluginHost {
             capability_defs: reg.capability_defs,
             prompt_sections: reg.prompt_sections,
             prompt_contributors: reg.prompt_contributors,
+            turn_prompt_contributors: reg.turn_prompt_contributors,
             before_turn_hooks: reg.before_turn_hooks,
             before_tool_call_hooks: reg.before_tool_call_hooks,
             after_tool_call_hooks: reg.after_tool_call_hooks,
@@ -372,6 +385,7 @@ pub struct PluginSession {
     capability_defs: BTreeMap<String, DynamicCapabilityDef>,
     prompt_sections: Vec<String>,
     prompt_contributors: Vec<PromptContributor>,
+    turn_prompt_contributors: Vec<RegisteredHook<TurnPromptContributor>>,
     before_turn_hooks: Vec<RegisteredHook<BeforeTurnHook>>,
     before_tool_call_hooks: Vec<RegisteredHook<BeforeToolCallHook>>,
     after_tool_call_hooks: Vec<RegisteredHook<AfterToolCallHook>>,
@@ -441,6 +455,27 @@ impl PluginSession {
                 .cmp(b.section.as_str())
                 .then(a.priority.cmp(&b.priority))
         });
+        Ok(out)
+    }
+
+    pub async fn collect_turn_prompt_contributions(
+        &self,
+        ctx: TurnHookContext,
+    ) -> Result<Vec<TurnPromptContribution>, PluginError> {
+        let mut out = Vec::new();
+        for registered in &self.turn_prompt_contributors {
+            for contribution in (registered.hook)(ctx.clone()).await? {
+                let content = contribution.content.trim().to_string();
+                if content.is_empty() {
+                    continue;
+                }
+                out.push(TurnPromptContribution {
+                    priority: contribution.priority,
+                    content,
+                });
+            }
+        }
+        out.sort_by(|a, b| a.priority.cmp(&b.priority));
         Ok(out)
     }
 

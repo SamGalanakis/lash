@@ -1,10 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ops::{Add, Sub};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::capabilities::{CapabilityId, tools_for_capability};
-use crate::{ExecutionMode, ProgressSender, ToolDefinition, ToolProvider, ToolResult};
+use crate::{
+    ExecutionMode, ProgressSender, ToolDefinition, ToolPromptContext, ToolProvider, ToolResult,
+};
 
 /// Dependencies for constructing the default tool set.
 #[derive(Default)]
@@ -59,8 +61,7 @@ impl ToolSet {
         }
 
         #[cfg(feature = "sqlite-store")]
-        if let Some(ref store) = deps.store {
-            set = set + super::TaskStore::new(Arc::clone(store));
+        if deps.store.is_some() {
             set = set + super::StateStore::new(deps.skill_dirs.clone().unwrap_or_default());
         }
 
@@ -97,6 +98,31 @@ impl ToolSet {
                 .insert(def.name.clone(), (def, Arc::clone(&provider)));
         }
         self
+    }
+
+    fn prompt_guides_for(&self, context: &ToolPromptContext) -> Vec<String> {
+        let mut seen_providers = HashSet::new();
+        let mut seen_guides = HashSet::new();
+        let mut guides = Vec::new();
+
+        for (_, provider) in self.tools.values() {
+            let key = Arc::as_ptr(provider) as *const ();
+            if !seen_providers.insert(key) {
+                continue;
+            }
+            for guide in provider
+                .prompt_guides(context)
+                .into_iter()
+                .map(|guide| guide.trim().to_string())
+                .filter(|guide| !guide.is_empty())
+            {
+                if seen_guides.insert(guide.clone()) {
+                    guides.push(guide);
+                }
+            }
+        }
+
+        guides
     }
 }
 
@@ -152,6 +178,10 @@ impl Sub<CapabilityId> for ToolSet {
 impl ToolProvider for ToolSet {
     fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools.values().map(|(def, _)| def.clone()).collect()
+    }
+
+    fn prompt_guides(&self, context: &ToolPromptContext) -> Vec<String> {
+        self.prompt_guides_for(context)
     }
 
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
@@ -253,6 +283,46 @@ mod tests {
         }
         async fn execute(&self, name: &str, _args: &serde_json::Value) -> ToolResult {
             ToolResult::ok(serde_json::json!(format!("{name}_result")))
+        }
+    }
+
+    struct MockGuides;
+
+    #[async_trait::async_trait]
+    impl ToolProvider for MockGuides {
+        fn definitions(&self) -> Vec<ToolDefinition> {
+            vec![
+                ToolDefinition {
+                    name: "guide_a".into(),
+                    description: vec![],
+                    params: vec![],
+                    returns: "str".into(),
+                    examples: vec![],
+                    hidden: false,
+                    inject_into_prompt: true,
+                },
+                ToolDefinition {
+                    name: "guide_b".into(),
+                    description: vec![],
+                    params: vec![],
+                    returns: "str".into(),
+                    examples: vec![],
+                    hidden: false,
+                    inject_into_prompt: true,
+                },
+            ]
+        }
+
+        fn prompt_guides(&self, context: &ToolPromptContext) -> Vec<String> {
+            let mut guides = vec!["### Shared\nOnly once.".to_string()];
+            if context.omitted_tool_count > 0 {
+                guides.push("### Discovery\nOnly when omitted.".to_string());
+            }
+            guides
+        }
+
+        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
+            ToolResult::ok(serde_json::json!("ok"))
         }
     }
 
@@ -406,6 +476,32 @@ mod tests {
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"multi_a"));
         assert!(names.contains(&"multi_b"));
+    }
+
+    #[test]
+    fn prompt_guides_are_deduped_per_provider_and_content() {
+        let set = ToolSet::new() + MockGuides;
+        let guides = set.prompt_guides(&ToolPromptContext {
+            mode: crate::ExecutionMode::Repl,
+            omitted_tool_count: 1,
+        });
+        assert_eq!(
+            guides,
+            vec![
+                "### Shared\nOnly once.".to_string(),
+                "### Discovery\nOnly when omitted.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn prompt_guides_receive_context() {
+        let set = ToolSet::new() + MockGuides;
+        let guides = set.prompt_guides(&ToolPromptContext {
+            mode: crate::ExecutionMode::Repl,
+            omitted_tool_count: 0,
+        });
+        assert_eq!(guides, vec!["### Shared\nOnly once.".to_string()]);
     }
 
     #[test]

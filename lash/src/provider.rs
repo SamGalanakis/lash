@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ContextFoldingConfig;
 use crate::llm::factory::adapter_for;
+use crate::model_info::{ModelCatalog, ResolvedModelSpec};
 use crate::oauth::{self, OAuthError};
 
 pub const OPENAI_GENERIC_DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -211,24 +212,12 @@ impl Provider {
         adapter_for(self).context_lookup_model(model)
     }
 
-    /// Context window for a model under this provider.
-    pub fn context_window(&self, model: &str) -> Option<u64> {
-        let lookup = self.context_lookup_model(model);
-        crate::model_info::context_window(&lookup).or_else(|| {
-            if lookup != model {
-                crate::model_info::context_window(model)
-            } else {
-                None
-            }
-        })
-    }
-
     pub fn input_usage_excludes_cached_tokens(&self) -> bool {
         matches!(self, Provider::Claude { .. })
     }
 
-    /// Validate model syntax and local catalog availability for this provider.
-    pub fn validate_model(&self, model: &str) -> Result<(), String> {
+    /// Validate model syntax only.
+    pub fn validate_model_name(&self, model: &str) -> Result<(), String> {
         let m = model.trim();
         if m.is_empty() {
             return Err("model cannot be empty".to_string());
@@ -236,14 +225,31 @@ impl Provider {
         if m.contains(char::is_whitespace) {
             return Err("model cannot contain whitespace".to_string());
         }
-        let allow_unknown = std::env::var("LASH_ALLOW_UNKNOWN_MODELS").ok().as_deref() == Some("1");
-        if self.context_window(m).is_none() && !allow_unknown {
-            return Err(format!(
-                "model `{}` is not in local catalog for this provider (set LASH_ALLOW_UNKNOWN_MODELS=1 to bypass)",
-                m
-            ));
-        }
         Ok(())
+    }
+
+    /// Resolve a model against an explicit catalog supplied by the host.
+    pub fn resolve_model_spec(
+        &self,
+        model: &str,
+        catalog: &ModelCatalog,
+    ) -> Result<ResolvedModelSpec, String> {
+        self.validate_model_name(model)?;
+        let configured_model = model.trim();
+        let catalog_model_id = self.context_lookup_model(configured_model);
+        let Some(info) = catalog.get(&catalog_model_id).cloned() else {
+            return Err(format!(
+                "model `{}` has no context-window entry in the supplied model catalog for {}. Provide an explicit model spec or choose a cataloged model.",
+                configured_model,
+                self.label(),
+            ));
+        };
+        Ok(ResolvedModelSpec {
+            configured_model: configured_model.to_string(),
+            resolved_model: self.resolve_model(configured_model),
+            catalog_model_id,
+            info,
+        })
     }
 
     /// Refresh OAuth tokens if needed. No-op for OpenAI-generic.
@@ -683,22 +689,33 @@ mod tests {
     #[test]
     fn validate_model_rejects_empty_and_whitespace() {
         let p = codex();
-        assert!(p.validate_model("").is_err());
-        assert!(p.validate_model("   ").is_err());
-        assert!(p.validate_model("gpt 5.3").is_err());
+        assert!(p.validate_model_name("").is_err());
+        assert!(p.validate_model_name("   ").is_err());
+        assert!(p.validate_model_name("gpt 5.3").is_err());
     }
 
     #[test]
-    fn validate_model_accepts_known_default_model() {
+    fn resolve_model_spec_accepts_known_default_model() {
         let p = codex();
-        assert!(p.validate_model(p.default_model()).is_ok());
+        let catalog = crate::model_info::ModelCatalog::from_models_dev_json(
+            crate::model_info::bundled_models_dev_snapshot(),
+        )
+        .expect("bundled models.dev snapshot parses");
+        let spec = p
+            .resolve_model_spec(p.default_model(), &catalog)
+            .expect("default model resolves");
+        assert!(spec.context_window() > 0);
     }
 
     #[test]
-    fn validate_model_rejects_unknown_model() {
+    fn resolve_model_spec_rejects_unknown_model() {
         let p = openai_generic();
+        let catalog = crate::model_info::ModelCatalog::from_models_dev_json(
+            crate::model_info::bundled_models_dev_snapshot(),
+        )
+        .expect("bundled models.dev snapshot parses");
         assert!(
-            p.validate_model("this-model-does-not-exist-xyz-123")
+            p.resolve_model_spec("this-model-does-not-exist-xyz-123", &catalog)
                 .is_err()
         );
     }

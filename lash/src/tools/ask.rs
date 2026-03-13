@@ -1,4 +1,7 @@
-use crate::{ExecutionMode, PromptBridge, ToolDefinition, ToolParam, ToolProvider, ToolResult};
+use crate::{
+    ExecutionMode, PromptBridge, ToolDefinition, ToolParam, ToolPromptContext, ToolProvider,
+    ToolResult,
+};
 
 #[derive(Clone)]
 pub struct AskTool {
@@ -100,6 +103,13 @@ impl ToolProvider for AskTool {
             hidden: false,
             inject_into_prompt: true,
         }]
+    }
+
+    fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
+        if self.headless {
+            return Vec::new();
+        }
+        vec!["### Interactive Ask\n`call ask { question: \"...\", options: [...] }` pauses execution and shows a real interactive prompt to the user. It still returns the normal wrapped tool result, so on success read the answer from `result.value`. Example:\n`resp = call ask { question: \"Deploy where?\", options: [\"staging\", \"prod\"] }`\n`finish(resp.ok ? format(\"Deploying to {0}\", resp.value) : format(\"Prompt failed: {0}\", resp.error))`".to_string()]
     }
 
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {

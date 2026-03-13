@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
     pub start: usize,
     pub end: usize,
@@ -61,12 +62,22 @@ pub enum TokenKind {
 
 #[derive(Debug, Error, PartialEq)]
 pub enum LexError {
-    #[error("unexpected character `{ch}` at {offset}")]
+    #[error("unexpected `{ch}`")]
     UnexpectedChar { ch: char, offset: usize },
-    #[error("unterminated string starting at {offset}")]
+    #[error("unterminated string")]
     UnterminatedString { offset: usize },
-    #[error("invalid number `{lexeme}` at {offset}")]
+    #[error("invalid number `{lexeme}`")]
     InvalidNumber { lexeme: String, offset: usize },
+}
+
+impl LexError {
+    pub fn offset(&self) -> usize {
+        match self {
+            Self::UnexpectedChar { offset, .. }
+            | Self::UnterminatedString { offset }
+            | Self::InvalidNumber { offset, .. } => *offset,
+        }
+    }
 }
 
 pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {

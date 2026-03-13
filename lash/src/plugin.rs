@@ -37,6 +37,8 @@ pub type CheckpointHook =
     Arc<dyn Fn(CheckpointHookContext) -> PluginFuture<Vec<PluginDirective>> + Send + Sync>;
 pub type PromptContributor =
     Arc<dyn Fn(PromptHookContext) -> Result<Vec<PromptContribution>, PluginError> + Send + Sync>;
+pub type TurnPromptContributor =
+    Arc<dyn Fn(TurnHookContext) -> PluginFuture<Vec<TurnPromptContribution>> + Send + Sync>;
 pub type MessageMutator = Arc<
     dyn Fn(MessageMutatorContext, Vec<crate::Message>) -> PluginFuture<Vec<crate::Message>>
         + Send
@@ -73,6 +75,8 @@ pub struct SessionConfigOverrides {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_variant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context_tokens: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_mode: Option<ExecutionMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,6 +134,13 @@ pub struct SessionCreateRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PromptContribution {
     pub section: PromptSectionName,
+    #[serde(default)]
+    pub priority: i32,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnPromptContribution {
     #[serde(default)]
     pub priority: i32,
     pub content: String,
@@ -502,7 +513,8 @@ mod builtin;
 #[cfg(feature = "sqlite-store")]
 pub use builtin::{
     BuiltinHistoryPluginFactory, BuiltinMemoryPluginFactory, BuiltinPlanModePluginFactory,
-    BuiltinPlanTrackerPluginFactory, builtin_dynamic_capability_defs,
+    BuiltinPlanTrackerPluginFactory, BuiltinPromptContextPluginFactory, PromptContextPluginConfig,
+    builtin_dynamic_capability_defs,
 };
 
 #[cfg(test)]
@@ -633,6 +645,14 @@ mod tests {
                 enabled_by_default: true,
             })?;
             reg.register_prompt_section("## Plugin Prompt");
+            reg.register_turn_prompt_contributor(Arc::new(|_ctx| {
+                Box::pin(async move {
+                    Ok(vec![TurnPromptContribution {
+                        priority: 0,
+                        content: "dynamic note".to_string(),
+                    }])
+                })
+            }));
             let agent_id = self.agent_id.clone();
             reg.register_external_op(
                 ExternalOpDef {
@@ -676,6 +696,27 @@ mod tests {
         assert_eq!(session.tool_providers().len(), 1);
         assert!(session.capability_defs().contains_key("mock_cap"));
         assert_eq!(session.prompt_sections(), &["## Plugin Prompt".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn session_collects_turn_prompt_contributions() {
+        let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
+        let session = host.build_session("root", None).expect("session");
+        let contributions = session
+            .collect_turn_prompt_contributions(TurnHookContext {
+                session_id: "root".to_string(),
+                state: AgentStateEnvelope::default(),
+                host: Arc::new(MockSessionManager),
+            })
+            .await
+            .expect("turn prompt contributions");
+        assert_eq!(
+            contributions,
+            vec![TurnPromptContribution {
+                priority: 0,
+                content: "dynamic note".to_string(),
+            }]
+        );
     }
 
     #[tokio::test]

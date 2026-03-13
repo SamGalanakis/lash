@@ -990,7 +990,7 @@ flowchart LR
           </div>
           <p>
             The TUI is defined less by cards and more by stacked terminal zones: a compact status
-            strip, uninterrupted history, framed plan/task/plugin blocks, and an input area with
+            strip, uninterrupted history, framed plan/plugin blocks, and an input area with
             mode context pinned on the lower edge.
           </p>
         </div>
@@ -1003,7 +1003,7 @@ flowchart LR
             <div class="mock-body">
               <div class="history-line">
                 <span class="caret">❯</span>
-                <div class="history-copy">Split planning into a checklist tool and separate plan mode.</div>
+                <div class="history-copy">Use one native checklist tool for substantial multi-step work.</div>
               </div>
               <div class="status-line">
                 <span class="status-accent">│</span>
@@ -1013,7 +1013,7 @@ flowchart LR
                 <header>Current Plan</header>
                 <ol>
                   <li><strong>[x]</strong> Inspect planning architecture</li>
-                  <li><strong>[-]</strong> Split tracker and plan mode</li>
+                  <li><strong>[-]</strong> Tighten checklist rendering</li>
                   <li><strong>[ ]</strong> Refresh TUI docs</li>
                 </ol>
               </div>
@@ -1030,15 +1030,15 @@ flowchart LR
           <div class="grid-2">
             <article class="mock">
               <div class="mock-bar">
-                <span>task tray</span>
-                <span class="accent">2 active</span>
+                <span>queue lanes</span>
+                <span class="accent">checkpoint-aware</span>
               </div>
               <div class="mock-body">
                 <div class="task-box">
-                  <header>Active Work</header>
+                  <header>Queued Input</header>
                   <ul>
-                    <li>Split tracker and mode plugins</li>
-                    <li>Update design doc</li>
+                    <li>After next tool/result</li>
+                    <li>Next full turn</li>
                   </ul>
                 </div>
               </div>
@@ -1074,8 +1074,8 @@ flowchart LR
                   <div class="lane-row">
                     <span class="lane-marker task">◆</span>
                     <div class="lane-copy">
-                      <strong>task completed · 0007</strong>
-                      <span>Task transcript rows should read like lifecycle transitions, while the tray holds the durable state snapshot.</span>
+                      <strong>plan updated</strong>
+                      <span>Checklist changes should read like concise progress signals, while the bordered plan block holds the durable state snapshot.</span>
                     </div>
                   </div>
                   <div class="lane-row">
@@ -1210,7 +1210,7 @@ flowchart TD
         <div class="principles-grid">
           <article class="principle">
             <strong>Accent Means Action</strong>
-            <p>Sodium is reserved for the active edge: prompts, plan mode, key labels, task activity, and headings that genuinely matter.</p>
+            <p>Sodium is reserved for the active edge: prompts, plan mode, key labels, plan updates, and headings that genuinely matter.</p>
           </article>
           <article class="principle">
             <strong>Structure Before Ornament</strong>
