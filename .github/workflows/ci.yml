@@ -15,6 +15,7 @@ env:
 jobs:
   test:
     name: Test
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
     runs-on: ubuntu-latest
 
     steps:
@@ -37,6 +38,7 @@ jobs:
 
   build-release-assets:
     name: Build (${{ matrix.target }})
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -116,3 +118,58 @@ jobs:
         with:
           name: ${{ matrix.asset_name }}
           path: dist/${{ matrix.asset_name }}
+
+  prepare-release:
+    name: Prepare release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[skip ci]')
+    needs:
+      - test
+      - build-release-assets
+    runs-on: ubuntu-latest
+    concurrency:
+      group: lash-release-main
+      cancel-in-progress: false
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next release version
+        id: version
+        run: |
+          version="$(python3 scripts/release_version.py print-next)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Update workspace version files
+        run: python3 scripts/release_version.py set "${{ steps.version.outputs.version }}"
+
+      - name: Commit release version
+        id: commit
+        run: |
+          if git diff --quiet -- Cargo.toml Cargo.lock; then
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "Release v${{ steps.version.outputs.version }} [skip ci]"
+          git push origin HEAD:main
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push release tag
+        run: |
+          tag="v${{ steps.version.outputs.version }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "Tag ${tag} already exists on origin; skipping."
+            exit 0
+          fi
+          git fetch origin main --tags
+          git checkout main
+          git reset --hard origin/main
+          git tag "${tag}"
+          git push origin "${tag}"

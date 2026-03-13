@@ -250,9 +250,9 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
             PromptProfile::SubAgentInteractive => match input.execution_mode {
                 ExecutionMode::Repl => {
                     if input.can_write {
-                        "You are a sub-agent inside lash working on a delegated task.\nUse tools decisively and return results to the caller via done() when complete.".to_string()
+                        "You are a sub-agent inside lash working on a delegated task.\nUse tools decisively and return results to the caller via `finish ...` when complete.".to_string()
                     } else {
-                        "You are a read-only sub-agent inside lash working on a delegated task.\nFocus on lookup/summarization tasks and return results to the caller via done() when complete.".to_string()
+                        "You are a read-only sub-agent inside lash working on a delegated task.\nFocus on lookup/summarization tasks and return results to the caller via `finish ...` when complete.".to_string()
                     }
                 }
                 ExecutionMode::Standard => {
@@ -266,9 +266,9 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
             PromptProfile::SubAgentHeadless => match input.execution_mode {
                 ExecutionMode::Repl => {
                     if input.can_write {
-                        "You are a headless sub-agent inside lash working on a delegated task.\nOperate autonomously and return final results via done() only when complete.".to_string()
+                        "You are a headless sub-agent inside lash working on a delegated task.\nOperate autonomously and return final results via `finish ...` only when complete.".to_string()
                     } else {
-                        "You are a headless read-only sub-agent inside lash working on a delegated task.\nOperate autonomously on lookup/summarization tasks and return final results via done() only when complete.".to_string()
+                        "You are a headless read-only sub-agent inside lash working on a delegated task.\nOperate autonomously on lookup/summarization tasks and return final results via `finish ...` only when complete.".to_string()
                     }
                 }
                 ExecutionMode::Standard => {
@@ -294,7 +294,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
         PromptSectionName::ExecutionContract => Some(format!(
             "{}\n{}",
             if matches!(input.execution_mode, ExecutionMode::Repl) {
-                "## Execution Contract\n\nYour output can include prose and `<repl>` blocks.\n- Use prose only when no execution is needed\n- `<repl>` executes immediately when `</repl>` is reached\n- After you use `<repl>`, continue until you call `done(...)`\n- Do not assume prose after `</repl>` is user-visible unless you pass it to `done(...)`\n- Maximum one `<repl>` block per response\n- For direct conversational requests that need no tools, respond in prose only\n- `print(...)` output is model-visible only\n\n### REPL Language\n\nThe REPL is a small Python-like runtime for tool orchestration.\n- Supports ordinary control flow, lists/dicts/sets, comprehensions, f-strings, and `await`\n- Use `asyncio.gather(...)` only for supported async tool helpers\n- Limited modules: `re`, `os.getenv`, `pathlib.Path`\n- No arbitrary imports, `open()`, classes, generators, context managers, or broad standard-library access\n- If you need unsupported features, use the appropriate host tool instead of trying to emulate them inside the REPL"
+                "## Execution Contract\n\nYour output can include prose and `<repl>` blocks.\n- Use prose only when no execution is needed\n- `<repl>` executes immediately when `</repl>` is reached\n- After you use `<repl>`, continue until you end with `finish ...`\n- Do not assume prose after `</repl>` is user-visible unless you pass it via `finish ...`\n- Maximum one `<repl>` block per response\n- For direct conversational requests that need no tools, respond in prose only\n- The REPL has no `print`; use `observe expr` for intermediate inspection and `finish \"...\"` for the final answer\n- Prefer small REPL blocks over giant one-shot programs\n- Validate one or two steps, inspect intermediate outputs, then extend the workflow\n- Only `observe expr` creates intermediate execution feedback for the next model step; ordinary assignments are silent\n- The user should see only final prose or `finish ...` output, not intermediate observations\n\n### REPL Language\n\nThe REPL is `lashlang`, a small workflow language for tool orchestration.\n- Values are null, booleans, numbers, strings, lists, and records\n- Assign with `name = expr`\n- Call tools with `call tool_name { arg: expr }`\n- Use `observe expr` to inspect a value without ending execution\n- Control flow is limited to statement `if`, `for`, `parallel`, and `finish`\n- Use ternary expressions for inline branching: `cond ? yes : no`\n- Boolean negation supports both `!cond` and `not cond`\n- Boolean conjunction/disjunction support both `&&` / `||` and `and` / `or`\n- Tool results are records like `{ ok: true, value: ... }` or `{ ok: false, error: ... }`\n- Access the wrapped payload via `.value` only when `result.ok` is true\n- Do not assume every `value` is a record: many tools return strings, numbers, or lists directly\n- There are no imports, classes, methods, exceptions, comprehensions, or arbitrary standard library access\n- Use builtins like `len(...)`, `empty(...)`, `contains(...)`, `slice(...)`, `json_parse(...)`, and `format(...)`\n- `format(value)` stringifies a single value; `format(\"...\", args...)` formats with placeholders\n- String `+` concatenation auto-stringifies when either side is already a string\n- `format(...)` already stringifies records/lists/errors for display; do not wrap values in `json_stringify(...)`\n- If you need unsupported features, use the appropriate host tool instead of emulating them inside the REPL"
             } else {
                 "## Execution Contract\n\nUse direct tool calls when execution is needed.\n- Do not emit `<repl>` blocks or Python code\n- Call tools directly with valid arguments\n- Group independent tool calls in the same response; serialize only when later arguments depend on earlier results\n- Avoid filler prose between tool calls\n- Keep going until the task is complete; do not stop after inspection or partial progress\n- If you are unsure, inspect or validate more instead of guessing\n- For direct conversational requests that need no tools, respond in prose only"
             },
@@ -302,7 +302,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
                 if profile.is_headless() {
                     "- In headless mode, prose-only turns are invalid; execute via `<repl>`"
                 } else {
-                    "- In interactive mode, prose-only is fine only if you never opened `<repl>`; after any REPL execution, finish with `done(...)`"
+                    "- In interactive mode, prose-only is fine only if you never opened `<repl>`; after any REPL execution, finish with `finish ...`"
                 }
             } else if profile.is_headless() {
                 "- In headless mode, keep calling tools until the task is complete, then return a final answer without extra commentary."
@@ -313,15 +313,15 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
         PromptSectionName::TerminationContract => Some(format!(
             "{}\n{}",
             if matches!(input.execution_mode, ExecutionMode::Repl) {
-                "## Termination Contract\n\n`done(value)` ends the turn and returns control.\n- `done(...)` may only be called inside `<repl>`\n- If you never used `<repl>` in the turn, you may finish with plain prose instead\n- If you used `<repl>` at any point in the turn, only `done(...)` ends the turn\n- Do not use `done(...)` for status updates"
+                "## Termination Contract\n\n`finish expr` ends the turn and returns control.\n- `finish ...` may only be used inside `<repl>`\n- If you never used `<repl>` in the turn, you may finish with plain prose instead\n- If you used `<repl>` at any point in the turn, only `finish ...` ends the turn\n- Do not use `finish ...` for status updates"
             } else {
                 "## Termination Contract\n\nFinish by returning a final assistant answer.\n- Do not emit fake tool calls or placeholder arguments\n- Do not stop after tool execution unless the task is actually complete"
             },
             if matches!(input.execution_mode, ExecutionMode::Repl) {
                 if profile.is_headless() {
-                    "- Headless: call `done(...)` only after the task is fully completed"
+                    "- Headless: call `finish ...` only after the task is fully completed"
                 } else {
-                    "- Interactive: after any REPL execution, call `done(...)` only when your final user-facing answer is ready"
+                    "- Interactive: after any REPL execution, call `finish ...` only when your final user-facing answer is ready"
                 }
             } else if profile.is_headless() {
                 "- Headless: do not stop on prose-only intermediate steps."
@@ -331,7 +331,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
         )),
         PromptSectionName::ToolAccess => Some(
             if matches!(input.execution_mode, ExecutionMode::Repl) {
-                "## Tool Access\n\n- `T` is the tool namespace. Call tools as `T.<tool>(...)`\n- Tools are not exposed as bare globals; use `T.` consistently to avoid shadowing and accidental rebinding\n- Runtime control calls stay global: `done(...)`, `ask(...)` (interactive only), and `reset_repl()`\n- There is no `tools` module, no implicit imports, and no wrapper classes; work with plain dict/list/primitive values\n- Call sync tools directly through `T.`; use explicit `await` only for async `T.` calls\n- Use `asyncio.gather(...)` only for supported async `T.` calls"
+                "## Tool Access\n\n- Call tools as `call tool_name { arg: expr }`\n- Tool results are wrapped records; read `result.ok`, `result.value`, and `result.error`\n- Interactive prompting is available as `call ask { question: \"...\", options: [\"a\", \"b\"] }`\n- There is no `T` namespace, no imports, no methods, and no wrapper classes; work with plain records/lists/primitives\n- Use `parallel { ... }` for independent tool calls"
                     .to_string()
             } else {
                 "## Tool Access\n\n- The runtime exposes only the listed tools\n- Use only tools shown in Available Tools\n- Group independent calls in one response when the provider supports it\n- Good fits: reading several files, multiple searches, and unrelated diagnostics\n- Do not parallelize dependent steps or ordered stateful work\n- Never invent tool names or arguments".to_string()
@@ -357,7 +357,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
         )),
         PromptSectionName::ErrorRecovery => Some(
             if matches!(input.execution_mode, ExecutionMode::Repl) {
-                "## Error Recovery\n\nTool failures raise `ToolError`; execution stops at the failing line.\n- Read the traceback and fix the cause before retrying\n- Do not repeat failing calls unchanged\n- If REPL state is corrupted, call `reset_repl()`"
+                "## Error Recovery\n\nTool failures return error records from `call`.\n- Inspect `result.ok` / `result.error` and fix the cause before retrying\n- Do not repeat failing calls unchanged\n- If a REPL program fails, shrink the block, use `observe expr` on the next uncertain value, and rerun a smaller `<repl>` block before expanding again\n- When a workflow is uncertain, validate the next small step instead of writing the whole program at once"
                     .to_string()
             } else {
                 "## Error Recovery\n\nTool failures return structured errors.\n- Read the error carefully and fix the cause before retrying\n- Do not repeat failing calls unchanged\n- If a tool result is incomplete or ambiguous, inspect with other tools instead of guessing"
@@ -431,7 +431,7 @@ fn default_section(section: PromptSectionName, input: &PromptComposeInput<'_>) -
             if !history_enabled(input) {
                 ""
             } else {
-                "- Use `T.search_history(...)` and other `T.` memory/search calls only when prior-turn recall is actually needed"
+                "- Use `search_history`, `search_mem`, and related memory/search tools only when prior-turn recall is actually needed"
             }
         )),
     }
@@ -447,14 +447,15 @@ fn builtins_section(
     let mut lines = vec![
         "## Runtime Globals".to_string(),
         "".to_string(),
-        "- `done(value)`".to_string(),
+        "- `observe expr`".to_string(),
+        "- `finish expr`".to_string(),
     ];
     if profile.is_headless() {
-        lines.push("- `ask(...)` is unavailable in headless mode".to_string());
+        lines.push("- `call ask { ... }` is unavailable in headless mode".to_string());
     } else {
-        lines.push("- `ask(question, options=None)`".to_string());
+        lines.push("- `call ask { question: \"...\", options: [...] }`".to_string());
     }
-    lines.push("- `reset_repl()`".to_string());
+    lines.push("- Builtins: `len`, `empty`, `contains`, `slice`, `json_parse`, `format`, `to_string`, `to_int`, `to_float`".to_string());
     lines.join("\n")
 }
 
@@ -474,17 +475,14 @@ fn memory_section(
     let mut lines = vec![title.to_string(), "".to_string()];
     if memory_enabled {
         lines.push(
-            "- Memory is persistent across context pruning; use `T.mem_set(...)` for durable decisions"
+            "- Memory is persistent across context pruning; use `mem_set` for durable decisions"
                 .to_string(),
         );
-        lines.push(
-            "- Retrieve memory with `T.mem_get(...)`, `T.mem_all()`, and `T.search_mem(...)`"
-                .to_string(),
-        );
+        lines.push("- Retrieve memory with `mem_get`, `mem_all`, and `search_mem`".to_string());
     }
     if history_enabled && has_history {
         lines.push(
-            "- Pruned prior turns can be searched with `T.search_history(...)` when older context matters"
+            "- Pruned prior turns can be searched with `search_history` when older context matters"
                 .to_string(),
         );
     }
@@ -511,12 +509,12 @@ fn memory_api_section() -> String {
     [
         "## Memory API",
         "",
-        "- `T.mem_set(key, description, value=None)` stores/updates memory",
-        "- `T.mem_get(key)` returns `{key, description, value, turn}` dict or `None`; use `entry[\"value\"]` to extract the stored value",
-        "- `T.mem_delete(key)` removes a key",
-        "- `T.mem_all()` lists keys with descriptions",
-        "- `T.search_mem(query, mode=\"hybrid\", regex=None, limit=10, keys=None)` searches memory by content",
-        "- Example: `T.mem_set(\"repo_convention\", \"Use snake_case for tool names\")`",
+        "- `mem_set(key, description, value=None)` stores/updates memory",
+        "- `mem_get(key)` returns `{key, description, value, turn}` or `null`; use `entry.value` to extract the stored value in REPL mode",
+        "- `mem_delete(key)` removes a key",
+        "- `mem_all()` lists keys with descriptions",
+        "- `search_mem(query, mode=\"hybrid\", regex=None, limit=10, keys=None)` searches memory by content",
+        "- Example: `call mem_set { key: \"repo_convention\", description: \"Use snake_case for tool names\" }`",
     ]
     .join("\n")
 }
@@ -533,25 +531,37 @@ fn tool_guides(
 
     if tools.contains("ls") || tools.contains("read_file") || tools.contains("glob") {
         chunks.push(
-            "**Orient -> Read -> Act**\n1. `T.ls()` / `T.glob()` and inspect `result[\"items\"]` (each item has `path`, `kind`, `size_bytes`, `modified_at`, optional `lines`)\n2. `T.read_file(...)` / `T.grep(...)` for content-level context before mutating files\n3. Apply focused changes only after you understand the surrounding code"
+            "**Orient -> Read -> Act**\n1. Use `ls` / `glob` and inspect `result.items` (each item has `path`, `kind`, `size_bytes`, `modified_at`, optional `lines`)\n2. Use `read_file` / `grep` for content-level context before mutating files\n3. Apply focused changes only after you understand the surrounding code"
                 .to_string(),
         );
     }
     if tools.contains("read_file") {
         chunks.push(
-            "**Image reads**\nIf `T.read_file(...)` on an image returns an `[Image: ...]` marker, that marker is metadata only. Use the attached image context to describe what is visibly present; do not just repeat the marker text."
+            "**Image reads**\nIf `read_file` on an image returns an `[Image: ...]` marker, that marker is metadata only. Use the attached image context to describe what is visibly present; do not just repeat the marker text."
                 .to_string(),
         );
     }
     if tools.contains("glob") {
         chunks.push(
-            "**glob/ls output**\n`T.glob(...)` and `T.ls(...)` both return `{ \"__type__\": \"path_entries\", \"items\": [...], \"truncated\": ... }`. Read paths from `result[\"items\"]`, not `result[\"entries\"]`. `T.glob(...)` sorts `items` by modification time (newest first); `T.ls(...)` sorts `items` alphabetically by path. If `truncated` is non-null, rerun with `limit=None` when needed."
+            "**glob/ls output**\n`glob` and `ls` both return `{ \"__type__\": \"path_entries\", \"items\": [...], \"truncated\": ... }`. Read paths from `result.items`, not `result.entries`. `glob` sorts `items` by modification time (newest first); `ls` sorts `items` alphabetically by path. If `truncated` is non-null, rerun with `limit=None` when needed."
                 .to_string(),
         );
     }
     if tools.contains("shell") || tools.contains("exec_command") {
         chunks.push(
             "**Git safety**\nDo not revert user changes you did not make. Avoid destructive git commands unless explicitly requested."
+                .to_string(),
+        );
+    }
+    if tools.contains("shell") {
+        chunks.push(
+            "**REPL shell shapes**\n`call shell { ... }` returns a handle record in `result.value` with an `id` field. `call shell_wait { id: handle.value.id }` returns the command output as a plain string in `result.value`, not `{ stdout: ... }`. Example:\n`proc = call shell { command: \"date\" }`\n`out = call shell_wait { id: proc.value.id }`\n`finish format(\"It is {0}\", out.value)`"
+                .to_string(),
+        );
+    }
+    if tools.contains("ask") {
+        chunks.push(
+            "**Interactive ask**\n`call ask { question: \"...\", options: [...] }` pauses execution and shows a real interactive prompt to the user. It still returns the normal wrapped tool result, so on success read the answer from `result.value`. Example:\n`resp = call ask { question: \"Deploy where?\", options: [\"staging\", \"prod\"] }`\n`finish(resp.ok ? format(\"Deploying to {0}\", resp.value) : format(\"Prompt failed: {0}\", resp.error))`"
                 .to_string(),
         );
     }
@@ -571,13 +581,13 @@ fn tool_guides(
             "Context recall pattern"
         };
         let recall_line = if history_enabled && memory_enabled {
-            "When prior context likely matters, use a low-intelligence (read-only) `T.agent_call(...)` to summarize relevant `T.search_history(...)` / memory results quickly, then continue execution."
+            "When prior context likely matters, use a low-intelligence (read-only) `agent_call` to summarize relevant `search_history` / memory results quickly, then continue execution."
         } else if history_enabled {
-            "When prior context likely matters, use a low-intelligence (read-only) `T.agent_call(...)` to summarize relevant `T.search_history(...)` results quickly, then continue execution."
+            "When prior context likely matters, use a low-intelligence (read-only) `agent_call` to summarize relevant `search_history` results quickly, then continue execution."
         } else if memory_enabled {
-            "When prior context likely matters, use a low-intelligence (read-only) `T.agent_call(...)` to summarize relevant memory results quickly, then continue execution."
+            "When prior context likely matters, use a low-intelligence (read-only) `agent_call` to summarize relevant memory results quickly, then continue execution."
         } else {
-            "When prior context likely matters, use a low-intelligence (read-only) `T.agent_call(...)` to summarize relevant context quickly, then continue execution."
+            "When prior context likely matters, use a low-intelligence (read-only) `agent_call` to summarize relevant context quickly, then continue execution."
         };
         chunks.push(
             format!(
@@ -587,13 +597,13 @@ fn tool_guides(
             ),
         );
         chunks.push(
-            "**Agent lifecycle**\n`T.agent_result(id)` blocks until the agent finishes and returns its final result. The agent ID remains valid afterwards — you can call `T.agent_result(...)` again or use `T.agent_kill(...)` to clean up. Delegate progress is surfaced by the runtime/UI rather than through a separate tool call."
+            "**Agent lifecycle**\n`agent_result(id)` blocks until the agent finishes and returns its final result. The agent ID remains valid afterwards — you can call `agent_result` again or use `agent_kill` to clean up. Delegate progress is surfaced by the runtime/UI rather than through a separate tool call."
                 .to_string(),
         );
     }
     if tools.contains("create_task") || tools.contains("start_task") {
         chunks.push(
-            "**Task management**\nFor multi-step work: create tasks, keep one in progress, and mark completion immediately. Use `T.start_task(subject=...)` for work you are starting now; use `T.claim_task(...)` only when adopting an existing queued task. Use `T.update_task(...)` to mark completion or other state changes. Valid statuses are `pending`, `in_progress`, `completed`, and `cancelled`."
+            "**Task management**\nFor multi-step work: create tasks, keep one in progress, and mark completion immediately. Use `start_task(subject=...)` for work you are starting now; use `claim_task(...)` only when adopting an existing queued task. Use `update_task(...)` to mark completion or other state changes. Valid statuses are `pending`, `in_progress`, `completed`, and `cancelled`."
                 .to_string(),
         );
     }
@@ -705,7 +715,7 @@ mod tests {
             overrides: &[],
         });
         assert!(text.contains("## Memory API"));
-        assert!(text.contains("T.mem_set(key, description, value=None)"));
+        assert!(text.contains("mem_set(key, description, value=None)"));
     }
 
     #[test]
@@ -741,13 +751,17 @@ mod tests {
     }
 
     #[test]
-    fn repl_tool_access_describes_global_calls() {
+    fn repl_tool_access_describes_lashlang_calls() {
         let text = compose_system_prompt(PromptComposeInput {
             profile: PromptProfile::RootInteractive,
             execution_mode: crate::ExecutionMode::Repl,
             context: "ctx",
             tool_list: "tools",
-            tool_names: &["shell".to_string(), "agent_call".to_string()],
+            tool_names: &[
+                "shell".to_string(),
+                "agent_call".to_string(),
+                "ask".to_string(),
+            ],
             has_history: false,
             helper_bindings: &helpers_for(&AgentCapabilities::default()),
             capability_prompt_sections: &prompt_sections_for(&AgentCapabilities::default()),
@@ -757,13 +771,28 @@ mod tests {
             project_instructions: "",
             overrides: &[],
         });
-        assert!(text.contains("`T` is the tool namespace. Call tools as `T.<tool>(...)`"));
+        assert!(text.contains("Call tools as `call tool_name { arg: expr }`"));
+        assert!(text.contains("Use ternary expressions for inline branching: `cond ? yes : no`"));
+        assert!(text.contains("Boolean negation supports both `!cond` and `not cond`"));
+        assert!(text.contains("`format(value)` stringifies a single value"));
+        assert!(text.contains("Prefer small REPL blocks over giant one-shot programs"));
+        assert!(text.contains("inspect intermediate outputs"));
+        assert!(text.contains("use `observe expr` for intermediate inspection"));
+        assert!(text.contains("Only `observe expr` creates intermediate execution feedback"));
+        assert!(text.contains("The user should see only final prose or `finish ...` output"));
+        assert!(text.contains("- `observe expr`"));
         assert!(
             text.contains(
-                "There is no `tools` module, no implicit imports, and no wrapper classes"
+                "There is no `T` namespace, no imports, no methods, and no wrapper classes"
             )
         );
-        assert!(text.contains("use explicit `await` only for async `T.` calls"));
+        assert!(text.contains("Use `parallel { ... }` for independent tool calls"));
+        assert!(text.contains("`call shell { ... }` returns a handle record"));
+        assert!(text.contains(
+            "`call shell_wait { id: handle.value.id }` returns the command output as a plain string"
+        ));
+        assert!(text.contains("`call ask { question: \"...\", options: [...] }` pauses execution"));
+        assert!(text.contains("on success read the answer from `result.value`"));
         assert!(text.contains("Do not revert user changes you did not make"));
     }
 

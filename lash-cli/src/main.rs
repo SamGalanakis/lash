@@ -16,15 +16,6 @@ mod theme;
 mod ui;
 mod util;
 
-// macOS has no uuid_generate_time_safe (Linux-only, from util-linux libuuid).
-// Python's _uuid module references it; --whole-archive pulls in the reference.
-// Return -1 ("not safe") so Python falls back to its pure-Python uuid impl.
-#[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
-pub extern "C" fn uuid_generate_time_safe(_out: *mut u8) -> i32 {
-    -1
-}
-
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -233,7 +224,7 @@ async fn main() -> anyhow::Result<()> {
             lash_dir.display()
         );
         eprintln!(
-            "    {ASH_TEXT}python cache           {CHALK}{}{RESET}",
+            "    {ASH_TEXT}runtime cache          {CHALK}{}{RESET}",
             cache_dir.display()
         );
         eprintln!();
@@ -1907,7 +1898,8 @@ async fn run_app(
                             continue;
                         }
                         if app.running {
-                            app.queue_turn(queued);
+                            app.queue_turn(queued.clone());
+                            app.preview_queued_turn(&queued, false);
                             continue;
                         }
                         if runtime.is_none() {
@@ -1994,7 +1986,10 @@ async fn run_app(
                                 content: queued.text.clone(),
                             };
                             match turn_injection_bridge.enqueue(vec![injection]) {
-                                Ok(()) => app.queue_pending_steer(queued),
+                                Ok(()) => {
+                                    app.queue_pending_steer(queued.clone());
+                                    app.preview_queued_turn(&queued, true);
+                                }
                                 Err(err) => {
                                     push_system_message(
                                         &mut app,
@@ -3517,7 +3512,12 @@ fn send_user_message(
     active_stream_id: &mut u64,
     app_tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
-    if !display_input.is_empty() {
+    let already_visible = if !display_input.is_empty() {
+        app.commit_pending_user_preview(&display_input)
+    } else {
+        false
+    };
+    if !display_input.is_empty() && !already_visible {
         app.blocks
             .push(DisplayBlock::UserInput(display_input.clone()));
         app.invalidate_height_cache();

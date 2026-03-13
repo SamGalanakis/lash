@@ -2307,6 +2307,9 @@ impl RuntimeTurnDriver {
     ) -> Result<crate::ExecResponse, String> {
         let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
         self.session.set_message_sender(msg_tx);
+        let (prompt_tx, mut prompt_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::session::UserPrompt>();
+        self.session.set_prompt_sender(prompt_tx);
         let event_tx_clone = event_tx.clone();
         let drain_handle = tokio::spawn(async move {
             while let Some(sandbox_msg) = msg_rx.recv().await {
@@ -2320,9 +2323,25 @@ impl RuntimeTurnDriver {
                 }
             }
         });
+        let event_tx_clone = event_tx.clone();
+        let prompt_handle = tokio::spawn(async move {
+            while let Some(user_prompt) = prompt_rx.recv().await {
+                if !event_tx_clone.is_closed() {
+                    let _ = event_tx_clone
+                        .send(AgentEvent::Prompt {
+                            question: user_prompt.question,
+                            options: user_prompt.options,
+                            response_tx: user_prompt.response_tx,
+                        })
+                        .await;
+                }
+            }
+        });
         let result = self.session.run_code(code).await.map_err(|e| e.to_string());
         self.session.clear_message_sender();
+        self.session.clear_prompt_sender();
         let _ = drain_handle.await;
+        let _ = prompt_handle.await;
         result
     }
 
@@ -3251,6 +3270,36 @@ mod tests {
         runtime
     }
 
+    fn repl_test_config() -> RuntimeConfig {
+        RuntimeConfig {
+            execution_mode: ExecutionMode::Repl,
+            provider: Provider::OpenAiGeneric {
+                api_key: "test-key".to_string(),
+                base_url: "https://example.invalid/v1".to_string(),
+            },
+            model: "mock-model".to_string(),
+            headless: false,
+            host_profile: HostProfile::Interactive,
+            ..RuntimeConfig::default()
+        }
+    }
+
+    async fn repl_runtime_with_transport(transport: MockTransport) -> LashRuntime {
+        let tools: Arc<dyn crate::ToolProvider> = Arc::new(crate::ToolSet::new());
+        let mut runtime = LashRuntime::from_state(
+            repl_test_config(),
+            crate::RuntimeServices::tools_only(tools, "root").expect("services"),
+            AgentStateEnvelope {
+                execution_mode: ExecutionMode::Repl,
+                ..AgentStateEnvelope::default()
+            },
+        )
+        .await
+        .expect("runtime");
+        runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
+        runtime
+    }
+
     async fn standard_runtime_with_bridge(
         transport: MockTransport,
         turn_injection_bridge: crate::TurnInjectionBridge,
@@ -3931,6 +3980,63 @@ mod tests {
             })
             .collect();
         assert_eq!(streamed_text, "What time is it?");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repl_run_exec_code_forwards_interactive_prompt_events() {
+        use tokio::time::{Duration, timeout};
+
+        let transport = MockTransport::new(Vec::new());
+        let mut runtime = repl_runtime_with_transport(transport).await;
+        let session_manager = runtime.runtime_session_manager().expect("manager");
+        let session = runtime.session.take().expect("session");
+        let mut driver = RuntimeTurnDriver {
+            session,
+            config: runtime.config.clone(),
+            cached_base_context: runtime.cached_base_context.clone(),
+            agent_id: runtime.state.agent_id.clone(),
+            llm_factory: runtime.llm_factory.clone(),
+            plugin_prompt_sections: Vec::new(),
+            session_manager,
+        };
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+
+        let run = tokio::spawn(async move {
+            driver
+                .run_exec_code(
+                    r#"
+                    answer = call ask { question: "Pick one", options: ["works", "done"] }
+                    finish format("selected={0}", answer.value)
+                    "#,
+                    &event_tx,
+                )
+                .await
+        });
+
+        let prompt = timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .expect("prompt event timeout")
+            .expect("prompt event");
+        let AgentEvent::Prompt {
+            question,
+            options,
+            response_tx,
+        } = prompt
+        else {
+            panic!("expected prompt event");
+        };
+        assert_eq!(question, "Pick one");
+        assert_eq!(options, vec!["works".to_string(), "done".to_string()]);
+        response_tx
+            .send("done".to_string())
+            .expect("prompt response");
+
+        let result = timeout(Duration::from_secs(2), run)
+            .await
+            .expect("exec result timeout")
+            .expect("join")
+            .expect("exec result");
+        assert_eq!(result.response, "selected=done");
     }
 
     #[tokio::test]

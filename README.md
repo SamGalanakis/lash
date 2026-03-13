@@ -5,16 +5,16 @@ AI coding agent with a persistent Monty-backed `repl` runtime or `standard` tool
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SamGalanakis/lash/main/install_lash.sh | bash
+curl -fsSL https://github.com/SamGalanakis/lash/releases/latest/download/install_lash.sh | bash
 ```
 
 Install a pinned release instead:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SamGalanakis/lash/main/install_lash.sh | LASH_VERSION=v0.2.0 bash
+curl -fsSL https://github.com/SamGalanakis/lash/releases/download/v0.2.0/install_lash.sh | bash
 ```
 
-The installer downloads the latest prebuilt GitHub release asset for your platform, verifies `SHA256SUMS`, and installs `lash` to `~/.local/bin` by default.
+Successful pushes to `main` automatically bump the release patch version when needed, create the next `v*` tag, and trigger the release workflow. That workflow mints a GitHub Release with platform tarballs, `SHA256SUMS`, and a version-pinned `install_lash.sh`. The installer downloads the matching prebuilt asset for your platform, verifies `SHA256SUMS`, and installs `lash` to `~/.local/bin` by default.
 
 From a local checkout, run `./install_lash.sh`.
 
@@ -182,7 +182,7 @@ Default root model by provider:
 |---|---|
 | `openai-generic` | `anthropic/claude-sonnet-4.6` |
 | `Claude` | `claude-opus-4-6` |
-| `Codex` | `gpt-5.4` |
+| `Codex` | `gpt-5.4` (`reasoning=high`) |
 | `Google OAuth` | `gemini-3.1-pro-preview` |
 
 `openai-generic` defaults to `https://openrouter.ai/api/v1` as its base URL.

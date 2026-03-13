@@ -34,11 +34,7 @@ mod tests {
     struct Host;
 
     impl ToolHost for Host {
-        fn call(
-            &self,
-            _name: &str,
-            _args: &Record,
-        ) -> Result<Value, ToolHostError> {
+        fn call(&self, _name: &str, _args: &Record) -> Result<Value, ToolHostError> {
             Ok(Value::Null)
         }
     }

@@ -334,7 +334,7 @@ impl AgentCall {
                 .unwrap_or_else(|| "Result".to_string());
             match agent_execution_mode {
                 crate::ExecutionMode::Repl => format!(
-                    "{prompt}\n\nCall done(...) with a single JSON-compatible dict matching this schema exactly:\n{schema_str}\n\nDo not return prose in done(). The dict should represent a `{model_name}` object."
+                    "{prompt}\n\nInside `<repl>`, end with `finish {{ ... }}` using a single JSON-compatible record matching this schema exactly:\n{schema_str}\n\nDo not return prose in `finish`. The record should represent a `{model_name}` object."
                 ),
                 crate::ExecutionMode::Standard => format!(
                     "{prompt}\n\nReturn your final answer as a single JSON object matching this schema exactly:\n{schema_str}\n\nDo not wrap it in markdown fences or extra commentary."
@@ -581,7 +581,7 @@ impl ToolProvider for AgentCall {
                 name: "agent_call".into(),
                 description: vec![
                     crate::ToolText::new(
-                        r#"Spawn a sub-agent for scoped work and return a handle. Use `await agent_result(handle["id"])` or `await agent_kill(handle["id"])` with the returned id. Use `intelligence="low"` for fast read-only work; medium/high inherit the parent execution mode and parent history/memory read-only."#,
+                        r#"Spawn a sub-agent for scoped work and return a handle. In REPL mode, use `call agent_result { id: handle.value.id }` or `call agent_kill { id: handle.value.id }` with the returned id. Use `intelligence="low"` for fast read-only work; medium/high inherit the parent execution mode and parent history/memory read-only."#,
                         [crate::ExecutionMode::Repl],
                     ),
                     crate::ToolText::new(
@@ -602,11 +602,11 @@ impl ToolProvider for AgentCall {
                 returns: "dict".into(),
                 examples: vec![
                     crate::ToolText::new(
-                        "handle = agent_call(\"Summarize the auth flow\", intelligence=\"low\")",
+                        r#"handle = call agent_call { prompt: "Summarize the auth flow", intelligence: "low" }"#,
                         [crate::ExecutionMode::Repl],
                     ),
                     crate::ToolText::new(
-                        "result = await agent_result(handle[\"id\"])",
+                        r#"result = call agent_result { id: handle.value.id }"#,
                         [crate::ExecutionMode::Repl],
                     ),
                     crate::ToolText::new(
@@ -759,7 +759,7 @@ mod tests {
         let standard_desc = agent_call.description_for(crate::ExecutionMode::Standard);
 
         assert!(repl_desc.contains("return a handle"));
-        assert!(repl_desc.contains("await agent_result(handle[\"id\"])"));
+        assert!(repl_desc.contains("call agent_result { id: handle.value.id }"));
         assert!(!standard_desc.contains("AgentHandle"));
     }
 

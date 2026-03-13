@@ -41,6 +41,7 @@ impl Parser {
             TokenKind::For => self.parse_for(),
             TokenKind::Parallel => self.parse_parallel(),
             TokenKind::Finish => self.parse_finish(),
+            TokenKind::Observe => self.parse_observe(),
             TokenKind::Call => Ok(Stmt::Call(self.parse_call_expr()?)),
             TokenKind::Ident(_) if self.peek_assign() => self.parse_assign(),
             _ => Err(self.unexpected()),
@@ -95,6 +96,11 @@ impl Parser {
         Ok(Stmt::Finish(self.parse_expr()?))
     }
 
+    fn parse_observe(&mut self) -> Result<Stmt, ParseError> {
+        self.bump();
+        Ok(Stmt::Observe(self.parse_expr()?))
+    }
+
     fn parse_block(&mut self) -> Result<Vec<Stmt>, ParseError> {
         self.expect_exact(TokenKind::LBrace, "`{`")?;
         let mut statements = Vec::new();
@@ -106,12 +112,28 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        self.parse_or()
+        self.parse_ternary()
+    }
+
+    fn parse_ternary(&mut self) -> Result<Expr, ParseError> {
+        let condition = self.parse_or()?;
+        if !matches!(self.peek_kind(), TokenKind::Question) {
+            return Ok(condition);
+        }
+        self.bump();
+        let then_expr = self.parse_expr()?;
+        self.expect_exact(TokenKind::Colon, "`:`")?;
+        let else_expr = self.parse_expr()?;
+        Ok(Expr::Conditional {
+            condition: Box::new(condition),
+            then_expr: Box::new(then_expr),
+            else_expr: Box::new(else_expr),
+        })
     }
 
     fn parse_or(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_and()?;
-        while matches!(self.peek_kind(), TokenKind::Or) {
+        while matches!(self.peek_kind(), TokenKind::Or | TokenKind::OrOr) {
             self.bump();
             let right = self.parse_and()?;
             expr = Expr::Binary {
@@ -125,7 +147,7 @@ impl Parser {
 
     fn parse_and(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_compare()?;
-        while matches!(self.peek_kind(), TokenKind::And) {
+        while matches!(self.peek_kind(), TokenKind::And | TokenKind::AndAnd) {
             self.bump();
             let right = self.parse_compare()?;
             expr = Expr::Binary {
@@ -209,6 +231,13 @@ impl Parser {
                 })
             }
             TokenKind::Not => {
+                self.bump();
+                Ok(Expr::Unary {
+                    op: UnaryOp::Not,
+                    expr: Box::new(self.parse_unary()?),
+                })
+            }
+            TokenKind::Bang => {
                 self.bump();
                 Ok(Expr::Unary {
                     op: UnaryOp::Not,
@@ -433,10 +462,14 @@ fn render_kind(kind: &TokenKind) -> String {
         TokenKind::RBracket => "`]`".to_string(),
         TokenKind::Comma => "`,`".to_string(),
         TokenKind::Colon => "`:`".to_string(),
+        TokenKind::Question => "`?`".to_string(),
         TokenKind::Dot => "`.`".to_string(),
+        TokenKind::Bang => "`!`".to_string(),
         TokenKind::Equal => "`=`".to_string(),
         TokenKind::DoubleEqual => "`==`".to_string(),
         TokenKind::BangEqual => "`!=`".to_string(),
+        TokenKind::AndAnd => "`&&`".to_string(),
+        TokenKind::OrOr => "`||`".to_string(),
         TokenKind::Less => "`<`".to_string(),
         TokenKind::LessEqual => "`<=`".to_string(),
         TokenKind::Greater => "`>`".to_string(),
@@ -452,6 +485,7 @@ fn render_kind(kind: &TokenKind) -> String {
         TokenKind::In => "`in`".to_string(),
         TokenKind::Parallel => "`parallel`".to_string(),
         TokenKind::Finish => "`finish`".to_string(),
+        TokenKind::Observe => "`observe`".to_string(),
         TokenKind::Call => "`call`".to_string(),
         TokenKind::And => "`and`".to_string(),
         TokenKind::Or => "`or`".to_string(),
@@ -472,7 +506,7 @@ mod tests {
         let program = parse(
             r#"
             call ping {}
-            value = not false or -(5 - 2) < 0 and 8 / 2 >= 4 and 7 % 3 != 0 and 1 <= 2 and 3 > 2
+            value = !false || -(5 - 2) < 0 && 8 / 2 >= 4 && 7 % 3 != 0 && 1 <= 2 && 3 > 2
             rec = { a: [1, 2], b: call tool { x: 1 } }
             if value {
               field = rec.b.ok
@@ -486,12 +520,13 @@ mod tests {
               left = call alpha {}
               right = helper()
             }
+            observe rec
             finish field
             "#,
         )
         .expect("program should parse");
 
-        assert_eq!(program.statements.len(), 7);
+        assert_eq!(program.statements.len(), 8);
     }
 
     #[test]
@@ -510,6 +545,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_ternary_expressions_with_low_precedence_and_right_association() {
+        let program = parse(
+            r#"
+            value = false or true ? 1 : 2 ? 3 : 4
+            finish value
+            "#,
+        )
+        .expect("program should parse");
+
+        let Stmt::Assign { expr, .. } = &program.statements[0] else {
+            panic!("expected assignment");
+        };
+        let Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+        } = expr
+        else {
+            panic!("expected conditional expression");
+        };
+        assert!(matches!(
+            condition.as_ref(),
+            Expr::Binary {
+                op: BinaryOp::Or,
+                ..
+            }
+        ));
+        assert!(matches!(then_expr.as_ref(), Expr::Number(1.0)));
+        assert!(matches!(else_expr.as_ref(), Expr::Conditional { .. }));
+    }
+
+    #[test]
+    fn parses_symbolic_boolean_operator_aliases() {
+        let program = parse(
+            r#"
+            value = true && false || true
+            finish value
+            "#,
+        )
+        .expect("program should parse");
+
+        assert_eq!(program.statements.len(), 2);
+    }
+
+    #[test]
     fn parse_errors_cover_expected_and_unexpected_paths() {
         let err = parse("{").expect_err("parse should fail");
         assert!(matches!(err, ParseError::Unexpected { .. }));
@@ -518,22 +598,67 @@ mod tests {
         assert!(matches!(err, ParseError::Unexpected { .. }));
 
         let err = parse("if true answer = 1").expect_err("parse should fail");
-        assert!(matches!(err, ParseError::Expected { expected: "`{`", .. }));
+        assert!(matches!(
+            err,
+            ParseError::Expected {
+                expected: "`{`",
+                ..
+            }
+        ));
 
         let err = parse("for x 1 {}").expect_err("parse should fail");
-        assert!(matches!(err, ParseError::Expected { expected: "`in`", .. }));
+        assert!(matches!(
+            err,
+            ParseError::Expected {
+                expected: "`in`",
+                ..
+            }
+        ));
 
         let err = parse("call {}").expect_err("parse should fail");
-        assert!(matches!(err, ParseError::Expected { expected: "identifier", .. }));
+        assert!(matches!(
+            err,
+            ParseError::Expected {
+                expected: "identifier",
+                ..
+            }
+        ));
 
         let err = parse("x = [1").expect_err("parse should fail");
-        assert!(matches!(err, ParseError::Expected { expected: "`]`", .. }));
+        assert!(matches!(
+            err,
+            ParseError::Expected {
+                expected: "`]`",
+                ..
+            }
+        ));
 
         let err = parse("x = {a 1}").expect_err("parse should fail");
-        assert!(matches!(err, ParseError::Expected { expected: "`:`", .. }));
+        assert!(matches!(
+            err,
+            ParseError::Expected {
+                expected: "`:`",
+                ..
+            }
+        ));
 
         let err = parse("x = f(1").expect_err("parse should fail");
-        assert!(matches!(err, ParseError::Expected { expected: "`)`", .. }));
+        assert!(matches!(
+            err,
+            ParseError::Expected {
+                expected: "`)`",
+                ..
+            }
+        ));
+
+        let err = parse("finish true ? 1").expect_err("parse should fail");
+        assert!(matches!(
+            err,
+            ParseError::Expected {
+                expected: "`:`",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -561,10 +686,14 @@ mod tests {
             TokenKind::RBracket,
             TokenKind::Comma,
             TokenKind::Colon,
+            TokenKind::Question,
             TokenKind::Dot,
+            TokenKind::Bang,
             TokenKind::Equal,
             TokenKind::DoubleEqual,
             TokenKind::BangEqual,
+            TokenKind::AndAnd,
+            TokenKind::OrOr,
             TokenKind::Less,
             TokenKind::LessEqual,
             TokenKind::Greater,
@@ -580,6 +709,7 @@ mod tests {
             TokenKind::In,
             TokenKind::Parallel,
             TokenKind::Finish,
+            TokenKind::Observe,
             TokenKind::Call,
             TokenKind::And,
             TokenKind::Or,

@@ -100,6 +100,10 @@ pub enum SuggestionKind {
 /// A renderable block in the scrollable history.
 pub enum DisplayBlock {
     UserInput(String),
+    PendingUserInput {
+        text: String,
+        inject_at_checkpoint: bool,
+    },
     AssistantText(String),
     CodeBlock {
         code: String,
@@ -247,6 +251,7 @@ impl DisplayBlock {
                 // Left-aligned with "\u{25CF} " prefix (2 chars)
                 wrapped_text_height(s, width, 2)
             }
+            DisplayBlock::PendingUserInput { text, .. } => wrapped_text_height(text, width, 2),
             DisplayBlock::AssistantText(s) => {
                 markdown::markdown_height_compact(s, width.saturating_sub(2))
             }
@@ -610,8 +615,10 @@ impl App {
                     {
                         self.pending_steers.pop_front();
                     }
-                    self.blocks
-                        .push(DisplayBlock::UserInput(message.content.clone()));
+                    if !self.commit_pending_user_preview(&message.content) {
+                        self.blocks
+                            .push(DisplayBlock::UserInput(message.content.clone()));
+                    }
                 }
                 MessageRole::System => {
                     self.blocks
@@ -764,7 +771,7 @@ impl App {
             AgentEvent::LlmRequest { iteration, .. } => {
                 self.flush_pending_text();
                 self.iteration = iteration + 1;
-                self.set_status("thinking", None, true);
+                self.set_status("thinking", Some("waiting for first token".into()), true);
                 self.live_output_chars_estimate = 0;
                 self.live_output_tokens_estimate = 0;
             }
@@ -907,6 +914,32 @@ impl App {
 
     pub fn has_queued_messages(&self) -> bool {
         !self.pending_steers.is_empty() || !self.queued_turns.is_empty()
+    }
+
+    pub fn preview_queued_turn(&mut self, turn: &QueuedTurn, inject_at_checkpoint: bool) {
+        if turn.is_empty() || turn.text.is_empty() {
+            return;
+        }
+        self.blocks.push(DisplayBlock::PendingUserInput {
+            text: turn.text.clone(),
+            inject_at_checkpoint,
+        });
+        self.invalidate_height_cache();
+        self.scroll_to_bottom();
+    }
+
+    pub fn commit_pending_user_preview(&mut self, text: &str) -> bool {
+        for block in self.blocks.iter_mut().rev() {
+            if let DisplayBlock::PendingUserInput { text: pending, .. } = block
+                && pending == text
+            {
+                *block = DisplayBlock::UserInput(text.to_string());
+                self.invalidate_height_cache();
+                self.scroll_to_bottom();
+                return true;
+            }
+        }
+        false
     }
 
     pub fn set_plan_mode_enabled(&mut self, enabled: bool) {
@@ -1189,7 +1222,10 @@ impl App {
         for (i, block) in self.blocks.iter().enumerate() {
             // Blank line before UserInput to separate turns (matches render_block)
             if i > 0
-                && matches!(block, DisplayBlock::UserInput(_))
+                && matches!(
+                    block,
+                    DisplayBlock::UserInput(_) | DisplayBlock::PendingUserInput { .. }
+                )
                 && !matches!(self.blocks[i - 1], DisplayBlock::Splash)
             {
                 cumulative += 1;
@@ -2038,6 +2074,21 @@ mod tests {
     }
 
     #[test]
+    fn llm_request_sets_waiting_for_first_token_status() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        app.handle_agent_event(AgentEvent::LlmRequest {
+            iteration: 0,
+            message_count: 0,
+            tool_list: String::new(),
+        });
+        assert_eq!(app.status_text.as_deref(), Some("thinking"));
+        assert_eq!(
+            app.status_detail.as_deref(),
+            Some("waiting for first token")
+        );
+    }
+
+    #[test]
     fn llm_request_flushes_intermediate_stream_text() {
         let mut app = App::new("test-model".into(), "test".into(), None);
         app.handle_agent_event(AgentEvent::TextDelta {
@@ -2212,7 +2263,9 @@ mod tests {
     #[test]
     fn injected_messages_commit_render_user_blocks_and_clear_pending_preview() {
         let mut app = App::new("test-model".into(), "test".into(), None);
-        app.queue_pending_steer(QueuedTurn::new("follow up".into(), Vec::new()));
+        let turn = QueuedTurn::new("follow up".into(), Vec::new());
+        app.queue_pending_steer(turn.clone());
+        app.preview_queued_turn(&turn, true);
 
         app.handle_agent_event(AgentEvent::InjectedMessagesCommitted {
             messages: vec![PluginMessage {
@@ -2226,6 +2279,36 @@ mod tests {
         assert!(matches!(
             app.blocks.last(),
             Some(DisplayBlock::UserInput(text)) if text == "follow up"
+        ));
+    }
+
+    #[test]
+    fn previewed_pending_user_turn_is_visible_immediately() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        let turn = QueuedTurn::new("follow up now".into(), Vec::new());
+
+        app.queue_pending_steer(turn.clone());
+        app.preview_queued_turn(&turn, true);
+
+        assert!(matches!(
+            app.blocks.last(),
+            Some(DisplayBlock::PendingUserInput {
+                text,
+                inject_at_checkpoint: true,
+            }) if text == "follow up now"
+        ));
+    }
+
+    #[test]
+    fn commit_pending_user_preview_promotes_existing_block() {
+        let mut app = App::new("test-model".into(), "test".into(), None);
+        let turn = QueuedTurn::new("queued text".into(), Vec::new());
+        app.preview_queued_turn(&turn, false);
+
+        assert!(app.commit_pending_user_preview("queued text"));
+        assert!(matches!(
+            app.blocks.last(),
+            Some(DisplayBlock::UserInput(text)) if text == "queued text"
         ));
     }
 
@@ -2526,6 +2609,7 @@ mod tests {
     fn other_variant_name(block: &DisplayBlock) -> &'static str {
         match block {
             DisplayBlock::UserInput(_) => "UserInput",
+            DisplayBlock::PendingUserInput { .. } => "PendingUserInput",
             DisplayBlock::AssistantText(_) => "AssistantText",
             DisplayBlock::CodeBlock { .. } => "CodeBlock",
             DisplayBlock::Activity(_) => "Activity",

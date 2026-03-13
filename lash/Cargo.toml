@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 
 [features]
-# Keep core portable by default. Monty-backed `repl` support is always on.
+# Keep core portable by default. The lashlang-backed `repl` runtime is always on.
 default = []
 sqlite-store = ["dep:rusqlite"]
 # Convenience umbrella for first-party consumers (e.g. lash-cli).
@@ -28,7 +28,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 base64 = "0.22"
 sha2 = "0.10"
 rusqlite = { version = "0.33", features = ["bundled"], optional = true }
-monty = { path = "../vendor/monty" }
+lashlang = { path = "../lashlang" }
 dirs = "6"
 chrono = "0.4"
 similar = "2"
