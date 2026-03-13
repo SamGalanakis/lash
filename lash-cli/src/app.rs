@@ -594,9 +594,11 @@ impl App {
 
     fn commit_injected_messages(&mut self, messages: &[PluginMessage]) {
         self.flush_pending_text();
+        let mut committed_user_message = false;
         for message in messages {
             match message.role {
                 MessageRole::User => {
+                    committed_user_message = true;
                     if self
                         .pending_steers
                         .front()
@@ -618,7 +620,11 @@ impl App {
         }
         if !messages.is_empty() {
             self.invalidate_height_cache();
-            self.keep_latest_user_block_visible();
+            if committed_user_message {
+                self.keep_latest_user_block_visible();
+            } else {
+                self.scroll_to_bottom();
+            }
         }
     }
 
