@@ -11,10 +11,12 @@ use tokio::sync::mpsc;
 use crate::ContextFoldingConfig;
 use crate::ExecutionMode;
 use crate::ToolDefinition;
-use crate::capabilities::AgentCapabilities;
+use crate::ToolPromptContext;
+use crate::capabilities::{AgentCapabilities, prompt_sections_for_capabilities};
 use crate::instructions::{FsInstructionSource, InstructionSource};
 use crate::llm::factory::adapter_for;
 use crate::llm::types::{LlmStreamEvent, LlmToolSpec};
+use crate::plugin::PromptContribution;
 use crate::plugin::{CheckpointKind, PluginMessage, PluginSurfaceEvent};
 use crate::provider::{OPENAI_GENERIC_DEFAULT_BASE_URL, Provider};
 use crate::session::Session;
@@ -45,12 +47,8 @@ fn is_context_archive_marker(msg: &Message) -> bool {
     msg.id == CONTEXT_ARCHIVE_MARKER_ID
 }
 
-fn context_archive_marker(history_enabled: bool) -> Message {
-    let content = if history_enabled {
-        "Earlier turns were archived outside the active context. Use `search_history(...)` when older context matters."
-    } else {
-        "Earlier turns were archived outside the active context."
-    };
+fn context_archive_marker() -> Message {
+    let content = "Earlier turns were archived outside the active context.";
     Message {
         id: CONTEXT_ARCHIVE_MARKER_ID.to_string(),
         role: MessageRole::System,
@@ -90,7 +88,6 @@ pub(crate) fn apply_context_folding(
     last_input_tokens: usize,
     max_context: usize,
     policy: ContextFoldingConfig,
-    history_enabled: bool,
 ) -> ContextFoldResult {
     let mut result = ContextFoldResult {
         has_archived_history: msgs.iter().any(is_context_archive_marker),
@@ -127,7 +124,7 @@ pub(crate) fn apply_context_folding(
 
     msgs.drain(prefix_len..keep_from);
     if !result.has_archived_history {
-        msgs.insert(prefix_len, context_archive_marker(history_enabled));
+        msgs.insert(prefix_len, context_archive_marker());
     }
     result.has_archived_history = true;
     result
@@ -170,7 +167,7 @@ pub struct AgentConfig {
     pub model: String,
     /// LLM provider (OpenAI-generic, Claude OAuth, Codex, or Google OAuth)
     pub provider: Provider,
-    /// Override for context window size (tokens). If None, looked up from model_info.
+    /// Explicit context window size (tokens) supplied by the host.
     pub max_context_tokens: Option<usize>,
     /// When true, use SubAgentStep prompt instead of CodeActStep
     pub sub_agent: bool,
@@ -468,13 +465,9 @@ pub(crate) struct ExecutionPreamble {
     pub(crate) tool_specs: Vec<LlmToolSpec>,
     pub(crate) tool_names: Vec<String>,
     pub(crate) helper_bindings: BTreeSet<String>,
-    pub(crate) capability_prompt_sections: Vec<String>,
-    pub(crate) plugin_prompt_sections: Vec<String>,
+    pub(crate) guide_sections: Vec<String>,
+    pub(crate) plugin_prompt_contributions: Vec<PromptContribution>,
     pub(crate) can_write: bool,
-    pub(crate) history_enabled: bool,
-    pub(crate) instruction_source: Arc<dyn InstructionSource>,
-    pub(crate) project_instructions: String,
-    pub(crate) base_context: String,
 }
 
 pub(crate) fn transport_stream_events(
@@ -495,22 +488,12 @@ pub(crate) fn transport_stream_events(
     }
 }
 
-pub(crate) fn cached_base_context(context_cache: &mut Option<String>) -> String {
-    if let Some(context) = context_cache.as_ref() {
-        return context.clone();
-    }
-    let context = build_context();
-    *context_cache = Some(context.clone());
-    context
-}
-
 pub(crate) fn build_execution_preamble(
     session: &Session,
     config: &AgentConfig,
-    base_context_cache: &mut Option<String>,
     mode: ExecutionMode,
     model: String,
-    plugin_prompt_sections: Vec<String>,
+    plugin_prompt_contributions: Vec<PromptContribution>,
 ) -> ExecutionPreamble {
     let all_tools = session.tools().definitions();
     let prompt_tools: Vec<_> = all_tools
@@ -520,14 +503,17 @@ pub(crate) fn build_execution_preamble(
         .cloned()
         .collect();
     let mut tool_list = ToolDefinition::format_tool_docs(&prompt_tools, mode);
-    let omitted_tool_count = all_tools
+    let omitted_tool_count = count_prompt_omitted_tools(&all_tools, mode);
+    let has_search_tools = all_tools
         .iter()
-        .filter(|t| !t.inject_into_prompt || t.description_for(mode).is_empty())
-        .count();
+        .any(|tool| tool.name == "search_tools" && !tool.description_for(mode).is_empty());
     if omitted_tool_count > 0 {
         let note = match mode {
+            ExecutionMode::Repl if has_search_tools => format!(
+                "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Only use `call search_tools {{ ... }}` when the tool you need is not already listed above."
+            ),
             ExecutionMode::Repl => format!(
-                "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Use `call search_tools {{ query: \"...\" }}` to discover them, then call tools via `call tool_name {{ ... }}`."
+                "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity."
             ),
             ExecutionMode::Standard => {
                 format!(
@@ -551,21 +537,35 @@ pub(crate) fn build_execution_preamble(
         Vec::new()
     };
     let tool_names: Vec<String> = all_tools.iter().map(|t| t.name.clone()).collect();
+    let available_tools: BTreeSet<String> = tool_names.iter().cloned().collect();
     let dynamic_projection = session.tools().dynamic_projection();
     let helper_bindings: BTreeSet<String> = dynamic_projection
         .as_ref()
         .map(|p| p.helper_bindings.clone())
         .unwrap_or_default();
-    let capability_prompt_sections: Vec<String> = dynamic_projection
-        .as_ref()
-        .map(|p| p.prompt_sections.clone())
-        .unwrap_or_default();
+    let mut guide_sections = prompt_sections_for_capabilities(
+        &config.capabilities.enabled_capabilities,
+        &helper_bindings,
+        &available_tools,
+    );
+    if let Some(dynamic_sections) = dynamic_projection.as_ref().map(|p| &p.prompt_sections) {
+        guide_sections.extend(
+            dynamic_sections
+                .iter()
+                .map(|section| section.trim().to_string())
+                .filter(|section| !section.is_empty()),
+        );
+    }
+    let tool_guides = session.tools().prompt_guides(&ToolPromptContext {
+        mode,
+        omitted_tool_count,
+    });
+    for guide in tool_guides {
+        if !guide_sections.contains(&guide) {
+            guide_sections.push(guide);
+        }
+    }
     let can_write = tool_names.iter().any(|name| name == "apply_patch");
-    let history_enabled = tool_names.iter().any(|name| name == "search_history")
-        || helper_bindings.contains("search_history");
-    let instruction_source = Arc::clone(&config.instruction_source);
-    let project_instructions = instruction_source.system_instructions();
-    let base_context = cached_base_context(base_context_cache);
 
     ExecutionPreamble {
         model,
@@ -573,13 +573,56 @@ pub(crate) fn build_execution_preamble(
         tool_specs,
         tool_names,
         helper_bindings,
-        capability_prompt_sections,
-        plugin_prompt_sections,
+        guide_sections,
+        plugin_prompt_contributions,
         can_write,
-        history_enabled,
-        instruction_source,
-        project_instructions,
-        base_context,
+    }
+}
+
+fn count_prompt_omitted_tools(all_tools: &[crate::ToolDefinition], mode: ExecutionMode) -> usize {
+    all_tools
+        .iter()
+        .filter(|t| !t.hidden)
+        .filter(|t| t.name != "search_tools")
+        .filter(|t| !t.inject_into_prompt)
+        .filter(|t| !t.description_for(mode).is_empty())
+        .count()
+}
+
+#[cfg(test)]
+mod execution_preamble_tests {
+    use super::*;
+
+    #[test]
+    fn omitted_tool_count_ignores_search_tools_when_everything_else_is_prompted() {
+        let defs = vec![
+            crate::ToolDefinition {
+                name: "read_file".into(),
+                description: vec![crate::ToolText::new(
+                    "Read file",
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
+                )],
+                params: vec![],
+                returns: "str".into(),
+                examples: vec![],
+                hidden: false,
+                inject_into_prompt: true,
+            },
+            crate::ToolDefinition {
+                name: "search_tools".into(),
+                description: vec![crate::ToolText::new(
+                    "Discover tools",
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
+                )],
+                params: vec![],
+                returns: "list".into(),
+                examples: vec![],
+                hidden: false,
+                inject_into_prompt: false,
+            },
+        ];
+
+        assert_eq!(count_prompt_omitted_tools(&defs, ExecutionMode::Repl), 0);
     }
 }
 
@@ -640,57 +683,6 @@ pub(crate) fn format_tool_result_content(success: bool, result: &serde_json::Val
 }
 
 /// Build environment context string for the system prompt.
-pub(crate) fn build_context() -> String {
-    let mut parts = Vec::new();
-
-    if let Ok(cwd) = std::env::current_dir() {
-        parts.push(format!("Working directory: {}", cwd.display()));
-
-        let git_dir = cwd.join(".git");
-        if git_dir.exists() {
-            parts.push("Git repository: yes".into());
-        }
-
-        if let Ok(entries) = std::fs::read_dir(&cwd) {
-            let mut names: Vec<String> = entries
-                .filter_map(|e| e.ok())
-                .map(|e| {
-                    let name = e.file_name().to_string_lossy().to_string();
-                    if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                        format!("{}/", name)
-                    } else {
-                        name
-                    }
-                })
-                .filter(|n| !n.starts_with('.'))
-                .collect();
-            names.sort();
-            if !names.is_empty() {
-                parts.push(format!("Top-level entries: {}", names.join(", ")));
-            }
-        }
-    }
-
-    match repl_third_party_packages() {
-        Some(pkgs) if pkgs.is_empty() => {
-            parts.push("REPL third-party packages: none".into());
-        }
-        Some(pkgs) => {
-            parts.push(format!("REPL third-party packages: {}", pkgs.join(", ")));
-        }
-        None => {
-            parts.push("REPL third-party packages: unknown".into());
-        }
-    }
-
-    parts.join("\n")
-}
-
-/// lashlang does not support importing third-party packages inside the REPL.
-fn repl_third_party_packages() -> Option<Vec<String>> {
-    Some(Vec::new())
-}
-
 /// Build alternating Prose/Code parts for an assistant message.
 pub(crate) fn build_assistant_parts(
     msg_id: &str,
@@ -1053,8 +1045,7 @@ mod tests {
             text_message("a4", MessageRole::Assistant, &"a4".repeat(40)),
         ];
 
-        let result =
-            apply_context_folding(&mut msgs, 70, 100, ContextFoldingConfig::default(), true);
+        let result = apply_context_folding(&mut msgs, 70, 100, ContextFoldingConfig::default());
 
         assert!(result.has_archived_history);
         assert!(is_context_archive_marker(&msgs[0]));
@@ -1077,8 +1068,7 @@ mod tests {
             text_message("a1", MessageRole::Assistant, "world"),
         ];
 
-        let result =
-            apply_context_folding(&mut msgs, 55, 100, ContextFoldingConfig::default(), true);
+        let result = apply_context_folding(&mut msgs, 55, 100, ContextFoldingConfig::default());
 
         assert!(result.has_archived_history);
         assert_eq!(

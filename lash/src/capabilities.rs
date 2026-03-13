@@ -11,7 +11,6 @@ pub enum CapabilityId {
     CoreRead,
     CoreWrite,
     Shell,
-    Tasks,
     Planning,
     Delegation,
     Memory,
@@ -26,7 +25,6 @@ impl CapabilityId {
             Self::CoreRead => "core_read",
             Self::CoreWrite => "core_write",
             Self::Shell => "shell",
-            Self::Tasks => "tasks",
             Self::Planning => "planning",
             Self::Delegation => "delegation",
             Self::Memory => "memory",
@@ -41,7 +39,6 @@ impl CapabilityId {
             "core_read" => Some(Self::CoreRead),
             "core_write" => Some(Self::CoreWrite),
             "shell" => Some(Self::Shell),
-            "tasks" => Some(Self::Tasks),
             "planning" => Some(Self::Planning),
             "delegation" => Some(Self::Delegation),
             "memory" => Some(Self::Memory),
@@ -106,7 +103,9 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
         id: CapabilityId::CoreRead,
         name: "Core Read",
         description: "Core file navigation and discovery.",
-        prompt_section: None,
+        prompt_section: Some(
+            "### Orient -> Read -> Act\n1. Use `ls` / `glob` to orient yourself first\n2. Use `read_file` / `grep` for content-level context before mutating files\n3. Apply focused changes only after you understand the surrounding code",
+        ),
         helper_bindings: &[],
         tools: &["read_file", "glob", "grep", "ls", "search_tools"],
         enabled_by_default: true,
@@ -124,7 +123,9 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
         id: CapabilityId::Shell,
         name: "Shell",
         description: "Command execution and interactive process handles.",
-        prompt_section: None,
+        prompt_section: Some(
+            "### Git Safety\nDo not revert user changes you did not make. Avoid destructive git commands unless explicitly requested.",
+        ),
         helper_bindings: &[],
         tools: &[
             "exec_command",
@@ -138,29 +139,11 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
         enabled_by_default: true,
     },
     CapabilityDefinition {
-        id: CapabilityId::Tasks,
-        name: "Tasks",
-        description: "Task planning and dependency graph tooling.",
-        prompt_section: None,
-        helper_bindings: &[],
-        tools: &[
-            "tasks",
-            "tasks_summary",
-            "get_task",
-            "create_task",
-            "start_task",
-            "update_task",
-            "delete_task",
-            "claim_task",
-        ],
-        enabled_by_default: true,
-    },
-    CapabilityDefinition {
         id: CapabilityId::Planning,
         name: "Planning",
         description: "Native plan tracking for substantial multi-step work.",
         prompt_section: Some(
-            "## Planning\n\nUse `update_plan` for substantial multi-step work, not for trivial or single-step requests. Keep plans short, concrete, and easy to verify. There should be at most one `in_progress` step at a time; mark completed work promptly and keep the next active step current while you work. Do not restate the full plan after calling `update_plan`; the runtime already surfaces it. `update_plan` is a checklist tool for normal execution turns, not for plan mode.",
+            "### Planning\nUse `update_plan` for substantial multi-step work, not for trivial or single-step requests. Keep plans short, concrete, and easy to verify. There should be at most one `in_progress` step at a time; mark completed work promptly and keep the next active step current while you work. Do not restate the full plan after calling `update_plan`; the runtime already surfaces it. `update_plan` is a checklist tool for normal execution turns, not for plan mode.",
         ),
         helper_bindings: &[],
         tools: &["update_plan", "ask"],
@@ -171,7 +154,7 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
         name: "Delegation",
         description: "Sub-agent orchestration via agent_call.",
         prompt_section: Some(
-            "## Delegation\n\nUse `agent_call` for scoped sub-tasks. Prefer low-intelligence delegates for read-only lookup/summarization work, and avoid overlapping file edits across concurrent delegates.",
+            "### Delegation\nUse `agent_call` for scoped sub-tasks. Prefer low-intelligence delegates for read-only lookup/summarization work, and avoid overlapping file edits across concurrent delegates.",
         ),
         helper_bindings: &[],
         tools: &["agent_call", "agent_result", "agent_kill"],
@@ -182,10 +165,10 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
         name: "Skills",
         description: "Skill discovery and loading.",
         prompt_section: Some(
-            "## Skills\n\nWhen the user requests a skill-based workflow, use `load_skill(name)` and follow the skill instructions.",
+            "### Skills\nWhen the user requests a skill-based workflow, use `search_skills(...)` to discover the right skill, then `load_skill(name)` and follow the skill instructions.",
         ),
         helper_bindings: &["search_skills"],
-        tools: &["skills", "load_skill", "read_skill_file", "search_skills"],
+        tools: &["load_skill", "read_skill_file", "search_skills"],
         enabled_by_default: true,
     },
     CapabilityDefinition {
@@ -228,6 +211,51 @@ pub fn tools_for_capability(id: CapabilityId) -> &'static [&'static str] {
 
 pub fn helper_bindings_for_capability(id: CapabilityId) -> &'static [&'static str] {
     capability_def(id).map(|d| d.helper_bindings).unwrap_or(&[])
+}
+
+pub fn prompt_sections_for_capabilities(
+    enabled: &BTreeSet<CapabilityId>,
+    helper_bindings: &BTreeSet<String>,
+    available_tools: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut sections = Vec::new();
+
+    for id in enabled {
+        let Some(def) = capability_def(*id) else {
+            continue;
+        };
+        let has_surface = def.tools.iter().any(|tool| available_tools.contains(*tool))
+            || def
+                .helper_bindings
+                .iter()
+                .any(|binding| helper_bindings.contains(*binding));
+        if has_surface
+            && let Some(section) = def.prompt_section
+            && !section.trim().is_empty()
+        {
+            sections.push(section.to_string());
+        }
+    }
+
+    if enabled.contains(&CapabilityId::Delegation) && available_tools.contains("agent_call") {
+        let recall_line = if helper_bindings.contains("search_history")
+            && helper_bindings.contains("search_mem")
+        {
+            "When prior context likely matters, use a low-intelligence (read-only) `agent_call` to summarize relevant `search_history` or memory results quickly, then continue execution."
+        } else if helper_bindings.contains("search_history") {
+            "When prior context likely matters, use a low-intelligence (read-only) `agent_call` to summarize relevant `search_history` results quickly, then continue execution."
+        } else if helper_bindings.contains("search_mem") {
+            "When prior context likely matters, use a low-intelligence (read-only) `agent_call` to summarize relevant memory results quickly, then continue execution."
+        } else {
+            "When prior context likely matters, use a low-intelligence (read-only) `agent_call` to summarize relevant context quickly, then continue execution."
+        };
+        sections.push(format!(
+            "### Delegation Recall\n{}\nDo not delegate straightforward local file or image inspection that you can do directly with available tools.",
+            recall_line
+        ));
+    }
+
+    sections
 }
 
 pub fn capability_for_tool(name: &str) -> Option<CapabilityId> {
@@ -277,6 +305,48 @@ pub fn resolve_features(
         enabled_capabilities: caps.enabled_capabilities.clone(),
         effective_tools,
         helper_bindings,
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn capability_prompt_sections_only_include_available_surfaces() {
+        let enabled = BTreeSet::from([CapabilityId::Planning]);
+        let sections =
+            prompt_sections_for_capabilities(&enabled, &BTreeSet::new(), &BTreeSet::new());
+        assert!(sections.is_empty());
+
+        let available_tools = BTreeSet::from(["update_plan".to_string()]);
+        let sections =
+            prompt_sections_for_capabilities(&enabled, &BTreeSet::new(), &available_tools);
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].contains("### Planning"));
+    }
+
+    #[test]
+    fn delegation_prompt_sections_include_recall_guidance_when_helpers_exist() {
+        let enabled = BTreeSet::from([CapabilityId::Delegation]);
+        let helpers = BTreeSet::from(["search_history".to_string(), "search_mem".to_string()]);
+        let tools = BTreeSet::from(["agent_call".to_string(), "agent_result".to_string()]);
+        let sections = prompt_sections_for_capabilities(&enabled, &helpers, &tools);
+        assert!(
+            sections
+                .iter()
+                .any(|section| section.contains("### Delegation"))
+        );
+        assert!(
+            sections
+                .iter()
+                .any(|section| section.contains("### Delegation Recall"))
+        );
+        assert!(
+            sections
+                .iter()
+                .any(|section| section.contains("`search_history` or memory results"))
+        );
     }
 }
 

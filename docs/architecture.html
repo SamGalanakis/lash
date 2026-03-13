@@ -574,7 +574,7 @@
     </div>
     <div class="doc-meta">
       Lash Agent Framework<br>
-      Rust + Monty REPL Runtime<br>
+      Rust + Lash REPL Runtime<br>
       2026
     </div>
   </header>
@@ -640,7 +640,7 @@
         <div class="arch-card-tag tag-bridge"><span class="dot"></span>Layer 4</div>
         <div class="arch-card-title">Execution Bridge</div>
         <div class="arch-card-desc">
-          Two execution backends: a persistent Monty-backed REPL and provider-native tool calls.
+          Two execution backends: a persistent REPL runtime and provider-native tool calls.
           Mode-specific contracts with bidirectional streaming signals.
         </div>
       </div>
@@ -838,7 +838,7 @@
     <div class="section-header">
       <span class="section-number">04</span>
       <span class="section-title">REPL Mode</span>
-      <span class="section-desc">Monty-backed execution with persistent state across turns.</span>
+      <span class="section-desc">Persistent REPL execution with state across turns.</span>
     </div>
 
     <div class="arch-grid">
@@ -846,7 +846,7 @@
         <div class="arch-card-tag tag-repl"><span class="dot"></span>Execution Contract</div>
         <div class="arch-card-title">REPL Execution Model</div>
         <div class="arch-card-desc">
-          The session spins up a Monty-backed REPL, registers tool definitions/capabilities,
+          The session spins up the REPL runtime, registers tool definitions/capabilities,
           and executes <code>&lt;repl&gt;</code> blocks in a persistent namespace. The model may emit prose
           plus at most one <code>&lt;repl&gt;</code> block per turn.
         </div>
@@ -962,7 +962,7 @@ models, routes = <span class="kw">await</span> asyncio.<span class="fn">gather</
         </div>
 
         <div class="sequence-block">
-          <pre>  <span class="role">Host</span>          <span class="role">Runtime</span>         <span class="role">Agent</span>           <span class="role">Monty REPL</span>
+          <pre>  <span class="role">Host</span>          <span class="role">Runtime</span>         <span class="role">Agent</span>           <span class="role">REPL Runtime</span>
    │               │                │                │
    │──TurnInput──▶│                │                │
    │               │──assemble──▶  │                │
@@ -1223,7 +1223,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="arch-card-tag tag-persist"><span class="dot"></span>Persistence</div>
         <div class="arch-card-title">Store, Logs, and Session State</div>
         <div class="arch-card-desc">
-          SQLite-backed store tracks tasks/context artifacts for the session, while CLI keeps session logs and runtime
+          SQLite-backed store tracks archived context, history, memory, and agent state for the session, while CLI keeps session logs and runtime
           state envelope that can be restored on resume.
         </div>
         <div class="cell-grid cols-2">
@@ -1233,7 +1233,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
           </div>
           <div class="cell">
             <h4>Envelope</h4>
-            <p><code>AgentStateEnvelope</code>: messages, iteration, token usage, task/subagent state, snapshot.</p>
+            <p><code>AgentStateEnvelope</code>: messages, iteration, token usage, sub-agent state, snapshot.</p>
           </div>
         </div>
       </div>
@@ -1288,7 +1288,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="arch-card-tag tag-caps"><span class="dot"></span>Capability Registry</div>
         <div class="arch-card-title">Built-in Capabilities</div>
         <div class="arch-card-desc">
-          Ten capability groups ship by default. Each controls a coherent set of tools and optional prompt guidance.
+          Nine capability groups ship by default. Each controls a coherent set of tools and optional prompt guidance.
         </div>
         <div class="cell-grid cols-2">
           <div class="cell">
@@ -1304,16 +1304,12 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
             <p><code>exec_command</code> and <code>write_stdin</code> in standard mode, plus <code>shell</code>, <code>shell_wait</code>, <code>shell_read</code>, <code>shell_write</code>, <code>shell_kill</code> in REPL mode.</p>
           </div>
           <div class="cell">
-            <h4>Tasks</h4>
-            <p><code>tasks</code>, <code>tasks_summary</code>, <code>get_task</code>, <code>create_task</code>, <code>start_task</code>, <code>update_task</code>, <code>delete_task</code>, <code>claim_task</code>.</p>
-          </div>
-          <div class="cell">
             <h4>Planning</h4>
-            <p><code>update_plan</code> plus <code>ask</code> in interactive standard sessions. In-memory plan tracking and targeted user clarification.</p>
+            <p><code>update_plan</code> plus <code>ask</code> in interactive standard sessions. In-memory checklist tracking and targeted user clarification.</p>
           </div>
           <div class="cell">
             <h4>Delegation</h4>
-            <p><code>agent_call</code>, <code>agent_result</code>, <code>agent_output</code>, <code>agent_kill</code>. Sub-agent orchestration.</p>
+            <p><code>agent_call</code>, <code>agent_result</code>, <code>agent_kill</code>. Sub-agent orchestration.</p>
           </div>
           <div class="cell">
             <h4>History</h4>
@@ -1325,7 +1321,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
           </div>
           <div class="cell">
             <h4>Skills</h4>
-            <p><code>skills</code>, <code>load_skill</code>, <code>read_skill_file</code>, <code>search_skills</code>. Skill discovery and loading.</p>
+            <p><code>load_skill</code>, <code>read_skill_file</code>, <code>search_skills</code>. Skill discovery and loading.</p>
           </div>
           <div class="cell">
             <h4>Web</h4>
@@ -1582,7 +1578,7 @@ skill = <span class="fn">T.load_skill</span>(<span class="str">"frontend-design"
         <div class="step">
           <span class="step-num">04</span>
           <strong>Mode Exec</strong>
-          <p>Execution diverges here: persistent Monty REPL for <code>repl</code>, provider-native tool loop for <code>standard</code>.</p>
+          <p>Execution diverges here: persistent REPL execution for <code>repl</code>, provider-native tool loop for <code>standard</code>.</p>
         </div>
         <div class="step">
           <span class="step-num">05</span>

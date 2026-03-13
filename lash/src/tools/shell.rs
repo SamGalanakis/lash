@@ -11,7 +11,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::Notify;
 
-use crate::{ProgressSender, SandboxMessage, ToolDefinition, ToolParam, ToolProvider, ToolResult};
+use crate::{
+    ProgressSender, SandboxMessage, ToolDefinition, ToolParam, ToolPromptContext, ToolProvider,
+    ToolResult,
+};
 
 use super::require_str;
 
@@ -676,7 +679,6 @@ impl ReplShell {
                 if exit_code != 0 {
                     output.push_str(&format!("\n[exit code: {exit_code}]"));
                 }
-                self.runtime.remove_process(id);
                 ToolResult {
                     success: exit_code == 0,
                     result: json!(output),
@@ -767,6 +769,10 @@ impl ToolProvider for StandardShell {
                 inject_into_prompt: true,
             },
         ]
+    }
+
+    fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
+        Vec::new()
     }
 
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
@@ -872,6 +878,10 @@ impl ToolProvider for ReplShell {
                 inject_into_prompt: false,
             },
         ]
+    }
+
+    fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
+        vec!["### REPL Shell Shapes\n`call shell { ... }` returns a handle record in `result.value` with an `id` field. `call shell_wait { id: handle.value.id }` returns the command output as a plain string in `result.value`, not `{ stdout: ... }`. Waiting does not consume the handle; you may still call `shell_read` afterwards. Example:\n`proc = call shell { command: \"date\" }`\n`out = call shell_wait { id: proc.value.id }`\n`finish format(\"It is {0}\", out.value)`".to_string()]
     }
 
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
@@ -1058,6 +1068,10 @@ mod tests {
             .await;
         assert!(result.success);
         assert!(result.result.as_str().unwrap().contains("hello"));
+
+        let read = shell.execute("shell_read", &json!({"id": id})).await;
+        assert!(read.success);
+        assert!(read.result.as_str().unwrap().contains("hello"));
     }
 
     #[tokio::test]

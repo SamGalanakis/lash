@@ -10,9 +10,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::activity::{
     ActivityArtifact, ActivityBlock, ActivityKind, ActivityStatus, PatchFilePreview,
 };
-use crate::app::{
-    App, DisplayBlock, QueuedTurn, SuggestionKind, TASK_TRAY_TWO_COL_MIN_INNER_WIDTH, TaskSnapshot,
-};
+use crate::app::{App, DisplayBlock, QueuedTurn, SuggestionKind};
 use crate::markdown;
 use crate::theme;
 use lash_core::TokenUsage;
@@ -35,10 +33,9 @@ fn queue_preview_height(app: &App, frame_width: u16) -> u16 {
 /// Exact history viewport height based on the same layout math used in draw().
 pub fn history_viewport_height(app: &App, frame_width: u16, frame_height: u16) -> usize {
     let strike_h = if app.running { 1 } else { 0 };
-    let task_tray_h = app.task_tray_height(frame_width);
     let queued_h = queue_preview_height(app, frame_width);
     let input_h = input_height(app, frame_width);
-    let overhead = 1 + strike_h + task_tray_h + queued_h + input_h;
+    let overhead = 1 + strike_h + queued_h + input_h;
     frame_height.saturating_sub(overhead) as usize
 }
 
@@ -47,17 +44,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
     frame.render_widget(Block::default().style(theme::history_bg()), frame.area());
 
     let strike_h = if app.running { 1 } else { 0 };
-    let task_tray_h = app.task_tray_height(frame.area().width);
     let queued_h = queue_preview_height(app, frame.area().width);
     let input_h = input_height(app, frame.area().width);
 
     let chunks = Layout::vertical([
-        Constraint::Length(1),           // [0] status bar
-        Constraint::Min(3),              // [1] history
-        Constraint::Length(strike_h),    // [2] strike zone (only when running)
-        Constraint::Length(task_tray_h), // [3] task tray
-        Constraint::Length(queued_h),    // [4] pending input preview
-        Constraint::Length(input_h),     // [5] input (dynamic height)
+        Constraint::Length(1),        // [0] status bar
+        Constraint::Min(3),           // [1] history
+        Constraint::Length(strike_h), // [2] strike zone (only when running)
+        Constraint::Length(queued_h), // [3] pending input preview
+        Constraint::Length(input_h),  // [4] input (dynamic height)
     ])
     .split(frame.area());
 
@@ -66,13 +61,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.running {
         draw_strike_zone(frame, app, chunks[2]);
     }
-    draw_task_tray(frame, app, chunks[3]);
-    draw_queue_preview(frame, app, chunks[4]);
+    draw_queue_preview(frame, app, chunks[3]);
     if app.has_prompt() {
-        draw_prompt(frame, app, chunks[5]);
+        draw_prompt(frame, app, chunks[4]);
     } else {
-        draw_input(frame, app, chunks[5]);
-        draw_suggestions(frame, app, chunks[5]);
+        draw_input(frame, app, chunks[4]);
+        draw_suggestions(frame, app, chunks[4]);
     }
     draw_session_picker(frame, app, chunks[1]); // overlay on history area
     draw_skill_picker(frame, app, chunks[1]); // overlay on history area
@@ -101,12 +95,20 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let display_output_tokens = app.token_usage.output_tokens + app.live_output_tokens_estimate;
     let display_total_tokens = display_input_tokens + display_output_tokens;
     let has_usage = display_total_tokens > 0;
-    let ctx_pct = app
-        .context_window
-        .and_then(|ctx_win| context_usage_pct(&app.last_response_usage, ctx_win));
-    let ctx_display = app
-        .context_window
-        .and_then(|ctx_win| format_context_usage(&app.last_response_usage, ctx_win));
+    let ctx_pct = app.context_window.and_then(|ctx_win| {
+        context_usage_pct(
+            &app.last_response_usage,
+            ctx_win,
+            app.context_usage_excludes_cached_input,
+        )
+    });
+    let ctx_display = app.context_window.and_then(|ctx_win| {
+        format_context_usage(
+            &app.last_response_usage,
+            ctx_win,
+            app.context_usage_excludes_cached_input,
+        )
+    });
     let ctx_display_pct = ctx_pct.map(|pct| format!("{pct:.1}%"));
 
     let in_out = if has_usage {
@@ -231,17 +233,37 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(bar, area);
 }
 
-fn context_usage_pct(usage: &TokenUsage, context_window: u64) -> Option<f64> {
-    let used = usage.context_total();
+fn context_usage_total(usage: &TokenUsage, excludes_cached_input: bool) -> i64 {
+    let adjusted_input = if excludes_cached_input {
+        usage.input_tokens
+    } else {
+        usage.input_tokens.saturating_sub(usage.cached_input_tokens)
+    };
+    adjusted_input
+        .saturating_add(usage.output_tokens)
+        .saturating_add(usage.reasoning_tokens)
+        .saturating_add(usage.cached_input_tokens)
+}
+
+fn context_usage_pct(
+    usage: &TokenUsage,
+    context_window: u64,
+    excludes_cached_input: bool,
+) -> Option<f64> {
+    let used = context_usage_total(usage, excludes_cached_input);
     if used <= 0 || context_window == 0 {
         return None;
     }
     Some(used as f64 / context_window as f64 * 100.0)
 }
 
-fn format_context_usage(usage: &TokenUsage, context_window: u64) -> Option<String> {
-    let used = usage.context_total();
-    let pct = context_usage_pct(usage, context_window)?;
+fn format_context_usage(
+    usage: &TokenUsage,
+    context_window: u64,
+    excludes_cached_input: bool,
+) -> Option<String> {
+    let used = context_usage_total(usage, excludes_cached_input);
+    let pct = context_usage_pct(usage, context_window, excludes_cached_input)?;
     if used <= 0 || context_window == 0 {
         return None;
     }
@@ -668,7 +690,7 @@ fn render_activity_block<'a>(
                 format!("{prefix}\u{2502}  "),
                 Style::default().fg(theme::LICHEN),
             ),
-            ActivityKind::TaskAction => (
+            ActivityKind::PlanUpdate => (
                 format!("{prefix}\u{25c6} "),
                 Style::default()
                     .fg(theme::LICHEN)
@@ -1355,184 +1377,6 @@ fn effective_status_detail(
     } else {
         details
     }
-}
-
-fn draw_task_tray(frame: &mut Frame, app: &App, area: Rect) {
-    if app.task_tray.is_empty() {
-        return;
-    }
-
-    let width = area.width as usize;
-    let total = app.task_tray.len();
-    let completed = app
-        .task_tray
-        .iter()
-        .filter(|t| t.status == "completed" || t.status == "cancelled")
-        .count();
-    let remaining = total - completed;
-    let ratio_str = if remaining == 0 {
-        format!("{} done", total)
-    } else {
-        format!("{} left \u{b7} {} done", remaining, completed)
-    };
-
-    // Top border: ┌─ TASKS ─ 3 left · 6 done ──────────┐
-    let title = format!(" TASKS \u{2500} {} ", ratio_str);
-    let title_w = UnicodeWidthStr::width(title.as_str());
-    let fill_w = width.saturating_sub(3 + title_w); // ┌─ + title + ┐
-
-    let top_line = Line::from(vec![
-        Span::styled("\u{250c}\u{2500}", Style::default().fg(theme::ASH)),
-        Span::styled(
-            title,
-            Style::default()
-                .fg(theme::SODIUM)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("\u{2500}".repeat(fill_w), Style::default().fg(theme::ASH)),
-        Span::styled("\u{2510}", Style::default().fg(theme::ASH)),
-    ]);
-
-    // Build pills for non-completed tasks
-    let active_tasks: Vec<&TaskSnapshot> = app
-        .task_tray
-        .iter()
-        .filter(|t| t.status != "completed" && t.status != "cancelled")
-        .collect();
-
-    let inner_w = width.saturating_sub(4); // "│ " + content + " │"
-    let two_col = active_tasks.len() >= 4 && inner_w >= TASK_TRAY_TWO_COL_MIN_INNER_WIDTH;
-
-    let format_task_cell = |task: &TaskSnapshot, cell_w: usize| -> (String, Style) {
-        let (marker, marker_color, text_color) = match task.status.as_str() {
-            "in_progress" => ("\u{25c6}", theme::SODIUM, theme::SODIUM),
-            "pending" if task.is_blocked => ("\u{25cb}", theme::ASH, theme::ASH_TEXT),
-            "pending" => ("\u{25cb}", theme::ASH_MID, theme::CHALK_DIM),
-            _ => ("\u{25cb}", theme::ASH_MID, theme::CHALK_DIM),
-        };
-        let label = if task.is_blocked && task.status == "pending" {
-            format!("{} (blocked)", task.label)
-        } else {
-            task.label.clone()
-        };
-        let raw_text = if task.owner.is_empty() {
-            label
-        } else {
-            format!("{} \u{00b7} {}", label, task.owner)
-        };
-
-        let body_w = cell_w.saturating_sub(2); // marker + space
-        let body = truncate_to_display_width(&raw_text, body_w);
-        let mut cell = format!("{} {}", marker, body);
-        let pad = cell_w.saturating_sub(UnicodeWidthStr::width(cell.as_str()));
-        if pad > 0 {
-            cell.push_str(&" ".repeat(pad));
-        }
-
-        let style =
-            Style::default()
-                .fg(text_color)
-                .add_modifier(if marker_color == theme::SODIUM {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                });
-        (cell, style)
-    };
-
-    // Breathing line above the tray so it doesn't collide with content above
-    let mut lines = vec![Line::from(""), top_line];
-
-    if active_tasks.is_empty() {
-        // All tasks completed — single row
-        let dismiss_text = match app.task_dismiss_remaining() {
-            Some(s) if s > 0 => format!("all completed \u{2500} {}s", s),
-            Some(_) => "all completed".to_string(),
-            None => "all completed".to_string(),
-        };
-        let dismiss_w = UnicodeWidthStr::width(dismiss_text.as_str());
-        lines.push(Line::from(vec![
-            Span::styled("\u{2502} ", Style::default().fg(theme::ASH)),
-            Span::styled(dismiss_text, Style::default().fg(theme::LICHEN)),
-            Span::raw(" ".repeat(inner_w.saturating_sub(dismiss_w))),
-            Span::styled(" \u{2502}", Style::default().fg(theme::ASH)),
-        ]));
-    } else if two_col {
-        // Two-column mode on wide terminals, preserving vertical list order down the first column.
-        let gap_w = 3usize;
-        let left_w = inner_w.saturating_sub(gap_w) / 2;
-        let right_w = inner_w.saturating_sub(gap_w + left_w);
-        let rows = active_tasks.len().div_ceil(2);
-
-        for row in 0..rows {
-            let left_idx = row;
-            let right_idx = row + rows;
-            let mut spans: Vec<Span> =
-                vec![Span::styled("\u{2502} ", Style::default().fg(theme::ASH))];
-
-            let (left_cell, left_style) = format_task_cell(active_tasks[left_idx], left_w);
-            spans.push(Span::styled(left_cell, left_style));
-            spans.push(Span::raw(" ".repeat(gap_w)));
-
-            if right_idx < active_tasks.len() {
-                let (right_cell, right_style) = format_task_cell(active_tasks[right_idx], right_w);
-                spans.push(Span::styled(right_cell, right_style));
-            } else {
-                spans.push(Span::raw(" ".repeat(right_w)));
-            }
-            spans.push(Span::styled(" \u{2502}", Style::default().fg(theme::ASH)));
-            lines.push(Line::from(spans));
-        }
-    } else {
-        // Default: one long vertically aligned list.
-        for task in &active_tasks {
-            let (cell, style) = format_task_cell(task, inner_w);
-            lines.push(Line::from(vec![
-                Span::styled("\u{2502} ", Style::default().fg(theme::ASH)),
-                Span::styled(cell, style),
-                Span::styled(" \u{2502}", Style::default().fg(theme::ASH)),
-            ]));
-        }
-    }
-
-    // Progress bar (2+ tasks) — scribe-line style: heavy ━ for done, light ─ for remaining.
-    // Ratio already shown in the title so the bar is purely visual.
-    if total >= 2 {
-        let bar_w = inner_w;
-        let filled = if total > 0 {
-            (completed * bar_w) / total
-        } else {
-            0
-        };
-        let empty = bar_w.saturating_sub(filled);
-
-        let mut progress_spans = vec![Span::styled("\u{2502} ", Style::default().fg(theme::ASH))];
-        if filled > 0 {
-            progress_spans.push(Span::styled(
-                "\u{2501}".repeat(filled),
-                Style::default().fg(theme::SODIUM),
-            ));
-        }
-        if empty > 0 {
-            progress_spans.push(Span::styled(
-                "\u{2500}".repeat(empty),
-                Style::default().fg(theme::ASH),
-            ));
-        }
-        progress_spans.push(Span::styled(" \u{2502}", Style::default().fg(theme::ASH)));
-
-        lines.push(Line::from(progress_spans));
-    }
-
-    // Bottom border
-    let bottom_fill = width.saturating_sub(2);
-    lines.push(Line::from(Span::styled(
-        format!("\u{2514}{}\u{2518}", "\u{2500}".repeat(bottom_fill)),
-        Style::default().fg(theme::ASH),
-    )));
-
-    let paragraph = Paragraph::new(lines).style(theme::history_bg());
-    frame.render_widget(paragraph, area);
 }
 
 const QUEUE_SECTION_ITEM_LIMIT: usize = 2;
@@ -2328,23 +2172,15 @@ mod tests {
 
     #[test]
     fn history_viewport_height_respects_dynamic_input_and_trays() {
-        let mut app = App::new("model".into(), "session".into(), None);
+        let mut app = App::new("model".into(), "session".into());
         app.blocks.clear(); // avoid splash-specific influence on expectations
         app.input = "line1\nline2\nline3".into();
         app.queue_turn(crate::app::QueuedTurn::new("queued".into(), Vec::new()));
-        app.task_tray.push(crate::app::TaskSnapshot {
-            id: "t1".into(),
-            label: "Task".into(),
-            status: "pending".into(),
-            owner: String::new(),
-            is_blocked: false,
-        });
 
         let fw = 100u16;
         let fh = 40u16;
         let expected_overhead = 1u16 // status bar
             + if app.running { 1 } else { 0 }
-            + app.task_tray_height(fw)
             + queue_preview_height(&app, fw)
             + input_height(&app, fw);
 
@@ -2354,7 +2190,7 @@ mod tests {
 
     #[test]
     fn queue_preview_lines_distinguish_checkpoint_and_next_turn() {
-        let mut app = App::new("model".into(), "session".into(), None);
+        let mut app = App::new("model".into(), "session".into());
         app.queue_pending_steer(QueuedTurn::new(
             "tighten the current assertion".into(),
             Vec::new(),
@@ -2395,7 +2231,7 @@ mod tests {
 
     #[test]
     fn queue_preview_height_grows_for_two_queue_sections() {
-        let mut app = App::new("model".into(), "session".into(), None);
+        let mut app = App::new("model".into(), "session".into());
         app.queue_pending_steer(QueuedTurn::new("checkpoint follow-up".into(), Vec::new()));
         app.queue_turn(QueuedTurn::new("next turn".into(), Vec::new()));
 
@@ -2455,28 +2291,6 @@ mod tests {
             line_text(&lines[0]),
             "├─ delegate · inspect queue rendering · 7ms"
         );
-    }
-
-    #[test]
-    fn task_activity_renders_diamond_marker() {
-        let activity = ActivityBlock {
-            kind: ActivityKind::TaskAction,
-            status: ActivityStatus::Completed,
-            tool_name: "update_task".into(),
-            summary: "task completed · 0007".into(),
-            detail_lines: Vec::new(),
-            duration_ms: 2,
-            args: serde_json::Value::Null,
-            result: serde_json::Value::Null,
-            artifact: None,
-            children: Vec::new(),
-            extra: None,
-        };
-
-        let mut lines = Vec::new();
-        render_activity_block(&activity, 1, &mut lines, 80, false);
-
-        assert_eq!(line_text(&lines[0]), "◆ task completed · 0007 · 2ms");
     }
 
     #[test]
@@ -2605,12 +2419,12 @@ mod tests {
             cached_input_tokens: 3_000,
             reasoning_tokens: 400,
         };
-        let pct = context_usage_pct(&usage, 1_050_000).expect("context pct");
+        let pct = context_usage_pct(&usage, 1_050_000, true).expect("context pct");
         assert!(pct > 7.8 && pct < 7.9, "unexpected pct: {pct}");
     }
 
     #[test]
-    fn format_context_usage_shows_raw_values() {
+    fn format_context_usage_shows_provider_adjusted_values() {
         let usage = TokenUsage {
             input_tokens: 78_182,
             output_tokens: 1_200,
@@ -2618,7 +2432,7 @@ mod tests {
             reasoning_tokens: 400,
         };
         assert_eq!(
-            format_context_usage(&usage, 1_050_000).as_deref(),
+            format_context_usage(&usage, 1_050_000, true).as_deref(),
             Some("82.8k / 1.1M (7.9%)")
         );
         assert_eq!(
@@ -2629,14 +2443,33 @@ mod tests {
                     cached_input_tokens: 0,
                     reasoning_tokens: 0,
                 },
-                1_050_000
+                1_050_000,
+                false,
             )
             .as_deref(),
             Some("1.0k / 1.1M (0.1%)")
         );
         assert_eq!(
-            format_context_usage(&TokenUsage::default(), 1_050_000),
+            format_context_usage(&TokenUsage::default(), 1_050_000, false),
             None
+        );
+    }
+
+    #[test]
+    fn format_context_usage_avoids_double_counting_cached_input_for_openai_like_providers() {
+        let usage = TokenUsage {
+            input_tokens: 1_000,
+            output_tokens: 50,
+            cached_input_tokens: 200,
+            reasoning_tokens: 10,
+        };
+        assert_eq!(
+            format_context_usage(&usage, 10_000, false).as_deref(),
+            Some("1.1k / 10.0k (10.6%)")
+        );
+        assert_eq!(
+            format_context_usage(&usage, 10_000, true).as_deref(),
+            Some("1.3k / 10.0k (12.6%)")
         );
     }
 
@@ -2765,7 +2598,7 @@ mod tests {
 
     #[test]
     fn thinking_status_shows_long_wait_detail_after_30s() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         app.status_text = Some("thinking".into());
         app.status_detail = Some("waiting for first token".into());
         app.status_started_at =
@@ -2785,7 +2618,7 @@ mod tests {
 
     #[test]
     fn thinking_status_shows_very_long_wait_detail_after_120s() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         app.status_text = Some("thinking".into());
         app.status_detail = Some("waiting for first token".into());
         app.status_started_at =
@@ -2805,7 +2638,7 @@ mod tests {
 
     #[test]
     fn thinking_status_keeps_original_detail_once_output_starts() {
-        let mut app = App::new("test-model".into(), "test".into(), None);
+        let mut app = App::new("test-model".into(), "test".into());
         app.status_text = Some("thinking".into());
         app.status_detail = Some("waiting for first token".into());
         app.status_started_at =

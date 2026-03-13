@@ -6,14 +6,23 @@ use thiserror::Error;
 pub enum ParseError {
     #[error(transparent)]
     Lex(#[from] LexError),
-    #[error("expected {expected} at {span:?}, found {found}")]
+    #[error("expected {expected}, found {found}")]
     Expected {
         expected: &'static str,
         found: String,
         span: Span,
     },
-    #[error("unexpected token {found} at {span:?}")]
+    #[error("unexpected {found}")]
     Unexpected { found: String, span: Span },
+}
+
+impl ParseError {
+    pub fn offset(&self) -> usize {
+        match self {
+            Self::Lex(err) => err.offset(),
+            Self::Expected { span, .. } | Self::Unexpected { span, .. } => span.start,
+        }
+    }
 }
 
 pub fn parse(source: &str) -> Result<Program, ParseError> {
@@ -276,7 +285,7 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
-        match self.peek_kind().clone() {
+        match self.peek_kind() {
             TokenKind::Null => {
                 self.bump();
                 Ok(Expr::Null)
@@ -290,14 +299,17 @@ impl Parser {
                 Ok(Expr::Bool(false))
             }
             TokenKind::Number(value) => {
+                let value = *value;
                 self.bump();
                 Ok(Expr::Number(value))
             }
             TokenKind::String(value) => {
+                let value = value.clone();
                 self.bump();
                 Ok(Expr::String(value))
             }
             TokenKind::Ident(name) => {
+                let name = name.clone();
                 self.bump();
                 if matches!(self.peek_kind(), TokenKind::LParen) {
                     self.bump();
@@ -383,12 +395,13 @@ impl Parser {
     }
 
     fn expect_ident(&mut self) -> Result<String, ParseError> {
-        match self.bump().kind {
-            TokenKind::Ident(name) => Ok(name),
+        let token = self.bump();
+        match &token.kind {
+            TokenKind::Ident(name) => Ok(name.clone()),
             other => Err(ParseError::Expected {
                 expected: "identifier",
-                found: render_kind(&other),
-                span: self.prev_span(),
+                found: render_kind(other),
+                span: token.span,
             }),
         }
     }
@@ -411,7 +424,7 @@ impl Parser {
     }
 
     fn unexpected(&mut self) -> ParseError {
-        let token = self.peek().clone();
+        let token = self.peek();
         ParseError::Unexpected {
             found: render_kind(&token.kind),
             span: token.span,
@@ -438,12 +451,13 @@ impl Parser {
         &self.tokens[self.index]
     }
 
-    fn bump(&mut self) -> Token {
-        let token = self.tokens[self.index].clone();
+    fn bump(&mut self) -> &Token {
+        let token = &self.tokens[self.index];
         self.index += 1;
         token
     }
 
+    #[cfg(test)]
     fn prev_span(&self) -> Span {
         self.tokens[self.index.saturating_sub(1)].span
     }

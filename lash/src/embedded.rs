@@ -1,13 +1,13 @@
-use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc as std_mpsc;
 use std::thread::JoinHandle;
 
 use lashlang::{
-    ExecuteError, ParseError as FlowParseError, Snapshot as FlowSnapshot, State as FlowState,
-    ToolHost, ToolHostError, Value as FlowValue,
+    ExecuteError, ExecutionOutcome, ParseError as FlowParseError, Record as FlowRecord,
+    Snapshot as FlowSnapshot, State as FlowState, ToolHost, ToolHostError, Value as FlowValue,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 
 #[derive(Debug)]
 pub enum PythonRequest {
@@ -51,13 +51,11 @@ pub enum PythonResponse {
         args: String,
         result_tx: std_mpsc::Sender<String>,
     },
-    Message {
-        text: String,
-        kind: String,
-    },
     ExecResult {
         id: String,
         output: String,
+        response: String,
+        finished: bool,
         observations: Vec<String>,
         error: Option<String>,
     },
@@ -194,6 +192,8 @@ fn runtime_thread_main(
                 let _ = response_tx.send(PythonResponse::ExecResult {
                     id,
                     output: result.output,
+                    response: result.response,
+                    finished: result.finished,
                     observations: result.observations,
                     error: result.error,
                 });
@@ -215,6 +215,8 @@ fn runtime_thread_main(
                 let _ = response_tx.send(PythonResponse::ExecResult {
                     id,
                     output: String::new(),
+                    response: String::new(),
+                    finished: false,
                     observations: Vec::new(),
                     error,
                 });
@@ -251,6 +253,8 @@ fn runtime_thread_main(
 
 struct ExecOutcome {
     output: String,
+    response: String,
+    finished: bool,
     observations: Vec<String>,
     error: Option<String>,
 }
@@ -269,27 +273,31 @@ fn execute_code(
     };
 
     match lashlang::execute(code, &mut state.repl, &host) {
-        Ok(value) => {
-            let final_text = format_output_value(&value);
-            if !final_text.is_empty() {
-                let _ = response_tx.send(PythonResponse::Message {
-                    text: final_text,
-                    kind: "final".into(),
-                });
-            }
-            ExecOutcome {
-                output: String::new(),
-                observations: observations.into_inner().unwrap_or_default(),
-                error: None,
-            }
-        }
+        Ok(ExecutionOutcome::Finished(value)) => ExecOutcome {
+            output: String::new(),
+            response: format_output_value(&value),
+            finished: true,
+            observations: observations.into_inner().unwrap_or_default(),
+            error: None,
+        },
+        Ok(ExecutionOutcome::Continued) => ExecOutcome {
+            output: String::new(),
+            response: String::new(),
+            finished: false,
+            observations: observations.into_inner().unwrap_or_default(),
+            error: None,
+        },
         Err(ExecuteError::Parse(err)) => ExecOutcome {
             output: String::new(),
+            response: String::new(),
+            finished: false,
             observations: observations.into_inner().unwrap_or_default(),
             error: Some(format_parse_error(code, &err)),
         },
         Err(ExecuteError::Runtime(err)) => ExecOutcome {
             output: String::new(),
+            response: String::new(),
+            finished: false,
             observations: observations.into_inner().unwrap_or_default(),
             error: Some(err.to_string()),
         },
@@ -304,11 +312,7 @@ struct HostBridge<'a> {
 }
 
 impl ToolHost for HostBridge<'_> {
-    fn call(
-        &self,
-        name: &str,
-        args: &HashMap<String, FlowValue>,
-    ) -> Result<FlowValue, ToolHostError> {
+    fn call(&self, name: &str, args: &FlowRecord) -> Result<FlowValue, ToolHostError> {
         if name == "ask" {
             if self.headless {
                 return Err(ToolHostError::new(
@@ -325,10 +329,10 @@ impl ToolHost for HostBridge<'_> {
                 .transpose()?
                 .unwrap_or_default();
             let answer = ask_user(self.response_tx, question, options)?;
-            return Ok(FlowValue::String(answer));
+            return Ok(FlowValue::String(answer.into()));
         }
 
-        let mut payload = flow_to_json_value(&FlowValue::Record(args.clone()));
+        let mut payload = flow_to_json_value(&FlowValue::Record(Arc::new(args.clone())));
         if let Some(obj) = payload.as_object_mut() {
             obj.entry("__agent_id__".to_string())
                 .or_insert_with(|| Value::String(self.agent_id.clone()));
@@ -446,7 +450,7 @@ fn is_code_complete(code: &str) -> bool {
 
 fn as_flow_string(value: &FlowValue) -> Option<String> {
     match value {
-        FlowValue::String(text) => Some(text.clone()),
+        FlowValue::String(text) => Some(text.to_string()),
         _ => None,
     }
 }
@@ -470,16 +474,32 @@ fn flow_to_json_value(value: &FlowValue) -> Value {
     match value {
         FlowValue::Null => Value::Null,
         FlowValue::Bool(value) => Value::Bool(*value),
-        FlowValue::Number(value) => json!(value),
-        FlowValue::String(value) => Value::String(value.clone()),
+        FlowValue::Number(value) => json_number(*value),
+        FlowValue::String(value) => Value::String(value.to_string()),
         FlowValue::List(values) => Value::Array(values.iter().map(flow_to_json_value).collect()),
         FlowValue::Record(record) => Value::Object(
             record
                 .iter()
-                .map(|(key, value)| (key.clone(), flow_to_json_value(value)))
+                .map(|(key, value)| (key.to_string(), flow_to_json_value(value)))
                 .collect(),
         ),
     }
+}
+
+fn json_number(value: f64) -> Value {
+    if value.is_finite() && value.fract() == 0.0 {
+        let as_i64 = value as i64 as f64;
+        if as_i64 == value {
+            return Value::Number(serde_json::Number::from(value as i64));
+        }
+        let as_u64 = value as u64 as f64;
+        if as_u64 == value {
+            return Value::Number(serde_json::Number::from(value as u64));
+        }
+    }
+    serde_json::Number::from_f64(value)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
 }
 
 fn json_to_flow_value(value: Value) -> FlowValue {
@@ -487,22 +507,22 @@ fn json_to_flow_value(value: Value) -> FlowValue {
         Value::Null => FlowValue::Null,
         Value::Bool(value) => FlowValue::Bool(value),
         Value::Number(value) => FlowValue::Number(value.as_f64().unwrap_or_default()),
-        Value::String(value) => FlowValue::String(value),
+        Value::String(value) => FlowValue::String(value.into()),
         Value::Array(values) => {
             FlowValue::List(values.into_iter().map(json_to_flow_value).collect())
         }
-        Value::Object(map) => FlowValue::Record(
+        Value::Object(map) => FlowValue::Record(Arc::new(
             map.into_iter()
                 .map(|(key, value)| (key, json_to_flow_value(value)))
-                .collect(),
-        ),
+                .collect::<FlowRecord>(),
+        )),
     }
 }
 
 fn format_output_value(value: &FlowValue) -> String {
     match value {
         FlowValue::Null => String::new(),
-        FlowValue::String(text) => text.clone(),
+        FlowValue::String(text) => text.to_string(),
         FlowValue::Bool(value) => value.to_string(),
         FlowValue::Number(value) => value.to_string(),
         FlowValue::List(_) | FlowValue::Record(_) => {
@@ -512,25 +532,27 @@ fn format_output_value(value: &FlowValue) -> String {
 }
 
 fn format_parse_error(source: &str, err: &FlowParseError) -> String {
-    let offset = match err {
-        FlowParseError::Lex(lashlang::LexError::UnexpectedChar { offset, .. })
-        | FlowParseError::Lex(lashlang::LexError::UnterminatedString { offset })
-        | FlowParseError::Lex(lashlang::LexError::InvalidNumber { offset, .. }) => *offset,
-        FlowParseError::Expected { span, .. } | FlowParseError::Unexpected { span, .. } => {
-            span.start
-        }
-    };
+    let offset = err.offset();
     let (line_no, column, line_text) = line_context(source, offset);
     let caret_pad = " ".repeat(column.saturating_sub(1));
-    let mut message = format!(
-        "{} at line {}, column {}\n{}\n{}^",
-        err, line_no, column, line_text, caret_pad
-    );
+    let mut message = format!("line {line_no}, column {column}: {err}\n{line_text}\n{caret_pad}^");
     if matches!(
         err,
         FlowParseError::Unexpected { found, .. } if found == "`if`"
     ) {
-        message.push_str("\nhint: statement `if { ... } else { ... }` is not valid inside expressions; use `cond ? yes : no`");
+        message.push_str("\nhint: use `cond ? yes : no` for inline conditionals");
+    }
+    if matches!(
+        err,
+        FlowParseError::Lex(lashlang::LexError::UnexpectedChar { ch: '&', .. })
+    ) {
+        message.push_str("\nhint: use `and` or `&&`");
+    }
+    if matches!(
+        err,
+        FlowParseError::Lex(lashlang::LexError::UnexpectedChar { ch: '|', .. })
+    ) {
+        message.push_str("\nhint: use `or` or `||`");
     }
     message
 }
@@ -552,6 +574,7 @@ fn line_context(source: &str, offset: usize) -> (usize, usize, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn tool_reply_success_round_trips_json() {
@@ -582,6 +605,12 @@ mod tests {
     }
 
     #[test]
+    fn whole_numbers_serialize_as_json_integers_for_tool_args() {
+        assert_eq!(json_number(1.0), serde_json::json!(1));
+        assert_eq!(json_number(1.5), serde_json::json!(1.5));
+    }
+
+    #[test]
     fn completion_check_distinguishes_incomplete_inputs() {
         assert!(!is_code_complete("if true {"));
         assert!(!is_code_complete("finish \"unterminated"));
@@ -593,6 +622,7 @@ mod tests {
     fn parse_error_format_includes_line_context_and_hint() {
         let err = lashlang::parse("x = if true { 1 } else { 2 }").expect_err("parse should fail");
         let formatted = format_parse_error("x = if true { 1 } else { 2 }", &err);
+        assert!(formatted.starts_with("line 1, column 5: unexpected `if`"));
         assert!(formatted.contains("line 1, column 5"));
         assert!(formatted.contains("x = if true { 1 } else { 2 }"));
         assert!(formatted.contains("^"));
@@ -603,8 +633,30 @@ mod tests {
     fn parse_error_format_handles_lex_offsets() {
         let err = lashlang::parse("a = @").expect_err("parse should fail");
         let formatted = format_parse_error("a = @", &err);
+        assert!(formatted.starts_with("line 1, column 5: unexpected `@`"));
         assert!(formatted.contains("line 1, column 5"));
         assert!(formatted.contains("a = @"));
+    }
+
+    #[test]
+    fn parse_error_format_adds_operator_hints() {
+        let err = lashlang::parse("x = true & false").expect_err("parse should fail");
+        let formatted = format_parse_error("x = true & false", &err);
+        assert!(formatted.contains("hint: use `and` or `&&`"));
+    }
+
+    #[test]
+    fn execute_code_runtime_errors_are_concise() {
+        let mut state = RuntimeState::new();
+        let (tx, _rx) = std_mpsc::channel();
+
+        let result = execute_code(&mut state, "value = 1 finish value.name", &tx);
+
+        assert!(!result.finished);
+        assert_eq!(
+            result.error,
+            Some("can't read `.name` from number".to_string())
+        );
     }
 
     #[test]
@@ -622,11 +674,25 @@ mod tests {
         );
 
         assert_eq!(result.output, "");
+        assert_eq!(result.response, "done");
+        assert!(result.finished);
         assert_eq!(result.error, None);
         assert_eq!(result.observations.len(), 1);
         let parsed: serde_json::Value =
             serde_json::from_str(&result.observations[0]).expect("observation should be json");
-        assert_eq!(parsed, serde_json::json!({"ok": true, "count": 2.0}));
+        assert_eq!(parsed, serde_json::json!({"ok": true, "count": 2}));
+    }
+
+    #[test]
+    fn finish_with_empty_text_still_marks_execution_finished() {
+        let mut state = RuntimeState::new();
+        let (tx, _rx) = std_mpsc::channel();
+
+        let result = execute_code(&mut state, "finish \"\"", &tx);
+
+        assert!(result.finished);
+        assert_eq!(result.response, "");
+        assert_eq!(result.error, None);
     }
 
     #[test]
@@ -643,11 +709,7 @@ mod tests {
     struct TestHost;
 
     impl ToolHost for TestHost {
-        fn call(
-            &self,
-            _name: &str,
-            _args: &HashMap<String, FlowValue>,
-        ) -> Result<FlowValue, ToolHostError> {
+        fn call(&self, _name: &str, _args: &FlowRecord) -> Result<FlowValue, ToolHostError> {
             Ok(FlowValue::Null)
         }
     }

@@ -1,7 +1,7 @@
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
-use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
+use crate::{ToolDefinition, ToolParam, ToolPromptContext, ToolProvider, ToolResult};
 
 use super::{compact_diff, require_str, run_blocking};
 
@@ -31,10 +31,13 @@ impl ToolProvider for ApplyPatchTool {
                     "- Begin with `*** Begin Patch`\n",
                     "- End with `*** End Patch`\n",
                     "- Use `*** Add File: path`, `*** Delete File: path`, or `*** Update File: path`\n",
-                    "- Optional move: `*** Move to: new/path`\n",
-                    "- Inside updates, each line must start with ` ` (context), `-` (remove), or `+` (add)\n",
-                    "- Optional context headers start with `@@`\n\n",
-                    "Pass paths relative to `workdir` when provided, otherwise relative to the current working directory."
+                    "- `*** Add File: path` creates a new file; every following content line must start with `+`\n",
+                    "- `*** Update File: path` patches an existing file and may be followed by `*** Move to: new/path`\n",
+                    "- Inside update hunks, each line must start with ` ` (context), `-` (remove), or `+` (add)\n",
+                    "- Optional hunk headers start with `@@`\n",
+                    "- Paths must be relative, never absolute; use `workdir` to target another directory\n\n",
+                    "Example add-file patch:\n",
+                    "`*** Begin Patch\\n*** Add File: hello.txt\\n+hello\\n*** End Patch`"
                 ),
                 [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
@@ -54,13 +57,23 @@ impl ToolProvider for ApplyPatchTool {
                 },
             ],
             returns: "dict".into(),
-            examples: vec![crate::ToolText::new(
-                "apply_patch(input=\"*** Begin Patch\\n*** Update File: src/main.rs\\n@@\\n-old\\n+new\\n*** End Patch\")",
-                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-            )],
+            examples: vec![
+                crate::ToolText::new(
+                    "apply_patch(input=\"*** Begin Patch\\n*** Add File: hello.txt\\n+hello\\n*** End Patch\")",
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
+                ),
+                crate::ToolText::new(
+                    "apply_patch(input=\"*** Begin Patch\\n*** Update File: src/main.rs\\n@@\\n-old\\n+new\\n*** End Patch\")",
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
+                ),
+            ],
             hidden: false,
             inject_into_prompt: true,
         }]
+    }
+
+    fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
+        vec!["### apply_patch Format\nUse `apply_patch` for file edits. New files require `*** Add File: path` followed by content lines that each start with `+`. Paths must be relative, never absolute; use `workdir` to target another directory.".to_string()]
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
@@ -225,7 +238,7 @@ fn parse_one_hunk(lines: &[&str], line_number: usize) -> Result<(Hunk, usize), S
         }
         if contents.is_empty() {
             return Err(format!(
-                "invalid hunk at line {line_number}: add file hunk for '{path}' is empty"
+                "invalid hunk at line {line_number}: add file hunk for '{path}' is empty; every new file content line must start with '+'"
             ));
         }
         return Ok((
@@ -503,6 +516,7 @@ fn normalize_display_path(cwd: &Path, path: &Path) -> String {
 fn prepare_change(hunk: &Hunk, cwd: &Path) -> Result<PreparedChange, String> {
     match hunk {
         Hunk::Add { path, contents } => {
+            ensure_relative_path(path)?;
             let resolved = resolve_path(cwd, path);
             if resolved.exists() {
                 return Err(format!("File already exists: {}", resolved.display()));
@@ -517,6 +531,7 @@ fn prepare_change(hunk: &Hunk, cwd: &Path) -> Result<PreparedChange, String> {
             })
         }
         Hunk::Delete { path } => {
+            ensure_relative_path(path)?;
             let resolved = resolve_path(cwd, path);
             let original = std::fs::read_to_string(&resolved)
                 .map_err(|err| format!("Failed to read {}: {err}", resolved.display()))?;
@@ -533,11 +548,16 @@ fn prepare_change(hunk: &Hunk, cwd: &Path) -> Result<PreparedChange, String> {
             move_path,
             chunks,
         } => {
+            ensure_relative_path(path)?;
             let resolved = resolve_path(cwd, path);
             let applied = derive_new_contents_from_chunks(&resolved, chunks)?;
             let target = move_path
                 .as_ref()
-                .map(|path| resolve_path(cwd, path))
+                .map(|path| -> Result<PathBuf, String> {
+                    ensure_relative_path(path)?;
+                    Ok(resolve_path(cwd, path))
+                })
+                .transpose()?
                 .unwrap_or_else(|| resolved.clone());
             let display_path = normalize_display_path(cwd, &target);
             let diff = compact_diff(
@@ -602,10 +622,17 @@ fn apply_change(change: &PreparedChange) -> Result<(), String> {
 }
 
 fn resolve_path(cwd: &Path, path: &Path) -> PathBuf {
+    cwd.join(path)
+}
+
+fn ensure_relative_path(path: &Path) -> Result<(), String> {
     if path.is_absolute() {
-        path.to_path_buf()
+        Err(format!(
+            "Patch paths must be relative, never absolute: {}",
+            path.display()
+        ))
     } else {
-        cwd.join(path)
+        Ok(())
     }
 }
 
@@ -878,5 +905,49 @@ mod tests {
         assert_eq!(result.result["files"][0]["removed"], 1);
         assert_eq!(result.result["added"], 1);
         assert_eq!(result.result["removed"], 1);
+    }
+
+    #[tokio::test]
+    async fn add_file_patch_requires_plus_prefixed_lines() {
+        let dir = TempDir::new().unwrap();
+        let tool = ApplyPatchTool;
+        let result = tool
+            .execute(
+                "apply_patch",
+                &json!({
+                    "workdir": dir.path().to_str().unwrap(),
+                    "input": "*** Begin Patch\n*** Add File: hello.txt\nhello\n*** End Patch"
+                }),
+            )
+            .await;
+        assert!(!result.success);
+        assert!(
+            result
+                .result
+                .as_str()
+                .is_some_and(|value| value.contains("must start with '+'"))
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rejects_absolute_paths() {
+        let dir = TempDir::new().unwrap();
+        let tool = ApplyPatchTool;
+        let abs = dir.path().join("hello.txt");
+        let result = tool
+            .execute(
+                "apply_patch",
+                &json!({
+                    "workdir": dir.path().to_str().unwrap(),
+                    "input": format!("*** Begin Patch\n*** Add File: {}\n+hello\n*** End Patch", abs.display())
+                }),
+            )
+            .await;
+        assert!(!result.success);
+        let expected = format!(
+            "Patch paths must be relative, never absolute: {}",
+            abs.display()
+        );
+        assert_eq!(result.result.as_str(), Some(expected.as_str()));
     }
 }

@@ -666,7 +666,6 @@ pub struct LashRuntime {
     path_resolver: Option<Arc<dyn PathResolver>>,
     sanitizer: SanitizerPolicy,
     termination: TerminationPolicy,
-    cached_base_context: Option<String>,
     llm_factory: LlmFactory,
     managed_sessions: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
 }
@@ -689,6 +688,9 @@ impl RuntimeSessionManager {
         }
         if let Some(model_variant) = &overrides.model_variant {
             config.model_variant = Some(model_variant.clone());
+        }
+        if let Some(max_context_tokens) = overrides.max_context_tokens {
+            config.max_context_tokens = Some(max_context_tokens);
         }
         if let Some(execution_mode) = overrides.execution_mode {
             config.execution_mode = execution_mode;
@@ -957,35 +959,10 @@ type PreparedMutator = Option<(Arc<crate::PluginSession>, MessageMutatorContext)
 type PreparedMessages = (PreparedMutator, Vec<Message>);
 
 impl LashRuntime {
-    fn history_enabled(&self) -> bool {
-        let Some(session) = self.session.as_ref() else {
-            return false;
-        };
-        let tool_names: Vec<String> = session
-            .tools()
-            .definitions()
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
-        let helper_bindings = session
-            .tools()
-            .dynamic_projection()
-            .map(|projection| projection.helper_bindings)
-            .unwrap_or_default();
-        tool_names.iter().any(|name| name == "search_history")
-            || helper_bindings.contains("search_history")
-    }
-
-    fn max_context_tokens(&self, model: &str) -> usize {
+    fn max_context_tokens(&self) -> usize {
         self.config
             .max_context_tokens
-            .or_else(|| {
-                self.config
-                    .provider
-                    .context_window(model)
-                    .map(|v| v as usize)
-            })
-            .unwrap_or(200_000)
+            .expect("lash runtime requires explicit max_context_tokens")
     }
 
     fn prepare_message_mutation(
@@ -1065,6 +1042,11 @@ impl LashRuntime {
         if state.context_folding.is_default() && !config.context_folding.is_default() {
             state.context_folding = config.context_folding;
         }
+        if config.max_context_tokens.is_none() {
+            return Err(SessionError::Protocol(
+                "runtime config missing max_context_tokens; hosts must supply explicit model metadata".to_string(),
+            ));
+        }
         let mut session = Session::new(
             services,
             &state.agent_id,
@@ -1095,7 +1077,6 @@ impl LashRuntime {
             path_resolver,
             sanitizer,
             termination,
-            cached_base_context: None,
             llm_factory: default_llm_factory(),
             managed_sessions: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -1135,11 +1116,7 @@ impl LashRuntime {
             model_variant: self.config.model_variant.clone(),
             execution_mode: self.config.execution_mode,
             context_folding: self.config.context_folding,
-            context_window: self
-                .config
-                .max_context_tokens
-                .map(|tokens| tokens as u64)
-                .or_else(|| self.config.provider.context_window(&self.config.model)),
+            context_window: self.config.max_context_tokens.map(|tokens| tokens as u64),
         }
     }
 
@@ -1211,6 +1188,11 @@ impl LashRuntime {
         self.config.model_variant = model_variant;
     }
 
+    /// Update explicit model context metadata on the runtime config.
+    pub fn set_max_context_tokens(&mut self, max_context_tokens: usize) {
+        self.config.max_context_tokens = Some(max_context_tokens);
+    }
+
     /// Update provider on the runtime config.
     pub fn set_provider(&mut self, provider: Provider) {
         self.config.provider = provider;
@@ -1232,6 +1214,7 @@ impl LashRuntime {
         provider: Option<Provider>,
         model: Option<String>,
         model_variant: Option<Option<String>>,
+        max_context_tokens: Option<usize>,
         context_folding: Option<ContextFoldingConfig>,
     ) {
         let previous = self.session_config_snapshot();
@@ -1243,6 +1226,9 @@ impl LashRuntime {
         }
         if let Some(model_variant) = model_variant {
             self.config.model_variant = model_variant;
+        }
+        if let Some(max_context_tokens) = max_context_tokens {
+            self.config.max_context_tokens = Some(max_context_tokens);
         }
         if let Some(context_folding) = context_folding {
             self.state.context_folding = context_folding;
@@ -1434,7 +1420,7 @@ impl LashRuntime {
         });
 
         if let Some(prompt_usage) = previous_prompt_usage.clone() {
-            let max_context_tokens = LashRuntime::max_context_tokens(self, &self.config.model);
+            let max_context_tokens = LashRuntime::max_context_tokens(self);
             let hard_budget =
                 max_context_tokens * usize::from(self.state.context_folding.hard_limit_pct) / 100;
             if prompt_usage.prompt_context_tokens >= hard_budget {
@@ -1465,7 +1451,6 @@ impl LashRuntime {
                         prompt_usage.prompt_context_tokens,
                         max_context_tokens,
                         self.state.context_folding,
-                        self.history_enabled(),
                     );
                     normalize_message_ids(&mut messages);
                 }
@@ -1606,13 +1591,26 @@ impl LashRuntime {
             ));
         }
 
-        let plugin_prompt_sections = plugins
+        let plugin_prompt_contributions = plugins
             .collect_prompt_contributions(PromptHookContext {
                 session_id: self.state.agent_id.clone(),
                 host: Arc::clone(&manager),
             })
             .map_err(|err| RuntimeError {
                 code: "plugin_prompt".to_string(),
+                message: err.to_string(),
+            })?;
+        let mut prompt_state = self.export_state();
+        prompt_state.messages = messages.clone();
+        let turn_prompt_sections = plugins
+            .collect_turn_prompt_contributions(TurnHookContext {
+                session_id: self.state.agent_id.clone(),
+                state: prompt_state,
+                host: Arc::clone(&manager),
+            })
+            .await
+            .map_err(|err| RuntimeError {
+                code: "plugin_turn_prompt".to_string(),
                 message: err.to_string(),
             })?
             .into_iter()
@@ -1627,10 +1625,10 @@ impl LashRuntime {
         let mut driver = RuntimeTurnDriver {
             session,
             config: self.config.clone(),
-            cached_base_context: self.cached_base_context.take(),
             agent_id: self.state.agent_id.clone(),
             llm_factory: Arc::clone(&self.llm_factory),
-            plugin_prompt_sections,
+            plugin_prompt_contributions,
+            turn_prompt_sections,
             session_manager: manager,
         };
         let run_offset = self.state.iteration;
@@ -1668,7 +1666,6 @@ impl LashRuntime {
 
         self.session = Some(driver.session);
         self.config = driver.config;
-        self.cached_base_context = driver.cached_base_context;
         self.state.messages = new_messages;
         self.state.iteration = new_iteration;
         if assembler.token_usage.total() > 0 {
@@ -1764,10 +1761,10 @@ impl LashRuntime {
 struct RuntimeTurnDriver {
     session: Session,
     config: RuntimeConfig,
-    cached_base_context: Option<String>,
     agent_id: String,
     llm_factory: LlmFactory,
-    plugin_prompt_sections: Vec<String>,
+    plugin_prompt_contributions: Vec<crate::PromptContribution>,
+    turn_prompt_sections: Vec<String>,
     session_manager: Arc<dyn SessionManager>,
 }
 
@@ -1866,10 +1863,9 @@ impl RuntimeTurnDriver {
         let preamble = build_execution_preamble(
             &self.session,
             &agent_config,
-            &mut self.cached_base_context,
             ExecutionMode::Repl,
             model,
-            self.plugin_prompt_sections.clone(),
+            self.plugin_prompt_contributions.clone(),
         );
         self.config = agent_config.into();
 
@@ -1970,10 +1966,9 @@ impl RuntimeTurnDriver {
         let preamble = build_execution_preamble(
             &self.session,
             &agent_config,
-            &mut self.cached_base_context,
             ExecutionMode::Standard,
             model,
-            self.plugin_prompt_sections.clone(),
+            self.plugin_prompt_contributions.clone(),
         );
         self.config = agent_config.into();
 
@@ -2287,14 +2282,12 @@ impl RuntimeTurnDriver {
             tool_specs: preamble.tool_specs,
             tool_names: preamble.tool_names,
             helper_bindings: preamble.helper_bindings,
-            capability_prompt_sections: preamble.capability_prompt_sections,
-            plugin_prompt_sections: preamble.plugin_prompt_sections,
+            guide_sections: preamble.guide_sections,
+            plugin_prompt_contributions: preamble.plugin_prompt_contributions,
+            turn_prompt_sections: self.turn_prompt_sections.clone(),
             can_write: preamble.can_write,
-            history_enabled: preamble.history_enabled,
-            project_instructions: preamble.project_instructions,
             prompt_overrides: self.config.prompt_overrides.clone(),
-            base_context: preamble.base_context,
-            instruction_source: preamble.instruction_source,
+            instruction_source: Arc::clone(&self.config.instruction_source),
             llm_log_path: self.config.llm_log_path.clone(),
             agent_id: self.agent_id.clone(),
         }
@@ -3251,6 +3244,7 @@ mod tests {
                 base_url: "https://example.invalid/v1".to_string(),
             },
             model: "mock-model".to_string(),
+            max_context_tokens: Some(200_000),
             headless: true,
             host_profile: HostProfile::Headless,
             ..RuntimeConfig::default()
@@ -3270,6 +3264,35 @@ mod tests {
         runtime
     }
 
+    #[tokio::test]
+    async fn runtime_requires_explicit_max_context_tokens() {
+        let tools: Arc<dyn crate::ToolProvider> = Arc::new(crate::ToolSet::new());
+        let result = LashRuntime::from_state(
+            RuntimeConfig {
+                execution_mode: ExecutionMode::Standard,
+                provider: Provider::OpenAiGeneric {
+                    api_key: "test-key".to_string(),
+                    base_url: "https://example.invalid/v1".to_string(),
+                },
+                model: "mock-model".to_string(),
+                max_context_tokens: None,
+                headless: true,
+                host_profile: HostProfile::Headless,
+                ..RuntimeConfig::default()
+            },
+            crate::RuntimeServices::tools_only(tools, "root").expect("services"),
+            AgentStateEnvelope::default(),
+        )
+        .await;
+        match result {
+            Err(SessionError::Protocol(message)) => {
+                assert!(message.contains("max_context_tokens"));
+            }
+            Err(other) => panic!("unexpected session error: {other}"),
+            Ok(_) => panic!("runtime should reject implicit model metadata"),
+        }
+    }
+
     fn repl_test_config() -> RuntimeConfig {
         RuntimeConfig {
             execution_mode: ExecutionMode::Repl,
@@ -3278,6 +3301,7 @@ mod tests {
                 base_url: "https://example.invalid/v1".to_string(),
             },
             model: "mock-model".to_string(),
+            max_context_tokens: Some(200_000),
             headless: false,
             host_profile: HostProfile::Interactive,
             ..RuntimeConfig::default()
@@ -3434,6 +3458,7 @@ mod tests {
                 }),
                 Some("claude-opus-4-6".to_string()),
                 Some(None),
+                Some(123_456),
                 None,
             )
             .await;
@@ -3993,10 +4018,10 @@ mod tests {
         let mut driver = RuntimeTurnDriver {
             session,
             config: runtime.config.clone(),
-            cached_base_context: runtime.cached_base_context.clone(),
             agent_id: runtime.state.agent_id.clone(),
             llm_factory: runtime.llm_factory.clone(),
-            plugin_prompt_sections: Vec::new(),
+            plugin_prompt_contributions: Vec::new(),
+            turn_prompt_sections: Vec::new(),
             session_manager,
         };
         let (event_tx, mut event_rx) = mpsc::channel(8);
@@ -4487,6 +4512,7 @@ mod tests {
                 }),
                 Some("gemini-2.5-flash-image".to_string()),
                 None,
+                Some(32_768),
                 None,
             )
             .await;

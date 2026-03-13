@@ -14,8 +14,6 @@ mod skills;
 #[cfg(feature = "sqlite-store")]
 mod state;
 mod switchable;
-#[cfg(feature = "sqlite-store")]
-mod tasks;
 mod toolset;
 mod update_plan;
 mod web_search;
@@ -35,8 +33,6 @@ pub use skills::SkillStore;
 #[cfg(feature = "sqlite-store")]
 pub use state::StateStore;
 pub use switchable::SwitchableTools;
-#[cfg(feature = "sqlite-store")]
-pub use tasks::TaskStore;
 pub use toolset::{ToolSet, ToolSetDeps};
 pub use update_plan::UpdatePlanTool;
 pub use web_search::WebSearch;

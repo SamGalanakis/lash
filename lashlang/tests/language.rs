@@ -1,4 +1,6 @@
-use lashlang::{Record, RuntimeError, State, ToolHost, ToolHostError, Value, execute, parse};
+use lashlang::{
+    ExecutionOutcome, Record, RuntimeError, State, ToolHost, ToolHostError, Value, execute, parse,
+};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -25,21 +27,21 @@ impl ToolHost for TestHost {
             "read_file" => {
                 let path = expect_string(args, "path")?;
                 match self.files.get(path) {
-                    Some(content) => Ok(Value::String(content.clone())),
+                    Some(content) => Ok(Value::String(content.clone().into())),
                     None => Err(ToolHostError::new(format!("missing file: {path}"))),
                 }
             }
             "glob" => {
                 let pattern = expect_string(args, "pattern")?;
-                let values = self
+                let values: Vec<_> = self
                     .globs
                     .get(pattern)
                     .cloned()
                     .unwrap_or_default()
                     .into_iter()
-                    .map(Value::String)
+                    .map(|value| Value::String(value.into()))
                     .collect();
-                Ok(Value::List(values))
+                Ok(Value::List(values.into()))
             }
             "sleep_echo" => {
                 let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
@@ -58,7 +60,7 @@ impl ToolHost for TestHost {
                 }
                 std::thread::sleep(Duration::from_millis(50));
                 self.active.fetch_sub(1, Ordering::SeqCst);
-                Ok(Value::String(expect_string(args, "value")?.to_string()))
+                Ok(Value::String(expect_string(args, "value")?.to_string().into()))
             }
             _ => Err(ToolHostError::new(format!("unknown tool: {name}"))),
         }
@@ -70,6 +72,13 @@ impl ToolHost for TestHost {
             .expect("observation mutex")
             .push(value.clone());
         Ok(())
+    }
+}
+
+fn finished(outcome: ExecutionOutcome) -> Value {
+    match outcome {
+        ExecutionOutcome::Finished(value) => value,
+        ExecutionOutcome::Continued => panic!("expected `finish`"),
     }
 }
 
@@ -108,18 +117,20 @@ fn executes_arithmetic_strings_and_finish() {
     let host = TestHost::default();
     let mut state = State::new();
 
-    let value = execute(
-        r#"
+    let value = finished(
+        execute(
+            r#"
         total = 1 + 2 * 3
         msg = format("total={0}", total)
         finish msg
         "#,
-        &mut state,
-        &host,
-    )
-    .expect("execution should succeed");
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
 
-    assert_eq!(value, Value::String("total=7".to_string()));
+    assert_eq!(value, Value::String("total=7".to_string().into()));
     assert_eq!(state.globals()["total"], Value::Number(7.0));
 }
 
@@ -128,8 +139,9 @@ fn executes_if_for_and_list_concat() {
     let host = TestHost::default();
     let mut state = State::new();
 
-    let value = execute(
-        r#"
+    let value = finished(
+        execute(
+            r#"
         nums = [1, 2, 3, 4]
         sum = 0
         labels = []
@@ -144,12 +156,13 @@ fn executes_if_for_and_list_concat() {
         }
         finish result
         "#,
-        &mut state,
-        &host,
-    )
-    .expect("execution should succeed");
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
 
-    assert_eq!(value, Value::String("n=1,n=2,n=3,n=4".to_string()));
+    assert_eq!(value, Value::String("n=1,n=2,n=3,n=4".to_string().into()));
 }
 
 #[test]
@@ -157,18 +170,20 @@ fn ternary_selects_the_correct_branch() {
     let host = TestHost::default();
     let mut state = State::new();
 
-    let value = execute(
-        r#"
+    let value = finished(
+        execute(
+            r#"
         truthy = true ? "left" : "right"
         falsy = false ? "left" : "right"
         finish format("{0}:{1}", truthy, falsy)
         "#,
-        &mut state,
-        &host,
-    )
-    .expect("execution should succeed");
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
 
-    assert_eq!(value, Value::String("left:right".to_string()));
+    assert_eq!(value, Value::String("left:right".to_string().into()));
 }
 
 #[test]
@@ -176,15 +191,17 @@ fn ternary_is_right_associative() {
     let host = TestHost::default();
     let mut state = State::new();
 
-    let value = execute(
-        r#"
+    let value = finished(
+        execute(
+            r#"
         result = false ? 1 : true ? 2 : 3
         finish result
         "#,
-        &mut state,
-        &host,
-    )
-    .expect("execution should succeed");
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
 
     assert_eq!(value, Value::Number(2.0));
 }
@@ -194,17 +211,19 @@ fn ternary_has_lower_precedence_than_boolean_ops() {
     let host = TestHost::default();
     let mut state = State::new();
 
-    let value = execute(
-        r#"
+    let value = finished(
+        execute(
+            r#"
         result = false or true ? "yes" : "no"
         finish result
         "#,
-        &mut state,
-        &host,
-    )
-    .expect("execution should succeed");
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
 
-    assert_eq!(value, Value::String("yes".to_string()));
+    assert_eq!(value, Value::String("yes".to_string().into()));
 }
 
 #[test]
@@ -212,18 +231,20 @@ fn ternary_short_circuits_unselected_branch() {
     let host = TestHost::default();
     let mut state = State::new();
 
-    let value = execute(
-        r#"
+    let value = finished(
+        execute(
+            r#"
         yes = true ? "ok" : missing_name
         no = false ? missing_name : "ok"
         finish format("{0}:{1}", yes, no)
         "#,
-        &mut state,
-        &host,
-    )
-    .expect("execution should succeed");
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
 
-    assert_eq!(value, Value::String("ok:ok".to_string()));
+    assert_eq!(value, Value::String("ok:ok".to_string().into()));
 }
 
 #[test]
@@ -231,20 +252,22 @@ fn unary_bang_aliases_not() {
     let host = TestHost::default();
     let mut state = State::new();
 
-    let value = execute(
-        r#"
+    let value = finished(
+        execute(
+            r#"
         a = !false
         b = !true
         finish [a, b]
         "#,
-        &mut state,
-        &host,
-    )
-    .expect("execution should succeed");
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
 
     assert_eq!(
         value,
-        Value::List(vec![Value::Bool(true), Value::Bool(false)])
+        Value::List(vec![Value::Bool(true), Value::Bool(false)].into())
     );
 }
 
@@ -253,47 +276,58 @@ fn symbolic_boolean_aliases_match_word_operators() {
     let host = TestHost::default();
     let mut state = State::new();
 
-    let value = execute(
-        r#"
+    let value = finished(
+        execute(
+            r#"
         a = true && false
         b = false || true
         c = !false && (false || true)
         finish [a, b, c]
         "#,
-        &mut state,
-        &host,
-    )
-    .expect("execution should succeed");
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
 
     assert_eq!(
         value,
-        Value::List(vec![
-            Value::Bool(false),
-            Value::Bool(true),
-            Value::Bool(true)
-        ])
+        Value::List(vec![Value::Bool(false), Value::Bool(true), Value::Bool(true)].into())
     );
 }
 
 #[test]
-fn ternary_requires_boolean_condition() {
+fn conditions_and_ternary_use_bounded_truthiness() {
     let host = TestHost::default();
     let mut state = State::new();
 
-    let error = execute(
-        r#"
-        result = 1 ? "yes" : "no"
-        finish result
+    let value = finished(
+        execute(
+            r#"
+        a = 1 ? "yes" : "no"
+        b = "" ? "yes" : "no"
+        c = !0
+        d = ![]
+        finish [a, b, c, d]
         "#,
-        &mut state,
-        &host,
-    )
-    .expect_err("execution should fail");
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
 
-    assert!(matches!(
-        error,
-        lashlang::ExecuteError::Runtime(RuntimeError::NonBooleanCondition)
-    ));
+    assert_eq!(
+        value,
+        Value::List(
+            vec![
+                Value::String("yes".to_string().into()),
+                Value::String("no".to_string().into()),
+                Value::Bool(true),
+                Value::Bool(false),
+            ]
+            .into()
+        )
+    );
 }
 
 #[test]
@@ -301,20 +335,66 @@ fn string_concatenation_stringifies_non_string_side() {
     let host = TestHost::default().with_file("src/lib.rs", "pub fn main() {}");
     let mut state = State::new();
 
-    let value = execute(
-        r#"
+    let value = finished(
+        execute(
+            r#"
         found = call read_file { path: "src/lib.rs" }
         finish "status=" + found.ok + " value=" + found.value
         "#,
-        &mut state,
-        &host,
-    )
-    .expect("execution should succeed");
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
 
     assert_eq!(
         value,
-        Value::String("status=true value=pub fn main() {}".to_string())
+        Value::String("status=true value=pub fn main() {}".to_string().into())
     );
+}
+
+#[test]
+fn arithmetic_and_string_builtins_coerce_scalars() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        total = true + 2
+        scaled = "3" * 2
+        joined = join(["a", 2, true], "-")
+        split_num = split(101, 0)
+        prefix = starts_with(123, 12)
+        finish {
+          total: total,
+          scaled: scaled,
+          joined: joined,
+          split_num: split_num,
+          prefix: prefix
+        }
+        "#,
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
+
+    let record = value.as_record().expect("expected record");
+    assert_eq!(record["total"], Value::Number(3.0));
+    assert_eq!(record["scaled"], Value::Number(6.0));
+    assert_eq!(record["joined"], Value::String("a-2-true".to_string().into()));
+    assert_eq!(
+        record["split_num"],
+        Value::List(
+            vec![
+                Value::String("1".to_string().into()),
+                Value::String("1".to_string().into())
+            ]
+            .into()
+        )
+    );
+    assert_eq!(record["prefix"], Value::Bool(true));
 }
 
 #[test]
@@ -322,18 +402,20 @@ fn format_with_single_value_stringifies_it() {
     let host = TestHost::default();
     let mut state = State::new();
 
-    let value = execute(
-        r#"
+    let value = finished(
+        execute(
+            r#"
         finish format({ ok: true, count: 2 })
         "#,
-        &mut state,
-        &host,
-    )
-    .expect("execution should succeed");
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
 
     assert_eq!(
         value,
-        Value::String("{\"count\":2.0,\"ok\":true}".to_string())
+        Value::String("{\"count\":2.0,\"ok\":true}".to_string().into())
     );
 }
 
@@ -342,29 +424,54 @@ fn observe_captures_intermediate_values_without_ending_execution() {
     let host = TestHost::default();
     let mut state = State::new();
 
-    let value = execute(
-        r#"
+    let value = finished(
+        execute(
+            r#"
         item = { ok: true, count: 2 }
         observe item
         observe "step done"
         finish "final"
+        "#,
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
+
+    assert_eq!(value, Value::String("final".to_string().into()));
+    let observed = host.observations.lock().expect("observation mutex");
+    assert_eq!(observed.len(), 2);
+    assert_eq!(
+        observed[0],
+        Value::Record({
+            let mut record = Record::default();
+            record.insert("ok".to_string(), Value::Bool(true));
+            record.insert("count".to_string(), Value::Number(2.0));
+            record.into()
+        })
+    );
+    assert_eq!(observed[1], Value::String("step done".to_string().into()));
+}
+
+#[test]
+fn execution_can_continue_without_finish() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let outcome = execute(
+        r#"
+        counter = 1
+        observe counter
         "#,
         &mut state,
         &host,
     )
     .expect("execution should succeed");
 
-    assert_eq!(value, Value::String("final".to_string()));
+    assert_eq!(outcome, ExecutionOutcome::Continued);
+    assert_eq!(state.globals()["counter"], Value::Number(1.0));
     let observed = host.observations.lock().expect("observation mutex");
-    assert_eq!(observed.len(), 2);
-    assert_eq!(
-        observed[0],
-        Value::Record(Record::from([
-            ("ok".to_string(), Value::Bool(true)),
-            ("count".to_string(), Value::Number(2.0)),
-        ]))
-    );
-    assert_eq!(observed[1], Value::String("step done".to_string()));
+    assert_eq!(observed.as_slice(), &[Value::Number(1.0)]);
 }
 
 #[test]
@@ -372,8 +479,9 @@ fn ternary_fixes_tool_result_formatting_pattern() {
     let host = TestHost::default().with_file("src/lib.rs", "pub fn main() {}");
     let mut state = State::new();
 
-    let value = execute(
-        r#"
+    let value = finished(
+        execute(
+            r#"
         found = call read_file { path: "src/lib.rs" }
         missing = call read_file { path: "src/missing.rs" }
         summary = format(
@@ -383,10 +491,11 @@ fn ternary_fixes_tool_result_formatting_pattern() {
         )
         finish summary
         "#,
-        &mut state,
-        &host,
-    )
-    .expect("execution should succeed");
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
 
     let Value::String(text) = value else {
         panic!("expected string");
@@ -400,16 +509,18 @@ fn tool_calls_return_result_records() {
     let host = TestHost::default().with_file("src/lib.rs", "pub fn main() {}");
     let mut state = State::new();
 
-    let value = execute(
-        r#"
+    let value = finished(
+        execute(
+            r#"
         found = call read_file { path: "src/lib.rs" }
         missing = call read_file { path: "src/missing.rs" }
         finish { found: found, missing: missing }
         "#,
-        &mut state,
-        &host,
-    )
-    .expect("execution should succeed");
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
 
     let Value::Record(record) = value else {
         panic!("expected record");
@@ -429,29 +540,31 @@ fn parallel_executes_concurrently_and_merges_distinct_bindings() {
     let host = TestHost::default();
     let mut state = State::new();
 
-    let value = execute(
-        r#"
+    let value = finished(
+        execute(
+            r#"
         parallel {
           left = call sleep_echo { value: "a" }
           right = call sleep_echo { value: "b" }
         }
         finish { left: left, right: right }
         "#,
-        &mut state,
-        &host,
-    )
-    .expect("execution should succeed");
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
 
     let Value::Record(record) = value else {
         panic!("expected record");
     };
     assert_eq!(
         record["left"].as_record().unwrap()["value"],
-        Value::String("a".to_string())
+        Value::String("a".to_string().into())
     );
     assert_eq!(
         record["right"].as_record().unwrap()["value"],
-        Value::String("b".to_string())
+        Value::String("b".to_string().into())
     );
     assert!(host.max_active.load(Ordering::SeqCst) >= 2);
 }
@@ -485,30 +598,34 @@ fn snapshot_round_trip_preserves_repl_like_state() {
     let host = TestHost::default();
     let mut state = State::new();
 
-    execute(
-        r#"
+    finished(
+        execute(
+            r#"
         counter = 1
         finish counter
         "#,
-        &mut state,
-        &host,
-    )
-    .expect("first execution should succeed");
+            &mut state,
+            &host,
+        )
+        .expect("first execution should succeed"),
+    );
 
     let snapshot = state.snapshot();
     let encoded = serde_json::to_vec(&snapshot).expect("snapshot should serialize");
     let decoded = serde_json::from_slice(&encoded).expect("snapshot should deserialize");
     let mut restored = State::from_snapshot(decoded);
 
-    let value = execute(
-        r#"
+    let value = finished(
+        execute(
+            r#"
         counter = counter + 1
         finish counter
         "#,
-        &mut restored,
-        &host,
-    )
-    .expect("restored execution should succeed");
+            &mut restored,
+            &host,
+        )
+        .expect("restored execution should succeed"),
+    );
 
     assert_eq!(value, Value::Number(2.0));
 }
@@ -518,17 +635,19 @@ fn json_and_record_helpers_work() {
     let host = TestHost::default();
     let mut state = State::new();
 
-    let value = execute(
-        r#"
+    let value = finished(
+        execute(
+            r#"
         obj = json_parse("{\"path\":\"src/lib.rs\",\"line\":7}")
         finish format("{0}:{1}", obj.path, obj.line)
         "#,
-        &mut state,
-        &host,
-    )
-    .expect("execution should succeed");
+            &mut state,
+            &host,
+        )
+        .expect("execution should succeed"),
+    );
 
-    assert_eq!(value, Value::String("src/lib.rs:7".to_string()));
+    assert_eq!(value, Value::String("src/lib.rs:7".to_string().into()));
 }
 
 #[test]

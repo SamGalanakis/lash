@@ -77,7 +77,12 @@ pub use dynamic::{
     default_dynamic_capability_defs, profile_from_agent_capabilities,
     resolve_capability_projection, resolve_projection,
 };
+pub use instructions::InstructionLoaderConfig;
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
+pub use model_info::{
+    CachedModelCatalog, FileModelCatalogStore, MemoryModelCatalogStore, ModelCatalog,
+    ModelCatalogSource, ModelCatalogStore, ModelInfo, ModelsDevHttpSource, ResolvedModelSpec,
+};
 pub use model_variant::VariantRequestConfig;
 pub use plugin::{
     AssistantResponseHookContext, AssistantResponseTransform, AssistantStreamHookContext,
@@ -89,12 +94,13 @@ pub use plugin::{
     PromptContribution, PromptHookContext, RuntimeServices, SessionConfigOverrides,
     SessionCreateRequest, SessionHandle, SessionManager, SessionParam, SessionPlugin,
     SessionSnapshot, SessionStartPoint, SnapshotReader, SnapshotWriter, TurnHookContext,
-    TurnResultHookContext,
+    TurnPromptContribution, TurnResultHookContext,
 };
 #[cfg(feature = "sqlite-store")]
 pub use plugin::{
     BuiltinHistoryPluginFactory, BuiltinMemoryPluginFactory, BuiltinPlanModePluginFactory,
-    BuiltinPlanTrackerPluginFactory, builtin_dynamic_capability_defs,
+    BuiltinPlanTrackerPluginFactory, BuiltinPromptContextPluginFactory, PromptContextPluginConfig,
+    builtin_dynamic_capability_defs,
 };
 pub use provider::{LashConfig, Provider};
 pub use runtime::{
@@ -108,7 +114,7 @@ pub use session::{
     ExecResponse, PromptBridge, Session, SessionError, TurnInjectionBridge, UserPrompt,
 };
 #[cfg(feature = "sqlite-store")]
-pub use store::{AgentState, Store, TaskEntry};
+pub use store::{AgentState, Store};
 pub use text::strip_repl_fragments;
 pub use tools::{BatchingTools, ToolSet, ToolSetDeps};
 
@@ -616,10 +622,19 @@ pub struct ToolCallRecord {
     pub duration_ms: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ToolPromptContext {
+    pub mode: ExecutionMode,
+    pub omitted_tool_count: usize,
+}
+
 /// Trait for providing tools to the sandbox. Implement this per-project.
 #[async_trait::async_trait]
 pub trait ToolProvider: Send + Sync + 'static {
     fn definitions(&self) -> Vec<ToolDefinition>;
+    fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
+        Vec::new()
+    }
     fn dynamic_projection(&self) -> Option<crate::dynamic::ResolvedProjection> {
         None
     }

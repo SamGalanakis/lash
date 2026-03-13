@@ -4,6 +4,23 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::SystemTime;
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InstructionLoaderConfig {
+    pub enabled: bool,
+    pub global_filenames: Vec<String>,
+    pub local_filenames: Vec<String>,
+}
+
+impl Default for InstructionLoaderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            global_filenames: vec!["AGENT.md".to_string()],
+            local_filenames: vec!["AGENTS.md".to_string(), "CLAUDE.md".to_string()],
+        }
+    }
+}
+
 /// Loads project instruction files (AGENTS.md, CLAUDE.md) with deduplication.
 ///
 /// System-level instructions are computed once at construction (global + ancestor walk).
@@ -19,6 +36,8 @@ pub struct InstructionLoader {
     /// Last seen modified time for context-aware instruction files.
     /// Files are reloaded when mtime changes.
     loaded_context: Mutex<HashMap<PathBuf, Option<SystemTime>>>,
+    /// Loader policy for which instruction files are considered.
+    config: InstructionLoaderConfig,
 }
 
 /// Host-provided instruction source for system + context-aware instructions.
@@ -36,8 +55,12 @@ pub struct FsInstructionSource {
 
 impl FsInstructionSource {
     pub fn new() -> Self {
+        Self::with_config(InstructionLoaderConfig::default())
+    }
+
+    pub fn with_config(config: InstructionLoaderConfig) -> Self {
         Self {
-            loader: Arc::new(InstructionLoader::new()),
+            loader: Arc::new(InstructionLoader::with_config(config)),
         }
     }
 }
@@ -77,28 +100,32 @@ impl Default for InstructionLoader {
 impl InstructionLoader {
     /// Create a new loader. Computes system-level instructions immediately.
     pub fn new() -> Self {
+        Self::with_config(InstructionLoaderConfig::default())
+    }
+
+    pub fn with_config(config: InstructionLoaderConfig) -> Self {
         let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let mut system_paths = HashSet::new();
         let mut parts = Vec::new();
 
-        // 1. Global: $LASH_HOME/AGENT.md
-        {
-            let global = crate::lash_home().join("AGENT.md");
-            if let Some(text) = load_with_prefix(&global) {
-                system_paths.insert(global);
-                parts.push(text);
+        if config.enabled {
+            for filename in &config.global_filenames {
+                let global = crate::lash_home().join(filename);
+                if let Some(text) = load_with_prefix(&global) {
+                    system_paths.insert(global);
+                    parts.push(text);
+                    break;
+                }
             }
-        }
 
-        // 2. Walk ancestors root → cwd (most-specific-last)
-        let ancestors: Vec<_> = project_root.ancestors().collect();
-        for dir in ancestors.into_iter().rev() {
-            // First match wins per directory: AGENTS.md > CLAUDE.md
-            if let Some(path) = find_instruction_file(dir)
-                && let Some(text) = load_with_prefix(&path)
-            {
-                system_paths.insert(path);
-                parts.push(text);
+            let ancestors: Vec<_> = project_root.ancestors().collect();
+            for dir in ancestors.into_iter().rev() {
+                if let Some(path) = find_instruction_file(dir, &config.local_filenames)
+                    && let Some(text) = load_with_prefix(&path)
+                {
+                    system_paths.insert(path);
+                    parts.push(text);
+                }
             }
         }
 
@@ -107,6 +134,7 @@ impl InstructionLoader {
             system_paths,
             project_root,
             loaded_context: Mutex::new(HashMap::new()),
+            config,
         }
     }
 
@@ -121,6 +149,9 @@ impl InstructionLoader {
     /// Returns formatted instruction text if a new (not yet loaded) instruction
     /// file is found, or None.
     pub fn resolve(&self, filepath: &str) -> Option<String> {
+        if !self.config.enabled {
+            return None;
+        }
         let file_path = Path::new(filepath);
         let start_dir = file_path.parent()?;
 
@@ -134,7 +165,7 @@ impl InstructionLoader {
         let mut parts = Vec::new();
 
         loop {
-            if let Some(path) = find_instruction_file(&dir) {
+            if let Some(path) = find_instruction_file(&dir, &self.config.local_filenames) {
                 // Skip if already in system instructions
                 if !self.system_paths.contains(&path) {
                     let mut loaded = self.loaded_context.lock().unwrap();
@@ -171,9 +202,11 @@ impl InstructionLoader {
 }
 
 /// Check for instruction files in priority order. First match wins.
-fn find_instruction_file(dir: &Path) -> Option<PathBuf> {
-    let candidates = [dir.join("AGENTS.md"), dir.join("CLAUDE.md")];
-    candidates.into_iter().find(|p| p.is_file())
+fn find_instruction_file(dir: &Path, filenames: &[String]) -> Option<PathBuf> {
+    filenames
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|path| path.is_file())
 }
 
 /// Read a file and prefix with its source path.
@@ -200,7 +233,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("AGENTS.md"), "agents").unwrap();
         std::fs::write(dir.path().join("CLAUDE.md"), "claude").unwrap();
-        let found = find_instruction_file(dir.path()).unwrap();
+        let found = find_instruction_file(
+            dir.path(),
+            &InstructionLoaderConfig::default().local_filenames,
+        )
+        .unwrap();
         assert!(found.ends_with("AGENTS.md"));
     }
 
@@ -208,14 +245,32 @@ mod tests {
     fn find_instruction_file_falls_back_to_claude() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("CLAUDE.md"), "claude").unwrap();
-        let found = find_instruction_file(dir.path()).unwrap();
+        let found = find_instruction_file(
+            dir.path(),
+            &InstructionLoaderConfig::default().local_filenames,
+        )
+        .unwrap();
         assert!(found.ends_with("CLAUDE.md"));
     }
 
     #[test]
     fn find_instruction_file_none() {
         let dir = TempDir::new().unwrap();
-        assert!(find_instruction_file(dir.path()).is_none());
+        assert!(
+            find_instruction_file(
+                dir.path(),
+                &InstructionLoaderConfig::default().local_filenames
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn find_instruction_file_uses_custom_names() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("RULES.md"), "rules").unwrap();
+        let found = find_instruction_file(dir.path(), &["RULES.md".to_string()]).unwrap();
+        assert!(found.ends_with("RULES.md"));
     }
 
     #[test]
@@ -256,6 +311,7 @@ mod tests {
             system_paths: HashSet::new(),
             project_root: dir.path().to_path_buf(),
             loaded_context: Mutex::new(HashMap::new()),
+            config: InstructionLoaderConfig::default(),
         };
 
         let file = sub.join("code.rs");
@@ -276,6 +332,7 @@ mod tests {
             system_paths: HashSet::new(),
             project_root: dir.path().to_path_buf(),
             loaded_context: Mutex::new(HashMap::new()),
+            config: InstructionLoaderConfig::default(),
         };
 
         let file = sub.join("code.rs");
@@ -298,6 +355,7 @@ mod tests {
             system_paths: HashSet::new(),
             project_root: dir.path().to_path_buf(),
             loaded_context: Mutex::new(HashMap::new()),
+            config: InstructionLoaderConfig::default(),
         };
 
         let file = sub.join("code.rs");
@@ -321,6 +379,7 @@ mod tests {
             system_paths: HashSet::new(),
             project_root: dir.path().to_path_buf(),
             loaded_context: Mutex::new(HashMap::new()),
+            config: InstructionLoaderConfig::default(),
         };
         assert!(loader.resolve("/tmp/outside/file.rs").is_none());
     }

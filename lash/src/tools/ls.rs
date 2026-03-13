@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use super::{build_path_entry, parse_optional_bool, parse_optional_usize_arg, path_entries_value};
-use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
+use crate::{ToolDefinition, ToolParam, ToolPromptContext, ToolProvider, ToolResult};
 
 /// List filesystem entries in a directory tree.
 #[derive(Default)]
@@ -66,6 +66,10 @@ impl ToolProvider for Ls {
             hidden: false,
             inject_into_prompt: true,
         }]
+    }
+
+    fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
+        vec!["### Path Entry Results\n`glob` and `ls` both return `{ \"__type__\": \"path_entries\", \"items\": [...], \"truncated\": ... }`. Read paths from `result.items`, not `result.entries`. `glob` sorts `items` by modification time (newest first); `ls` sorts `items` alphabetically by path. If `truncated` is non-null, rerun with `limit=None` when needed.".to_string()]
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {

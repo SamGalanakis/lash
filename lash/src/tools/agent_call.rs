@@ -10,7 +10,8 @@ use crate::provider::AgentModels;
 use crate::{
     AgentConfig, AgentEvent, AgentStateEnvelope, DynamicStateSnapshot, EventSink, LashRuntime,
     Message, MessageRole, Part, PartKind, PluginSession, ProgressSender, PruneState, RuntimeConfig,
-    RuntimeServices, SandboxMessage, ToolDefinition, ToolParam, ToolProvider, ToolResult,
+    RuntimeServices, SandboxMessage, ToolDefinition, ToolParam, ToolPromptContext, ToolProvider,
+    ToolResult,
 };
 
 use super::{FilteredTools, ToolSet, require_str};
@@ -171,6 +172,7 @@ impl AgentCall {
             provider: self.config.provider.clone(),
             sub_agent: true,
             include_soul: matches!(tier, Tier::High),
+            max_context_tokens: self.config.max_context_tokens,
             max_turns: None,
             llm_log_path: self.config.llm_log_path.clone(),
             headless: self.config.headless,
@@ -651,6 +653,10 @@ impl ToolProvider for AgentCall {
         inject_into_prompt: false,
             },
         ]
+    }
+
+    fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
+        vec!["### Agent Lifecycle\n`agent_result(id)` blocks until the agent finishes and returns an object in `result.value` with fields like `result`, `context`, and `_sub_agent`. The agent ID remains valid afterwards, so you can call `agent_result` again or use `agent_kill` to clean up. Delegate progress is surfaced by the runtime and UI rather than through a separate tool call.".to_string()]
     }
 
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {

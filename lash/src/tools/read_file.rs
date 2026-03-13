@@ -1,7 +1,7 @@
 use serde_json::json;
 use std::path::Path;
 
-use crate::{ToolDefinition, ToolImage, ToolParam, ToolProvider, ToolResult};
+use crate::{ToolDefinition, ToolImage, ToolParam, ToolPromptContext, ToolProvider, ToolResult};
 
 use super::hashline;
 use super::{parse_optional_usize_arg, read_to_string, require_str, run_blocking};
@@ -57,6 +57,10 @@ impl ToolProvider for ReadFile {
             hidden: false,
             inject_into_prompt: true,
         }]
+    }
+
+    fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
+        vec!["### Image Reads\nIf `read_file` on an image returns an `[Image: ...]` marker, that marker is metadata only. Use the attached image context to describe what is visibly present; do not just repeat the marker text.".to_string()]
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {

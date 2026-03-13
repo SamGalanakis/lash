@@ -120,22 +120,6 @@ impl SkillStore {
         self.discover_skills().into_iter().find(|s| s.name == name)
     }
 
-    fn execute_skills(&self) -> ToolResult {
-        let skills = self.discover_skills();
-        let items: Vec<serde_json::Value> = skills
-            .iter()
-            .map(|s| {
-                json!({
-                    "__type__": "skill_summary",
-                    "name": s.name,
-                    "description": s.description,
-                    "file_count": s.files.len(),
-                })
-            })
-            .collect();
-        ToolResult::ok(json!({ "__type__": "skill_list", "items": items }))
-    }
-
     fn execute_load_skill(&self, args: &serde_json::Value) -> ToolResult {
         let name = match args.get("name").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s,
@@ -156,9 +140,13 @@ impl SkillStore {
     }
 
     fn execute_read_skill_file(&self, args: &serde_json::Value) -> ToolResult {
-        let skill_name = match args.get("skill_name").and_then(|v| v.as_str()) {
+        let skill_name = match args
+            .get("name")
+            .or_else(|| args.get("skill_name"))
+            .and_then(|v| v.as_str())
+        {
             Some(s) if !s.is_empty() => s,
-            _ => return ToolResult::err(json!("Missing required parameter: skill_name")),
+            _ => return ToolResult::err(json!("Missing required parameter: name")),
         };
         let path = match args.get("path").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s,
@@ -230,18 +218,6 @@ impl ToolProvider for SkillStore {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![
             ToolDefinition {
-                name: "skills".into(),
-                description: vec![crate::ToolText::new(
-                    "List available skills. Returns a dict with `items` (list of `{name, description, file_count}` dicts).",
-                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-                )],
-                params: vec![],
-                returns: "dict".into(),
-                examples: vec![],
-                hidden: false,
-                inject_into_prompt: false,
-            },
-            ToolDefinition {
                 name: "load_skill".into(),
                 description: vec![crate::ToolText::new(
                     "Load a skill by name. Returns a dict with `name`, `description`, `instructions`, `files`, and `file_count`.",
@@ -256,11 +232,11 @@ impl ToolProvider for SkillStore {
             ToolDefinition {
                 name: "read_skill_file".into(),
                 description: vec![crate::ToolText::new(
-                    "Read a supporting file from a skill directory.",
+                    "Read a supporting file from a skill directory. Use the same `name` parameter as `load_skill`.",
                     [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
                 )],
                 params: vec![
-                    ToolParam::typed("skill_name", "str"),
+                    ToolParam::typed("name", "str"),
                     ToolParam {
                         name: "path".into(),
                         r#type: "str".into(),
@@ -281,11 +257,79 @@ impl ToolProvider for SkillStore {
         let name = name.to_string();
         let args = args.clone();
         run_blocking(move || match name.as_str() {
-            "skills" => store.execute_skills(),
             "load_skill" => store.execute_load_skill(&args),
             "read_skill_file" => store.execute_read_skill_file(&args),
             _ => ToolResult::err_fmt(format_args!("Unknown tool: {}", name)),
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    fn make_store(base: &std::path::Path) -> SkillStore {
+        SkillStore::new(vec![base.to_path_buf()])
+    }
+
+    #[tokio::test]
+    async fn read_skill_file_uses_name_parameter() {
+        let dir = TempDir::new().expect("tmp");
+        let skill_dir = dir.path().join("demo-skill");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo\ndescription: demo skill\n---\n\nbody\n",
+        )
+        .expect("skill");
+        std::fs::write(skill_dir.join("extra.txt"), "hello\n").expect("extra");
+        let store = make_store(dir.path());
+
+        let result = store
+            .execute(
+                "read_skill_file",
+                &json!({"name":"demo","path":"extra.txt"}),
+            )
+            .await;
+        assert!(result.success);
+        assert_eq!(result.result.as_str(), Some("hello\n"));
+    }
+
+    #[tokio::test]
+    async fn read_skill_file_accepts_legacy_skill_name_alias() {
+        let dir = TempDir::new().expect("tmp");
+        let skill_dir = dir.path().join("demo-skill");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo\ndescription: demo skill\n---\n\nbody\n",
+        )
+        .expect("skill");
+        std::fs::write(skill_dir.join("extra.txt"), "hello\n").expect("extra");
+        let store = make_store(dir.path());
+
+        let result = store
+            .execute(
+                "read_skill_file",
+                &json!({"skill_name":"demo","path":"extra.txt"}),
+            )
+            .await;
+        assert!(result.success);
+    }
+
+    #[test]
+    fn skill_store_definitions_do_not_expose_legacy_skills_tool() {
+        let store = SkillStore::new(Vec::new());
+        let names: Vec<String> = store
+            .definitions()
+            .into_iter()
+            .map(|def| def.name)
+            .collect();
+        assert!(!names.iter().any(|name| name == "skills"));
+        assert!(names.iter().any(|name| name == "load_skill"));
+        assert!(names.iter().any(|name| name == "read_skill_file"));
     }
 }

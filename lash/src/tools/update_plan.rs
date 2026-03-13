@@ -72,16 +72,16 @@ impl ToolProvider for UpdatePlanTool {
             )],
             params: vec![
                 ToolParam::optional("explanation", "str"),
-                ToolParam::typed("plan", "list"),
+                ToolParam::typed("steps", "list"),
             ],
             returns: "str".into(),
             examples: vec![
                 crate::ToolText::new(
-                    "update_plan(explanation=\"I found the main renderer.\", plan=[{\"step\":\"Inspect renderer\", \"status\":\"completed\"}, {\"step\":\"Patch layout\", \"status\":\"in_progress\"}, {\"step\":\"Run tests\", \"status\":\"pending\"}])",
+                    "update_plan(explanation=\"I found the main renderer.\", steps=[{\"label\":\"Inspect renderer\", \"status\":\"completed\"}, {\"label\":\"Patch layout\", \"status\":\"in_progress\"}, {\"label\":\"Run tests\", \"status\":\"pending\"}])",
                     [crate::ExecutionMode::Repl],
                 ),
                 crate::ToolText::new(
-                    "{\"explanation\":\"I found the main renderer.\",\"plan\":[{\"step\":\"Inspect renderer\",\"status\":\"completed\"},{\"step\":\"Patch layout\",\"status\":\"in_progress\"},{\"step\":\"Run tests\",\"status\":\"pending\"}]}",
+                    "{\"explanation\":\"I found the main renderer.\",\"steps\":[{\"label\":\"Inspect renderer\",\"status\":\"completed\"},{\"label\":\"Patch layout\",\"status\":\"in_progress\"},{\"label\":\"Run tests\",\"status\":\"pending\"}]}",
                     [crate::ExecutionMode::Standard],
                 ),
             ],
@@ -105,8 +105,12 @@ fn execute_update_plan(state: &Arc<Mutex<PlanState>>, args: &serde_json::Value) 
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    let Some(raw_plan) = args.get("plan").and_then(|value| value.as_array()) else {
-        return ToolResult::err_fmt("Missing required parameter: plan");
+    let Some(raw_plan) = args
+        .get("steps")
+        .or_else(|| args.get("plan"))
+        .and_then(|value| value.as_array())
+    else {
+        return ToolResult::err_fmt("Missing required parameter: steps");
     };
     if raw_plan.is_empty() {
         return ToolResult::err_fmt("Plan must contain at least one step");
@@ -116,17 +120,18 @@ fn execute_update_plan(state: &Arc<Mutex<PlanState>>, args: &serde_json::Value) 
     for (idx, item) in raw_plan.iter().enumerate() {
         let Some(object) = item.as_object() else {
             return ToolResult::err_fmt(format_args!(
-                "Invalid plan[{idx}]: expected object with step and status"
+                "Invalid steps[{idx}]: expected object with label and status"
             ));
         };
         let Some(step) = object
-            .get("step")
+            .get("label")
+            .or_else(|| object.get("step"))
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
         else {
             return ToolResult::err_fmt(format_args!(
-                "Invalid plan[{idx}].step: expected non-empty string"
+                "Invalid steps[{idx}].label: expected non-empty string"
             ));
         };
         let Some(status) = object
@@ -135,12 +140,12 @@ fn execute_update_plan(state: &Arc<Mutex<PlanState>>, args: &serde_json::Value) 
             .map(str::trim)
         else {
             return ToolResult::err_fmt(format_args!(
-                "Invalid plan[{idx}].status: expected string"
+                "Invalid steps[{idx}].status: expected string"
             ));
         };
         if !matches!(status, "pending" | "in_progress" | "completed") {
             return ToolResult::err_fmt(format_args!(
-                "Invalid plan[{idx}].status: expected pending, in_progress, or completed"
+                "Invalid steps[{idx}].status: expected pending, in_progress, or completed"
             ));
         }
         items.push(PlanItem {
@@ -173,7 +178,7 @@ mod tests {
         let result = tool
             .execute(
                 "update_plan",
-                &json!({"plan":[{"step":"","status":"pending"}]}),
+                &json!({"steps":[{"label":"","status":"pending"}]}),
             )
             .await;
         assert!(!result.success);
@@ -181,7 +186,7 @@ mod tests {
             result
                 .result
                 .as_str()
-                .is_some_and(|value| value.contains("plan[0].step"))
+                .is_some_and(|value| value.contains("steps[0].label"))
         );
     }
 
@@ -193,9 +198,9 @@ mod tests {
                 "update_plan",
                 &json!({
                     "explanation":"done reading",
-                    "plan":[
-                        {"step":"Inspect code","status":"completed"},
-                        {"step":"Patch UI","status":"in_progress"}
+                    "steps":[
+                        {"label":"Inspect code","status":"completed"},
+                        {"label":"Patch UI","status":"in_progress"}
                     ]
                 }),
             )
@@ -211,9 +216,9 @@ mod tests {
             .execute(
                 "update_plan",
                 &json!({
-                    "plan":[
-                        {"step":"Inspect UI","status":"in_progress"},
-                        {"step":"Patch layout","status":"in_progress"}
+                    "steps":[
+                        {"label":"Inspect UI","status":"in_progress"},
+                        {"label":"Patch layout","status":"in_progress"}
                     ]
                 }),
             )
@@ -225,6 +230,23 @@ mod tests {
                 .as_str()
                 .is_some_and(|value| value.contains("at most one in_progress"))
         );
+    }
+
+    #[tokio::test]
+    async fn update_plan_accepts_legacy_plan_and_step_aliases() {
+        let tool = UpdatePlanTool::new();
+        let result = tool
+            .execute(
+                "update_plan",
+                &json!({
+                    "plan":[
+                        {"step":"Inspect code","status":"completed"},
+                        {"step":"Patch UI","status":"in_progress"}
+                    ]
+                }),
+            )
+            .await;
+        assert!(result.success);
     }
 
     #[test]

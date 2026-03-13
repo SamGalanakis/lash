@@ -156,7 +156,6 @@ pub struct Session {
     tool_images: Vec<ToolImage>,
     message_tx: Option<UnboundedSender<SandboxMessage>>,
     prompt_tx: Option<UnboundedSender<UserPrompt>>,
-    final_response: Option<String>,
     scratch_dir: tempfile::TempDir,
 }
 
@@ -177,7 +176,6 @@ impl Session {
             tool_images: Vec::new(),
             message_tx: None,
             prompt_tx: None,
-            final_response: None,
             scratch_dir,
         };
 
@@ -266,7 +264,6 @@ impl Session {
     pub async fn run_code(&mut self, code: &str) -> Result<ExecResponse, SessionError> {
         self.tool_calls.clear();
         self.tool_images.clear();
-        self.final_response = None;
         let start = std::time::Instant::now();
         let id = uuid::Uuid::new_v4().to_string();
 
@@ -354,16 +351,11 @@ impl Session {
                     });
                     tool_handles.push(handle);
                 }
-                PythonResponse::Message { text, kind } => {
-                    if kind == "final" {
-                        self.final_response = Some(text.clone());
-                    } else if let Some(tx) = &self.message_tx {
-                        let _ = tx.send(SandboxMessage { text, kind });
-                    }
-                }
                 PythonResponse::ExecResult {
                     id: _,
                     output,
+                    response,
+                    finished,
                     observations,
                     error,
                 } => {
@@ -392,13 +384,12 @@ impl Session {
                             }
                         }
                     }
-
-                    let response = self.final_response.clone().unwrap_or_default();
                     let error = error.filter(|value| !value.trim().is_empty());
                     return Ok(ExecResponse {
                         output,
                         observations,
                         response,
+                        finished,
                         tool_calls: self.tool_calls.clone(),
                         images: std::mem::take(&mut self.tool_images),
                         error,
@@ -611,6 +602,8 @@ pub struct ExecResponse {
     pub observations: Vec<String>,
     /// User-facing final response from `finish`.
     pub response: String,
+    /// True when execution ended the turn via `finish`, even if `response` is empty.
+    pub finished: bool,
     pub tool_calls: Vec<ToolCallRecord>,
     /// Images returned by tools during this execution (e.g. read_file on a PNG).
     pub images: Vec<ToolImage>,
