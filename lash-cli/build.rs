@@ -3,11 +3,7 @@ use std::path::{Path, PathBuf};
 fn main() {
     let target = std::env::var("TARGET").unwrap_or_default();
 
-    if target.contains("linux") {
-        // Export all symbols so ctypes.pythonapi can resolve Python C API functions
-        // (e.g. PyCapsule_New) from the statically-linked libpython.
-        println!("cargo:rustc-link-arg=-Wl,--export-dynamic");
-    } else if target.contains("apple") {
+    if target.contains("apple") {
         // PBS pgo+lto-full ships LLVM 21 bitcode; Apple's Xcode linker bundles
         // an older libLTO that can't parse it. Point ld at Homebrew LLVM's
         // libLTO.dylib so the system linker can process the bitcode.

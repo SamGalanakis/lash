@@ -7,6 +7,7 @@ use std::time::Duration;
 struct TestHost {
     files: HashMap<String, String>,
     globs: HashMap<String, Vec<String>>,
+    observations: std::sync::Mutex<Vec<Value>>,
     active: AtomicUsize,
     max_active: AtomicUsize,
 }
@@ -62,6 +63,14 @@ impl ToolHost for TestHost {
             _ => Err(ToolHostError::new(format!("unknown tool: {name}"))),
         }
     }
+
+    fn observe(&self, value: &Value) -> Result<(), ToolHostError> {
+        self.observations
+            .lock()
+            .expect("observation mutex")
+            .push(value.clone());
+        Ok(())
+    }
 }
 
 #[test]
@@ -79,6 +88,19 @@ fn parser_handles_precedence_and_parallel() {
     .expect("program should parse");
 
     assert_eq!(program.statements.len(), 3);
+}
+
+#[test]
+fn parser_accepts_ternary_in_call_arguments() {
+    let program = parse(
+        r#"
+        result = format("{0}", true ? "yes" : "no")
+        finish result
+        "#,
+    )
+    .expect("program should parse");
+
+    assert_eq!(program.statements.len(), 2);
 }
 
 #[test]
@@ -128,6 +150,249 @@ fn executes_if_for_and_list_concat() {
     .expect("execution should succeed");
 
     assert_eq!(value, Value::String("n=1,n=2,n=3,n=4".to_string()));
+}
+
+#[test]
+fn ternary_selects_the_correct_branch() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = execute(
+        r#"
+        truthy = true ? "left" : "right"
+        falsy = false ? "left" : "right"
+        finish format("{0}:{1}", truthy, falsy)
+        "#,
+        &mut state,
+        &host,
+    )
+    .expect("execution should succeed");
+
+    assert_eq!(value, Value::String("left:right".to_string()));
+}
+
+#[test]
+fn ternary_is_right_associative() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = execute(
+        r#"
+        result = false ? 1 : true ? 2 : 3
+        finish result
+        "#,
+        &mut state,
+        &host,
+    )
+    .expect("execution should succeed");
+
+    assert_eq!(value, Value::Number(2.0));
+}
+
+#[test]
+fn ternary_has_lower_precedence_than_boolean_ops() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = execute(
+        r#"
+        result = false or true ? "yes" : "no"
+        finish result
+        "#,
+        &mut state,
+        &host,
+    )
+    .expect("execution should succeed");
+
+    assert_eq!(value, Value::String("yes".to_string()));
+}
+
+#[test]
+fn ternary_short_circuits_unselected_branch() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = execute(
+        r#"
+        yes = true ? "ok" : missing_name
+        no = false ? missing_name : "ok"
+        finish format("{0}:{1}", yes, no)
+        "#,
+        &mut state,
+        &host,
+    )
+    .expect("execution should succeed");
+
+    assert_eq!(value, Value::String("ok:ok".to_string()));
+}
+
+#[test]
+fn unary_bang_aliases_not() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = execute(
+        r#"
+        a = !false
+        b = !true
+        finish [a, b]
+        "#,
+        &mut state,
+        &host,
+    )
+    .expect("execution should succeed");
+
+    assert_eq!(
+        value,
+        Value::List(vec![Value::Bool(true), Value::Bool(false)])
+    );
+}
+
+#[test]
+fn symbolic_boolean_aliases_match_word_operators() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = execute(
+        r#"
+        a = true && false
+        b = false || true
+        c = !false && (false || true)
+        finish [a, b, c]
+        "#,
+        &mut state,
+        &host,
+    )
+    .expect("execution should succeed");
+
+    assert_eq!(
+        value,
+        Value::List(vec![
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(true)
+        ])
+    );
+}
+
+#[test]
+fn ternary_requires_boolean_condition() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let error = execute(
+        r#"
+        result = 1 ? "yes" : "no"
+        finish result
+        "#,
+        &mut state,
+        &host,
+    )
+    .expect_err("execution should fail");
+
+    assert!(matches!(
+        error,
+        lashlang::ExecuteError::Runtime(RuntimeError::NonBooleanCondition)
+    ));
+}
+
+#[test]
+fn string_concatenation_stringifies_non_string_side() {
+    let host = TestHost::default().with_file("src/lib.rs", "pub fn main() {}");
+    let mut state = State::new();
+
+    let value = execute(
+        r#"
+        found = call read_file { path: "src/lib.rs" }
+        finish "status=" + found.ok + " value=" + found.value
+        "#,
+        &mut state,
+        &host,
+    )
+    .expect("execution should succeed");
+
+    assert_eq!(
+        value,
+        Value::String("status=true value=pub fn main() {}".to_string())
+    );
+}
+
+#[test]
+fn format_with_single_value_stringifies_it() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = execute(
+        r#"
+        finish format({ ok: true, count: 2 })
+        "#,
+        &mut state,
+        &host,
+    )
+    .expect("execution should succeed");
+
+    assert_eq!(
+        value,
+        Value::String("{\"count\":2.0,\"ok\":true}".to_string())
+    );
+}
+
+#[test]
+fn observe_captures_intermediate_values_without_ending_execution() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = execute(
+        r#"
+        item = { ok: true, count: 2 }
+        observe item
+        observe "step done"
+        finish "final"
+        "#,
+        &mut state,
+        &host,
+    )
+    .expect("execution should succeed");
+
+    assert_eq!(value, Value::String("final".to_string()));
+    let observed = host.observations.lock().expect("observation mutex");
+    assert_eq!(observed.len(), 2);
+    assert_eq!(
+        observed[0],
+        Value::Record(Record::from([
+            ("ok".to_string(), Value::Bool(true)),
+            ("count".to_string(), Value::Number(2.0)),
+        ]))
+    );
+    assert_eq!(observed[1], Value::String("step done".to_string()));
+}
+
+#[test]
+fn ternary_fixes_tool_result_formatting_pattern() {
+    let host = TestHost::default().with_file("src/lib.rs", "pub fn main() {}");
+    let mut state = State::new();
+
+    let value = execute(
+        r#"
+        found = call read_file { path: "src/lib.rs" }
+        missing = call read_file { path: "src/missing.rs" }
+        summary = format(
+          "found={0} missing={1}",
+          found.ok ? "ok" : format("failed: {0}", found.error),
+          missing.ok ? "ok" : format("failed: {0}", missing.error)
+        )
+        finish summary
+        "#,
+        &mut state,
+        &host,
+    )
+    .expect("execution should succeed");
+
+    let Value::String(text) = value else {
+        panic!("expected string");
+    };
+    assert!(text.contains("found=ok"));
+    assert!(text.contains("missing=failed:"));
 }
 
 #[test]

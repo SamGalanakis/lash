@@ -74,7 +74,7 @@ impl ToolProvider for AskTool {
             name: "ask".into(),
             description: vec![crate::ToolText::new(
                 "Pause and ask the user a targeted question, then wait for the answer before continuing. Use this only when you are genuinely blocked, need the user's decision, or must request a value that cannot be inferred safely. Prefer doing the work without asking when a reasonable default can be discovered from local context. Omit `options` for free-form input, or provide a short list of choices.",
-                [ExecutionMode::Standard],
+                [ExecutionMode::Standard, ExecutionMode::Repl],
             )],
             params: vec![
                 ToolParam {
@@ -95,7 +95,7 @@ impl ToolProvider for AskTool {
             returns: "str".into(),
             examples: vec![crate::ToolText::new(
                 "ask(question=\"Which environment should I use?\", options=[\"staging\", \"prod\"])",
-                [ExecutionMode::Standard],
+                [ExecutionMode::Standard, ExecutionMode::Repl],
             )],
             hidden: false,
             inject_into_prompt: true,

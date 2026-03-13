@@ -378,11 +378,11 @@ impl TurnTerminationPolicyState {
                 id: format!("{}.p0", sys_id),
                 kind: PartKind::Text,
                 content: format!(
-                    "Turn limit reached ({max}). You MUST call done() now with:\n\
+                    "Turn limit reached ({max}). You MUST end with `finish ...` now containing:\n\
                         1. Summary of what you accomplished\n\
                         2. List of remaining tasks not yet completed\n\
                         3. Recommended next steps\n\
-                        Do NOT make any more tool calls. Call done() immediately."
+                        Do NOT make any more tool calls. End the REPL block immediately."
                 ),
                 tool_call_id: None,
                 tool_name: None,
@@ -513,17 +513,12 @@ pub(crate) fn build_execution_preamble(
     plugin_prompt_sections: Vec<String>,
 ) -> ExecutionPreamble {
     let all_tools = session.tools().definitions();
-    let mut prompt_tools: Vec<_> = all_tools
+    let prompt_tools: Vec<_> = all_tools
         .iter()
         .filter(|t| t.inject_into_prompt)
         .filter(|t| !t.description_for(mode).is_empty())
         .cloned()
         .collect();
-    if matches!(mode, ExecutionMode::Repl) {
-        for tool in &mut prompt_tools {
-            tool.name = format!("T.{}", tool.name);
-        }
-    }
     let mut tool_list = ToolDefinition::format_tool_docs(&prompt_tools, mode);
     let omitted_tool_count = all_tools
         .iter()
@@ -532,7 +527,7 @@ pub(crate) fn build_execution_preamble(
     if omitted_tool_count > 0 {
         let note = match mode {
             ExecutionMode::Repl => format!(
-                "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Use `T.search_tools(...)` to discover them, or call `T.search_tools()` to browse the full active catalog, then call tools via `T.<tool>(...)`."
+                "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Use `call search_tools {{ query: \"...\" }}` to discover them, then call tools via `call tool_name {{ ... }}`."
             ),
             ExecutionMode::Standard => {
                 format!(
@@ -691,7 +686,7 @@ pub(crate) fn build_context() -> String {
     parts.join("\n")
 }
 
-/// Monty does not support importing third-party packages inside the REPL.
+/// lashlang does not support importing third-party packages inside the REPL.
 fn repl_third_party_packages() -> Option<Vec<String>> {
     Some(Vec::new())
 }

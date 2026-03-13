@@ -68,6 +68,51 @@ impl ClaudeOAuthAdapter {
         vec![Self::user_message_json(req)]
     }
 
+    fn build_request_body(provider: &Provider, req: &LlmRequest) -> Value {
+        let messages = Self::build_messages(req);
+        let mut body = json!({
+            "model": req.model,
+            "system": [{
+                "type": "text",
+                "text": req.system_prompt,
+                "cache_control": { "type": "ephemeral" }
+            }],
+            "messages": messages,
+            "max_tokens": 32768,
+            "temperature": 0,
+            "stream": req.stream_events.is_some(),
+        });
+        if let Some(variant) = req.model_variant.as_deref()
+            && let Some(VariantRequestConfig::AnthropicThinkingBudget { budget_tokens }) =
+                crate::model_variant::request_config(provider, &req.model, variant)
+        {
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": budget_tokens,
+            });
+            // Anthropic requires temperature=1 when extended thinking is enabled.
+            body["temperature"] = json!(1);
+        }
+        if !req.tools.is_empty() {
+            body["tools"] = json!(
+                req.tools
+                    .iter()
+                    .map(|tool| json!({
+                        "name": tool.name.clone(),
+                        "description": tool.description.clone(),
+                        "input_schema": tool.input_schema.clone(),
+                    }))
+                    .collect::<Vec<_>>()
+            );
+            body["tool_choice"] = match req.tool_choice {
+                crate::llm::types::LlmToolChoice::Auto => json!({"type": "auto"}),
+                crate::llm::types::LlmToolChoice::None => json!({"type": "none"}),
+                crate::llm::types::LlmToolChoice::Required => json!({"type": "any"}),
+            };
+        }
+        body
+    }
+
     fn parse_i64(v: Option<&Value>) -> i64 {
         match v {
             Some(Value::Number(n)) => n.as_i64().unwrap_or(0),
@@ -334,46 +379,7 @@ impl LlmTransport for ClaudeOAuthAdapter {
             }
         };
 
-        let messages = Self::build_messages(&req);
-
-        let mut body = json!({
-            "model": req.model,
-            "system": [{
-                "type": "text",
-                "text": req.system_prompt,
-                "cache_control": { "type": "ephemeral" }
-            }],
-            "messages": messages,
-            "max_tokens": 32768,
-            "temperature": 0,
-            "stream": stream_events.is_some(),
-        });
-        if let Some(variant) = req.model_variant.as_deref()
-            && let Some(VariantRequestConfig::AnthropicThinkingBudget { budget_tokens }) =
-                crate::model_variant::request_config(provider, &req.model, variant)
-        {
-            body["thinking"] = json!({
-                "type": "enabled",
-                "budget_tokens": budget_tokens,
-            });
-        }
-        if !req.tools.is_empty() {
-            body["tools"] = json!(
-                req.tools
-                    .iter()
-                    .map(|tool| json!({
-                        "name": tool.name.clone(),
-                        "description": tool.description.clone(),
-                        "input_schema": tool.input_schema.clone(),
-                    }))
-                    .collect::<Vec<_>>()
-            );
-            body["tool_choice"] = match req.tool_choice {
-                crate::llm::types::LlmToolChoice::Auto => json!({"type": "auto"}),
-                crate::llm::types::LlmToolChoice::None => json!({"type": "none"}),
-                crate::llm::types::LlmToolChoice::Required => json!({"type": "any"}),
-            };
-        }
+        let body = Self::build_request_body(provider, &req);
 
         let request_body = serde_json::to_string(&body).ok();
         let url = "https://api.anthropic.com/v1/messages".to_string();
@@ -657,5 +663,56 @@ mod tests {
         assert_eq!(messages[0]["role"], "user");
         assert_eq!(messages[0]["content"].as_array().map(Vec::len), Some(1));
         assert_eq!(messages[0]["content"][0]["text"], "history");
+    }
+
+    #[test]
+    fn build_request_body_keeps_temperature_zero_without_thinking() {
+        let provider = Provider::Claude {
+            access_token: "tok".into(),
+            refresh_token: "ref".into(),
+            expires_at: u64::MAX,
+        };
+        let req = LlmRequest {
+            model: "claude-opus-4-6".to_string(),
+            system_prompt: "sys".to_string(),
+            user_prompt: vec![LlmPromptPart::Text("hi".to_string())],
+            messages: vec![],
+            attachments: vec![],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: None,
+            stream_events: None,
+        };
+
+        let body = ClaudeOAuthAdapter::build_request_body(&provider, &req);
+        assert_eq!(body["temperature"], 0);
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn build_request_body_sets_temperature_one_with_thinking() {
+        let provider = Provider::Claude {
+            access_token: "tok".into(),
+            refresh_token: "ref".into(),
+            expires_at: u64::MAX,
+        };
+        let req = LlmRequest {
+            model: "claude-opus-4-6".to_string(),
+            system_prompt: "sys".to_string(),
+            user_prompt: vec![LlmPromptPart::Text("hi".to_string())],
+            messages: vec![],
+            attachments: vec![],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            model_variant: Some("high".to_string()),
+            session_id: None,
+            stream_events: None,
+        };
+
+        let body = ClaudeOAuthAdapter::build_request_body(&provider, &req);
+        assert_eq!(body["temperature"], 1);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 16_000);
     }
 }

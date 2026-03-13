@@ -12,6 +12,7 @@ pub enum Stmt {
         expr: Expr,
     },
     Call(CallExpr),
+    Observe(Expr),
     If {
         condition: Expr,
         then_block: Vec<Stmt>,
@@ -53,6 +54,11 @@ pub enum Expr {
     Unary {
         op: UnaryOp,
         expr: Box<Expr>,
+    },
+    Conditional {
+        condition: Box<Expr>,
+        then_expr: Box<Expr>,
+        else_expr: Box<Expr>,
     },
     Binary {
         left: Box<Expr>,

@@ -11,7 +11,7 @@ use crate::{
     ToolProvider,
 };
 
-const REPL_SNAPSHOT_VERSION: u32 = 2;
+const REPL_SNAPSHOT_VERSION: u32 = 3;
 
 fn capabilities_payload_json(
     tools: &Arc<dyn ToolProvider>,
@@ -262,7 +262,7 @@ impl Session {
         self.prompt_tx = None;
     }
 
-    /// Execute code in the persistent Monty REPL.
+    /// Execute code in the persistent lashlang REPL.
     pub async fn run_code(&mut self, code: &str) -> Result<ExecResponse, SessionError> {
         self.tool_calls.clear();
         self.tool_images.clear();
@@ -291,8 +291,8 @@ impl Session {
         })?;
 
         // Read messages until we get exec_result.
-        // Tool calls are spawned as concurrent tokio tasks so that Monty's
-        // asyncio.gather() can dispatch multiple tools in parallel.
+        // Tool calls are spawned as concurrent tokio tasks so REPL parallel branches
+        // can dispatch multiple tools at the same time.
         let mut tool_handles: Vec<tokio::task::JoinHandle<(ToolCallRecord, Vec<ToolImage>)>> =
             Vec::new();
 
@@ -364,6 +364,7 @@ impl Session {
                 PythonResponse::ExecResult {
                     id: _,
                     output,
+                    observations,
                     error,
                 } => {
                     tracing::info!(
@@ -372,8 +373,8 @@ impl Session {
                         tool_handles.len()
                     );
                     // Collect results from all concurrent tool calls.
-                    // By the time Python sends ExecResult, all tool futures have
-                    // resolved (asyncio.gather waits), so these awaits are instant.
+                    // By the time the runtime sends ExecResult, all tool futures have
+                    // resolved, so these awaits are instant.
                     for handle in tool_handles {
                         match handle.await {
                             Ok((record, images)) => {
@@ -396,6 +397,7 @@ impl Session {
                     let error = error.filter(|value| !value.trim().is_empty());
                     return Ok(ExecResponse {
                         output,
+                        observations,
                         response,
                         tool_calls: self.tool_calls.clone(),
                         images: std::mem::take(&mut self.tool_images),
@@ -434,7 +436,7 @@ impl Session {
         }
     }
 
-    /// Check if a code string is syntactically complete for the Monty REPL.
+    /// Check if a code string is syntactically complete for the lashlang REPL.
     pub fn check_complete(&self, code: &str) -> Result<bool, SessionError> {
         self.runtime()?.send(PythonRequest::CheckComplete {
             code: code.to_string(),
@@ -448,7 +450,7 @@ impl Session {
         }
     }
 
-    /// Reset the Monty REPL namespace and re-register tools.
+    /// Reset the lashlang REPL state and re-register tools.
     pub async fn reset(&mut self) -> Result<(), SessionError> {
         let id = uuid::Uuid::new_v4().to_string();
         self.runtime()?
@@ -526,7 +528,7 @@ impl Session {
 
         let combined = json!({
             "version": REPL_SNAPSHOT_VERSION,
-            "engine": "monty",
+            "engine": "lashlang",
             "vars": data,
             "files": files,
         });
@@ -547,13 +549,13 @@ impl Session {
                 "unsupported REPL snapshot version".to_string(),
             ));
         }
-        if parsed.get("engine").and_then(|v| v.as_str()) != Some("monty") {
+        if parsed.get("engine").and_then(|v| v.as_str()) != Some("lashlang") {
             return Err(SessionError::Protocol(
                 "unsupported REPL snapshot engine".to_string(),
             ));
         }
 
-        // `vars` is an opaque Monty snapshot string from the executor thread.
+        // `vars` is an opaque lashlang snapshot string from the executor thread.
         let vars_str = parsed
             .get("vars")
             .and_then(|v| v.as_str())
@@ -603,9 +605,11 @@ impl Session {
 
 #[derive(Clone, Debug)]
 pub struct ExecResponse {
-    /// Captured stdout — model's own context (print, auto-printed expressions).
+    /// Captured stdout from the REPL runtime.
     pub output: String,
-    /// User-facing final response from done().
+    /// Hidden intermediate observations surfaced back to the model on the next REPL step.
+    pub observations: Vec<String>,
+    /// User-facing final response from `finish`.
     pub response: String,
     pub tool_calls: Vec<ToolCallRecord>,
     /// Images returned by tools during this execution (e.g. read_file on a PNG).
