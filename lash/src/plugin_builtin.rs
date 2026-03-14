@@ -2690,7 +2690,13 @@ mod tests {
             })
             .expect("tool surface");
 
-        assert!(!surface.tools.iter().any(|tool| tool.name == "search_tools"));
+        assert_eq!(surface.tools.len(), 2);
+        assert!(
+            surface
+                .tools
+                .iter()
+                .any(|tool| tool.name == "search_tools" && !tool.inject_into_prompt && tool.hidden)
+        );
         assert!(surface.guide_sections.is_empty());
         assert!(surface.tool_list_notes.is_empty());
     }

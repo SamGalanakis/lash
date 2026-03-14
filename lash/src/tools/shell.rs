@@ -357,6 +357,18 @@ impl ShellRuntime {
                 && quiet_deadline
                     .is_none_or(|quiet_until| tokio::time::Instant::now() >= quiet_until)
             {
+                let exit_code = *state.exit_code.lock().unwrap();
+                if let Some(exit_code) = exit_code {
+                    wait_for_buffer_settle(&state, Duration::from_millis(OUTPUT_QUIET_PERIOD_MS))
+                        .await;
+                    let (output, original_token_count) =
+                        self.take_incremental_output(id, max_output_tokens)?;
+                    return Ok(PollOutcome::Exited {
+                        output,
+                        original_token_count,
+                        exit_code,
+                    });
+                }
                 let (output, original_token_count) =
                     self.take_incremental_output(id, max_output_tokens)?;
                 return Ok(PollOutcome::Running {
@@ -369,6 +381,18 @@ impl ShellRuntime {
             if let Some(dl) = deadline
                 && tokio::time::Instant::now() >= dl
             {
+                let exit_code = *state.exit_code.lock().unwrap();
+                if let Some(exit_code) = exit_code {
+                    wait_for_buffer_settle(&state, Duration::from_millis(OUTPUT_QUIET_PERIOD_MS))
+                        .await;
+                    let (output, original_token_count) =
+                        self.take_incremental_output(id, max_output_tokens)?;
+                    return Ok(PollOutcome::Exited {
+                        output,
+                        original_token_count,
+                        exit_code,
+                    });
+                }
                 let (output, original_token_count) =
                     self.take_incremental_output(id, max_output_tokens)?;
                 return Ok(PollOutcome::Running {
@@ -1367,7 +1391,9 @@ fn send_signal_to_process_group(pid: u32, signal: i32) -> std::io::Result<()> {
 
 fn request_termination(pid: u32, killer: &mut dyn ChildKiller) -> Result<(), String> {
     #[cfg(unix)]
-    if send_signal_to_pid(pid, libc::SIGHUP).is_ok() {
+    if send_signal_to_process_group(pid, libc::SIGHUP).is_ok()
+        || send_signal_to_pid(pid, libc::SIGHUP).is_ok()
+    {
         return Ok(());
     }
 
