@@ -67,21 +67,21 @@ impl ToolProvider for UpdatePlanTool {
         vec![ToolDefinition {
             name: "update_plan".into(),
             description: vec![crate::ToolText::new(
-                "Update the task plan for substantial multi-step work. Provide an optional explanation and a list of short steps with statuses. Valid statuses: pending, in_progress, completed. At most one step can be in_progress at a time.",
+                "Update the task plan for substantial multi-step work. Provide an optional explanation and a list of short plan items, each with a step and status. Valid statuses: pending, in_progress, completed. At most one step can be in_progress at a time.",
                 [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             params: vec![
                 ToolParam::optional("explanation", "str"),
-                ToolParam::typed("steps", "list"),
+                ToolParam::typed("plan", "list"),
             ],
             returns: "str".into(),
             examples: vec![
                 crate::ToolText::new(
-                    "call update_plan { explanation: \"I found the main renderer.\", steps: [{ label: \"Inspect renderer\", status: \"completed\" }, { label: \"Patch layout\", status: \"in_progress\" }, { label: \"Run tests\", status: \"pending\" }] }",
+                    "call update_plan { explanation: \"I found the main renderer.\", plan: [{ step: \"Inspect renderer\", status: \"completed\" }, { step: \"Patch layout\", status: \"in_progress\" }, { step: \"Run tests\", status: \"pending\" }] }",
                     [crate::ExecutionMode::Repl],
                 ),
                 crate::ToolText::new(
-                    "{\"explanation\":\"I found the main renderer.\",\"steps\":[{\"label\":\"Inspect renderer\",\"status\":\"completed\"},{\"label\":\"Patch layout\",\"status\":\"in_progress\"},{\"label\":\"Run tests\",\"status\":\"pending\"}]}",
+                    "{\"explanation\":\"I found the main renderer.\",\"plan\":[{\"step\":\"Inspect renderer\",\"status\":\"completed\"},{\"step\":\"Patch layout\",\"status\":\"in_progress\"},{\"step\":\"Run tests\",\"status\":\"pending\"}]}",
                     [crate::ExecutionMode::Standard],
                 ),
             ],
@@ -105,8 +105,8 @@ fn execute_update_plan(state: &Arc<Mutex<PlanState>>, args: &serde_json::Value) 
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    let Some(raw_plan) = args.get("steps").and_then(|value| value.as_array()) else {
-        return ToolResult::err_fmt("Missing required parameter: steps");
+    let Some(raw_plan) = args.get("plan").and_then(|value| value.as_array()) else {
+        return ToolResult::err_fmt("Missing required parameter: plan");
     };
     if raw_plan.is_empty() {
         return ToolResult::err_fmt("Plan must contain at least one step");
@@ -116,17 +116,17 @@ fn execute_update_plan(state: &Arc<Mutex<PlanState>>, args: &serde_json::Value) 
     for (idx, item) in raw_plan.iter().enumerate() {
         let Some(object) = item.as_object() else {
             return ToolResult::err_fmt(format_args!(
-                "Invalid steps[{idx}]: expected object with label and status"
+                "Invalid plan[{idx}]: expected object with step and status"
             ));
         };
         let Some(step) = object
-            .get("label")
+            .get("step")
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
         else {
             return ToolResult::err_fmt(format_args!(
-                "Invalid steps[{idx}].label: expected non-empty string"
+                "Invalid plan[{idx}].step: expected non-empty string"
             ));
         };
         let Some(status) = object
@@ -135,12 +135,12 @@ fn execute_update_plan(state: &Arc<Mutex<PlanState>>, args: &serde_json::Value) 
             .map(str::trim)
         else {
             return ToolResult::err_fmt(format_args!(
-                "Invalid steps[{idx}].status: expected string"
+                "Invalid plan[{idx}].status: expected string"
             ));
         };
         if !matches!(status, "pending" | "in_progress" | "completed") {
             return ToolResult::err_fmt(format_args!(
-                "Invalid steps[{idx}].status: expected pending, in_progress, or completed"
+                "Invalid plan[{idx}].status: expected pending, in_progress, or completed"
             ));
         }
         items.push(PlanItem {
@@ -173,7 +173,7 @@ mod tests {
         let result = tool
             .execute(
                 "update_plan",
-                &json!({"steps":[{"label":"","status":"pending"}]}),
+                &json!({"plan":[{"step":"","status":"pending"}]}),
             )
             .await;
         assert!(!result.success);
@@ -181,7 +181,7 @@ mod tests {
             result
                 .result
                 .as_str()
-                .is_some_and(|value| value.contains("steps[0].label"))
+                .is_some_and(|value| value.contains("plan[0].step"))
         );
     }
 
@@ -193,9 +193,9 @@ mod tests {
                 "update_plan",
                 &json!({
                     "explanation":"done reading",
-                    "steps":[
-                        {"label":"Inspect code","status":"completed"},
-                        {"label":"Patch UI","status":"in_progress"}
+                    "plan":[
+                        {"step":"Inspect code","status":"completed"},
+                        {"step":"Patch UI","status":"in_progress"}
                     ]
                 }),
             )
@@ -211,9 +211,9 @@ mod tests {
             .execute(
                 "update_plan",
                 &json!({
-                    "steps":[
-                        {"label":"Inspect UI","status":"in_progress"},
-                        {"label":"Patch layout","status":"in_progress"}
+                    "plan":[
+                        {"step":"Inspect UI","status":"in_progress"},
+                        {"step":"Patch layout","status":"in_progress"}
                     ]
                 }),
             )

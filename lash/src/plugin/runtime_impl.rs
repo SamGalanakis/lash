@@ -19,12 +19,69 @@ struct RegisteredMessageMutator {
     hook: MessageMutator,
 }
 
+fn current_plugin_id(registering_plugin_id: &Option<String>) -> String {
+    registering_plugin_id
+        .clone()
+        .unwrap_or_else(|| "__unknown__".to_string())
+}
+
+fn push_registered_hook<T>(
+    hooks: &mut Vec<RegisteredHook<T>>,
+    registering_plugin_id: &Option<String>,
+    hook: T,
+) {
+    hooks.push(RegisteredHook {
+        plugin_id: current_plugin_id(registering_plugin_id),
+        hook,
+    });
+}
+
+async fn collect_owned_async<C, O, H, F>(
+    hooks: &[RegisteredHook<H>],
+    ctx: C,
+    invoke: F,
+) -> Result<Vec<PluginOwned<O>>, PluginError>
+where
+    C: Clone,
+    F: Fn(&H, C) -> PluginFuture<Vec<O>>,
+{
+    let mut out = Vec::new();
+    for registered in hooks {
+        for value in invoke(&registered.hook, ctx.clone()).await? {
+            out.push(PluginOwned {
+                plugin_id: registered.plugin_id.clone(),
+                value,
+            });
+        }
+    }
+    Ok(out)
+}
+
+fn collect_owned_sync<C, O, H, F>(
+    hooks: &[RegisteredHook<H>],
+    ctx: C,
+    invoke: F,
+) -> Result<Vec<PluginOwned<O>>, PluginError>
+where
+    C: Clone,
+    F: Fn(&H, C) -> Result<O, PluginError>,
+{
+    let mut out = Vec::new();
+    for registered in hooks {
+        out.push(PluginOwned {
+            plugin_id: registered.plugin_id.clone(),
+            value: invoke(&registered.hook, ctx.clone())?,
+        });
+    }
+    Ok(out)
+}
+
 pub struct PluginRegistrar {
     tool_names: BTreeSet<String>,
     tool_providers: Vec<Arc<dyn ToolProvider>>,
     capability_defs: BTreeMap<String, DynamicCapabilityDef>,
-    prompt_sections: Vec<String>,
     prompt_contributors: Vec<PromptContributor>,
+    tool_surface_contributors: Vec<RegisteredHook<ToolSurfaceContributor>>,
     turn_prompt_contributors: Vec<RegisteredHook<TurnPromptContributor>>,
     before_turn_hooks: Vec<RegisteredHook<BeforeTurnHook>>,
     before_tool_call_hooks: Vec<RegisteredHook<BeforeToolCallHook>>,
@@ -48,8 +105,8 @@ impl PluginRegistrar {
             tool_names: BTreeSet::new(),
             tool_providers: Vec::new(),
             capability_defs: BTreeMap::new(),
-            prompt_sections: Vec::new(),
             prompt_contributors: Vec::new(),
+            tool_surface_contributors: Vec::new(),
             turn_prompt_contributors: Vec::new(),
             before_turn_hooks: Vec::new(),
             before_tool_call_hooks: Vec::new(),
@@ -95,95 +152,80 @@ impl PluginRegistrar {
         Ok(())
     }
 
-    pub fn register_prompt_section(&mut self, section: impl Into<String>) {
-        let section = section.into();
-        if !section.trim().is_empty() {
-            self.prompt_sections.push(section);
-        }
-    }
-
     pub fn register_prompt_contributor(&mut self, contributor: PromptContributor) {
         self.prompt_contributors.push(contributor);
     }
 
     pub fn register_turn_prompt_contributor(&mut self, contributor: TurnPromptContributor) {
-        self.turn_prompt_contributors.push(RegisteredHook {
-            plugin_id: self
-                .registering_plugin_id
-                .clone()
-                .unwrap_or_else(|| "__unknown__".to_string()),
-            hook: contributor,
-        });
+        push_registered_hook(
+            &mut self.turn_prompt_contributors,
+            &self.registering_plugin_id,
+            contributor,
+        );
+    }
+
+    pub fn register_tool_surface_contributor(&mut self, contributor: ToolSurfaceContributor) {
+        push_registered_hook(
+            &mut self.tool_surface_contributors,
+            &self.registering_plugin_id,
+            contributor,
+        );
     }
 
     pub fn before_turn(&mut self, hook: BeforeTurnHook) {
-        self.before_turn_hooks.push(RegisteredHook {
-            plugin_id: self
-                .registering_plugin_id
-                .clone()
-                .unwrap_or_else(|| "__unknown__".to_string()),
+        push_registered_hook(
+            &mut self.before_turn_hooks,
+            &self.registering_plugin_id,
             hook,
-        });
+        );
     }
 
     pub fn before_tool_call(&mut self, hook: BeforeToolCallHook) {
-        self.before_tool_call_hooks.push(RegisteredHook {
-            plugin_id: self
-                .registering_plugin_id
-                .clone()
-                .unwrap_or_else(|| "__unknown__".to_string()),
+        push_registered_hook(
+            &mut self.before_tool_call_hooks,
+            &self.registering_plugin_id,
             hook,
-        });
+        );
     }
 
     pub fn after_tool_call(&mut self, hook: AfterToolCallHook) {
-        self.after_tool_call_hooks.push(RegisteredHook {
-            plugin_id: self
-                .registering_plugin_id
-                .clone()
-                .unwrap_or_else(|| "__unknown__".to_string()),
+        push_registered_hook(
+            &mut self.after_tool_call_hooks,
+            &self.registering_plugin_id,
             hook,
-        });
+        );
     }
 
     pub fn after_turn(&mut self, hook: AfterTurnHook) {
-        self.after_turn_hooks.push(RegisteredHook {
-            plugin_id: self
-                .registering_plugin_id
-                .clone()
-                .unwrap_or_else(|| "__unknown__".to_string()),
+        push_registered_hook(
+            &mut self.after_turn_hooks,
+            &self.registering_plugin_id,
             hook,
-        });
+        );
     }
 
     pub fn at_checkpoint(&mut self, hook: CheckpointHook) {
-        self.checkpoint_hooks.push(RegisteredHook {
-            plugin_id: self
-                .registering_plugin_id
-                .clone()
-                .unwrap_or_else(|| "__unknown__".to_string()),
+        push_registered_hook(
+            &mut self.checkpoint_hooks,
+            &self.registering_plugin_id,
             hook,
-        });
+        );
     }
 
     pub fn on_assistant_stream(&mut self, hook: AssistantStreamHook) {
-        self.assistant_stream_hooks.push(RegisteredHook {
-            plugin_id: self
-                .registering_plugin_id
-                .clone()
-                .unwrap_or_else(|| "__unknown__".to_string()),
+        push_registered_hook(
+            &mut self.assistant_stream_hooks,
+            &self.registering_plugin_id,
             hook,
-        });
+        );
     }
 
     pub fn on_assistant_response(&mut self, hook: AssistantResponseHook) {
-        self.assistant_response_hooks.push(RegisteredHook {
-            plugin_id: self
-                .registering_plugin_id
-                .clone()
-                .unwrap_or_else(|| "__unknown__".to_string()),
+        push_registered_hook(
+            &mut self.assistant_response_hooks,
+            &self.registering_plugin_id,
             hook,
-        });
+        );
     }
 
     pub fn register_message_mutator(
@@ -290,8 +332,8 @@ impl PluginHost {
             plugins,
             tool_providers: reg.tool_providers,
             capability_defs: reg.capability_defs,
-            prompt_sections: reg.prompt_sections,
             prompt_contributors: reg.prompt_contributors,
+            tool_surface_contributors: reg.tool_surface_contributors,
             turn_prompt_contributors: reg.turn_prompt_contributors,
             before_turn_hooks: reg.before_turn_hooks,
             before_tool_call_hooks: reg.before_tool_call_hooks,
@@ -383,8 +425,8 @@ pub struct PluginSession {
     plugins: Vec<Arc<dyn SessionPlugin>>,
     tool_providers: Vec<Arc<dyn ToolProvider>>,
     capability_defs: BTreeMap<String, DynamicCapabilityDef>,
-    prompt_sections: Vec<String>,
     prompt_contributors: Vec<PromptContributor>,
+    tool_surface_contributors: Vec<RegisteredHook<ToolSurfaceContributor>>,
     turn_prompt_contributors: Vec<RegisteredHook<TurnPromptContributor>>,
     before_turn_hooks: Vec<RegisteredHook<BeforeTurnHook>>,
     before_tool_call_hooks: Vec<RegisteredHook<BeforeToolCallHook>>,
@@ -418,12 +460,56 @@ impl PluginSession {
         &self.capability_defs
     }
 
-    pub fn prompt_sections(&self) -> &[String] {
-        &self.prompt_sections
-    }
-
-    pub fn prompt_contributors(&self) -> &[PromptContributor] {
-        &self.prompt_contributors
+    pub fn resolve_tool_surface(
+        &self,
+        ctx: ToolSurfaceContext,
+    ) -> Result<ResolvedToolSurface, PluginError> {
+        let mode = ctx.mode;
+        let mut resolved = ResolvedToolSurface::from_tools(mode, ctx.tools.clone());
+        for owned in collect_owned_sync(
+            &self.tool_surface_contributors,
+            ToolSurfaceContext {
+                session_id: ctx.session_id.clone(),
+                mode,
+                tools: resolved.tools.clone(),
+            },
+            |hook, ctx| hook(ctx),
+        )? {
+            let contribution = owned.value;
+            for override_ in contribution.overrides {
+                if let Some(tool) = resolved
+                    .tools
+                    .iter_mut()
+                    .find(|tool| tool.name == override_.tool_name)
+                {
+                    if let Some(inject_into_prompt) = override_.inject_into_prompt {
+                        tool.inject_into_prompt = inject_into_prompt;
+                    }
+                    if let Some(discoverable) = override_.discoverable {
+                        tool.hidden = !discoverable;
+                    }
+                    if tool.description_for(mode).is_empty() {
+                        tool.inject_into_prompt = false;
+                        tool.hidden = true;
+                    }
+                }
+            }
+            resolved.guide_sections.extend(
+                contribution
+                    .guide_sections
+                    .into_iter()
+                    .map(|section| section.trim().to_string())
+                    .filter(|section| !section.is_empty()),
+            );
+            resolved.tool_list_notes.extend(
+                contribution
+                    .tool_list_notes
+                    .into_iter()
+                    .map(|note| note.trim().to_string())
+                    .filter(|note| !note.is_empty()),
+            );
+        }
+        Ok(resolved)
     }
 
     pub fn external_ops(&self) -> Vec<ExternalOpDef> {
@@ -437,15 +523,7 @@ impl PluginSession {
         &self,
         ctx: PromptHookContext,
     ) -> Result<Vec<PromptContribution>, PluginError> {
-        let mut out = self
-            .prompt_sections
-            .iter()
-            .map(|content| PromptContribution {
-                section: PromptSectionName::PluginExtensions,
-                priority: 0,
-                content: content.clone(),
-            })
-            .collect::<Vec<_>>();
+        let mut out = Vec::new();
         for contributor in &self.prompt_contributors {
             out.extend(contributor(ctx.clone())?);
         }
@@ -462,19 +540,22 @@ impl PluginSession {
         &self,
         ctx: TurnHookContext,
     ) -> Result<Vec<TurnPromptContribution>, PluginError> {
-        let mut out = Vec::new();
-        for registered in &self.turn_prompt_contributors {
-            for contribution in (registered.hook)(ctx.clone()).await? {
-                let content = contribution.content.trim().to_string();
-                if content.is_empty() {
-                    continue;
-                }
-                out.push(TurnPromptContribution {
-                    priority: contribution.priority,
-                    content,
-                });
-            }
-        }
+        let mut out =
+            collect_owned_async(&self.turn_prompt_contributors, ctx, |hook, ctx| hook(ctx))
+                .await?
+                .into_iter()
+                .filter_map(|owned| {
+                    let content = owned.value.content.trim().to_string();
+                    if content.is_empty() {
+                        None
+                    } else {
+                        Some(TurnPromptContribution {
+                            priority: owned.value.priority,
+                            content,
+                        })
+                    }
+                })
+                .collect::<Vec<_>>();
         out.sort_by(|a, b| a.priority.cmp(&b.priority));
         Ok(out)
     }
@@ -483,80 +564,35 @@ impl PluginSession {
         &self,
         ctx: TurnHookContext,
     ) -> Result<Vec<PluginOwned<PluginDirective>>, PluginError> {
-        let mut directives = Vec::new();
-        for registered in &self.before_turn_hooks {
-            for directive in (registered.hook)(ctx.clone()).await? {
-                directives.push(PluginOwned {
-                    plugin_id: registered.plugin_id.clone(),
-                    value: directive,
-                });
-            }
-        }
-        Ok(directives)
+        collect_owned_async(&self.before_turn_hooks, ctx, |hook, ctx| hook(ctx)).await
     }
 
     pub async fn before_tool_call(
         &self,
         ctx: ToolCallHookContext,
     ) -> Result<Vec<PluginOwned<PluginDirective>>, PluginError> {
-        let mut directives = Vec::new();
-        for registered in &self.before_tool_call_hooks {
-            for directive in (registered.hook)(ctx.clone()).await? {
-                directives.push(PluginOwned {
-                    plugin_id: registered.plugin_id.clone(),
-                    value: directive,
-                });
-            }
-        }
-        Ok(directives)
+        collect_owned_async(&self.before_tool_call_hooks, ctx, |hook, ctx| hook(ctx)).await
     }
 
     pub async fn after_tool_call(
         &self,
         ctx: ToolResultHookContext,
     ) -> Result<Vec<PluginOwned<PluginDirective>>, PluginError> {
-        let mut directives = Vec::new();
-        for registered in &self.after_tool_call_hooks {
-            for directive in (registered.hook)(ctx.clone()).await? {
-                directives.push(PluginOwned {
-                    plugin_id: registered.plugin_id.clone(),
-                    value: directive,
-                });
-            }
-        }
-        Ok(directives)
+        collect_owned_async(&self.after_tool_call_hooks, ctx, |hook, ctx| hook(ctx)).await
     }
 
     pub async fn after_turn(
         &self,
         ctx: TurnResultHookContext,
     ) -> Result<Vec<PluginOwned<PluginDirective>>, PluginError> {
-        let mut directives = Vec::new();
-        for registered in &self.after_turn_hooks {
-            for directive in (registered.hook)(ctx.clone()).await? {
-                directives.push(PluginOwned {
-                    plugin_id: registered.plugin_id.clone(),
-                    value: directive,
-                });
-            }
-        }
-        Ok(directives)
+        collect_owned_async(&self.after_turn_hooks, ctx, |hook, ctx| hook(ctx)).await
     }
 
     pub async fn at_checkpoint(
         &self,
         ctx: CheckpointHookContext,
     ) -> Result<Vec<PluginOwned<PluginDirective>>, PluginError> {
-        let mut directives = Vec::new();
-        for registered in &self.checkpoint_hooks {
-            for directive in (registered.hook)(ctx.clone()).await? {
-                directives.push(PluginOwned {
-                    plugin_id: registered.plugin_id.clone(),
-                    value: directive,
-                });
-            }
-        }
-        Ok(directives)
+        collect_owned_async(&self.checkpoint_hooks, ctx, |hook, ctx| hook(ctx)).await
     }
 
     pub async fn transform_assistant_stream(
@@ -814,6 +850,12 @@ impl SessionManager for NoopSessionManager {
     async fn snapshot_session(&self, _session_id: &str) -> Result<SessionSnapshot, PluginError> {
         Err(PluginError::Session(
             "session lookup is unavailable in this runtime".to_string(),
+        ))
+    }
+
+    async fn tool_catalog(&self, _session_id: &str) -> Result<Vec<serde_json::Value>, PluginError> {
+        Err(PluginError::Session(
+            "tool catalogs are unavailable in this runtime".to_string(),
         ))
     }
 

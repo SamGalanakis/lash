@@ -127,6 +127,9 @@ pub enum DisplayBlock {
     Splash,
 }
 
+pub(crate) const SPLASH_CONTENT_HEIGHT: usize = 8;
+pub(crate) const SPLASH_SCROLLBACK_HEIGHT: usize = SPLASH_CONTENT_HEIGHT + 2;
+
 /// How many visual rows a single line of text takes when wrapped to `width`.
 fn wrapped_line_height(line: &str, width: usize) -> usize {
     if width == 0 {
@@ -232,7 +235,7 @@ impl DisplayBlock {
     /// Number of visual lines this block takes when rendered at `width` columns.
     /// `viewport_height` is needed for Splash centering; pass 0 for non-Splash blocks.
     ///
-    /// `expand_level`: 0 = ghost fold, 1 = compact plus, 2 = full.
+    /// `expand_level`: 0 = ghost fold, 1 = compact activity-only, 2 = full.
     pub fn height(&self, expand_level: u8, width: usize, viewport_height: usize) -> usize {
         match self {
             DisplayBlock::UserInput(s) => {
@@ -251,7 +254,7 @@ impl DisplayBlock {
                         // Ghost fold: first in group = 1 (summary line), continuation = 0.
                         if *continuation { 0 } else { 1 }
                     }
-                    1 => 1, // Compact: one summary line per code block.
+                    1 => 0, // Compact: hide raw code; keep semantic activity rows only.
                     _ => {
                         // Full: show actual code lines
                         wrapped_text_height(code, width, 2)
@@ -329,10 +332,7 @@ impl DisplayBlock {
             DisplayBlock::PluginPanel(panel) => {
                 2 + markdown::markdown_height(&panel.content, width.saturating_sub(2))
             }
-            DisplayBlock::Splash => {
-                // Splash fills the entire viewport (centered content + top/bottom padding)
-                viewport_height
-            }
+            DisplayBlock::Splash => viewport_height,
         }
     }
 }
@@ -568,6 +568,17 @@ impl App {
     /// Mark the height cache as stale so it will be recomputed on next access.
     pub fn invalidate_height_cache(&mut self) {
         self.height_cache.clear();
+    }
+
+    /// Remove the empty-state splash once real conversation content is present.
+    #[cfg(test)]
+    pub fn dismiss_splash(&mut self) {
+        if !matches!(self.blocks.first(), Some(DisplayBlock::Splash)) {
+            return;
+        }
+        self.blocks
+            .retain(|block| !matches!(block, DisplayBlock::Splash));
+        self.invalidate_height_cache();
     }
 
     /// Check whether a new CodeBlock belongs to an existing code-block group.
@@ -1062,6 +1073,32 @@ impl App {
         self.scroll_offset = usize::MAX;
     }
 
+    /// Explicitly resume following new output from the bottom.
+    pub fn resume_follow_output(&mut self) {
+        self.follow_output = true;
+        self.scroll_offset = usize::MAX;
+    }
+
+    /// Recompute the follow-output anchor for the current viewport dimensions.
+    pub fn refresh_follow_output_anchor(&mut self, viewport_width: usize, viewport_height: usize) {
+        if !self.follow_output {
+            return;
+        }
+
+        let awaiting_first_visible_output = self.running
+            && self.pending_text.is_empty()
+            && self.streaming_output.is_empty()
+            && self.live_output_chars_estimate == 0;
+
+        if awaiting_first_visible_output {
+            self.keep_latest_user_block_visible();
+            return;
+        }
+
+        let total_height = self.total_content_height(viewport_width, viewport_height);
+        self.scroll_offset = total_height.saturating_sub(viewport_height);
+    }
+
     /// Keep the latest user-authored block visible while following output.
     ///
     /// Before the first visible assistant output arrives, prefer the start of a
@@ -1100,13 +1137,18 @@ impl App {
         };
         let block_end = self.height_cache[last_idx];
         let block_height = block_end.saturating_sub(block_start);
+        let has_splash_before = self.blocks[..last_idx]
+            .iter()
+            .any(|block| matches!(block, DisplayBlock::Splash));
 
         let awaiting_first_visible_output = self.running
             && self.pending_text.is_empty()
             && self.streaming_output.is_empty()
             && self.live_output_chars_estimate == 0;
 
-        self.scroll_offset = if awaiting_first_visible_output && block_height >= viewport_height {
+        self.scroll_offset = if awaiting_first_visible_output
+            && (has_splash_before || block_height >= viewport_height)
+        {
             block_start.min(max_scroll)
         } else {
             block_end.saturating_sub(viewport_height).min(max_scroll)
@@ -1157,7 +1199,10 @@ impl App {
             {
                 cumulative += 1;
             }
-            cumulative += block.height(self.expand_level, width, viewport_height);
+            cumulative += match block {
+                DisplayBlock::Splash if self.blocks.len() > 1 => SPLASH_SCROLLBACK_HEIGHT,
+                _ => block.height(self.expand_level, width, viewport_height),
+            };
             self.height_cache.push(cumulative);
         }
     }
@@ -1664,7 +1709,7 @@ impl App {
         }
     }
 
-    /// Dismiss the prompt without selecting (Esc) — sends empty string to unblock Python.
+    /// Dismiss the prompt without selecting (Esc) — sends empty string to unblock the REPL runtime.
     pub fn dismiss_prompt(&mut self) {
         if let Some(p) = self.prompt.take() {
             let _ = p.response_tx.send(String::new());
@@ -1767,10 +1812,7 @@ pub fn format_tokens(n: i64) -> String {
 }
 
 pub(crate) fn render_plan_content_from_args(args: &serde_json::Value) -> Option<String> {
-    let items = args
-        .get("steps")
-        .or_else(|| args.get("plan"))
-        .and_then(|value| value.as_array())?;
+    let items = args.get("plan").and_then(|value| value.as_array())?;
     if items.is_empty() {
         return None;
     }
@@ -1787,10 +1829,7 @@ pub(crate) fn render_plan_content_from_args(args: &serde_json::Value) -> Option<
     }
 
     for (idx, item) in items.iter().enumerate() {
-        let step = item
-            .get("label")
-            .or_else(|| item.get("step"))
-            .and_then(|value| value.as_str())?;
+        let step = item.get("step").and_then(|value| value.as_str())?;
         let status = item.get("status").and_then(|value| value.as_str())?;
         let marker = match status {
             "completed" => "[x]",
@@ -1936,8 +1975,8 @@ mod tests {
         };
         // Level 0: first in group = 1 (ghost fold summary)
         assert_eq!(block.height(0, 80, 0), 1);
-        // Level 1: compact summary line
-        assert_eq!(block.height(1, 80, 0), 1);
+        // Level 1: compact view hides code blocks
+        assert_eq!(block.height(1, 80, 0), 0);
         // Level 2: full code view
         assert_eq!(block.height(2, 80, 0), 1);
 
@@ -1946,7 +1985,7 @@ mod tests {
             continuation: true,
         };
         assert_eq!(cont.height(0, 80, 0), 0); // absorbed into ghost fold
-        assert_eq!(cont.height(1, 80, 0), 1); // visible at level 1
+        assert_eq!(cont.height(1, 80, 0), 0); // hidden at level 1
         assert_eq!(cont.height(2, 80, 0), 1); // visible at level 2
     }
 
@@ -2033,9 +2072,9 @@ mod tests {
             content: "Let me continue testing.".into(),
         });
         app.handle_agent_event(AgentEvent::ToolCall {
-            name: "batch".into(),
-            args: serde_json::json!({}),
-            result: serde_json::json!(null),
+            name: "read_file".into(),
+            args: serde_json::json!({"path":"src/main.rs"}),
+            result: serde_json::json!("ok"),
             success: true,
             duration_ms: 1,
         });
@@ -2312,6 +2351,20 @@ mod tests {
     }
 
     #[test]
+    fn splash_collapses_to_compact_scrollback_height_once_history_exists() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.blocks
+            .push(DisplayBlock::UserInput("short prompt".into()));
+
+        let width = 32usize;
+        let viewport_height = 12usize;
+        app.ensure_height_cache_pub(width, viewport_height);
+
+        let cache = app.height_cache_snapshot().to_vec();
+        assert_eq!(cache[0], SPLASH_SCROLLBACK_HEIGHT);
+    }
+
+    #[test]
     fn display_block_error_height() {
         let block = DisplayBlock::Error("short error".into());
         assert_eq!(block.height(0, 80, 0), 1);
@@ -2335,6 +2388,20 @@ mod tests {
     fn display_block_splash_height() {
         let block = DisplayBlock::Splash;
         assert_eq!(block.height(0, 80, 24), 24);
+    }
+
+    #[test]
+    fn dismiss_splash_removes_empty_state_before_history_content() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.dismiss_splash();
+
+        assert!(app.blocks.is_empty());
+
+        app.blocks.push(DisplayBlock::UserInput("hello".into()));
+        app.dismiss_splash();
+
+        assert_eq!(app.blocks.len(), 1);
+        assert!(matches!(app.blocks[0], DisplayBlock::UserInput(_)));
     }
 
     #[test]
@@ -2511,6 +2578,64 @@ mod tests {
             "should stay at bottom after collapsing"
         );
         assert!(app.follow_output, "follow_output should remain true");
+    }
+
+    #[test]
+    fn refresh_follow_output_anchor_tracks_bottom_across_viewport_changes() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.blocks.clear();
+
+        app.blocks.push(DisplayBlock::UserInput("Message 1".into()));
+        app.blocks.push(DisplayBlock::AssistantText(
+            "Line 1\nLine 2\nLine 3\nLine 4\nLine 5".into(),
+        ));
+
+        let width = 80;
+        app.follow_output = true;
+
+        app.refresh_follow_output_anchor(width, 3);
+        let small_bottom = app.total_content_height(width, 3).saturating_sub(3);
+        assert_eq!(app.scroll_offset, small_bottom);
+
+        app.refresh_follow_output_anchor(width, 6);
+        let large_bottom = app.total_content_height(width, 6).saturating_sub(6);
+        assert_eq!(app.scroll_offset, large_bottom);
+    }
+
+    #[test]
+    fn resume_follow_output_reenables_bottom_following() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.blocks.clear();
+        app.blocks.push(DisplayBlock::UserInput("hello".into()));
+        app.blocks.push(DisplayBlock::AssistantText("world".into()));
+        app.follow_output = false;
+        app.scroll_offset = 3;
+
+        app.resume_follow_output();
+
+        assert!(app.follow_output);
+        assert_eq!(app.scroll_offset, usize::MAX);
+    }
+
+    #[test]
+    fn refresh_follow_output_anchor_repositions_waiting_prompt_on_resize() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.blocks.push(DisplayBlock::UserInput(
+            "A long prompt that should stay visible while we are waiting for first token output"
+                .into(),
+        ));
+        app.running = true;
+        app.follow_output = true;
+
+        let width = 24;
+        app.refresh_follow_output_anchor(width, 3);
+        let initial_offset = app.scroll_offset;
+
+        app.refresh_follow_output_anchor(width, 6);
+        assert!(
+            app.scroll_offset <= initial_offset,
+            "larger viewport should not push the waiting prompt further down"
+        );
     }
 
     #[test]

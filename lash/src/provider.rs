@@ -106,11 +106,13 @@ impl AuxiliarySecrets {
 pub struct RuntimeSettings {
     #[serde(default, skip_serializing_if = "ContextFoldingConfig::is_default")]
     pub context_folding: ContextFoldingConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_tier_subagent_execution_mode: Option<crate::ExecutionMode>,
 }
 
 impl RuntimeSettings {
     fn is_default(&self) -> bool {
-        self.context_folding.is_default()
+        self.context_folding.is_default() && self.low_tier_subagent_execution_mode.is_none()
     }
 }
 

@@ -616,7 +616,7 @@
         <div class="arch-card-tag tag-host"><span class="dot"></span>Layer 1</div>
         <div class="arch-card-title">Host Interface</div>
         <div class="arch-card-desc">
-          Three host modes (interactive CLI, headless, embedded) feed into a single runtime API.
+          Three host interfaces (interactive CLI, autonomous CLI preset, embedded) feed into a single runtime API.
           Each produces ordered <code>TurnInput</code> items that the runtime normalizes before dispatch.
         </div>
       </div>
@@ -670,7 +670,7 @@
         <div class="arch-card-tag tag-host"><span class="dot"></span>Host Interface</div>
         <div class="arch-card-title">Frontend Modes</div>
         <div class="arch-card-desc">
-          Three host modes feed into a single runtime API. Each produces ordered <code>TurnInput</code> items
+          Three host interfaces feed into a single runtime API. Each produces ordered <code>TurnInput</code> items
           that the runtime normalizes before dispatch.
         </div>
         <div class="cell-grid cols-3">
@@ -679,8 +679,8 @@
             <p>Slash commands, image paste markers, file/path references.</p>
           </div>
           <div class="cell">
-            <h4>Headless</h4>
-            <p>Single autonomous run with printed final output.</p>
+            <h4>Autonomous CLI</h4>
+            <p>Single autonomous run with printed final output and no interactive prompt bridge.</p>
           </div>
           <div class="cell">
             <h4>Embedded Host</h4>
@@ -726,16 +726,16 @@
         <div class="arch-card-title">Prompt Assembly + Sans-IO Turn Machine</div>
         <div class="arch-card-desc">
           LashRuntime resolves provider/model, refreshes tokens, reads dynamic projection state from the active tool registry,
-          injects only tools with <code>inject_into_prompt=true</code>, and appends discovery guidance for omitted tools
-          (<code>search_tools</code>). Prompt assembly is execution-mode aware:
-          the same tool identity is projected into REPL help/docs or provider-native tool schemas depending on the active mode.
+          and asks plugin-owned tool-surface contributors to resolve the prompt-visible and optionally discoverable tool surface for the
+          current session. Prompt assembly is execution-mode aware: the same tool identity is projected into REPL help/docs or
+          provider-native tool schemas depending on the active mode.
           Both execution paths are driven by a single synchronous state machine (<code>TurnMachine</code> in <code>lash/src/sansio.rs</code>)
           that emits I/O effects (<code>LlmCall</code>, <code>ToolCall</code>, <code>ExecCode</code>, <code>Sleep</code>) for the async host driver to fulfil.
         </div>
         <div class="cell-grid cols-3">
           <div class="cell">
             <h4>Prompt Tooling</h4>
-            <p>Visible tools split into prompt-injected subset + discoverable runtime subset from the active generation.</p>
+            <p>Plugins resolve the active tool surface: prompt-injected tools, conditional <code>search_tools</code> discovery when extra tools are omitted, and any extra guidance or omitted-tool notes.</p>
           </div>
           <div class="cell">
             <h4>Execution Mode</h4>
@@ -743,11 +743,15 @@
           </div>
           <div class="cell">
             <h4>Context Control</h4>
-            <p>Batched context folding with soft/hard watermarks plus <code>search_history</code> / <code>search_mem</code> tool calls for long-running sessions and sub-agents.</p>
+            <p>Plugin-owned history compaction with soft/hard watermarks plus <code>search_history</code> / <code>search_mem</code> tool calls for long-running sessions and sub-agents.</p>
           </div>
           <div class="cell">
             <h4>Capability Guidance</h4>
             <p>Prompt helper bindings + capability prompt sections come from dynamic capability definitions.</p>
+          </div>
+          <div class="cell">
+            <h4>Schema Boundary</h4>
+            <p>Tool-surface plugins shape docs and discovery. Core still owns provider-native tool schema injection and execution dispatch.</p>
           </div>
         </div>
       </div>
@@ -858,7 +862,7 @@
               <code>lexer.rs</code> tokenizes a compact surface language with reserved words like
               <code>call</code>, <code>observe</code>, <code>finish</code>, and <code>parallel</code>.
               <code>parser.rs</code> builds an AST over assignments, control flow, records, lists,
-              ternaries, tool calls, and completion.
+              field/index access, unary/binary operators, ternaries, tool calls, and completion.
             </p>
           </div>
           <div class="cell">
@@ -881,6 +885,8 @@
             <p>
               <code>parallel { ... }</code> can execute independent branches concurrently. Branches may only merge if
               they assign disjoint names, and <code>finish</code> is rejected inside a parallel branch.
+              In expression position it returns a source-ordered list of branch results, and bare expression branches
+              contribute those values directly.
             </p>
           </div>
           <div class="cell">
@@ -905,6 +911,70 @@
 config = <span class="kw">call</span> read_file { path: <span class="str">"src/config.rs"</span> }
 summary = config.ok ? slice(config.value, 0, 80) : config.error
 <span class="kw">observe</span> summary
+<span class="tag">&lt;/repl&gt;</span></pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Language Surface Summary</div>
+          <pre><span class="role">values</span>
+null | bool | number | string | list | record
+
+<span class="role">statements</span>
+name = expr
+expr
+if cond { ... } else { ... }
+for item in list { ... }
+observe expr
+finish expr
+
+<span class="role">expressions</span>
+literals, variables, field access (.name), indexing ([expr]),
+unary (! / not / -), binary arithmetic/comparison/boolean ops,
+ternary (cond ? yes : no), builtins, tool calls, parallel blocks
+
+<span class="role">operators</span>
++ - * / % | == != &lt; &lt;= &gt; &gt;= | &amp;&amp; || | and or | ! not
+
+<span class="role">tool calls</span>
+call tool_name { arg: expr, ... }
+
+<span class="role">parallel</span>
+parallel { ... } as a statement fan-out or expression returning a source-ordered list
+
+<span class="role">data helpers</span>
+slice(value, start, end) treats null bounds as omitted
+negative list/string indices count from the end
+contains(record, key) checks record keys
+string comparisons are lexicographic
+to_string preserves integer formatting inside JSON-like output
+
+<span class="role">constraints</span>
+no imports, classes, methods, exceptions, comprehensions, or hidden stdlib surface</pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Control Flow + Data Shaping</div>
+          <pre><span class="tag">&lt;repl&gt;</span>
+files = <span class="kw">call</span> glob { pattern: <span class="str">"src/**/*.rs"</span> }
+names = []
+<span class="kw">if</span> files.ok {
+  <span class="kw">for</span> item <span class="kw">in</span> files.value.items {
+    names = names + [item.path]
+  }
+}
+<span class="kw">finish</span> { count: len(names), first: names[0], all: names }
+<span class="tag">&lt;/repl&gt;</span></pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Parallel Read Fan-Out</div>
+          <pre><span class="tag">&lt;repl&gt;</span>
+<span class="kw">parallel</span> {
+  lib = <span class="kw">call</span> read_file { path: <span class="str">"src/lib.rs"</span> }
+  main = <span class="kw">call</span> read_file { path: <span class="str">"src/main.rs"</span> }
+}
+<span class="kw">observe</span> { lib_ok: lib.ok, main_ok: main.ok }
+<span class="kw">finish</span> { lib: lib, main: main }
 <span class="tag">&lt;/repl&gt;</span></pre>
         </div>
 
@@ -959,7 +1029,7 @@ from_snapshot(...) -&gt; restored globals</pre>
           </div>
           <div class="cell">
             <h4>Builtins</h4>
-            <p>Builtins cover formatting, string/list helpers, indexing, JSON conversion, numeric coercion, truthiness-aware conditionals, and utility helpers like <code>len</code>, <code>slice</code>, and <code>format</code>.</p>
+            <p>Builtins are intentionally small and explicit: <code>len</code>, <code>empty</code>, <code>keys</code>, <code>values</code>, <code>contains</code>, <code>starts_with</code>, <code>ends_with</code>, <code>split</code>, <code>join</code>, <code>trim</code>, <code>slice</code>, <code>to_string</code>, <code>to_int</code>, <code>to_float</code>, <code>json_parse</code>, and <code>format</code>. <code>contains</code> covers string substring checks, list membership, and record-key membership. <code>slice(value, start, end)</code> treats <code>null</code> bounds as omitted. <code>to_string(value)</code> handles conversion and preserves integer formatting inside list/record JSON-like output; <code>format("x={}", value)</code> is template-only and supports <code>{0}</code>/<code>{1}</code> only for explicit reordering.</p>
           </div>
           <div class="cell">
             <h4>Truthiness</h4>
@@ -976,6 +1046,36 @@ observe(value: &amp;Value) -&gt; Result&lt;(), ToolHostError&gt;
 <span class="role">tool result convention</span>
 { ok: true, value: ... }
 { ok: false, error: ... }</pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Tool Result Branching</div>
+          <pre><span class="tag">&lt;repl&gt;</span>
+found = <span class="kw">call</span> read_file { path: <span class="str">"src/lib.rs"</span> }
+missing = <span class="kw">call</span> read_file { path: <span class="str">"src/missing.rs"</span> }
+summary = format(
+  <span class="str">"found={} missing={}"</span>,
+  found.ok ? <span class="str">"ok"</span> : format(<span class="str">"failed: {}"</span>, found.error),
+  missing.ok ? <span class="str">"ok"</span> : format(<span class="str">"failed: {}"</span>, missing.error)
+)
+<span class="kw">finish</span> summary
+<span class="tag">&lt;/repl&gt;</span></pre>
+        </div>
+
+        <div class="example-block">
+          <div class="example-label">Formatting Rules</div>
+          <pre><span class="role">conversion</span>
+to_string(value)
+
+<span class="role">templates</span>
+format("x={} y={}", a, b)
+format("b={1} a={0}", a, b)
+format("{{{}}}", 1)  <span class="comment"># =&gt; {1}</span>
+
+<span class="role">errors</span>
+format({ a: 1 })        <span class="comment"># template must be a string</span>
+format("{} {1}", a, b) <span class="comment"># mixed placeholder styles are invalid</span>
+format("x", a)         <span class="comment"># unused args are invalid</span></pre>
         </div>
       </div>
 
@@ -1001,7 +1101,7 @@ observe(value: &amp;Value) -&gt; Result&lt;(), ToolHostError&gt;
             <h4>Termination</h4>
             <p>
               <code>finish expr</code> always ends the turn, even when the rendered text is empty.
-              <code>observe expr</code> never ends the turn. In headless mode, the task must eventually terminate
+              <code>observe expr</code> never ends the turn. In autonomous CLI runs, the task must eventually terminate
               through <code>finish ...</code> rather than prose alone.
             </p>
           </div>
@@ -1009,7 +1109,11 @@ observe(value: &amp;Value) -&gt; Result&lt;(), ToolHostError&gt;
             <h4>Tool Access</h4>
             <p>
               In REPL mode, tools are called with <code>call tool_name { ... }</code>. Use <code>call search_tools {}</code>
-              only when the needed tool is not already listed in the prompt. There is no <code>T</code> namespace or Python async layer.
+              only when the prompt tells you additional tools were omitted for brevity. The visible tool list comes from the active plugin-owned
+              tool surface. There is no <code>T</code> namespace or legacy Python runtime layer. Independent
+              branches use <code>parallel { ... }</code>, and branches ending in <code>call ...</code> produce the same
+              wrapped <code>{ ok, value, error }</code> result records as ordinary tool calls. Bare expression branches are also legal
+              and contribute their direct values to the returned list.
             </p>
           </div>
           <div class="cell">
@@ -1079,9 +1183,9 @@ patch = <span class="kw">call</span> apply_patch { patch: <span class="str">"""*
           <div class="cell">
             <h4>Contract Rules</h4>
             <p>
-              Use native tool calls when execution is needed. Do not emit <code>&lt;repl&gt;</code> blocks or Python code.
-              When several tool calls are independent, emit them together in the same response.
-              Use serial calls only when later arguments depend on earlier results.
+              Use native tool calls when execution is needed. Do not emit <code>&lt;repl&gt;</code> blocks.
+              Emit multiple independent native tool calls in the same response for concurrent work,
+              and serialize only when later arguments depend on earlier results.
             </p>
           </div>
           <div class="cell">
@@ -1089,14 +1193,18 @@ patch = <span class="kw">call</span> apply_patch { patch: <span class="str">"""*
             <p>
               Finish by returning a final assistant answer. No fake tool calls or placeholder arguments.
               Do not stop after tool execution unless the task is actually complete.
-              In headless mode, keep calling tools until the task is done, then return a final answer.
+              In autonomous CLI runs, keep calling tools until the task is done, then return a final answer.
             </p>
           </div>
           <div class="cell">
             <h4>Tool Access</h4>
             <p>
-              The runtime exposes the available tools as native tool call schemas. Use only the tools shown in Available Tools.
-              Prefer parallel independent calls in one turn when the arguments are already known. Prefer <code>batch</code> when you already know the arguments for several unrelated reads, searches, shell commands, or diagnostics and want them started together.
+              The runtime exposes the available tools as native tool call schemas. Prompt-visible docs and <code>search_tools</code>
+              browsing come from the active plugin-owned tool surface for the session. In standard mode,
+              the native parallel primitive is multiple independent tool calls in a single assistant response;
+              the runtime executes them concurrently and feeds all results back together before the next model step.
+              Use that for unrelated reads, searches, shell commands, or diagnostics that should start together. The standard shell surface
+              (<code>exec_command</code> / <code>write_stdin</code>) is PTY-backed and streams terminal-style merged output.
               Never invent tool names or arguments.
             </p>
           </div>
@@ -1179,13 +1287,11 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         </div>
 
         <div class="example-block">
-          <div class="example-label">Example &mdash; Batch tool (when available)</div>
+          <div class="example-label">Example &mdash; Multiple native tool calls in one response</div>
           <pre><span class="role">assistant:</span>
-<span class="kw">tool_call:</span> <span class="fn">batch</span>
-  <span class="str">tool_calls</span>:
-    - <span class="fn">read_file</span> { <span class="str">path</span>: "src/config.rs" }
-    - <span class="fn">read_file</span> { <span class="str">path</span>: "src/main.rs" }
-    - <span class="fn">grep</span>    { <span class="str">pattern</span>: "timeout", <span class="str">path</span>: "src/" }</pre>
+<span class="kw">tool_call:</span> <span class="fn">read_file</span> { <span class="str">path</span>: "src/config.rs" }
+<span class="kw">tool_call:</span> <span class="fn">read_file</span> { <span class="str">path</span>: "src/main.rs" }
+<span class="kw">tool_call:</span> <span class="fn">grep</span> { <span class="str">pattern</span>: "timeout", <span class="str">path</span>: "src/" }</pre>
         </div>
       </div>
 
@@ -1257,7 +1363,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
           </div>
           <div class="cell">
             <h4>Discovery</h4>
-            <p><code>search_tools</code> is for genuine discovery of tools not injected into the prompt. With no query, it returns the full active catalog.</p>
+            <p><code>search_tools</code> is only exposed when additional non-hidden tools are omitted from Available Tools for brevity. With no query, it returns the full active catalog for the current session.</p>
           </div>
         </div>
       </div>
@@ -1267,12 +1373,12 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="arch-card-title">Sub-Agent Orchestration</div>
         <div class="arch-card-desc">
           <code>agent_call</code> forks parent dynamic state per sub-agent. Sub-agents share the same filesystem/worktree
-          but get isolated tool/capability state. Low tier sub-agents are filtered (no write/delegation tools) and always execute in <code>standard</code>; medium/high inherit the parent session's execution mode. REPL-specific setup only applies when the child actually runs in <code>repl</code>.
+          but get isolated tool/capability state. Low tier sub-agents are filtered (no write/delegation tools) and default to <code>standard</code> via the host-owned <code>runtime.low_tier_subagent_execution_mode</code> setting; medium/high inherit the parent session's execution mode. REPL-specific setup only applies when the child actually runs in <code>repl</code>.
         </div>
         <div class="cell-grid cols-3">
           <div class="cell">
             <h4>Tiers</h4>
-            <p>Low (read-only lookup, forced standard), medium (general), high (full capability). Each tier has a filtered tool set.</p>
+            <p>Low (read-only lookup, host-configurable mode defaulting to standard), medium (general), high (full capability). Each tier has a filtered tool set.</p>
           </div>
           <div class="cell">
             <h4>Recall Pattern</h4>
@@ -1289,7 +1395,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="arch-card-tag tag-persist"><span class="dot"></span>Persistence</div>
         <div class="arch-card-title">Store, Logs, and Session State</div>
         <div class="arch-card-desc">
-          SQLite-backed store tracks archived context, history, memory, and agent state for the session, while CLI keeps session logs and runtime
+          SQLite-backed store tracks archived-history state, history, memory, and agent state for the session, while CLI keeps session logs and runtime
           state envelope that can be restored on resume.
         </div>
         <div class="cell-grid cols-2">
@@ -1307,7 +1413,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
 
     <div class="legend" style="margin-top: 2px;">
       <span class="pill"><b>Prompt-visible</b> <code>inject_into_prompt=true</code></span>
-      <span class="pill"><b>Discoverable</b> <code>search_tools</code></span>
+      <span class="pill"><b>Discoverable</b> <code>search_tools</code> when extra tools are omitted</span>
       <span class="pill"><b>Reconfigure</b> <code>/tools / /caps / /reconfigure</code></span>
       <span class="pill"><b>Unified Items</b> <code>text + refs + image + skill</code></span>
     </div>
@@ -1359,7 +1465,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="cell-grid cols-2">
           <div class="cell">
             <h4>Core Read</h4>
-            <p><code>read_file</code>, <code>glob</code>, <code>grep</code>, <code>ls</code>, <code>search_tools</code>. File navigation and discovery.</p>
+            <p><code>read_file</code>, <code>glob</code>, <code>grep</code>, <code>ls</code>, <code>search_tools</code>. File navigation and discovery, with <code>search_tools</code> only exposed when additional tools are omitted from the prompt.</p>
           </div>
           <div class="cell">
             <h4>Core Write</h4>
@@ -1367,7 +1473,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
           </div>
           <div class="cell">
             <h4>Shell</h4>
-            <p><code>exec_command</code> and <code>write_stdin</code> in standard mode, plus <code>shell</code>, <code>shell_wait</code>, <code>shell_read</code>, <code>shell_write</code>, <code>shell_kill</code> in REPL mode.</p>
+            <p><code>exec_command</code> and <code>write_stdin</code> in standard mode, plus <code>shell</code>, <code>shell_wait</code>, <code>shell_read</code>, <code>shell_write</code>, <code>shell_kill</code> in REPL mode. Both surfaces are PTY-backed, return incremental terminal output, and merge stdout/stderr by terminal semantics.</p>
           </div>
           <div class="cell">
             <h4>Planning</h4>
@@ -1383,15 +1489,15 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
           </div>
           <div class="cell">
             <h4>Memory</h4>
-            <p><code>search_mem</code>, <code>mem_set</code>, <code>mem_get</code>, <code>mem_delete</code>, <code>mem_all</code>. Key-value memory.</p>
+            <p><code>search_mem</code>, <code>mem_set</code>, <code>mem_get</code>, <code>mem_delete</code>. Key-value memory, with browse-all behavior on empty <code>query</code>.</p>
           </div>
           <div class="cell">
             <h4>Skills</h4>
-            <p><code>load_skill</code>, <code>read_skill_file</code>, <code>search_skills</code>. Skill discovery and loading.</p>
+            <p><code>load_skill</code>, <code>read_skill_file</code>, <code>search_skills</code>. Skill discovery and loading. These tools only exist when installed skills are present, and when they do exist they are prompt-visible.</p>
           </div>
           <div class="cell">
             <h4>Web</h4>
-            <p><code>search_web</code>, <code>fetch_url</code>. Web search and page fetch.</p>
+            <p><code>search_web</code>, <code>fetch_url</code>. Web search and page fetch. When the web provider is configured, both tools are prompt-visible.</p>
           </div>
         </div>
       </div>
@@ -1423,13 +1529,13 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
               <code>call mem_set { key, description, value }</code> &mdash; store/update in REPL<br>
               <code>call mem_get { key }</code> &mdash; retrieve or <code>null</code> in REPL<br>
               <code>call mem_delete { key }</code> &mdash; remove in REPL<br>
-              <code>call search_mem { query, mode, regex, limit, keys }</code> &mdash; search in REPL
+              <code>call search_mem { query, mode, regex, limit, keys }</code> &mdash; search in REPL; omit <code>query</code> to list all memory in stable key order
             </p>
           </div>
           <div class="cell">
             <h4>Availability</h4>
             <p>
-              <code>search_mem</code> is available in both execution modes, but REPL calls it as <code>call search_mem { ... }</code>.
+              <code>search_mem</code> is available in both execution modes, but REPL calls it as <code>call search_mem { ... }</code>. With no query, it returns the full memory list.
             </p>
           </div>
         </div>
@@ -1470,7 +1576,7 @@ results = <span class="kw">call</span> search_mem { query: <span class="str">"na
           <div class="cell">
             <h4>API</h4>
             <p>
-              <code>search_history(query, mode="hybrid", regex=None, limit=10, fields=None, since_turn=None)</code> &mdash; search prior completed turns
+              <code>search_history(query=None, mode="hybrid", regex=None, limit=None, fields=None, since_turn=None)</code> &mdash; search prior completed turns; with no query, list all turns in stable turn order
             </p>
           </div>
           <div class="cell">
@@ -1538,8 +1644,7 @@ worker = <span class="kw">call</span> agent_call { prompt: <span class="str">"Se
           <div class="cell">
             <h4>Discovery</h4>
             <p>
-              <code>skills</code> lists all available skills with names and descriptions.
-              <code>search_skills(query, ...)</code> performs hybrid search across skill metadata.
+              <code>search_skills(query, ...)</code> performs hybrid search across installed skill metadata and also serves as the full catalog browse when called without a query.
               Both global and project-local skill directories are scanned.
             </p>
           </div>

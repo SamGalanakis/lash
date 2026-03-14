@@ -6,7 +6,6 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::capabilities::{AgentCapabilities, CAPABILITY_DEFINITIONS, CapabilityId};
-use crate::tools::{INTERNAL_TOOL_CATALOG_ARG, project_tool_catalog};
 use crate::{ProgressSender, ToolDefinition, ToolProvider, ToolResult};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -105,7 +104,10 @@ pub fn default_dynamic_capability_defs() -> BTreeMap<String, DynamicCapabilityDe
                 id: def.id.as_str().to_string(),
                 name: def.name.to_string(),
                 description: def.description.to_string(),
-                prompt_section: def.prompt_section.map(str::to_string),
+                // Core capability guidance is owned by prompt_sections_for_capabilities().
+                // Dynamic projection should only surface sections for genuinely dynamic
+                // capabilities so the prompt builder has a single source of truth.
+                prompt_section: None,
                 helper_bindings: def
                     .helper_bindings
                     .iter()
@@ -411,16 +413,15 @@ impl DynamicToolProvider {
             .clone()
     }
 
-    pub fn capabilities_payload_json(&self) -> String {
+    pub fn capabilities_payload(&self) -> crate::ToolCapabilityPayload {
         let resolved = self.resolved_projection();
         let profile = self.profile();
-        serde_json::json!({
-            "enabled_capabilities": resolved.enabled_capabilities.into_iter().collect::<Vec<_>>(),
-            "enabled_tools": resolved.effective_tools.into_iter().collect::<Vec<_>>(),
-            "helper_bindings": resolved.helper_bindings.into_iter().collect::<Vec<_>>(),
-            "explicit_enabled_tools": profile.enabled_tools.into_iter().collect::<Vec<_>>(),
-        })
-        .to_string()
+        crate::ToolCapabilityPayload {
+            enabled_capabilities: resolved.enabled_capabilities.into_iter().collect(),
+            enabled_tools: resolved.effective_tools.into_iter().collect(),
+            helper_bindings: resolved.helper_bindings.into_iter().collect(),
+            explicit_enabled_tools: profile.enabled_tools.into_iter().collect(),
+        }
     }
 
     pub fn apply_state(&self, next: DynamicStateSnapshot) -> Result<u64, ReconfigureError> {
@@ -559,8 +560,8 @@ impl ToolProvider for DynamicToolProvider {
             .map(|fork| Arc::new(fork) as Arc<dyn ToolProvider>)
     }
 
-    fn dynamic_capabilities_payload_json(&self) -> Option<String> {
-        Some(self.capabilities_payload_json())
+    fn dynamic_capability_payload(&self) -> Option<crate::ToolCapabilityPayload> {
+        Some(self.capabilities_payload())
     }
 
     fn dynamic_generation(&self) -> Option<u64> {
@@ -576,30 +577,11 @@ impl ToolProvider for DynamicToolProvider {
         args: &serde_json::Value,
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
-        let (adapter_id, allowed, catalog) = {
+        let (adapter_id, allowed) = {
             let state = self.state.read().expect("dynamic state lock poisoned");
             let allowed = state.resolved.effective_tools.contains(name);
             let adapter_id = state.tools.get(name).map(|s| s.adapter_id.clone());
-            let catalog = if name == "search_tools" && args.get(INTERNAL_TOOL_CATALOG_ARG).is_none()
-            {
-                Some(project_tool_catalog(
-                    state
-                        .tools
-                        .values()
-                        .filter(|spec| {
-                            state
-                                .resolved
-                                .effective_tools
-                                .contains(&spec.definition.name)
-                        })
-                        .map(|spec| spec.definition.clone())
-                        .collect::<Vec<_>>(),
-                    crate::ExecutionMode::Standard,
-                ))
-            } else {
-                None
-            };
-            (adapter_id, allowed, catalog)
+            (adapter_id, allowed)
         };
 
         if !allowed {
@@ -622,18 +604,7 @@ impl ToolProvider for DynamicToolProvider {
             return ToolResult::err_fmt(format_args!("Tool adapter missing for tool `{name}`"));
         };
 
-        let payload = if let Some(catalog) = catalog {
-            let mut object = args.as_object().cloned().unwrap_or_default();
-            object.insert(
-                INTERNAL_TOOL_CATALOG_ARG.to_string(),
-                serde_json::Value::Array(catalog),
-            );
-            serde_json::Value::Object(object)
-        } else {
-            args.clone()
-        };
-
-        adapter.execute(name, &payload, progress).await
+        adapter.execute(name, args, progress).await
     }
 }
 
@@ -721,6 +692,44 @@ mod tests {
         snapshot.profile.enabled_tools.clear();
         let generation = registry.apply_state(snapshot).expect("apply succeeds");
         assert_eq!(generation, 2);
+    }
+
+    #[test]
+    fn capability_payload_includes_explicit_enabled_tools() {
+        let provider: Arc<dyn ToolProvider> = Arc::new(MockTool);
+        let enabled_tools = BTreeSet::from(["mock_tool".to_string()]);
+        let registry = DynamicToolProvider::from_tool_provider(
+            provider,
+            BTreeMap::new(),
+            CapabilityProfile {
+                enabled_capabilities: BTreeSet::new(),
+                enabled_tools: enabled_tools.clone(),
+            },
+        )
+        .expect("registry builds");
+
+        let payload = registry.capabilities_payload();
+        assert_eq!(
+            payload.explicit_enabled_tools,
+            vec!["mock_tool".to_string()]
+        );
+    }
+
+    #[test]
+    fn default_core_capability_defs_do_not_embed_prompt_sections() {
+        let defs = default_dynamic_capability_defs();
+        assert!(
+            defs.get(CapabilityId::CoreRead.as_str())
+                .expect("core read def")
+                .prompt_section
+                .is_none()
+        );
+        assert!(
+            defs.get(CapabilityId::Planning.as_str())
+                .expect("planning def")
+                .prompt_section
+                .is_none()
+        );
     }
 
     #[test]

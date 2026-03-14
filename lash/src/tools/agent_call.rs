@@ -23,6 +23,19 @@ enum Tier {
     High,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AgentCallConfig {
+    pub low_tier_execution_mode: crate::ExecutionMode,
+}
+
+impl Default for AgentCallConfig {
+    fn default() -> Self {
+        Self {
+            low_tier_execution_mode: crate::ExecutionMode::Standard,
+        }
+    }
+}
+
 impl Tier {
     fn from_str(s: &str) -> Option<Self> {
         match s {
@@ -126,6 +139,7 @@ pub struct AgentCall {
     tools: Arc<dyn ToolProvider>,
     plugins: Arc<PluginSession>,
     config: AgentConfig,
+    tool_config: AgentCallConfig,
     agent_models: Option<AgentModels>,
     cancel: CancellationToken,
     agents: Arc<StdMutex<HashMap<String, RunningAgent>>>,
@@ -136,6 +150,7 @@ impl AgentCall {
         tools: Arc<dyn ToolProvider>,
         plugins: Arc<PluginSession>,
         config: &AgentConfig,
+        tool_config: AgentCallConfig,
         agent_models: Option<AgentModels>,
         cancel: CancellationToken,
     ) -> Self {
@@ -143,6 +158,7 @@ impl AgentCall {
             tools,
             plugins,
             config: config.clone(),
+            tool_config,
             agent_models,
             cancel,
             agents: Arc::new(StdMutex::new(HashMap::new())),
@@ -159,11 +175,6 @@ impl AgentCall {
         } else {
             self.config.capabilities.clone()
         };
-        let execution_mode = if matches!(tier, Tier::Low) {
-            crate::ExecutionMode::Standard
-        } else {
-            self.config.execution_mode
-        };
         AgentConfig {
             capabilities,
             model,
@@ -175,11 +186,20 @@ impl AgentCall {
             max_context_tokens: self.config.max_context_tokens,
             max_turns: None,
             llm_log_path: self.config.llm_log_path.clone(),
-            headless: self.config.headless,
             prompt_overrides: self.config.prompt_overrides.clone(),
             instruction_source: self.config.instruction_source.clone(),
-            execution_mode,
+            execution_mode: match tier {
+                Tier::Low => self.tool_config.low_tier_execution_mode,
+                Tier::Medium | Tier::High => self.config.execution_mode,
+            },
             ..Default::default()
+        }
+    }
+
+    fn low_tier_execution_mode_summary(&self) -> &'static str {
+        match self.tool_config.low_tier_execution_mode {
+            crate::ExecutionMode::Standard => "by default, low runs in standard mode",
+            crate::ExecutionMode::Repl => "in this session, low runs in repl mode",
         }
     }
 
@@ -247,15 +267,16 @@ impl AgentCall {
 
         Arc::new(
             ToolSet::new()
-                + Arc::clone(&self.tools)
-                + AgentCall::new(
+                .with_arc_provider(Arc::clone(&self.tools))
+                .with_provider(AgentCall::new(
                     Arc::clone(&self.tools),
                     Arc::clone(&self.plugins),
                     &self.config,
+                    self.tool_config,
                     self.agent_models.clone(),
                     self.cancel.clone(),
-                )
-                - "ask",
+                ))
+                .without_tool("ask"),
         )
     }
 
@@ -583,11 +604,17 @@ impl ToolProvider for AgentCall {
                 name: "agent_call".into(),
                 description: vec![
                     crate::ToolText::new(
-                        r#"Spawn a sub-agent for scoped work and return a handle. In REPL mode, use `call agent_result { id: handle.value.id }` or `call agent_kill { id: handle.value.id }` with the returned id. Use `intelligence="low"` for fast read-only work; medium/high inherit the parent execution mode and parent history/memory read-only."#,
+                        format!(
+                            "Spawn a sub-agent for scoped work and return a handle. In REPL mode, use `call agent_result {{ id: handle.value.id }}` or `call agent_kill {{ id: handle.value.id }}` with the returned id. Use `intelligence=\"low\"` for fast read-only work; {}. Medium/high inherit the parent execution mode and parent history/memory read-only.",
+                            self.low_tier_execution_mode_summary()
+                        ),
                         [crate::ExecutionMode::Repl],
                     ),
                     crate::ToolText::new(
-                        r#"Spawn a sub-agent for scoped work and return a handle. Use `agent_result(id)` or `agent_kill(id)` with the returned id. Use `intelligence="low"` for fast read-only work; medium/high inherit the parent execution mode and parent history/memory read-only."#,
+                        format!(
+                            "Spawn a sub-agent for scoped work and return a handle. Use `agent_result(id)` or `agent_kill(id)` with the returned id. Use `intelligence=\"low\"` for fast read-only work; {}. Medium/high inherit the parent execution mode and parent history/memory read-only.",
+                            self.low_tier_execution_mode_summary()
+                        ),
                         [crate::ExecutionMode::Standard],
                     ),
                 ],
@@ -635,7 +662,7 @@ impl ToolProvider for AgentCall {
                 returns: "dict".into(),
                 examples: vec![],
                 hidden: false,
-        inject_into_prompt: false,
+                inject_into_prompt: true,
             },
             ToolDefinition {
                 name: "agent_kill".into(),
@@ -650,7 +677,7 @@ impl ToolProvider for AgentCall {
                 returns: "None".into(),
                 examples: vec![],
                 hidden: false,
-        inject_into_prompt: false,
+                inject_into_prompt: true,
             },
         ]
     }
@@ -769,6 +796,17 @@ mod tests {
         assert!(!standard_desc.contains("AgentHandle"));
     }
 
+    #[test]
+    fn agent_lifecycle_tools_are_prompt_injected() {
+        let defs = test_agent_call().definitions();
+        for name in ["agent_call", "agent_result", "agent_kill"] {
+            assert!(
+                defs.iter()
+                    .any(|def| def.name == name && def.inject_into_prompt)
+            );
+        }
+    }
+
     struct MockBaseTool;
 
     #[async_trait::async_trait]
@@ -832,6 +870,7 @@ mod tests {
             Arc::new(MockBaseTool),
             plugins,
             &config,
+            AgentCallConfig::default(),
             None,
             CancellationToken::new(),
         )
@@ -880,7 +919,37 @@ mod tests {
         let medium = agent_call.build_agent_config(&Tier::Medium);
         assert!(!low.capabilities.enabled(CapabilityId::CoreWrite));
         assert!(medium.capabilities.enabled(CapabilityId::CoreWrite));
-        assert_eq!(low.execution_mode, crate::ExecutionMode::Standard);
-        assert_eq!(medium.execution_mode, crate::ExecutionMode::Repl);
+        assert_eq!(
+            low.execution_mode,
+            AgentCallConfig::default().low_tier_execution_mode
+        );
+        assert_eq!(medium.execution_mode, agent_call.config.execution_mode);
+    }
+
+    #[test]
+    fn low_tier_execution_mode_is_host_configurable() {
+        let config = AgentConfig {
+            execution_mode: crate::ExecutionMode::Standard,
+            ..AgentConfig::default()
+        };
+        let plugins = crate::PluginHost::empty()
+            .build_session("root", None)
+            .expect("plugins");
+        let agent_call = AgentCall::new(
+            Arc::new(MockBaseTool),
+            plugins,
+            &config,
+            AgentCallConfig {
+                low_tier_execution_mode: crate::ExecutionMode::Repl,
+            },
+            None,
+            CancellationToken::new(),
+        );
+
+        let low = agent_call.build_agent_config(&Tier::Low);
+        let medium = agent_call.build_agent_config(&Tier::Medium);
+
+        assert_eq!(low.execution_mode, crate::ExecutionMode::Repl);
+        assert_eq!(medium.execution_mode, crate::ExecutionMode::Standard);
     }
 }

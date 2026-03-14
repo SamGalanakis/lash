@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashSet};
-use std::ops::{Add, Sub};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -16,13 +15,14 @@ pub struct ToolSetDeps {
     pub tavily_api_key: Option<String>,
     pub skill_dirs: Option<Vec<PathBuf>>,
     pub prompt_bridge: Option<crate::PromptBridge>,
-    pub headless: bool,
 }
 
-/// A composable set of tools supporting set-algebra operators.
+/// A composable set of tools with explicit composition methods.
 ///
 /// ```rust,ignore
-/// let tools = ToolSet::standard_defaults(deps) + my_custom_tool - "exec_command";
+/// let tools = ToolSet::standard_defaults(deps)
+///     .with_provider(my_custom_tool)
+///     .without_tool("exec_command");
 /// ```
 pub struct ToolSet {
     tools: BTreeMap<String, (ToolDefinition, Arc<dyn ToolProvider>)>,
@@ -44,12 +44,12 @@ impl ToolSet {
         };
 
         Self::new()
-            + shell_provider
-            + super::ReadFile::new()
-            + super::ApplyPatchTool
-            + super::Glob
-            + super::Grep
-            + super::Ls
+            .with_arc_provider(shell_provider)
+            .with_provider(super::ReadFile::new())
+            .with_provider(super::ApplyPatchTool)
+            .with_provider(super::Glob)
+            .with_provider(super::Grep)
+            .with_provider(super::Ls)
     }
 
     /// Default tools for a concrete execution mode.
@@ -57,20 +57,24 @@ impl ToolSet {
         let mut set = Self::core_for(mode);
 
         if let Some(prompt_bridge) = deps.prompt_bridge.clone() {
-            set = set + super::AskTool::new(prompt_bridge, deps.headless);
+            set = set.with_provider(super::AskTool::new(prompt_bridge));
         }
 
         #[cfg(feature = "sqlite-store")]
         if deps.store.is_some() {
-            set = set + super::StateStore::new(deps.skill_dirs.clone().unwrap_or_default());
+            set = set.with_provider(super::StateStore::new(
+                deps.skill_dirs.clone().unwrap_or_default(),
+            ));
         }
 
         if let Some(key) = deps.tavily_api_key {
-            set = set + super::WebSearch::new(key.clone()) + super::FetchUrl::new(key);
+            set = set
+                .with_provider(super::WebSearch::new(key.clone()))
+                .with_provider(super::FetchUrl::new(key));
         }
 
         if let Some(dirs) = deps.skill_dirs {
-            set = set + super::SkillStore::new(dirs);
+            set = set.with_provider(super::SkillStore::new(dirs));
         }
 
         set
@@ -84,7 +88,7 @@ impl ToolSet {
         Self::defaults_for(ExecutionMode::Repl, deps)
     }
 
-    fn insert_provider(mut self, provider: impl ToolProvider) -> Self {
+    pub fn with_provider(mut self, provider: impl ToolProvider) -> Self {
         let arc: Arc<dyn ToolProvider> = Arc::new(provider);
         for def in arc.definitions() {
             self.tools.insert(def.name.clone(), (def, Arc::clone(&arc)));
@@ -92,10 +96,29 @@ impl ToolSet {
         self
     }
 
-    fn insert_arc(mut self, provider: Arc<dyn ToolProvider>) -> Self {
+    pub fn with_arc_provider(mut self, provider: Arc<dyn ToolProvider>) -> Self {
         for def in provider.definitions() {
             self.tools
                 .insert(def.name.clone(), (def, Arc::clone(&provider)));
+        }
+        self
+    }
+
+    pub fn with_toolset(mut self, other: Self) -> Self {
+        for (name, entry) in other.tools {
+            self.tools.insert(name, entry);
+        }
+        self
+    }
+
+    pub fn without_tool(mut self, tool_name: &str) -> Self {
+        self.tools.remove(tool_name);
+        self
+    }
+
+    pub fn without_capability(mut self, capability: CapabilityId) -> Self {
+        for name in tools_for_capability(capability) {
+            self.tools.remove(*name);
         }
         self
     }
@@ -129,46 +152,6 @@ impl ToolSet {
 impl Default for ToolSet {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-// ── Operator: ToolSet + impl ToolProvider ──
-
-impl<T: ToolProvider> Add<T> for ToolSet {
-    type Output = ToolSet;
-    fn add(self, rhs: T) -> ToolSet {
-        self.insert_provider(rhs)
-    }
-}
-
-// ── Operator: ToolSet + Arc<dyn ToolProvider> ──
-
-impl Add<Arc<dyn ToolProvider>> for ToolSet {
-    type Output = ToolSet;
-    fn add(self, rhs: Arc<dyn ToolProvider>) -> ToolSet {
-        self.insert_arc(rhs)
-    }
-}
-
-// ── Operator: ToolSet - &str (remove by name) ──
-
-impl Sub<&str> for ToolSet {
-    type Output = ToolSet;
-    fn sub(mut self, rhs: &str) -> ToolSet {
-        self.tools.remove(rhs);
-        self
-    }
-}
-
-// ── Operator: ToolSet - CapabilityId (remove by capability) ──
-
-impl Sub<CapabilityId> for ToolSet {
-    type Output = ToolSet;
-    fn sub(mut self, rhs: CapabilityId) -> ToolSet {
-        for name in tools_for_capability(rhs) {
-            self.tools.remove(*name);
-        }
-        self
     }
 }
 
@@ -352,31 +335,35 @@ mod tests {
     }
 
     #[test]
-    fn defaults_include_ask_only_for_interactive_sessions() {
+    fn defaults_include_ask_when_prompt_bridge_is_available() {
         let prompt_bridge = crate::PromptBridge::new();
         let interactive = ToolSet::standard_defaults(ToolSetDeps {
             prompt_bridge: Some(prompt_bridge.clone()),
             ..Default::default()
         });
-        let headless = ToolSet::standard_defaults(ToolSetDeps {
-            prompt_bridge: Some(prompt_bridge),
-            headless: true,
+        let no_prompt = ToolSet::standard_defaults(ToolSetDeps {
+            prompt_bridge: None,
             ..Default::default()
         });
         let repl = ToolSet::repl_defaults(ToolSetDeps {
-            prompt_bridge: Some(crate::PromptBridge::new()),
+            prompt_bridge: Some(prompt_bridge),
             ..Default::default()
         });
-        let repl_headless = ToolSet::repl_defaults(ToolSetDeps {
-            prompt_bridge: Some(crate::PromptBridge::new()),
-            headless: true,
+        let repl_no_prompt = ToolSet::repl_defaults(ToolSetDeps {
+            prompt_bridge: None,
             ..Default::default()
         });
 
         assert!(interactive.definitions().iter().any(|d| d.name == "ask"));
-        assert!(!headless.definitions().iter().any(|d| d.name == "ask"));
+        assert!(!no_prompt.definitions().iter().any(|d| d.name == "ask"));
         assert!(repl.definitions().iter().any(|d| d.name == "ask"));
-        assert!(!repl_headless.definitions().iter().any(|d| d.name == "ask"));
+        assert!(!repl_no_prompt.definitions().iter().any(|d| d.name == "ask"));
+    }
+
+    #[test]
+    fn standard_defaults_do_not_expose_batch_tool() {
+        let standard = ToolSet::standard_defaults(ToolSetDeps::default());
+        assert!(!standard.definitions().iter().any(|d| d.name == "batch"));
     }
 
     #[test]
@@ -386,8 +373,8 @@ mod tests {
     }
 
     #[test]
-    fn add_provider_via_operator() {
-        let set = ToolSet::new() + MockAlpha;
+    fn add_provider_via_method() {
+        let set = ToolSet::new().with_provider(MockAlpha);
         let defs = set.definitions();
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "alpha");
@@ -396,7 +383,7 @@ mod tests {
     #[test]
     fn add_arc_provider() {
         let arc: Arc<dyn ToolProvider> = Arc::new(MockBeta);
-        let set = ToolSet::new() + arc;
+        let set = ToolSet::new().with_arc_provider(arc);
         let defs = set.definitions();
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "beta");
@@ -404,14 +391,19 @@ mod tests {
 
     #[test]
     fn sub_str_removes_tool() {
-        let set = ToolSet::new() + MockAlpha + MockBeta - "alpha";
+        let set = ToolSet::new()
+            .with_provider(MockAlpha)
+            .with_provider(MockBeta)
+            .without_tool("alpha");
         let names: Vec<String> = set.definitions().iter().map(|d| d.name.clone()).collect();
         assert_eq!(names, vec!["beta"]);
     }
 
     #[test]
     fn sub_str_missing_is_noop() {
-        let set = ToolSet::new() + MockAlpha - "nonexistent";
+        let set = ToolSet::new()
+            .with_provider(MockAlpha)
+            .without_tool("nonexistent");
         assert_eq!(set.definitions().len(), 1);
     }
 
@@ -419,14 +411,21 @@ mod tests {
     fn sub_capability_removes_group() {
         // Shell capability tools: shell, shell_wait, shell_read, shell_write, shell_kill
         // MockAlpha's "alpha" tool is NOT in the Shell capability, so it survives.
-        let set = ToolSet::new() + MockAlpha - CapabilityId::Shell;
+        let set = ToolSet::new()
+            .with_provider(MockAlpha)
+            .without_capability(CapabilityId::Shell);
         let names: Vec<String> = set.definitions().iter().map(|d| d.name.clone()).collect();
         assert_eq!(names, vec!["alpha"]);
     }
 
     #[test]
-    fn operator_chaining() {
-        let set = ToolSet::new() + MockAlpha + MockBeta - "alpha" + MockMulti - "multi_b";
+    fn method_chaining() {
+        let set = ToolSet::new()
+            .with_provider(MockAlpha)
+            .with_provider(MockBeta)
+            .without_tool("alpha")
+            .with_provider(MockMulti)
+            .without_tool("multi_b");
         let mut names: Vec<String> = set.definitions().iter().map(|d| d.name.clone()).collect();
         names.sort();
         assert_eq!(names, vec!["beta", "multi_a"]);
@@ -459,7 +458,9 @@ mod tests {
             }
         }
 
-        let set = ToolSet::new() + MockAlpha + MockAlpha2;
+        let set = ToolSet::new()
+            .with_provider(MockAlpha)
+            .with_provider(MockAlpha2);
         let defs = set.definitions();
         assert_eq!(defs.len(), 1);
         assert_eq!(
@@ -470,7 +471,7 @@ mod tests {
 
     #[test]
     fn multi_tool_provider_shares_arc() {
-        let set = ToolSet::new() + MockMulti;
+        let set = ToolSet::new().with_provider(MockMulti);
         let defs = set.definitions();
         assert_eq!(defs.len(), 2);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
@@ -480,7 +481,7 @@ mod tests {
 
     #[test]
     fn prompt_guides_are_deduped_per_provider_and_content() {
-        let set = ToolSet::new() + MockGuides;
+        let set = ToolSet::new().with_provider(MockGuides);
         let guides = set.prompt_guides(&ToolPromptContext {
             mode: crate::ExecutionMode::Repl,
             omitted_tool_count: 1,
@@ -496,7 +497,7 @@ mod tests {
 
     #[test]
     fn prompt_guides_receive_context() {
-        let set = ToolSet::new() + MockGuides;
+        let set = ToolSet::new().with_provider(MockGuides);
         let guides = set.prompt_guides(&ToolPromptContext {
             mode: crate::ExecutionMode::Repl,
             omitted_tool_count: 0,
@@ -505,10 +506,10 @@ mod tests {
     }
 
     #[test]
-    fn toolset_plus_toolset() {
-        let a = ToolSet::new() + MockAlpha;
-        let b = ToolSet::new() + MockBeta;
-        let combined = a + b;
+    fn toolset_combines_toolsets() {
+        let a = ToolSet::new().with_provider(MockAlpha);
+        let b = ToolSet::new().with_provider(MockBeta);
+        let combined = a.with_toolset(b);
         let mut names: Vec<String> = combined
             .definitions()
             .iter()
@@ -520,7 +521,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_routes_correctly() {
-        let set = ToolSet::new() + MockAlpha + MockBeta;
+        let set = ToolSet::new()
+            .with_provider(MockAlpha)
+            .with_provider(MockBeta);
         let r = set.execute("alpha", &serde_json::json!({})).await;
         assert!(r.success);
         assert_eq!(r.result, serde_json::json!("alpha_result"));
@@ -532,14 +535,14 @@ mod tests {
 
     #[tokio::test]
     async fn execute_unknown_tool_errors() {
-        let set = ToolSet::new() + MockAlpha;
+        let set = ToolSet::new().with_provider(MockAlpha);
         let r = set.execute("nonexistent", &serde_json::json!({})).await;
         assert!(!r.success);
     }
 
     #[tokio::test]
     async fn execute_multi_tool_provider() {
-        let set = ToolSet::new() + MockMulti;
+        let set = ToolSet::new().with_provider(MockMulti);
         let r = set.execute("multi_a", &serde_json::json!({})).await;
         assert!(r.success);
         assert_eq!(r.result, serde_json::json!("multi_a_result"));
@@ -551,7 +554,10 @@ mod tests {
 
     #[tokio::test]
     async fn removed_tool_is_not_executable() {
-        let set = ToolSet::new() + MockAlpha + MockBeta - "alpha";
+        let set = ToolSet::new()
+            .with_provider(MockAlpha)
+            .with_provider(MockBeta)
+            .without_tool("alpha");
         let r = set.execute("alpha", &serde_json::json!({})).await;
         assert!(!r.success);
     }

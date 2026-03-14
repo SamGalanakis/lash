@@ -44,7 +44,7 @@ impl ToolProvider for FetchUrl {
                 [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             hidden: false,
-            inject_into_prompt: false,
+            inject_into_prompt: true,
         }]
     }
 

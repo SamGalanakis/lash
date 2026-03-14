@@ -12,6 +12,7 @@ pub enum CapabilityId {
     CoreWrite,
     Shell,
     Planning,
+    Ask,
     Delegation,
     Memory,
     History,
@@ -26,6 +27,7 @@ impl CapabilityId {
             Self::CoreWrite => "core_write",
             Self::Shell => "shell",
             Self::Planning => "planning",
+            Self::Ask => "ask",
             Self::Delegation => "delegation",
             Self::Memory => "memory",
             Self::History => "history",
@@ -40,6 +42,7 @@ impl CapabilityId {
             "core_write" => Some(Self::CoreWrite),
             "shell" => Some(Self::Shell),
             "planning" => Some(Self::Planning),
+            "ask" => Some(Self::Ask),
             "delegation" => Some(Self::Delegation),
             "memory" => Some(Self::Memory),
             "history" => Some(Self::History),
@@ -146,7 +149,16 @@ pub const CAPABILITY_DEFINITIONS: &[CapabilityDefinition] = &[
             "### Planning\nUse `update_plan` for substantial multi-step work, not for trivial or single-step requests. Keep plans short, concrete, and easy to verify. There should be at most one `in_progress` step at a time; mark completed work promptly and keep the next active step current while you work. Do not restate the full plan after calling `update_plan`; the runtime already surfaces it. `update_plan` is a checklist tool for normal execution turns, not for plan mode.",
         ),
         helper_bindings: &[],
-        tools: &["update_plan", "ask"],
+        tools: &["update_plan"],
+        enabled_by_default: true,
+    },
+    CapabilityDefinition {
+        id: CapabilityId::Ask,
+        name: "Ask",
+        description: "Interactive user clarification when local context is insufficient.",
+        prompt_section: None,
+        helper_bindings: &[],
+        tools: &["ask"],
         enabled_by_default: true,
     },
     CapabilityDefinition {
@@ -327,6 +339,15 @@ mod prompt_tests {
     }
 
     #[test]
+    fn ask_capability_does_not_reuse_planning_prompt_section() {
+        let enabled = BTreeSet::from([CapabilityId::Ask]);
+        let available_tools = BTreeSet::from(["ask".to_string()]);
+        let sections =
+            prompt_sections_for_capabilities(&enabled, &BTreeSet::new(), &available_tools);
+        assert!(sections.is_empty());
+    }
+
+    #[test]
     fn delegation_prompt_sections_include_recall_guidance_when_helpers_exist() {
         let enabled = BTreeSet::from([CapabilityId::Delegation]);
         let helpers = BTreeSet::from(["search_history".to_string(), "search_mem".to_string()]);
@@ -386,10 +407,7 @@ mod tests {
         let caps = AgentCapabilities::default()
             .enable(CapabilityId::History)
             .enable(CapabilityId::Memory);
-        let resolved = resolve_features(
-            &caps,
-            &defs(&["search_history", "search_mem", "mem_set", "mem_all"]),
-        );
+        let resolved = resolve_features(&caps, &defs(&["search_history", "search_mem", "mem_set"]));
         assert!(!resolved.effective_tools.contains("search_history"));
         assert!(!resolved.effective_tools.contains("search_mem"));
         assert!(
@@ -410,5 +428,13 @@ mod tests {
         let caps = AgentCapabilities::default();
         let resolved = resolve_features(&caps, &defs);
         assert!(!resolved.effective_tools.contains("shell"));
+    }
+
+    #[test]
+    fn ask_capability_resolves_ask_without_planning() {
+        let caps = AgentCapabilities::default().disable(CapabilityId::Planning);
+        let resolved = resolve_features(&caps, &defs(&["ask", "update_plan"]));
+        assert!(resolved.effective_tools.contains("ask"));
+        assert!(!resolved.effective_tools.contains("update_plan"));
     }
 }

@@ -47,7 +47,7 @@ impl ToolProvider for WebSearch {
                 ),
             ],
             hidden: false,
-            inject_into_prompt: false,
+            inject_into_prompt: true,
         }]
     }
 

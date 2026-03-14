@@ -53,7 +53,7 @@ impl Parser {
             TokenKind::Observe => self.parse_observe(),
             TokenKind::Call => Ok(Stmt::Call(self.parse_call_expr()?)),
             TokenKind::Ident(_) if self.peek_assign() => self.parse_assign(),
-            _ => Err(self.unexpected()),
+            _ => Ok(Stmt::Expr(self.parse_expr()?)),
         }
     }
 
@@ -70,7 +70,11 @@ impl Parser {
         let then_block = self.parse_block()?;
         let else_block = if matches!(self.peek_kind(), TokenKind::Else) {
             self.bump();
-            self.parse_block()?
+            if matches!(self.peek_kind(), TokenKind::If) {
+                vec![self.parse_if()?]
+            } else {
+                self.parse_block()?
+            }
         } else {
             Vec::new()
         };
@@ -96,8 +100,12 @@ impl Parser {
 
     fn parse_parallel(&mut self) -> Result<Stmt, ParseError> {
         self.bump();
-        let branches = self.parse_block()?;
+        let branches = self.parse_parallel_branches()?;
         Ok(Stmt::Parallel { branches })
+    }
+
+    fn parse_parallel_branches(&mut self) -> Result<Vec<Stmt>, ParseError> {
+        self.parse_block()
     }
 
     fn parse_finish(&mut self) -> Result<Stmt, ParseError> {
@@ -339,6 +347,11 @@ impl Parser {
             TokenKind::LBracket => self.parse_list(),
             TokenKind::LBrace => self.parse_record(),
             TokenKind::Call => Ok(Expr::ToolCall(self.parse_call_expr()?)),
+            TokenKind::Parallel => {
+                self.bump();
+                let branches = self.parse_parallel_branches()?;
+                Ok(Expr::Parallel { branches })
+            }
             _ => Err(self.unexpected()),
         }
     }
@@ -604,9 +617,53 @@ mod tests {
     }
 
     #[test]
+    fn parses_expression_statements_and_parallel_expression_branches() {
+        let program = parse(
+            r#"
+            "branch_a"
+            results = parallel {
+              "branch_b"
+              40 + 2
+              len([1,2,3])
+            }
+            finish results
+            "#,
+        )
+        .expect("program should parse");
+
+        assert_eq!(program.statements.len(), 3);
+        assert!(matches!(program.statements[0], Stmt::Expr(Expr::String(_))));
+    }
+
+    #[test]
+    fn parses_else_if_chains_without_extra_braces() {
+        let program = parse(
+            r#"
+            if false {
+              answer = 1
+            } else if true {
+              answer = 2
+            } else {
+              answer = 3
+            }
+            finish answer
+            "#,
+        )
+        .expect("program should parse");
+
+        let Stmt::If { else_block, .. } = &program.statements[0] else {
+            panic!("expected if statement");
+        };
+        assert!(matches!(else_block.as_slice(), [Stmt::If { .. }]));
+    }
+
+    #[test]
     fn parse_errors_cover_expected_and_unexpected_paths() {
         let err = parse("{").expect_err("parse should fail");
-        assert!(matches!(err, ParseError::Unexpected { .. }));
+        assert!(matches!(
+            err,
+            ParseError::Expected { .. } | ParseError::Unexpected { .. }
+        ));
 
         let err = parse("x = ]").expect_err("parse should fail");
         assert!(matches!(err, ParseError::Unexpected { .. }));

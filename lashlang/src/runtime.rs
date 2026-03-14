@@ -296,13 +296,14 @@ impl fmt::Display for Value {
         match self {
             Self::Null => write!(f, "null"),
             Self::Bool(value) => write!(f, "{value}"),
-            Self::Number(value) => write!(f, "{value}"),
+            Self::Number(value) => write_number(f, *value),
             Self::String(value) => write!(f, "{value}"),
-            Self::List(values) => {
-                write!(f, "{}", serde_json::to_string(values).unwrap_or_default())
-            }
-            Self::Record(record) => {
-                write!(f, "{}", serde_json::to_string(record).unwrap_or_default())
+            Self::List(_) | Self::Record(_) => {
+                write!(
+                    f,
+                    "{}",
+                    serde_json::to_string(&to_json(self)).unwrap_or_default()
+                )
             }
         }
     }
@@ -527,7 +528,9 @@ enum Instruction {
     IterNext { jump_to: usize },
     EndIter,
     ParallelCalls(usize),
+    ParallelCallsValue(usize),
     Parallel(usize),
+    ParallelValue(usize),
 }
 
 #[derive(Clone, Copy)]
@@ -578,7 +581,9 @@ impl Instruction {
             Instruction::IterNext { .. } => InstructionProfileTag::IterNext,
             Instruction::EndIter => InstructionProfileTag::EndIter,
             Instruction::ParallelCalls(_) => InstructionProfileTag::Parallel,
+            Instruction::ParallelCallsValue(_) => InstructionProfileTag::Parallel,
             Instruction::Parallel(_) => InstructionProfileTag::Parallel,
+            Instruction::ParallelValue(_) => InstructionProfileTag::Parallel,
         }
     }
 }
@@ -979,6 +984,10 @@ impl Compiler {
                 self.compile_expr(expr);
                 self.code.push(Instruction::StoreName(slot));
             }
+            Stmt::Expr(expr) => {
+                self.compile_expr(expr);
+                self.code.push(Instruction::Pop);
+            }
             Stmt::Call(call) => {
                 self.compile_call_expr(call);
                 self.code.push(Instruction::Pop);
@@ -1024,22 +1033,7 @@ impl Compiler {
                 self.patch_jump(iter_next, loop_end);
             }
             Stmt::Parallel { branches } => {
-                if let Some(branches) = self.compile_parallel_calls(branches) {
-                    let branches = self.push_parallel_call_set(branches);
-                    self.code.push(Instruction::ParallelCalls(branches));
-                    return;
-                }
-
-                let branches = branches
-                    .iter()
-                    .map(|branch| {
-                        let mut compiler = Self::with_slots(self.slots.clone());
-                        compiler.compile_stmt(branch);
-                        compiler.finish()
-                    })
-                    .collect::<Vec<_>>();
-                let branches = self.push_branch_set(branches);
-                self.code.push(Instruction::Parallel(branches));
+                self.compile_parallel(branches, false);
             }
             Stmt::Finish(expr) => {
                 self.compile_expr(expr);
@@ -1099,6 +1093,9 @@ impl Compiler {
             )),
             Expr::ToolCall(_) => Err(RuntimeError::ValueError {
                 message: "tool calls are not allowed in pure expressions".to_string(),
+            }),
+            Expr::Parallel { .. } => Err(RuntimeError::ValueError {
+                message: "`parallel` is not allowed in pure expressions".to_string(),
             }),
             Expr::BuiltinCall { name, args } => Ok(PureExpr::Builtin {
                 builtin: self.resolve_builtin(name),
@@ -1173,6 +1170,7 @@ impl Compiler {
                 self.code.push(Instruction::BuildRecord(keys));
             }
             Expr::ToolCall(call) => self.compile_call_expr(call),
+            Expr::Parallel { branches } => self.compile_parallel(branches, true),
             Expr::BuiltinCall { name, args } => {
                 for arg in args {
                     self.compile_expr(arg);
@@ -1249,6 +1247,33 @@ impl Compiler {
         let keys = self.push_key_list(call.args.iter().map(|(name, _)| name.as_str()));
         let name = self.push_name(&call.name);
         self.code.push(Instruction::CallTool { name, keys });
+    }
+
+    fn compile_parallel(&mut self, branches: &[Stmt], want_value: bool) {
+        if let Some(branches) = self.compile_parallel_calls(branches) {
+            let branches = self.push_parallel_call_set(branches);
+            self.code.push(if want_value {
+                Instruction::ParallelCallsValue(branches)
+            } else {
+                Instruction::ParallelCalls(branches)
+            });
+            return;
+        }
+
+        let branches = branches
+            .iter()
+            .map(|branch| {
+                let mut compiler = Self::with_slots(self.slots.clone());
+                compiler.compile_stmt(branch);
+                compiler.finish()
+            })
+            .collect::<Vec<_>>();
+        let branches = self.push_branch_set(branches);
+        self.code.push(if want_value {
+            Instruction::ParallelValue(branches)
+        } else {
+            Instruction::Parallel(branches)
+        });
     }
 
     fn emit_jump_if_false(&mut self) -> usize {
@@ -1336,6 +1361,7 @@ struct Vm<'a, H> {
     chunk: &'a Chunk,
     ip: usize,
     stack: Vec<Value>,
+    last_value: Option<Value>,
     slots: SlotState,
     host: &'a H,
     in_parallel_branch: bool,
@@ -1350,6 +1376,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             chunk,
             ip: 0,
             stack: Vec::new(),
+            last_value: None,
             slots,
             host,
             in_parallel_branch,
@@ -1404,8 +1431,9 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             Instruction::StoreName(name) => {
                 let value = self.pop_stack()?;
-                self.slots.assign(name, value);
+                self.slots.assign(name, value.clone());
                 self.record_assignment(name);
+                self.last_value = Some(value);
             }
             Instruction::BuildList(len) => {
                 let values = self.pop_n(len)?;
@@ -1493,8 +1521,10 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                         name: slot_name.clone(),
                     }
                 })?;
-                self.slots.assign(slot, add_values(left, right)?);
+                let value = add_values(left, right)?;
+                self.slots.assign(slot, value.clone());
                 self.record_assignment(slot);
+                self.last_value = Some(value);
             }
             Instruction::AppendAssign(slot) => {
                 let item = self.pop_stack()?;
@@ -1513,8 +1543,9 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                     }
                     other => add_values(other, Value::List(vec![item].into()))?,
                 };
-                self.slots.assign(slot, value);
+                self.slots.assign(slot, value.clone());
                 self.record_assignment(slot);
+                self.last_value = Some(value);
             }
             Instruction::Observe => {
                 let value = self.pop_stack()?;
@@ -1523,6 +1554,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                     .map_err(|err| RuntimeError::ValueError {
                         message: format!("observe failed: {err}"),
                     })?;
+                self.last_value = Some(value);
             }
             Instruction::Finish => {
                 if self.in_parallel_branch {
@@ -1531,7 +1563,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 return Ok(Some(ExecutionOutcome::Finished(self.pop_stack()?)));
             }
             Instruction::Pop => {
-                let _ = self.pop_stack()?;
+                self.last_value = Some(self.pop_stack()?);
             }
             Instruction::BeginIter(binding) => {
                 let iterable = self.pop_stack()?;
@@ -1567,9 +1599,21 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             Instruction::ParallelCalls(branches) => {
                 self.exec_parallel_calls(branches)?;
+                self.last_value = Some(Value::Null);
+            }
+            Instruction::ParallelCallsValue(branches) => {
+                let value = self.exec_parallel_calls_value(branches)?;
+                self.last_value = Some(value.clone());
+                self.stack.push(value);
             }
             Instruction::Parallel(branches) => {
                 self.exec_parallel(branches)?;
+                self.last_value = Some(Value::Null);
+            }
+            Instruction::ParallelValue(branches) => {
+                let value = self.exec_parallel_value(branches)?;
+                self.last_value = Some(value.clone());
+                self.stack.push(value);
             }
         }
         Ok(None)
@@ -1578,11 +1622,6 @@ impl<'a, H: ToolHost> Vm<'a, H> {
     fn exec_parallel(&mut self, branches_index: usize) -> Result<(), RuntimeError> {
         let branches = &self.chunk.branch_sets[branches_index];
         if branches.is_empty() {
-            return Ok(());
-        }
-        if branches.len() == 1 {
-            let result = Self::run_branch(&branches[0], self.slots.clone(), self.host, true)?;
-            self.merge_branch_result(result, &mut vec![false; self.chunk.slot_names.len()])?;
             return Ok(());
         }
 
@@ -1597,6 +1636,28 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             self.merge_branch_result(result?, &mut merged_names)?;
         }
         Ok(())
+    }
+
+    fn exec_parallel_value(&mut self, branches_index: usize) -> Result<Value, RuntimeError> {
+        let branches = &self.chunk.branch_sets[branches_index];
+        if branches.is_empty() {
+            return Ok(Value::List(Vec::<Value>::new().into()));
+        }
+
+        let base_slots = self.slots.clone();
+        let results = branches
+            .par_iter()
+            .map(|branch| Self::run_branch(branch, base_slots.clone(), self.host, true))
+            .collect::<Vec<_>>();
+
+        let mut outputs = Vec::with_capacity(results.len());
+        let mut merged_names = vec![false; self.chunk.slot_names.len()];
+        for result in results {
+            let result = result?;
+            outputs.push(result.output.clone());
+            self.merge_branch_result(result, &mut merged_names)?;
+        }
+        Ok(Value::List(outputs.into()))
     }
 
     fn exec_parallel_calls(&mut self, branches_index: usize) -> Result<(), RuntimeError> {
@@ -1621,30 +1682,119 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             calls.push(PreparedParallelCall {
                 slot: branch.slot,
                 name: branch.name,
-                args,
+                args: Arc::unwrap_or_clone(args),
             });
         }
 
-        let results = if calls.len() == 1 {
-            vec![Self::run_prepared_call(self.chunk, &calls[0], self.host)]
-        } else if calls.len() == 2 {
-            let (left, right) = rayon::join(
-                || Self::run_prepared_call(self.chunk, &calls[0], self.host),
-                || Self::run_prepared_call(self.chunk, &calls[1], self.host),
-            );
-            vec![left, right]
-        } else {
-            calls
-                .par_iter()
-                .map(|call| Self::run_prepared_call(self.chunk, call, self.host))
-                .collect()
-        };
-
-        let mut merged_names = vec![false; self.chunk.slot_names.len()];
-        for result in results {
-            self.merge_branch_result(result?, &mut merged_names)?;
+        match calls.len() {
+            1 => {
+                let result = Self::run_prepared_call(self.chunk, &calls[0], self.host)?;
+                self.slots.assign(result.slot, result.output);
+                self.record_assignment(result.slot);
+                Ok(())
+            }
+            2 => {
+                if calls[0].slot == calls[1].slot {
+                    return Err(RuntimeError::ParallelConflict {
+                        name: self.chunk.slot_names[calls[0].slot].clone(),
+                    });
+                }
+                let (left, right) = rayon::join(
+                    || Self::run_prepared_call(self.chunk, &calls[0], self.host),
+                    || Self::run_prepared_call(self.chunk, &calls[1], self.host),
+                );
+                let left = left?;
+                let right = right?;
+                self.slots.assign(left.slot, left.output);
+                self.record_assignment(left.slot);
+                self.slots.assign(right.slot, right.output);
+                self.record_assignment(right.slot);
+                Ok(())
+            }
+            _ => {
+                let results = calls
+                    .par_iter()
+                    .map(|call| Self::run_prepared_call(self.chunk, call, self.host))
+                    .collect::<Vec<_>>();
+                for result in results {
+                    let result = result?;
+                    self.slots.assign(result.slot, result.output);
+                    self.record_assignment(result.slot);
+                }
+                Ok(())
+            }
         }
-        Ok(())
+    }
+
+    fn exec_parallel_calls_value(&mut self, branches_index: usize) -> Result<Value, RuntimeError> {
+        let branches = &self.chunk.parallel_call_sets[branches_index];
+        if branches.is_empty() {
+            return Ok(Value::List(Vec::<Value>::new().into()));
+        }
+
+        let mut calls = Vec::with_capacity(branches.len());
+        for branch in branches {
+            let value = eval_pure_expr(
+                &branch.args,
+                &self.slots,
+                &self.chunk.names,
+                &self.chunk.slot_names,
+            )?;
+            let Value::Record(args) = value else {
+                return Err(RuntimeError::TypeError {
+                    message: "parallel call args must compile to a record".to_string(),
+                });
+            };
+            calls.push(PreparedParallelCall {
+                slot: branch.slot,
+                name: branch.name,
+                args: Arc::unwrap_or_clone(args),
+            });
+        }
+
+        match calls.len() {
+            1 => {
+                let result = Self::run_prepared_call(self.chunk, &calls[0], self.host)?;
+                let output = result.output.clone();
+                self.slots.assign(result.slot, result.output);
+                self.record_assignment(result.slot);
+                Ok(Value::List(vec![output].into()))
+            }
+            2 => {
+                if calls[0].slot == calls[1].slot {
+                    return Err(RuntimeError::ParallelConflict {
+                        name: self.chunk.slot_names[calls[0].slot].clone(),
+                    });
+                }
+                let (left, right) = rayon::join(
+                    || Self::run_prepared_call(self.chunk, &calls[0], self.host),
+                    || Self::run_prepared_call(self.chunk, &calls[1], self.host),
+                );
+                let left = left?;
+                let right = right?;
+                let outputs = vec![left.output.clone(), right.output.clone()];
+                self.slots.assign(left.slot, left.output);
+                self.record_assignment(left.slot);
+                self.slots.assign(right.slot, right.output);
+                self.record_assignment(right.slot);
+                Ok(Value::List(outputs.into()))
+            }
+            _ => {
+                let results = calls
+                    .par_iter()
+                    .map(|call| Self::run_prepared_call(self.chunk, call, self.host))
+                    .collect::<Vec<_>>();
+
+                let mut outputs = Vec::with_capacity(results.len());
+                for result in results {
+                    let result = result?;
+                    outputs.push(result.output.clone());
+                    self.slots.assign(result.slot, result.output);
+                    self.record_assignment(result.slot);
+                }
+                Ok(Value::List(outputs.into()))
+            }
+        }
     }
 
     fn run_branch(
@@ -1669,16 +1819,17 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         chunk: &'a Chunk,
         call: &PreparedParallelCall,
         host: &'a H,
-    ) -> Result<BranchResult, RuntimeError> {
+    ) -> Result<ParallelCallResult, RuntimeError> {
         let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            match host.call(chunk.names[call.name].text.as_ref(), call.args.as_ref()) {
+            match host.call(chunk.names[call.name].text.as_ref(), &call.args) {
                 Ok(value) => Ok(success(value)),
                 Err(error) => Ok(error_value(error.to_string())),
             }
         }));
         match run {
-            Ok(Ok(value)) => Ok(BranchResult {
-                values: vec![(call.slot, value)],
+            Ok(Ok(value)) => Ok(ParallelCallResult {
+                slot: call.slot,
+                output: value,
             }),
             Ok(Err(error)) => Err(error),
             Err(_) => Err(RuntimeError::ValueError {
@@ -1750,7 +1901,10 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 values.push((slot, value));
             }
         }
-        BranchResult { values }
+        BranchResult {
+            values,
+            output: self.last_value.unwrap_or(Value::Null),
+        }
     }
 
     fn into_globals(self) -> Record {
@@ -1785,12 +1939,18 @@ impl<'a, H: ToolHost> Vm<'a, H> {
 
 struct BranchResult {
     values: Vec<(usize, Value)>,
+    output: Value,
+}
+
+struct ParallelCallResult {
+    slot: usize,
+    output: Value,
 }
 
 struct PreparedParallelCall {
     slot: usize,
     name: usize,
-    args: Arc<Record>,
+    args: Record,
 }
 
 struct IterState {
@@ -1810,6 +1970,7 @@ fn is_pure_expr(expr: &Expr) -> bool {
         Expr::List(items) => items.iter().all(is_pure_expr),
         Expr::Record(entries) => entries.iter().all(|(_, value)| is_pure_expr(value)),
         Expr::ToolCall(_) => false,
+        Expr::Parallel { .. } => false,
         Expr::BuiltinCall { args, .. } => args.iter().all(is_pure_expr),
         Expr::Field { target, .. } => is_pure_expr(target),
         Expr::Index { target, index } => is_pure_expr(target) && is_pure_expr(index),
@@ -1983,10 +2144,14 @@ fn execute_builtin(
                     haystack.contains(coerce_string(needle)?.as_ref()),
                 )),
                 (Value::List(items), needle) => Ok(Value::Bool(items.contains(needle))),
+                (Value::Record(record), needle) => Ok(Value::Bool(
+                    record.get(coerce_string(needle)?.as_ref()).is_some(),
+                )),
                 (Value::Null, _) => Ok(Value::Bool(false)),
                 _ => Err(RuntimeError::TypeError {
-                    message: "`contains` requires a string/string, list/value, or null/value pair"
-                        .to_string(),
+                    message:
+                        "`contains` requires a string/string, list/value, record/key, or null/value pair"
+                            .to_string(),
                 }),
             }
         }
@@ -2039,12 +2204,12 @@ fn execute_builtin(
         }
         Builtin::Slice => {
             expect_arg_count("slice", values, 3)?;
-            let start = as_index(&values[1])?;
-            let end = as_index(&values[2])?;
+            let start = as_slice_bound(&values[1])?;
+            let end = as_slice_bound(&values[2])?;
             match &values[0] {
                 Value::String(value) => Ok(Value::String(slice_string(value, start, end).into())),
                 Value::List(items) => {
-                    let Some((start, end)) = clamp_range(start, end, items.len()) else {
+                    let Some((start, end)) = clamp_slice_bounds(start, end, items.len()) else {
                         return Ok(Value::List(Vec::new().into()));
                     };
                     Ok(Value::List(items[start..end].to_vec().into()))
@@ -2079,9 +2244,6 @@ fn execute_builtin(
                 return Err(RuntimeError::TypeError {
                     message: "`format` requires at least a template string".to_string(),
                 });
-            }
-            if values.len() == 1 {
-                return Ok(Value::String(stringify_value(&values[0])?.into()));
             }
             let template = match &values[0] {
                 Value::String(value) => value.as_str(),
@@ -2120,14 +2282,20 @@ fn read_field(value: Value, field: &Name) -> Result<Value, RuntimeError> {
 }
 
 fn read_index(target: Value, index: Value) -> Result<Value, RuntimeError> {
-    let idx = as_index(&index)?;
     match target {
-        Value::List(values) => Ok(values.get(idx).cloned().unwrap_or(Value::Null)),
-        Value::String(value) => Ok(value
-            .chars()
-            .nth(idx)
-            .map(|ch| Value::String(ch.to_string().into()))
-            .unwrap_or(Value::Null)),
+        Value::List(values) => {
+            let idx = resolve_index(&index, values.len())?;
+            Ok(idx
+                .and_then(|idx| values.get(idx).cloned())
+                .unwrap_or(Value::Null))
+        }
+        Value::String(value) => {
+            let idx = resolve_index(&index, value.chars().count())?;
+            Ok(idx
+                .and_then(|idx| value.chars().nth(idx))
+                .map(|ch| Value::String(ch.to_string().into()))
+                .unwrap_or(Value::Null))
+        }
         Value::Null => Ok(Value::Null),
         _ => Err(RuntimeError::TypeError {
             message: format!("can't index {}", value_type_name(&target)),
@@ -2144,10 +2312,10 @@ fn eval_binary_values(left: Value, op: BinaryOp, right: Value) -> Result<Value, 
         BinaryOp::Modulo => Ok(Value::Number(as_number(&left)? % as_number(&right)?)),
         BinaryOp::Equal => Ok(Value::Bool(left == right)),
         BinaryOp::NotEqual => Ok(Value::Bool(left != right)),
-        BinaryOp::Less => compare_numbers(left, right, |a, b| a < b),
-        BinaryOp::LessEqual => compare_numbers(left, right, |a, b| a <= b),
-        BinaryOp::Greater => compare_numbers(left, right, |a, b| a > b),
-        BinaryOp::GreaterEqual => compare_numbers(left, right, |a, b| a >= b),
+        BinaryOp::Less => compare_ordered(left, right, |a, b| a < b, |a, b| a < b),
+        BinaryOp::LessEqual => compare_ordered(left, right, |a, b| a <= b, |a, b| a <= b),
+        BinaryOp::Greater => compare_ordered(left, right, |a, b| a > b, |a, b| a > b),
+        BinaryOp::GreaterEqual => compare_ordered(left, right, |a, b| a >= b, |a, b| a >= b),
         BinaryOp::And | BinaryOp::Or => unreachable!("logical ops are compiled with jumps"),
     }
 }
@@ -2184,14 +2352,21 @@ fn coerce_string(value: &Value) -> Result<Cow<'_, str>, RuntimeError> {
     }
 }
 
-fn as_index(value: &Value) -> Result<usize, RuntimeError> {
+fn as_offset(value: &Value) -> Result<isize, RuntimeError> {
     let number = as_number(value)?;
-    if !number.is_finite() || number < 0.0 || number.fract() != 0.0 {
+    if !number.is_finite() || number.fract() != 0.0 {
         return Err(RuntimeError::TypeError {
-            message: "index must be a non-negative integer".to_string(),
+            message: "index must be an integer".to_string(),
         });
     }
-    Ok(number as usize)
+    Ok(number as isize)
+}
+
+fn as_slice_bound(value: &Value) -> Result<Option<isize>, RuntimeError> {
+    match value {
+        Value::Null => Ok(None),
+        other => as_offset(other).map(Some),
+    }
 }
 
 fn compare_numbers(
@@ -2200,6 +2375,18 @@ fn compare_numbers(
     cmp: impl FnOnce(f64, f64) -> bool,
 ) -> Result<Value, RuntimeError> {
     Ok(Value::Bool(cmp(as_number(&left)?, as_number(&right)?)))
+}
+
+fn compare_ordered(
+    left: Value,
+    right: Value,
+    number_cmp: impl FnOnce(f64, f64) -> bool,
+    string_cmp: impl FnOnce(&str, &str) -> bool,
+) -> Result<Value, RuntimeError> {
+    match (&left, &right) {
+        (Value::String(left), Value::String(right)) => Ok(Value::Bool(string_cmp(left, right))),
+        _ => compare_numbers(left, right, number_cmp),
+    }
 }
 
 fn add_values(left: Value, right: Value) -> Result<Value, RuntimeError> {
@@ -2250,14 +2437,25 @@ fn error_value(message: String) -> Value {
 }
 
 fn stringify_value(value: &Value) -> Result<String, RuntimeError> {
+    let mut output = String::new();
+    append_stringified_value(&mut output, value)?;
+    Ok(output)
+}
+
+fn append_stringified_value(output: &mut String, value: &Value) -> Result<(), RuntimeError> {
     match value {
-        Value::String(value) => Ok(value.to_string()),
-        Value::Null => Ok("null".to_string()),
-        Value::Bool(value) => Ok(value.to_string()),
-        Value::Number(value) => Ok(value.to_string()),
-        Value::List(_) | Value::Record(_) => Ok(serde_json::to_string(&to_json(value))
-            .expect("value json serialization should succeed")),
+        Value::String(value) => output.push_str(value),
+        Value::Null => output.push_str("null"),
+        Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+        Value::Number(value) => {
+            write_number(output, *value).expect("string writes should not fail")
+        }
+        Value::List(_) | Value::Record(_) => output.push_str(
+            &serde_json::to_string(&to_json(value))
+                .expect("value json serialization should succeed"),
+        ),
     }
+    Ok(())
 }
 
 fn value_type_name(value: &Value) -> &'static str {
@@ -2271,50 +2469,177 @@ fn value_type_name(value: &Value) -> &'static str {
     }
 }
 
+fn write_number(output: &mut impl fmt::Write, value: f64) -> fmt::Result {
+    if value.is_finite() && value.fract() == 0.0 {
+        let as_i64 = value as i64 as f64;
+        if as_i64 == value {
+            return write!(output, "{}", value as i64);
+        }
+        let as_u64 = value as u64 as f64;
+        if as_u64 == value {
+            return write!(output, "{}", value as u64);
+        }
+    }
+    write!(output, "{value}")
+}
+
+fn json_number(value: f64) -> Option<serde_json::Number> {
+    if !value.is_finite() {
+        return None;
+    }
+    if value.is_finite() && value.fract() == 0.0 {
+        let as_i64 = value as i64 as f64;
+        if as_i64 == value {
+            return Some(serde_json::Number::from(value as i64));
+        }
+        let as_u64 = value as u64 as f64;
+        if as_u64 == value {
+            return Some(serde_json::Number::from(value as u64));
+        }
+    }
+    serde_json::Number::from_f64(value)
+}
+
+fn resolve_index(index: &Value, len: usize) -> Result<Option<usize>, RuntimeError> {
+    let index = as_offset(index)?;
+    let len = len as isize;
+    let normalized = if index < 0 { len + index } else { index };
+    if normalized < 0 || normalized >= len {
+        return Ok(None);
+    }
+    Ok(Some(normalized as usize))
+}
+
 fn apply_format(template: &str, args: &[Value]) -> Result<String, RuntimeError> {
     let mut output = String::with_capacity(template.len());
     let bytes = template.as_bytes();
     let mut index = 0;
     let mut last_literal = 0;
+    let mut uses_sequential = false;
+    let mut uses_indexed = false;
+    let mut next_sequential = 0usize;
+    let mut used_indexed_args: Option<Vec<bool>> = None;
     while index < bytes.len() {
-        if bytes[index] == b'{' {
-            let mut cursor = index + 1;
-            while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
-                cursor += 1;
-            }
-            if cursor < bytes.len() && bytes[cursor] == b'}' && cursor > index + 1 {
+        match bytes[index] {
+            b'{' if bytes.get(index + 1) == Some(&b'{') => {
                 output.push_str(&template[last_literal..index]);
-                let digits = &template[index + 1..cursor];
-                let slot = digits
-                    .parse::<usize>()
-                    .map_err(|_| RuntimeError::ValueError {
-                        message: format!("bad format slot `{digits}`"),
-                    })?;
+                output.push('{');
+                index += 2;
+                last_literal = index;
+                continue;
+            }
+            b'{' => {
+                output.push_str(&template[last_literal..index]);
+                let mut cursor = index + 1;
+                while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                    cursor += 1;
+                }
+
+                let (slot, slot_text) = if cursor >= bytes.len() {
+                    return Err(RuntimeError::ValueError {
+                        message: "unmatched `{` in format string".to_string(),
+                    });
+                } else if bytes[cursor] != b'}' {
+                    return Err(RuntimeError::ValueError {
+                        message: "invalid format placeholder".to_string(),
+                    });
+                } else if cursor == index + 1 {
+                    if uses_indexed {
+                        return Err(RuntimeError::ValueError {
+                            message: "can't mix `{}` and indexed format placeholders".to_string(),
+                        });
+                    }
+                    uses_sequential = true;
+                    let slot = next_sequential;
+                    next_sequential += 1;
+                    (slot, None)
+                } else {
+                    if uses_sequential {
+                        return Err(RuntimeError::ValueError {
+                            message: "can't mix `{}` and indexed format placeholders".to_string(),
+                        });
+                    }
+                    uses_indexed = true;
+                    let used_args =
+                        used_indexed_args.get_or_insert_with(|| vec![false; args.len()]);
+                    let digits = &template[index + 1..cursor];
+                    let slot = digits
+                        .parse::<usize>()
+                        .map_err(|_| RuntimeError::ValueError {
+                            message: format!("bad format slot `{digits}`"),
+                        })?;
+                    if slot < used_args.len() {
+                        used_args[slot] = true;
+                    }
+                    (slot, Some(digits))
+                };
+
                 let value = args.get(slot).ok_or_else(|| RuntimeError::ValueError {
-                    message: format!("format slot `{slot}` is out of range"),
+                    message: match slot_text {
+                        Some(slot_text) => format!("format slot `{slot_text}` is out of range"),
+                        None => "format slot `{}` is out of range".to_string(),
+                    },
                 })?;
-                output.push_str(&stringify_value(value)?);
+                append_stringified_value(&mut output, value)?;
                 index = cursor + 1;
                 last_literal = index;
                 continue;
             }
+            b'}' if bytes.get(index + 1) == Some(&b'}') => {
+                output.push_str(&template[last_literal..index]);
+                output.push('}');
+                index += 2;
+                last_literal = index;
+                continue;
+            }
+            b'}' => {
+                return Err(RuntimeError::ValueError {
+                    message: "unmatched `}` in format string".to_string(),
+                });
+            }
+            _ => {}
         }
         index += 1;
     }
     output.push_str(&template[last_literal..]);
+    let unused_index = if uses_sequential {
+        (next_sequential < args.len()).then_some(next_sequential)
+    } else if uses_indexed {
+        used_indexed_args
+            .as_ref()
+            .and_then(|used_args| used_args.iter().position(|used| !*used))
+    } else {
+        (!args.is_empty()).then_some(0)
+    };
+    if let Some(unused_index) = unused_index {
+        return Err(RuntimeError::ValueError {
+            message: format!("format argument `{unused_index}` is unused"),
+        });
+    }
     Ok(output)
 }
 
-fn clamp_range(start: usize, end: usize, len: usize) -> Option<(usize, usize)> {
-    let start = start.min(len);
-    let end = end.min(len);
+fn clamp_slice_bounds(
+    start: Option<isize>,
+    end: Option<isize>,
+    len: usize,
+) -> Option<(usize, usize)> {
+    let len = len as isize;
+    let start = normalize_slice_bound(start.unwrap_or(0), len);
+    let end = normalize_slice_bound(end.unwrap_or(len), len);
     (start < end).then_some((start, end))
 }
 
-fn slice_string(value: &str, start: usize, end: usize) -> String {
-    if start >= end {
+fn normalize_slice_bound(bound: isize, len: isize) -> usize {
+    let normalized = if bound < 0 { len + bound } else { bound };
+    normalized.clamp(0, len) as usize
+}
+
+fn slice_string(value: &str, start: Option<isize>, end: Option<isize>) -> String {
+    let char_count = value.chars().count();
+    let Some((start, end)) = clamp_slice_bounds(start, end, char_count) else {
         return String::new();
-    }
+    };
 
     let mut indices = value
         .char_indices()
@@ -2333,7 +2658,7 @@ fn to_json(value: &Value) -> serde_json::Value {
     match value {
         Value::Null => serde_json::Value::Null,
         Value::Bool(value) => serde_json::Value::Bool(*value),
-        Value::Number(value) => serde_json::Number::from_f64(*value)
+        Value::Number(value) => json_number(*value)
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
         Value::String(value) => serde_json::Value::String(value.to_string()),
@@ -2415,11 +2740,7 @@ mod tests {
             Value::Number(1.0)
         );
         assert!(Value::String("x".to_string().into()).as_record().is_none());
-        assert!(
-            Value::Record(record.into())
-                .to_string()
-                .contains("\"k\":1.0")
-        );
+        assert!(Value::Record(record.into()).to_string().contains("\"k\":1"));
     }
 
     #[test]
@@ -2525,8 +2846,8 @@ mod tests {
         let err = exec("finish [1][1.5]").expect_err("fractional index should fail");
         assert!(matches!(err, RuntimeError::TypeError { .. }));
 
-        let err = exec("finish [1][-1]").expect_err("negative index should fail");
-        assert!(matches!(err, RuntimeError::TypeError { .. }));
+        let value = exec("finish [1][-1]").expect("negative index should resolve from the end");
+        assert_eq!(value, Value::Number(1.0));
 
         let value = exec("finish not 1").expect("not should use truthiness");
         assert_eq!(value, Value::Bool(false));
@@ -2626,6 +2947,7 @@ mod tests {
               contains_s: contains("abc", "b"),
               contains_num: contains("123", 2),
               contains_l: contains([1,2,3], 2),
+              contains_r: contains({ foo: 1, bar: 2 }, "foo"),
               contains_n: contains(null, 2),
               starts: starts_with("lash", "la"),
               starts_num: starts_with(123, 12),
@@ -2634,9 +2956,13 @@ mod tests {
               join: join(["a",2,true], "-"),
               trim: trim(101),
               slice_s: slice("abcd", 1, 3),
+              slice_end_s: slice("abcd", 2, null),
               slice_back_s: slice("abcd", 3, 1),
+              slice_from_start_s: slice("abcd", null, 2),
               slice_l: slice([1,2,3,4], 1, 3),
+              slice_end_l: slice([1,2,3,4], 2, null),
               slice_back_l: slice([1,2,3,4], 3, 1),
+              slice_from_start_l: slice([1,2,3,4], null, 2),
               to_s: to_string({ a: 1 }),
               to_i_n: to_int(3.9),
               to_i_s: to_int("4"),
@@ -2644,8 +2970,7 @@ mod tests {
               to_f_n: to_float(1),
               to_f_s: to_float("2.5"),
               to_f_nl: to_float(null),
-              fmt_value: format({ a: 1 }),
-              fmt: format("x={0},y={1}", 1, true)
+              fmt: format("x={},y={}", 1, true)
             }
             "#,
         )
@@ -2656,6 +2981,7 @@ mod tests {
         assert_eq!(record["len_n"], Value::Number(0.0));
         assert_eq!(record["contains_num"], Value::Bool(true));
         assert_eq!(record["contains_l"], Value::Bool(true));
+        assert_eq!(record["contains_r"], Value::Bool(true));
         assert_eq!(record["contains_n"], Value::Bool(false));
         assert_eq!(record["keys_n"], Value::List(Vec::new().into()));
         assert_eq!(record["values_n"], Value::List(Vec::new().into()));
@@ -2673,16 +2999,28 @@ mod tests {
         assert_eq!(record["join"], Value::String("a-2-true".to_string().into()));
         assert_eq!(record["trim"], Value::String("101".to_string().into()));
         assert_eq!(record["slice_s"], Value::String("bc".to_string().into()));
+        assert_eq!(
+            record["slice_end_s"],
+            Value::String("cd".to_string().into())
+        );
         assert_eq!(record["slice_back_s"], Value::String(String::new().into()));
+        assert_eq!(
+            record["slice_from_start_s"],
+            Value::String("ab".to_string().into())
+        );
+        assert_eq!(
+            record["slice_end_l"],
+            Value::List(vec![Value::Number(3.0), Value::Number(4.0)].into())
+        );
         assert_eq!(record["slice_back_l"], Value::List(Vec::new().into()));
+        assert_eq!(
+            record["slice_from_start_l"],
+            Value::List(vec![Value::Number(1.0), Value::Number(2.0)].into())
+        );
         assert_eq!(record["to_i_n"], Value::Number(3.0));
         assert_eq!(record["to_i_b"], Value::Number(1.0));
         assert_eq!(record["to_f_s"], Value::Number(2.5));
         assert_eq!(record["to_f_nl"], Value::Number(0.0));
-        assert_eq!(
-            record["fmt_value"],
-            Value::String("{\"a\":1.0}".to_string().into())
-        );
         assert_eq!(
             record["fmt"],
             Value::String("x=1,y=true".to_string().into())
@@ -2709,7 +3047,13 @@ mod tests {
             ("finish to_float(\"x\")", "to_float"),
             ("finish json_parse(\"{\")", "json_parse"),
             ("finish format()", "format"),
+            ("finish format({})", "format"),
             ("finish format(\"{1}\", \"x\")", "format"),
+            ("finish format(\"{}\", \"x\", \"y\")", "format"),
+            ("finish format(\"{} {1}\", \"x\", \"y\")", "format"),
+            ("finish format(\"{x}\")", "format"),
+            ("finish format(\"{\")", "format"),
+            ("finish format(\"}\")", "format"),
             ("finish no_such_builtin()", "no_such_builtin"),
         ];
 
@@ -2743,15 +3087,50 @@ mod tests {
             "x"
         );
         assert_eq!(coerce_string(&Value::Bool(true)).expect("bool"), "true");
-        assert_eq!(as_index(&Value::Number(2.0)).expect("index"), 2);
-        assert!(as_index(&Value::Number(-1.0)).is_err());
-        assert_eq!(slice_string("héllo", 1, 4), "éll");
-        assert_eq!(slice_string("abc", 3, 1), "");
-        assert_eq!(clamp_range(1, 3, 4), Some((1, 3)));
-        assert_eq!(clamp_range(3, 1, 4), None);
+        assert_eq!(as_offset(&Value::Number(-1.0)).expect("offset"), -1);
+        assert_eq!(as_slice_bound(&Value::Null).expect("null bound"), None);
+        assert_eq!(
+            as_slice_bound(&Value::Number(2.0)).expect("numeric bound"),
+            Some(2)
+        );
+        assert_eq!(
+            as_slice_bound(&Value::Number(-2.0)).expect("negative numeric bound"),
+            Some(-2)
+        );
+        assert_eq!(slice_string("héllo", Some(1), Some(4)), "éll");
+        assert_eq!(slice_string("abcdef", Some(-2), None), "ef");
+        assert_eq!(slice_string("abcdef", None, Some(-1)), "abcde");
+        assert_eq!(slice_string("abcdef", Some(-5), Some(-2)), "bcd");
+        assert_eq!(slice_string("abc", Some(1), None), "bc");
+        assert_eq!(slice_string("abc", Some(3), Some(1)), "");
+        assert_eq!(clamp_slice_bounds(Some(1), Some(3), 4), Some((1, 3)));
+        assert_eq!(clamp_slice_bounds(Some(1), None, 4), Some((1, 4)));
+        assert_eq!(clamp_slice_bounds(None, Some(2), 4), Some((0, 2)));
+        assert_eq!(clamp_slice_bounds(Some(-2), None, 4), Some((2, 4)));
+        assert_eq!(clamp_slice_bounds(None, Some(-1), 4), Some((0, 3)));
+        assert_eq!(clamp_slice_bounds(Some(-10), Some(10), 4), Some((0, 4)));
+        assert_eq!(clamp_slice_bounds(Some(3), Some(1), 4), None);
+        assert_eq!(
+            resolve_index(&Value::Number(-1.0), 3).expect("resolved"),
+            Some(2)
+        );
+        assert_eq!(
+            resolve_index(&Value::Number(-4.0), 3).expect("resolved"),
+            None
+        );
 
         assert_eq!(
             compare_numbers(Value::Number(1.0), Value::Number(2.0), |a, b| a < b).expect("compare"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            compare_ordered(
+                Value::String("abc".to_string().into()),
+                Value::String("def".to_string().into()),
+                |a, b| a < b,
+                |a, b| a < b,
+            )
+            .expect("string compare"),
             Value::Bool(true)
         );
         assert_eq!(
@@ -2776,8 +3155,34 @@ mod tests {
         );
         assert_eq!(stringify_value(&Value::Null).expect("stringify"), "null");
         assert_eq!(
-            apply_format("a{0}b", &[Value::Number(1.0)]).expect("format"),
+            stringify_value(&Value::Number(1.0)).expect("stringify"),
+            "1"
+        );
+        assert_eq!(
+            stringify_value(&Value::List(
+                vec![Value::Number(1.0), Value::Number(2.0)].into()
+            ))
+            .expect("stringify"),
+            "[1,2]"
+        );
+        let mut appended = String::from("prefix:");
+        append_stringified_value(&mut appended, &Value::Bool(true)).expect("append stringify");
+        assert_eq!(appended, "prefix:true");
+        assert_eq!(
+            apply_format("a{}b", &[Value::Number(1.0)]).expect("format"),
             "a1b"
+        );
+        assert_eq!(
+            apply_format(
+                "b={1} a={0}",
+                &[Value::String("x".into()), Value::String("y".into())]
+            )
+            .expect("indexed format"),
+            "b=y a=x"
+        );
+        assert_eq!(
+            apply_format("{{{}}}", &[Value::Number(1.0)]).expect("escaped braces"),
+            "{1}"
         );
         assert_eq!(
             apply_format("{999999999999999999999999999999999999}", &[])
@@ -2787,8 +3192,38 @@ mod tests {
             }
         );
         assert_eq!(
-            apply_format("{x}", &[]).expect("invalid brace pattern should pass through"),
-            "{x}"
+            apply_format("{x}", &[]).expect_err("invalid placeholder should fail"),
+            RuntimeError::ValueError {
+                message: "invalid format placeholder".to_string()
+            }
+        );
+        assert_eq!(
+            apply_format(
+                "{} {1}",
+                &[Value::String("x".into()), Value::String("y".into())]
+            )
+            .expect_err("mixed placeholder styles should fail"),
+            RuntimeError::ValueError {
+                message: "can't mix `{}` and indexed format placeholders".to_string()
+            }
+        );
+        assert_eq!(
+            apply_format("{", &[]).expect_err("unmatched open brace should fail"),
+            RuntimeError::ValueError {
+                message: "unmatched `{` in format string".to_string()
+            }
+        );
+        assert_eq!(
+            apply_format("}", &[]).expect_err("unmatched close brace should fail"),
+            RuntimeError::ValueError {
+                message: "unmatched `}` in format string".to_string()
+            }
+        );
+        assert_eq!(
+            apply_format("plain", &[Value::Number(1.0)]).expect_err("unused arg should fail"),
+            RuntimeError::ValueError {
+                message: "format argument `0` is unused".to_string()
+            }
         );
         assert_eq!(
             value_type_name(&Value::Record(Record::default().into())),
@@ -2822,7 +3257,7 @@ mod tests {
         );
         assert_eq!(
             to_json(&Value::List(vec![Value::Number(1.0)].into())),
-            serde_json::json!([1.0])
+            serde_json::json!([1])
         );
         assert_eq!(
             to_json(&Value::Record({
@@ -2830,7 +3265,7 @@ mod tests {
                 record.insert("a".to_string(), Value::Number(1.0));
                 record.into()
             })),
-            serde_json::json!({"a": 1.0})
+            serde_json::json!({"a": 1})
         );
 
         let value = from_json(serde_json::json!({

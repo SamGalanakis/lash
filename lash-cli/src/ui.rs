@@ -10,7 +10,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::activity::{
     ActivityArtifact, ActivityBlock, ActivityKind, ActivityStatus, PatchFilePreview,
 };
-use crate::app::{App, DisplayBlock, QueuedTurn, SuggestionKind};
+use crate::app::{
+    App, DisplayBlock, QueuedTurn, SPLASH_CONTENT_HEIGHT, SPLASH_SCROLLBACK_HEIGHT, SuggestionKind,
+};
 use crate::markdown;
 use crate::theme;
 use lash_core::TokenUsage;
@@ -663,35 +665,95 @@ fn render_patch_artifact<'a>(
     render_patch_preview(lines, files, viewport_width, indent, include_diffs);
 }
 
-fn render_activity_block<'a>(
-    activity: &'a ActivityBlock,
-    expand_level: u8,
-    lines: &mut Vec<Line<'a>>,
-    viewport_width: usize,
-    nested: bool,
-) {
-    let style = activity_style(activity.status);
+#[derive(Clone)]
+struct ActivityLane {
+    summary_prefix: String,
+    summary_prefix_style: Style,
+    detail_prefix: String,
+    detail_prefix_style: Style,
+    artifact_indent: String,
+    parallel_child_prefix: String,
+}
+
+#[derive(Clone, Copy)]
+struct CodeWorkflowLane {
+    is_first: bool,
+    is_last: bool,
+}
+
+fn is_code_workflow_activity(kind: ActivityKind) -> bool {
+    matches!(
+        kind,
+        ActivityKind::Exploration
+            | ActivityKind::ShellCommand
+            | ActivityKind::ShellInteraction
+            | ActivityKind::Edit
+            | ActivityKind::Parallel
+            | ActivityKind::GenericTool
+    )
+}
+
+fn is_code_workflow_block(block: &DisplayBlock) -> bool {
+    match block {
+        DisplayBlock::CodeBlock { .. } | DisplayBlock::CodeOutput { .. } => true,
+        DisplayBlock::Activity(activity) => is_code_workflow_activity(activity.kind.clone()),
+        _ => false,
+    }
+}
+
+fn code_workflow_lane(blocks: &[DisplayBlock], idx: usize) -> Option<CodeWorkflowLane> {
+    if !is_code_workflow_block(&blocks[idx]) {
+        return None;
+    }
+
+    let prev = idx > 0 && is_code_workflow_block(&blocks[idx - 1]);
+    let next = idx + 1 < blocks.len() && is_code_workflow_block(&blocks[idx + 1]);
+    Some(CodeWorkflowLane {
+        is_first: !prev,
+        is_last: !next,
+    })
+}
+
+fn code_workflow_summary_prefix(lane: CodeWorkflowLane) -> &'static str {
+    if lane.is_first {
+        "╭─ "
+    } else if lane.is_last {
+        "╰─ "
+    } else {
+        "├─ "
+    }
+}
+
+fn code_workflow_detail_prefix(lane: CodeWorkflowLane) -> &'static str {
+    if lane.is_last { "   " } else { "│  " }
+}
+
+fn code_workflow_artifact_indent(lane: CodeWorkflowLane) -> &'static str {
+    if lane.is_last { "  " } else { "│ " }
+}
+
+fn default_activity_lane(activity: &ActivityBlock, nested: bool) -> ActivityLane {
     let prefix = if nested { "  " } else { "" };
     let (summary_prefix, summary_prefix_style, detail_prefix, detail_prefix_style) =
         match activity.kind {
             ActivityKind::Exploration => (
-                format!("{prefix}\u{251c}\u{2500} "),
+                format!("{prefix}├─ "),
                 Style::default()
                     .fg(theme::SODIUM)
                     .add_modifier(Modifier::BOLD),
-                format!("{prefix}\u{2502}  "),
+                format!("{prefix}│  "),
                 Style::default().fg(theme::SODIUM),
             ),
             ActivityKind::Delegate => (
-                format!("{prefix}\u{251c}\u{2500} "),
+                format!("{prefix}◆ "),
                 Style::default()
                     .fg(theme::LICHEN)
                     .add_modifier(Modifier::BOLD),
-                format!("{prefix}\u{2502}  "),
+                format!("{prefix}│ "),
                 Style::default().fg(theme::LICHEN),
             ),
             ActivityKind::PlanUpdate => (
-                format!("{prefix}\u{25c6} "),
+                format!("{prefix}◆ "),
                 Style::default()
                     .fg(theme::LICHEN)
                     .add_modifier(Modifier::BOLD),
@@ -699,13 +761,13 @@ fn render_activity_block<'a>(
                 Style::default().fg(theme::LICHEN),
             ),
             ActivityKind::Edit => (
-                format!("{prefix}\u{256d}\u{2500} "),
+                format!("{prefix}╭─ "),
                 if activity.status == ActivityStatus::Failed {
                     theme::error().add_modifier(Modifier::BOLD)
                 } else {
                     theme::patch_frame().add_modifier(Modifier::BOLD)
                 },
-                format!("{prefix}\u{2502}  "),
+                format!("{prefix}│  "),
                 if activity.status == ActivityStatus::Failed {
                     theme::error()
                 } else {
@@ -714,21 +776,57 @@ fn render_activity_block<'a>(
             ),
             _ => (
                 format!("{}{} ", prefix, activity_icon(activity.status)),
-                style,
+                activity_style(activity.status),
                 format!("{}  ", prefix),
                 theme::code_chrome(),
             ),
         };
+
+    ActivityLane {
+        artifact_indent: format!("{prefix}  "),
+        parallel_child_prefix: format!("{}  └ ", prefix),
+        summary_prefix,
+        summary_prefix_style,
+        detail_prefix,
+        detail_prefix_style,
+    }
+}
+
+fn code_workflow_activity_lane(lane: CodeWorkflowLane) -> ActivityLane {
+    let summary_style = theme::code_scribe().add_modifier(Modifier::BOLD);
+    let detail_style = theme::code_scribe();
+    ActivityLane {
+        summary_prefix: code_workflow_summary_prefix(lane).to_string(),
+        summary_prefix_style: summary_style,
+        detail_prefix: code_workflow_detail_prefix(lane).to_string(),
+        detail_prefix_style: detail_style,
+        artifact_indent: code_workflow_artifact_indent(lane).to_string(),
+        parallel_child_prefix: format!("{}└ ", code_workflow_artifact_indent(lane)),
+    }
+}
+
+fn render_activity_block_with_lane<'a>(
+    activity: &'a ActivityBlock,
+    expand_level: u8,
+    lines: &mut Vec<Line<'a>>,
+    viewport_width: usize,
+    lane: ActivityLane,
+) {
+    let style = if activity.kind == ActivityKind::Delegate {
+        Style::default().fg(theme::CHALK_MID)
+    } else {
+        activity_style(activity.status)
+    };
     let summary_text = truncate_to_display_width(
         &format!(
-            "{} \u{b7} {}",
+            "{} · {}",
             activity.summary,
             crate::util::format_duration_ms(activity.duration_ms)
         ),
-        viewport_width.saturating_sub(UnicodeWidthStr::width(summary_prefix.as_str())),
+        viewport_width.saturating_sub(UnicodeWidthStr::width(lane.summary_prefix.as_str())),
     );
     lines.push(Line::from(vec![
-        Span::styled(summary_prefix, summary_prefix_style),
+        Span::styled(lane.summary_prefix.clone(), lane.summary_prefix_style),
         Span::styled(summary_text, style),
     ]));
 
@@ -740,12 +838,12 @@ fn render_activity_block<'a>(
     if expand_level >= 1 && !hide_success_shell_details {
         for detail in &activity.detail_lines {
             lines.push(Line::from(vec![
-                Span::styled(detail_prefix.clone(), detail_prefix_style),
+                Span::styled(lane.detail_prefix.clone(), lane.detail_prefix_style),
                 Span::styled(
                     truncate_to_display_width(
                         detail,
                         viewport_width
-                            .saturating_sub(UnicodeWidthStr::width(detail_prefix.as_str())),
+                            .saturating_sub(UnicodeWidthStr::width(lane.detail_prefix.as_str())),
                     ),
                     Style::default().fg(theme::ASH_TEXT),
                 ),
@@ -754,13 +852,18 @@ fn render_activity_block<'a>(
         if expand_level == 1
             && let Some(ActivityArtifact::PatchPreview { files, .. }) = &activity.artifact
         {
-            let indent = format!("{prefix}  ");
-            render_patch_artifact(lines, files, viewport_width, &indent, false);
+            render_patch_artifact(
+                lines,
+                files,
+                viewport_width,
+                lane.artifact_indent.as_str(),
+                false,
+            );
         }
         if activity.kind == ActivityKind::Parallel {
             for child in &activity.children {
                 lines.push(Line::from(vec![
-                    Span::styled(format!("{}  \u{2514} ", prefix), theme::code_chrome()),
+                    Span::styled(lane.parallel_child_prefix.clone(), theme::code_chrome()),
                     Span::styled(child.summary.clone(), activity_style(child.status)),
                 ]));
             }
@@ -771,24 +874,53 @@ fn render_activity_block<'a>(
         if let Some(artifact) = &activity.artifact {
             match artifact {
                 ActivityArtifact::PatchPreview { files, .. } => {
-                    let indent = format!("{prefix}  ");
-                    render_patch_artifact(lines, files, viewport_width, &indent, true);
+                    render_patch_artifact(
+                        lines,
+                        files,
+                        viewport_width,
+                        lane.artifact_indent.as_str(),
+                        true,
+                    );
                 }
                 _ => {
-                    let indent = format!("{}  ", prefix);
-                    render_activity_artifact(lines, artifact, viewport_width, &indent);
+                    render_activity_artifact(
+                        lines,
+                        artifact,
+                        viewport_width,
+                        lane.artifact_indent.as_str(),
+                    );
                 }
             }
         }
         if activity.kind == ActivityKind::Parallel {
             for child in &activity.children {
                 if let Some(artifact) = &child.artifact {
-                    let indent = format!("{}    ", prefix);
-                    render_activity_artifact(lines, artifact, viewport_width, &indent);
+                    render_activity_artifact(
+                        lines,
+                        artifact,
+                        viewport_width,
+                        lane.artifact_indent.as_str(),
+                    );
                 }
             }
         }
     }
+}
+
+fn render_activity_block<'a>(
+    activity: &'a ActivityBlock,
+    expand_level: u8,
+    lines: &mut Vec<Line<'a>>,
+    viewport_width: usize,
+    nested: bool,
+) {
+    render_activity_block_with_lane(
+        activity,
+        expand_level,
+        lines,
+        viewport_width,
+        default_activity_lane(activity, nested),
+    );
 }
 
 fn render_block<'a>(
@@ -981,28 +1113,30 @@ fn render_block<'a>(
             }
         }
         DisplayBlock::CodeBlock { code, continuation } => {
+            let code_lane = code_workflow_lane(blocks, idx);
             match expand_level {
                 0 => {
                     if !*continuation {
                         let summary = truncate_to_display_width(
                             &build_code_fold_summary(blocks, idx),
-                            viewport_width,
+                            viewport_width.saturating_sub(code_lane.map_or(0, |lane| {
+                                UnicodeWidthStr::width(code_workflow_summary_prefix(lane))
+                            })),
                         );
-                        lines.push(Line::from(Span::styled(summary, theme::code_header())));
+                        if let Some(lane) = code_lane {
+                            lines.push(Line::from(vec![
+                                Span::styled(
+                                    code_workflow_summary_prefix(lane),
+                                    theme::code_scribe().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(summary, theme::code_header()),
+                            ]));
+                        } else {
+                            lines.push(Line::from(Span::styled(summary, theme::code_header())));
+                        }
                     }
                 }
-                1 => {
-                    let line_count = code.lines().count().max(1);
-                    let summary = truncate_to_display_width(
-                        &format!(
-                            "\u{25b6} code \u{b7} {} line{}",
-                            line_count,
-                            if line_count != 1 { "s" } else { "" }
-                        ),
-                        viewport_width,
-                    );
-                    lines.push(Line::from(Span::styled(summary, theme::code_header())));
-                }
+                1 => {}
                 _ => {
                     // Full: render code with scribe border
                     for line in code.lines() {
@@ -1015,7 +1149,19 @@ fn render_block<'a>(
             }
         }
         DisplayBlock::Activity(activity) => {
-            render_activity_block(activity, expand_level, lines, viewport_width, false);
+            if let Some(lane) = code_workflow_lane(blocks, idx)
+                && is_code_workflow_activity(activity.kind.clone())
+            {
+                render_activity_block_with_lane(
+                    activity,
+                    expand_level,
+                    lines,
+                    viewport_width,
+                    code_workflow_activity_lane(lane),
+                );
+            } else {
+                render_activity_block(activity, expand_level, lines, viewport_width, false);
+            }
         }
         DisplayBlock::CodeOutput { output, error } => {
             if expand_level >= 2 && !output.is_empty() {
@@ -1098,14 +1244,10 @@ fn render_block<'a>(
             tool_calls,
             iterations,
             success,
-            is_last,
+            is_last: _,
         } => {
-            let connector = if *is_last {
-                "\u{2514}\u{2500}"
-            } else {
-                "\u{251c}\u{2500}"
-            };
-            let status_connector = if *is_last { "   " } else { "\u{2502}  " };
+            let connector = "◆";
+            let status_connector = "│ ";
 
             // Truncate task to fit: connector(2) + space(1) + task + sep(3) + stats(~30)
             let stats_str = format!(
@@ -1127,15 +1269,15 @@ fn render_block<'a>(
 
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("{} ", connector),
+                    format!("{connector} "),
                     Style::default()
-                        .fg(theme::SODIUM)
+                        .fg(theme::LICHEN)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     "delegate",
                     Style::default()
-                        .fg(theme::SODIUM)
+                        .fg(theme::LICHEN)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" \u{b7} ", Style::default().fg(theme::ASH_MID)),
@@ -1149,7 +1291,7 @@ fn render_block<'a>(
                 ("failed", Style::default().fg(theme::ERROR))
             };
             lines.push(Line::from(vec![
-                Span::styled(status_connector, Style::default().fg(theme::SODIUM)),
+                Span::styled(status_connector, Style::default().fg(theme::LICHEN)),
                 Span::styled(status_label, status_style),
             ]));
         }
@@ -1164,9 +1306,14 @@ fn render_block<'a>(
             let sodium = Style::default().fg(theme::SODIUM);
 
             let content_width = 30;
-            let content_height = 8;
+            let content_height = SPLASH_CONTENT_HEIGHT;
             let cx = viewport_width.saturating_sub(content_width) / 2;
-            let cy = viewport_height.saturating_sub(content_height) / 2;
+            let fullscreen = blocks.len() == 1;
+            let cy = if fullscreen {
+                viewport_height.saturating_sub(content_height) / 2
+            } else {
+                1
+            };
             let pad = " ".repeat(cx);
 
             for _ in 0..cy {
@@ -1198,9 +1345,13 @@ fn render_block<'a>(
             ]));
             lines.push(Line::from(""));
 
-            // Bottom padding to fill viewport (so bottom-align logic sees full viewport)
+            let target_height = if fullscreen {
+                viewport_height
+            } else {
+                SPLASH_SCROLLBACK_HEIGHT
+            };
             let rendered = cy + content_height;
-            for _ in rendered..viewport_height {
+            for _ in rendered..target_height {
                 lines.push(Line::from(""));
             }
         }
@@ -1375,7 +1526,7 @@ fn effective_status_detail(
     } else if secs >= 30 {
         Some("model is still reasoning; no visible output yet".into())
     } else {
-        details
+        None
     }
 }
 
@@ -2289,8 +2440,71 @@ mod tests {
 
         assert_eq!(
             line_text(&lines[0]),
-            "├─ delegate · inspect queue rendering · 7ms"
+            "◆ delegate · inspect queue rendering · 7ms"
         );
+    }
+
+    #[test]
+    fn code_workflow_lane_stays_connected_across_code_and_edit_blocks() {
+        let blocks = [
+            DisplayBlock::CodeBlock {
+                code: "let answer = 42;".into(),
+                continuation: false,
+            },
+            DisplayBlock::Activity(ActivityBlock {
+                kind: ActivityKind::Edit,
+                status: ActivityStatus::Completed,
+                tool_name: "apply_patch".into(),
+                summary: "edited hello.txt (+2 -1)".into(),
+                detail_lines: Vec::new(),
+                duration_ms: 5,
+                args: serde_json::Value::Null,
+                result: serde_json::Value::Null,
+                artifact: Some(ActivityArtifact::PatchPreview {
+                    files: vec![PatchFilePreview {
+                        path: "hello.txt".into(),
+                        from_path: None,
+                        status: "modified".into(),
+                        added: 2,
+                        removed: 1,
+                        diff: String::new(),
+                    }],
+                    total_added: 2,
+                    total_removed: 1,
+                }),
+                children: Vec::new(),
+                extra: None,
+            }),
+            DisplayBlock::CodeBlock {
+                code: "println!(\"done\");".into(),
+                continuation: true,
+            },
+        ];
+
+        let mut lines = Vec::new();
+        for idx in 0..blocks.len() {
+            render_block(&blocks, idx, 1, &mut lines, 80, 20);
+        }
+
+        assert_eq!(line_text(&lines[0]), "├─ edited hello.txt (+2 -1) · 5ms");
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn compact_view_hides_code_blocks_but_full_view_keeps_them() {
+        let blocks = [DisplayBlock::CodeBlock {
+            code: "let answer = 42;\nprintln!(\"done\");".into(),
+            continuation: false,
+        }];
+
+        let mut compact_lines = Vec::new();
+        render_block(&blocks, 0, 1, &mut compact_lines, 80, 20);
+        assert!(compact_lines.is_empty());
+
+        let mut full_lines = Vec::new();
+        render_block(&blocks, 0, 2, &mut full_lines, 80, 20);
+        assert_eq!(line_text(&full_lines[0]), "│ let answer = 42;");
+        assert_eq!(line_text(&full_lines[1]), "│ println!(\"done\");");
     }
 
     #[test]
@@ -2495,9 +2709,9 @@ mod tests {
 
         assert_eq!(
             line_text(&lines[0]),
-            "└─ delegate · Inspect the skills system · 2 turns · 3 tool uses · 1.0k tokens"
+            "◆ delegate · Inspect the skills system · 2 turns · 3 tool uses · 1.0k tokens"
         );
-        assert_eq!(line_text(&lines[1]), "   done");
+        assert_eq!(line_text(&lines[1]), "│ done");
     }
 
     #[test]
@@ -2654,6 +2868,24 @@ mod tests {
             )
             .as_deref(),
             Some("waiting for first token")
+        );
+    }
+
+    #[test]
+    fn thinking_status_hides_initial_waiting_detail() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.status_text = Some("thinking".into());
+        app.status_detail = Some("waiting for first token".into());
+        app.status_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
+
+        assert_eq!(
+            effective_status_detail(
+                &app,
+                "thinking",
+                app.status_detail.clone(),
+                app.status_started_at.map(|started| started.elapsed()),
+            ),
+            None
         );
     }
 }

@@ -105,6 +105,12 @@ impl<'a> Lexer<'a> {
                 self.skip_comment();
                 continue;
             }
+            if ch == '/' && self.peek_second() == Some('/') {
+                self.bump();
+                self.bump();
+                self.skip_comment();
+                continue;
+            }
 
             let token = match ch {
                 '{' => self.single(TokenKind::LBrace),
@@ -303,6 +309,12 @@ impl<'a> Lexer<'a> {
         self.chars.peek().copied()
     }
 
+    fn peek_second(&self) -> Option<char> {
+        let mut chars = self.chars.clone();
+        chars.next()?;
+        chars.next().map(|(_, ch)| ch)
+    }
+
     fn consume_if(&mut self, expected: char) -> bool {
         match self.peek() {
             Some((_, ch)) if ch == expected => {
@@ -330,6 +342,7 @@ mod tests {
     fn lexes_all_token_classes_and_comments() {
         let tokens = lex(r#"
             # comment
+            // comment
             if else for in parallel finish observe call and or not true false null
             name _x a1 "hi\n\t\"\\\r\q" 12 3.5 { } ( ) [ ] , : ? . ! = == != && || < <= > >= + - * / %
             "#)
@@ -393,6 +406,31 @@ mod tests {
     fn rejects_unexpected_characters() {
         let err = lex("@").expect_err("lexing should fail");
         assert_eq!(err, LexError::UnexpectedChar { ch: '@', offset: 0 });
+    }
+
+    #[test]
+    fn lexes_double_slash_comments_without_breaking_division() {
+        let tokens = lex(r#"
+            value = 6 / 2
+            // trailing comment
+            finish value
+            "#)
+        .expect("lexing should succeed");
+
+        let kinds: Vec<_> = tokens.into_iter().map(|token| token.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Ident("value".to_string()),
+                TokenKind::Equal,
+                TokenKind::Number(6.0),
+                TokenKind::Slash,
+                TokenKind::Number(2.0),
+                TokenKind::Finish,
+                TokenKind::Ident("value".to_string()),
+                TokenKind::Eof,
+            ]
+        );
     }
 
     #[test]

@@ -7,7 +7,8 @@ use serde_json::json;
 use crate::search::{SearchDoc, SearchMode, limit_from_args, rank_docs};
 use crate::{ToolDefinition, ToolParam, ToolPromptContext, ToolProvider, ToolResult};
 
-use super::{INTERNAL_TOOL_CATALOG_ARG, project_tool_catalog, run_blocking};
+use super::skills::discover_installed_skills;
+use super::{INTERNAL_TOOL_CATALOG_ARG, run_blocking};
 
 type SkillCatalogEntry = (String, String, usize);
 type SkillCatalogCache = Arc<RwLock<Option<Vec<SkillCatalogEntry>>>>;
@@ -26,82 +27,11 @@ impl StateStore {
         }
     }
 
-    fn parse_skill_frontmatter(text: &str) -> Option<(String, String)> {
-        let text = text.trim_start();
-        if !text.starts_with("---") {
-            return None;
-        }
-        let after_open = &text[3..];
-        let close_idx = after_open.find("\n---")?;
-        let frontmatter = &after_open[..close_idx];
-        let mut name = String::new();
-        let mut description = String::new();
-        for line in frontmatter.lines() {
-            let line = line.trim();
-            if let Some(v) = line.strip_prefix("name:") {
-                name = v.trim().to_string();
-            } else if let Some(v) = line.strip_prefix("description:") {
-                description = v.trim().to_string();
-            }
-        }
-        Some((name, description))
-    }
-
     fn build_skill_catalog(&self) -> Vec<(String, String, usize)> {
-        let mut by_name: HashMap<String, (String, usize)> = HashMap::new();
-        for dir in &self.skill_dirs {
-            let entries = match std::fs::read_dir(dir) {
-                Ok(rd) => rd,
-                Err(_) => continue,
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                let skill_md = path.join("SKILL.md");
-                if !skill_md.is_file() {
-                    continue;
-                }
-                let text = match std::fs::read_to_string(&skill_md) {
-                    Ok(t) => t,
-                    Err(_) => continue,
-                };
-                let Some((mut name, description)) = Self::parse_skill_frontmatter(&text) else {
-                    continue;
-                };
-                if name.is_empty() {
-                    name = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or_default()
-                        .to_string();
-                }
-                if name.is_empty() {
-                    continue;
-                }
-                if !name
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-                {
-                    continue;
-                }
-                let file_count = ignore::WalkBuilder::new(&path)
-                    .hidden(false)
-                    .build()
-                    .filter_map(Result::ok)
-                    .filter(|e| e.path().is_file())
-                    .count()
-                    .saturating_sub(1);
-                by_name.insert(name, (description, file_count));
-            }
-        }
-        let mut out: Vec<(String, String, usize)> = by_name
+        discover_installed_skills(&self.skill_dirs)
             .into_iter()
-            .map(|(name, (description, file_count))| (name, description, file_count))
-            .collect();
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        out
+            .map(|skill| (skill.name, skill.description, skill.files.len()))
+            .collect()
     }
 
     fn discover_skills(&self) -> Vec<(String, String, usize)> {
@@ -118,12 +48,14 @@ impl StateStore {
         skills
     }
 
-    fn tool_catalog(&self, args: &serde_json::Value) -> Vec<serde_json::Value> {
+    fn tool_catalog(&self, args: &serde_json::Value) -> Result<Vec<serde_json::Value>, ToolResult> {
         args.get(INTERNAL_TOOL_CATALOG_ARG)
             .and_then(|v| v.as_array())
             .cloned()
-            .unwrap_or_else(|| {
-                project_tool_catalog(self.definitions(), crate::ExecutionMode::Standard)
+            .ok_or_else(|| {
+                ToolResult::err(json!(
+                    "search_tools requires the active session tool catalog; call it through the runtime or plugin host"
+                ))
             })
     }
 
@@ -142,7 +74,10 @@ impl StateStore {
             limit_from_args(args)
         };
         let injected_only = args.get("injected_only").and_then(|v| v.as_bool());
-        let catalog = self.tool_catalog(args);
+        let catalog = match self.tool_catalog(args) {
+            Ok(catalog) => catalog,
+            Err(err) => return err,
+        };
 
         let mut filtered = Vec::new();
         for t in &catalog {
@@ -251,7 +186,6 @@ impl StateStore {
                     .take(limit)
                     .map(|(name, description, file_count)| {
                         json!({
-                            "__type__": "skill_summary",
                             "name": name,
                             "description": description,
                             "file_count": file_count,
@@ -282,7 +216,6 @@ impl StateStore {
             .map(|(idx, score, _)| {
                 let (name, description, file_count) = &skills[idx];
                 json!({
-                    "__type__": "skill_summary",
                     "name": name,
                     "description": description,
                     "file_count": file_count,
@@ -300,7 +233,7 @@ impl ToolProvider for StateStore {
         let mut defs = vec![ToolDefinition {
             name: "search_tools".into(),
             description: vec![crate::ToolText::new(
-                "Discover available tools. With a focused `query`, returns ranked matches using hybrid/literal/regex search. With no `query`, returns the full active tool catalog in stable name order. If the current prompt already lists the tool you need, call it directly instead of starting with `search_tools`.",
+                "Discover available tools. With a focused `query`, returns ranked matches using hybrid/literal/regex search. With no `query`, returns the full active tool catalog in stable name order.",
                 [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
             )],
             params: vec![
@@ -326,50 +259,47 @@ impl ToolProvider for StateStore {
             hidden: false,
             inject_into_prompt: false,
         }];
-        defs.push(ToolDefinition {
-            name: "search_skills".into(),
-            description: vec![crate::ToolText::new(
-                "Discover installed skills. With a focused `query`, returns ranked matches using hybrid/literal/regex search. With no `query`, returns the full installed skill catalog in stable name order.",
-                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-            )],
-            params: vec![
-                ToolParam::optional("query", "str"),
-                ToolParam::optional("mode", "str"),
-                ToolParam::optional("regex", "str"),
-                ToolParam::optional("limit", "int"),
-            ],
-            returns: "list[SkillSummary]".into(),
-            examples: vec![
-                crate::ToolText::new(
-                    "call search_skills { query: \"benchmarking\" }",
-                    [crate::ExecutionMode::Repl],
-                ),
-                crate::ToolText::new(
-                    "search_skills(query=\"benchmarking\")",
-                    [crate::ExecutionMode::Standard],
-                ),
-                crate::ToolText::new(
-                    "call search_skills {}",
-                    [crate::ExecutionMode::Repl],
-                ),
-                crate::ToolText::new(
-                    "search_skills()",
-                    [crate::ExecutionMode::Standard],
-                ),
-            ],
-            hidden: false,
-            inject_into_prompt: false,
-        });
+        if !self.discover_skills().is_empty() {
+            defs.push(ToolDefinition {
+                name: "search_skills".into(),
+                description: vec![crate::ToolText::new(
+                    "Discover installed skills. With a focused `query`, returns ranked matches using hybrid/literal/regex search. With no `query`, returns the full installed skill catalog in stable name order.",
+                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
+                )],
+                params: vec![
+                    ToolParam::optional("query", "str"),
+                    ToolParam::optional("mode", "str"),
+                    ToolParam::optional("regex", "str"),
+                    ToolParam::optional("limit", "int"),
+                ],
+                returns: "list[SkillSummary]".into(),
+                examples: vec![
+                    crate::ToolText::new(
+                        "call search_skills { query: \"benchmarking\" }",
+                        [crate::ExecutionMode::Repl],
+                    ),
+                    crate::ToolText::new(
+                        "search_skills(query=\"benchmarking\")",
+                        [crate::ExecutionMode::Standard],
+                    ),
+                    crate::ToolText::new(
+                        "call search_skills {}",
+                        [crate::ExecutionMode::Repl],
+                    ),
+                    crate::ToolText::new(
+                        "search_skills()",
+                        [crate::ExecutionMode::Standard],
+                    ),
+                ],
+                hidden: false,
+                inject_into_prompt: true,
+            });
+        }
         defs
     }
 
-    fn prompt_guides(&self, context: &ToolPromptContext) -> Vec<String> {
-        if context.omitted_tool_count == 0 {
-            return Vec::new();
-        }
-        vec![
-            "### Tool Discovery\nUse `search_tools` only when the tool you need is not already listed in Available Tools. Prefer `call search_tools {}` to browse the active catalog and use focused queries only for genuine discovery.".to_string(),
-        ]
+    fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
+        Vec::new()
     }
 
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
@@ -426,16 +356,21 @@ mod tests {
     }
 
     #[test]
-    fn search_tools_works_without_catalog_arg() {
+    fn search_tools_errors_without_session_catalog() {
         let p = provider();
         let result = p.search_tools(&json!({
             "query":"search tools",
             "mode":"hybrid",
             "limit":10
         }));
-        assert!(result.success);
-        let items = result.result.as_array().cloned().unwrap_or_default();
-        assert!(!items.is_empty());
+        assert!(!result.success);
+        assert!(
+            result
+                .result
+                .as_str()
+                .unwrap_or_default()
+                .contains("active session tool catalog")
+        );
     }
 
     #[test]
@@ -491,10 +426,22 @@ mod tests {
     }
 
     #[test]
-    fn skills_search_is_defined() {
+    fn skills_search_is_omitted_when_no_skills_exist() {
         let p = StateStore::new(Vec::new());
         let names: Vec<String> = p.definitions().into_iter().map(|d| d.name).collect();
-        assert!(names.iter().any(|n| n == "search_skills"));
+        assert!(!names.iter().any(|n| n == "search_skills"));
+    }
+
+    #[test]
+    fn skills_search_is_defined_when_skills_exist() {
+        let dir = TempDir::new().unwrap();
+        write_skill(dir.path(), "alpha", "alpha", "Alpha skill");
+        let p = StateStore::new(vec![dir.path().to_path_buf()]);
+        let defs = p.definitions();
+        assert!(
+            defs.iter()
+                .any(|def| def.name == "search_skills" && def.inject_into_prompt)
+        );
     }
 
     #[test]

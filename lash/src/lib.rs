@@ -17,6 +17,7 @@ pub mod session;
 #[cfg(feature = "sqlite-store")]
 pub mod store;
 pub mod text;
+mod tool_dispatch;
 pub mod tools;
 
 use std::path::PathBuf;
@@ -99,8 +100,8 @@ pub use plugin::{
 #[cfg(feature = "sqlite-store")]
 pub use plugin::{
     BuiltinHistoryPluginFactory, BuiltinMemoryPluginFactory, BuiltinPlanModePluginFactory,
-    BuiltinPlanTrackerPluginFactory, BuiltinPromptContextPluginFactory, PromptContextPluginConfig,
-    builtin_dynamic_capability_defs,
+    BuiltinPlanTrackerPluginFactory, BuiltinPromptContextPluginFactory,
+    BuiltinToolSurfacePluginFactory, PromptContextPluginConfig, builtin_dynamic_capability_defs,
 };
 pub use provider::{LashConfig, Provider};
 pub use runtime::{
@@ -116,7 +117,7 @@ pub use session::{
 #[cfg(feature = "sqlite-store")]
 pub use store::{AgentState, Store};
 pub use text::strip_repl_fragments;
-pub use tools::{BatchingTools, ToolSet, ToolSetDeps};
+pub use tools::{ToolSet, ToolSetDeps};
 
 /// Execution backend for agent turns.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -301,14 +302,6 @@ impl ToolDefinition {
         "any".into()
     }
 
-    pub fn batchable_in(&self, mode: ExecutionMode) -> bool {
-        if self.description_for(mode).is_empty() {
-            return false;
-        }
-
-        !matches!(self.name.as_str(), "ask" | "batch" | "update_plan")
-    }
-
     pub fn description_for(&self, mode: ExecutionMode) -> String {
         self.description
             .iter()
@@ -473,6 +466,7 @@ impl ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     // ── ToolParam ──
 
@@ -606,6 +600,41 @@ mod tests {
             .is_err()
         );
     }
+
+    struct MockToolProvider;
+
+    #[async_trait::async_trait]
+    impl ToolProvider for MockToolProvider {
+        fn definitions(&self) -> Vec<ToolDefinition> {
+            vec![ToolDefinition {
+                name: "alpha".into(),
+                description: vec![ToolText::new(
+                    "Alpha tool",
+                    [ExecutionMode::Repl, ExecutionMode::Standard],
+                )],
+                params: vec![],
+                returns: "str".into(),
+                examples: vec![],
+                hidden: false,
+                inject_into_prompt: true,
+            }]
+        }
+
+        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
+            ToolResult::ok(serde_json::json!("ok"))
+        }
+    }
+
+    #[test]
+    fn capability_payload_preserves_explicit_enabled_tools_for_static_providers() {
+        let capabilities = crate::AgentCapabilities {
+            enabled_capabilities: BTreeSet::new(),
+            enabled_tools: BTreeSet::from(["alpha".to_string()]),
+        };
+        let payload = resolve_tool_capability_payload(&MockToolProvider, &capabilities);
+        assert_eq!(payload.enabled_tools, vec!["alpha".to_string()]);
+        assert_eq!(payload.explicit_enabled_tools, vec!["alpha".to_string()]);
+    }
 }
 
 /// Record of a tool call (for context/logging).
@@ -622,6 +651,66 @@ pub struct ToolCallRecord {
 pub struct ToolPromptContext {
     pub mode: ExecutionMode,
     pub omitted_tool_count: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolCapabilityPayload {
+    pub enabled_capabilities: Vec<String>,
+    pub enabled_tools: Vec<String>,
+    pub helper_bindings: Vec<String>,
+    #[serde(default)]
+    pub explicit_enabled_tools: Vec<String>,
+}
+
+impl ToolCapabilityPayload {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
+pub fn resolve_tool_capability_payload(
+    tools: &dyn ToolProvider,
+    capabilities: &crate::AgentCapabilities,
+) -> ToolCapabilityPayload {
+    if let Some(payload) = tools.dynamic_capability_payload() {
+        return payload;
+    }
+
+    if let Some(projection) = tools.dynamic_projection() {
+        return ToolCapabilityPayload {
+            enabled_capabilities: projection.enabled_capabilities.into_iter().collect(),
+            enabled_tools: projection.effective_tools.into_iter().collect(),
+            helper_bindings: projection.helper_bindings.into_iter().collect(),
+            explicit_enabled_tools: capabilities.enabled_tools.iter().cloned().collect(),
+        };
+    }
+
+    let available_defs = tools.definitions();
+    let capability_defs = crate::default_dynamic_capability_defs();
+    let resolved =
+        crate::resolve_capability_projection(&capability_defs, capabilities, &available_defs)
+            .unwrap_or_else(|_| crate::ResolvedProjection {
+                enabled_capabilities: capabilities
+                    .enabled_capabilities
+                    .iter()
+                    .map(|id| id.as_str().to_string())
+                    .collect(),
+                effective_tools: capabilities
+                    .enabled_tools
+                    .iter()
+                    .filter(|tool| available_defs.iter().any(|def| def.name == tool.as_str()))
+                    .cloned()
+                    .collect(),
+                helper_bindings: std::collections::BTreeSet::new(),
+                prompt_sections: Vec::new(),
+            });
+
+    ToolCapabilityPayload {
+        enabled_capabilities: resolved.enabled_capabilities.into_iter().collect(),
+        enabled_tools: resolved.effective_tools.into_iter().collect(),
+        helper_bindings: resolved.helper_bindings.into_iter().collect(),
+        explicit_enabled_tools: capabilities.enabled_tools.iter().cloned().collect(),
+    }
 }
 
 /// Trait for providing tools to the sandbox. Implement this per-project.
@@ -643,7 +732,7 @@ pub trait ToolProvider: Send + Sync + 'static {
     ) -> Option<std::sync::Arc<dyn ToolProvider>> {
         None
     }
-    fn dynamic_capabilities_payload_json(&self) -> Option<String> {
+    fn dynamic_capability_payload(&self) -> Option<ToolCapabilityPayload> {
         None
     }
     fn dynamic_generation(&self) -> Option<u64> {

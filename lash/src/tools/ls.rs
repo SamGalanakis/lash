@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use super::{build_path_entry, parse_optional_bool, parse_optional_usize_arg, path_entries_value};
+use super::{
+    build_path_entry, filesystem_entries_result, parse_optional_bool, parse_optional_usize_arg,
+};
 use crate::{ToolDefinition, ToolParam, ToolPromptContext, ToolProvider, ToolResult};
 
 /// List filesystem entries in a directory tree.
@@ -17,7 +19,7 @@ impl ToolProvider for Ls {
             name: "ls".into(),
             description: vec![crate::ToolText::new(
                 format!(
-                    "List filesystem entries, respecting `.gitignore`. Returns `path_entries` with `items` sorted by path. Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: depth={}, limit={}, with_lines=false.",
+                    "List filesystem entries, respecting `.gitignore`. Returns a record with `items` sorted by path. Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: depth={}, limit={}, with_lines=false.",
                     DEFAULT_DEPTH, MAX_ENTRIES
                 ),
                 [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
@@ -69,7 +71,7 @@ impl ToolProvider for Ls {
     }
 
     fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
-        vec!["### Path Entry Results\n`glob` and `ls` both return `{ \"__type__\": \"path_entries\", \"items\": [...], \"truncated\": ... }`. Read paths from `result.items`, not `result.entries`. `glob` sorts `items` by modification time (newest first); `ls` sorts `items` alphabetically by path. If `truncated` is non-null, rerun with `limit=None` when needed.".to_string()]
+        vec!["### Filesystem Listing Results\n`glob` and `ls` both return a record `{ items: [...], truncated: ... }`. In REPL tool calls, read listing paths from `result.value.items`; there is no extra wrapper like `result.value.path_entries`. `glob` sorts `items` by modification time (newest first); `ls` sorts `items` alphabetically by path. If `truncated` is non-null, rerun with `limit=None` when needed.".to_string()]
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
@@ -136,7 +138,7 @@ impl ToolProvider for Ls {
         if let Some(limit) = limit {
             entries.truncate(limit);
         }
-        ToolResult::ok(path_entries_value(entries, total_entries))
+        ToolResult::ok(filesystem_entries_result(entries, total_entries))
     }
 }
 
@@ -157,10 +159,6 @@ mod tests {
 
     fn items(result: &ToolResult) -> &Vec<serde_json::Value> {
         let obj = result.result.as_object().unwrap();
-        assert_eq!(
-            obj.get("__type__").and_then(|v| v.as_str()),
-            Some("path_entries")
-        );
         obj.get("items").and_then(|v| v.as_array()).unwrap()
     }
 

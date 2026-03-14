@@ -24,6 +24,7 @@ Options:
   --variant <name>              Provider-native model variant passed to lash (optional)
   --execution-mode <mode>       Lash execution mode: repl|standard (required)
   --jobs-dir <path>             Harbor jobs output dir (default: jobs)
+  --results-dir <path>          Persistent structured results dir (default: .benchmarks/terminalbench)
   --job-name <name>             Harbor job name (optional)
   --n-concurrent <int>          Concurrent trials (default: 1)
   --attempts <int>              Attempts per trial (default: 1)
@@ -57,6 +58,7 @@ require_cmd() {
 
 DATASET="terminal-bench-sample@2.0"
 JOBS_DIR="jobs"
+RESULTS_DIR=".benchmarks/terminalbench"
 JOB_NAME=""
 MODEL=""
 VARIANT=""
@@ -168,6 +170,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --jobs-dir)
       JOBS_DIR="${2:?missing value for --jobs-dir}"
+      shift 2
+      ;;
+    --results-dir)
+      RESULTS_DIR="${2:?missing value for --results-dir}"
       shift 2
       ;;
     --job-name)
@@ -388,5 +394,54 @@ set +e
 HARBOR_RC=$?
 set -e
 
-python3 "${SCRIPT_DIR}/summarize_terminalbench.py" "${JOBS_DIR}/${JOB_NAME}" || true
+JOB_DIR="${JOBS_DIR}/${JOB_NAME}"
+if [[ -d "${JOB_DIR}" ]]; then
+  EXPORT_CMD=(
+    python3 "${SCRIPT_DIR}/export_terminalbench_results.py"
+    "${JOB_DIR}"
+    --results-dir "${RESULTS_DIR}"
+    --dataset "${DATASET}"
+    --execution-mode "${EXECUTION_MODE}"
+    --harbor-env "${ENV_BACKEND}"
+    --registry-url "${REGISTRY_URL}"
+    --n-concurrent "${N_CONCURRENT}"
+    --attempts "${ATTEMPTS}"
+    --timeout-multiplier "${TIMEOUT_MULT}"
+    --binary-path "${BINARY_PATH}"
+  )
+
+  if [[ -f "${HOME}/.lash/config.json" ]]; then
+    EXPORT_CMD+=(--provider-config "${HOME}/.lash/config.json")
+  fi
+  if [[ -n "${MODEL}" ]]; then
+    EXPORT_CMD+=(--requested-model "${MODEL}")
+  fi
+  if [[ -n "${VARIANT}" ]]; then
+    EXPORT_CMD+=(--variant "${VARIANT}")
+  fi
+  if [[ "${DELETE_AFTER_RUN}" -eq 1 ]]; then
+    EXPORT_CMD+=(--delete-after-run)
+  fi
+  if [[ "${DEBUG}" -eq 1 ]]; then
+    EXPORT_CMD+=(--debug)
+  fi
+  for pattern in "${TASK_PATTERNS[@]}"; do
+    EXPORT_CMD+=(--task-pattern "${pattern}")
+  done
+  for task_name in "${EXACT_TASKS[@]}"; do
+    EXPORT_CMD+=(--exact-task "${task_name}")
+  done
+  for pattern in "${EXCLUDE_PATTERNS[@]}"; do
+    EXPORT_CMD+=(--exclude-pattern "${pattern}")
+  done
+  for arg in "${EXTRA_ARGS[@]}"; do
+    EXPORT_CMD+=(--extra-arg "${arg}")
+  done
+
+  "${EXPORT_CMD[@]}" || true
+  python3 "${SCRIPT_DIR}/summarize_terminalbench.py" "${JOB_DIR}" || true
+  echo
+  echo "Structured results: ${RESULTS_DIR}"
+  echo "Browse them with: python3 ${SCRIPT_DIR}/bench_ui.py --results-dir ${RESULTS_DIR}"
+fi
 exit "${HARBOR_RC}"

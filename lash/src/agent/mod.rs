@@ -16,118 +16,21 @@ use crate::capabilities::{AgentCapabilities, prompt_sections_for_capabilities};
 use crate::instructions::{FsInstructionSource, InstructionSource};
 use crate::llm::factory::adapter_for;
 use crate::llm::types::{LlmStreamEvent, LlmToolSpec};
-use crate::plugin::PromptContribution;
 use crate::plugin::{CheckpointKind, PluginMessage, PluginSurfaceEvent};
+use crate::plugin::{PromptContribution, ResolvedToolSurface, ToolSurfaceContext};
 use crate::provider::{OPENAI_GENERIC_DEFAULT_BASE_URL, Provider};
 use crate::session::Session;
 
 pub use message::{Message, MessageRole, Part, PartKind, PruneState, render_transcript_prompt};
 
-#[allow(unused_imports)]
-pub(crate) use message::IMAGE_REF_PREFIX;
 pub(crate) use prompt::{PromptComposeInput, PromptProfile, compose_system_prompt};
 pub use prompt::{PromptOverrideMode, PromptSectionName, PromptSectionOverride};
-
-const CONTEXT_ARCHIVE_MARKER_ID: &str = "__context_archive__";
-const MIN_RECENT_USER_TURNS: usize = 3;
 
 /// Send an event to the channel if it's still open.
 pub(crate) async fn send_event(tx: &mpsc::Sender<AgentEvent>, event: AgentEvent) {
     if !tx.is_closed() {
         let _ = tx.send(event).await;
     }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct ContextFoldResult {
-    pub(crate) has_archived_history: bool,
-}
-
-fn is_context_archive_marker(msg: &Message) -> bool {
-    msg.id == CONTEXT_ARCHIVE_MARKER_ID
-}
-
-fn context_archive_marker() -> Message {
-    let content = "Earlier turns were archived outside the active context.";
-    Message {
-        id: CONTEXT_ARCHIVE_MARKER_ID.to_string(),
-        role: MessageRole::System,
-        parts: vec![Part {
-            id: format!("{CONTEXT_ARCHIVE_MARKER_ID}.p0"),
-            kind: PartKind::Text,
-            content: content.to_string(),
-            tool_call_id: None,
-            tool_name: None,
-            prune_state: PruneState::Intact,
-        }],
-        origin: None,
-    }
-}
-
-fn leading_system_prefix_len(msgs: &[Message]) -> usize {
-    msgs.iter()
-        .take_while(|msg| msg.role == MessageRole::System)
-        .count()
-}
-
-fn keep_from_for_recent_turns(msgs: &[Message], prefix_len: usize) -> usize {
-    let mut user_turns = 0usize;
-    for i in (prefix_len..msgs.len()).rev() {
-        if msgs[i].role == MessageRole::User {
-            user_turns += 1;
-            if user_turns >= MIN_RECENT_USER_TURNS {
-                return i;
-            }
-        }
-    }
-    prefix_len
-}
-
-pub(crate) fn apply_context_folding(
-    msgs: &mut Vec<Message>,
-    last_input_tokens: usize,
-    max_context: usize,
-    policy: ContextFoldingConfig,
-) -> ContextFoldResult {
-    let mut result = ContextFoldResult {
-        has_archived_history: msgs.iter().any(is_context_archive_marker),
-    };
-    if last_input_tokens == 0 || msgs.is_empty() {
-        return result;
-    }
-
-    let hard_budget = max_context * usize::from(policy.hard_limit_pct) / 100;
-    if last_input_tokens < hard_budget {
-        return result;
-    }
-
-    let soft_budget = max_context * usize::from(policy.soft_limit_pct) / 100;
-    let prefix_len = leading_system_prefix_len(msgs);
-    let total_chars: usize = msgs.iter().map(Message::char_count).sum();
-    let target_chars = total_chars.saturating_mul(soft_budget) / last_input_tokens.max(1);
-
-    let mut keep_from = msgs.len();
-    let mut tail_chars = 0usize;
-    for i in (prefix_len..msgs.len()).rev() {
-        let cost = msgs[i].char_count();
-        if tail_chars + cost > target_chars {
-            break;
-        }
-        tail_chars += cost;
-        keep_from = i;
-    }
-
-    keep_from = keep_from.min(keep_from_for_recent_turns(msgs, prefix_len));
-    if keep_from <= prefix_len {
-        return result;
-    }
-
-    msgs.drain(prefix_len..keep_from);
-    if !result.has_archived_history {
-        msgs.insert(prefix_len, context_archive_marker());
-    }
-    result.has_archived_history = true;
-    result
 }
 
 // ─── Token tracking ───
@@ -181,8 +84,6 @@ pub struct AgentConfig {
     pub include_soul: bool,
     /// When set, append raw LLM request/response JSON to this file (debug logging).
     pub llm_log_path: Option<PathBuf>,
-    /// When true, use headless prompt (no ask(), no TUI references).
-    pub headless: bool,
     /// Ordered prompt section overrides applied on top of the selected profile.
     pub prompt_overrides: Vec<PromptSectionOverride>,
     /// Host-provided instruction source (filesystem by default).
@@ -209,7 +110,6 @@ impl Default for AgentConfig {
             max_turns: None,
             include_soul: false,
             llm_log_path: None,
-            headless: false,
             prompt_overrides: Vec::new(),
             instruction_source: Arc::new(FsInstructionSource::new()),
             execution_mode: crate::default_execution_mode(),
@@ -329,27 +229,13 @@ pub(crate) const LLM_RETRY_DELAYS: [std::time::Duration; 3] = [
 
 pub(crate) struct TurnTerminationPolicyState {
     max_steps_final: bool,
-    headless_prose_only_streak: usize,
 }
 
 impl TurnTerminationPolicyState {
     pub(crate) fn new() -> Self {
         Self {
             max_steps_final: false,
-            headless_prose_only_streak: 0,
         }
-    }
-
-    pub(crate) fn record_pure_prose_step(&mut self, headless: bool) -> bool {
-        if !headless {
-            return false;
-        }
-        self.headless_prose_only_streak += 1;
-        self.headless_prose_only_streak >= 3
-    }
-
-    pub(crate) fn reset_pure_prose_streak(&mut self) {
-        self.headless_prose_only_streak = 0;
     }
 
     pub(crate) fn should_force_exit_after_grace_turn(&self) -> bool {
@@ -496,32 +382,24 @@ pub(crate) fn build_execution_preamble(
     plugin_prompt_contributions: Vec<PromptContribution>,
 ) -> ExecutionPreamble {
     let all_tools = session.tools().definitions();
-    let prompt_tools: Vec<_> = all_tools
+    let session_id = config.session_id.as_deref().unwrap_or("root");
+    let surface = resolve_tool_surface(
+        session.plugins().as_ref(),
+        session_id,
+        mode,
+        all_tools.clone(),
+    );
+    let prompt_tools: Vec<_> = surface
+        .tools
         .iter()
         .filter(|t| t.inject_into_prompt)
-        .filter(|t| !t.description_for(mode).is_empty())
         .cloned()
         .collect();
     let mut tool_list = ToolDefinition::format_tool_docs(&prompt_tools, mode);
-    let omitted_tool_count = count_prompt_omitted_tools(&all_tools, mode);
-    let has_search_tools = all_tools
-        .iter()
-        .any(|tool| tool.name == "search_tools" && !tool.description_for(mode).is_empty());
-    if omitted_tool_count > 0 {
-        let note = match mode {
-            ExecutionMode::Repl if has_search_tools => format!(
-                "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Only use `call search_tools {{ ... }}` when the tool you need is not already listed above."
-            ),
-            ExecutionMode::Repl => format!(
-                "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity."
-            ),
-            ExecutionMode::Standard => {
-                format!(
-                    "\n\n- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity."
-                )
-            }
-        };
-        tool_list.push_str(&note);
+    let omitted_tool_count = count_prompt_omitted_tools(&surface.tools, mode);
+    for note in &surface.tool_list_notes {
+        tool_list.push_str("\n\n");
+        tool_list.push_str(note);
     }
     let tool_specs = if matches!(mode, ExecutionMode::Standard) {
         all_tools
@@ -556,6 +434,11 @@ pub(crate) fn build_execution_preamble(
                 .filter(|section| !section.is_empty()),
         );
     }
+    for section in surface.guide_sections {
+        if !guide_sections.contains(&section) {
+            guide_sections.push(section);
+        }
+    }
     let tool_guides = session.tools().prompt_guides(&ToolPromptContext {
         mode,
         omitted_tool_count,
@@ -579,11 +462,28 @@ pub(crate) fn build_execution_preamble(
     }
 }
 
+pub(crate) fn resolve_tool_surface(
+    plugins: &crate::PluginSession,
+    session_id: &str,
+    mode: ExecutionMode,
+    tools: Vec<ToolDefinition>,
+) -> ResolvedToolSurface {
+    plugins
+        .resolve_tool_surface(ToolSurfaceContext {
+            session_id: session_id.to_string(),
+            mode,
+            tools: tools.clone(),
+        })
+        .unwrap_or_else(|err| {
+            tracing::warn!("failed to resolve tool surface: {err}");
+            ResolvedToolSurface::from_tools(mode, tools)
+        })
+}
+
 fn count_prompt_omitted_tools(all_tools: &[crate::ToolDefinition], mode: ExecutionMode) -> usize {
     all_tools
         .iter()
         .filter(|t| !t.hidden)
-        .filter(|t| t.name != "search_tools")
         .filter(|t| !t.inject_into_prompt)
         .filter(|t| !t.description_for(mode).is_empty())
         .count()
@@ -594,7 +494,7 @@ mod execution_preamble_tests {
     use super::*;
 
     #[test]
-    fn omitted_tool_count_ignores_search_tools_when_everything_else_is_prompted() {
+    fn omitted_tool_count_ignores_hidden_tools_when_everything_else_is_prompted() {
         let defs = vec![
             crate::ToolDefinition {
                 name: "read_file".into(),
@@ -617,7 +517,7 @@ mod execution_preamble_tests {
                 params: vec![],
                 returns: "list".into(),
                 examples: vec![],
-                hidden: false,
+                hidden: true,
                 inject_into_prompt: false,
             },
         ];
@@ -851,28 +751,7 @@ pub(crate) fn resolve_context_instructions(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        apply_context_folding, format_tool_result_content, is_context_archive_marker,
-        is_malformed_assistant_output, parse_fence_line,
-    };
-    use crate::ContextFoldingConfig;
-    use crate::agent::{Message, MessageRole, Part, PartKind, PruneState};
-
-    fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
-        Message {
-            id: id.to_string(),
-            role,
-            parts: vec![Part {
-                id: format!("{id}.p0"),
-                kind: PartKind::Text,
-                content: content.to_string(),
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: PruneState::Intact,
-            }],
-            origin: None,
-        }
-    }
+    use super::{format_tool_result_content, is_malformed_assistant_output, parse_fence_line};
 
     #[test]
     fn parses_inline_open_and_close_tags() {
@@ -1029,53 +908,6 @@ mod tests {
         assert_eq!(
             format_tool_result_content(false, &serde_json::json!({"code": "ENOENT"})),
             r#"{"error":{"code":"ENOENT"}}"#
-        );
-    }
-
-    #[test]
-    fn context_folding_inserts_single_archive_marker_and_keeps_recent_turns() {
-        let mut msgs = vec![
-            text_message("u1", MessageRole::User, &"u1".repeat(40)),
-            text_message("a1", MessageRole::Assistant, &"a1".repeat(40)),
-            text_message("u2", MessageRole::User, &"u2".repeat(40)),
-            text_message("a2", MessageRole::Assistant, &"a2".repeat(40)),
-            text_message("u3", MessageRole::User, &"u3".repeat(40)),
-            text_message("a3", MessageRole::Assistant, &"a3".repeat(40)),
-            text_message("u4", MessageRole::User, &"u4".repeat(40)),
-            text_message("a4", MessageRole::Assistant, &"a4".repeat(40)),
-        ];
-
-        let result = apply_context_folding(&mut msgs, 70, 100, ContextFoldingConfig::default());
-
-        assert!(result.has_archived_history);
-        assert!(is_context_archive_marker(&msgs[0]));
-        assert_eq!(
-            msgs.iter()
-                .filter(|msg| is_context_archive_marker(msg))
-                .count(),
-            1
-        );
-        assert!(!msgs.iter().any(|msg| msg.id == "u1"));
-        assert!(msgs.iter().any(|msg| msg.id == "u2"));
-        assert!(msgs.iter().any(|msg| msg.id == "u4"));
-    }
-
-    #[test]
-    fn context_folding_does_not_repeat_between_soft_and_hard() {
-        let mut msgs = vec![
-            text_message("__context_archive__", MessageRole::System, "archived"),
-            text_message("u1", MessageRole::User, "hello"),
-            text_message("a1", MessageRole::Assistant, "world"),
-        ];
-
-        let result = apply_context_folding(&mut msgs, 55, 100, ContextFoldingConfig::default());
-
-        assert!(result.has_archived_history);
-        assert_eq!(
-            msgs.iter()
-                .filter(|msg| is_context_archive_marker(msg))
-                .count(),
-            1
         );
     }
 }

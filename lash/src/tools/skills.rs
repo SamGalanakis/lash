@@ -12,12 +12,13 @@ pub struct SkillStore {
     skill_dirs: Vec<PathBuf>, // [~/.lash/skills, legacy .lash/skills, preferred .agents/lash/skills]
 }
 
-struct SkillEntry {
-    name: String,
-    description: String,
-    instructions: String,
-    files: Vec<String>,
-    base_path: PathBuf,
+#[derive(Clone)]
+pub(crate) struct DiscoveredSkill {
+    pub name: String,
+    pub description: String,
+    pub instructions: String,
+    pub files: Vec<String>,
+    pub base_path: PathBuf,
 }
 
 /// Parse YAML frontmatter from a markdown file.
@@ -54,69 +55,11 @@ impl SkillStore {
         Self { skill_dirs }
     }
 
-    fn discover_skills(&self) -> Vec<SkillEntry> {
-        let mut skills: Vec<SkillEntry> = Vec::new();
-
-        for dir in &self.skill_dirs {
-            let entries = match std::fs::read_dir(dir) {
-                Ok(rd) => rd,
-                Err(_) => continue,
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                let skill_md = path.join("SKILL.md");
-                if !skill_md.is_file() {
-                    continue;
-                }
-                let text = match std::fs::read_to_string(&skill_md) {
-                    Ok(t) => t,
-                    Err(_) => continue,
-                };
-                let (mut name, description, instructions) = match parse_frontmatter(&text) {
-                    Some(t) => t,
-                    None => continue,
-                };
-
-                // Default name to directory name if not set in frontmatter
-                if name.is_empty() {
-                    if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
-                        name = dir_name.to_string();
-                    } else {
-                        continue;
-                    }
-                }
-
-                // Validate name: only lowercase alphanumeric and hyphens
-                if !name
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-                {
-                    continue;
-                }
-
-                // List supporting files (non-SKILL.md, recursive)
-                let files = list_skill_files(&path);
-
-                // Later dirs override earlier by name
-                skills.retain(|s| s.name != name);
-                skills.push(SkillEntry {
-                    name,
-                    description,
-                    instructions,
-                    files,
-                    base_path: path,
-                });
-            }
-        }
-
-        skills.sort_by(|a, b| a.name.cmp(&b.name));
-        skills
+    fn discover_skills(&self) -> Vec<DiscoveredSkill> {
+        discover_installed_skills(&self.skill_dirs)
     }
 
-    fn find_skill(&self, name: &str) -> Option<SkillEntry> {
+    fn find_skill(&self, name: &str) -> Option<DiscoveredSkill> {
         self.discover_skills().into_iter().find(|s| s.name == name)
     }
 
@@ -128,7 +71,6 @@ impl SkillStore {
 
         match self.find_skill(name) {
             Some(skill) => ToolResult::ok(json!({
-                "__type__": "skill",
                 "name": skill.name,
                 "description": skill.description,
                 "instructions": skill.instructions,
@@ -212,6 +154,10 @@ fn collect_files(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<St
 #[async_trait::async_trait]
 impl ToolProvider for SkillStore {
     fn definitions(&self) -> Vec<ToolDefinition> {
+        if self.discover_skills().is_empty() {
+            return Vec::new();
+        }
+
         vec![
             ToolDefinition {
                 name: "load_skill".into(),
@@ -223,7 +169,7 @@ impl ToolProvider for SkillStore {
                 returns: "dict".into(),
                 examples: vec![],
                 hidden: false,
-                inject_into_prompt: false,
+                inject_into_prompt: true,
             },
             ToolDefinition {
                 name: "read_skill_file".into(),
@@ -243,7 +189,7 @@ impl ToolProvider for SkillStore {
                 returns: "str".into(),
                 examples: vec![],
                 hidden: false,
-                inject_into_prompt: false,
+                inject_into_prompt: true,
             },
         ]
     }
@@ -259,6 +205,64 @@ impl ToolProvider for SkillStore {
         })
         .await
     }
+}
+
+pub(crate) fn discover_installed_skills(skill_dirs: &[PathBuf]) -> Vec<DiscoveredSkill> {
+    let mut skills: Vec<DiscoveredSkill> = Vec::new();
+
+    for dir in skill_dirs {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let skill_md = path.join("SKILL.md");
+            if !skill_md.is_file() {
+                continue;
+            }
+            let text = match std::fs::read_to_string(&skill_md) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let (mut name, description, instructions) = match parse_frontmatter(&text) {
+                Some(t) => t,
+                None => continue,
+            };
+
+            if name.is_empty() {
+                if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+                    name = dir_name.to_string();
+                } else {
+                    continue;
+                }
+            }
+
+            if !name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            {
+                continue;
+            }
+
+            let files = list_skill_files(&path);
+
+            skills.retain(|skill| skill.name != name);
+            skills.push(DiscoveredSkill {
+                name,
+                description,
+                instructions,
+                files,
+                base_path: path,
+            });
+        }
+    }
+
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills
 }
 
 #[cfg(test)]
@@ -303,7 +307,30 @@ mod tests {
             .map(|def| def.name)
             .collect();
         assert!(!names.iter().any(|name| name == "skills"));
-        assert!(names.iter().any(|name| name == "load_skill"));
-        assert!(names.iter().any(|name| name == "read_skill_file"));
+        assert!(!names.iter().any(|name| name == "load_skill"));
+        assert!(!names.iter().any(|name| name == "read_skill_file"));
+    }
+
+    #[test]
+    fn skill_store_definitions_exist_when_skills_are_installed() {
+        let dir = TempDir::new().expect("tmp");
+        let skill_dir = dir.path().join("demo-skill");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo\ndescription: demo skill\n---\n\nbody\n",
+        )
+        .expect("skill");
+
+        let store = make_store(dir.path());
+        let defs = store.definitions();
+        assert!(
+            defs.iter()
+                .any(|def| def.name == "load_skill" && def.inject_into_prompt)
+        );
+        assert!(
+            defs.iter()
+                .any(|def| def.name == "read_skill_file" && def.inject_into_prompt)
+        );
     }
 }

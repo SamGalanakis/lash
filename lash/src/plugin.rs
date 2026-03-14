@@ -8,9 +8,10 @@ use crate::llm::types::LlmResponse;
 use crate::runtime::{AssembledTurn, PromptUsage};
 use crate::{
     AgentCapabilities, AgentStateEnvelope, ContextFoldingConfig, ExecutionMode, MessageRole,
-    ToolProvider, ToolResult, TurnInput,
+    ToolDefinition, ToolProvider, ToolResult, TurnInput,
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 pub type PluginFuture<T> = Pin<Box<dyn Future<Output = Result<T, PluginError>> + Send>>;
 pub type TurnCommittedHook = Arc<dyn Fn(AssembledTurn) -> PluginFuture<()> + Send + Sync>;
@@ -39,6 +40,8 @@ pub type PromptContributor =
     Arc<dyn Fn(PromptHookContext) -> Result<Vec<PromptContribution>, PluginError> + Send + Sync>;
 pub type TurnPromptContributor =
     Arc<dyn Fn(TurnHookContext) -> PluginFuture<Vec<TurnPromptContribution>> + Send + Sync>;
+pub type ToolSurfaceContributor =
+    Arc<dyn Fn(ToolSurfaceContext) -> Result<ToolSurfaceContribution, PluginError> + Send + Sync>;
 pub type MessageMutator = Arc<
     dyn Fn(MessageMutatorContext, Vec<crate::Message>) -> PluginFuture<Vec<crate::Message>>
         + Send
@@ -131,7 +134,7 @@ pub struct SessionCreateRequest {
     pub initial_messages: Vec<PluginMessage>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptContribution {
     pub section: PromptSectionName,
     #[serde(default)]
@@ -144,6 +147,50 @@ pub struct TurnPromptContribution {
     #[serde(default)]
     pub priority: i32,
     pub content: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolSurfaceContext {
+    pub session_id: String,
+    pub mode: ExecutionMode,
+    pub tools: Vec<ToolDefinition>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ToolSurfaceContribution {
+    pub overrides: Vec<ToolSurfaceOverride>,
+    pub guide_sections: Vec<String>,
+    pub tool_list_notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ToolSurfaceOverride {
+    pub tool_name: String,
+    pub inject_into_prompt: Option<bool>,
+    pub discoverable: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ResolvedToolSurface {
+    pub tools: Vec<ToolDefinition>,
+    pub guide_sections: Vec<String>,
+    pub tool_list_notes: Vec<String>,
+}
+
+impl ResolvedToolSurface {
+    pub fn from_tools(mode: ExecutionMode, mut tools: Vec<ToolDefinition>) -> Self {
+        for tool in &mut tools {
+            if tool.description_for(mode).is_empty() {
+                tool.inject_into_prompt = false;
+                tool.hidden = true;
+            }
+        }
+        Self {
+            tools,
+            guide_sections: Vec::new(),
+            tool_list_notes: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +219,23 @@ pub enum PluginSurfaceEvent {
         name: String,
         payload: serde_json::Value,
     },
+}
+
+pub(crate) async fn emit_plugin_surface_events(
+    event_tx: &mpsc::Sender<crate::AgentEvent>,
+    plugin_id: &str,
+    events: Vec<PluginSurfaceEvent>,
+) {
+    for event in events {
+        crate::agent::send_event(
+            event_tx,
+            crate::AgentEvent::PluginEvent {
+                plugin_id: plugin_id.to_string(),
+                event,
+            },
+        )
+        .await;
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -227,6 +291,7 @@ impl PluginDirective {
 pub trait SessionManager: Send + Sync {
     async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError>;
     async fn snapshot_session(&self, session_id: &str) -> Result<SessionSnapshot, PluginError>;
+    async fn tool_catalog(&self, session_id: &str) -> Result<Vec<serde_json::Value>, PluginError>;
     async fn create_session(
         &self,
         request: SessionCreateRequest,
@@ -513,8 +578,8 @@ mod builtin;
 #[cfg(feature = "sqlite-store")]
 pub use builtin::{
     BuiltinHistoryPluginFactory, BuiltinMemoryPluginFactory, BuiltinPlanModePluginFactory,
-    BuiltinPlanTrackerPluginFactory, BuiltinPromptContextPluginFactory, PromptContextPluginConfig,
-    builtin_dynamic_capability_defs,
+    BuiltinPlanTrackerPluginFactory, BuiltinPromptContextPluginFactory,
+    BuiltinToolSurfacePluginFactory, PromptContextPluginConfig, builtin_dynamic_capability_defs,
 };
 
 #[cfg(test)]
@@ -583,6 +648,13 @@ mod tests {
             Ok(AgentStateEnvelope::default())
         }
 
+        async fn tool_catalog(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<serde_json::Value>, PluginError> {
+            Ok(Vec::new())
+        }
+
         async fn create_session(
             &self,
             request: SessionCreateRequest,
@@ -644,7 +716,13 @@ mod tests {
                 tool_names: BTreeSet::from(["mock_tool".to_string()]),
                 enabled_by_default: true,
             })?;
-            reg.register_prompt_section("## Plugin Prompt");
+            reg.register_prompt_contributor(Arc::new(|_ctx| {
+                Ok(vec![PromptContribution {
+                    section: PromptSectionName::PluginExtensions,
+                    priority: 0,
+                    content: "## Plugin Prompt".to_string(),
+                }])
+            }));
             reg.register_turn_prompt_contributor(Arc::new(|_ctx| {
                 Box::pin(async move {
                     Ok(vec![TurnPromptContribution {
@@ -695,7 +773,20 @@ mod tests {
         let session = host.build_session("root", None).expect("session");
         assert_eq!(session.tool_providers().len(), 1);
         assert!(session.capability_defs().contains_key("mock_cap"));
-        assert_eq!(session.prompt_sections(), &["## Plugin Prompt".to_string()]);
+        let contributions = session
+            .collect_prompt_contributions(PromptHookContext {
+                session_id: "root".to_string(),
+                host: Arc::new(MockSessionManager),
+            })
+            .expect("prompt contributions");
+        assert_eq!(
+            contributions,
+            vec![PromptContribution {
+                section: PromptSectionName::PluginExtensions,
+                priority: 0,
+                content: "## Plugin Prompt".to_string(),
+            }]
+        );
     }
 
     #[tokio::test]
