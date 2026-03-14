@@ -85,6 +85,7 @@ struct WaitBehavior {
     return_on_output: bool,
     baseline_len: usize,
     quiet_period: Option<Duration>,
+    exit_grace_period: Option<Duration>,
 }
 
 impl ShellRuntime {
@@ -357,6 +358,9 @@ impl ShellRuntime {
                 && quiet_deadline
                     .is_none_or(|quiet_until| tokio::time::Instant::now() >= quiet_until)
             {
+                if let Some(grace_period) = behavior.exit_grace_period {
+                    let _ = tokio::time::timeout(grace_period, state.exit_notify.notified()).await;
+                }
                 let exit_code = *state.exit_code.lock().unwrap();
                 if let Some(exit_code) = exit_code {
                     wait_for_buffer_settle(&state, Duration::from_millis(OUTPUT_QUIET_PERIOD_MS))
@@ -616,6 +620,7 @@ impl StandardShell {
                     return_on_output: false,
                     baseline_len: 0,
                     quiet_period: None,
+                    exit_grace_period: None,
                 },
             )
             .await
@@ -698,6 +703,7 @@ impl StandardShell {
                     return_on_output: true,
                     baseline_len,
                     quiet_period: Some(Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)),
+                    exit_grace_period: Some(Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)),
                 },
             )
             .await
@@ -829,6 +835,7 @@ impl ReplShell {
                     return_on_output: false,
                     baseline_len: 0,
                     quiet_period: None,
+                    exit_grace_period: None,
                 },
             )
             .await
@@ -912,6 +919,7 @@ impl ReplShell {
                     return_on_output: true,
                     baseline_len: read_cursor,
                     quiet_period: Some(Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)),
+                    exit_grace_period: None,
                 },
             )
             .await
@@ -977,6 +985,7 @@ impl ReplShell {
                     return_on_output: true,
                     baseline_len,
                     quiet_period: Some(Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)),
+                    exit_grace_period: None,
                 },
             )
             .await
@@ -1581,6 +1590,41 @@ mod tests {
                 .unwrap()
                 .contains("got:hello")
         );
+    }
+
+    #[tokio::test]
+    async fn write_stdin_prefers_completed_state_for_short_lived_commands() {
+        let shell = StandardShell::default();
+        for _ in 0..16 {
+            let open = shell
+                .execute(
+                    "exec_command",
+                    &json!({"cmd": "read line; echo got:$line", "yield_time_ms": 10}),
+                )
+                .await;
+            assert!(open.success);
+            let id = open.result["id"].as_str().unwrap();
+
+            let result = shell
+                .execute(
+                    "write_stdin",
+                    &json!({"id": id, "chars": "hello\n", "yield_time_ms": 1000}),
+                )
+                .await;
+            assert!(result.success);
+            assert_eq!(
+                result.result["running"], false,
+                "expected completed handle, got: {}",
+                result.result
+            );
+            assert_eq!(result.result["exit_code"], 0);
+            assert!(
+                result.result["output"]
+                    .as_str()
+                    .unwrap()
+                    .contains("got:hello")
+            );
+        }
     }
 
     #[tokio::test]
