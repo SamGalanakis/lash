@@ -26,7 +26,7 @@ use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
 use lash_core::agent::{Message, MessageRole};
 use lash_core::provider::{LashConfig, OPENAI_GENERIC_DEFAULT_BASE_URL, Provider, ProviderKind};
 use lash_core::tools::{
-    AgentCall, BatchingTools, FilteredTools, SwitchableTools, ToolSet, ToolSetDeps,
+    AgentCall, AgentCallConfig, FilteredTools, SwitchableTools, ToolSet, ToolSetDeps,
 };
 use lash_core::*;
 use ratatui::DefaultTerminal;
@@ -48,6 +48,21 @@ const LONG_VERSION: &str = concat!(
     "lash-core ",
     env!("CARGO_PKG_VERSION")
 );
+
+fn autonomous_prompt_overrides() -> Vec<PromptSectionOverride> {
+    vec![
+        PromptSectionOverride {
+            section: PromptSectionName::Identity,
+            mode: PromptOverrideMode::Prepend,
+            content: "You are an autonomous AI coding agent running without a human in the loop.\nComplete the task end-to-end without asking for user input.".to_string(),
+        },
+        PromptSectionOverride {
+            section: PromptSectionName::ExecutionContract,
+            mode: PromptOverrideMode::Append,
+            content: "- No user is available during this run. Do not rely on `ask`; make the best reasonable decision from local context and continue.".to_string(),
+        },
+    ]
+}
 
 #[derive(Parser)]
 #[command(name = "lash", version = APP_VERSION, long_version = LONG_VERSION)]
@@ -108,7 +123,7 @@ struct Args {
     #[arg(long)]
     info: bool,
 
-    /// Run headlessly: execute prompt, print response to stdout, exit
+    /// Run autonomously: execute prompt, print response to stdout, exit
     #[arg(short = 'p', long = "print")]
     print_prompt: Option<String>,
 
@@ -196,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let args = Args::parse();
-    let prompt_overrides = resolve_prompt_overrides(&args)?;
+    let mut prompt_overrides = resolve_prompt_overrides(&args)?;
 
     // Handle --reset before any TUI/provider setup
     if args.reset {
@@ -380,8 +395,11 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let headless = args.print_prompt.is_some();
-    let run_session_id = if headless {
+    let autonomous = args.print_prompt.is_some();
+    if autonomous {
+        prompt_overrides.extend(autonomous_prompt_overrides());
+    }
+    let run_session_id = if autonomous {
         None
     } else {
         resume_start
@@ -390,6 +408,11 @@ async fn main() -> anyhow::Result<()> {
             .or_else(|| Some(uuid::Uuid::new_v4().to_string()))
     };
     let instruction_source: Arc<dyn InstructionSource> = Arc::new(FsInstructionSource::new());
+    let mut capabilities = lash_core::AgentCapabilities::default();
+    if autonomous {
+        capabilities = capabilities.disable(lash_core::CapabilityId::Ask);
+    }
+
     let config = AgentConfig {
         model: model.clone(),
         provider: lash_config.active_provider().clone(),
@@ -397,11 +420,11 @@ async fn main() -> anyhow::Result<()> {
         max_context_tokens: Some(resolved_model_spec.context_window() as usize),
         session_id: run_session_id.clone(),
         llm_log_path,
-        headless,
         prompt_overrides,
         execution_mode,
         context_folding,
         instruction_source: Arc::clone(&instruction_source),
+        capabilities,
         ..Default::default()
     };
 
@@ -434,8 +457,7 @@ async fn main() -> anyhow::Result<()> {
                 Some(tavily_key)
             },
             skill_dirs: Some(skill_dirs),
-            prompt_bridge: Some(prompt_bridge.clone()),
-            headless: args.print_prompt.is_some(),
+            prompt_bridge: (!autonomous).then_some(prompt_bridge.clone()),
         },
     );
     let base_provider: Arc<dyn ToolProvider> = Arc::new(base_all);
@@ -447,12 +469,13 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(BuiltinHistoryPluginFactory::new(Arc::clone(&store))),
         Arc::new(BuiltinMemoryPluginFactory::new(Arc::clone(&store))),
         Arc::new(BuiltinPlanTrackerPluginFactory),
-        Arc::new(BuiltinPlanModePluginFactory),
+        Arc::new(BuiltinPlanModePluginFactory::default()),
+        Arc::new(BuiltinToolSurfacePluginFactory),
         Arc::new(fork::ForkPluginFactory),
     ]);
     let root_plugins = plugin_host.build_session("root", None)?;
 
-    let mut all_base = ToolSet::new() + Arc::clone(&base_provider);
+    let mut all_base = ToolSet::new().with_arc_provider(Arc::clone(&base_provider));
     let mut tool_names: BTreeSet<String> = base_provider
         .definitions()
         .into_iter()
@@ -467,7 +490,7 @@ async fn main() -> anyhow::Result<()> {
                 )));
             }
         }
-        all_base = all_base + Arc::clone(provider);
+        all_base = all_base.with_arc_provider(Arc::clone(provider));
     }
     let all_base_tools: Arc<dyn ToolProvider> = Arc::new(all_base);
 
@@ -476,10 +499,17 @@ async fn main() -> anyhow::Result<()> {
 
     // Root cancel token — lives for the whole app lifetime, child tokens are created per run
     let root_cancel = CancellationToken::new();
+    let agent_call_config = AgentCallConfig {
+        low_tier_execution_mode: lash_config
+            .runtime
+            .low_tier_subagent_execution_mode
+            .unwrap_or(ExecutionMode::Standard),
+    };
     let probe_agent_call = AgentCall::new(
         Arc::clone(&agent_parent_tools) as Arc<dyn ToolProvider>,
         Arc::clone(&root_plugins),
         &config,
+        agent_call_config,
         lash_config.agent_models.clone(),
         root_cancel.clone(),
     );
@@ -511,18 +541,19 @@ async fn main() -> anyhow::Result<()> {
         .filter(|n| resolved.effective_tools.contains(n))
         .collect();
 
-    let mut tools_comp = ToolSet::new() + Arc::clone(&filtered_base);
+    let mut tools_comp = ToolSet::new().with_arc_provider(Arc::clone(&filtered_base));
     if !agent_allowed.is_empty() {
         let agent_call = AgentCall::new(
             Arc::clone(&agent_parent_tools) as Arc<dyn ToolProvider>,
             Arc::clone(&root_plugins),
             &config,
+            agent_call_config,
             lash_config.agent_models.clone(),
             root_cancel.clone(),
         );
         let filtered_agent: Arc<dyn ToolProvider> =
             Arc::new(FilteredTools::new(Arc::new(agent_call), agent_allowed));
-        tools_comp = tools_comp + filtered_agent;
+        tools_comp = tools_comp.with_arc_provider(filtered_agent);
     }
     let tools: Arc<dyn ToolProvider> = Arc::new(tools_comp);
     let dynamic_tools = Arc::new(DynamicToolProvider::from_tool_provider(
@@ -530,10 +561,7 @@ async fn main() -> anyhow::Result<()> {
         capability_defs,
         profile_from_agent_capabilities(&config.capabilities),
     )?);
-    let dynamic_tools_provider: Arc<dyn ToolProvider> = Arc::new(BatchingTools::with_mode(
-        dynamic_tools.clone(),
-        execution_mode,
-    ));
+    let dynamic_tools_provider: Arc<dyn ToolProvider> = dynamic_tools.clone();
     agent_parent_tools.swap(dynamic_tools_provider.clone());
     let toolset_hash = hash12(
         &serde_json::to_vec(&dynamic_tools_provider.definitions())
@@ -579,9 +607,9 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    // ── Headless mode: skip TUI, run agent, print to stdout ──
+    // ── Autonomous preset: skip TUI, run agent, print response to stdout ──
     if let Some(prompt) = args.print_prompt {
-        return run_headless(runtime, prompt).await;
+        return run_autonomous(runtime, prompt).await;
     }
 
     let session_name = resume_start
@@ -645,16 +673,16 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-/// Run the agent headlessly: send prompt, consume events, print final response to stdout.
-async fn run_headless(mut runtime: LashRuntime, prompt: String) -> anyhow::Result<()> {
+/// Run the agent autonomously: send prompt, consume events, print final response to stdout.
+async fn run_autonomous(mut runtime: LashRuntime, prompt: String) -> anyhow::Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    struct HeadlessSink {
+    struct AutonomousSink {
         had_error: AtomicBool,
     }
 
     #[async_trait::async_trait]
-    impl EventSink for HeadlessSink {
+    impl EventSink for AutonomousSink {
         async fn emit(&self, event: AgentEvent) {
             match event {
                 AgentEvent::Error { message, .. } => {
@@ -662,7 +690,7 @@ async fn run_headless(mut runtime: LashRuntime, prompt: String) -> anyhow::Resul
                     self.had_error.store(true, Ordering::Relaxed);
                 }
                 AgentEvent::Prompt { response_tx, .. } => {
-                    // No human available in headless mode.
+                    // No human is attached in the autonomous preset.
                     let _ = response_tx.send(String::new());
                 }
                 _ => {}
@@ -671,7 +699,7 @@ async fn run_headless(mut runtime: LashRuntime, prompt: String) -> anyhow::Resul
     }
 
     let (items, image_blobs) = build_items_from_editor_input(&prompt, Vec::new());
-    let sink = HeadlessSink {
+    let sink = AutonomousSink {
         had_error: AtomicBool::new(false),
     };
     let result = runtime
@@ -1628,6 +1656,7 @@ async fn run_app(
             let vh = ui::history_viewport_height(&app, size.width, size.height);
             let vw = size.width as usize;
             app.ensure_height_cache_pub(vw, vh);
+            app.refresh_follow_output_anchor(vw, vh);
             // Clamp scroll_offset (especially for scroll_to_bottom's usize::MAX)
             let total = app.total_content_height(vw, vh);
             let max_scroll = total.saturating_sub(vh);
@@ -3540,21 +3569,15 @@ async fn apply_pending_reconfigure(
         }
     };
 
-    let capabilities_json = dynamic_tools.capabilities_payload_json();
     let prompt_caps = agent_capabilities_from_profile(&dynamic_tools.profile());
     if let Some(rt) = runtime.as_mut() {
         rt.set_capabilities(prompt_caps);
-        if let Err(e) = rt.reconfigure_session(capabilities_json, generation).await {
+        if let Err(e) = rt.refresh_session_execution_surface().await {
             let mut rollback = previous.clone();
             rollback.base_generation = dynamic_tools.generation();
             let _ = dynamic_tools.apply_state(rollback);
             rt.set_capabilities(agent_capabilities_from_profile(&dynamic_tools.profile()));
-            let _ = rt
-                .reconfigure_session(
-                    dynamic_tools.capabilities_payload_json(),
-                    dynamic_tools.generation(),
-                )
-                .await;
+            let _ = rt.refresh_session_execution_surface().await;
             desired_dynamic.base_generation = dynamic_tools.generation();
             return Err(format!(
                 "Failed to apply runtime reconfigure (state rolled back): {e}"
@@ -3593,6 +3616,7 @@ fn send_user_message(
     }
     app.running = true;
     app.iteration = 0;
+    app.resume_follow_output();
     app.keep_latest_user_block_visible();
 
     if !display_input.is_empty() {

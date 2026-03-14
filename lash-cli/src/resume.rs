@@ -70,7 +70,7 @@ pub async fn load_resumed_session(
     )
     .await?;
     app.invalidate_height_cache();
-    app.scroll_to_bottom();
+    app.resume_follow_output();
     Ok(())
 }
 
@@ -282,12 +282,7 @@ pub async fn restore_agent_state(
             rt.set_capabilities(lash_core::agent_capabilities_from_profile(
                 &dynamic_tools.profile(),
             ));
-            let _ = rt
-                .reconfigure_session(
-                    dynamic_tools.capabilities_payload_json(),
-                    dynamic_tools.generation(),
-                )
-                .await;
+            let _ = rt.refresh_session_execution_surface().await;
             let replay_manifest = config_value
                 .as_ref()
                 .and_then(|v| v.get("manifest").cloned());

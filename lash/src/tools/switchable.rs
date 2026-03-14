@@ -50,8 +50,8 @@ impl ToolProvider for SwitchableTools {
         self.current().fork_dynamic_with_snapshot(snapshot)
     }
 
-    fn dynamic_capabilities_payload_json(&self) -> Option<String> {
-        self.current().dynamic_capabilities_payload_json()
+    fn dynamic_capability_payload(&self) -> Option<crate::ToolCapabilityPayload> {
+        self.current().dynamic_capability_payload()
     }
 
     fn dynamic_generation(&self) -> Option<u64> {

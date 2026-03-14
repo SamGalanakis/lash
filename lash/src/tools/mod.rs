@@ -1,7 +1,6 @@
 mod agent_call;
 mod apply_patch;
 mod ask;
-mod batch;
 mod fetch_url;
 mod filtered;
 mod glob;
@@ -18,10 +17,9 @@ mod toolset;
 mod update_plan;
 mod web_search;
 
-pub use agent_call::AgentCall;
+pub use agent_call::{AgentCall, AgentCallConfig};
 pub use apply_patch::ApplyPatchTool;
 pub use ask::AskTool;
-pub use batch::BatchingTools;
 pub use fetch_url::FetchUrl;
 pub use filtered::FilteredTools;
 pub use glob::Glob;
@@ -170,6 +168,27 @@ pub(crate) fn project_tool_catalog(
         .collect()
 }
 
+pub(crate) fn preflight_tool_args(
+    tool_name: &str,
+    mut args: serde_json::Value,
+    definitions: impl IntoIterator<Item = crate::ToolDefinition>,
+    mode: crate::ExecutionMode,
+) -> serde_json::Value {
+    if tool_name == "search_tools" && args.get(INTERNAL_TOOL_CATALOG_ARG).is_none() {
+        if !args.is_object() {
+            args = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let obj = args
+            .as_object_mut()
+            .expect("search_tools args should be normalized to an object");
+        obj.insert(
+            INTERNAL_TOOL_CATALOG_ARG.to_string(),
+            serde_json::Value::Array(project_tool_catalog(definitions, mode)),
+        );
+    }
+    args
+}
+
 /// Read a file to string, or return ToolResult::err.
 pub(crate) fn read_to_string(path: &std::path::Path) -> Result<String, ToolResult> {
     std::fs::read_to_string(path)
@@ -235,8 +254,11 @@ pub(crate) fn build_path_entry(path: &Path, with_lines: bool) -> (PathEntry, Sys
     (entry, mtime)
 }
 
-/// Build the standard typed envelope returned by filesystem listing tools.
-pub(crate) fn path_entries_value(items: Vec<PathEntry>, total_count: usize) -> serde_json::Value {
+/// Build the standard result envelope returned by filesystem listing tools.
+pub(crate) fn filesystem_entries_result(
+    items: Vec<PathEntry>,
+    total_count: usize,
+) -> serde_json::Value {
     let shown = items.len();
     let truncated = if total_count > shown {
         Some(TruncationMeta {
@@ -248,7 +270,6 @@ pub(crate) fn path_entries_value(items: Vec<PathEntry>, total_count: usize) -> s
         None
     };
     serde_json::json!({
-        "__type__": "path_entries",
         "items": items,
         "truncated": truncated,
     })
@@ -289,5 +310,73 @@ pub(crate) fn compact_diff(old: &str, new: &str, path: &str, max_lines: usize) -
         let mut truncated: String = lines[..max_lines].join("\n");
         truncated.push_str(&format!("\n... ({} more lines)", lines.len() - max_lines));
         truncated
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_tool(name: &str) -> crate::ToolDefinition {
+        crate::ToolDefinition {
+            name: name.to_string(),
+            description: vec![crate::ToolText::new(
+                format!("desc for {name}"),
+                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
+            )],
+            params: Vec::new(),
+            returns: String::new(),
+            examples: Vec::new(),
+            hidden: false,
+            inject_into_prompt: true,
+        }
+    }
+
+    #[test]
+    fn preflight_tool_args_injects_catalog_for_search_tools() {
+        let args = preflight_tool_args(
+            "search_tools",
+            serde_json::json!({}),
+            [dummy_tool("read_file"), dummy_tool("search_tools")],
+            crate::ExecutionMode::Repl,
+        );
+
+        let catalog = args
+            .get(INTERNAL_TOOL_CATALOG_ARG)
+            .and_then(|value| value.as_array())
+            .cloned()
+            .expect("catalog should be injected");
+        assert_eq!(catalog.len(), 2);
+    }
+
+    #[test]
+    fn preflight_tool_args_preserves_existing_catalog() {
+        let args = preflight_tool_args(
+            "search_tools",
+            serde_json::json!({
+                "__tool_catalog": [{"name":"already_here"}]
+            }),
+            [dummy_tool("read_file")],
+            crate::ExecutionMode::Repl,
+        );
+
+        assert_eq!(
+            args.get(INTERNAL_TOOL_CATALOG_ARG),
+            Some(&serde_json::json!([{ "name": "already_here" }]))
+        );
+    }
+
+    #[test]
+    fn preflight_tool_args_leaves_other_tools_unchanged() {
+        let args = serde_json::json!({"path":"Cargo.toml"});
+        assert_eq!(
+            preflight_tool_args(
+                "read_file",
+                args.clone(),
+                [dummy_tool("read_file")],
+                crate::ExecutionMode::Repl,
+            ),
+            args
+        );
     }
 }

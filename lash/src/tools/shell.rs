@@ -1,14 +1,15 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex as StdMutex,
-    atomic::{AtomicI32, Ordering},
+    atomic::{AtomicBool, AtomicI32, Ordering},
 };
+use std::thread;
 use std::time::{Duration, Instant};
 
+use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Child;
 use tokio::sync::Notify;
 
 use crate::{
@@ -20,19 +21,38 @@ use super::require_str;
 
 struct ShellProcess {
     pid: u32,
-    stdin: Option<tokio::process::ChildStdin>,
-    buffer: Arc<StdMutex<String>>,
+    _master: Box<dyn MasterPty + Send>,
+    writer: Arc<StdMutex<Option<Box<dyn Write + Send>>>>,
+    killer: Arc<StdMutex<Box<dyn ChildKiller + Send + Sync>>>,
+    buffer: Arc<StdMutex<Vec<u8>>>,
+    truncated: Arc<AtomicBool>,
     read_cursor: Arc<StdMutex<usize>>,
     exit_code: Arc<StdMutex<Option<i32>>>,
     exit_notify: Arc<Notify>,
+    output_notify: Arc<Notify>,
     default_timeout_ms: Option<u64>,
 }
 
-type ProcessState = (u32, Arc<StdMutex<Option<i32>>>, Arc<Notify>, Option<u64>);
+#[derive(Clone)]
+struct ProcessState {
+    buffer: Arc<StdMutex<Vec<u8>>>,
+    exit_code: Arc<StdMutex<Option<i32>>>,
+    exit_notify: Arc<Notify>,
+    output_notify: Arc<Notify>,
+    default_timeout_ms: Option<u64>,
+}
 
 const MAX_OUTPUT: usize = 512_000;
 const DEFAULT_EXEC_YIELD_MS: u64 = 10_000;
 const DEFAULT_WRITE_STDIN_YIELD_MS: u64 = 250;
+const DEFAULT_SHELL_IO_TIMEOUT_MS: u64 = 250;
+const OUTPUT_QUIET_PERIOD_MS: u64 = 75;
+const DEFAULT_PTY_SIZE: PtySize = PtySize {
+    rows: 24,
+    cols: 80,
+    pixel_width: 0,
+    pixel_height: 0,
+};
 
 #[derive(Clone, Debug)]
 struct ReplShellParams {
@@ -48,7 +68,6 @@ struct ExecCommandParams {
     workdir: PathBuf,
     shell_path: String,
     login: bool,
-    tty: bool,
     yield_time_ms: u64,
     max_output_tokens: Option<usize>,
 }
@@ -59,6 +78,13 @@ struct ShellRuntime {
     cwd: PathBuf,
     processes: Arc<StdMutex<HashMap<String, ShellProcess>>>,
     next_session_id: Arc<AtomicI32>,
+}
+
+#[derive(Clone, Copy)]
+struct WaitBehavior {
+    return_on_output: bool,
+    baseline_len: usize,
+    quiet_period: Option<Duration>,
 }
 
 impl ShellRuntime {
@@ -128,102 +154,83 @@ impl ShellRuntime {
         }
     }
 
-    fn spawn_child(
-        &self,
-        command: &str,
-        workdir: &PathBuf,
-        login: bool,
-        shell_path: &str,
-    ) -> Result<tokio::process::Child, String> {
-        let mut cmd = tokio::process::Command::new(shell_path);
-        for arg in self.shell_args(command, login, shell_path)? {
-            cmd.arg(arg);
-        }
-        cmd.current_dir(workdir)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        #[cfg(unix)]
-        cmd.process_group(0);
-        cmd.spawn().map_err(|e| format!("Failed to spawn: {e}"))
-    }
-
     fn spawn_process(
         &self,
         id: String,
         command: &str,
-        workdir: &PathBuf,
+        workdir: &Path,
         login: bool,
         shell_path: &str,
         timeout_ms: Option<u64>,
     ) -> Result<u32, String> {
-        let mut child = self.spawn_child(command, workdir, login, shell_path)?;
-        let pid = child.id().unwrap_or(0);
-        let stdin = child.stdin.take();
-        let buffer = Arc::new(StdMutex::new(String::new()));
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(DEFAULT_PTY_SIZE)
+            .map_err(|err| format!("Failed to open PTY: {err}"))?;
+
+        let mut cmd = CommandBuilder::new(shell_path);
+        for arg in self.shell_args(command, login, shell_path)? {
+            cmd.arg(arg);
+        }
+        cmd.cwd(workdir.as_os_str());
+
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|err| format!("Failed to spawn PTY command: {err}"))?;
+        let pid = child.process_id().unwrap_or(0);
+        let reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|err| format!("Failed to clone PTY reader: {err}"))?;
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|err| format!("Failed to take PTY writer: {err}"))?;
+        let killer = child.clone_killer();
+        drop(pair.slave);
+
+        let buffer = Arc::new(StdMutex::new(Vec::new()));
+        let truncated = Arc::new(AtomicBool::new(false));
         let read_cursor = Arc::new(StdMutex::new(0usize));
         let exit_code = Arc::new(StdMutex::new(None));
         let exit_notify = Arc::new(Notify::new());
+        let output_notify = Arc::new(Notify::new());
 
-        spawn_reader(
+        spawn_reader_thread(
+            reader,
+            Arc::clone(&buffer),
+            Arc::clone(&truncated),
+            Arc::clone(&output_notify),
+        );
+        spawn_wait_thread(
             child,
-            buffer.clone(),
-            exit_code.clone(),
-            exit_notify.clone(),
+            Arc::clone(&exit_code),
+            Arc::clone(&exit_notify),
+            Arc::clone(&output_notify),
         );
 
         let process = ShellProcess {
             pid,
-            stdin,
+            _master: pair.master,
+            writer: Arc::new(StdMutex::new(Some(writer))),
+            killer: Arc::new(StdMutex::new(killer)),
             buffer,
+            truncated,
             read_cursor,
             exit_code,
             exit_notify,
+            output_notify,
             default_timeout_ms: timeout_ms,
         };
         self.processes.lock().unwrap().insert(id, process);
         Ok(pid)
     }
 
-    fn allocate_session_id(&self) -> i32 {
-        self.next_session_id.fetch_add(1, Ordering::SeqCst)
-    }
-
-    fn take_incremental_output(
-        &self,
-        id: &str,
-        max_output_tokens: Option<usize>,
-    ) -> Result<(String, Option<usize>), String> {
-        let (buffer, read_cursor) = {
-            let procs = self.processes.lock().unwrap();
-            let proc = procs
-                .get(id)
-                .ok_or_else(|| format!("Unknown session id {id}"))?;
-            (proc.buffer.clone(), proc.read_cursor.clone())
-        };
-
-        let buf = buffer.lock().unwrap();
-        let mut cursor = read_cursor.lock().unwrap();
-        let new_output = if *cursor <= buf.len() {
-            buf[*cursor..].to_string()
-        } else {
-            buf.clone()
-        };
-        *cursor = buf.len();
-        Ok(truncate_exec_output(new_output, max_output_tokens))
-    }
-
-    fn full_output(&self, id: &str) -> Result<String, String> {
-        let procs = self.processes.lock().unwrap();
-        let proc = procs
-            .get(id)
-            .ok_or_else(|| format!("No process with id: {id}"))?;
-        let mut output = proc.buffer.lock().unwrap().clone();
-        if output.len() > MAX_OUTPUT {
-            output.truncate(MAX_OUTPUT);
-            output.push_str("\n[truncated]");
-        }
-        Ok(output)
+    fn allocate_handle_id(&self) -> String {
+        self.next_session_id
+            .fetch_add(1, Ordering::SeqCst)
+            .to_string()
     }
 
     fn process_state(&self, id: &str) -> Result<ProcessState, String> {
@@ -231,12 +238,59 @@ impl ShellRuntime {
         let proc = procs
             .get(id)
             .ok_or_else(|| format!("No process with id: {id}"))?;
-        Ok((
-            proc.pid,
-            proc.exit_code.clone(),
-            proc.exit_notify.clone(),
-            proc.default_timeout_ms,
-        ))
+        Ok(ProcessState {
+            buffer: Arc::clone(&proc.buffer),
+            exit_code: Arc::clone(&proc.exit_code),
+            exit_notify: Arc::clone(&proc.exit_notify),
+            output_notify: Arc::clone(&proc.output_notify),
+            default_timeout_ms: proc.default_timeout_ms,
+        })
+    }
+
+    fn output_state(&self, id: &str) -> Result<(usize, usize), String> {
+        let procs = self.processes.lock().unwrap();
+        let proc = procs
+            .get(id)
+            .ok_or_else(|| format!("No process with id: {id}"))?;
+        let buffer_len = proc.buffer.lock().unwrap().len();
+        let read_cursor = *proc.read_cursor.lock().unwrap();
+        Ok((buffer_len, read_cursor))
+    }
+
+    fn take_incremental_output(
+        &self,
+        id: &str,
+        max_output_tokens: Option<usize>,
+    ) -> Result<(String, Option<usize>), String> {
+        let (buffer, truncated, read_cursor) = {
+            let procs = self.processes.lock().unwrap();
+            let proc = procs
+                .get(id)
+                .ok_or_else(|| format!("Unknown session id {id}"))?;
+            (
+                Arc::clone(&proc.buffer),
+                Arc::clone(&proc.truncated),
+                Arc::clone(&proc.read_cursor),
+            )
+        };
+
+        let buf = buffer.lock().unwrap();
+        let mut cursor = read_cursor.lock().unwrap();
+        let start = (*cursor).min(buf.len());
+        let mut rendered = String::from_utf8_lossy(&buf[start..]).to_string();
+        *cursor = buf.len();
+        if !rendered.is_empty() && truncated.load(Ordering::SeqCst) && *cursor == buf.len() {
+            if !rendered.ends_with('\n') {
+                rendered.push('\n');
+            }
+            rendered.push_str("[truncated]");
+        }
+        Ok(truncate_exec_output(rendered, max_output_tokens))
+    }
+
+    fn exit_code(&self, id: &str) -> Result<Option<i32>, String> {
+        let state = self.process_state(id)?;
+        Ok(*state.exit_code.lock().unwrap())
     }
 
     async fn wait_until_exit_or_timeout(
@@ -244,32 +298,30 @@ impl ShellRuntime {
         id: &str,
         timeout: Option<Duration>,
         progress: Option<&ProgressSender>,
-        incremental: bool,
         max_output_tokens: Option<usize>,
+        behavior: WaitBehavior,
     ) -> Result<PollOutcome, String> {
-        let (_pid, exit_code, exit_notify, _) = self.process_state(id)?;
+        let state = self.process_state(id)?;
         let deadline = timeout.map(|value| tokio::time::Instant::now() + value);
-        let mut sent_len = 0usize;
+        let mut sent_len = behavior.baseline_len;
+        let mut observed_len = behavior.baseline_len;
+        let mut quiet_deadline = None;
 
         loop {
-            let exited = exit_code.lock().unwrap().is_some();
-
             if let Some(tx) = progress {
                 let new_chunk = {
-                    let procs = self.processes.lock().unwrap();
-                    let proc = procs
-                        .get(id)
-                        .ok_or_else(|| format!("No process with id: {id}"))?;
-                    let buf = proc.buffer.lock().unwrap();
+                    let buf = state.buffer.lock().unwrap();
                     if buf.len() > sent_len {
-                        let chunk = buf[sent_len..].to_string();
+                        let chunk = String::from_utf8_lossy(&buf[sent_len..]).to_string();
                         sent_len = buf.len();
                         Some(chunk)
                     } else {
                         None
                     }
                 };
-                if let Some(chunk) = new_chunk {
+                if let Some(chunk) = new_chunk
+                    && !chunk.is_empty()
+                {
                     let _ = tx.send(SandboxMessage {
                         text: chunk,
                         kind: "tool_output".into(),
@@ -277,77 +329,123 @@ impl ShellRuntime {
                 }
             }
 
+            let exited = state.exit_code.lock().unwrap().is_some();
+            let buffer_len = state.buffer.lock().unwrap().len();
+            if buffer_len > observed_len {
+                observed_len = buffer_len;
+                if behavior.return_on_output {
+                    quiet_deadline = Some(
+                        tokio::time::Instant::now() + behavior.quiet_period.unwrap_or_default(),
+                    );
+                }
+            }
+
             if exited {
-                let output = if incremental {
-                    self.take_incremental_output(id, max_output_tokens)?
-                } else {
-                    (self.full_output(id)?, None)
-                };
-                let code = exit_code.lock().unwrap().unwrap_or(-1);
+                wait_for_buffer_settle(&state, Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)).await;
+                let (output, original_token_count) =
+                    self.take_incremental_output(id, max_output_tokens)?;
+                let exit_code = state.exit_code.lock().unwrap().unwrap_or(-1);
                 return Ok(PollOutcome::Exited {
-                    output: output.0,
-                    original_token_count: output.1,
-                    exit_code: code,
+                    output,
+                    original_token_count,
+                    exit_code,
+                });
+            }
+
+            if behavior.return_on_output
+                && observed_len > behavior.baseline_len
+                && quiet_deadline
+                    .is_none_or(|quiet_until| tokio::time::Instant::now() >= quiet_until)
+            {
+                let (output, original_token_count) =
+                    self.take_incremental_output(id, max_output_tokens)?;
+                return Ok(PollOutcome::Running {
+                    output,
+                    original_token_count,
+                    deadline_reached: false,
                 });
             }
 
             if let Some(dl) = deadline
                 && tokio::time::Instant::now() >= dl
             {
-                let output = if incremental {
-                    self.take_incremental_output(id, max_output_tokens)?
-                } else {
-                    (self.full_output(id)?, None)
-                };
+                let (output, original_token_count) =
+                    self.take_incremental_output(id, max_output_tokens)?;
                 return Ok(PollOutcome::Running {
-                    output: output.0,
-                    original_token_count: output.1,
+                    output,
+                    original_token_count,
+                    deadline_reached: true,
                 });
             }
 
-            tokio::select! {
-                _ = exit_notify.notified() => {}
-                _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+            let wake_at = match (deadline, quiet_deadline) {
+                (Some(deadline), Some(quiet_until)) => Some(deadline.min(quiet_until)),
+                (Some(deadline), None) => Some(deadline),
+                (None, Some(quiet_until)) => Some(quiet_until),
+                (None, None) => None,
+            };
+
+            if let Some(wake_at) = wake_at {
+                tokio::select! {
+                    _ = state.exit_notify.notified() => {}
+                    _ = state.output_notify.notified() => {}
+                    _ = tokio::time::sleep_until(wake_at) => {}
+                }
+            } else {
+                tokio::select! {
+                    _ = state.exit_notify.notified() => {}
+                    _ = state.output_notify.notified() => {}
+                }
             }
         }
     }
 
     async fn kill_process(&self, id: &str) -> Result<(), String> {
-        let (pid, exit_notify, _) = {
+        let (pid, killer, exit_notify, state) = {
             let procs = self.processes.lock().unwrap();
             let proc = procs
                 .get(id)
                 .ok_or_else(|| format!("No process with id: {id}"))?;
-            (proc.pid, proc.exit_notify.clone(), proc.default_timeout_ms)
+            (
+                proc.pid,
+                Arc::clone(&proc.killer),
+                Arc::clone(&proc.exit_notify),
+                ProcessState {
+                    buffer: Arc::clone(&proc.buffer),
+                    exit_code: Arc::clone(&proc.exit_code),
+                    exit_notify: Arc::clone(&proc.exit_notify),
+                    output_notify: Arc::clone(&proc.output_notify),
+                    default_timeout_ms: proc.default_timeout_ms,
+                },
+            )
         };
 
-        let _ = tokio::process::Command::new("kill")
-            .arg("--")
-            .arg(format!("-{pid}"))
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await;
+        tokio::task::spawn_blocking({
+            let killer = Arc::clone(&killer);
+            move || {
+                let mut killer = killer.lock().unwrap();
+                request_termination(pid, killer.as_mut())
+            }
+        })
+        .await
+        .map_err(|err| format!("Kill task failed: {err}"))??;
 
-        let exited = tokio::time::timeout(Duration::from_secs(2), exit_notify.notified()).await;
-        if exited.is_err() {
-            let _ = tokio::process::Command::new("kill")
-                .args(["-9", "--", &format!("-{pid}")])
-                .stderr(std::process::Stdio::null())
-                .status()
-                .await;
-            let _ = tokio::process::Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .stderr(std::process::Stdio::null())
-                .status()
-                .await;
+        let exited = tokio::time::timeout(Duration::from_secs(2), exit_notify.notified())
+            .await
+            .is_ok();
+        if !exited {
+            tokio::task::spawn_blocking(move || {
+                let mut killer = killer.lock().unwrap();
+                force_termination(pid, killer.as_mut())
+            })
+            .await
+            .map_err(|err| format!("Kill task failed: {err}"))??;
+            let _ = tokio::time::timeout(Duration::from_secs(1), exit_notify.notified()).await;
         }
 
+        wait_for_buffer_settle(&state, Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)).await;
         self.processes.lock().unwrap().remove(id);
         Ok(())
-    }
-
-    async fn kill_for_timeout(&self, id: &str) -> Result<(), String> {
-        self.kill_process(id).await
     }
 
     fn remove_process(&self, id: &str) {
@@ -355,23 +453,43 @@ impl ShellRuntime {
     }
 
     async fn write_stdin(&self, id: &str, input: &str) -> Result<(), String> {
-        let stdin = {
-            let mut procs = self.processes.lock().unwrap();
+        let writer = {
+            let procs = self.processes.lock().unwrap();
             let proc = procs
-                .get_mut(id)
+                .get(id)
                 .ok_or_else(|| format!("Unknown session id {id}"))?;
-            proc.stdin.take()
+            Arc::clone(&proc.writer)
         };
+        let input = input.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut writer = writer.lock().unwrap();
+            let writer = writer
+                .as_mut()
+                .ok_or_else(|| "Process stdin not available".to_string())?;
+            writer
+                .write_all(input.as_bytes())
+                .map_err(|err| format!("Write failed: {err}"))?;
+            writer.flush().map_err(|err| format!("Flush failed: {err}"))
+        })
+        .await
+        .map_err(|err| format!("Write task failed: {err}"))?
+    }
+}
 
-        if let Some(mut stdin) = stdin {
-            let result = stdin.write_all(input.as_bytes()).await;
-            let mut procs = self.processes.lock().unwrap();
-            if let Some(proc) = procs.get_mut(id) {
-                proc.stdin = Some(stdin);
+async fn wait_for_buffer_settle(state: &ProcessState, quiet_period: Duration) {
+    let mut last_len = state.buffer.lock().unwrap().len();
+    let mut quiet_until = tokio::time::Instant::now() + quiet_period;
+
+    loop {
+        tokio::select! {
+            _ = state.output_notify.notified() => {
+                let buffer_len = state.buffer.lock().unwrap().len();
+                if buffer_len != last_len {
+                    last_len = buffer_len;
+                    quiet_until = tokio::time::Instant::now() + quiet_period;
+                }
             }
-            result.map_err(|e| format!("Write failed: {e}"))
-        } else {
-            Err("Process stdin not available".to_string())
+            _ = tokio::time::sleep_until(quiet_until) => break,
         }
     }
 }
@@ -380,6 +498,7 @@ enum PollOutcome {
     Running {
         output: String,
         original_token_count: Option<usize>,
+        deadline_reached: bool,
     },
     Exited {
         output: String,
@@ -424,10 +543,6 @@ impl StandardShell {
             .get("login")
             .and_then(|value| value.as_bool())
             .unwrap_or(true);
-        let tty = args
-            .get("tty")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
         let yield_time_ms = args
             .get("yield_time_ms")
             .and_then(|value| value.as_u64())
@@ -442,7 +557,6 @@ impl StandardShell {
             workdir,
             shell_path,
             login,
-            tty,
             yield_time_ms,
             max_output_tokens,
         })
@@ -454,12 +568,10 @@ impl StandardShell {
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
         let started = Instant::now();
-        let session_id = self.runtime.allocate_session_id();
-        let session_key = session_id.to_string();
-        let _ = params.tty;
+        let handle_id = self.runtime.allocate_handle_id();
 
         if let Err(err) = self.runtime.spawn_process(
-            session_key.clone(),
+            handle_id.clone(),
             &params.cmd,
             &params.workdir,
             params.login,
@@ -472,38 +584,49 @@ impl StandardShell {
         match self
             .runtime
             .wait_until_exit_or_timeout(
-                &session_key,
+                &handle_id,
                 Some(Duration::from_millis(params.yield_time_ms)),
                 progress,
-                true,
                 params.max_output_tokens,
+                WaitBehavior {
+                    return_on_output: false,
+                    baseline_len: 0,
+                    quiet_period: None,
+                },
             )
             .await
         {
             Ok(PollOutcome::Running {
                 output,
                 original_token_count,
-            }) => ToolResult::ok(json!({
-                "wall_time_seconds": started.elapsed().as_secs_f64(),
-                "session_id": session_id,
-                "original_token_count": original_token_count,
-                "output": output,
-            })),
+                ..
+            }) => ToolResult::ok(shell_io_record(
+                &handle_id,
+                output,
+                true,
+                None,
+                original_token_count,
+                Some(started.elapsed().as_secs_f64()),
+                false,
+            )),
             Ok(PollOutcome::Exited {
                 output,
                 original_token_count,
                 exit_code,
             }) => {
-                self.runtime.remove_process(&session_key);
-                ToolResult::ok(json!({
-                    "wall_time_seconds": started.elapsed().as_secs_f64(),
-                    "exit_code": exit_code,
-                    "original_token_count": original_token_count,
-                    "output": output,
-                }))
+                self.runtime.remove_process(&handle_id);
+                ToolResult::ok(shell_io_record(
+                    &handle_id,
+                    output,
+                    false,
+                    Some(exit_code),
+                    original_token_count,
+                    Some(started.elapsed().as_secs_f64()),
+                    false,
+                ))
             }
             Err(err) => {
-                self.runtime.remove_process(&session_key);
+                self.runtime.remove_process(&handle_id);
                 ToolResult::err(json!(err))
             }
         }
@@ -514,11 +637,7 @@ impl StandardShell {
         args: &serde_json::Value,
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
-        let session_id = args
-            .get("session_id")
-            .and_then(|value| value.as_i64())
-            .ok_or_else(|| ToolResult::err_fmt("Missing required parameter: session_id"));
-        let session_id = match session_id {
+        let id = match require_str(args, "id") {
             Ok(value) => value,
             Err(err) => return err,
         };
@@ -534,45 +653,59 @@ impl StandardShell {
             .get("max_output_tokens")
             .and_then(|value| value.as_u64())
             .map(|value| value as usize);
-        let session_key = session_id.to_string();
         let started = Instant::now();
+        let (baseline_len, _) = match self.runtime.output_state(id) {
+            Ok(state) => state,
+            Err(err) => return ToolResult::err(json!(err)),
+        };
 
-        if let Err(err) = self.runtime.write_stdin(&session_key, chars).await {
+        if let Err(err) = self.runtime.write_stdin(id, chars).await {
             return ToolResult::err(json!(err));
         }
 
         match self
             .runtime
             .wait_until_exit_or_timeout(
-                &session_key,
+                id,
                 Some(Duration::from_millis(yield_time_ms)),
                 progress,
-                true,
                 max_output_tokens,
+                WaitBehavior {
+                    return_on_output: true,
+                    baseline_len,
+                    quiet_period: Some(Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)),
+                },
             )
             .await
         {
             Ok(PollOutcome::Running {
                 output,
                 original_token_count,
-            }) => ToolResult::ok(json!({
-                "wall_time_seconds": started.elapsed().as_secs_f64(),
-                "session_id": session_id,
-                "original_token_count": original_token_count,
-                "output": output,
-            })),
+                ..
+            }) => ToolResult::ok(shell_io_record(
+                id,
+                output,
+                true,
+                None,
+                original_token_count,
+                Some(started.elapsed().as_secs_f64()),
+                false,
+            )),
             Ok(PollOutcome::Exited {
                 output,
                 original_token_count,
                 exit_code,
             }) => {
-                self.runtime.remove_process(&session_key);
-                ToolResult::ok(json!({
-                    "wall_time_seconds": started.elapsed().as_secs_f64(),
-                    "exit_code": exit_code,
-                    "original_token_count": original_token_count,
-                    "output": output,
-                }))
+                self.runtime.remove_process(id);
+                ToolResult::ok(shell_io_record(
+                    id,
+                    output,
+                    false,
+                    Some(exit_code),
+                    original_token_count,
+                    Some(started.elapsed().as_secs_f64()),
+                    false,
+                ))
             }
             Err(err) => ToolResult::err(json!(err)),
         }
@@ -635,15 +768,14 @@ impl ReplShell {
             &self.runtime.shell_path,
             params.timeout_ms,
         ) {
-            Ok(pid) => ToolResult::ok(json!({
-                "__handle__": "shell",
-                "id": id,
-                "pid": pid,
-                "command": params.command,
-                "workdir": params.workdir.display().to_string(),
-                "timeout_ms": params.timeout_ms,
-                "login": params.login,
-            })),
+            Ok(pid) => ToolResult::ok(shell_handle_record(
+                &id,
+                pid,
+                &params.command,
+                &params.workdir,
+                params.timeout_ms,
+                params.login,
+            )),
             Err(err) => ToolResult::err(json!(err)),
         }
     }
@@ -651,71 +783,220 @@ impl ReplShell {
     async fn shell_wait(
         &self,
         id: &str,
-        timeout: Option<f64>,
+        timeout_ms: Option<u64>,
+        max_output_tokens: Option<usize>,
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
-        let (_, _, _, default_timeout_ms) = match self.runtime.process_state(id) {
+        let started = Instant::now();
+        let state = match self.runtime.process_state(id) {
             Ok(state) => state,
             Err(err) => return ToolResult::err(json!(err)),
         };
-        let timeout = timeout.or_else(|| default_timeout_ms.map(|ms| ms as f64 / 1000.0));
+        let timeout_ms = timeout_ms.or(state.default_timeout_ms);
 
         match self
             .runtime
             .wait_until_exit_or_timeout(
                 id,
-                timeout.map(Duration::from_secs_f64),
+                timeout_ms.map(Duration::from_millis),
                 progress,
-                false,
-                None,
+                max_output_tokens,
+                WaitBehavior {
+                    return_on_output: false,
+                    baseline_len: 0,
+                    quiet_period: None,
+                },
             )
             .await
         {
             Ok(PollOutcome::Exited {
-                mut output,
+                output,
+                original_token_count,
                 exit_code,
-                ..
             }) => {
-                if exit_code != 0 {
-                    output.push_str(&format!("\n[exit code: {exit_code}]"));
-                }
-                ToolResult {
-                    success: exit_code == 0,
-                    result: json!(output),
-                    images: vec![],
-                }
+                self.runtime.remove_process(id);
+                ToolResult::ok(shell_io_record(
+                    id,
+                    output,
+                    false,
+                    Some(exit_code),
+                    original_token_count,
+                    Some(started.elapsed().as_secs_f64()),
+                    false,
+                ))
             }
-            Ok(PollOutcome::Running { mut output, .. }) => {
-                if let Err(err) = self.runtime.kill_for_timeout(id).await {
-                    return ToolResult::err(json!(err));
-                }
-                output.push_str(
-                    "\n[timed out: process exceeded timeout; retry with a larger timeout or split into smaller commands]",
-                );
-                ToolResult::err(json!(output))
-            }
+            Ok(PollOutcome::Running {
+                output,
+                original_token_count,
+                deadline_reached,
+            }) => ToolResult::ok(shell_io_record(
+                id,
+                output,
+                true,
+                None,
+                original_token_count,
+                Some(started.elapsed().as_secs_f64()),
+                deadline_reached && timeout_ms.is_some(),
+            )),
             Err(err) => ToolResult::err(json!(err)),
         }
     }
 
-    fn shell_read(&self, id: &str) -> ToolResult {
-        let output = match self.runtime.take_incremental_output(id, None) {
-            Ok((output, _)) => output,
+    async fn shell_read(
+        &self,
+        id: &str,
+        timeout_ms: Option<u64>,
+        max_output_tokens: Option<usize>,
+    ) -> ToolResult {
+        let exit_code = match self.runtime.exit_code(id) {
+            Ok(exit_code) => exit_code,
             Err(err) => return ToolResult::err_fmt(err),
         };
-        ToolResult::ok(json!(output))
+        if exit_code.is_some() {
+            let output = match self.runtime.take_incremental_output(id, max_output_tokens) {
+                Ok(output) => output,
+                Err(err) => return ToolResult::err_fmt(err),
+            };
+            return ToolResult::ok(shell_io_record(
+                id, output.0, false, exit_code, output.1, None, false,
+            ));
+        }
+
+        let (buffer_len, read_cursor) = match self.runtime.output_state(id) {
+            Ok(state) => state,
+            Err(err) => return ToolResult::err_fmt(err),
+        };
+        if buffer_len > read_cursor {
+            let output = match self.runtime.take_incremental_output(id, max_output_tokens) {
+                Ok(output) => output,
+                Err(err) => return ToolResult::err_fmt(err),
+            };
+            return ToolResult::ok(shell_io_record(
+                id, output.0, true, None, output.1, None, false,
+            ));
+        }
+
+        let timeout = timeout_ms.unwrap_or(0);
+        match self
+            .runtime
+            .wait_until_exit_or_timeout(
+                id,
+                Some(Duration::from_millis(timeout)),
+                None,
+                max_output_tokens,
+                WaitBehavior {
+                    return_on_output: true,
+                    baseline_len: read_cursor,
+                    quiet_period: Some(Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)),
+                },
+            )
+            .await
+        {
+            Ok(PollOutcome::Running {
+                output,
+                original_token_count,
+                deadline_reached,
+            }) => ToolResult::ok(shell_io_record(
+                id,
+                output,
+                true,
+                None,
+                original_token_count,
+                None,
+                deadline_reached && timeout_ms.is_some(),
+            )),
+            Ok(PollOutcome::Exited {
+                output,
+                original_token_count,
+                exit_code,
+            }) => {
+                self.runtime.remove_process(id);
+                ToolResult::ok(shell_io_record(
+                    id,
+                    output,
+                    false,
+                    Some(exit_code),
+                    original_token_count,
+                    None,
+                    false,
+                ))
+            }
+            Err(err) => ToolResult::err_fmt(err),
+        }
     }
 
-    async fn shell_write(&self, id: &str, input: &str) -> ToolResult {
-        match self.runtime.write_stdin(id, input).await {
-            Ok(()) => ToolResult::ok(json!(null)),
+    async fn shell_write(
+        &self,
+        id: &str,
+        input: &str,
+        timeout_ms: Option<u64>,
+        max_output_tokens: Option<usize>,
+    ) -> ToolResult {
+        let started = Instant::now();
+        let (baseline_len, _) = match self.runtime.output_state(id) {
+            Ok(state) => state,
+            Err(err) => return ToolResult::err(json!(err)),
+        };
+        if let Err(err) = self.runtime.write_stdin(id, input).await {
+            return ToolResult::err(json!(err));
+        }
+
+        let timeout_ms = timeout_ms.unwrap_or(DEFAULT_SHELL_IO_TIMEOUT_MS);
+        match self
+            .runtime
+            .wait_until_exit_or_timeout(
+                id,
+                Some(Duration::from_millis(timeout_ms)),
+                None,
+                max_output_tokens,
+                WaitBehavior {
+                    return_on_output: true,
+                    baseline_len,
+                    quiet_period: Some(Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)),
+                },
+            )
+            .await
+        {
+            Ok(PollOutcome::Running {
+                output,
+                original_token_count,
+                deadline_reached,
+            }) => ToolResult::ok(shell_io_record(
+                id,
+                output,
+                true,
+                None,
+                original_token_count,
+                Some(started.elapsed().as_secs_f64()),
+                deadline_reached,
+            )),
+            Ok(PollOutcome::Exited {
+                output,
+                original_token_count,
+                exit_code,
+            }) => {
+                self.runtime.remove_process(id);
+                ToolResult::ok(shell_io_record(
+                    id,
+                    output,
+                    false,
+                    Some(exit_code),
+                    original_token_count,
+                    Some(started.elapsed().as_secs_f64()),
+                    false,
+                ))
+            }
             Err(err) => ToolResult::err(json!(err)),
         }
     }
 
     async fn shell_kill(&self, id: &str) -> ToolResult {
         match self.runtime.kill_process(id).await {
-            Ok(()) => ToolResult::ok(json!(null)),
+            Ok(()) => ToolResult::ok(json!({
+                "id": id,
+                "running": false,
+                "killed": true,
+            })),
             Err(err) => ToolResult::err(json!(err)),
         }
     }
@@ -734,7 +1015,7 @@ impl ToolProvider for StandardShell {
             ToolDefinition {
                 name: "exec_command".into(),
                 description: vec![crate::ToolText::new(
-                    "Runs a command in a PTY, returning output or a session ID for ongoing interaction.",
+                    "Runs a command in a PTY and returns a shell result record. PTY output is terminal-style and stdout/stderr are merged. Long-running commands return `running: true` with a reusable handle `id`; completed commands return `running: false` with `exit_code` and incremental `output`.",
                     [crate::ExecutionMode::Standard],
                 )],
                 params: vec![
@@ -742,7 +1023,6 @@ impl ToolProvider for StandardShell {
                     ToolParam::optional("workdir", "str"),
                     ToolParam::optional("shell", "str"),
                     ToolParam::optional("login", "bool"),
-                    ToolParam::optional("tty", "bool"),
                     ToolParam::optional("yield_time_ms", "int"),
                     ToolParam::optional("max_output_tokens", "int"),
                 ],
@@ -754,11 +1034,11 @@ impl ToolProvider for StandardShell {
             ToolDefinition {
                 name: "write_stdin".into(),
                 description: vec![crate::ToolText::new(
-                    "Writes characters to an existing unified exec session and returns recent output.",
+                    "Writes characters to an existing PTY shell handle and returns the next settled chunk of terminal output. Pass empty `chars` to poll for more output without sending input.",
                     [crate::ExecutionMode::Standard],
                 )],
                 params: vec![
-                    ToolParam::typed("session_id", "int"),
+                    ToolParam::typed("id", "str"),
                     ToolParam::optional("chars", "str"),
                     ToolParam::optional("yield_time_ms", "int"),
                     ToolParam::optional("max_output_tokens", "int"),
@@ -808,7 +1088,7 @@ impl ToolProvider for ReplShell {
                 name: "shell".into(),
                 description: vec![crate::ToolText::new(
                     format!(
-                        "Start a command via {shell_name} and return a handle for interactive or long-running work. Use this when you need to wait, poll output, send stdin, or kill the process later. Set `workdir` instead of relying on `cd` when possible."
+                        "Start a PTY-backed command via {shell_name} and return a handle for interactive or long-running work. Companion tools are `shell_wait`, `shell_read`, `shell_write`, and `shell_kill`. Use this for terminal-sensitive programs like REPLs, prompts, and tools that change behavior when attached to a terminal."
                     ),
                     [crate::ExecutionMode::Repl],
                 )],
@@ -826,62 +1106,69 @@ impl ToolProvider for ReplShell {
             ToolDefinition {
                 name: "shell_wait".into(),
                 description: vec![crate::ToolText::new(
-                    "Wait for a shell handle to exit and return its full output. Use this for commands started with `shell(...)` that should eventually terminate.",
+                    "Wait for a PTY shell handle to exit or until `timeout_ms` elapses. Returns the next drained output chunk; if the timeout elapses first, returns `running: true` with `timed_out: true` without killing the process.",
                     [crate::ExecutionMode::Repl],
                 )],
                 params: vec![
                     ToolParam::typed("id", "str"),
-                    ToolParam::optional("timeout", "float"),
+                    ToolParam::optional("timeout_ms", "int"),
+                    ToolParam::optional("max_output_tokens", "int"),
                 ],
-                returns: "str".into(),
+                returns: "dict".into(),
                 examples: vec![],
                 hidden: false,
-                inject_into_prompt: false,
+                inject_into_prompt: true,
             },
             ToolDefinition {
                 name: "shell_read".into(),
                 description: vec![crate::ToolText::new(
-                    "Read and drain buffered output from a running shell handle. Non-blocking; returns an empty string if nothing new is available.",
+                    "Read and drain PTY output from a shell handle. Unread output returns immediately; otherwise, if `timeout_ms` is provided, wait up to that long for new output before returning.",
                     [crate::ExecutionMode::Repl],
                 )],
-                params: vec![ToolParam::typed("id", "str")],
-                returns: "str".into(),
+                params: vec![
+                    ToolParam::typed("id", "str"),
+                    ToolParam::optional("timeout_ms", "int"),
+                    ToolParam::optional("max_output_tokens", "int"),
+                ],
+                returns: "dict".into(),
                 examples: vec![],
                 hidden: false,
-                inject_into_prompt: false,
+                inject_into_prompt: true,
             },
             ToolDefinition {
                 name: "shell_write".into(),
                 description: vec![crate::ToolText::new(
-                    "Write input to a shell handle's stdin.",
+                    "Write input to a PTY shell handle's stdin and wait briefly for the next settled output chunk. Terminal echo and prompts may appear in the returned `output`.",
                     [crate::ExecutionMode::Repl],
                 )],
                 params: vec![
                     ToolParam::typed("id", "str"),
                     ToolParam::typed("input", "str"),
+                    ToolParam::optional("timeout_ms", "int"),
+                    ToolParam::optional("max_output_tokens", "int"),
                 ],
-                returns: "None".into(),
+                returns: "dict".into(),
                 examples: vec![],
                 hidden: false,
-                inject_into_prompt: false,
+                inject_into_prompt: true,
             },
             ToolDefinition {
                 name: "shell_kill".into(),
                 description: vec![crate::ToolText::new(
-                    "Terminate a running shell handle.",
+                    "Terminate a running PTY shell handle.",
                     [crate::ExecutionMode::Repl],
                 )],
                 params: vec![ToolParam::typed("id", "str")],
-                returns: "None".into(),
+                returns: "dict".into(),
                 examples: vec![],
                 hidden: false,
-                inject_into_prompt: false,
+                inject_into_prompt: true,
             },
         ]
     }
 
     fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
-        vec!["### REPL Shell Shapes\n`call shell { ... }` returns a handle record in `result.value` with an `id` field. `call shell_wait { id: handle.value.id }` returns the command output as a plain string in `result.value`, not `{ stdout: ... }`. Waiting does not consume the handle; you may still call `shell_read` afterwards. Example:\n`proc = call shell { command: \"date\" }`\n`out = call shell_wait { id: proc.value.id }`\n`finish format(\"It is {0}\", out.value)`".to_string()]
+        vec!["### REPL Shell Shapes\n`call shell { ... }` starts a PTY-backed terminal session and returns a handle record in `result.value` with an `id` field. `shell_wait`, `shell_read`, and `shell_write` all return a dict with `id`, `running`, `output`, and `exit_code`. Output is incremental and draining, `shell_read` returns unread output immediately, and `shell_write` waits briefly for output to settle before returning. Stdout/stderr are merged by terminal semantics. Example:\n`proc = call shell { command: \"python3 -q\" }`\n`prompt = call shell_read { id: proc.value.id, timeout_ms: 1000 }`\n`reply = call shell_write { id: proc.value.id, input: \"print(2 + 2)\\n\", timeout_ms: 1000 }`\n`finish reply.value.output`".to_string()]
     }
 
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
@@ -907,15 +1194,31 @@ impl ToolProvider for ReplShell {
                     Ok(value) => value,
                     Err(err) => return err,
                 };
-                let timeout = args.get("timeout").and_then(|value| value.as_f64());
-                self.shell_wait(id, timeout, progress).await
+                let timeout_ms = match parse_timeout_ms(args) {
+                    Ok(timeout) => timeout,
+                    Err(err) => return err,
+                };
+                let max_output_tokens = args
+                    .get("max_output_tokens")
+                    .and_then(|value| value.as_u64())
+                    .map(|value| value as usize);
+                self.shell_wait(id, timeout_ms, max_output_tokens, progress)
+                    .await
             }
             "shell_read" => {
                 let id = match require_str(args, "id") {
                     Ok(value) => value,
                     Err(err) => return err,
                 };
-                self.shell_read(id)
+                let timeout_ms = match parse_timeout_ms(args) {
+                    Ok(timeout) => timeout,
+                    Err(err) => return err,
+                };
+                let max_output_tokens = args
+                    .get("max_output_tokens")
+                    .and_then(|value| value.as_u64())
+                    .map(|value| value as usize);
+                self.shell_read(id, timeout_ms, max_output_tokens).await
             }
             "shell_write" => {
                 let id = match require_str(args, "id") {
@@ -926,7 +1229,16 @@ impl ToolProvider for ReplShell {
                     Ok(value) => value,
                     Err(err) => return err,
                 };
-                self.shell_write(id, input).await
+                let timeout_ms = match parse_timeout_ms(args) {
+                    Ok(timeout) => timeout,
+                    Err(err) => return err,
+                };
+                let max_output_tokens = args
+                    .get("max_output_tokens")
+                    .and_then(|value| value.as_u64())
+                    .map(|value| value as usize);
+                self.shell_write(id, input, timeout_ms, max_output_tokens)
+                    .await
             }
             "shell_kill" => {
                 let id = match require_str(args, "id") {
@@ -940,60 +1252,55 @@ impl ToolProvider for ReplShell {
     }
 }
 
-fn spawn_reader(
-    mut child: Child,
-    buffer: Arc<StdMutex<String>>,
+fn spawn_reader_thread(
+    mut reader: Box<dyn Read + Send>,
+    buffer: Arc<StdMutex<Vec<u8>>>,
+    truncated: Arc<AtomicBool>,
+    output_notify: Arc<Notify>,
+) {
+    thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    {
+                        let mut buf = buffer.lock().unwrap();
+                        if buf.len() < MAX_OUTPUT {
+                            let remaining = MAX_OUTPUT - buf.len();
+                            let to_copy = remaining.min(n);
+                            buf.extend_from_slice(&chunk[..to_copy]);
+                            if to_copy < n {
+                                truncated.store(true, Ordering::SeqCst);
+                            }
+                        } else {
+                            truncated.store(true, Ordering::SeqCst);
+                        }
+                    }
+                    output_notify.notify_waiters();
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        output_notify.notify_waiters();
+    });
+}
+
+fn spawn_wait_thread(
+    mut child: Box<dyn portable_pty::Child + Send + Sync>,
     exit_code: Arc<StdMutex<Option<i32>>>,
     exit_notify: Arc<Notify>,
+    output_notify: Arc<Notify>,
 ) {
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-
-    tokio::spawn(async move {
-        let buf_out = buffer.clone();
-        let buf_err = buffer.clone();
-
-        let out_task = tokio::spawn(async move {
-            if let Some(stdout) = stdout {
-                let mut reader = BufReader::new(stdout);
-                let mut line = String::new();
-                while let Ok(n) = reader.read_line(&mut line).await {
-                    if n == 0 {
-                        break;
-                    }
-                    let mut buf = buf_out.lock().unwrap();
-                    if buf.len() < MAX_OUTPUT {
-                        buf.push_str(&line);
-                    }
-                    line.clear();
-                }
-            }
-        });
-
-        let err_task = tokio::spawn(async move {
-            if let Some(stderr) = stderr {
-                let mut reader = BufReader::new(stderr);
-                let mut line = String::new();
-                while let Ok(n) = reader.read_line(&mut line).await {
-                    if n == 0 {
-                        break;
-                    }
-                    let mut buf = buf_err.lock().unwrap();
-                    if buf.len() < MAX_OUTPUT {
-                        buf.push_str(&line);
-                    }
-                    line.clear();
-                }
-            }
-        });
-
-        let _ = out_task.await;
-        let _ = err_task.await;
-
-        let status = child.wait().await;
-        let code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+    thread::spawn(move || {
+        let code = child
+            .wait()
+            .map(|status| i32::try_from(status.exit_code()).unwrap_or(i32::MAX))
+            .unwrap_or(-1);
         *exit_code.lock().unwrap() = Some(code);
         exit_notify.notify_waiters();
+        output_notify.notify_waiters();
     });
 }
 
@@ -1026,6 +1333,98 @@ fn estimate_token_count(text: &str) -> usize {
     text.chars().count().div_ceil(4)
 }
 
+#[cfg(unix)]
+fn send_signal_to_pid(pid: u32, signal: i32) -> std::io::Result<()> {
+    if pid == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "missing process id",
+        ));
+    }
+
+    if unsafe { libc::kill(pid as i32, signal) } == 0 {
+        return Ok(());
+    }
+
+    Err(std::io::Error::last_os_error())
+}
+
+#[cfg(unix)]
+fn send_signal_to_process_group(pid: u32, signal: i32) -> std::io::Result<()> {
+    if pid == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "missing process id",
+        ));
+    }
+
+    if unsafe { libc::kill(-(pid as i32), signal) } == 0 {
+        return Ok(());
+    }
+
+    Err(std::io::Error::last_os_error())
+}
+
+fn request_termination(pid: u32, killer: &mut dyn ChildKiller) -> Result<(), String> {
+    #[cfg(unix)]
+    if send_signal_to_pid(pid, libc::SIGHUP).is_ok() {
+        return Ok(());
+    }
+
+    killer.kill().map_err(|err| format!("Kill failed: {err}"))
+}
+
+fn force_termination(pid: u32, killer: &mut dyn ChildKiller) -> Result<(), String> {
+    #[cfg(unix)]
+    if send_signal_to_process_group(pid, libc::SIGKILL).is_ok()
+        || send_signal_to_pid(pid, libc::SIGKILL).is_ok()
+    {
+        return Ok(());
+    }
+
+    killer.kill().map_err(|err| format!("Kill failed: {err}"))
+}
+
+fn shell_handle_record(
+    id: &str,
+    pid: u32,
+    command: &str,
+    workdir: &Path,
+    timeout_ms: Option<u64>,
+    login: bool,
+) -> serde_json::Value {
+    json!({
+        "__handle__": "shell",
+        "id": id,
+        "pid": pid,
+        "command": command,
+        "workdir": workdir.display().to_string(),
+        "timeout_ms": timeout_ms,
+        "login": login,
+        "running": true,
+    })
+}
+
+fn shell_io_record(
+    id: &str,
+    output: String,
+    running: bool,
+    exit_code: Option<i32>,
+    original_token_count: Option<usize>,
+    wall_time_seconds: Option<f64>,
+    timed_out: bool,
+) -> serde_json::Value {
+    json!({
+        "id": id,
+        "running": running,
+        "exit_code": exit_code,
+        "output": output,
+        "original_token_count": original_token_count,
+        "wall_time_seconds": wall_time_seconds,
+        "timed_out": timed_out,
+    })
+}
+
 fn parse_timeout_ms(args: &serde_json::Value) -> Result<Option<u64>, ToolResult> {
     if let Some(value) = args.get("timeout_ms") {
         if let Some(timeout) = value.as_u64() {
@@ -1041,10 +1440,6 @@ fn parse_timeout_ms(args: &serde_json::Value) -> Result<Option<u64>, ToolResult>
         )));
     }
 
-    if let Some(timeout) = args.get("timeout").and_then(|value| value.as_f64()) {
-        return Ok(Some((timeout * 1000.0).round() as u64));
-    }
-
     Ok(None)
 }
 
@@ -1052,6 +1447,11 @@ fn parse_timeout_ms(args: &serde_json::Value) -> Result<Option<u64>, ToolResult>
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn buffered_output(state: &ProcessState) -> String {
+        let buffer = state.buffer.lock().unwrap();
+        String::from_utf8_lossy(&buffer).into_owned()
+    }
 
     #[tokio::test]
     async fn repl_shell_spawn_and_wait() {
@@ -1064,14 +1464,41 @@ mod tests {
         let id = handle["id"].as_str().unwrap();
 
         let result = shell
-            .execute("shell_wait", &json!({"id": id, "timeout": 5.0}))
+            .execute("shell_wait", &json!({"id": id, "timeout_ms": 5000}))
             .await;
         assert!(result.success);
-        assert!(result.result.as_str().unwrap().contains("hello"));
+        assert_eq!(result.result["running"], false);
+        assert_eq!(result.result["exit_code"], 0);
+        assert!(result.result["output"].as_str().unwrap().contains("hello"));
+    }
 
-        let read = shell.execute("shell_read", &json!({"id": id})).await;
-        assert!(read.success);
-        assert!(read.result.as_str().unwrap().contains("hello"));
+    #[tokio::test]
+    async fn repl_shell_reads_python_prompt_from_pty() {
+        let shell = ReplShell::default();
+        let open = shell
+            .execute("shell", &json!({"command": "python3 -q"}))
+            .await;
+        assert!(open.success);
+        let id = open.result["id"].as_str().unwrap();
+
+        let prompt = shell
+            .execute("shell_read", &json!({"id": id, "timeout_ms": 1000}))
+            .await;
+        assert!(prompt.success);
+        assert!(prompt.result["running"].as_bool().unwrap());
+        assert!(prompt.result["output"].as_str().unwrap().contains(">>>"));
+
+        let reply = shell
+            .execute(
+                "shell_write",
+                &json!({"id": id, "input": "print(2 + 2)\n", "timeout_ms": 1000}),
+            )
+            .await;
+        assert!(reply.success);
+        assert!(reply.result["output"].as_str().unwrap().contains("4"));
+
+        let killed = shell.execute("shell_kill", &json!({"id": id})).await;
+        assert!(killed.success);
     }
 
     #[tokio::test]
@@ -1081,13 +1508,14 @@ mod tests {
             .execute("exec_command", &json!({"cmd": "echo hello"}))
             .await;
         assert!(result.success);
+        assert!(result.result["id"].as_str().is_some());
+        assert_eq!(result.result["running"], false);
         assert_eq!(result.result["exit_code"], 0);
         assert!(result.result["output"].as_str().unwrap().contains("hello"));
-        assert!(result.result.get("session_id").is_none());
     }
 
     #[tokio::test]
-    async fn exec_command_returns_session_id_for_running_process() {
+    async fn exec_command_returns_handle_id_for_running_process() {
         let shell = StandardShell::default();
         let result = shell
             .execute(
@@ -1096,12 +1524,13 @@ mod tests {
             )
             .await;
         assert!(result.success);
-        assert!(result.result["session_id"].as_i64().is_some());
-        assert!(result.result.get("exit_code").is_none());
+        assert!(result.result["id"].as_str().is_some());
+        assert_eq!(result.result["running"], true);
+        assert!(result.result["exit_code"].is_null());
     }
 
     #[tokio::test]
-    async fn write_stdin_reuses_running_exec_session() {
+    async fn write_stdin_reuses_running_exec_handle() {
         let shell = StandardShell::default();
         let open = shell
             .execute(
@@ -1109,15 +1538,16 @@ mod tests {
                 &json!({"cmd": "read line; echo got:$line", "yield_time_ms": 10}),
             )
             .await;
-        let session_id = open.result["session_id"].as_i64().unwrap();
+        let id = open.result["id"].as_str().unwrap();
 
         let result = shell
             .execute(
                 "write_stdin",
-                &json!({"session_id": session_id, "chars": "hello\n", "yield_time_ms": 1000}),
+                &json!({"id": id, "chars": "hello\n", "yield_time_ms": 1000}),
             )
             .await;
         assert!(result.success);
+        assert_eq!(result.result["running"], false);
         assert_eq!(result.result["exit_code"], 0);
         assert!(
             result.result["output"]
@@ -1128,13 +1558,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repl_shell_wait_timeout_keeps_process_running() {
+        let shell = ReplShell::default();
+        let open = shell
+            .execute("shell", &json!({"command": "sleep 0.2; echo done"}))
+            .await;
+        let id = open.result["id"].as_str().unwrap();
+
+        let waiting = shell
+            .execute("shell_wait", &json!({"id": id, "timeout_ms": 10}))
+            .await;
+        assert!(waiting.success);
+        assert_eq!(waiting.result["running"], true);
+        assert_eq!(waiting.result["timed_out"], true);
+
+        let final_result = shell
+            .execute("shell_wait", &json!({"id": id, "timeout_ms": 1000}))
+            .await;
+        assert!(final_result.success);
+        assert_eq!(final_result.result["running"], false);
+        assert_eq!(final_result.result["exit_code"], 0);
+        assert!(
+            final_result.result["output"]
+                .as_str()
+                .unwrap()
+                .contains("done")
+        );
+    }
+
+    #[tokio::test]
+    async fn repl_shell_kill_preserves_trapped_hup_output() {
+        let shell = ReplShell::default();
+        let open = shell
+            .execute(
+                "shell",
+                &json!({
+                    "command": "trap 'echo caught_hup; exit 0' HUP; echo ready; sleep 30"
+                }),
+            )
+            .await;
+        assert!(open.success);
+        let id = open.result["id"].as_str().unwrap().to_string();
+
+        let prompt = shell
+            .execute("shell_read", &json!({"id": id, "timeout_ms": 1000}))
+            .await;
+        assert!(prompt.success);
+        assert!(prompt.result["running"].as_bool().unwrap());
+        assert!(prompt.result["output"].as_str().unwrap().contains("ready"));
+
+        let state = shell.runtime.process_state(&id).unwrap();
+
+        let killed = shell.execute("shell_kill", &json!({"id": id})).await;
+        assert!(killed.success);
+        assert_eq!(killed.result["killed"], true);
+
+        let exit_code = *state.exit_code.lock().unwrap();
+        assert_eq!(exit_code, Some(0));
+
+        let output = buffered_output(&state);
+        assert!(
+            output.contains("caught_hup"),
+            "expected shell_kill to preserve trapped HUP output, got {output:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn exec_command_honors_workdir() {
         let shell = StandardShell::new().with_cwd("/");
         let result = shell
             .execute("exec_command", &json!({"cmd": "pwd", "workdir": "tmp"}))
             .await;
         assert!(result.success);
-        assert!(result.result["output"].as_str().unwrap().trim_end() == "/tmp");
+        assert_eq!(result.result["output"].as_str().unwrap().trim_end(), "/tmp");
     }
 
     #[tokio::test]

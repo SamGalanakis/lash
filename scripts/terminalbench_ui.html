@@ -1,0 +1,928 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lash Bench Observatory</title>
+  <style>
+    :root {
+      --paper: #f4efe2;
+      --paper-2: #fff9ee;
+      --ink: #111926;
+      --ink-soft: #475467;
+      --line: rgba(17, 25, 38, 0.14);
+      --accent: #d4622d;
+      --accent-2: #146c94;
+      --accent-3: #1f8f6a;
+      --danger: #b42318;
+      --pass: #14532d;
+      --fail: #9f1239;
+      --error: #7c2d12;
+      --shadow: 0 18px 50px rgba(17, 25, 38, 0.12);
+      --mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+      --serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+      --sans: "Avenir Next", "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(212, 98, 45, 0.12), transparent 30%),
+        radial-gradient(circle at top right, rgba(20, 108, 148, 0.16), transparent 28%),
+        linear-gradient(180deg, #f7f2e7 0%, #efe7d7 100%);
+      font-family: var(--sans);
+      min-height: 100vh;
+    }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      border-right: 1px solid var(--line);
+      background: rgba(255, 249, 238, 0.88);
+      backdrop-filter: blur(14px);
+      padding: 26px 20px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow: auto;
+    }
+
+    .masthead h1 {
+      margin: 0;
+      font: 700 28px/1 var(--serif);
+      letter-spacing: 0.02em;
+    }
+
+    .masthead p {
+      margin: 8px 0 0;
+      color: var(--ink-soft);
+      line-height: 1.5;
+      font-size: 14px;
+    }
+
+    .toolbar {
+      display: grid;
+      gap: 10px;
+      margin: 18px 0 20px;
+    }
+
+    .toolbar-row {
+      display: flex;
+      gap: 10px;
+    }
+
+    input, button, select {
+      font: inherit;
+    }
+
+    input[type="search"] {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px 14px;
+      background: var(--paper-2);
+    }
+
+    button {
+      border: 0;
+      border-radius: 14px;
+      padding: 11px 14px;
+      cursor: pointer;
+      color: white;
+      background: linear-gradient(135deg, var(--accent), #f08b49);
+      box-shadow: var(--shadow);
+    }
+
+    button.secondary {
+      background: linear-gradient(135deg, var(--accent-2), #3ca6d4);
+    }
+
+    button.ghost {
+      background: rgba(17, 25, 38, 0.08);
+      color: var(--ink);
+      box-shadow: none;
+    }
+
+    button.danger {
+      background: linear-gradient(135deg, #a61b1b, #d64545);
+    }
+
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+
+    .run-list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .run-card {
+      border: 1px solid transparent;
+      border-radius: 20px;
+      padding: 14px;
+      background: rgba(255, 255, 255, 0.74);
+      box-shadow: 0 8px 22px rgba(17, 25, 38, 0.06);
+      cursor: pointer;
+      transition: transform 120ms ease, border-color 120ms ease;
+    }
+
+    .run-card:hover {
+      transform: translateY(-1px);
+      border-color: rgba(20, 108, 148, 0.25);
+    }
+
+    .run-card.active {
+      border-color: rgba(212, 98, 45, 0.55);
+      background: linear-gradient(180deg, rgba(255, 249, 238, 0.94), rgba(255, 255, 255, 0.98));
+    }
+
+    .run-card-top {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+    }
+
+    .run-card-top input {
+      margin-top: 3px;
+    }
+
+    .run-card h3 {
+      margin: 0;
+      font: 700 18px/1.2 var(--serif);
+    }
+
+    .run-card small, .muted {
+      color: var(--ink-soft);
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-top: 10px;
+    }
+
+    .chip {
+      border-radius: 999px;
+      padding: 4px 9px;
+      font-size: 12px;
+      background: rgba(17, 25, 38, 0.08);
+      color: var(--ink-soft);
+    }
+
+    .chip.pass { background: rgba(31, 143, 106, 0.14); color: var(--pass); }
+    .chip.fail { background: rgba(159, 18, 57, 0.14); color: var(--fail); }
+    .chip.error { background: rgba(180, 35, 24, 0.14); color: var(--danger); }
+
+    .content {
+      padding: 28px;
+      display: grid;
+      gap: 20px;
+    }
+
+    .hero {
+      padding: 26px;
+      border-radius: 28px;
+      color: white;
+      background:
+        linear-gradient(135deg, rgba(17, 25, 38, 0.94), rgba(20, 108, 148, 0.88)),
+        linear-gradient(180deg, rgba(255,255,255,0.06), transparent);
+      box-shadow: var(--shadow);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero:after {
+      content: "";
+      position: absolute;
+      right: -40px;
+      top: -60px;
+      width: 240px;
+      height: 240px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(255,255,255,0.18), transparent 68%);
+    }
+
+    .hero h2 {
+      margin: 0;
+      font: 700 34px/1 var(--serif);
+      letter-spacing: 0.02em;
+    }
+
+    .hero p {
+      margin: 10px 0 0;
+      max-width: 920px;
+      color: rgba(255, 255, 255, 0.82);
+    }
+
+    .panel {
+      border: 1px solid rgba(17, 25, 38, 0.1);
+      border-radius: 24px;
+      padding: 20px;
+      background: rgba(255, 255, 255, 0.76);
+      box-shadow: 0 12px 34px rgba(17, 25, 38, 0.08);
+    }
+
+    .panel h3 {
+      margin: 0 0 14px;
+      font: 700 22px/1 var(--serif);
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px;
+    }
+
+    .stat {
+      border-radius: 18px;
+      padding: 14px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.84), rgba(244, 239, 226, 0.92));
+      border: 1px solid rgba(17, 25, 38, 0.08);
+    }
+
+    .stat label {
+      display: block;
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ink-soft);
+    }
+
+    .stat strong {
+      display: block;
+      margin-top: 8px;
+      font: 700 24px/1.1 var(--mono);
+    }
+
+    .compare-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 12px;
+    }
+
+    .compare-card {
+      border: 1px solid rgba(17, 25, 38, 0.08);
+      border-radius: 20px;
+      padding: 16px;
+      background: var(--paper-2);
+    }
+
+    .compare-card h4 {
+      margin: 0 0 8px;
+      font: 700 18px/1.2 var(--serif);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      table-layout: auto;
+    }
+
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid rgba(17, 25, 38, 0.08);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ink-soft);
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      margin: 0 -4px;
+      padding: 0 4px 2px;
+    }
+
+    .table-wrap table {
+      min-width: 100%;
+    }
+
+    .num {
+      text-align: right;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+      font-family: var(--mono);
+    }
+
+    .compact-task {
+      min-width: 220px;
+    }
+
+    .trial-row {
+      cursor: pointer;
+    }
+
+    .trial-row:hover {
+      background: rgba(20, 108, 148, 0.05);
+    }
+
+    .status-pill {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .status-pass { background: rgba(31, 143, 106, 0.14); color: var(--pass); }
+    .status-fail { background: rgba(159, 18, 57, 0.14); color: var(--fail); }
+    .status-error { background: rgba(180, 35, 24, 0.14); color: var(--danger); }
+    .status-no-reward { background: rgba(17, 25, 38, 0.12); color: var(--ink-soft); }
+
+    .logs {
+      display: grid;
+      gap: 12px;
+    }
+
+    .tab-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .tab {
+      border-radius: 999px;
+      border: 1px solid rgba(17, 25, 38, 0.08);
+      padding: 7px 12px;
+      background: rgba(255, 255, 255, 0.72);
+      cursor: pointer;
+    }
+
+    .tab.active {
+      background: linear-gradient(135deg, rgba(212, 98, 45, 0.16), rgba(20, 108, 148, 0.14));
+      border-color: rgba(212, 98, 45, 0.38);
+    }
+
+    pre {
+      margin: 0;
+      padding: 18px;
+      max-height: 520px;
+      overflow: auto;
+      border-radius: 18px;
+      background: #111926;
+      color: #ecf0f6;
+      font: 13px/1.45 var(--mono);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+    }
+
+    .empty {
+      padding: 18px;
+      border: 1px dashed rgba(17, 25, 38, 0.16);
+      border-radius: 18px;
+      color: var(--ink-soft);
+      background: rgba(255, 255, 255, 0.52);
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 20px;
+    }
+
+    .banner {
+      margin-top: 10px;
+      font-size: 13px;
+      color: var(--ink-soft);
+    }
+
+    @media (max-width: 1180px) {
+      .shell, .split { grid-template-columns: 1fr; }
+      .sidebar { position: relative; height: auto; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="masthead">
+        <h1>Lash Bench Observatory</h1>
+        <p>Browse persisted benchmark runs, select multiple runs for comparison, and delete stale runs end-to-end, including their exported snapshot and original Harbor job directory.</p>
+      </div>
+
+      <div class="toolbar">
+        <input id="runSearch" type="search" placeholder="Filter runs by job, model, mode, dataset">
+        <div class="toolbar-row">
+          <button id="refreshButton" class="secondary">Refresh</button>
+          <button id="deleteButton" class="danger" disabled>Delete Selected</button>
+        </div>
+        <div class="banner" id="selectionBanner">0 selected</div>
+      </div>
+
+      <div class="run-list" id="runList"></div>
+    </aside>
+
+    <main class="content">
+      <section class="hero">
+        <h2>Compare runs like experiments, not log dumps.</h2>
+        <p>The dashboard keeps run-wide aggregates, task rollups, trial detail, and copied artifacts in one place so you can inspect pass rate, time, tokens, failures, and raw evidence without digging back through Harbor job trees.</p>
+      </section>
+
+      <section class="panel">
+        <h3>Selection Snapshot</h3>
+        <div class="compare-grid" id="compareGrid"></div>
+      </section>
+
+      <section class="panel">
+        <h3>Active Run</h3>
+        <div class="stats-grid" id="runStats"></div>
+        <div class="banner" id="runMeta"></div>
+      </section>
+
+      <div class="split">
+        <section class="panel">
+          <h3>Task Rollups</h3>
+          <div id="taskRollups"></div>
+        </section>
+
+        <section class="panel">
+          <h3>Selection Comparison</h3>
+          <div id="comparisonTable"></div>
+        </section>
+      </div>
+
+      <div class="split">
+        <section class="panel">
+          <h3>Trials</h3>
+          <div id="trialsTable"></div>
+        </section>
+
+        <section class="panel">
+          <h3>Trial Detail</h3>
+          <div class="logs">
+            <div id="trialMeta" class="empty">Select a trial to inspect logs and artifacts.</div>
+            <div class="tab-row" id="logTabs"></div>
+            <pre id="logViewer">Select a log tab.</pre>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const state = {
+      runs: [],
+      runDetails: new Map(),
+      selectedRunIds: new Set(),
+      activeRunId: null,
+      activeTrial: null,
+      activeLogPath: null,
+    };
+
+    const fmtPct = value => `${(100 * (value || 0)).toFixed(1)}%`;
+    const fmtInt = value => new Intl.NumberFormat().format(value || 0);
+    const fmtFixed = value => value == null ? "-" : value.toFixed(2);
+    const tokenHeaders = `
+      <th class="num">Total</th>
+      <th class="num">Input</th>
+      <th class="num">Output</th>
+      <th class="num">Cache</th>
+    `;
+    function tokenCells(tokens) {
+      const value = tokens || {};
+      return `
+        <td class="num">${fmtInt(value.total)}</td>
+        <td class="num">${fmtInt(value.input)}</td>
+        <td class="num">${fmtInt(value.output)}</td>
+        <td class="num">${fmtInt(value.cache)}</td>
+      `;
+    }
+    function tokenInline(tokens) {
+      const value = tokens || {};
+      return `tot ${fmtInt(value.total)} · in ${fmtInt(value.input)} · out ${fmtInt(value.output)} · cache ${fmtInt(value.cache)}`;
+    }
+    const fmtSeconds = value => {
+      if (value == null) return "-";
+      const total = Math.round(value);
+      const minutes = Math.floor(total / 60);
+      const seconds = total % 60;
+      const hours = Math.floor(minutes / 60);
+      const mins = minutes % 60;
+      return hours ? `${hours}h${String(mins).padStart(2, "0")}m${String(seconds).padStart(2, "0")}s` : `${mins}m${String(seconds).padStart(2, "0")}s`;
+    };
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, options);
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || `${response.status} ${response.statusText}`);
+      }
+      const contentType = response.headers.get("content-type") || "";
+      return contentType.includes("application/json") ? response.json() : response.text();
+    }
+
+    async function loadRuns() {
+      const data = await api("/api/runs");
+      state.runs = data.runs || [];
+      if (!state.activeRunId && state.runs[0]) {
+        state.activeRunId = state.runs[0].run_id;
+      }
+      if (state.activeRunId && !state.runs.some(run => run.run_id === state.activeRunId)) {
+        state.activeRunId = state.runs[0]?.run_id || null;
+      }
+      renderRunList();
+      await ensureActiveRunLoaded();
+      render();
+    }
+
+    async function ensureRunLoaded(runId) {
+      if (!runId || state.runDetails.has(runId)) return;
+      const run = await api(`/api/runs/${runId}`);
+      state.runDetails.set(runId, run);
+    }
+
+    async function ensureActiveRunLoaded() {
+      if (state.activeRunId) {
+        await ensureRunLoaded(state.activeRunId);
+      }
+      for (const runId of state.selectedRunIds) {
+        await ensureRunLoaded(runId);
+      }
+    }
+
+    function renderRunList() {
+      const query = document.getElementById("runSearch").value.trim().toLowerCase();
+      const runList = document.getElementById("runList");
+      const filtered = state.runs.filter(run => {
+        if (!query) return true;
+        return [
+          run.job_name,
+          run.dataset,
+          run.execution_mode,
+          run.requested_model,
+          run.variant,
+          run.provider
+        ].filter(Boolean).join(" ").toLowerCase().includes(query);
+      });
+
+      if (!filtered.length) {
+        runList.innerHTML = `<div class="empty">No runs match the current filter.</div>`;
+        return;
+      }
+
+      runList.innerHTML = filtered.map(run => `
+        <article class="run-card ${run.run_id === state.activeRunId ? "active" : ""}" data-run-id="${run.run_id}">
+          <div class="run-card-top">
+            <input type="checkbox" class="run-select" data-run-id="${run.run_id}" ${state.selectedRunIds.has(run.run_id) ? "checked" : ""}>
+            <div style="flex: 1">
+              <h3>${escapeHtml(run.job_name)}</h3>
+              <small>${escapeHtml(run.dataset || "-")} · ${escapeHtml(run.execution_mode || "-")} · ${escapeHtml(run.provider || "-")}</small>
+              <div class="chips">
+                <span class="chip pass">${fmtPct(run.pass_rate)}</span>
+                <span class="chip">${fmtInt(run.trials_passed)}/${fmtInt(run.trials_total)} passed</span>
+                <span class="chip">${fmtInt(run.tokens_total)} tokens</span>
+              </div>
+            </div>
+          </div>
+        </article>
+      `).join("");
+
+      runList.querySelectorAll(".run-card").forEach(card => {
+        card.addEventListener("click", async event => {
+          if (event.target.classList.contains("run-select")) return;
+          state.activeRunId = card.dataset.runId;
+          state.activeTrial = null;
+          state.activeLogPath = null;
+          await ensureActiveRunLoaded();
+          renderRunList();
+          render();
+        });
+      });
+
+      runList.querySelectorAll(".run-select").forEach(box => {
+        box.addEventListener("click", event => event.stopPropagation());
+        box.addEventListener("change", async () => {
+          const runId = box.dataset.runId;
+          if (box.checked) state.selectedRunIds.add(runId);
+          else state.selectedRunIds.delete(runId);
+          await ensureRunLoaded(runId);
+          renderSelectionBanner();
+          render();
+        });
+      });
+
+      renderSelectionBanner();
+    }
+
+    function renderSelectionBanner() {
+      document.getElementById("selectionBanner").textContent = `${state.selectedRunIds.size} selected`;
+      document.getElementById("deleteButton").disabled = state.selectedRunIds.size === 0;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, char => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;",
+        "'": "&#39;"
+      }[char]));
+    }
+
+    function render() {
+      renderCompareGrid();
+      renderActiveRun();
+    }
+
+    function renderCompareGrid() {
+      const compareGrid = document.getElementById("compareGrid");
+      const selected = [...state.selectedRunIds].map(id => state.runDetails.get(id)).filter(Boolean);
+      if (!selected.length) {
+        compareGrid.innerHTML = `<div class="empty">Select runs in the sidebar to compare pass rate, duration, and token totals side by side.</div>`;
+        renderComparisonTable([]);
+        return;
+      }
+      compareGrid.innerHTML = selected.map(run => {
+        const stats = run.global_stats || {};
+        const params = run.params || {};
+        return `
+          <div class="compare-card">
+            <h4>${escapeHtml(run.job_name)}</h4>
+            <div class="muted">${escapeHtml(params.requested_model || "resolved in trial")} · ${escapeHtml(params.execution_mode || "-")} · ${escapeHtml(params.variant || "default variant")}</div>
+            <div class="chips">
+              <span class="chip pass">${fmtPct(stats.pass_rate)}</span>
+              <span class="chip">${fmtInt(stats.trials_passed)}/${fmtInt(stats.trials_total)} passed</span>
+            </div>
+            <table>
+              <tr><td>Avg Duration</td><td>${fmtSeconds(stats.duration_seconds_avg)}</td></tr>
+              <tr><td>Total Tokens</td><td>${tokenInline(stats.tokens_total)}</td></tr>
+              <tr><td>Avg Tokens</td><td>${tokenInline(stats.tokens_avg)}</td></tr>
+              <tr><td>Reward Mean</td><td>${fmtFixed(stats.reward_mean)}</td></tr>
+            </table>
+          </div>
+        `;
+      }).join("");
+      renderComparisonTable(selected);
+    }
+
+    function renderComparisonTable(runs) {
+      const target = document.getElementById("comparisonTable");
+      if (!runs.length) {
+        target.innerHTML = `<div class="empty">Task-by-task comparison appears here once you select at least one run.</div>`;
+        return;
+      }
+      const taskMap = new Map();
+      for (const run of runs) {
+        for (const rollup of run.task_rollups || []) {
+          if (!taskMap.has(rollup.task_name)) taskMap.set(rollup.task_name, { task_name: rollup.task_name });
+          taskMap.get(rollup.task_name)[run.run_id] = rollup;
+        }
+      }
+      const rows = [...taskMap.values()].sort((a, b) => a.task_name.localeCompare(b.task_name));
+      const columns = runs.map(run => `<th>${escapeHtml(run.job_name)}</th>`).join("");
+      target.innerHTML = `
+        <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="compact-task">Task</th>
+              ${columns}
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(row => `
+              <tr>
+                <td>${escapeHtml(row.task_name)}</td>
+                ${runs.map(run => {
+                  const item = row[run.run_id];
+                  if (!item) return `<td class="muted">-</td>`;
+                  return `<td>${fmtPct(item.pass_rate)} · ${fmtSeconds(item.duration_seconds_avg)}<br><span class="muted">${escapeHtml(tokenInline(item.tokens_total))}</span></td>`;
+                }).join("")}
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+        </div>
+      `;
+    }
+
+    function renderActiveRun() {
+      const run = state.runDetails.get(state.activeRunId);
+      const statsRoot = document.getElementById("runStats");
+      const metaRoot = document.getElementById("runMeta");
+      if (!run) {
+        statsRoot.innerHTML = `<div class="empty">Choose a run from the sidebar.</div>`;
+        metaRoot.textContent = "";
+        document.getElementById("taskRollups").innerHTML = `<div class="empty">No run loaded.</div>`;
+        document.getElementById("trialsTable").innerHTML = `<div class="empty">No run loaded.</div>`;
+        document.getElementById("trialMeta").innerHTML = `Select a trial to inspect logs and artifacts.`;
+        document.getElementById("logTabs").innerHTML = "";
+        document.getElementById("logViewer").textContent = "Select a log tab.";
+        return;
+      }
+
+      const stats = run.global_stats || {};
+      const params = run.params || {};
+      statsRoot.innerHTML = [
+        statCard("Pass Rate", fmtPct(stats.pass_rate)),
+        statCard("Trials", `${fmtInt(stats.trials_total)} total`),
+        statCard("Passed", fmtInt(stats.trials_passed)),
+        statCard("Avg Duration", fmtSeconds(stats.duration_seconds_avg)),
+        statCard("Total Tokens", fmtInt((stats.tokens_total || {}).total)),
+        statCard("Input Tokens", fmtInt((stats.tokens_total || {}).input)),
+        statCard("Output Tokens", fmtInt((stats.tokens_total || {}).output)),
+        statCard("Cache Tokens", fmtInt((stats.tokens_total || {}).cache)),
+        statCard("Reward Mean", fmtFixed(stats.reward_mean)),
+        statCard("Errors", fmtInt(stats.trials_errors)),
+      ].join("");
+      metaRoot.textContent = `${run.job_name} · ${params.dataset || "-"} · ${params.execution_mode || "-"} · provider ${((params.provider || {}).active_provider || "-")} · model ${params.requested_model || "resolved in trial"} · variant ${params.variant || "default"}`;
+
+      renderTaskRollups(run.task_rollups || []);
+      renderTrials(run.trials || []);
+      renderTrialDetail();
+    }
+
+    function statCard(label, value) {
+      return `<div class="stat"><label>${escapeHtml(label)}</label><strong>${escapeHtml(value)}</strong></div>`;
+    }
+
+    function renderTaskRollups(rollups) {
+      const root = document.getElementById("taskRollups");
+      if (!rollups.length) {
+        root.innerHTML = `<div class="empty">This run has no task rollups yet.</div>`;
+        return;
+      }
+      root.innerHTML = `
+        <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="compact-task">Task</th>
+              <th class="num">Pass Rate</th>
+              <th class="num">Attempts</th>
+              <th class="num">Avg Duration</th>
+              ${tokenHeaders}
+            </tr>
+          </thead>
+          <tbody>
+            ${rollups.map(item => `
+              <tr>
+                <td>${escapeHtml(item.task_name)}</td>
+                <td class="num">${fmtPct(item.pass_rate)}</td>
+                <td class="num">${fmtInt(item.attempts)}</td>
+                <td class="num">${fmtSeconds(item.duration_seconds_avg)}</td>
+                ${tokenCells(item.tokens_total)}
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+        </div>
+      `;
+    }
+
+    function renderTrials(trials) {
+      const root = document.getElementById("trialsTable");
+      if (!trials.length) {
+        root.innerHTML = `<div class="empty">This run has no trials.</div>`;
+        return;
+      }
+      root.innerHTML = `
+        <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="compact-task">Task</th>
+              <th>Status</th>
+              <th class="num">Reward</th>
+              <th class="num">Duration</th>
+              ${tokenHeaders}
+              <th>Model</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${trials.map(trial => `
+              <tr class="trial-row" data-trial-name="${escapeHtml(trial.trial_name)}">
+                <td>
+                  <strong>${escapeHtml(trial.task_name)}</strong><br>
+                  <small>${escapeHtml(trial.failure_reason || trial.trial_name)}</small>
+                </td>
+                <td><span class="status-pill status-${escapeHtml(trial.status)}">${escapeHtml(trial.status)}</span></td>
+                <td class="num">${trial.reward == null ? "-" : escapeHtml(trial.reward)}</td>
+                <td class="num">${escapeHtml(trial.duration_display)}</td>
+                ${tokenCells(trial.tokens)}
+                <td>${escapeHtml(((trial.metadata || {}).resolved_models || [])[0] || (trial.metadata || {}).requested_model || "-")}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+        </div>
+      `;
+      root.querySelectorAll(".trial-row").forEach(row => {
+        row.addEventListener("click", () => {
+          state.activeTrial = trials.find(trial => trial.trial_name === row.dataset.trialName);
+          state.activeLogPath = null;
+          renderTrialDetail();
+        });
+      });
+    }
+
+    function renderTrialDetail() {
+      const meta = document.getElementById("trialMeta");
+      const tabs = document.getElementById("logTabs");
+      const viewer = document.getElementById("logViewer");
+      const trial = state.activeTrial;
+      if (!trial) {
+        meta.innerHTML = `Select a trial to inspect logs and artifacts.`;
+        tabs.innerHTML = "";
+        viewer.textContent = "Select a log tab.";
+        return;
+      }
+
+      const models = ((trial.metadata || {}).resolved_models || []).join(", ") || (trial.metadata || {}).requested_model || "-";
+      meta.innerHTML = `
+        <strong>${escapeHtml(trial.task_name)}</strong><br>
+        <span class="muted">${escapeHtml(trial.trial_name)} · ${escapeHtml(trial.status)} · ${escapeHtml(tokenInline(trial.tokens))} · ${escapeHtml(models)}</span><br>
+        <span class="muted">${escapeHtml(trial.failure_reason || "No failure summary.")}</span>
+      `;
+
+      const tabItems = [];
+      const files = (trial.artifacts || {}).files || {};
+      const commands = (trial.artifacts || {}).commands || [];
+      if (commands[0]?.stdout) tabItems.push({ label: "Agent stdout", path: commands[0].stdout });
+      if (commands[0]?.stderr) tabItems.push({ label: "Agent stderr", path: commands[0].stderr });
+      if (commands[0]?.command) tabItems.push({ label: "Command", path: commands[0].command });
+      if (files.verifier_stdout) tabItems.push({ label: "Verifier", path: files.verifier_stdout });
+      if (files.trial_log) tabItems.push({ label: "Trial log", path: files.trial_log });
+      if (files.lash_log) tabItems.push({ label: "Lash log", path: files.lash_log });
+      if (files.exception_txt) tabItems.push({ label: "Exception", path: files.exception_txt });
+
+      tabs.innerHTML = tabItems.map(item => `
+        <button class="tab ${state.activeLogPath === item.path ? "active" : ""}" data-log-path="${escapeHtml(item.path)}">${escapeHtml(item.label)}</button>
+      `).join("");
+
+      if (!state.activeLogPath && tabItems[0]) {
+        state.activeLogPath = tabItems[0].path;
+      }
+
+      tabs.querySelectorAll(".tab").forEach(tab => {
+        tab.addEventListener("click", async () => {
+          state.activeLogPath = tab.dataset.logPath;
+          await loadLog();
+          renderTrialDetail();
+        });
+      });
+
+      loadLog();
+    }
+
+    async function loadLog() {
+      const viewer = document.getElementById("logViewer");
+      const trial = state.activeTrial;
+      if (!trial || !state.activeLogPath) {
+        viewer.textContent = "Select a log tab.";
+        return;
+      }
+      viewer.textContent = "Loading log...";
+      try {
+        const text = await api(`/api/runs/${state.activeRunId}/artifact?path=${encodeURIComponent(state.activeLogPath)}`);
+        viewer.textContent = text || "[empty file]";
+      } catch (error) {
+        viewer.textContent = `Failed to load log: ${error.message}`;
+      }
+    }
+
+    async function deleteSelectedRuns() {
+      const runIds = [...state.selectedRunIds];
+      if (!runIds.length) return;
+      if (!confirm(`Delete ${runIds.length} selected run(s), including their exported snapshot and original Harbor job directory?`)) return;
+      await api("/api/runs/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_ids: runIds }),
+      });
+      for (const runId of runIds) {
+        state.runDetails.delete(runId);
+        if (state.activeRunId === runId) {
+          state.activeRunId = null;
+          state.activeTrial = null;
+          state.activeLogPath = null;
+        }
+      }
+      state.selectedRunIds.clear();
+      await loadRuns();
+    }
+
+    document.getElementById("runSearch").addEventListener("input", renderRunList);
+    document.getElementById("refreshButton").addEventListener("click", loadRuns);
+    document.getElementById("deleteButton").addEventListener("click", deleteSelectedRuns);
+
+    loadRuns().catch(error => {
+      document.getElementById("runList").innerHTML = `<div class="empty">Failed to load runs: ${escapeHtml(error.message)}</div>`;
+    });
+  </script>
+</body>
+</html>

@@ -147,7 +147,6 @@ fn execute_apply_patch_sync(input: &str, workdir: Option<&str>) -> ToolResult {
         .join("\n");
 
     ToolResult::ok(json!({
-        "__type__": "patch_result",
         "summary": summary,
         "added": total_added,
         "removed": total_removed,

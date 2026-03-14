@@ -3,7 +3,7 @@ use std::path::Path;
 use crate::{ToolDefinition, ToolParam, ToolPromptContext, ToolProvider, ToolResult};
 
 use super::{
-    build_path_entry, parse_optional_bool, parse_optional_usize_arg, path_entries_value,
+    build_path_entry, filesystem_entries_result, parse_optional_bool, parse_optional_usize_arg,
     require_str,
 };
 
@@ -20,7 +20,7 @@ impl ToolProvider for Glob {
             name: "glob".into(),
             description: vec![crate::ToolText::new(
                 format!(
-                    "Find filesystem entries by glob. Returns `path_entries` with `items` sorted by `modified_at` (newest first). Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: limit={}, with_lines=false.",
+                    "Find filesystem entries by glob. Returns a record with `items` sorted by `modified_at` (newest first). Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: limit={}, with_lines=false.",
                     MAX_RESULTS
                 ),
                 [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
@@ -58,7 +58,7 @@ impl ToolProvider for Glob {
     }
 
     fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
-        vec!["### Path Entry Results\n`glob` and `ls` both return `{ \"__type__\": \"path_entries\", \"items\": [...], \"truncated\": ... }`. Read paths from `result.items`, not `result.entries`. `glob` sorts `items` by modification time (newest first); `ls` sorts `items` alphabetically by path. If `truncated` is non-null, rerun with `limit=None` when needed.".to_string()]
+        vec!["### Filesystem Listing Results\n`glob` and `ls` both return a record `{ items: [...], truncated: ... }`. In REPL tool calls, read listing paths from `result.value.items`; there is no extra wrapper like `result.value.path_entries`. `glob` sorts `items` by modification time (newest first); `ls` sorts `items` alphabetically by path. If `truncated` is non-null, rerun with `limit=None` when needed.".to_string()]
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
@@ -139,7 +139,7 @@ impl ToolProvider for Glob {
         }
 
         let items: Vec<super::PathEntry> = matches.into_iter().map(|(entry, _)| entry).collect();
-        ToolResult::ok(path_entries_value(items, total_matches))
+        ToolResult::ok(filesystem_entries_result(items, total_matches))
     }
 }
 
@@ -155,10 +155,6 @@ mod tests {
 
     fn items(result: &ToolResult) -> &Vec<serde_json::Value> {
         let obj = result.result.as_object().unwrap();
-        assert_eq!(
-            obj.get("__type__").and_then(|v| v.as_str()),
-            Some("path_entries")
-        );
         obj.get("items").and_then(|v| v.as_array()).unwrap()
     }
 

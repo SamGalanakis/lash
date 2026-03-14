@@ -8,7 +8,7 @@ use crate::dynamic::DynamicCapabilityDef;
 use crate::instructions::InstructionSource;
 use crate::search::{SearchDoc, SearchMode, limit_from_args, rank_docs, truncate_preview};
 use crate::store::{HistoryTurnRecord, MemRecord, Store};
-use crate::tools::{INTERNAL_TOOL_CATALOG_ARG, UpdatePlanTool, run_blocking};
+use crate::tools::{UpdatePlanTool, run_blocking};
 use crate::{ExecutionMode, ToolDefinition, ToolParam, ToolText};
 
 use super::*;
@@ -55,6 +55,159 @@ fn build_prompt_environment_context() -> String {
     parts.join("\n")
 }
 
+const MIN_RECENT_USER_TURNS: usize = 3;
+
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+struct HistoryPluginState {
+    has_archived_history: bool,
+}
+
+fn leading_system_prefix_len(msgs: &[crate::Message]) -> usize {
+    msgs.iter()
+        .take_while(|msg| msg.role == crate::MessageRole::System)
+        .count()
+}
+
+fn keep_from_for_recent_turns(msgs: &[crate::Message], prefix_len: usize) -> usize {
+    let mut user_turns = 0usize;
+    for i in (prefix_len..msgs.len()).rev() {
+        if msgs[i].role == crate::MessageRole::User {
+            user_turns += 1;
+            if user_turns >= MIN_RECENT_USER_TURNS {
+                return i;
+            }
+        }
+    }
+    prefix_len
+}
+
+fn compact_history_messages(
+    msgs: &mut Vec<crate::Message>,
+    last_input_tokens: usize,
+    max_context: usize,
+    policy: crate::ContextFoldingConfig,
+) -> bool {
+    if last_input_tokens == 0 || msgs.is_empty() {
+        return false;
+    }
+
+    let hard_budget = max_context * usize::from(policy.hard_limit_pct) / 100;
+    if last_input_tokens < hard_budget {
+        return false;
+    }
+
+    let soft_budget = max_context * usize::from(policy.soft_limit_pct) / 100;
+    let prefix_len = leading_system_prefix_len(msgs);
+    let total_chars: usize = msgs.iter().map(crate::Message::char_count).sum();
+    let target_chars = total_chars.saturating_mul(soft_budget) / last_input_tokens.max(1);
+
+    let mut keep_from = msgs.len();
+    let mut tail_chars = 0usize;
+    for i in (prefix_len..msgs.len()).rev() {
+        let cost = msgs[i].char_count();
+        if tail_chars + cost > target_chars {
+            break;
+        }
+        tail_chars += cost;
+        keep_from = i;
+    }
+
+    keep_from = keep_from.min(keep_from_for_recent_turns(msgs, prefix_len));
+    if keep_from <= prefix_len {
+        return false;
+    }
+
+    msgs.drain(prefix_len..keep_from);
+    true
+}
+
+fn history_message_text(msg: &crate::Message) -> String {
+    msg.parts
+        .iter()
+        .filter_map(|part| match part.kind {
+            crate::PartKind::Text | crate::PartKind::Prose | crate::PartKind::Code => {
+                Some(part.content.as_str())
+            }
+            _ => None,
+        })
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn latest_turn_history_payload(turn: &crate::AssembledTurn) -> serde_json::Value {
+    let messages = &turn.state.messages;
+    let turn_index = messages
+        .iter()
+        .filter(|msg| matches!(msg.role, crate::MessageRole::User))
+        .count() as i64;
+    let last_user_idx = messages
+        .iter()
+        .rposition(|msg| matches!(msg.role, crate::MessageRole::User));
+
+    let user_message = last_user_idx
+        .and_then(|idx| messages.get(idx))
+        .map(history_message_text)
+        .unwrap_or_default();
+
+    let mut prose_parts = Vec::new();
+    let mut code_parts = Vec::new();
+    if let Some(idx) = last_user_idx {
+        for msg in messages.iter().skip(idx + 1) {
+            if !matches!(msg.role, crate::MessageRole::Assistant) {
+                continue;
+            }
+            for part in &msg.parts {
+                match part.kind {
+                    crate::PartKind::Text | crate::PartKind::Prose => {
+                        if !part.content.trim().is_empty() {
+                            prose_parts.push(part.content.clone());
+                        }
+                    }
+                    crate::PartKind::Code => {
+                        if !part.content.trim().is_empty() {
+                            code_parts.push(part.content.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let prose = if prose_parts.is_empty() {
+        turn.assistant_output.raw_text.clone()
+    } else {
+        prose_parts.join("\n\n")
+    };
+    let code = code_parts.join("\n\n");
+    let output = turn
+        .code_outputs
+        .iter()
+        .map(|record| match (&record.output, &record.error) {
+            (output, Some(error)) if !output.is_empty() && !error.is_empty() => {
+                format!("{output}\n{error}")
+            }
+            (output, _) if !output.is_empty() => output.clone(),
+            (_, Some(error)) => error.clone(),
+            _ => String::new(),
+        })
+        .filter(|chunk| !chunk.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let error = turn.errors.first().map(|issue| issue.message.clone());
+
+    serde_json::json!({
+        "index": turn_index,
+        "user_message": user_message,
+        "prose": prose,
+        "code": code,
+        "output": output,
+        "error": error,
+        "tool_calls": turn.tool_calls,
+    })
+}
+
 fn current_turn_index(turn: &AssembledTurn) -> i64 {
     turn.state
         .messages
@@ -84,7 +237,7 @@ fn memory_capability_def() -> DynamicCapabilityDef {
         name: "Memory".to_string(),
         description: "Persistent key-value memory and retrieval.".to_string(),
         prompt_section: Some(
-            "### Memory\nUse `mem_set`, `mem_get`, `mem_delete`, `mem_all`, and `search_mem(...)` for durable decisions that should survive context pruning."
+            "### Memory\nUse `mem_set`, `mem_get`, `mem_delete`, and `search_mem(...)` for durable decisions that should survive context pruning."
                 .to_string(),
         ),
         helper_bindings: BTreeSet::from([
@@ -92,14 +245,12 @@ fn memory_capability_def() -> DynamicCapabilityDef {
             "mem_set".to_string(),
             "mem_get".to_string(),
             "mem_delete".to_string(),
-            "mem_all".to_string(),
         ]),
         tool_names: BTreeSet::from([
             "search_mem".to_string(),
             "mem_set".to_string(),
             "mem_get".to_string(),
             "mem_delete".to_string(),
-            "mem_all".to_string(),
         ]),
         enabled_by_default: true,
     }
@@ -218,50 +369,56 @@ Only produce at most one `<proposed_plan>` block per turn, and only when you are
     }
 }
 
-fn plan_mode_tool_allowed(tool_name: &str, args: &serde_json::Value) -> bool {
-    match tool_name {
-        "ask" | "fetch_url" | "glob" | "grep" | "ls" | "mem_all" | "mem_get" | "read_file"
-        | "read_skill_file" | "search_history" | "search_mem" | "search_skills"
-        | "search_tools" | "search_web" | "exec_command" | "write_stdin" => true,
-        "batch" => args
-            .get("tool_calls")
-            .and_then(|value| value.as_array())
-            .is_some_and(|calls| {
-                calls.iter().all(|call| {
-                    let Some(name) = call.get("tool").and_then(|value| value.as_str()) else {
-                        return false;
-                    };
-                    let args = call.get("args").unwrap_or(&serde_json::Value::Null);
-                    name != "batch" && plan_mode_tool_allowed(name, args)
-                })
-            }),
-        _ => false,
+#[derive(Clone, Debug)]
+pub struct PlanModePluginConfig {
+    pub blocked_tools: BTreeSet<String>,
+}
+
+impl Default for PlanModePluginConfig {
+    fn default() -> Self {
+        Self {
+            blocked_tools: [
+                "agent_call",
+                "agent_kill",
+                "agent_result",
+                "apply_patch",
+                "mem_delete",
+                "mem_set",
+                "shell",
+                "shell_kill",
+                "shell_read",
+                "shell_wait",
+                "shell_write",
+                "update_plan",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        }
     }
 }
 
-fn plan_mode_tool_discoverable(tool_name: &str) -> bool {
-    tool_name == "batch" || plan_mode_tool_allowed(tool_name, &serde_json::Value::Null)
+impl PlanModePluginConfig {
+    pub fn with_blocked_tools<I, S>(mut self, blocked_tools: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.blocked_tools = blocked_tools.into_iter().map(Into::into).collect();
+        self
+    }
 }
 
-fn filter_plan_mode_search_catalog(args: &serde_json::Value) -> Option<serde_json::Value> {
-    let mut replacement = args.as_object()?.clone();
-    let filtered = replacement
-        .get(INTERNAL_TOOL_CATALOG_ARG)?
-        .as_array()?
-        .iter()
-        .filter(|entry| {
-            entry
-                .get("name")
-                .and_then(|value| value.as_str())
-                .is_some_and(plan_mode_tool_discoverable)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    replacement.insert(
-        INTERNAL_TOOL_CATALOG_ARG.to_string(),
-        serde_json::Value::Array(filtered),
-    );
-    Some(serde_json::Value::Object(replacement))
+fn plan_mode_tool_blocked(
+    config: &PlanModePluginConfig,
+    tool_name: &str,
+    _args: &serde_json::Value,
+) -> bool {
+    config.blocked_tools.contains(tool_name)
+}
+
+fn plan_mode_tool_discoverable(config: &PlanModePluginConfig, tool_name: &str) -> bool {
+    !config.blocked_tools.contains(tool_name)
 }
 
 const PROPOSED_PLAN_OPEN: &str = "<proposed_plan>";
@@ -520,6 +677,23 @@ impl HistoryTools {
         Self { store }
     }
 
+    fn history_item(turn: &HistoryTurnRecord) -> serde_json::Value {
+        let preview_source = if !turn.user_message.trim().is_empty() {
+            &turn.user_message
+        } else if !turn.prose.trim().is_empty() {
+            &turn.prose
+        } else {
+            &turn.output
+        };
+        json!({
+            "turn": turn.index,
+            "preview": truncate_preview(preview_source, 220),
+            "tool_calls": turn.tool_calls,
+            "files_read": turn.files_read,
+            "files_written": turn.files_written,
+        })
+    }
+
     fn search_history(&self, args: &serde_json::Value) -> ToolResult {
         let agent_id = agent_id(args);
         let query = args
@@ -527,9 +701,14 @@ impl HistoryTools {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
+        let browse_all = query.trim().is_empty();
         let mode = SearchMode::parse(args.get("mode").and_then(|v| v.as_str()));
         let regex = args.get("regex").and_then(|v| v.as_str());
-        let limit = limit_from_args(args);
+        let limit = if browse_all && args.get("limit").is_none() {
+            usize::MAX
+        } else {
+            limit_from_args(args)
+        };
         let since_turn = args.get("since_turn").and_then(|v| v.as_i64());
 
         let selected_fields: HashSet<String> = args
@@ -559,6 +738,16 @@ impl HistoryTools {
             .into_iter()
             .filter(|turn| since_turn.is_none_or(|min_turn| turn.index >= min_turn))
             .collect();
+
+        if browse_all {
+            return ToolResult::ok(json!(
+                turns
+                    .iter()
+                    .take(limit)
+                    .map(Self::history_item)
+                    .collect::<Vec<_>>()
+            ));
+        }
 
         let docs: Vec<SearchDoc> = turns
             .iter()
@@ -603,22 +792,12 @@ impl HistoryTools {
             .take(limit)
             .map(|(idx, score, hits)| {
                 let turn = &turns[idx];
-                let preview_source = if !turn.user_message.trim().is_empty() {
-                    &turn.user_message
-                } else if !turn.prose.trim().is_empty() {
-                    &turn.prose
-                } else {
-                    &turn.output
-                };
-                json!({
-                    "turn": turn.index,
-                    "score": score,
-                    "field_hits": hits,
-                    "preview": truncate_preview(preview_source, 220),
-                    "tool_calls": turn.tool_calls,
-                    "files_read": turn.files_read,
-                    "files_written": turn.files_written,
-                })
+                let mut item = Self::history_item(turn);
+                if let Some(obj) = item.as_object_mut() {
+                    obj.insert("score".to_string(), json!(score));
+                    obj.insert("field_hits".to_string(), json!(hits));
+                }
+                item
             })
             .collect();
         ToolResult::ok(json!(items))
@@ -631,11 +810,11 @@ impl ToolProvider for HistoryTools {
         vec![ToolDefinition {
             name: "search_history".into(),
             description: vec![ToolText::new(
-                "Search turn history using hybrid/literal/regex matching.",
+                "Search turn history using hybrid/literal/regex matching. With no `query`, returns the full turn list in stable turn order.",
                 [ExecutionMode::Repl, ExecutionMode::Standard],
             )],
             params: vec![
-                ToolParam::typed("query", "str"),
+                ToolParam::optional("query", "str"),
                 ToolParam::optional("mode", "str"),
                 ToolParam::optional("regex", "str"),
                 ToolParam::optional("limit", "int"),
@@ -645,7 +824,7 @@ impl ToolProvider for HistoryTools {
             returns: "list".into(),
             examples: vec![],
             hidden: false,
-            inject_into_prompt: false,
+            inject_into_prompt: true,
         }]
     }
 
@@ -671,6 +850,15 @@ impl MemoryTools {
         Self { store }
     }
 
+    fn memory_item(entry: &MemRecord) -> serde_json::Value {
+        json!({
+            "key": entry.key,
+            "description": entry.description,
+            "value": entry.value,
+            "turn": entry.turn,
+        })
+    }
+
     fn search_mem(&self, args: &serde_json::Value) -> ToolResult {
         let agent_id = agent_id(args);
         let query = args
@@ -678,9 +866,14 @@ impl MemoryTools {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
+        let browse_all = query.trim().is_empty();
         let mode = SearchMode::parse(args.get("mode").and_then(|v| v.as_str()));
         let regex = args.get("regex").and_then(|v| v.as_str());
-        let limit = limit_from_args(args);
+        let limit = if browse_all && args.get("limit").is_none() {
+            usize::MAX
+        } else {
+            limit_from_args(args)
+        };
         let key_filter: Option<HashSet<String>> =
             args.get("keys").and_then(|v| v.as_array()).map(|arr| {
                 arr.iter()
@@ -699,6 +892,16 @@ impl MemoryTools {
                     .is_none_or(|keys| keys.contains(&entry.key))
             })
             .collect();
+
+        if browse_all {
+            return ToolResult::ok(json!(
+                entries
+                    .iter()
+                    .take(limit)
+                    .map(Self::memory_item)
+                    .collect::<Vec<_>>()
+            ));
+        }
 
         let docs: Vec<SearchDoc> = entries
             .iter()
@@ -722,14 +925,12 @@ impl MemoryTools {
             .take(limit)
             .map(|(idx, score, field_hits)| {
                 let entry = &entries[idx];
-                json!({
-                    "key": entry.key,
-                    "description": entry.description,
-                    "value": entry.value,
-                    "turn": entry.turn,
-                    "score": score,
-                    "field_hits": field_hits,
-                })
+                let mut item = Self::memory_item(entry);
+                if let Some(obj) = item.as_object_mut() {
+                    obj.insert("score".to_string(), json!(score));
+                    obj.insert("field_hits".to_string(), json!(field_hits));
+                }
+                item
             })
             .collect();
         ToolResult::ok(json!(items))
@@ -779,24 +980,6 @@ impl MemoryTools {
         let _ = self.store.mem_delete(&agent_id, key);
         ToolResult::ok(json!(null))
     }
-
-    fn mem_all(&self, args: &serde_json::Value) -> ToolResult {
-        let agent_id = agent_id(args);
-        let entries = self
-            .store
-            .mem_export(&agent_id)
-            .into_iter()
-            .map(|entry| {
-                json!({
-                    "key": entry.key,
-                    "description": entry.description,
-                    "value": entry.value,
-                    "turn": entry.turn,
-                })
-            })
-            .collect::<Vec<_>>();
-        ToolResult::ok(json!(entries))
-    }
 }
 
 #[async_trait::async_trait]
@@ -806,11 +989,11 @@ impl ToolProvider for MemoryTools {
             ToolDefinition {
                 name: "search_mem".into(),
                 description: vec![ToolText::new(
-                    "Search persistent memory using hybrid/literal/regex matching.",
+                    "Search persistent memory using hybrid/literal/regex matching. With no `query`, returns the full memory list in stable key order.",
                     [ExecutionMode::Repl, ExecutionMode::Standard],
                 )],
                 params: vec![
-                    ToolParam::typed("query", "str"),
+                    ToolParam::optional("query", "str"),
                     ToolParam::optional("mode", "str"),
                     ToolParam::optional("regex", "str"),
                     ToolParam::optional("limit", "int"),
@@ -819,7 +1002,7 @@ impl ToolProvider for MemoryTools {
                 returns: "list".into(),
                 examples: vec![],
                 hidden: false,
-                inject_into_prompt: false,
+                inject_into_prompt: true,
             },
             ToolDefinition {
                 name: "mem_set".into(),
@@ -835,7 +1018,7 @@ impl ToolProvider for MemoryTools {
                 returns: "None".into(),
                 examples: vec![],
                 hidden: false,
-                inject_into_prompt: false,
+                inject_into_prompt: true,
             },
             ToolDefinition {
                 name: "mem_get".into(),
@@ -847,7 +1030,7 @@ impl ToolProvider for MemoryTools {
                 returns: "dict".into(),
                 examples: vec![],
                 hidden: false,
-                inject_into_prompt: false,
+                inject_into_prompt: true,
             },
             ToolDefinition {
                 name: "mem_delete".into(),
@@ -859,19 +1042,7 @@ impl ToolProvider for MemoryTools {
                 returns: "None".into(),
                 examples: vec![],
                 hidden: false,
-                inject_into_prompt: false,
-            },
-            ToolDefinition {
-                name: "mem_all".into(),
-                description: vec![ToolText::new(
-                    "List all persistent memory entries.",
-                    [ExecutionMode::Repl, ExecutionMode::Standard],
-                )],
-                params: vec![],
-                returns: "list".into(),
-                examples: vec![],
-                hidden: false,
-                inject_into_prompt: false,
+                inject_into_prompt: true,
             },
         ]
     }
@@ -885,7 +1056,6 @@ impl ToolProvider for MemoryTools {
             "mem_set" => tools.mem_set(&args),
             "mem_get" => tools.mem_get(&args),
             "mem_delete" => tools.mem_delete(&args),
-            "mem_all" => tools.mem_all(&args),
             _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
         })
         .await
@@ -916,6 +1086,7 @@ impl PluginFactory for HistoryPluginFactory {
             store: Arc::clone(&self.store),
             tools: Arc::clone(&self.tools),
             agent_id: ctx.agent_id.clone(),
+            state: Arc::new(Mutex::new(HistoryPluginState::default())),
         }))
     }
 }
@@ -939,6 +1110,94 @@ pub struct PromptContextPluginFactory {
     base_context: String,
     project_instructions: String,
     config: PromptContextPluginConfig,
+}
+
+pub struct ToolSurfacePluginFactory;
+
+impl PluginFactory for ToolSurfacePluginFactory {
+    fn id(&self) -> &'static str {
+        "tool_surface"
+    }
+
+    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        Ok(Arc::new(ToolSurfacePlugin))
+    }
+}
+
+struct ToolSurfacePlugin;
+
+impl SessionPlugin for ToolSurfacePlugin {
+    fn id(&self) -> &'static str {
+        "tool_surface"
+    }
+
+    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
+        reg.register_tool_surface_contributor(Arc::new(|ctx| {
+            let omitted_tool_count = ctx
+                .tools
+                .iter()
+                .filter(|tool| !tool.hidden)
+                .filter(|tool| tool.name != "search_tools")
+                .filter(|tool| !tool.inject_into_prompt)
+                .filter(|tool| !tool.description_for(ctx.mode).is_empty())
+                .count();
+            let has_tool_search_tool = ctx
+                .tools
+                .iter()
+                .any(|tool| tool.name == "search_tools" && !tool.hidden);
+            let show_tool_search = has_tool_search_tool && omitted_tool_count > 0;
+            let has_skill_search = ctx
+                .tools
+                .iter()
+                .any(|tool| tool.name == "search_skills" && !tool.hidden);
+
+            let mut overrides = Vec::new();
+            if has_tool_search_tool {
+                overrides.push(ToolSurfaceOverride {
+                    tool_name: "search_tools".to_string(),
+                    inject_into_prompt: Some(show_tool_search),
+                    discoverable: Some(show_tool_search),
+                });
+            }
+
+            let mut guide_sections = Vec::new();
+            if show_tool_search {
+                guide_sections.push(match ctx.mode {
+                    ExecutionMode::Repl => "### Tool Discovery\nUse `call search_tools {}` to inspect the additional available tools that are omitted from Available Tools for brevity. With no query, it browses the full active tool catalog; use focused queries when you know the kind of tool you need.".to_string(),
+                    ExecutionMode::Standard => "### Tool Discovery\nUse `search_tools(...)` to inspect the additional available tools that are omitted from Available Tools for brevity. With no query, it browses the full active tool catalog; use focused queries when you know the kind of tool you need.".to_string(),
+                });
+            }
+            if has_skill_search {
+                guide_sections.push(match ctx.mode {
+                    ExecutionMode::Repl => "### Skill Discovery\nUse `call search_skills {}` to inspect installed skills before choosing one to load with `load_skill`.".to_string(),
+                    ExecutionMode::Standard => "### Skill Discovery\nUse `search_skills(...)` to inspect installed skills before choosing one to load with `load_skill`.".to_string(),
+                });
+            }
+
+            let tool_list_notes = if omitted_tool_count > 0 {
+                vec![match ctx.mode {
+                    ExecutionMode::Repl if show_tool_search => format!(
+                        "- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Use `call search_tools {{ ... }}` to inspect them when needed."
+                    ),
+                    ExecutionMode::Standard if show_tool_search => format!(
+                        "- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Use `search_tools(...)` to inspect them when needed."
+                    ),
+                    _ => format!(
+                        "- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity."
+                    ),
+                }]
+            } else {
+                Vec::new()
+            };
+
+            Ok(ToolSurfaceContribution {
+                overrides,
+                guide_sections,
+                tool_list_notes,
+            })
+        }));
+        Ok(())
+    }
 }
 
 impl PromptContextPluginFactory {
@@ -1009,6 +1268,7 @@ struct HistoryPlugin {
     store: Arc<Store>,
     tools: Arc<HistoryTools>,
     agent_id: String,
+    state: Arc<Mutex<HistoryPluginState>>,
 }
 
 impl SessionPlugin for HistoryPlugin {
@@ -1019,13 +1279,63 @@ impl SessionPlugin for HistoryPlugin {
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
         reg.register_tool_provider(Arc::clone(&self.tools) as Arc<dyn ToolProvider>)?;
         reg.register_capability(history_capability_def())?;
-        reg.register_turn_prompt_contributor(Arc::new(|ctx| {
+        let state = Arc::clone(&self.state);
+        reg.register_message_mutator(
+            MessageMutatorHook::AfterTokenCount,
+            Arc::new(move |ctx, mut messages| {
+                let state = Arc::clone(&state);
+                Box::pin(async move {
+                    let Some(prompt_usage) = ctx.prompt_usage else {
+                        return Ok(messages);
+                    };
+                    let Some(max_context) = ctx.max_context_tokens else {
+                        return Ok(messages);
+                    };
+                    let policy = ctx.context_folding.unwrap_or_default();
+                    if compact_history_messages(
+                        &mut messages,
+                        prompt_usage.prompt_context_tokens,
+                        max_context,
+                        policy,
+                    ) {
+                        state
+                            .lock()
+                            .map_err(|_| {
+                                PluginError::Session("history plugin state poisoned".to_string())
+                            })?
+                            .has_archived_history = true;
+                    }
+                    Ok(messages)
+                })
+            }),
+        )?;
+        let state = Arc::clone(&self.state);
+        reg.register_tool_surface_contributor(Arc::new(move |ctx| {
+            let has_archived_history = state
+                .lock()
+                .map_err(|_| PluginError::Session("history plugin state poisoned".to_string()))?
+                .has_archived_history;
+            if !ctx.tools.iter().any(|tool| tool.name == "search_history") {
+                return Ok(ToolSurfaceContribution::default());
+            }
+            Ok(ToolSurfaceContribution {
+                overrides: vec![ToolSurfaceOverride {
+                    tool_name: "search_history".to_string(),
+                    inject_into_prompt: Some(has_archived_history),
+                    discoverable: Some(has_archived_history),
+                }],
+                guide_sections: Vec::new(),
+                tool_list_notes: Vec::new(),
+            })
+        }));
+        let state = Arc::clone(&self.state);
+        reg.register_turn_prompt_contributor(Arc::new(move |_ctx| {
+            let state = Arc::clone(&state);
             Box::pin(async move {
-                let has_archived_history = ctx
-                    .state
-                    .messages
-                    .iter()
-                    .any(|message| message.id == "__context_archive__");
+                let has_archived_history = state
+                    .lock()
+                    .map_err(|_| PluginError::Session("history plugin state poisoned".to_string()))?
+                    .has_archived_history;
                 Ok(if has_archived_history {
                     vec![TurnPromptContribution {
                         priority: 0,
@@ -1043,15 +1353,14 @@ impl SessionPlugin for HistoryPlugin {
             let store = Arc::clone(&store);
             let agent_id = agent_id.clone();
             Box::pin(async move {
-                store.history_add_turn(
-                    &agent_id,
-                    &crate::runtime::latest_turn_history_payload(&turn),
-                );
+                store.history_add_turn(&agent_id, &latest_turn_history_payload(&turn));
                 Ok(())
             })
         }));
 
-        reg.register_session_config_mutator(Arc::new(|ctx, mut state| {
+        let plugin_state = Arc::clone(&self.state);
+        reg.register_session_config_mutator(Arc::new(move |ctx, mut state| {
+            let plugin_state = Arc::clone(&plugin_state);
             Box::pin(async move {
                 let Some(max_context) = ctx.current.context_window else {
                     return Ok(state);
@@ -1065,12 +1374,19 @@ impl SessionPlugin for HistoryPlugin {
                 {
                     return Ok(state);
                 }
-                crate::agent::apply_context_folding(
+                if compact_history_messages(
                     &mut state.messages,
                     prompt_usage.prompt_context_tokens,
                     max_context as usize,
                     state.context_folding,
-                );
+                ) {
+                    plugin_state
+                        .lock()
+                        .map_err(|_| {
+                            PluginError::Session("history plugin state poisoned".to_string())
+                        })?
+                        .has_archived_history = true;
+                }
                 Ok(state)
             })
         }));
@@ -1168,10 +1484,17 @@ impl SessionPlugin for HistoryPlugin {
                 })
             })
             .collect::<Vec<_>>();
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| PluginError::Snapshot("history plugin state poisoned".to_string()))?;
         Ok(PluginSnapshotMeta {
             plugin_id: self.id().to_string(),
             plugin_version: self.version().to_string(),
-            state: Some(json!({ "turns": turns })),
+            state: Some(json!({
+                "turns": turns,
+                "has_archived_history": state.has_archived_history,
+            })),
         })
     }
 
@@ -1188,6 +1511,16 @@ impl SessionPlugin for HistoryPlugin {
             .cloned()
             .unwrap_or_default();
         self.store.history_load(&self.agent_id, &turns);
+        let has_archived_history = meta
+            .state
+            .as_ref()
+            .and_then(|state| state.get("has_archived_history"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        self.state
+            .lock()
+            .map_err(|_| PluginError::Snapshot("history plugin state poisoned".to_string()))?
+            .has_archived_history = has_archived_history;
         Ok(())
     }
 }
@@ -1261,7 +1594,21 @@ impl SessionPlugin for PlanTrackerPlugin {
     }
 }
 
-pub struct PlanModePluginFactory;
+pub struct PlanModePluginFactory {
+    config: PlanModePluginConfig,
+}
+
+impl Default for PlanModePluginFactory {
+    fn default() -> Self {
+        Self::new(PlanModePluginConfig::default())
+    }
+}
+
+impl PlanModePluginFactory {
+    pub fn new(config: PlanModePluginConfig) -> Self {
+        Self { config }
+    }
+}
 
 impl PluginFactory for PlanModePluginFactory {
     fn id(&self) -> &'static str {
@@ -1271,12 +1618,14 @@ impl PluginFactory for PlanModePluginFactory {
     fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         Ok(Arc::new(PlanModePlugin {
             state: Arc::new(Mutex::new(PlanModeState::default())),
+            config: self.config.clone(),
         }))
     }
 }
 
 struct PlanModePlugin {
     state: Arc<Mutex<PlanModeState>>,
+    config: PlanModePluginConfig,
 }
 
 impl SessionPlugin for PlanModePlugin {
@@ -1372,8 +1721,10 @@ impl SessionPlugin for PlanModePlugin {
         }));
 
         let before_tool_state = Arc::clone(&self.state);
+        let before_tool_config = self.config.clone();
         reg.before_tool_call(Arc::new(move |ctx| {
             let state = Arc::clone(&before_tool_state);
+            let config = before_tool_config.clone();
             Box::pin(async move {
                 let enabled = state
                     .lock()
@@ -1382,12 +1733,7 @@ impl SessionPlugin for PlanModePlugin {
                 if !enabled {
                     return Ok(Vec::new());
                 }
-                if ctx.tool_name == "search_tools"
-                    && let Some(args) = filter_plan_mode_search_catalog(&ctx.args)
-                {
-                    return Ok(vec![PluginDirective::ReplaceToolArgs { args }]);
-                }
-                if plan_mode_tool_allowed(&ctx.tool_name, &ctx.args) {
+                if !plan_mode_tool_blocked(&config, &ctx.tool_name, &ctx.args) {
                     return Ok(Vec::new());
                 }
                 Ok(vec![PluginDirective::AbortTurn {
@@ -1397,6 +1743,34 @@ impl SessionPlugin for PlanModePlugin {
                         ctx.tool_name
                     ),
                 }])
+            })
+        }));
+
+        let tool_surface_state = Arc::clone(&self.state);
+        let tool_surface_config = self.config.clone();
+        reg.register_tool_surface_contributor(Arc::new(move |ctx| {
+            let enabled = tool_surface_state
+                .lock()
+                .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?
+                .enabled;
+            if !enabled {
+                return Ok(ToolSurfaceContribution::default());
+            }
+            let config = tool_surface_config.clone();
+            let overrides = ctx
+                .tools
+                .iter()
+                .filter(|tool| !plan_mode_tool_discoverable(&config, &tool.name))
+                .map(|tool| ToolSurfaceOverride {
+                    tool_name: tool.name.clone(),
+                    inject_into_prompt: Some(false),
+                    discoverable: Some(false),
+                })
+                .collect();
+            Ok(ToolSurfaceContribution {
+                overrides,
+                guide_sections: Vec::new(),
+                tool_list_notes: Vec::new(),
             })
         }));
 
@@ -1643,16 +2017,17 @@ pub use MemoryPluginFactory as BuiltinMemoryPluginFactory;
 pub use PlanModePluginFactory as BuiltinPlanModePluginFactory;
 pub use PlanTrackerPluginFactory as BuiltinPlanTrackerPluginFactory;
 pub use PromptContextPluginFactory as BuiltinPromptContextPluginFactory;
+pub use ToolSurfacePluginFactory as BuiltinToolSurfacePluginFactory;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::instructions::InstructionSource;
-    use crate::plugin::ToolCallHookContext;
+    use crate::plugin::{MessageMutatorContext, MessageMutatorHook, ToolCallHookContext};
     use crate::{
         AgentStateEnvelope, AssembledTurn, AssistantOutput, ContextFoldingConfig, DoneReason,
-        ExecutionMode, MessageRole, OutputState, PluginHost, SessionCreateRequest, SessionHandle,
-        SessionManager, SessionSnapshot, TokenUsage, TurnHookContext, TurnInput,
+        ExecutionMode, MessageRole, OutputState, PluginHost, PromptUsage, SessionCreateRequest,
+        SessionHandle, SessionManager, SessionSnapshot, TokenUsage, TurnHookContext, TurnInput,
         TurnResultHookContext, TurnStatus,
     };
 
@@ -1683,6 +2058,13 @@ mod tests {
             _session_id: &str,
         ) -> Result<SessionSnapshot, PluginError> {
             Ok(AgentStateEnvelope::default())
+        }
+
+        async fn tool_catalog(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<serde_json::Value>, PluginError> {
+            Ok(Vec::new())
         }
 
         async fn create_session(
@@ -1759,7 +2141,7 @@ mod tests {
 
     #[cfg(feature = "sqlite-store")]
     #[tokio::test]
-    async fn history_plugin_emits_turn_prompt_note_only_when_archive_marker_exists() {
+    async fn history_plugin_emits_turn_prompt_note_only_after_compaction() {
         let store = Arc::new(Store::memory().expect("store"));
         let host = PluginHost::new(vec![Arc::new(BuiltinHistoryPluginFactory::new(store))]);
         let session = host.build_session("root", None).expect("session");
@@ -1775,24 +2157,143 @@ mod tests {
             .expect("turn prompt");
         assert!(empty.is_empty());
 
-        let mut state = AgentStateEnvelope::default();
-        state.messages.push(crate::Message {
-            id: "__context_archive__".to_string(),
-            role: MessageRole::System,
-            parts: vec![crate::Part {
-                id: "archive.p0".to_string(),
-                kind: crate::PartKind::Text,
-                content: "archived".to_string(),
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: crate::PruneState::Intact,
-            }],
-            origin: None,
-        });
+        let messages = vec![
+            crate::Message {
+                id: "u1".to_string(),
+                role: MessageRole::User,
+                parts: vec![crate::Part {
+                    id: "u1.p0".to_string(),
+                    kind: crate::PartKind::Text,
+                    content: "oldest user".repeat(20),
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: crate::PruneState::Intact,
+                }],
+                origin: None,
+            },
+            crate::Message {
+                id: "a1".to_string(),
+                role: MessageRole::Assistant,
+                parts: vec![crate::Part {
+                    id: "a1.p0".to_string(),
+                    kind: crate::PartKind::Text,
+                    content: "oldest assistant".repeat(20),
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: crate::PruneState::Intact,
+                }],
+                origin: None,
+            },
+            crate::Message {
+                id: "u2".to_string(),
+                role: MessageRole::User,
+                parts: vec![crate::Part {
+                    id: "u2.p0".to_string(),
+                    kind: crate::PartKind::Text,
+                    content: "older user".repeat(20),
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: crate::PruneState::Intact,
+                }],
+                origin: None,
+            },
+            crate::Message {
+                id: "a2".to_string(),
+                role: MessageRole::Assistant,
+                parts: vec![crate::Part {
+                    id: "a2.p0".to_string(),
+                    kind: crate::PartKind::Text,
+                    content: "older assistant".repeat(20),
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: crate::PruneState::Intact,
+                }],
+                origin: None,
+            },
+            crate::Message {
+                id: "u3".to_string(),
+                role: MessageRole::User,
+                parts: vec![crate::Part {
+                    id: "u3.p0".to_string(),
+                    kind: crate::PartKind::Text,
+                    content: "recent user".repeat(20),
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: crate::PruneState::Intact,
+                }],
+                origin: None,
+            },
+            crate::Message {
+                id: "a3".to_string(),
+                role: MessageRole::Assistant,
+                parts: vec![crate::Part {
+                    id: "a3.p0".to_string(),
+                    kind: crate::PartKind::Text,
+                    content: "recent assistant".repeat(20),
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: crate::PruneState::Intact,
+                }],
+                origin: None,
+            },
+            crate::Message {
+                id: "u4".to_string(),
+                role: MessageRole::User,
+                parts: vec![crate::Part {
+                    id: "u4.p0".to_string(),
+                    kind: crate::PartKind::Text,
+                    content: "latest user".repeat(20),
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: crate::PruneState::Intact,
+                }],
+                origin: None,
+            },
+            crate::Message {
+                id: "a4".to_string(),
+                role: MessageRole::Assistant,
+                parts: vec![crate::Part {
+                    id: "a4.p0".to_string(),
+                    kind: crate::PartKind::Text,
+                    content: "latest assistant".repeat(20),
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: crate::PruneState::Intact,
+                }],
+                origin: None,
+            },
+        ];
+        let compacted = session
+            .mutate_messages(
+                MessageMutatorContext {
+                    hook: MessageMutatorHook::AfterTokenCount,
+                    session_id: "root".to_string(),
+                    state: AgentStateEnvelope::default(),
+                    host: Arc::clone(&manager),
+                    turn: None,
+                    prompt_usage: Some(PromptUsage {
+                        prompt_context_tokens: 70,
+                        input_tokens: 70,
+                        cached_input_tokens: 0,
+                    }),
+                    max_context_tokens: Some(100),
+                    context_folding: Some(ContextFoldingConfig::default()),
+                },
+                messages,
+            )
+            .await
+            .expect("mutate messages");
+        assert!(!compacted.iter().any(|message| {
+            message
+                .parts
+                .iter()
+                .any(|part| part.content.contains("oldest user"))
+        }));
+
         let contributions = session
             .collect_turn_prompt_contributions(TurnHookContext {
                 session_id: "root".to_string(),
-                state,
+                state: AgentStateEnvelope::default(),
                 host: manager,
             })
             .await
@@ -1803,6 +2304,247 @@ mod tests {
                 .content
                 .contains("Older turns were archived")
         );
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    #[tokio::test]
+    async fn history_plugin_hides_search_history_until_context_is_archived() {
+        let store = Arc::new(Store::memory().expect("store"));
+        let host = PluginHost::new(vec![Arc::new(BuiltinHistoryPluginFactory::new(store))]);
+        let session = host.build_session("root", None).expect("session");
+        let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
+        let defs = session
+            .tool_providers()
+            .iter()
+            .flat_map(|provider| provider.definitions())
+            .filter(|def| def.name == "search_history")
+            .collect::<Vec<_>>();
+        assert_eq!(defs.len(), 1);
+        assert!(defs[0].inject_into_prompt);
+
+        let surface = session
+            .resolve_tool_surface(ToolSurfaceContext {
+                session_id: "root".to_string(),
+                mode: ExecutionMode::Standard,
+                tools: defs.clone(),
+            })
+            .expect("tool surface");
+        assert_eq!(surface.tools.len(), 1);
+        assert!(!surface.tools[0].inject_into_prompt);
+        assert!(surface.tools[0].hidden);
+
+        let archived_result = session
+            .mutate_messages(
+                MessageMutatorContext {
+                    hook: MessageMutatorHook::AfterTokenCount,
+                    session_id: "root".to_string(),
+                    state: AgentStateEnvelope::default(),
+                    host: Arc::clone(&manager),
+                    turn: None,
+                    prompt_usage: Some(PromptUsage {
+                        prompt_context_tokens: 70,
+                        input_tokens: 70,
+                        cached_input_tokens: 0,
+                    }),
+                    max_context_tokens: Some(100),
+                    context_folding: Some(ContextFoldingConfig::default()),
+                },
+                vec![
+                    crate::Message {
+                        id: "u1".to_string(),
+                        role: MessageRole::User,
+                        parts: vec![crate::Part {
+                            id: "u1.p0".to_string(),
+                            kind: crate::PartKind::Text,
+                            content: "oldest user".repeat(20),
+                            tool_call_id: None,
+                            tool_name: None,
+                            prune_state: crate::PruneState::Intact,
+                        }],
+                        origin: None,
+                    },
+                    crate::Message {
+                        id: "a1".to_string(),
+                        role: MessageRole::Assistant,
+                        parts: vec![crate::Part {
+                            id: "a1.p0".to_string(),
+                            kind: crate::PartKind::Text,
+                            content: "oldest assistant".repeat(20),
+                            tool_call_id: None,
+                            tool_name: None,
+                            prune_state: crate::PruneState::Intact,
+                        }],
+                        origin: None,
+                    },
+                    crate::Message {
+                        id: "u2".to_string(),
+                        role: MessageRole::User,
+                        parts: vec![crate::Part {
+                            id: "u2.p0".to_string(),
+                            kind: crate::PartKind::Text,
+                            content: "older user".repeat(20),
+                            tool_call_id: None,
+                            tool_name: None,
+                            prune_state: crate::PruneState::Intact,
+                        }],
+                        origin: None,
+                    },
+                    crate::Message {
+                        id: "a2".to_string(),
+                        role: MessageRole::Assistant,
+                        parts: vec![crate::Part {
+                            id: "a2.p0".to_string(),
+                            kind: crate::PartKind::Text,
+                            content: "older assistant".repeat(20),
+                            tool_call_id: None,
+                            tool_name: None,
+                            prune_state: crate::PruneState::Intact,
+                        }],
+                        origin: None,
+                    },
+                    crate::Message {
+                        id: "u3".to_string(),
+                        role: MessageRole::User,
+                        parts: vec![crate::Part {
+                            id: "u3.p0".to_string(),
+                            kind: crate::PartKind::Text,
+                            content: "recent user".repeat(20),
+                            tool_call_id: None,
+                            tool_name: None,
+                            prune_state: crate::PruneState::Intact,
+                        }],
+                        origin: None,
+                    },
+                    crate::Message {
+                        id: "a3".to_string(),
+                        role: MessageRole::Assistant,
+                        parts: vec![crate::Part {
+                            id: "a3.p0".to_string(),
+                            kind: crate::PartKind::Text,
+                            content: "recent assistant".repeat(20),
+                            tool_call_id: None,
+                            tool_name: None,
+                            prune_state: crate::PruneState::Intact,
+                        }],
+                        origin: None,
+                    },
+                    crate::Message {
+                        id: "u4".to_string(),
+                        role: MessageRole::User,
+                        parts: vec![crate::Part {
+                            id: "u4.p0".to_string(),
+                            kind: crate::PartKind::Text,
+                            content: "latest user".repeat(20),
+                            tool_call_id: None,
+                            tool_name: None,
+                            prune_state: crate::PruneState::Intact,
+                        }],
+                        origin: None,
+                    },
+                    crate::Message {
+                        id: "a4".to_string(),
+                        role: MessageRole::Assistant,
+                        parts: vec![crate::Part {
+                            id: "a4.p0".to_string(),
+                            kind: crate::PartKind::Text,
+                            content: "latest assistant".repeat(20),
+                            tool_call_id: None,
+                            tool_name: None,
+                            prune_state: crate::PruneState::Intact,
+                        }],
+                        origin: None,
+                    },
+                ],
+            )
+            .await
+            .expect("mutate messages");
+        assert!(!archived_result.is_empty());
+
+        let surface = session
+            .resolve_tool_surface(ToolSurfaceContext {
+                session_id: "root".to_string(),
+                mode: ExecutionMode::Standard,
+                tools: defs,
+            })
+            .expect("tool surface");
+        assert_eq!(surface.tools.len(), 1);
+        assert!(surface.tools[0].inject_into_prompt);
+        assert!(!surface.tools[0].hidden);
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    #[test]
+    fn memory_tools_are_prompt_injected() {
+        let defs = MemoryTools::new(Arc::new(Store::memory().expect("store"))).definitions();
+        for name in ["search_mem", "mem_set", "mem_get", "mem_delete"] {
+            assert!(
+                defs.iter()
+                    .any(|def| def.name == name && def.inject_into_prompt)
+            );
+        }
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    #[test]
+    fn search_mem_lists_all_without_query_in_stable_key_order() {
+        let store = Arc::new(Store::memory().expect("store"));
+        store.mem_set_turn("root", 1);
+        store.mem_set("root", "zeta", "last", "z");
+        store.mem_set("root", "alpha", "first", "a");
+        let tools = MemoryTools::new(store);
+
+        let result = tools.search_mem(&json!({ "__agent_id__": "root" }));
+
+        assert!(result.success);
+        let items = result.result.as_array().cloned().unwrap_or_default();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["key"], "alpha");
+        assert_eq!(items[1]["key"], "zeta");
+        assert!(items[0].get("score").is_none());
+        assert!(items[0].get("field_hits").is_none());
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    #[test]
+    fn search_history_lists_all_without_query_in_stable_turn_order() {
+        let store = Arc::new(Store::memory().expect("store"));
+        store.history_add_turn(
+            "root",
+            &json!({
+                "index": 2,
+                "user_message": "second",
+                "prose": "",
+                "code": "",
+                "output": "",
+                "tool_calls": [],
+                "files_read": [],
+                "files_written": [],
+            }),
+        );
+        store.history_add_turn(
+            "root",
+            &json!({
+                "index": 1,
+                "user_message": "first",
+                "prose": "",
+                "code": "",
+                "output": "",
+                "tool_calls": [],
+                "files_read": [],
+                "files_written": [],
+            }),
+        );
+        let tools = HistoryTools::new(store);
+
+        let result = tools.search_history(&json!({ "__agent_id__": "root" }));
+
+        assert!(result.success);
+        let items = result.result.as_array().cloned().unwrap_or_default();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["turn"], 1);
+        assert_eq!(items[1]["turn"], 2);
+        assert!(items[0].get("score").is_none());
+        assert!(items[0].get("field_hits").is_none());
     }
 
     #[test]
@@ -1831,6 +2573,128 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn tool_surface_plugin_contributes_discovery_guidance_and_omitted_tool_note() {
+        let host = PluginHost::new(vec![Arc::new(ToolSurfacePluginFactory)]);
+        let session = host.build_session("root", None).expect("session");
+
+        let surface = session
+            .resolve_tool_surface(ToolSurfaceContext {
+                session_id: "root".to_string(),
+                mode: ExecutionMode::Standard,
+                tools: vec![
+                    ToolDefinition {
+                        name: "search_tools".to_string(),
+                        description: vec![ToolText::new(
+                            "Discover tools",
+                            [ExecutionMode::Standard],
+                        )],
+                        params: vec![],
+                        returns: "list".to_string(),
+                        examples: vec![],
+                        hidden: false,
+                        inject_into_prompt: false,
+                    },
+                    ToolDefinition {
+                        name: "search_skills".to_string(),
+                        description: vec![ToolText::new(
+                            "Discover skills",
+                            [ExecutionMode::Standard],
+                        )],
+                        params: vec![],
+                        returns: "list".to_string(),
+                        examples: vec![],
+                        hidden: false,
+                        inject_into_prompt: true,
+                    },
+                    ToolDefinition {
+                        name: "read_file".to_string(),
+                        description: vec![ToolText::new("Read files", [ExecutionMode::Standard])],
+                        params: vec![],
+                        returns: "str".to_string(),
+                        examples: vec![],
+                        hidden: false,
+                        inject_into_prompt: true,
+                    },
+                    ToolDefinition {
+                        name: "apply_patch".to_string(),
+                        description: vec![ToolText::new(
+                            "Apply patches",
+                            [ExecutionMode::Standard],
+                        )],
+                        params: vec![],
+                        returns: "str".to_string(),
+                        examples: vec![],
+                        hidden: false,
+                        inject_into_prompt: false,
+                    },
+                ],
+            })
+            .expect("tool surface");
+
+        assert!(
+            surface
+                .tools
+                .iter()
+                .any(|tool| tool.name == "search_tools" && tool.inject_into_prompt)
+        );
+        assert!(
+            surface
+                .tools
+                .iter()
+                .any(|tool| tool.name == "search_skills" && tool.inject_into_prompt)
+        );
+        assert!(surface.guide_sections.iter().any(|section| {
+            section.contains("Use `search_tools(...)` to inspect the additional available tools")
+        }));
+        assert!(surface.guide_sections.iter().any(|section| {
+            section.contains("Use `search_skills(...)` to inspect installed skills")
+        }));
+        assert!(surface.tool_list_notes.iter().any(|note| {
+            note.contains("additional tool(s) are available but omitted from this prompt")
+        }));
+    }
+
+    #[test]
+    fn tool_surface_plugin_hides_search_tools_when_nothing_is_omitted() {
+        let host = PluginHost::new(vec![Arc::new(ToolSurfacePluginFactory)]);
+        let session = host.build_session("root", None).expect("session");
+
+        let surface = session
+            .resolve_tool_surface(ToolSurfaceContext {
+                session_id: "root".to_string(),
+                mode: ExecutionMode::Standard,
+                tools: vec![
+                    ToolDefinition {
+                        name: "search_tools".to_string(),
+                        description: vec![ToolText::new(
+                            "Discover tools",
+                            [ExecutionMode::Standard],
+                        )],
+                        params: vec![],
+                        returns: "list".to_string(),
+                        examples: vec![],
+                        hidden: false,
+                        inject_into_prompt: false,
+                    },
+                    ToolDefinition {
+                        name: "read_file".to_string(),
+                        description: vec![ToolText::new("Read files", [ExecutionMode::Standard])],
+                        params: vec![],
+                        returns: "str".to_string(),
+                        examples: vec![],
+                        hidden: false,
+                        inject_into_prompt: true,
+                    },
+                ],
+            })
+            .expect("tool surface");
+
+        assert!(!surface.tools.iter().any(|tool| tool.name == "search_tools"));
+        assert!(surface.guide_sections.is_empty());
+        assert!(surface.tool_list_notes.is_empty());
+    }
+
     #[tokio::test]
     async fn plan_tracker_plugin_registers_update_plan_and_restores_state() {
         let host = PluginHost::new(vec![Arc::new(PlanTrackerPluginFactory)]);
@@ -1852,9 +2716,9 @@ mod tests {
                 "update_plan",
                 &json!({
                     "explanation": "Mapped the runtime/plugin seam.",
-                    "steps": [
-                        {"label":"Inspect planning hooks","status":"completed"},
-                        {"label":"Split plugin ownership","status":"in_progress"}
+                    "plan": [
+                        {"step":"Inspect planning hooks","status":"completed"},
+                        {"step":"Split plugin ownership","status":"in_progress"}
                     ]
                 }),
             )
@@ -1881,9 +2745,9 @@ mod tests {
             .execute(
                 "update_plan",
                 &json!({
-                    "steps": [
-                        {"label":"Inspect planning hooks","status":"completed"},
-                        {"label":"Split plugin ownership","status":"completed"}
+                    "plan": [
+                        {"step":"Inspect planning hooks","status":"completed"},
+                        {"step":"Split plugin ownership","status":"completed"}
                     ]
                 }),
             )
@@ -1893,7 +2757,7 @@ mod tests {
 
     #[tokio::test]
     async fn plan_mode_plugin_toggle_and_status_round_trip() {
-        let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory)]);
+        let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
         let session = host.build_session("root", None).expect("session");
         let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
 
@@ -1966,7 +2830,7 @@ mod tests {
 
     #[tokio::test]
     async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
-        let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory)]);
+        let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
         let session = host.build_session("root", None).expect("session");
         let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
 
@@ -2032,35 +2896,51 @@ mod tests {
             .expect("before_tool_call");
         assert!(allowed.is_empty());
 
-        let search_filtered = session
-            .before_tool_call(ToolCallHookContext {
+        let surface = session
+            .resolve_tool_surface(ToolSurfaceContext {
                 session_id: "root".to_string(),
-                tool_name: "search_tools".to_string(),
-                args: json!({
-                    "__tool_catalog": [
-                        {"name":"search_tools","description":"Discover tools","examples":[],"inject_into_prompt":true},
-                        {"name":"update_plan","description":"Update the checklist plan","examples":[],"inject_into_prompt":true},
-                        {"name":"read_file","description":"Read files","examples":[],"inject_into_prompt":true}
-                    ]
-                }),
-                host: Arc::clone(&manager),
+                mode: ExecutionMode::Standard,
+                tools: vec![
+                    ToolDefinition {
+                        name: "search_tools".to_string(),
+                        description: vec![ToolText::new(
+                            "Discover tools",
+                            [ExecutionMode::Standard],
+                        )],
+                        params: vec![],
+                        returns: "list".to_string(),
+                        examples: vec![],
+                        hidden: false,
+                        inject_into_prompt: false,
+                    },
+                    ToolDefinition {
+                        name: "update_plan".to_string(),
+                        description: vec![ToolText::new("Update plan", [ExecutionMode::Standard])],
+                        params: vec![],
+                        returns: "str".to_string(),
+                        examples: vec![],
+                        hidden: false,
+                        inject_into_prompt: true,
+                    },
+                    ToolDefinition {
+                        name: "read_file".to_string(),
+                        description: vec![ToolText::new("Read files", [ExecutionMode::Standard])],
+                        params: vec![],
+                        returns: "str".to_string(),
+                        examples: vec![],
+                        hidden: false,
+                        inject_into_prompt: true,
+                    },
+                ],
             })
-            .await
-            .expect("before_tool_call");
-        assert!(search_filtered.iter().any(|emitted| matches!(
-            &emitted.value,
-            PluginDirective::ReplaceToolArgs { args }
-                if args
-                    .get(INTERNAL_TOOL_CATALOG_ARG)
-                    .and_then(|value| value.as_array())
-                    .is_some_and(|items| {
-                        items.iter().all(|entry| {
-                            entry.get("name")
-                                .and_then(|value| value.as_str())
-                                != Some("update_plan")
-                        })
-                    })
-        )));
+            .expect("tool surface");
+        assert!(
+            surface
+                .tools
+                .iter()
+                .find(|tool| tool.name == "update_plan")
+                .is_some_and(|tool| tool.hidden && !tool.inject_into_prompt)
+        );
 
         let checklist_blocked = session
             .before_tool_call(ToolCallHookContext {
@@ -2078,21 +2958,18 @@ mod tests {
             PluginDirective::AbortTurn { code, .. } if code == "plan_mode_tool_blocked"
         )));
 
-        let batch_allowed = session
+        let read_allowed = session
             .before_tool_call(ToolCallHookContext {
                 session_id: "root".to_string(),
-                tool_name: "batch".to_string(),
+                tool_name: "read_file".to_string(),
                 args: json!({
-                    "tool_calls": [
-                        {"tool":"read_file","args":{"path":"src/main.rs"}},
-                        {"tool":"exec_command","args":{"cmd":"git status --short"}}
-                    ]
+                    "path":"src/main.rs"
                 }),
                 host: Arc::clone(&manager),
             })
             .await
             .expect("before_tool_call");
-        assert!(batch_allowed.is_empty());
+        assert!(read_allowed.is_empty());
 
         session
             .invoke_external(
@@ -2148,8 +3025,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plan_mode_plugin_uses_configured_blocked_tool_set() {
+        let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::new(
+            PlanModePluginConfig::default().with_blocked_tools(["read_file"]),
+        ))]);
+        let session = host.build_session("root", None).expect("session");
+        let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
+
+        session
+            .invoke_external(
+                "plan_mode.enable",
+                json!({}),
+                None,
+                true,
+                Arc::clone(&manager),
+            )
+            .await
+            .expect("enable");
+
+        let blocked = session
+            .before_tool_call(ToolCallHookContext {
+                session_id: "root".to_string(),
+                tool_name: "read_file".to_string(),
+                args: json!({"path":"src/main.rs"}),
+                host: Arc::clone(&manager),
+            })
+            .await
+            .expect("before_tool_call");
+        assert!(blocked.iter().any(|emitted| matches!(
+            &emitted.value,
+            PluginDirective::AbortTurn { code, .. } if code == "plan_mode_tool_blocked"
+        )));
+
+        let allowed = session
+            .before_tool_call(ToolCallHookContext {
+                session_id: "root".to_string(),
+                tool_name: "update_plan".to_string(),
+                args: json!({
+                    "plan": [{"step":"Inspect planning hooks","status":"in_progress"}]
+                }),
+                host: Arc::clone(&manager),
+            })
+            .await
+            .expect("before_tool_call");
+        assert!(allowed.is_empty());
+    }
+
+    #[tokio::test]
     async fn plan_mode_plugin_suppresses_proposed_plan_tags_and_emits_panel_events() {
-        let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory)]);
+        let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
         let session = host.build_session("root", None).expect("session");
         let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
 

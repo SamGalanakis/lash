@@ -209,35 +209,53 @@ class LashAgent(BaseInstalledAgent):
                 (command_dir / "stderr.txt").write_text(result.stderr)
         self.populate_context_post_run(context)
 
+    def _read_assistant_response(self) -> str | None:
+        outputs: list[str] = []
+        for path in sorted(self.logs_dir.glob("command-*/stdout.txt")):
+            try:
+                text = path.read_text().strip()
+            except Exception as exc:  # pragma: no cover - defensive, non-fatal
+                self.logger.warning("Failed to read lash stdout from %s: %s", path, exc)
+                continue
+            if text:
+                outputs.append(text)
+        if not outputs:
+            return None
+        return "\n\n".join(outputs)
+
     def populate_context_post_run(self, context: AgentContext) -> None:
         sessions_dir = self.logs_dir / "lash-home" / "sessions"
-        if not sessions_dir.exists():
-            return
-
         n_input_tokens = 0
         n_output_tokens = 0
         n_cache_tokens = 0
         saw_usage = False
 
-        for path in sorted(sessions_dir.glob("*.llm.jsonl")):
-            try:
-                with path.open() as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        record = json.loads(line)
-                        usage = record.get("usage")
-                        if not isinstance(usage, dict):
-                            continue
-                        n_input_tokens += int(usage.get("input_tokens") or 0)
-                        n_output_tokens += int(usage.get("output_tokens") or 0)
-                        n_cache_tokens += int(usage.get("cached_input_tokens") or 0)
-                        saw_usage = True
-            except Exception as exc:  # pragma: no cover - defensive, non-fatal
-                self.logger.warning("Failed to parse lash usage from %s: %s", path, exc)
+        if sessions_dir.exists():
+            for path in sorted(sessions_dir.glob("*.llm.jsonl")):
+                try:
+                    with path.open() as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            record = json.loads(line)
+                            usage = record.get("usage")
+                            if not isinstance(usage, dict):
+                                continue
+                            n_input_tokens += int(usage.get("input_tokens") or 0)
+                            n_output_tokens += int(usage.get("output_tokens") or 0)
+                            n_cache_tokens += int(usage.get("cached_input_tokens") or 0)
+                            saw_usage = True
+                except Exception as exc:  # pragma: no cover - defensive, non-fatal
+                    self.logger.warning("Failed to parse lash usage from %s: %s", path, exc)
 
         if saw_usage:
             context.n_input_tokens = n_input_tokens
             context.n_output_tokens = n_output_tokens
             context.n_cache_tokens = n_cache_tokens
+
+        assistant_response = self._read_assistant_response()
+        if assistant_response:
+            metadata = dict(context.metadata or {})
+            metadata["assistant_response"] = assistant_response
+            context.metadata = metadata

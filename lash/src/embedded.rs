@@ -10,11 +10,10 @@ use lashlang::{
 use serde_json::Value;
 
 #[derive(Debug)]
-pub enum PythonRequest {
+pub enum LashlangRequest {
     Init {
         tools_json: String,
         agent_id: String,
-        headless: bool,
         capabilities_json: String,
     },
     Exec {
@@ -43,7 +42,7 @@ pub enum PythonRequest {
 }
 
 #[derive(Debug)]
-pub enum PythonResponse {
+pub enum LashlangResponse {
     Ready,
     ToolCall {
         id: String,
@@ -80,16 +79,16 @@ pub enum PythonResponse {
     },
 }
 
-pub struct PythonRuntime {
-    request_tx: std_mpsc::Sender<PythonRequest>,
-    response_rx: std_mpsc::Receiver<PythonResponse>,
+pub struct LashlangRuntime {
+    request_tx: std_mpsc::Sender<LashlangRequest>,
+    response_rx: std_mpsc::Receiver<LashlangResponse>,
     thread: Option<JoinHandle<()>>,
 }
 
-impl PythonRuntime {
+impl LashlangRuntime {
     pub fn start() -> Result<Self, std::io::Error> {
-        let (request_tx, request_rx) = std_mpsc::channel::<PythonRequest>();
-        let (response_tx, response_rx) = std_mpsc::channel::<PythonResponse>();
+        let (request_tx, request_rx) = std_mpsc::channel::<LashlangRequest>();
+        let (response_tx, response_rx) = std_mpsc::channel::<LashlangResponse>();
 
         let thread = std::thread::Builder::new()
             .name("lashlang-runtime".into())
@@ -102,19 +101,19 @@ impl PythonRuntime {
         })
     }
 
-    pub fn send(&self, request: PythonRequest) -> Result<(), std::io::Error> {
+    pub fn send(&self, request: LashlangRequest) -> Result<(), std::io::Error> {
         self.request_tx.send(request).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, "executor thread gone")
         })
     }
 
-    pub fn recv(&self) -> Result<PythonResponse, std::io::Error> {
+    pub fn recv(&self) -> Result<LashlangResponse, std::io::Error> {
         self.response_rx.recv().map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, "executor thread gone")
         })
     }
 
-    pub fn try_recv(&self) -> Result<Option<PythonResponse>, std::io::Error> {
+    pub fn try_recv(&self) -> Result<Option<LashlangResponse>, std::io::Error> {
         match self.response_rx.try_recv() {
             Ok(msg) => Ok(Some(msg)),
             Err(std_mpsc::TryRecvError::Empty) => Ok(None),
@@ -126,9 +125,9 @@ impl PythonRuntime {
     }
 }
 
-impl Drop for PythonRuntime {
+impl Drop for LashlangRuntime {
     fn drop(&mut self) {
-        let _ = self.request_tx.send(PythonRequest::Shutdown);
+        let _ = self.request_tx.send(LashlangRequest::Shutdown);
         if let Some(handle) = self.thread.take() {
             let _ = handle.join();
         }
@@ -138,19 +137,11 @@ impl Drop for PythonRuntime {
 #[derive(Clone, Debug, Default)]
 struct RuntimeConfig {
     agent_id: String,
-    headless: bool,
 }
 
 impl RuntimeConfig {
-    fn apply(
-        &mut self,
-        _tools_json: &str,
-        agent_id: String,
-        headless: bool,
-        _capabilities_json: &str,
-    ) {
+    fn apply(&mut self, _tools_json: &str, agent_id: String, _capabilities_json: &str) {
         self.agent_id = agent_id;
-        self.headless = headless;
     }
 }
 
@@ -169,27 +160,26 @@ impl RuntimeState {
 }
 
 fn runtime_thread_main(
-    request_rx: std_mpsc::Receiver<PythonRequest>,
-    response_tx: std_mpsc::Sender<PythonResponse>,
+    request_rx: std_mpsc::Receiver<LashlangRequest>,
+    response_tx: std_mpsc::Sender<LashlangResponse>,
 ) {
     let mut state = RuntimeState::new();
 
     while let Ok(request) = request_rx.recv() {
         match request {
-            PythonRequest::Init {
+            LashlangRequest::Init {
                 tools_json,
                 agent_id,
-                headless,
                 capabilities_json,
             } => {
                 state
                     .config
-                    .apply(&tools_json, agent_id, headless, &capabilities_json);
-                let _ = response_tx.send(PythonResponse::Ready);
+                    .apply(&tools_json, agent_id, &capabilities_json);
+                let _ = response_tx.send(LashlangResponse::Ready);
             }
-            PythonRequest::Exec { id, code } => {
+            LashlangRequest::Exec { id, code } => {
                 let result = execute_code(&mut state, &code, &response_tx);
-                let _ = response_tx.send(PythonResponse::ExecResult {
+                let _ = response_tx.send(LashlangResponse::ExecResult {
                     id,
                     output: result.output,
                     response: result.response,
@@ -198,13 +188,13 @@ fn runtime_thread_main(
                     error: result.error,
                 });
             }
-            PythonRequest::Snapshot { id } => {
-                let _ = response_tx.send(PythonResponse::SnapshotResult {
+            LashlangRequest::Snapshot { id } => {
+                let _ = response_tx.send(LashlangResponse::SnapshotResult {
                     id,
                     data: snapshot_runtime(&state.repl).unwrap_or_default(),
                 });
             }
-            PythonRequest::Restore { id, data } => {
+            LashlangRequest::Restore { id, data } => {
                 let error = match restore_runtime(&data) {
                     Ok(repl) => {
                         state.repl = repl;
@@ -212,7 +202,7 @@ fn runtime_thread_main(
                     }
                     Err(err) => Some(err),
                 };
-                let _ = response_tx.send(PythonResponse::ExecResult {
+                let _ = response_tx.send(LashlangResponse::ExecResult {
                     id,
                     output: String::new(),
                     response: String::new(),
@@ -221,11 +211,11 @@ fn runtime_thread_main(
                     error,
                 });
             }
-            PythonRequest::Reset { id } => {
+            LashlangRequest::Reset { id } => {
                 state.repl = FlowState::new();
-                let _ = response_tx.send(PythonResponse::ResetResult { id });
+                let _ = response_tx.send(LashlangResponse::ResetResult { id });
             }
-            PythonRequest::Reconfigure {
+            LashlangRequest::Reconfigure {
                 tools_json,
                 capabilities_json,
                 generation,
@@ -233,20 +223,19 @@ fn runtime_thread_main(
                 state.config.apply(
                     &tools_json,
                     state.config.agent_id.clone(),
-                    state.config.headless,
                     &capabilities_json,
                 );
-                let _ = response_tx.send(PythonResponse::ReconfigureResult {
+                let _ = response_tx.send(LashlangResponse::ReconfigureResult {
                     generation,
                     error: None,
                 });
             }
-            PythonRequest::CheckComplete { code } => {
-                let _ = response_tx.send(PythonResponse::CheckCompleteResult {
+            LashlangRequest::CheckComplete { code } => {
+                let _ = response_tx.send(LashlangResponse::CheckCompleteResult {
                     is_complete: is_code_complete(&code),
                 });
             }
-            PythonRequest::Shutdown => break,
+            LashlangRequest::Shutdown => break,
         }
     }
 }
@@ -262,13 +251,12 @@ struct ExecOutcome {
 fn execute_code(
     state: &mut RuntimeState,
     code: &str,
-    response_tx: &std_mpsc::Sender<PythonResponse>,
+    response_tx: &std_mpsc::Sender<LashlangResponse>,
 ) -> ExecOutcome {
     let observations = Mutex::new(Vec::new());
     let host = HostBridge {
         response_tx,
         agent_id: state.config.agent_id.clone(),
-        headless: state.config.headless,
         observations: &observations,
     };
 
@@ -305,20 +293,14 @@ fn execute_code(
 }
 
 struct HostBridge<'a> {
-    response_tx: &'a std_mpsc::Sender<PythonResponse>,
+    response_tx: &'a std_mpsc::Sender<LashlangResponse>,
     agent_id: String,
-    headless: bool,
     observations: &'a Mutex<Vec<String>>,
 }
 
 impl ToolHost for HostBridge<'_> {
     fn call(&self, name: &str, args: &FlowRecord) -> Result<FlowValue, ToolHostError> {
         if name == "ask" {
-            if self.headless {
-                return Err(ToolHostError::new(
-                    "ask is unavailable in headless sessions",
-                ));
-            }
             let question = args
                 .get("question")
                 .and_then(as_flow_string)
@@ -353,13 +335,13 @@ impl ToolHost for HostBridge<'_> {
 }
 
 fn ask_user(
-    response_tx: &std_mpsc::Sender<PythonResponse>,
+    response_tx: &std_mpsc::Sender<LashlangResponse>,
     question: String,
     options: Vec<String>,
 ) -> Result<String, ToolHostError> {
     let (result_tx, result_rx) = std_mpsc::channel();
     response_tx
-        .send(PythonResponse::AskUser {
+        .send(LashlangResponse::AskUser {
             question,
             options,
             result_tx,
@@ -371,13 +353,13 @@ fn ask_user(
 }
 
 fn send_tool_call(
-    response_tx: &std_mpsc::Sender<PythonResponse>,
+    response_tx: &std_mpsc::Sender<LashlangResponse>,
     name: &str,
     payload: Value,
 ) -> Result<std_mpsc::Receiver<String>, ToolHostError> {
     let (result_tx, result_rx) = std_mpsc::channel();
     response_tx
-        .send(PythonResponse::ToolCall {
+        .send(LashlangResponse::ToolCall {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
             args: payload.to_string(),
@@ -521,12 +503,12 @@ fn json_to_flow_value(value: Value) -> FlowValue {
 
 fn format_output_value(value: &FlowValue) -> String {
     match value {
-        FlowValue::Null => String::new(),
+        FlowValue::Null => "null".to_string(),
         FlowValue::String(text) => text.to_string(),
         FlowValue::Bool(value) => value.to_string(),
         FlowValue::Number(value) => value.to_string(),
         FlowValue::List(_) | FlowValue::Record(_) => {
-            serde_json::to_string(&flow_to_json_value(value)).unwrap_or_default()
+            serde_json::to_string(&flow_to_json_value(value)).unwrap_or_else(|_| value.to_string())
         }
     }
 }
@@ -575,6 +557,43 @@ fn line_context(source: &str, offset: usize) -> (usize, usize, String) {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::Duration;
+
+    fn execute_code_with_tool_reply(
+        code: &str,
+        tool_name: &str,
+        tool_result: serde_json::Value,
+    ) -> ExecOutcome {
+        let mut state = RuntimeState::new();
+        let (tx, rx) = std_mpsc::channel();
+        let expected_tool_name = tool_name.to_string();
+
+        let tool_thread = std::thread::spawn(move || {
+            let message = rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("tool call should be sent");
+            let LashlangResponse::ToolCall {
+                name, result_tx, ..
+            } = message
+            else {
+                panic!("expected tool call");
+            };
+            assert_eq!(name, expected_tool_name);
+            result_tx
+                .send(
+                    json!({
+                        "success": true,
+                        "result": tool_result.to_string(),
+                    })
+                    .to_string(),
+                )
+                .expect("tool result should be delivered");
+        });
+
+        let result = execute_code(&mut state, code, &tx);
+        tool_thread.join().expect("tool thread should finish");
+        result
+    }
 
     #[test]
     fn tool_reply_success_round_trips_json() {
@@ -681,6 +700,58 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&result.observations[0]).expect("observation should be json");
         assert_eq!(parsed, serde_json::json!({"ok": true, "count": 2}));
+    }
+
+    #[test]
+    fn execute_code_observe_null_is_not_silent() {
+        let mut state = RuntimeState::new();
+        let (tx, _rx) = std_mpsc::channel();
+
+        let result = execute_code(
+            &mut state,
+            r#"
+            observe null
+            finish "done"
+            "#,
+            &tx,
+        );
+
+        assert!(result.finished);
+        assert_eq!(result.response, "done");
+        assert_eq!(result.observations, vec!["null".to_string()]);
+    }
+
+    #[test]
+    fn execute_code_can_index_listing_items_directly_under_result_value() {
+        let result = execute_code_with_tool_reply(
+            r#"
+            listing = call glob { pattern: "*.rs" }
+            finish {
+              count: len(listing.value.items),
+              first: listing.value.items[0].path
+            }
+            "#,
+            "glob",
+            json!({
+                "items": [
+                    { "path": "src/lib.rs", "kind": "file" },
+                    { "path": "src/main.rs", "kind": "file" }
+                ],
+                "truncated": null,
+            }),
+        );
+
+        assert!(result.finished);
+        assert_eq!(result.error, None);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result.response).expect("response should be json");
+        assert_eq!(
+            parsed,
+            json!({
+                "count": 2,
+                "first": "src/lib.rs",
+            })
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -9,7 +9,7 @@ use crate::agent::message::IMAGE_REF_PREFIX;
 use crate::agent::message::MessageOrigin;
 use crate::agent::{
     AgentConfig, AgentEvent, Message, MessageRole, Part, PartKind, PromptSectionOverride,
-    PruneState, TokenUsage, apply_context_folding, build_execution_preamble, make_error_event,
+    PruneState, TokenUsage, build_execution_preamble, make_error_event, resolve_tool_surface,
     transport_stream_events,
 };
 use crate::capabilities::AgentCapabilities;
@@ -19,12 +19,13 @@ use crate::llm::transport::LlmTransport;
 use crate::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
 use crate::plugin::{
     CheckpointHookContext, MessageMutatorContext, MessageMutatorHook, SessionConfigChangedContext,
-    SessionConfigSnapshot,
+    SessionConfigSnapshot, emit_plugin_surface_events,
 };
 use crate::provider::Provider;
 use crate::sansio::{Effect, LlmCallError, Response, TurnMachine, TurnMachineConfig};
 use crate::strip_repl_fragments;
-use crate::tools::{INTERNAL_TOOL_CATALOG_ARG, project_tool_catalog};
+use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call};
+use crate::tools::project_tool_catalog;
 use crate::{
     CheckpointKind, ContextFoldingConfig, ExecutionMode, ExternalInvokeError, PluginMessage,
     PluginSessionSnapshot, PromptHookContext, RuntimeServices, SandboxMessage, Session,
@@ -227,7 +228,6 @@ impl std::error::Error for RuntimeError {}
 pub enum HostProfile {
     #[default]
     Interactive,
-    Headless,
     Embedded,
 }
 
@@ -457,93 +457,6 @@ impl TurnAssembler {
     }
 }
 
-#[cfg(feature = "sqlite-store")]
-pub(crate) fn latest_turn_history_payload(turn: &AssembledTurn) -> serde_json::Value {
-    let messages = &turn.state.messages;
-    let turn_index = messages
-        .iter()
-        .filter(|msg| matches!(msg.role, MessageRole::User))
-        .count() as i64;
-    let last_user_idx = messages
-        .iter()
-        .rposition(|msg| matches!(msg.role, MessageRole::User));
-
-    let user_message = last_user_idx
-        .and_then(|idx| messages.get(idx))
-        .map(message_text_for_history)
-        .unwrap_or_default();
-
-    let mut prose_parts = Vec::new();
-    let mut code_parts = Vec::new();
-    if let Some(idx) = last_user_idx {
-        for msg in messages.iter().skip(idx + 1) {
-            if !matches!(msg.role, MessageRole::Assistant) {
-                continue;
-            }
-            for part in &msg.parts {
-                match part.kind {
-                    PartKind::Text | PartKind::Prose => {
-                        if !part.content.trim().is_empty() {
-                            prose_parts.push(part.content.clone());
-                        }
-                    }
-                    PartKind::Code => {
-                        if !part.content.trim().is_empty() {
-                            code_parts.push(part.content.clone());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    let prose = if prose_parts.is_empty() {
-        turn.assistant_output.raw_text.clone()
-    } else {
-        prose_parts.join("\n\n")
-    };
-    let code = code_parts.join("\n\n");
-    let output = turn
-        .code_outputs
-        .iter()
-        .map(|record| match (&record.output, &record.error) {
-            (output, Some(error)) if !output.is_empty() && !error.is_empty() => {
-                format!("{output}\n{error}")
-            }
-            (output, _) if !output.is_empty() => output.clone(),
-            (_, Some(error)) => error.clone(),
-            _ => String::new(),
-        })
-        .filter(|chunk| !chunk.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let error = turn.errors.first().map(|issue| issue.message.clone());
-
-    serde_json::json!({
-        "index": turn_index,
-        "user_message": user_message,
-        "prose": prose,
-        "code": code,
-        "output": output,
-        "error": error,
-        "tool_calls": turn.tool_calls,
-    })
-}
-
-#[cfg(feature = "sqlite-store")]
-fn message_text_for_history(msg: &Message) -> String {
-    msg.parts
-        .iter()
-        .filter_map(|part| match part.kind {
-            PartKind::Text | PartKind::Prose | PartKind::Code => Some(part.content.as_str()),
-            _ => None,
-        })
-        .filter(|text| !text.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
 /// Runtime config used by embedders to construct an engine.
 #[derive(Clone)]
 pub struct RuntimeConfig {
@@ -559,7 +472,6 @@ pub struct RuntimeConfig {
     pub max_turns: Option<usize>,
     pub include_soul: bool,
     pub llm_log_path: Option<PathBuf>,
-    pub headless: bool,
     pub host_profile: HostProfile,
     pub prompt_overrides: Vec<PromptSectionOverride>,
     pub base_dir: Option<PathBuf>,
@@ -585,12 +497,7 @@ impl Default for RuntimeConfig {
             max_turns: cfg.max_turns,
             include_soul: cfg.include_soul,
             llm_log_path: cfg.llm_log_path,
-            headless: cfg.headless,
-            host_profile: if cfg.headless {
-                HostProfile::Headless
-            } else {
-                HostProfile::Interactive
-            },
+            host_profile: HostProfile::Interactive,
             prompt_overrides: cfg.prompt_overrides,
             base_dir: None,
             path_resolver: None,
@@ -603,7 +510,6 @@ impl Default for RuntimeConfig {
 
 impl From<RuntimeConfig> for AgentConfig {
     fn from(value: RuntimeConfig) -> Self {
-        let headless = value.headless || matches!(value.host_profile, HostProfile::Headless);
         Self {
             capabilities: value.capabilities,
             model: value.model,
@@ -617,7 +523,6 @@ impl From<RuntimeConfig> for AgentConfig {
             max_turns: value.max_turns,
             include_soul: value.include_soul,
             llm_log_path: value.llm_log_path,
-            headless,
             prompt_overrides: value.prompt_overrides,
             instruction_source: value.instruction_source,
         }
@@ -626,11 +531,6 @@ impl From<RuntimeConfig> for AgentConfig {
 
 impl From<AgentConfig> for RuntimeConfig {
     fn from(value: AgentConfig) -> Self {
-        let host_profile = if value.headless {
-            HostProfile::Headless
-        } else {
-            HostProfile::Interactive
-        };
         Self {
             capabilities: value.capabilities,
             model: value.model,
@@ -644,8 +544,7 @@ impl From<AgentConfig> for RuntimeConfig {
             max_turns: value.max_turns,
             include_soul: value.include_soul,
             llm_log_path: value.llm_log_path,
-            headless: value.headless,
-            host_profile,
+            host_profile: HostProfile::Interactive,
             prompt_overrides: value.prompt_overrides,
             base_dir: None,
             path_resolver: None,
@@ -747,6 +646,31 @@ impl RuntimeSessionManager {
         let runtime = runtime.lock().await;
         Ok(runtime.export_state())
     }
+
+    async fn tool_catalog_by_id(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<serde_json::Value>, crate::PluginError> {
+        if session_id == self.current_agent_id {
+            let surface = resolve_tool_surface(
+                self.current_plugins.as_ref(),
+                &self.current_agent_id,
+                self.current_config.execution_mode,
+                self.current_tools.definitions(),
+            );
+            return Ok(project_tool_catalog(
+                surface.tools,
+                self.current_config.execution_mode,
+            ));
+        }
+        let runtime = {
+            let registry = self.registry.lock().await;
+            registry.get(session_id).cloned()
+        }
+        .ok_or_else(|| crate::PluginError::Session(format!("unknown session `{session_id}`")))?;
+        let runtime = runtime.lock().await;
+        Ok(runtime.active_tool_catalog())
+    }
 }
 
 #[async_trait::async_trait]
@@ -760,6 +684,13 @@ impl SessionManager for RuntimeSessionManager {
         session_id: &str,
     ) -> Result<SessionSnapshot, crate::PluginError> {
         self.snapshot_by_id(session_id).await
+    }
+
+    async fn tool_catalog(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<serde_json::Value>, crate::PluginError> {
+        self.tool_catalog_by_id(session_id).await
     }
 
     async fn create_session(
@@ -878,31 +809,6 @@ fn append_plugin_messages(messages: &mut Vec<Message>, plugin_messages: &[Plugin
     messages.extend(new_messages);
 }
 
-async fn send_plugin_surface_event(
-    event_tx: &mpsc::Sender<AgentEvent>,
-    plugin_id: &str,
-    event: crate::plugin::PluginSurfaceEvent,
-) {
-    crate::agent::send_event(
-        event_tx,
-        AgentEvent::PluginEvent {
-            plugin_id: plugin_id.to_string(),
-            event,
-        },
-    )
-    .await;
-}
-
-async fn emit_plugin_surface_events(
-    event_tx: &mpsc::Sender<AgentEvent>,
-    plugin_id: &str,
-    events: Vec<crate::plugin::PluginSurfaceEvent>,
-) {
-    for event in events {
-        send_plugin_surface_event(event_tx, plugin_id, event).await;
-    }
-}
-
 async fn emit_plugin_surface_events_to_sink(
     events: &dyn EventSink,
     plugin_id: &str,
@@ -920,9 +826,7 @@ async fn emit_plugin_surface_events_to_sink(
 
 fn normalize_message_ids(messages: &mut [Message]) {
     for (msg_idx, message) in messages.iter_mut().enumerate() {
-        if message.id != "__context_archive__" {
-            message.id = format!("m{msg_idx}");
-        }
+        message.id = format!("m{msg_idx}");
         if message.parts.is_empty() {
             message.parts.push(Part {
                 id: String::new(),
@@ -964,6 +868,21 @@ impl LashRuntime {
         self.config
             .max_context_tokens
             .expect("lash runtime requires explicit max_context_tokens")
+    }
+
+    fn active_tool_catalog(&self) -> Vec<serde_json::Value> {
+        self.session
+            .as_ref()
+            .map(|session| {
+                let surface = resolve_tool_surface(
+                    session.plugins().as_ref(),
+                    &self.state.agent_id,
+                    self.config.execution_mode,
+                    session.tools().definitions(),
+                );
+                project_tool_catalog(surface.tools, self.config.execution_mode)
+            })
+            .unwrap_or_default()
     }
 
     fn prepare_message_mutation(
@@ -1051,7 +970,6 @@ impl LashRuntime {
         let mut session = Session::new(
             services,
             &state.agent_id,
-            config.headless,
             capabilities.clone(),
             state.execution_mode,
         )
@@ -1245,18 +1163,16 @@ impl LashRuntime {
         self.config.capabilities = capabilities;
     }
 
-    /// Re-register the current tool/capability projection in the live Python session.
-    pub async fn reconfigure_session(
-        &mut self,
-        capabilities_json: String,
-        generation: u64,
-    ) -> Result<(), SessionError> {
+    /// Re-register the current tool/capability projection in the live REPL session.
+    pub async fn refresh_session_execution_surface(&mut self) -> Result<(), SessionError> {
         let Some(session) = self.session.as_mut() else {
             return Err(SessionError::Protocol(
                 "runtime session not available".to_string(),
             ));
         };
-        session.reconfigure(capabilities_json, generation).await
+        session
+            .refresh_execution_surface(&self.config.capabilities)
+            .await
     }
 
     /// Reset the REPL session on the underlying agent.
@@ -1347,9 +1263,7 @@ impl LashRuntime {
 
         let mut messages = self.state.messages.clone();
         let mode = input.mode.unwrap_or(match self.host_profile {
-            HostProfile::Interactive | HostProfile::Headless | HostProfile::Embedded => {
-                RunMode::Normal
-            }
+            HostProfile::Interactive | HostProfile::Embedded => RunMode::Normal,
         });
         let mode_msg = match mode {
             RunMode::Normal => None,
@@ -1446,14 +1360,6 @@ impl LashRuntime {
                     } else {
                         messages = input_messages;
                     }
-                } else {
-                    apply_context_folding(
-                        &mut messages,
-                        prompt_usage.prompt_context_tokens,
-                        max_context_tokens,
-                        self.state.context_folding,
-                    );
-                    normalize_message_ids(&mut messages);
                 }
             }
         }
@@ -1787,194 +1693,13 @@ impl RuntimeTurnDriver {
                 crate::agent::send_event(&event_tx, $event).await
             };
         }
-
-        if matches!(self.config.execution_mode, ExecutionMode::Standard) {
-            return self
-                .run_standard(messages, images, event_tx, cancel, run_offset)
-                .await;
-        }
-
-        let capabilities_json = self
-            .session
-            .tools()
-            .dynamic_capabilities_payload_json()
-            .unwrap_or_else(|| {
-                let available_defs = self.session.tools().definitions();
-                let capability_defs = crate::default_dynamic_capability_defs();
-                let resolved = crate::resolve_capability_projection(
-                    &capability_defs,
-                    &self.config.capabilities,
-                    &available_defs,
-                )
-                .unwrap_or_else(|_| crate::ResolvedProjection {
-                    enabled_capabilities: self
-                        .config
-                        .capabilities
-                        .enabled_capabilities
-                        .iter()
-                        .map(|id| id.as_str().to_string())
-                        .collect(),
-                    effective_tools: self
-                        .config
-                        .capabilities
-                        .enabled_tools
-                        .iter()
-                        .filter(|tool| {
-                            available_defs.iter().any(|def| {
-                                def.name == tool.as_str()
-                            })
-                        })
-                        .cloned()
-                        .collect(),
-                    helper_bindings: BTreeSet::new(),
-                    prompt_sections: Vec::new(),
-                });
-                serde_json::json!({
-                    "enabled_capabilities": resolved.enabled_capabilities.into_iter().collect::<Vec<_>>(),
-                    "enabled_tools": resolved.effective_tools.into_iter().collect::<Vec<_>>(),
-                    "helper_bindings": resolved.helper_bindings.into_iter().collect::<Vec<_>>(),
-                })
-                .to_string()
-            });
-        let generation = self.session.tools().dynamic_generation().unwrap_or(0);
-        if let Err(e) = self
-            .session
-            .reconfigure(capabilities_json, generation)
+        let mut machine = match self
+            .prepare_turn_machine(messages, images, &event_tx, run_offset)
             .await
         {
-            emit!(make_error_event(
-                "tool_projection",
-                Some("reconfigure_failed"),
-                format!("Failed to refresh REPL tool projection: {e}"),
-                Some(e.to_string()),
-            ));
-            emit!(AgentEvent::Done);
-            return (messages, run_offset);
-        }
-
-        let mut agent_config = self.runtime_agent_config();
-        let model = match self.prepare_provider(&mut agent_config).await {
-            Ok(model) => model,
-            Err(event) => {
-                emit!(event);
-                emit!(AgentEvent::Done);
-                return (messages, run_offset);
-            }
+            Ok(machine) => machine,
+            Err(result) => return result,
         };
-        let preamble = build_execution_preamble(
-            &self.session,
-            &agent_config,
-            ExecutionMode::Repl,
-            model,
-            self.plugin_prompt_contributions.clone(),
-        );
-        self.config = agent_config.into();
-
-        let machine_config = self.machine_config(preamble, ExecutionMode::Repl);
-        let mut machine = TurnMachine::new(machine_config, messages, images, run_offset);
-
-        loop {
-            let Some(effect) = machine.poll_effect() else {
-                break;
-            };
-            match effect {
-                Effect::Emit(event) => emit!(event),
-                Effect::Done {
-                    messages,
-                    iteration,
-                } => return (messages, iteration),
-                Effect::LlmCall { id, request } => {
-                    if cancel.is_cancelled() {
-                        emit!(AgentEvent::Done);
-                        return (Vec::new(), run_offset);
-                    }
-                    let llm_response = self
-                        .run_repl_llm_call(&mut machine, id, request, &event_tx, &cancel)
-                        .await;
-                    machine.handle_response(Response::LlmComplete {
-                        id,
-                        result: llm_response,
-                        text_streamed: false,
-                    });
-                }
-                Effect::ExecCode { id, code } => {
-                    let result = self.run_exec_code(&code, &event_tx).await;
-                    let response = match result {
-                        Ok(output) => Response::ExecResult {
-                            id,
-                            result: Ok(output),
-                        },
-                        Err(error) => Response::ExecResult {
-                            id,
-                            result: Err(error),
-                        },
-                    };
-                    machine.handle_response(response);
-                }
-                Effect::Checkpoint { id, checkpoint } => {
-                    match self
-                        .run_checkpoint(&mut machine, checkpoint, &event_tx)
-                        .await
-                    {
-                        Ok(messages) => {
-                            machine.handle_response(Response::Checkpoint { id, messages })
-                        }
-                        Err(err) => {
-                            machine.fail_turn(make_error_event(
-                                "plugin",
-                                Some(&err.code),
-                                err.message,
-                                None,
-                            ));
-                        }
-                    }
-                }
-                Effect::Sleep { id, duration } => {
-                    tokio::time::sleep(duration).await;
-                    machine.handle_response(Response::Timeout { id });
-                }
-                Effect::CancelLlm { .. } => {}
-                Effect::ToolCall { .. } => {}
-            }
-        }
-
-        (Vec::new(), run_offset)
-    }
-
-    async fn run_standard(
-        &mut self,
-        messages: Vec<Message>,
-        images: Vec<Vec<u8>>,
-        event_tx: mpsc::Sender<AgentEvent>,
-        cancel: CancellationToken,
-        run_offset: usize,
-    ) -> (Vec<Message>, usize) {
-        macro_rules! emit {
-            ($event:expr) => {
-                crate::agent::send_event(&event_tx, $event).await
-            };
-        }
-
-        let mut agent_config = self.runtime_agent_config();
-        let model = match self.prepare_provider(&mut agent_config).await {
-            Ok(model) => model,
-            Err(event) => {
-                emit!(event);
-                emit!(AgentEvent::Done);
-                return (messages, run_offset);
-            }
-        };
-        let preamble = build_execution_preamble(
-            &self.session,
-            &agent_config,
-            ExecutionMode::Standard,
-            model,
-            self.plugin_prompt_contributions.clone(),
-        );
-        self.config = agent_config.into();
-
-        let machine_config = self.machine_config(preamble, ExecutionMode::Standard);
-        let mut machine = TurnMachine::new(machine_config, messages, images, run_offset);
 
         loop {
             let Some(effect) = machine.poll_effect() else {
@@ -1992,7 +1717,7 @@ impl RuntimeTurnDriver {
                         return (Vec::new(), run_offset);
                     }
                     let (result, text_streamed) = self
-                        .run_standard_llm_call(request, &event_tx, &cancel)
+                        .run_llm_call(&mut machine, id, request, &event_tx, &cancel)
                         .await;
                     machine.handle_response(Response::LlmComplete {
                         id,
@@ -2058,11 +1783,106 @@ impl RuntimeTurnDriver {
                     machine.handle_response(Response::Timeout { id });
                 }
                 Effect::CancelLlm { .. } => {}
-                Effect::ExecCode { .. } => {}
+                Effect::ExecCode { id, code } => {
+                    let result = self.run_exec_code(&code, &event_tx).await;
+                    let response = match result {
+                        Ok(output) => Response::ExecResult {
+                            id,
+                            result: Ok(output),
+                        },
+                        Err(error) => Response::ExecResult {
+                            id,
+                            result: Err(error),
+                        },
+                    };
+                    machine.handle_response(response);
+                }
             }
         }
 
         (Vec::new(), run_offset)
+    }
+
+    async fn prepare_turn_machine(
+        &mut self,
+        messages: Vec<Message>,
+        images: Vec<Vec<u8>>,
+        event_tx: &mpsc::Sender<AgentEvent>,
+        run_offset: usize,
+    ) -> Result<TurnMachine, (Vec<Message>, usize)> {
+        macro_rules! emit {
+            ($event:expr) => {
+                crate::agent::send_event(event_tx, $event).await
+            };
+        }
+
+        if let Err(event) = self.prepare_mode_state().await {
+            emit!(event);
+            emit!(AgentEvent::Done);
+            return Err((messages, run_offset));
+        }
+
+        let execution_mode = self.config.execution_mode;
+        let mut agent_config = self.runtime_agent_config();
+        let model = match self.prepare_provider(&mut agent_config).await {
+            Ok(model) => model,
+            Err(event) => {
+                emit!(event);
+                emit!(AgentEvent::Done);
+                return Err((messages, run_offset));
+            }
+        };
+        let preamble = build_execution_preamble(
+            &self.session,
+            &agent_config,
+            execution_mode,
+            model,
+            self.plugin_prompt_contributions.clone(),
+        );
+        self.config = agent_config.into();
+        let machine_config = self.machine_config(preamble, execution_mode);
+        Ok(TurnMachine::new(
+            machine_config,
+            messages,
+            images,
+            run_offset,
+        ))
+    }
+
+    async fn prepare_mode_state(&mut self) -> Result<(), AgentEvent> {
+        if let Err(e) = self
+            .session
+            .refresh_execution_surface(&self.config.capabilities)
+            .await
+        {
+            return Err(make_error_event(
+                "execution_surface",
+                Some("reconfigure_failed"),
+                format!("Failed to refresh execution surface: {e}"),
+                Some(e.to_string()),
+            ));
+        }
+
+        Ok(())
+    }
+
+    async fn run_llm_call(
+        &mut self,
+        machine: &mut TurnMachine,
+        effect_id: crate::sansio::EffectId,
+        request: LlmRequest,
+        event_tx: &mpsc::Sender<AgentEvent>,
+        cancel: &CancellationToken,
+    ) -> (Result<LlmResponse, LlmCallError>, bool) {
+        match self.config.execution_mode {
+            ExecutionMode::Standard => self.run_standard_llm_call(request, event_tx, cancel).await,
+            ExecutionMode::Repl => {
+                let result = self
+                    .run_repl_llm_call(machine, effect_id, request, event_tx, cancel)
+                    .await;
+                (result, false)
+            }
+        }
     }
 
     fn runtime_agent_config(&self) -> AgentConfig {
@@ -2274,7 +2094,6 @@ impl RuntimeTurnDriver {
             execution_mode,
             model: preamble.model,
             max_turns: self.config.max_turns,
-            headless: self.config.headless,
             sub_agent: self.config.sub_agent,
             include_soul: self.config.include_soul,
             model_variant: self.config.model_variant.clone(),
@@ -2331,7 +2150,12 @@ impl RuntimeTurnDriver {
                 }
             }
         });
-        let result = self.session.run_code(code).await.map_err(|e| e.to_string());
+        let manager = Arc::clone(&self.session_manager);
+        let result = self
+            .session
+            .run_code(&self.agent_id, manager, event_tx, code)
+            .await
+            .map_err(|e| e.to_string());
         self.session.clear_message_sender();
         self.session.clear_prompt_sender();
         let _ = drain_handle.await;
@@ -2625,114 +2449,39 @@ impl RuntimeTurnDriver {
         crate::ToolResult,
         u64,
     )> {
-        let mut prompt_forward_handle = None;
-        if !self.config.headless {
-            let (prompt_tx, mut prompt_rx) =
-                tokio::sync::mpsc::unbounded_channel::<crate::session::UserPrompt>();
-            self.session.set_prompt_sender(prompt_tx);
-            let event_tx_clone = event_tx.clone();
-            prompt_forward_handle = Some(tokio::spawn(async move {
-                while let Some(user_prompt) = prompt_rx.recv().await {
-                    if !event_tx_clone.is_closed() {
-                        let _ = event_tx_clone
-                            .send(AgentEvent::Prompt {
-                                question: user_prompt.question,
-                                options: user_prompt.options,
-                                response_tx: user_prompt.response_tx,
-                            })
-                            .await;
-                    }
+        let (prompt_tx, mut prompt_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::session::UserPrompt>();
+        self.session.set_prompt_sender(prompt_tx);
+        let event_tx_clone = event_tx.clone();
+        let prompt_forward_handle = tokio::spawn(async move {
+            while let Some(user_prompt) = prompt_rx.recv().await {
+                if !event_tx_clone.is_closed() {
+                    let _ = event_tx_clone
+                        .send(AgentEvent::Prompt {
+                            question: user_prompt.question,
+                            options: user_prompt.options,
+                            response_tx: user_prompt.response_tx,
+                        })
+                        .await;
                 }
-            }));
-        }
+            }
+        });
 
         let tool_provider = Arc::clone(self.session.tools());
         let plugins = Arc::clone(self.session.plugins());
         let manager = Arc::clone(&self.session_manager);
+        let dispatch = Arc::new(ToolDispatchContext {
+            tool_provider: Arc::clone(&tool_provider),
+            plugins: Arc::clone(&plugins),
+            host: Arc::clone(&manager),
+            session_id: self.agent_id.clone(),
+            execution_mode: self.config.execution_mode,
+            event_tx: event_tx.clone(),
+        });
         let mut join_set = tokio::task::JoinSet::new();
-        let mut immediate = Vec::new();
-        for (eid, call_id, tool_name, mut args) in pending_tools {
-            if tool_name == "search_tools" && args.get(INTERNAL_TOOL_CATALOG_ARG).is_none() {
-                if !args.is_object() {
-                    args = serde_json::Value::Object(serde_json::Map::new());
-                }
-                let obj = args
-                    .as_object_mut()
-                    .expect("search_tools args should be normalized to an object");
-                let catalog =
-                    project_tool_catalog(tool_provider.definitions(), ExecutionMode::Standard);
-                obj.insert(
-                    INTERNAL_TOOL_CATALOG_ARG.to_string(),
-                    serde_json::Value::Array(catalog),
-                );
-            }
-
-            let directives = match plugins
-                .before_tool_call(crate::plugin::ToolCallHookContext {
-                    session_id: self.agent_id.clone(),
-                    tool_name: tool_name.clone(),
-                    args: args.clone(),
-                    host: Arc::clone(&manager),
-                })
-                .await
-            {
-                Ok(directives) => directives,
-                Err(err) => {
-                    immediate.push((
-                        eid,
-                        call_id,
-                        tool_name,
-                        args,
-                        crate::ToolResult::err_fmt(err.to_string()),
-                        0,
-                    ));
-                    continue;
-                }
-            };
-            let mut short_circuit: Option<crate::ToolResult> = None;
-            for emitted in directives {
-                let plugin_id = emitted.plugin_id;
-                let directive = emitted.value;
-                match directive {
-                    crate::PluginDirective::CreateSession { request } => {
-                        if let Err(err) = manager.create_session(*request).await {
-                            short_circuit = Some(crate::ToolResult::err_fmt(err.to_string()));
-                            break;
-                        }
-                    }
-                    crate::PluginDirective::ReplaceToolArgs { args: replacement } => {
-                        args = replacement;
-                    }
-                    crate::PluginDirective::ShortCircuitTool { result, success } => {
-                        short_circuit = Some(crate::ToolResult {
-                            success,
-                            result,
-                            images: Vec::new(),
-                        });
-                    }
-                    crate::PluginDirective::AbortTurn { message, .. } => {
-                        short_circuit = Some(crate::ToolResult::err_fmt(message));
-                    }
-                    crate::PluginDirective::EmitEvents { events } => {
-                        emit_plugin_surface_events(event_tx, &plugin_id, events).await;
-                    }
-                    crate::PluginDirective::EnqueueMessages { .. } => {
-                        short_circuit = Some(crate::ToolResult::err_fmt(
-                            "before_tool_call does not support message injection",
-                        ));
-                    }
-                }
-            }
-            if let Some(result) = short_circuit {
-                immediate.push((eid, call_id, tool_name, args, result, 0));
-                continue;
-            }
-
-            let provider = Arc::clone(&tool_provider);
+        for (eid, call_id, tool_name, args) in pending_tools {
+            let dispatch = Arc::clone(&dispatch);
             let event_tx_clone = event_tx.clone();
-            let plugins = Arc::clone(&plugins);
-            let manager = Arc::clone(&manager);
-            let session_id = self.agent_id.clone();
             join_set.spawn(async move {
                 let (progress_tx, mut progress_rx) =
                     tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
@@ -2749,78 +2498,26 @@ impl RuntimeTurnDriver {
                         }
                     }
                 });
-                let tool_start = std::time::Instant::now();
-                let result = provider
-                    .execute_streaming(&tool_name, &args, Some(&progress_tx))
-                    .await;
+                let outcome =
+                    dispatch_tool_call(&dispatch, tool_name, args, Some(&progress_tx)).await;
                 drop(progress_tx);
                 let _ = progress_handle.await;
-                let result = match plugins
-                    .after_tool_call(crate::plugin::ToolResultHookContext {
-                        session_id,
-                        tool_name: tool_name.clone(),
-                        args: args.clone(),
-                        result: result.clone(),
-                        duration_ms: tool_start.elapsed().as_millis() as u64,
-                        host: Arc::clone(&manager),
-                    })
-                    .await
-                {
-                    Ok(directives) => {
-                        let mut final_result = result;
-                        for emitted in directives {
-                            let plugin_id = emitted.plugin_id;
-                            let directive = emitted.value;
-                            match directive {
-                                crate::PluginDirective::CreateSession { request } => {
-                                    if let Err(err) = manager.create_session(*request).await {
-                                        final_result = crate::ToolResult::err_fmt(err.to_string());
-                                        break;
-                                    }
-                                }
-                                crate::PluginDirective::ShortCircuitTool { result, success } => {
-                                    final_result = crate::ToolResult {
-                                        success,
-                                        result,
-                                        images: Vec::new(),
-                                    };
-                                }
-                                crate::PluginDirective::AbortTurn { message, .. } => {
-                                    final_result = crate::ToolResult::err_fmt(message);
-                                }
-                                crate::PluginDirective::EmitEvents { events } => {
-                                    emit_plugin_surface_events(
-                                        &event_tx_clone,
-                                        &plugin_id,
-                                        events,
-                                    )
-                                        .await;
-                                }
-                                crate::PluginDirective::ReplaceToolArgs { .. }
-                                | crate::PluginDirective::EnqueueMessages { .. } => {
-                                    final_result = crate::ToolResult::err_fmt(
-                                        "after_tool_call only supports abort, short-circuit, and session creation",
-                                    );
-                                }
-                            }
-                        }
-                        final_result
-                    }
-                    Err(err) => crate::ToolResult::err_fmt(err.to_string()),
-                };
                 (
                     eid,
                     call_id,
-                    tool_name,
-                    args,
-                    result,
-                    tool_start.elapsed().as_millis() as u64,
+                    outcome.record.tool,
+                    outcome.record.args,
+                    crate::ToolResult {
+                        success: outcome.record.success,
+                        result: outcome.record.result,
+                        images: outcome.images,
+                    },
+                    outcome.record.duration_ms,
                 )
             });
         }
 
         let mut outcomes = Vec::new();
-        outcomes.extend(immediate);
         while let Some(joined) = join_set.join_next().await {
             match joined {
                 Ok(outcome) => outcomes.push(outcome),
@@ -2835,9 +2532,7 @@ impl RuntimeTurnDriver {
             }
         }
         self.session.clear_prompt_sender();
-        if let Some(handle) = prompt_forward_handle {
-            let _ = handle.await;
-        }
+        let _ = prompt_forward_handle.await;
         outcomes
     }
 
@@ -3236,8 +2931,6 @@ mod tests {
             },
             model: "mock-model".to_string(),
             max_context_tokens: Some(200_000),
-            headless: true,
-            host_profile: HostProfile::Headless,
             ..RuntimeConfig::default()
         }
     }
@@ -3267,8 +2960,6 @@ mod tests {
                 },
                 model: "mock-model".to_string(),
                 max_context_tokens: None,
-                headless: true,
-                host_profile: HostProfile::Headless,
                 ..RuntimeConfig::default()
             },
             crate::RuntimeServices::tools_only(tools, "root").expect("services"),
@@ -3293,7 +2984,6 @@ mod tests {
             },
             model: "mock-model".to_string(),
             max_context_tokens: Some(200_000),
-            headless: false,
             host_profile: HostProfile::Interactive,
             ..RuntimeConfig::default()
         }
@@ -3313,6 +3003,31 @@ mod tests {
         .expect("runtime");
         runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
         runtime
+    }
+
+    #[tokio::test]
+    async fn active_tool_catalog_uses_runtime_execution_mode() {
+        let tools: Arc<dyn crate::ToolProvider> =
+            Arc::new(crate::ToolSet::core_for(ExecutionMode::Repl));
+        let runtime = LashRuntime::from_state(
+            repl_test_config(),
+            crate::RuntimeServices::tools_only(tools, "root").expect("services"),
+            AgentStateEnvelope {
+                execution_mode: ExecutionMode::Repl,
+                ..AgentStateEnvelope::default()
+            },
+        )
+        .await
+        .expect("runtime");
+        let catalog = runtime.active_tool_catalog();
+        let names: Vec<&str> = catalog
+            .iter()
+            .filter_map(|item| item.get("name").and_then(|value| value.as_str()))
+            .collect();
+        assert!(names.contains(&"shell_wait"));
+        assert!(names.contains(&"shell_read"));
+        assert!(!names.contains(&"exec_command"));
+        assert!(!names.contains(&"write_stdin"));
     }
 
     async fn standard_runtime_with_bridge(
@@ -4183,8 +3898,9 @@ mod tests {
         assert_eq!(prompt_usage.prompt_context_tokens, 80);
     }
 
+    #[cfg(feature = "sqlite-store")]
     #[tokio::test]
-    async fn context_compaction_uses_previous_prompt_usage_across_turns() {
+    async fn history_plugin_compacts_using_previous_prompt_usage_across_turns() {
         let transport = MockTransport::new(vec![MockCall {
             stream_events: Vec::new(),
             response: Ok(LlmResponse {
@@ -4201,7 +3917,27 @@ mod tests {
                 ..LlmResponse::default()
             }),
         }]);
-        let mut runtime = standard_runtime_with_transport(transport).await;
+        let store = Arc::new(crate::store::Store::memory().expect("store"));
+        let base_provider: Arc<dyn crate::ToolProvider> = Arc::new(
+            crate::ToolSet::new().with_provider(crate::tools::StateStore::new(Vec::new())),
+        );
+        let plugin_host = crate::PluginHost::new(vec![Arc::new(
+            crate::BuiltinHistoryPluginFactory::new(Arc::clone(&store)),
+        )]);
+        let plugins = plugin_host.build_session("root", None).expect("plugins");
+        let mut toolset = crate::ToolSet::new().with_arc_provider(Arc::clone(&base_provider));
+        for provider in plugins.tool_providers() {
+            toolset = toolset.with_arc_provider(Arc::clone(provider));
+        }
+        let tools: Arc<dyn crate::ToolProvider> = Arc::new(toolset);
+        let mut runtime = LashRuntime::from_state(
+            standard_test_config(),
+            crate::RuntimeServices::new(tools, Arc::clone(&plugins)),
+            AgentStateEnvelope::default(),
+        )
+        .await
+        .expect("runtime");
+        runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
         runtime.set_state(AgentStateEnvelope {
             agent_id: "root".to_string(),
             execution_mode: ExecutionMode::Standard,
@@ -4241,12 +3977,6 @@ mod tests {
             .await
             .expect("turn");
 
-        assert!(
-            turn.state
-                .messages
-                .iter()
-                .any(|message| message.id == "__context_archive__")
-        );
         assert!(!turn.state.messages.iter().any(|message| {
             message
                 .parts
@@ -4369,15 +4099,16 @@ mod tests {
         }]);
 
         let store = Arc::new(crate::store::Store::memory().expect("store"));
-        let base_provider: Arc<dyn crate::ToolProvider> =
-            Arc::new(crate::ToolSet::new() + crate::tools::StateStore::new(Vec::new()));
+        let base_provider: Arc<dyn crate::ToolProvider> = Arc::new(
+            crate::ToolSet::new().with_provider(crate::tools::StateStore::new(Vec::new())),
+        );
         let plugin_host = crate::PluginHost::new(vec![Arc::new(
             crate::BuiltinHistoryPluginFactory::new(Arc::clone(&store)),
         )]);
         let plugins = plugin_host.build_session("root", None).expect("plugins");
-        let mut toolset = crate::ToolSet::new() + Arc::clone(&base_provider);
+        let mut toolset = crate::ToolSet::new().with_arc_provider(Arc::clone(&base_provider));
         for provider in plugins.tool_providers() {
-            toolset = toolset + Arc::clone(provider);
+            toolset = toolset.with_arc_provider(Arc::clone(provider));
         }
         let tools: Arc<dyn crate::ToolProvider> = Arc::new(toolset);
         let mut runtime = LashRuntime::from_state(
@@ -4443,15 +4174,16 @@ mod tests {
     async fn history_plugin_compacts_messages_when_model_change_shrinks_context_window() {
         let transport = MockTransport::new(Vec::new());
         let store = Arc::new(crate::store::Store::memory().expect("store"));
-        let base_provider: Arc<dyn crate::ToolProvider> =
-            Arc::new(crate::ToolSet::new() + crate::tools::StateStore::new(Vec::new()));
+        let base_provider: Arc<dyn crate::ToolProvider> = Arc::new(
+            crate::ToolSet::new().with_provider(crate::tools::StateStore::new(Vec::new())),
+        );
         let plugin_host = crate::PluginHost::new(vec![Arc::new(
             crate::BuiltinHistoryPluginFactory::new(Arc::clone(&store)),
         )]);
         let plugins = plugin_host.build_session("root", None).expect("plugins");
-        let mut toolset = crate::ToolSet::new() + Arc::clone(&base_provider);
+        let mut toolset = crate::ToolSet::new().with_arc_provider(Arc::clone(&base_provider));
         for provider in plugins.tool_providers() {
-            toolset = toolset + Arc::clone(provider);
+            toolset = toolset.with_arc_provider(Arc::clone(provider));
         }
         let tools: Arc<dyn crate::ToolProvider> = Arc::new(toolset);
         let mut runtime = LashRuntime::from_state(
@@ -4485,14 +4217,6 @@ mod tests {
         .expect("runtime");
         runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
 
-        assert!(
-            !runtime
-                .state
-                .messages
-                .iter()
-                .any(|message| message.id == "__context_archive__")
-        );
-
         runtime
             .update_session_config(
                 Some(crate::Provider::GoogleOAuth {
@@ -4508,13 +4232,6 @@ mod tests {
             )
             .await;
 
-        assert!(
-            runtime
-                .state
-                .messages
-                .iter()
-                .any(|message| message.id == "__context_archive__")
-        );
         assert!(!runtime.state.messages.iter().any(|message| {
             message
                 .parts

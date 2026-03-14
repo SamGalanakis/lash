@@ -6,15 +6,11 @@ use crate::{
 #[derive(Clone)]
 pub struct AskTool {
     prompt_bridge: PromptBridge,
-    headless: bool,
 }
 
 impl AskTool {
-    pub fn new(prompt_bridge: PromptBridge, headless: bool) -> Self {
-        Self {
-            prompt_bridge,
-            headless,
-        }
+    pub fn new(prompt_bridge: PromptBridge) -> Self {
+        Self { prompt_bridge }
     }
 
     async fn execute_ask(&self, args: &serde_json::Value) -> ToolResult {
@@ -69,10 +65,6 @@ fn parse_options(args: &serde_json::Value) -> Result<Vec<String>, ToolResult> {
 #[async_trait::async_trait]
 impl ToolProvider for AskTool {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        if self.headless {
-            return Vec::new();
-        }
-
         vec![ToolDefinition {
             name: "ask".into(),
             description: vec![crate::ToolText::new(
@@ -106,9 +98,6 @@ impl ToolProvider for AskTool {
     }
 
     fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
-        if self.headless {
-            return Vec::new();
-        }
         vec!["### Interactive Ask\n`call ask { question: \"...\", options: [...] }` pauses execution and shows a real interactive prompt to the user. It still returns the normal wrapped tool result, so on success read the answer from `result.value`. Example:\n`resp = call ask { question: \"Deploy where?\", options: [\"staging\", \"prod\"] }`\n`finish(resp.ok ? format(\"Deploying to {0}\", resp.value) : format(\"Prompt failed: {0}\", resp.error))`".to_string()]
     }
 
@@ -130,7 +119,7 @@ mod tests {
         let bridge = PromptBridge::new();
         let (tx, mut rx) = unbounded_channel();
         bridge.set_sender(tx);
-        let tool = AskTool::new(bridge, false);
+        let tool = AskTool::new(bridge);
 
         let response_task = tokio::spawn(async move {
             let prompt = rx.recv().await.expect("prompt");
@@ -152,11 +141,5 @@ mod tests {
         response_task.await.expect("response task");
         assert!(result.success);
         assert_eq!(result.result, serde_json::json!("b"));
-    }
-
-    #[test]
-    fn ask_tool_is_hidden_in_headless_mode() {
-        let tool = AskTool::new(PromptBridge::new(), true);
-        assert!(tool.definitions().is_empty());
     }
 }

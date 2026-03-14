@@ -5,52 +5,33 @@ use std::sync::Arc;
 use serde_json::json;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::embedded::{PythonRequest, PythonResponse, PythonRuntime};
+use crate::embedded::{LashlangRequest, LashlangResponse, LashlangRuntime};
+use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call};
 use crate::{
-    AgentCapabilities, PluginMessage, RuntimeServices, SandboxMessage, ToolCallRecord, ToolImage,
-    ToolProvider,
+    AgentCapabilities, AgentEvent, PluginMessage, RuntimeServices, SandboxMessage, SessionManager,
+    ToolCallRecord, ToolImage, ToolProvider, resolve_tool_capability_payload,
 };
 
 const REPL_SNAPSHOT_VERSION: u32 = 3;
 
-fn capabilities_payload_json(
+fn repl_tools_json(tools: &Arc<dyn ToolProvider>) -> String {
+    let defs: Vec<_> = tools
+        .definitions()
+        .into_iter()
+        .filter(|def| !def.description_for(crate::ExecutionMode::Repl).is_empty())
+        .map(|def| def.project(crate::ExecutionMode::Repl))
+        .collect();
+    serde_json::to_string(&defs).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn execution_surface_json(
     tools: &Arc<dyn ToolProvider>,
     capabilities: &AgentCapabilities,
-) -> String {
-    if let Some(projection) = tools.dynamic_projection() {
-        return serde_json::json!({
-            "enabled_capabilities": projection.enabled_capabilities.into_iter().collect::<Vec<_>>(),
-            "enabled_tools": projection.effective_tools.into_iter().collect::<Vec<_>>(),
-            "helper_bindings": projection.helper_bindings.into_iter().collect::<Vec<_>>(),
-        })
-        .to_string();
-    }
-
-    let available_defs = tools.definitions();
-    let capability_defs = crate::default_dynamic_capability_defs();
-    let resolved =
-        crate::resolve_capability_projection(&capability_defs, capabilities, &available_defs)
-            .unwrap_or_else(|_| crate::ResolvedProjection {
-                enabled_capabilities: capabilities
-                    .enabled_capabilities
-                    .iter()
-                    .map(|id| id.as_str().to_string())
-                    .collect(),
-                effective_tools: capabilities
-                    .enabled_tools
-                    .iter()
-                    .filter(|tool| available_defs.iter().any(|def| def.name == tool.as_str()))
-                    .cloned()
-                    .collect(),
-                helper_bindings: std::collections::BTreeSet::new(),
-                prompt_sections: Vec::new(),
-            });
-    serde_json::json!({
-        "enabled_capabilities": resolved.enabled_capabilities.into_iter().collect::<Vec<_>>(),
-        "enabled_tools": resolved.effective_tools.into_iter().collect::<Vec<_>>(),
-        "helper_bindings": resolved.helper_bindings.into_iter().collect::<Vec<_>>(),
-    })
-    .to_string()
+) -> (String, String) {
+    (
+        repl_tools_json(tools),
+        resolve_tool_capability_payload(tools.as_ref(), capabilities).to_json(),
+    )
 }
 
 /// A prompt from the agent asking the user a question.
@@ -146,7 +127,7 @@ pub enum SessionError {
 
 enum SessionBackend {
     Standard,
-    Python(PythonRuntime),
+    Lashlang(LashlangRuntime),
 }
 
 pub struct Session {
@@ -163,7 +144,6 @@ impl Session {
     pub async fn new(
         services: RuntimeServices,
         agent_id: &str,
-        headless: bool,
         capabilities: AgentCapabilities,
         execution_mode: crate::ExecutionMode,
     ) -> Result<Self, SessionError> {
@@ -180,50 +160,25 @@ impl Session {
         };
 
         if matches!(execution_mode, crate::ExecutionMode::Repl) {
-            let runtime = PythonRuntime::start()?;
-            session.backend = SessionBackend::Python(runtime);
-
-            // Send init with tool definitions and agent identity
-            let defs: Vec<_> = session
-                .tools()
-                .definitions()
-                .into_iter()
-                .filter(|def| !def.description_for(crate::ExecutionMode::Repl).is_empty())
-                .map(|def| def.project(crate::ExecutionMode::Repl))
-                .collect();
-            let tools_json = serde_json::to_string(&defs).unwrap_or_else(|_| "[]".to_string());
-            let capabilities_json = capabilities_payload_json(session.tools(), &capabilities);
-            session.runtime()?.send(PythonRequest::Init {
-                tools_json,
-                agent_id: agent_id.to_string(),
-                headless,
-                capabilities_json,
-            })?;
-
-            // Wait for ready
-            match session.runtime()?.recv()? {
-                PythonResponse::Ready => {}
-                other => {
-                    return Err(SessionError::Protocol(format!(
-                        "expected ready, got: {:?}",
-                        std::mem::discriminant(&other)
-                    )));
-                }
-            }
+            let runtime = LashlangRuntime::start()?;
+            session.backend = SessionBackend::Lashlang(runtime);
+            session
+                .initialize_execution_surface(agent_id, &capabilities)
+                .await?;
         }
 
         Ok(session)
     }
 
-    fn runtime(&self) -> Result<&PythonRuntime, SessionError> {
+    fn runtime(&self) -> Result<&LashlangRuntime, SessionError> {
         match &self.backend {
             SessionBackend::Standard => Err(SessionError::ReplUnavailable),
-            SessionBackend::Python(runtime) => Ok(runtime),
+            SessionBackend::Lashlang(runtime) => Ok(runtime),
         }
     }
 
     pub fn supports_repl(&self) -> bool {
-        matches!(self.backend, SessionBackend::Python(_))
+        matches!(self.backend, SessionBackend::Lashlang(_))
     }
 
     pub fn tools(&self) -> &Arc<dyn ToolProvider> {
@@ -261,7 +216,13 @@ impl Session {
     }
 
     /// Execute code in the persistent lashlang REPL.
-    pub async fn run_code(&mut self, code: &str) -> Result<ExecResponse, SessionError> {
+    pub async fn run_code(
+        &mut self,
+        session_id: &str,
+        host: Arc<dyn SessionManager>,
+        event_tx: &tokio::sync::mpsc::Sender<AgentEvent>,
+        code: &str,
+    ) -> Result<ExecResponse, SessionError> {
         self.tool_calls.clear();
         self.tool_images.clear();
         let start = std::time::Instant::now();
@@ -282,7 +243,7 @@ impl Session {
             .collect::<Vec<_>>()
             .join("\n");
 
-        self.runtime()?.send(PythonRequest::Exec {
+        self.runtime()?.send(LashlangRequest::Exec {
             id: id.clone(),
             code: clean_code,
         })?;
@@ -290,6 +251,14 @@ impl Session {
         // Read messages until we get exec_result.
         // Tool calls are spawned as concurrent tokio tasks so REPL parallel branches
         // can dispatch multiple tools at the same time.
+        let dispatch = Arc::new(ToolDispatchContext {
+            tool_provider: Arc::clone(self.tools()),
+            plugins: Arc::clone(self.plugins()),
+            host,
+            session_id: session_id.to_string(),
+            execution_mode: crate::ExecutionMode::Repl,
+            event_tx: event_tx.clone(),
+        });
         let mut tool_handles: Vec<tokio::task::JoinHandle<(ToolCallRecord, Vec<ToolImage>)>> =
             Vec::new();
 
@@ -300,7 +269,7 @@ impl Session {
             let response = tokio::task::block_in_place(|| runtime.recv())
                 .map_err(|_| SessionError::RuntimeExited)?;
             match response {
-                PythonResponse::ToolCall {
+                LashlangResponse::ToolCall {
                     id: _call_id,
                     name,
                     args,
@@ -311,47 +280,38 @@ impl Session {
                         "PARALLEL: ToolCall #{tc_num} '{name}' received at t+{:.3}s",
                         start.elapsed().as_secs_f64()
                     );
-                    let tools = Arc::clone(self.tools());
                     let parsed_args: serde_json::Value =
                         serde_json::from_str(&args).unwrap_or(json!({}));
                     let msg_tx = self.message_tx.clone();
                     let run_start = start;
+                    let dispatch = Arc::clone(&dispatch);
 
                     let handle = tokio::spawn(async move {
+                        let tool_name_for_log = name.clone();
                         tracing::info!(
                             "PARALLEL: task #{tc_num} '{name}' executing at t+{:.3}s",
                             run_start.elapsed().as_secs_f64()
                         );
-                        let tool_start = std::time::Instant::now();
-                        let mut result = tools
-                            .execute_streaming(&name, &parsed_args, msg_tx.as_ref())
-                            .await;
+                        let outcome =
+                            dispatch_tool_call(&dispatch, name, parsed_args, msg_tx.as_ref()).await;
 
-                        // Send result back to Python via the oneshot channel
+                        // Send the tool result back to the embedded lashlang runtime.
                         let result_json = json!({
-                            "success": result.success,
-                            "result": serde_json::to_string(&result.result)
+                            "success": outcome.record.success,
+                            "result": serde_json::to_string(&outcome.record.result)
                                 .unwrap_or_else(|_| "null".to_string()),
                         });
                         let _ = result_tx.send(result_json.to_string());
                         tracing::info!(
-                            "PARALLEL: task #{tc_num} '{name}' done at t+{:.3}s",
+                            "PARALLEL: task #{tc_num} '{tool_name_for_log}' done at t+{:.3}s",
                             run_start.elapsed().as_secs_f64()
                         );
 
-                        let images = std::mem::take(&mut result.images);
-                        let record = ToolCallRecord {
-                            tool: name,
-                            args: parsed_args,
-                            result: result.result,
-                            success: result.success,
-                            duration_ms: tool_start.elapsed().as_millis() as u64,
-                        };
-                        (record, images)
+                        (outcome.record, outcome.images)
                     });
                     tool_handles.push(handle);
                 }
-                PythonResponse::ExecResult {
+                LashlangResponse::ExecResult {
                     id: _,
                     output,
                     response,
@@ -396,10 +356,10 @@ impl Session {
                         duration_ms: start.elapsed().as_millis() as u64,
                     });
                 }
-                PythonResponse::Ready => {
+                LashlangResponse::Ready => {
                     // Unexpected but harmless
                 }
-                PythonResponse::AskUser {
+                LashlangResponse::AskUser {
                     question,
                     options,
                     result_tx,
@@ -411,14 +371,14 @@ impl Session {
                             response_tx: result_tx,
                         });
                     } else {
-                        // No prompt handler — unblock Python with empty string
+                        // No prompt handler — unblock the embedded lashlang runtime with an empty string.
                         let _ = result_tx.send(String::new());
                     }
                 }
-                PythonResponse::SnapshotResult { .. }
-                | PythonResponse::ResetResult { .. }
-                | PythonResponse::ReconfigureResult { .. }
-                | PythonResponse::CheckCompleteResult { .. } => {
+                LashlangResponse::SnapshotResult { .. }
+                | LashlangResponse::ResetResult { .. }
+                | LashlangResponse::ReconfigureResult { .. }
+                | LashlangResponse::CheckCompleteResult { .. } => {
                     return Err(SessionError::Protocol(
                         "unexpected response during exec".to_string(),
                     ));
@@ -429,14 +389,14 @@ impl Session {
 
     /// Check if a code string is syntactically complete for the lashlang REPL.
     pub fn check_complete(&self, code: &str) -> Result<bool, SessionError> {
-        self.runtime()?.send(PythonRequest::CheckComplete {
+        self.runtime()?.send(LashlangRequest::CheckComplete {
             code: code.to_string(),
         })?;
         let runtime = self.runtime()?;
         let response = tokio::task::block_in_place(|| runtime.recv())
             .map_err(|_| SessionError::RuntimeExited)?;
         match response {
-            PythonResponse::CheckCompleteResult { is_complete } => Ok(is_complete),
+            LashlangResponse::CheckCompleteResult { is_complete } => Ok(is_complete),
             _ => Ok(false),
         }
     }
@@ -445,11 +405,11 @@ impl Session {
     pub async fn reset(&mut self) -> Result<(), SessionError> {
         let id = uuid::Uuid::new_v4().to_string();
         self.runtime()?
-            .send(PythonRequest::Reset { id: id.clone() })?;
+            .send(LashlangRequest::Reset { id: id.clone() })?;
 
         loop {
             match self.runtime()?.recv()? {
-                PythonResponse::ResetResult { .. } => break,
+                LashlangResponse::ResetResult { .. } => break,
                 _ => continue,
             }
         }
@@ -459,20 +419,17 @@ impl Session {
 
     /// Re-register the current tool definitions and capability payload in the live REPL.
     /// This is intended for turn-boundary runtime reconfiguration.
-    pub async fn reconfigure(
+    pub async fn refresh_execution_surface(
         &mut self,
-        capabilities_json: String,
-        generation: u64,
+        capabilities: &AgentCapabilities,
     ) -> Result<(), SessionError> {
-        let defs: Vec<_> = self
-            .tools()
-            .definitions()
-            .into_iter()
-            .filter(|def| !def.description_for(crate::ExecutionMode::Repl).is_empty())
-            .map(|def| def.project(crate::ExecutionMode::Repl))
-            .collect();
-        let tools_json = serde_json::to_string(&defs).unwrap_or_else(|_| "[]".to_string());
-        self.runtime()?.send(PythonRequest::Reconfigure {
+        if !self.supports_repl() {
+            return Ok(());
+        }
+
+        let (tools_json, capabilities_json) = execution_surface_json(self.tools(), capabilities);
+        let generation = self.tools().dynamic_generation().unwrap_or(0);
+        self.runtime()?.send(LashlangRequest::Reconfigure {
             tools_json,
             capabilities_json,
             generation,
@@ -480,7 +437,7 @@ impl Session {
 
         loop {
             match self.runtime()?.recv()? {
-                PythonResponse::ReconfigureResult {
+                LashlangResponse::ReconfigureResult {
                     generation: got_generation,
                     error,
                 } => {
@@ -501,15 +458,36 @@ impl Session {
         Ok(())
     }
 
+    async fn initialize_execution_surface(
+        &mut self,
+        agent_id: &str,
+        capabilities: &AgentCapabilities,
+    ) -> Result<(), SessionError> {
+        let (tools_json, capabilities_json) = execution_surface_json(self.tools(), capabilities);
+        self.runtime()?.send(LashlangRequest::Init {
+            tools_json,
+            agent_id: agent_id.to_string(),
+            capabilities_json,
+        })?;
+
+        match self.runtime()?.recv()? {
+            LashlangResponse::Ready => Ok(()),
+            other => Err(SessionError::Protocol(format!(
+                "expected ready, got: {:?}",
+                std::mem::discriminant(&other)
+            ))),
+        }
+    }
+
     /// Snapshot the session: REPL state + scratch filesystem.
     pub async fn snapshot(&mut self) -> Result<Vec<u8>, SessionError> {
         let id = uuid::Uuid::new_v4().to_string();
         self.runtime()?
-            .send(PythonRequest::Snapshot { id: id.clone() })?;
+            .send(LashlangRequest::Snapshot { id: id.clone() })?;
 
         let data = loop {
             match self.runtime()?.recv()? {
-                PythonResponse::SnapshotResult { id: _, data } => break data,
+                LashlangResponse::SnapshotResult { id: _, data } => break data,
                 _ => continue,
             }
         };
@@ -555,12 +533,12 @@ impl Session {
 
         let id = uuid::Uuid::new_v4().to_string();
         self.runtime()?
-            .send(PythonRequest::Restore { id, data: vars_str })?;
+            .send(LashlangRequest::Restore { id, data: vars_str })?;
 
         // Wait for acknowledgment (exec_result with optional restore error)
         loop {
             match self.runtime()?.recv()? {
-                PythonResponse::ExecResult { error, .. } => {
+                LashlangResponse::ExecResult { error, .. } => {
                     if let Some(err) = error {
                         return Err(SessionError::Protocol(format!(
                             "executor restore failed: {err}"
