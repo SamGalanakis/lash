@@ -206,6 +206,27 @@ fn parser_allows_bare_expression_statements() {
 }
 
 #[test]
+fn parser_allows_bare_finish_at_the_end_of_a_block_or_program() {
+    let program = parse(
+        r#"
+        if true {
+          finish
+        }
+        finish
+        "#,
+    )
+    .expect("program should parse");
+
+    assert!(matches!(
+        program.statements.as_slice(),
+        [
+            lashlang::Stmt::If { then_block, .. },
+            lashlang::Stmt::Finish(None)
+        ] if matches!(then_block.as_slice(), [lashlang::Stmt::Finish(None)])
+    ));
+}
+
+#[test]
 fn executes_programs_with_double_slash_comments() {
     let host = TestHost::default();
     let mut state = State::new();
@@ -225,6 +246,16 @@ fn executes_programs_with_double_slash_comments() {
     );
 
     assert_eq!(value, Value::Number(3.0));
+}
+
+#[test]
+fn bare_finish_returns_null() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(execute("finish", &mut state, &host).expect("execution should succeed"));
+
+    assert_eq!(value, Value::Null);
 }
 
 #[test]

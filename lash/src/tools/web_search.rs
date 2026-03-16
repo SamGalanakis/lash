@@ -1,18 +1,20 @@
 use serde_json::json;
 
-use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
+use crate::{ExecutionMode, ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
 /// Web search via Tavily API.
 pub struct WebSearch {
     api_key: String,
     client: reqwest::Client,
+    execution_mode: ExecutionMode,
 }
 
 impl WebSearch {
-    pub fn new(api_key: impl Into<String>) -> Self {
+    pub fn new(api_key: impl Into<String>, execution_mode: ExecutionMode) -> Self {
         Self {
             api_key: api_key.into(),
             client: reqwest::Client::new(),
+            execution_mode,
         }
     }
 }
@@ -20,12 +22,18 @@ impl WebSearch {
 #[async_trait::async_trait]
 impl ToolProvider for WebSearch {
     fn definitions(&self) -> Vec<ToolDefinition> {
+        let examples = match self.execution_mode {
+            ExecutionMode::Repl => vec![
+                "r = search_web(query=\"latest Rust release notes\", max_results=5)\nr[\"answer\"]\nr[\"results\"][0][\"url\"]"
+                    .into(),
+            ],
+            ExecutionMode::Standard => {
+                vec!["search_web(query=\"latest Rust release notes\", max_results=5)".into()]
+            }
+        };
         vec![ToolDefinition {
             name: "search_web".into(),
-            description: vec![crate::ToolText::new(
-                "Search the web for candidate sources. Returns `{results, answer?}` with snippet text; use `fetch_url` when you need the page itself.",
-                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-            )],
+            description: "Search the web for candidate sources. Returns `{results, answer?}` with snippet text; use `fetch_url` when you need the page itself.".into(),
             params: vec![
                 ToolParam::typed("query", "str"),
                 ToolParam {
@@ -36,18 +44,9 @@ impl ToolProvider for WebSearch {
                 },
             ],
             returns: "dict".into(),
-            examples: vec![
-                crate::ToolText::new(
-                    "r = search_web(query=\"latest Rust release notes\", max_results=5)\nr[\"answer\"]\nr[\"results\"][0][\"url\"]",
-                    [crate::ExecutionMode::Repl],
-                ),
-                crate::ToolText::new(
-                    "search_web(query=\"latest Rust release notes\", max_results=5)",
-                    [crate::ExecutionMode::Standard],
-                ),
-            ],
-            hidden: false,
-            inject_into_prompt: true,
+            examples,
+            enabled: true,
+            injected: true,
         }]
     }
 

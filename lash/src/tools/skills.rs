@@ -1,336 +1,258 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use serde_json::json;
-
-use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
-
-use super::read_to_string;
-use super::run_blocking;
-
-#[derive(Clone)]
-pub struct SkillStore {
-    skill_dirs: Vec<PathBuf>, // [~/.lash/skills, legacy .lash/skills, preferred .agents/lash/skills]
-}
+use crate::plugin::{
+    MessageMutatorHook, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
+    SessionPlugin,
+};
+use crate::{LoadedSkill, Message, MessageRole, Part, PartKind, PromptContribution, SkillCatalog};
 
 #[derive(Clone)]
-pub(crate) struct DiscoveredSkill {
-    pub name: String,
-    pub description: String,
-    pub instructions: String,
-    pub files: Vec<String>,
-    pub base_path: PathBuf,
+pub struct SkillsPluginFactory {
+    skill_dirs: Vec<PathBuf>,
 }
 
-/// Parse YAML frontmatter from a markdown file.
-/// Returns `(name, description, body)` where name may be empty (caller fills from dir name).
-fn parse_frontmatter(text: &str) -> Option<(String, String, String)> {
-    let text = text.trim_start();
-    if !text.starts_with("---") {
-        return None;
-    }
-
-    let after_open = &text[3..];
-    let close_idx = after_open.find("\n---")?;
-    let frontmatter = &after_open[..close_idx];
-    let body_start = 3 + close_idx + 4; // skip "---" + "\n---"
-    let body = text[body_start..].trim().to_string();
-
-    let mut name = String::new();
-    let mut description = String::new();
-
-    for line in frontmatter.lines() {
-        let line = line.trim();
-        if let Some(val) = line.strip_prefix("name:") {
-            name = val.trim().to_string();
-        } else if let Some(val) = line.strip_prefix("description:") {
-            description = val.trim().to_string();
-        }
-    }
-
-    Some((name, description, body))
+struct SkillsPlugin {
+    skill_dirs: Vec<PathBuf>,
 }
 
-impl SkillStore {
+impl SkillsPluginFactory {
     pub fn new(skill_dirs: Vec<PathBuf>) -> Self {
         Self { skill_dirs }
     }
+}
 
-    fn discover_skills(&self) -> Vec<DiscoveredSkill> {
-        discover_installed_skills(&self.skill_dirs)
+impl PluginFactory for SkillsPluginFactory {
+    fn id(&self) -> &'static str {
+        "skills"
     }
 
-    fn find_skill(&self, name: &str) -> Option<DiscoveredSkill> {
-        self.discover_skills().into_iter().find(|s| s.name == name)
-    }
-
-    fn execute_load_skill(&self, args: &serde_json::Value) -> ToolResult {
-        let name = match args.get("name").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() => s,
-            _ => return ToolResult::err(json!("Missing required parameter: name")),
-        };
-
-        match self.find_skill(name) {
-            Some(skill) => ToolResult::ok(json!({
-                "name": skill.name,
-                "description": skill.description,
-                "instructions": skill.instructions,
-                "files": skill.files,
-                "file_count": skill.files.len(),
-            })),
-            None => ToolResult::err_fmt(format_args!("Skill not found: {name}")),
-        }
-    }
-
-    fn execute_read_skill_file(&self, args: &serde_json::Value) -> ToolResult {
-        let skill_name = match args.get("name").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() => s,
-            _ => return ToolResult::err(json!("Missing required parameter: name")),
-        };
-        let path = match args.get("path").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() => s,
-            _ => return ToolResult::err(json!("Missing required parameter: path")),
-        };
-
-        let skill = match self.find_skill(skill_name) {
-            Some(s) => s,
-            None => return ToolResult::err_fmt(format_args!("Skill not found: {skill_name}")),
-        };
-
-        // Resolve and validate path doesn't escape skill directory
-        let target = skill.base_path.join(path);
-        let canonical_base = match skill.base_path.canonicalize() {
-            Ok(p) => p,
-            Err(e) => return ToolResult::err_fmt(format_args!("Skill directory error: {e}")),
-        };
-        let canonical_target = match target.canonicalize() {
-            Ok(p) => p,
-            Err(_) => {
-                return ToolResult::err_fmt(format_args!("File not found: {path}"));
-            }
-        };
-
-        if !canonical_target.starts_with(&canonical_base) {
-            return ToolResult::err(json!("Path escapes skill directory"));
-        }
-
-        match read_to_string(&canonical_target) {
-            Ok(content) => ToolResult::ok(json!(content)),
-            Err(e) => e,
-        }
+    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        Ok(Arc::new(SkillsPlugin {
+            skill_dirs: self.skill_dirs.clone(),
+        }))
     }
 }
 
-/// Recursively list files in a skill directory, excluding SKILL.md.
-/// Returns relative paths from the skill directory root.
-fn list_skill_files(dir: &std::path::Path) -> Vec<String> {
-    let mut files = Vec::new();
-    collect_files(dir, dir, &mut files);
-    files.sort();
-    files
+pub(crate) fn skills_prompt_contributions(catalog: &SkillCatalog) -> Vec<PromptContribution> {
+    if catalog.is_empty() {
+        return Vec::new();
+    }
+
+    vec![PromptContribution::guidance(
+        "### Skills\nWhen the user explicitly invokes a skill, lash injects a `<skill>` block containing that skill's instructions for the current turn. Follow injected skill blocks directly instead of trying to rediscover skill files yourself.",
+    )]
 }
 
-fn collect_files(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(rd) => rd,
-        Err(_) => return,
+impl SessionPlugin for SkillsPlugin {
+    fn id(&self) -> &'static str {
+        "skills"
+    }
+
+    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
+        let prompt_skill_dirs = self.skill_dirs.clone();
+        reg.prompt().contribute(Arc::new(move |_ctx| {
+            let prompt_skill_dirs = prompt_skill_dirs.clone();
+            Box::pin(async move {
+                let catalog = SkillCatalog::from_dirs(&prompt_skill_dirs);
+                Ok(skills_prompt_contributions(&catalog))
+            })
+        }));
+
+        let message_skill_dirs = self.skill_dirs.clone();
+        reg.messages().mutator(
+            MessageMutatorHook::BeforeTurn,
+            Arc::new(move |_ctx, messages| {
+                let message_skill_dirs = message_skill_dirs.clone();
+                Box::pin(async move {
+                    let catalog = SkillCatalog::from_dirs(&message_skill_dirs);
+                    inject_skill_blocks(messages, &catalog)
+                })
+            }),
+        )?;
+        Ok(())
+    }
+}
+
+fn inject_skill_blocks(
+    mut messages: Vec<Message>,
+    catalog: &SkillCatalog,
+) -> Result<Vec<Message>, PluginError> {
+    if catalog.is_empty() {
+        return Ok(messages);
+    }
+
+    let Some(message_idx) = messages
+        .iter()
+        .rposition(|message| message.role == MessageRole::User)
+    else {
+        return Ok(messages);
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_files(base, &path, out);
-        } else if path.is_file() {
-            if path.file_name().and_then(|n| n.to_str()) == Some("SKILL.md")
-                && path.parent() == Some(base)
-            {
-                continue; // skip the main SKILL.md at root level
-            }
-            if let Ok(rel) = path.strip_prefix(base) {
-                out.push(rel.to_string_lossy().to_string());
-            }
-        }
+    let message = &mut messages[message_idx];
+    let skills = collect_selected_skills(message, catalog);
+    if skills.is_empty() {
+        return Ok(messages);
     }
+
+    for skill in skills {
+        let part_id = format!("{}.p{}", message.id, message.parts.len());
+        message.parts.push(Part {
+            id: part_id,
+            kind: PartKind::Text,
+            content: render_skill_block(skill),
+            tool_call_id: None,
+            tool_name: None,
+            prune_state: crate::PruneState::Intact,
+        });
+    }
+
+    Ok(messages)
 }
 
-#[async_trait::async_trait]
-impl ToolProvider for SkillStore {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        if self.discover_skills().is_empty() {
-            return Vec::new();
+fn collect_selected_skills<'a>(
+    message: &Message,
+    catalog: &'a SkillCatalog,
+) -> Vec<&'a LoadedSkill> {
+    let mut selected = Vec::new();
+    let mut seen = HashSet::new();
+
+    for part in &message.parts {
+        if part.kind != PartKind::Text {
+            continue;
         }
-
-        vec![
-            ToolDefinition {
-                name: "load_skill".into(),
-                description: vec![crate::ToolText::new(
-                    "Load a skill by name. Returns a dict with `name`, `description`, `instructions`, `files`, and `file_count`.",
-                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-                )],
-                params: vec![ToolParam::typed("name", "str")],
-                returns: "dict".into(),
-                examples: vec![],
-                hidden: false,
-                inject_into_prompt: true,
-            },
-            ToolDefinition {
-                name: "read_skill_file".into(),
-                description: vec![crate::ToolText::new(
-                    "Read a supporting file from a skill directory. Use the same `name` parameter as `load_skill`.",
-                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-                )],
-                params: vec![
-                    ToolParam::typed("name", "str"),
-                    ToolParam {
-                        name: "path".into(),
-                        r#type: "str".into(),
-                        description: "Relative path within the skill directory".into(),
-                        required: true,
-                    },
-                ],
-                returns: "str".into(),
-                examples: vec![],
-                hidden: false,
-                inject_into_prompt: true,
-            },
-        ]
+        for name in collect_skill_mentions(&part.content) {
+            if seen.insert(name.clone())
+                && let Some(skill) = catalog.get(&name)
+            {
+                selected.push(skill);
+            }
+        }
     }
 
-    async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
-        let store = self.clone();
-        let name = name.to_string();
-        let args = args.clone();
-        run_blocking(move || match name.as_str() {
-            "load_skill" => store.execute_load_skill(&args),
-            "read_skill_file" => store.execute_read_skill_file(&args),
-            _ => ToolResult::err_fmt(format_args!("Unknown tool: {}", name)),
-        })
-        .await
-    }
+    selected
 }
 
-pub(crate) fn discover_installed_skills(skill_dirs: &[PathBuf]) -> Vec<DiscoveredSkill> {
-    let mut skills: Vec<DiscoveredSkill> = Vec::new();
+fn collect_skill_mentions(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut mentions = Vec::new();
+    let mut idx = 0usize;
 
-    for dir in skill_dirs {
-        let entries = match std::fs::read_dir(dir) {
-            Ok(rd) => rd,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let skill_md = path.join("SKILL.md");
-            if !skill_md.is_file() {
-                continue;
-            }
-            let text = match std::fs::read_to_string(&skill_md) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            let (mut name, description, instructions) = match parse_frontmatter(&text) {
-                Some(t) => t,
-                None => continue,
-            };
+    while idx < bytes.len() {
+        if bytes[idx] != b'$' {
+            idx += 1;
+            continue;
+        }
 
-            if name.is_empty() {
-                if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
-                    name = dir_name.to_string();
-                } else {
-                    continue;
-                }
-            }
+        if idx > 0 && is_skill_name_byte(bytes[idx - 1]) {
+            idx += 1;
+            continue;
+        }
 
-            if !name
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-            {
-                continue;
-            }
-
-            let files = list_skill_files(&path);
-
-            skills.retain(|skill| skill.name != name);
-            skills.push(DiscoveredSkill {
-                name,
-                description,
-                instructions,
-                files,
-                base_path: path,
-            });
+        let start = idx + 1;
+        let mut end = start;
+        while end < bytes.len() && is_skill_name_byte(bytes[end]) {
+            end += 1;
+        }
+        if end > start {
+            mentions.push(text[start..end].to_string());
+            idx = end;
+        } else {
+            idx += 1;
         }
     }
 
-    skills.sort_by(|a, b| a.name.cmp(&b.name));
-    skills
+    mentions
+}
+
+fn is_skill_name_byte(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+}
+
+fn render_skill_block(skill: &LoadedSkill) -> String {
+    format!(
+        "<skill>\n<name>{}</name>\n<path>{}</path>\n{}\n</skill>",
+        skill.name,
+        skill.path_to_skill_md.display(),
+        skill.instructions
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use tempfile::TempDir;
 
-    fn make_store(base: &std::path::Path) -> SkillStore {
-        SkillStore::new(vec![base.to_path_buf()])
-    }
-
-    #[tokio::test]
-    async fn read_skill_file_uses_name_parameter() {
-        let dir = TempDir::new().expect("tmp");
-        let skill_dir = dir.path().join("demo-skill");
+    fn write_skill(root: &std::path::Path, dir_name: &str, name: &str) {
+        let skill_dir = root.join(dir_name);
         std::fs::create_dir_all(&skill_dir).expect("skill dir");
         std::fs::write(
             skill_dir.join("SKILL.md"),
-            "---\nname: demo\ndescription: demo skill\n---\n\nbody\n",
+            format!("---\nname: {name}\ndescription: demo\n---\n\nbody for {name}\n"),
         )
         .expect("skill");
-        std::fs::write(skill_dir.join("extra.txt"), "hello\n").expect("extra");
-        let store = make_store(dir.path());
+    }
 
-        let result = store
-            .execute(
-                "read_skill_file",
-                &json!({"name":"demo","path":"extra.txt"}),
-            )
-            .await;
-        assert!(result.success);
-        assert_eq!(result.result.as_str(), Some("hello\n"));
+    fn user_message(text: &str) -> Message {
+        Message {
+            id: "m0".to_string(),
+            role: MessageRole::User,
+            parts: vec![Part {
+                id: "m0.p0".to_string(),
+                kind: PartKind::Text,
+                content: text.to_string(),
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: crate::PruneState::Intact,
+            }],
+            origin: None,
+        }
     }
 
     #[test]
-    fn skill_store_definitions_do_not_expose_legacy_skills_tool() {
-        let store = SkillStore::new(Vec::new());
-        let names: Vec<String> = store
-            .definitions()
-            .into_iter()
-            .map(|def| def.name)
-            .collect();
-        assert!(!names.iter().any(|name| name == "skills"));
-        assert!(!names.iter().any(|name| name == "load_skill"));
-        assert!(!names.iter().any(|name| name == "read_skill_file"));
+    fn prompt_contributions_are_omitted_when_no_skills_exist() {
+        let catalog = SkillCatalog::default();
+        assert!(skills_prompt_contributions(&catalog).is_empty());
     }
 
     #[test]
-    fn skill_store_definitions_exist_when_skills_are_installed() {
+    fn collects_skill_mentions_from_plain_text() {
+        assert_eq!(
+            collect_skill_mentions("Use $frontend-design and then $wholehog."),
+            vec!["frontend-design".to_string(), "wholehog".to_string()]
+        );
+    }
+
+    #[test]
+    fn injects_selected_skills_into_last_user_message() {
         let dir = TempDir::new().expect("tmp");
-        let skill_dir = dir.path().join("demo-skill");
-        std::fs::create_dir_all(&skill_dir).expect("skill dir");
-        std::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: demo\ndescription: demo skill\n---\n\nbody\n",
-        )
-        .expect("skill");
+        write_skill(dir.path(), "frontend-design", "frontend-design");
+        let catalog = SkillCatalog::from_dirs(&[dir.path().to_path_buf()]);
 
-        let store = make_store(dir.path());
-        let defs = store.definitions();
+        let messages = vec![user_message("Use $frontend-design for this page.")];
+        let mutated = inject_skill_blocks(messages, &catalog).expect("mutated");
+        let last = mutated.last().expect("message");
+
+        assert_eq!(last.parts.len(), 2);
         assert!(
-            defs.iter()
-                .any(|def| def.name == "load_skill" && def.inject_into_prompt)
+            last.parts[1]
+                .content
+                .contains("<skill>\n<name>frontend-design</name>")
         );
-        assert!(
-            defs.iter()
-                .any(|def| def.name == "read_skill_file" && def.inject_into_prompt)
-        );
+        assert!(last.parts[1].content.contains("body for frontend-design"));
+    }
+
+    #[test]
+    fn ignores_unknown_mentions_and_deduplicates_known_ones() {
+        let dir = TempDir::new().expect("tmp");
+        write_skill(dir.path(), "demo", "demo");
+        let catalog = SkillCatalog::from_dirs(&[dir.path().to_path_buf()]);
+
+        let messages = vec![user_message("$demo then $unknown then $demo again")];
+        let mutated = inject_skill_blocks(messages, &catalog).expect("mutated");
+        let last = mutated.last().expect("message");
+
+        assert_eq!(last.parts.len(), 2);
+        assert!(last.parts[1].content.contains("<name>demo</name>"));
     }
 }

@@ -1,7 +1,4 @@
-use crate::{
-    ExecutionMode, PromptBridge, ToolDefinition, ToolParam, ToolPromptContext, ToolProvider,
-    ToolResult,
-};
+use crate::{PromptBridge, ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
 #[derive(Clone)]
 pub struct AskTool {
@@ -67,10 +64,7 @@ impl ToolProvider for AskTool {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "ask".into(),
-            description: vec![crate::ToolText::new(
-                "Pause and ask the user a targeted question, then wait for the answer before continuing. Use this only when you are genuinely blocked, need the user's decision, or must request a value that cannot be inferred safely. Prefer doing the work without asking when a reasonable default can be discovered from local context. Omit `options` for free-form input, or provide a short list of choices.",
-                [ExecutionMode::Standard, ExecutionMode::Repl],
-            )],
+            description: "Pause and ask the user a targeted question, then wait for the answer before continuing. Use this only when you are genuinely blocked, need the user's decision, or must request a value that cannot be inferred safely. Prefer doing the work without asking when a reasonable default can be discovered from local context. Omit `options` for free-form input, or provide a short list of choices.".into(),
             params: vec![
                 ToolParam {
                     name: "question".into(),
@@ -88,19 +82,14 @@ impl ToolProvider for AskTool {
                 },
             ],
             returns: "str".into(),
-            examples: vec![crate::ToolText::new(
-                "ask(question=\"Which environment should I use?\", options=[\"staging\", \"prod\"])",
-                [ExecutionMode::Standard, ExecutionMode::Repl],
-            )],
-            hidden: false,
-            inject_into_prompt: true,
+            examples: vec![
+                "ask(question=\"Which environment should I use?\", options=[\"staging\", \"prod\"])"
+                    .into(),
+            ],
+            enabled: true,
+            injected: true,
         }]
     }
-
-    fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
-        vec!["### Interactive Ask\n`call ask { question: \"...\", options: [...] }` pauses execution and shows a real interactive prompt to the user. It still returns the normal wrapped tool result, so on success read the answer from `result.value`. Example:\n`resp = call ask { question: \"Deploy where?\", options: [\"staging\", \"prod\"] }`\n`finish(resp.ok ? format(\"Deploying to {0}\", resp.value) : format(\"Prompt failed: {0}\", resp.error))`".to_string()]
-    }
-
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
         match name {
             "ask" => self.execute_ask(args).await,

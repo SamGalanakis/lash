@@ -2,7 +2,10 @@ use async_trait::async_trait;
 use base64::Engine;
 use serde_json::{Value, json};
 
-use crate::llm::adapters::streaming::{drive_sse_response, emit_progress, stream_chunk_timeout};
+use crate::llm::adapters::streaming::{drive_sse_response, emit_progress};
+use crate::llm::timeouts::{
+    LlmTimeouts, build_http_client, read_response_text, response_start_timeout, send_request,
+};
 use crate::llm::transport::{LlmTransport, LlmTransportError};
 use crate::llm::types::{
     LlmOutputPart, LlmPromptPart, LlmRequest, LlmResponse, LlmUsage, ModelSelection,
@@ -15,18 +18,22 @@ const CODE_ASSIST_API_VERSION: &str = "v1internal";
 
 pub struct GoogleCloudCodeAdapter {
     client: reqwest::Client,
+    request_timeout: Option<std::time::Duration>,
+    chunk_timeout: std::time::Duration,
 }
 
 impl Default for GoogleCloudCodeAdapter {
     fn default() -> Self {
-        Self::new()
+        Self::new(LlmTimeouts::default())
     }
 }
 
 impl GoogleCloudCodeAdapter {
-    pub fn new() -> Self {
+    pub fn new(timeouts: LlmTimeouts) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: build_http_client(),
+            request_timeout: timeouts.request_timeout,
+            chunk_timeout: timeouts.chunk_timeout,
         }
     }
 
@@ -460,14 +467,26 @@ impl LlmTransport for GoogleCloudCodeAdapter {
         if stream_events.is_some() {
             http = http.query(&[("alt", "sse")]);
         }
-        let resp = http
-            .send()
-            .await
-            .map_err(|e| LlmTransportError::new(format!("HTTP request failed: {e}")))?;
+        let resp = send_request(
+            http,
+            response_start_timeout(
+                self.request_timeout,
+                self.chunk_timeout,
+                stream_events.is_some(),
+            ),
+            "Cloud Code response start timed out",
+        )
+        .await?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
+            let body = read_response_text(
+                resp,
+                self.request_timeout,
+                "Cloud Code response body timed out",
+            )
+            .await
+            .unwrap_or_default();
             return Err(LlmTransportError {
                 message: format!("Cloud Code request failed with {}", status),
                 retryable: status == 429 || status >= 500,
@@ -477,7 +496,12 @@ impl LlmTransport for GoogleCloudCodeAdapter {
         }
 
         if stream_events.is_none() {
-            let text = resp.text().await.unwrap_or_default();
+            let text = read_response_text(
+                resp,
+                self.request_timeout,
+                "Cloud Code response body timed out",
+            )
+            .await?;
             let value: Value = serde_json::from_str(&text).map_err(|e| {
                 LlmTransportError::new(format!("Invalid Cloud Code response JSON: {e}"))
                     .with_raw(text.clone())
@@ -517,7 +541,7 @@ impl LlmTransport for GoogleCloudCodeAdapter {
         let mut tool_call_parts: Vec<LlmOutputPart> = Vec::new();
         drive_sse_response(
             resp,
-            stream_chunk_timeout(),
+            self.chunk_timeout,
             "Cloud Code stream chunk timed out",
             |raw| {
                 let prev_len = deltas.len();

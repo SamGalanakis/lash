@@ -1,0 +1,212 @@
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::instructions::InstructionSource;
+use crate::plugin::{PluginFactory, PluginSpec, PluginSpecFactory};
+use crate::{
+    ExecutionMode, ProgressSender, ToolDefinition, ToolExecutionContext, ToolProvider, ToolResult,
+};
+
+#[derive(Default)]
+pub struct DefaultToolPluginDeps {
+    #[cfg(feature = "sqlite-store")]
+    pub store: Option<Arc<crate::store::Store>>,
+    pub tavily_api_key: Option<String>,
+    pub skill_dirs: Option<Vec<PathBuf>>,
+    pub prompt_bridge: Option<crate::PromptBridge>,
+    pub instruction_source: Option<Arc<dyn InstructionSource>>,
+}
+
+fn shell_provider() -> Arc<dyn ToolProvider> {
+    Arc::new(super::StandardShell::new())
+}
+
+pub fn default_tool_plugin_factories(
+    mode: ExecutionMode,
+    deps: DefaultToolPluginDeps,
+) -> Vec<Arc<dyn PluginFactory>> {
+    let mut factories: Vec<Arc<dyn PluginFactory>> = vec![
+        Arc::new(crate::BuiltinToolResultProjectionPluginFactory::default()),
+        Arc::new(PluginSpecFactory::new(
+            "shell",
+            Arc::new(move |_ctx| {
+                Ok(PluginSpec::new()
+                    .with_tool_provider(shell_provider())
+                    .with_prompt_contributor(Arc::new(move |_ctx| {
+                        Box::pin(async move { Ok(super::shell::shell_prompt_contributions()) })
+                    })))
+            }),
+        )),
+        Arc::new(PluginSpecFactory::new(
+            "apply_patch",
+            Arc::new(|_ctx| {
+                Ok(PluginSpec::new()
+                    .with_tool_provider(Arc::new(super::ApplyPatchTool) as Arc<dyn ToolProvider>))
+            }),
+        )),
+        Arc::new(super::ReadFilePluginFactory::new(
+            deps.instruction_source.clone(),
+        )),
+        Arc::new(PluginSpecFactory::new(
+            "glob",
+            Arc::new(|_ctx| {
+                Ok(PluginSpec::new()
+                    .with_tool_provider(Arc::new(super::Glob) as Arc<dyn ToolProvider>))
+            }),
+        )),
+        Arc::new(PluginSpecFactory::new(
+            "grep",
+            Arc::new(|_ctx| {
+                Ok(PluginSpec::new()
+                    .with_tool_provider(Arc::new(super::Grep) as Arc<dyn ToolProvider>))
+            }),
+        )),
+        Arc::new(PluginSpecFactory::new(
+            "ls",
+            Arc::new(|_ctx| {
+                Ok(PluginSpec::new()
+                    .with_tool_provider(Arc::new(super::Ls) as Arc<dyn ToolProvider>))
+            }),
+        )),
+    ];
+
+    if let Some(prompt_bridge) = deps.prompt_bridge {
+        factories.push(Arc::new(PluginSpecFactory::new(
+            "ask",
+            Arc::new(move |_ctx| {
+                Ok(PluginSpec::new()
+                    .with_tool_provider(Arc::new(super::AskTool::new(prompt_bridge.clone()))
+                        as Arc<dyn ToolProvider>))
+            }),
+        )));
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    if deps.store.is_some() {
+        factories.push(Arc::new(super::StateToolsPluginFactory::new(mode)));
+    }
+
+    if let Some(key) = deps.tavily_api_key {
+        let search_key = key.clone();
+        factories.push(Arc::new(PluginSpecFactory::new(
+            "search_web",
+            Arc::new(move |_ctx| {
+                Ok(
+                    PluginSpec::new().with_tool_provider(Arc::new(super::WebSearch::new(
+                        search_key.clone(),
+                        mode,
+                    ))
+                        as Arc<dyn ToolProvider>),
+                )
+            }),
+        )));
+        factories.push(Arc::new(PluginSpecFactory::new(
+            "fetch_url",
+            Arc::new(move |_ctx| {
+                Ok(PluginSpec::new().with_tool_provider(
+                    Arc::new(super::FetchUrl::new(key.clone())) as Arc<dyn ToolProvider>,
+                ))
+            }),
+        )));
+    }
+
+    if let Some(skill_dirs) = deps.skill_dirs {
+        factories.push(Arc::new(super::SkillsPluginFactory::new(skill_dirs)));
+    }
+
+    factories
+}
+
+pub(crate) struct CompositeToolProvider {
+    tools: BTreeMap<String, (ToolDefinition, usize)>,
+    providers: Vec<(Arc<dyn ToolProvider>, Vec<String>)>,
+}
+
+impl CompositeToolProvider {
+    pub(crate) fn from_providers(providers: Vec<Arc<dyn ToolProvider>>) -> Self {
+        let mut tools = BTreeMap::new();
+        let mut entries = Vec::new();
+        for provider in providers {
+            let tool_names = provider
+                .definitions()
+                .into_iter()
+                .map(|def| {
+                    let name = def.name.clone();
+                    tools.insert(name.clone(), (def, entries.len()));
+                    name
+                })
+                .collect::<Vec<_>>();
+            entries.push((provider, tool_names));
+        }
+        Self {
+            tools,
+            providers: entries,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolProvider for CompositeToolProvider {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        self.tools.values().map(|(def, _)| def.clone()).collect()
+    }
+    async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
+        match self.tools.get(name) {
+            Some((_, provider_idx)) => self.providers[*provider_idx].0.execute(name, args).await,
+            None => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
+        }
+    }
+
+    async fn execute_with_context(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        context: &ToolExecutionContext,
+    ) -> ToolResult {
+        match self.tools.get(name) {
+            Some((_, provider_idx)) => {
+                self.providers[*provider_idx]
+                    .0
+                    .execute_with_context(name, args, context)
+                    .await
+            }
+            None => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
+        }
+    }
+
+    async fn execute_streaming(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        match self.tools.get(name) {
+            Some((_, provider_idx)) => {
+                self.providers[*provider_idx]
+                    .0
+                    .execute_streaming(name, args, progress)
+                    .await
+            }
+            None => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
+        }
+    }
+
+    async fn execute_streaming_with_context(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        context: &ToolExecutionContext,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        match self.tools.get(name) {
+            Some((_, provider_idx)) => {
+                self.providers[*provider_idx]
+                    .0
+                    .execute_streaming_with_context(name, args, context, progress)
+                    .await
+            }
+            None => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
+        }
+    }
+}

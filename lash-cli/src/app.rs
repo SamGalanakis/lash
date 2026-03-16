@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 
-use lash_core::{AgentEvent, MessageRole, PluginMessage, TokenUsage};
+use lash_core::{AgentEvent, MessageRole, PluginMessage, PromptUsage, SkillCatalog, TokenUsage};
 
 use crate::activity::{
     ActivityBlock, ActivityKind, ActivityState, ActivityStatus, PatchFilePreview,
@@ -10,8 +10,7 @@ use crate::activity::{
 use crate::command;
 use crate::markdown;
 use crate::plugin_surface;
-use crate::replay::push_assistant_text_block;
-use crate::skill::SkillRegistry;
+use crate::replay::{normalize_stream_text, push_assistant_text_block};
 use crate::util::{is_manual_interrupt_error, manual_interrupt_message};
 
 /// Find the byte offset within `line` that corresponds to a given display column.
@@ -48,6 +47,31 @@ pub struct PromptState {
     /// True when Shift+Tab has been pressed to edit extra text.
     pub editing_extra: bool,
     pub response_tx: std::sync::mpsc::Sender<String>,
+}
+
+pub struct LiveTurnState {
+    pub status_text: String,
+    pub status_detail: Option<String>,
+    pub phase_started_at: std::time::Instant,
+    pub turn_started_at: std::time::Instant,
+    pub assistant_block_idx: Option<usize>,
+    pub has_visible_output: bool,
+    pub transient_until: Option<std::time::Instant>,
+}
+
+impl LiveTurnState {
+    fn new(status_text: impl Into<String>, status_detail: Option<String>) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            status_text: status_text.into(),
+            status_detail,
+            phase_started_at: now,
+            turn_started_at: now,
+            assistant_block_idx: None,
+            has_visible_output: false,
+            transient_until: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,16 +138,6 @@ pub enum DisplayBlock {
     /// Rendered plan content from update_plan (bordered markdown).
     PlanContent(String),
     PluginPanel(PluginPanelBlock),
-    /// Sub-agent completion result with token stats.
-    SubAgentResult {
-        task: String,
-        usage: TokenUsage,
-        tool_calls: usize,
-        iterations: usize,
-        success: bool,
-        /// Whether this is the last in a consecutive sequence (uses └─ instead of ├─).
-        is_last: bool,
-    },
     Splash,
 }
 
@@ -324,10 +338,20 @@ impl DisplayBlock {
             }
             DisplayBlock::Error(msg) => wrapped_line_height(&format!("Error: {}", msg), width),
             DisplayBlock::SystemMessage(s) => wrapped_text_height(s, width, 0),
-            DisplayBlock::SubAgentResult { .. } => 2, // task line + status line
             DisplayBlock::PlanContent(s) => {
-                // borders (2) + title line is part of top border + markdown content height
-                2 + markdown::markdown_height(s, width.saturating_sub(2))
+                // borders (2) + plain-text content lines (not markdown)
+                let inner_w = width.saturating_sub(4).max(1);
+                let content_h: usize = s
+                    .lines()
+                    .map(|line| {
+                        if line.is_empty() {
+                            1
+                        } else {
+                            wrapped_line_height(line, inner_w)
+                        }
+                    })
+                    .sum();
+                2 + content_h.max(1)
             }
             DisplayBlock::PluginPanel(panel) => {
                 2 + markdown::markdown_height(&panel.content, width.saturating_sub(2))
@@ -350,12 +374,9 @@ pub struct App {
     pub input_history_idx: Option<usize>,
     /// Spinner frame counter
     pub tick: usize,
-    /// Latest progress message shown in the live status row.
-    pub status_text: Option<String>,
-    pub status_detail: Option<String>,
-    pub status_started_at: Option<std::time::Instant>,
-    /// Buffered TextDelta — rendered live as streaming text, flushed as AssistantText on Done.
-    /// Discarded when a CodeBlock arrives (it was intermediate thinking with code fences).
+    /// Active live turn state for the bottom status strip.
+    pub live_turn: Option<LiveTurnState>,
+    /// Raw TextDelta buffer for the active streamed assistant segment.
     pub pending_text: String,
     /// Active suggestions (display text, description).
     pub suggestions: Vec<(String, String)>,
@@ -385,7 +406,7 @@ pub struct App {
     /// Default: on (can be disabled via `LASH_SHOW_TOOL_OUTPUT=0`).
     pub show_live_tool_output: bool,
     /// Loaded skills registry.
-    pub skills: SkillRegistry,
+    pub skills: SkillCatalog,
     /// Skill picker: list of (name, description) when browsing skills.
     pub skill_picker: Vec<(String, String)>,
     /// Currently selected skill index.
@@ -408,6 +429,8 @@ pub struct App {
     pub model_variant: Option<String>,
     /// Latest completed model usage for context accounting.
     pub last_response_usage: TokenUsage,
+    /// Latest normalized prompt-budget usage for context accounting and folding.
+    pub last_prompt_usage: Option<PromptUsage>,
     /// Estimated output character count from live streaming chunks.
     pub live_output_chars_estimate: i64,
     /// Estimated output tokens from live streamed chunks before final usage arrives.
@@ -418,7 +441,7 @@ pub struct App {
     pub plugin_mode_indicators: BTreeMap<String, String>,
     /// Current working directory with ~ substitution.
     pub cwd: String,
-    /// Active delegate sub-agent: (name, task description, started_at).
+    /// Active delegate child session: (name, task description, started_at).
     pub active_delegate: Option<(String, String, std::time::Instant)>,
     /// Handle state used to derive semantic activity rows from raw tool calls.
     pub activity_state: ActivityState,
@@ -427,6 +450,39 @@ pub struct App {
 }
 
 impl App {
+    fn ensure_live_turn(&mut self) -> &mut LiveTurnState {
+        self.live_turn
+            .get_or_insert_with(|| LiveTurnState::new("starting", None))
+    }
+
+    pub fn start_turn(&mut self) {
+        self.running = true;
+        self.iteration = 0;
+        self.pending_text.clear();
+        self.streaming_output.clear();
+        self.active_delegate = None;
+        self.live_output_chars_estimate = 0;
+        self.live_output_tokens_estimate = 0;
+        self.live_turn = Some(LiveTurnState::new("starting", None));
+    }
+
+    pub fn stop_turn(&mut self) {
+        self.running = false;
+        self.pending_text.clear();
+        self.streaming_output.clear();
+        self.active_delegate = None;
+        self.live_output_chars_estimate = 0;
+        self.live_output_tokens_estimate = 0;
+        if self
+            .live_turn
+            .as_ref()
+            .and_then(|turn| turn.transient_until)
+            .is_none_or(|until| until <= std::time::Instant::now())
+        {
+            self.live_turn = None;
+        }
+    }
+
     fn set_status(
         &mut self,
         header: impl Into<String>,
@@ -434,26 +490,71 @@ impl App {
         reset_timer: bool,
     ) {
         let header = header.into();
-        let changed =
-            self.status_text.as_deref() != Some(header.as_str()) || self.status_detail != details;
-        self.status_text = Some(header);
-        self.status_detail = details;
-        if changed || reset_timer || self.status_started_at.is_none() {
-            self.status_started_at = Some(std::time::Instant::now());
+        let turn = self.ensure_live_turn();
+        let changed = turn.status_text != header || turn.status_detail != details;
+        turn.status_text = header;
+        turn.status_detail = details;
+        turn.transient_until = None;
+        if changed || reset_timer {
+            turn.phase_started_at = std::time::Instant::now();
         }
     }
 
+    fn set_transient_status(
+        &mut self,
+        header: impl Into<String>,
+        details: Option<String>,
+        duration: std::time::Duration,
+    ) {
+        let header = header.into();
+        let now = std::time::Instant::now();
+        let turn = self.ensure_live_turn();
+        turn.status_text = header;
+        turn.status_detail = details;
+        turn.phase_started_at = now;
+        turn.transient_until = Some(now + duration);
+    }
+
     fn clear_status(&mut self) {
-        self.status_text = None;
-        self.status_detail = None;
-        self.status_started_at = None;
+        self.live_turn = None;
+    }
+
+    pub fn on_tick(&mut self) {
+        if self.running {
+            self.tick += 1;
+            self.dirty = true;
+        }
+
+        if self.live_turn.as_ref().is_some_and(|turn| {
+            turn.transient_until
+                .is_some_and(|until| until <= std::time::Instant::now())
+        }) {
+            self.live_turn = None;
+            self.dirty = true;
+            return;
+        }
+
+        if self
+            .live_turn
+            .as_ref()
+            .is_some_and(|turn| turn.transient_until.is_some())
+        {
+            self.dirty = true;
+        }
     }
 
     fn mark_first_token_arrived(&mut self) {
-        if self.status_text.as_deref() == Some("thinking")
-            && self.status_detail.as_deref() == Some("waiting for first token")
-        {
+        if self.live_turn.as_ref().is_some_and(|turn| {
+            turn.status_text == "thinking"
+                && turn.status_detail.as_deref() == Some("waiting for first token")
+        }) {
             self.set_status("responding", None, true);
+        }
+    }
+
+    fn mark_visible_output(&mut self) {
+        if let Some(turn) = self.live_turn.as_mut() {
+            turn.has_visible_output = true;
         }
     }
 
@@ -501,9 +602,7 @@ impl App {
             input_history: Vec::new(),
             input_history_idx: None,
             tick: 0,
-            status_text: None,
-            status_detail: None,
-            status_started_at: None,
+            live_turn: None,
             pending_text: String::new(),
             suggestions: Vec::new(),
             suggestion_idx: 0,
@@ -524,7 +623,7 @@ impl App {
                     .as_str(),
                 "0" | "false" | "no" | "off"
             ),
-            skills: SkillRegistry::load(),
+            skills: SkillCatalog::load(),
             skill_picker: Vec::new(),
             skill_picker_idx: 0,
             pending_steers: VecDeque::new(),
@@ -536,6 +635,7 @@ impl App {
             context_usage_excludes_cached_input: false,
             model_variant: None,
             last_response_usage: TokenUsage::default(),
+            last_prompt_usage: None,
             live_output_chars_estimate: 0,
             live_output_tokens_estimate: 0,
             session_name,
@@ -596,15 +696,79 @@ impl App {
         false
     }
 
-    fn flush_pending_text(&mut self) {
-        if push_assistant_text_block(&mut self.blocks, &self.pending_text) {
-            self.invalidate_height_cache();
+    fn sync_pending_text_block(&mut self) {
+        let cleaned = normalize_stream_text(&self.pending_text);
+        if cleaned.is_empty() {
+            return;
+        }
+
+        let active_idx = self
+            .live_turn
+            .as_ref()
+            .and_then(|turn| turn.assistant_block_idx);
+        if let Some(idx) = active_idx
+            && let Some(DisplayBlock::AssistantText(text)) = self.blocks.get_mut(idx)
+        {
+            if *text != cleaned {
+                *text = cleaned;
+                self.invalidate_height_cache();
+            }
+            self.mark_visible_output();
+            return;
+        }
+
+        self.blocks.push(DisplayBlock::AssistantText(cleaned));
+        if let Some(turn) = self.live_turn.as_mut() {
+            turn.assistant_block_idx = Some(self.blocks.len() - 1);
+        }
+        self.mark_visible_output();
+        self.invalidate_height_cache();
+    }
+
+    fn close_pending_text(&mut self) {
+        if let Some(turn) = self.live_turn.as_mut() {
+            turn.assistant_block_idx = None;
         }
         self.pending_text.clear();
     }
 
+    fn commit_final_assistant_text(&mut self, text: &str) {
+        let cleaned = normalize_stream_text(text);
+        if cleaned.is_empty() {
+            self.close_pending_text();
+            return;
+        }
+
+        let active_idx = self
+            .live_turn
+            .as_ref()
+            .and_then(|turn| turn.assistant_block_idx);
+        if let Some(idx) = active_idx
+            && let Some(DisplayBlock::AssistantText(existing)) = self.blocks.get_mut(idx)
+        {
+            if cleaned.starts_with(existing.as_str()) {
+                if *existing != cleaned {
+                    *existing = cleaned;
+                    self.invalidate_height_cache();
+                }
+            } else if existing.is_empty() {
+                *existing = cleaned;
+                self.invalidate_height_cache();
+            }
+            self.mark_visible_output();
+            self.close_pending_text();
+            return;
+        }
+
+        if push_assistant_text_block(&mut self.blocks, &cleaned) {
+            self.invalidate_height_cache();
+            self.mark_visible_output();
+        }
+        self.close_pending_text();
+    }
+
     fn commit_injected_messages(&mut self, messages: &[PluginMessage]) {
-        self.flush_pending_text();
+        self.close_pending_text();
         let mut committed_user_message = false;
         for message in messages {
             match message.role {
@@ -648,14 +812,12 @@ impl App {
                 self.live_output_tokens_estimate =
                     estimate_tokens_from_char_count(self.live_output_chars_estimate);
                 self.pending_text.push_str(&content);
-                // Don't normalize here — stripping trailing newlines between
-                // deltas breaks code fences (```python\n + # comment → ```python# comment).
-                // Normalization happens at flush points (CodeBlock, Done).
+                self.sync_pending_text_block();
                 self.scroll_to_bottom();
             }
             AgentEvent::CodeBlock { code } => {
                 self.set_status("writing code", None, true);
-                self.flush_pending_text();
+                self.close_pending_text();
                 let trimmed = code.trim_matches('\n');
                 if !trimmed.is_empty() {
                     let continuation = self.is_code_continuation();
@@ -664,6 +826,7 @@ impl App {
                         continuation,
                     });
                     self.invalidate_height_cache();
+                    self.mark_visible_output();
                 }
                 self.scroll_to_bottom();
             }
@@ -675,7 +838,7 @@ impl App {
                 duration_ms,
                 ..
             } => {
-                self.flush_pending_text();
+                self.close_pending_text();
                 self.streaming_output.clear();
                 if name.starts_with("delegate_") {
                     self.active_delegate = None;
@@ -704,6 +867,9 @@ impl App {
                 if let Some(content) = plan_content {
                     self.push_plan_content(content);
                 }
+                if !matches!(self.blocks.last(), Some(DisplayBlock::Splash)) {
+                    self.mark_visible_output();
+                }
                 self.scroll_to_bottom();
             }
             AgentEvent::CodeOutput { output, error } => {
@@ -714,6 +880,7 @@ impl App {
                 if error.is_some() || !output.is_empty() {
                     self.blocks.push(DisplayBlock::CodeOutput { output, error });
                     self.invalidate_height_cache();
+                    self.mark_visible_output();
                 }
                 self.scroll_to_bottom();
             }
@@ -741,36 +908,34 @@ impl App {
                 } else if kind == "tool_output" {
                     // Explicit policy:
                     // - live tool output can be disabled via env var
-                    // - shell + sub-agent result streams can render text to the TUI
-                    let is_delegate_stream = matches!(
-                        self.status_text.as_deref(),
-                        Some("delegating") | Some("delegate")
-                    );
+                    // - shell + delegate result streams can render text to the TUI
+                    let current_status = self
+                        .live_turn
+                        .as_ref()
+                        .map(|turn| turn.status_text.as_str());
+                    let is_delegate_stream =
+                        matches!(current_status, Some("delegating") | Some("delegate"));
                     if is_delegate_stream {
                         self.live_output_chars_estimate += text.chars().count() as i64;
                         self.live_output_tokens_estimate =
                             estimate_tokens_from_char_count(self.live_output_chars_estimate);
                     }
                     let stream_active = self.active_delegate.is_some()
-                        || self
-                            .status_text
-                            .as_deref()
-                            .is_some_and(|status| status.contains("shell"));
+                        || current_status.is_some_and(|status| status.contains("shell"));
                     if self.show_live_tool_output && stream_active {
                         self.streaming_output.push(text);
+                        self.mark_visible_output();
                         self.scroll_to_bottom();
                     }
                 } else if kind == "final" {
-                    if push_assistant_text_block(&mut self.blocks, &text) {
-                        self.invalidate_height_cache();
-                        self.scroll_to_bottom();
-                    }
+                    self.commit_final_assistant_text(&text);
+                    self.scroll_to_bottom();
                 } else {
                     // Unknown message kinds are intentionally dropped.
                 }
             }
             AgentEvent::LlmRequest { iteration, .. } => {
-                self.flush_pending_text();
+                self.close_pending_text();
                 self.iteration = iteration + 1;
                 self.set_status("thinking", Some("waiting for first token".into()), true);
                 self.live_output_chars_estimate = 0;
@@ -782,6 +947,7 @@ impl App {
                 attempt,
                 max_attempts,
                 reason,
+                envelope: _,
             } => {
                 let mut reason_short: String = reason.chars().take(60).collect();
                 if reason.chars().count() > 60 {
@@ -798,32 +964,41 @@ impl App {
                 self.scroll_to_bottom();
             }
             AgentEvent::Done => {
-                self.flush_pending_text();
-                self.running = false;
-                self.clear_status();
-                self.streaming_output.clear();
-                self.active_delegate = None;
-                self.live_output_chars_estimate = 0;
-                self.live_output_tokens_estimate = 0;
+                self.close_pending_text();
+                self.stop_turn();
                 self.scroll_to_bottom();
             }
             AgentEvent::Error { message, envelope } => {
+                self.close_pending_text();
                 let code = envelope.as_ref().and_then(|err| err.code.as_deref());
                 if is_manual_interrupt_error(&message, code) {
                     self.blocks.push(DisplayBlock::SystemMessage(
                         manual_interrupt_message().to_string(),
                     ));
                 } else {
+                    self.set_transient_status(
+                        "error",
+                        Some(message.chars().take(96).collect()),
+                        std::time::Duration::from_secs(8),
+                    );
                     self.blocks.push(DisplayBlock::Error(message));
                 }
                 self.invalidate_height_cache();
+                self.mark_visible_output();
                 self.scroll_to_bottom();
             }
-            AgentEvent::TokenUsage { usage, .. } => {
-                self.token_usage.add(&usage);
-                self.last_response_usage = usage;
-                self.live_output_chars_estimate = 0;
-                self.live_output_tokens_estimate = 0;
+            AgentEvent::TokenUsage {
+                usage, cumulative, ..
+            } => {
+                let should_clear_live_estimate = usage.output_tokens > 0
+                    || usage.reasoning_tokens > 0
+                    || usage.cached_input_tokens > 0;
+                self.last_response_usage = usage.clone();
+                self.token_usage = cumulative;
+                if should_clear_live_estimate {
+                    self.live_output_chars_estimate = 0;
+                    self.live_output_tokens_estimate = 0;
+                }
             }
             AgentEvent::PluginEvent { plugin_id, event } => {
                 let mutation = plugin_surface::apply_surface_event(
@@ -839,37 +1014,6 @@ impl App {
                 if mutation.indicators_changed {
                     self.dirty = true;
                 }
-            }
-            AgentEvent::SubAgentDone {
-                task,
-                usage,
-                tool_calls,
-                iterations,
-                success,
-            } => {
-                self.token_usage.add(&usage);
-                self.live_output_chars_estimate = 0;
-                self.live_output_tokens_estimate = 0;
-                // Mark previous SubAgentResult blocks as not-last, then add new one as last
-                for block in self.blocks.iter_mut().rev() {
-                    match block {
-                        DisplayBlock::SubAgentResult { is_last, .. } if *is_last => {
-                            *is_last = false;
-                        }
-                        DisplayBlock::SubAgentResult { .. } => break,
-                        _ => break,
-                    }
-                }
-                self.blocks.push(DisplayBlock::SubAgentResult {
-                    task,
-                    usage,
-                    tool_calls,
-                    iterations,
-                    success,
-                    is_last: true,
-                });
-                self.invalidate_height_cache();
-                self.scroll_to_bottom();
             }
             AgentEvent::InjectedMessagesCommitted { messages, .. } => {
                 self.commit_injected_messages(&messages);
@@ -919,7 +1063,7 @@ impl App {
     }
 
     pub fn preview_queued_turn(&mut self, turn: &QueuedTurn, inject_at_checkpoint: bool) {
-        if turn.is_empty() || turn.text.is_empty() {
+        if !inject_at_checkpoint || turn.is_empty() || turn.text.is_empty() {
             return;
         }
         self.blocks.push(DisplayBlock::PendingUserInput {
@@ -974,6 +1118,7 @@ impl App {
         self.activity_state.reset();
         self.token_usage = TokenUsage::default();
         self.last_response_usage = TokenUsage::default();
+        self.last_prompt_usage = None;
         self.live_output_chars_estimate = 0;
         self.live_output_tokens_estimate = 0;
         self.model_variant = None;
@@ -1085,10 +1230,10 @@ impl App {
             return;
         }
 
-        let awaiting_first_visible_output = self.running
-            && self.pending_text.is_empty()
-            && self.streaming_output.is_empty()
-            && self.live_output_chars_estimate == 0;
+        let awaiting_first_visible_output = self
+            .live_turn
+            .as_ref()
+            .is_some_and(|turn| !turn.has_visible_output);
 
         if awaiting_first_visible_output {
             self.keep_latest_user_block_visible();
@@ -1141,10 +1286,10 @@ impl App {
             .iter()
             .any(|block| matches!(block, DisplayBlock::Splash));
 
-        let awaiting_first_visible_output = self.running
-            && self.pending_text.is_empty()
-            && self.streaming_output.is_empty()
-            && self.live_output_chars_estimate == 0;
+        let awaiting_first_visible_output = self
+            .live_turn
+            .as_ref()
+            .is_some_and(|turn| !turn.has_visible_output);
 
         self.scroll_offset = if awaiting_first_visible_output
             && (has_splash_before || block_height >= viewport_height)
@@ -1210,16 +1355,9 @@ impl App {
     pub fn total_content_height(&mut self, width: usize, viewport_height: usize) -> usize {
         self.ensure_height_cache(width, viewport_height);
         let block_height = self.height_cache.last().copied().unwrap_or(0);
-        // Include live streaming LLM text
-        let pending_height = if self.pending_text.is_empty() {
-            0
-        } else {
-            // Streaming assistant text is rendered with a 2-column left prefix in ui.rs.
-            crate::markdown::markdown_height_compact(&self.pending_text, width.saturating_sub(2))
-        };
         // Include live streaming output lines
         let streaming_height = self.streaming_output.len();
-        block_height + pending_height + streaming_height
+        block_height + streaming_height
     }
 
     /// Which line (0-indexed) the cursor is on in multi-line input.
@@ -1680,8 +1818,8 @@ impl App {
         }
     }
 
-    /// Submit the prompt response and dismiss the dialog.
-    pub fn take_prompt_response(&mut self) {
+    /// Submit the prompt response, render it as user input, and dismiss the dialog.
+    pub fn take_prompt_response(&mut self) -> Option<String> {
         if let Some(p) = self.prompt.take() {
             let response = if p.options.is_empty() {
                 // Freeform-only: just the text
@@ -1705,14 +1843,27 @@ impl App {
                 // "Other" selected
                 p.extra_text
             };
-            let _ = p.response_tx.send(response);
+            let _ = p.response_tx.send(response.clone());
+            self.invalidate_height_cache();
+            self.scroll_to_bottom();
+            self.dirty = true;
+            if !response.trim().is_empty() {
+                self.blocks.push(DisplayBlock::UserInput(response.clone()));
+                self.invalidate_height_cache();
+                self.keep_latest_user_block_visible();
+                return Some(response);
+            }
         }
+        None
     }
 
     /// Dismiss the prompt without selecting (Esc) — sends empty string to unblock the REPL runtime.
     pub fn dismiss_prompt(&mut self) {
         if let Some(p) = self.prompt.take() {
             let _ = p.response_tx.send(String::new());
+            self.invalidate_height_cache();
+            self.scroll_to_bottom();
+            self.dirty = true;
         }
     }
 }
@@ -1761,7 +1912,7 @@ fn complete_path(partial: &str) -> Vec<(String, String)> {
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
 
-        // Skip hidden files unless prefix starts with '.'
+        // Skip enabled files unless prefix starts with '.'
         if !show_hidden && name.starts_with('.') {
             continue;
         }
@@ -1828,15 +1979,15 @@ pub(crate) fn render_plan_content_from_args(args: &serde_json::Value) -> Option<
         lines.push(String::new());
     }
 
-    for (idx, item) in items.iter().enumerate() {
+    for item in items {
         let step = item.get("step").and_then(|value| value.as_str())?;
         let status = item.get("status").and_then(|value| value.as_str())?;
         let marker = match status {
-            "completed" => "[x]",
-            "in_progress" => "[-]",
-            _ => "[ ]",
+            "completed" => "\u{2713}",
+            "in_progress" => "\u{25b8}",
+            _ => "\u{25cb}",
         };
-        lines.push(format!("{}. {} {}", idx + 1, marker, step));
+        lines.push(format!("{marker} {step}"));
     }
 
     Some(lines.join("\n"))
@@ -1963,8 +2114,9 @@ mod tests {
         }))
         .expect("plan content");
         assert!(content.contains("Found the renderer."));
-        assert!(content.contains("1. [x] Inspect UI"));
-        assert!(content.contains("2. [-] Patch layout"));
+        assert!(content.contains("\u{2713} Inspect UI"));
+        assert!(content.contains("\u{25b8} Patch layout"));
+        assert!(!content.contains("1."));
     }
 
     #[test]
@@ -1985,7 +2137,7 @@ mod tests {
             continuation: true,
         };
         assert_eq!(cont.height(0, 80, 0), 0); // absorbed into ghost fold
-        assert_eq!(cont.height(1, 80, 0), 0); // hidden at level 1
+        assert_eq!(cont.height(1, 80, 0), 0); // enabled at level 1
         assert_eq!(cont.height(2, 80, 0), 1); // visible at level 2
     }
 
@@ -2018,6 +2170,46 @@ mod tests {
     }
 
     #[test]
+    fn text_delta_renders_into_a_durable_assistant_block() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.start_turn();
+
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: "Draft answer".into(),
+        });
+
+        assert!(matches!(
+            app.blocks.last(),
+            Some(DisplayBlock::AssistantText(text)) if text == "Draft answer"
+        ));
+        assert_eq!(
+            app.live_turn
+                .as_ref()
+                .and_then(|turn| turn.assistant_block_idx),
+            Some(app.blocks.len() - 1)
+        );
+    }
+
+    #[test]
+    fn final_message_never_replaces_visible_streamed_text_with_shorter_text() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.start_turn();
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: "Visible streamed text".into(),
+        });
+
+        app.handle_agent_event(AgentEvent::Message {
+            text: "Visible".into(),
+            kind: "final".into(),
+        });
+
+        assert!(matches!(
+            app.blocks.last(),
+            Some(DisplayBlock::AssistantText(text)) if text == "Visible streamed text"
+        ));
+    }
+
+    #[test]
     fn text_delta_updates_live_token_estimate() {
         let mut app = App::new("test-model".into(), "test".into());
         app.handle_agent_event(AgentEvent::LlmRequest {
@@ -2046,8 +2238,16 @@ mod tests {
         app.handle_agent_event(AgentEvent::TextDelta {
             content: "hello".into(),
         });
-        assert_eq!(app.status_text.as_deref(), Some("responding"));
-        assert_eq!(app.status_detail, None);
+        assert_eq!(
+            app.live_turn.as_ref().map(|turn| turn.status_text.as_str()),
+            Some("responding")
+        );
+        assert_eq!(
+            app.live_turn
+                .as_ref()
+                .and_then(|turn| turn.status_detail.as_deref()),
+            None
+        );
     }
 
     #[test]
@@ -2058,9 +2258,14 @@ mod tests {
             message_count: 0,
             tool_list: String::new(),
         });
-        assert_eq!(app.status_text.as_deref(), Some("thinking"));
         assert_eq!(
-            app.status_detail.as_deref(),
+            app.live_turn.as_ref().map(|turn| turn.status_text.as_str()),
+            Some("thinking")
+        );
+        assert_eq!(
+            app.live_turn
+                .as_ref()
+                .and_then(|turn| turn.status_detail.as_deref()),
             Some("waiting for first token")
         );
     }
@@ -2143,6 +2348,34 @@ mod tests {
     }
 
     #[test]
+    fn input_only_streamed_usage_keeps_live_output_estimate() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: "abcdefgh".into(),
+        });
+        let live_estimate = app.live_output_tokens_estimate;
+        assert!(live_estimate > 0);
+        app.handle_agent_event(AgentEvent::TokenUsage {
+            iteration: 0,
+            usage: TokenUsage {
+                input_tokens: 10,
+                output_tokens: 0,
+                cached_input_tokens: 0,
+                reasoning_tokens: 0,
+            },
+            cumulative: TokenUsage {
+                input_tokens: 10,
+                output_tokens: 0,
+                cached_input_tokens: 0,
+                reasoning_tokens: 0,
+            },
+        });
+        assert_eq!(app.live_output_tokens_estimate, live_estimate);
+        assert_eq!(app.token_usage.input_tokens, 10);
+        assert_eq!(app.last_response_usage.input_tokens, 10);
+    }
+
+    #[test]
     fn final_message_event_is_rendered() {
         let mut app = App::new("test-model".into(), "test".into());
         app.handle_agent_event(AgentEvent::Message {
@@ -2201,6 +2434,59 @@ mod tests {
             app.blocks.last(),
             Some(DisplayBlock::SystemMessage(msg)) if msg == "Manually interrupted."
         ));
+    }
+
+    #[test]
+    fn non_manual_error_sets_transient_status() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.handle_agent_event(AgentEvent::LlmRequest {
+            iteration: 0,
+            message_count: 0,
+            tool_list: String::new(),
+        });
+        app.handle_agent_event(AgentEvent::Error {
+            message: "LLM error: Claude request failed with 500".into(),
+            envelope: Some(lash_core::agent::ErrorEnvelope {
+                kind: "llm_provider".into(),
+                code: Some("http_500".into()),
+                user_message: "LLM error: Claude request failed with 500".into(),
+                raw: None,
+            }),
+        });
+        app.handle_agent_event(AgentEvent::Done);
+
+        assert_eq!(
+            app.live_turn.as_ref().map(|turn| turn.status_text.as_str()),
+            Some("error")
+        );
+        assert_eq!(
+            app.live_turn
+                .as_ref()
+                .and_then(|turn| turn.status_detail.as_deref()),
+            Some("LLM error: Claude request failed with 500")
+        );
+    }
+
+    #[test]
+    fn transient_status_expires_on_tick() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.handle_agent_event(AgentEvent::LlmRequest {
+            iteration: 0,
+            message_count: 0,
+            tool_list: String::new(),
+        });
+        app.handle_agent_event(AgentEvent::Error {
+            message: "runtime error".into(),
+            envelope: None,
+        });
+        app.handle_agent_event(AgentEvent::Done);
+
+        if let Some(turn) = app.live_turn.as_mut() {
+            turn.transient_until =
+                Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        }
+        app.on_tick();
+        assert!(app.live_turn.is_none());
     }
 
     #[test]
@@ -2277,16 +2563,63 @@ mod tests {
     }
 
     #[test]
-    fn commit_pending_user_preview_promotes_existing_block() {
+    fn regular_queued_turn_preview_stays_out_of_history() {
         let mut app = App::new("test-model".into(), "test".into());
         let turn = QueuedTurn::new("queued text".into(), Vec::new());
         app.preview_queued_turn(&turn, false);
 
-        assert!(app.commit_pending_user_preview("queued text"));
+        assert!(!app.commit_pending_user_preview("queued text"));
+        assert!(!matches!(
+            app.blocks.last(),
+            Some(DisplayBlock::PendingUserInput { .. } | DisplayBlock::UserInput(_))
+        ));
+    }
+
+    #[test]
+    fn take_prompt_response_renders_visible_user_block() {
+        let mut app = App::new("test-model".into(), "test".into());
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.prompt = Some(PromptState {
+            question: "Pick one".into(),
+            options: vec!["red".into(), "blue".into()],
+            selected_idx: 0,
+            extra_text: String::new(),
+            extra_cursor: 0,
+            editing_extra: false,
+            response_tx: tx,
+        });
+
+        let response = app.take_prompt_response();
+
+        assert_eq!(response.as_deref(), Some("1. red"));
+        assert_eq!(rx.recv().expect("response"), "1. red");
+        assert!(app.prompt.is_none());
+        assert!(app.dirty);
         assert!(matches!(
             app.blocks.last(),
-            Some(DisplayBlock::UserInput(text)) if text == "queued text"
+            Some(DisplayBlock::UserInput(text)) if text == "1. red"
         ));
+    }
+
+    #[test]
+    fn dismiss_prompt_marks_ui_dirty() {
+        let mut app = App::new("test-model".into(), "test".into());
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.prompt = Some(PromptState {
+            question: "Pick one".into(),
+            options: vec!["red".into()],
+            selected_idx: 0,
+            extra_text: String::new(),
+            extra_cursor: 0,
+            editing_extra: false,
+            response_tx: tx,
+        });
+
+        app.dismiss_prompt();
+
+        assert_eq!(rx.recv().expect("response"), "");
+        assert!(app.prompt.is_none());
+        assert!(app.dirty);
     }
 
     #[test]
@@ -2308,7 +2641,7 @@ mod tests {
             ]
             .join("\n"),
         ));
-        app.running = true;
+        app.start_turn();
         app.follow_output = true;
 
         let width = 32usize;
@@ -2708,7 +3041,7 @@ mod tests {
         match &app.blocks[0] {
             DisplayBlock::Activity(activity) => {
                 assert_eq!(activity.kind, ActivityKind::Exploration);
-                assert!(activity.summary.contains("explored"));
+                assert_eq!(activity.summary, "EXPLORE");
                 assert_eq!(activity.children.len(), 1);
                 assert!(
                     activity
@@ -2743,7 +3076,6 @@ mod tests {
             DisplayBlock::SystemMessage(_) => "SystemMessage",
             DisplayBlock::PlanContent(_) => "PlanContent",
             DisplayBlock::PluginPanel(_) => "PluginPanel",
-            DisplayBlock::SubAgentResult { .. } => "SubAgentResult",
             DisplayBlock::Splash => "Splash",
         }
     }

@@ -1,5 +1,4 @@
 pub mod agent;
-pub mod capabilities;
 pub mod dynamic;
 pub mod embedded;
 pub mod instructions;
@@ -14,6 +13,7 @@ pub mod sansio;
 #[cfg(feature = "sqlite-store")]
 mod search;
 pub mod session;
+pub mod skill_catalog;
 #[cfg(feature = "sqlite-store")]
 pub mod store;
 pub mod text;
@@ -61,22 +61,25 @@ pub fn legacy_repo_local_lash_dir() -> PathBuf {
     PathBuf::from(".lash")
 }
 
+/// Return skill search directories in override order from lowest to highest priority.
+pub fn default_skill_dirs() -> Vec<PathBuf> {
+    vec![
+        lash_home().join("skills"),
+        legacy_repo_local_lash_dir().join("skills"),
+        repo_local_lash_dir().join("skills"),
+    ]
+}
+
 // Re-exports
 pub use agent::message::MessageOrigin;
 pub use agent::{
-    AgentConfig, AgentEvent, Message, MessageRole, Part, PartKind, PromptOverrideMode,
-    PromptSectionName, PromptSectionOverride, PruneState, TokenUsage,
-};
-pub use capabilities::{
-    AgentCapabilities, CapabilityId, ResolvedFeatures, capability_def, capability_for_tool,
-    default_enabled_capabilities, resolve_features,
+    AgentConfig, AgentEvent, DefaultPromptRenderer, Message, MessageRole, Part, PartKind,
+    PromptOverrideMode, PromptRenderer, PromptSectionName, PromptSectionOverride, PruneState,
+    TokenUsage, default_prompt_renderer,
 };
 pub use dynamic::{
-    CapabilityProfile, DynamicCapabilityDef, DynamicStateSnapshot, DynamicToolProvider,
-    DynamicToolSpec, InProcessToolExecutionAdapter, InProcessToolFuture, InProcessToolHandler,
-    ReconfigureError, ResolvedProjection, ToolExecutionAdapter, agent_capabilities_from_profile,
-    default_dynamic_capability_defs, profile_from_agent_capabilities,
-    resolve_capability_projection, resolve_projection,
+    DynamicStateSnapshot, DynamicToolProvider, DynamicToolSpec, InProcessToolExecutionAdapter,
+    InProcessToolFuture, InProcessToolHandler, ReconfigureError, ToolExecutionAdapter,
 };
 pub use instructions::InstructionLoaderConfig;
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
@@ -87,23 +90,24 @@ pub use model_info::{
 pub use model_variant::VariantRequestConfig;
 pub use plugin::{
     AssistantResponseHookContext, AssistantResponseTransform, AssistantStreamHookContext,
-    AssistantStreamTransform, CheckpointHookContext, CheckpointKind, ExternalInvokeContext,
-    ExternalInvokeError, ExternalOpDef, ExternalOpKind, MessageMutatorContext, MessageMutatorHook,
-    PluginDirective, PluginError, PluginFactory, PluginHost, PluginMessage, PluginOwned,
-    PluginRegistrar, PluginSession, PluginSessionContext, PluginSessionSnapshot,
-    PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta, PluginSurfaceEvent,
-    PromptContribution, PromptHookContext, RuntimeServices, SessionConfigOverrides,
-    SessionCreateRequest, SessionHandle, SessionManager, SessionParam, SessionPlugin,
-    SessionSnapshot, SessionStartPoint, SnapshotReader, SnapshotWriter, TurnHookContext,
-    TurnPromptContribution, TurnResultHookContext,
+    AssistantStreamTransform, BuiltinToolResultProjectionPluginFactory, CheckpointHookContext,
+    CheckpointKind, ExternalInvokeContext, ExternalInvokeError, ExternalOpDef, ExternalOpKind,
+    MessageMutatorContext, MessageMutatorHook, PluginDirective, PluginError, PluginFactory,
+    PluginHost, PluginMessage, PluginOwned, PluginRegistrar, PluginSession, PluginSessionContext,
+    PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta,
+    PluginSpec, PluginSpecFactory, PluginSurfaceEvent, PromptContribution, PromptHookContext,
+    RuntimeServices, SessionConfigOverrides, SessionConfigSnapshot, SessionCreateRequest,
+    SessionHandle, SessionManager, SessionParam, SessionPlugin, SessionSnapshot, SessionStartPoint,
+    SessionTurnHandle, SnapshotReader, SnapshotWriter, ToolResultProjectionContext,
+    ToolResultProjectionHook, ToolResultProjectionMode, ToolResultProjectionPluginConfig,
+    ToolResultProjector, ToolSurfaceContribution, TurnHookContext, TurnResultHookContext,
 };
 #[cfg(feature = "sqlite-store")]
 pub use plugin::{
-    BuiltinHistoryPluginFactory, BuiltinMemoryPluginFactory, BuiltinPlanModePluginFactory,
-    BuiltinPlanTrackerPluginFactory, BuiltinPromptContextPluginFactory,
-    BuiltinToolSurfacePluginFactory, PromptContextPluginConfig, builtin_dynamic_capability_defs,
+    BuiltinHistoryPluginFactory, BuiltinPlanModePluginFactory, BuiltinPlanTrackerPluginFactory,
+    BuiltinPromptContextPluginFactory, PromptContextPluginConfig,
 };
-pub use provider::{LashConfig, Provider};
+pub use provider::{LashConfig, Provider, ProviderOptions, RequestTimeout};
 pub use runtime::{
     AgentStateEnvelope, AssembledTurn, AssistantOutput, CodeOutputRecord, DoneReason, EventSink,
     ExecutionSummary, HostProfile, InputItem, LashRuntime, NoopEventSink, OutputState,
@@ -114,10 +118,11 @@ pub use sansio::{Effect, EffectId, LlmCallError, Response, TurnMachine, TurnMach
 pub use session::{
     ExecResponse, PromptBridge, Session, SessionError, TurnInjectionBridge, UserPrompt,
 };
+pub use skill_catalog::{LoadedSkill, SkillCatalog};
 #[cfg(feature = "sqlite-store")]
 pub use store::{AgentState, Store};
 pub use text::strip_repl_fragments;
-pub use tools::{ToolSet, ToolSetDeps};
+pub use tools::{AgentCallPluginFactory, DefaultToolPluginDeps, default_tool_plugin_factories};
 
 /// Execution backend for agent turns.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -194,44 +199,6 @@ pub struct SandboxMessage {
 /// Sender for streaming progress messages from tools (e.g. live bash output).
 pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<SandboxMessage>;
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct ToolText {
-    pub text: String,
-    pub modes: Vec<ExecutionMode>,
-}
-
-impl ToolText {
-    pub fn new(text: impl Into<String>, modes: impl IntoIterator<Item = ExecutionMode>) -> Self {
-        Self {
-            text: text.into(),
-            modes: modes.into_iter().collect(),
-        }
-    }
-
-    pub fn matches_mode(&self, mode: ExecutionMode) -> bool {
-        self.modes.contains(&mode)
-    }
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct ProjectedToolDefinition {
-    pub name: String,
-    pub description: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub params: Vec<ToolParam>,
-    #[serde(
-        default = "ToolDefinition::default_returns",
-        skip_serializing_if = "String::is_empty"
-    )]
-    pub returns: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub examples: Vec<String>,
-    #[serde(default)]
-    pub hidden: bool,
-    #[serde(default)]
-    pub inject_into_prompt: bool,
-}
-
 /// A typed parameter for a tool definition.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ToolParam {
@@ -275,8 +242,8 @@ impl ToolParam {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub description: Vec<ToolText>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub params: Vec<ToolParam>,
     /// REPL return type: "str", "int", "float", "bool", "list", "dict", "any", "None"
@@ -287,54 +254,18 @@ pub struct ToolDefinition {
     pub returns: String,
     /// Short usage examples for discovery UIs / REPL browsing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub examples: Vec<ToolText>,
-    /// Whether this tool should be hidden from normal discovery listings.
+    pub examples: Vec<String>,
+    /// Whether this tool is available to the agent at all.
     #[serde(default)]
-    pub hidden: bool,
-    /// Whether this tool should be injected into the LLM system prompt.
-    /// Non-injected tools remain callable via discovery/meta calls.
+    pub enabled: bool,
+    /// Whether this tool should be injected into the LLM system prompt/docs.
     #[serde(default)]
-    pub inject_into_prompt: bool,
+    pub injected: bool,
 }
 
 impl ToolDefinition {
     fn default_returns() -> String {
         "any".into()
-    }
-
-    pub fn description_for(&self, mode: ExecutionMode) -> String {
-        self.description
-            .iter()
-            .filter(|entry| entry.matches_mode(mode))
-            .map(|entry| entry.text.trim())
-            .filter(|text| !text.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    pub fn examples_for(&self, mode: ExecutionMode) -> Vec<String> {
-        self.examples
-            .iter()
-            .filter(|entry| entry.matches_mode(mode))
-            .map(|entry| entry.text.clone())
-            .collect()
-    }
-
-    pub fn set_description_for(&mut self, mode: ExecutionMode, text: impl Into<String>) {
-        self.description.retain(|entry| !entry.matches_mode(mode));
-        self.description.push(ToolText::new(text, [mode]));
-    }
-
-    pub fn project(&self, mode: ExecutionMode) -> ProjectedToolDefinition {
-        ProjectedToolDefinition {
-            name: self.name.clone(),
-            description: self.description_for(mode),
-            params: self.params.clone(),
-            returns: self.returns.clone(),
-            examples: self.examples_for(mode),
-            hidden: self.hidden,
-            inject_into_prompt: self.inject_into_prompt,
-        }
     }
 
     /// Format as a typed Python signature: `name(param: type, ...) -> ret`
@@ -359,25 +290,37 @@ impl ToolDefinition {
     }
 
     /// Format all tools as a documentation block for LLM prompts.
-    pub fn format_tool_docs(tools: &[ToolDefinition], mode: ExecutionMode) -> String {
+    pub fn format_tool_docs(tools: &[ToolDefinition]) -> String {
         tools
             .iter()
             .map(|t| {
                 let mut lines = format!("- `{}`", t.signature());
-                let description = t.description_for(mode);
-                if !description.is_empty() {
-                    lines.push_str(&format!(" — {}", description));
-                }
-                // Include parameter descriptions if any have them
-                for p in &t.params {
-                    if !p.description.is_empty() {
-                        lines.push_str(&format!("\n    - `{}`: {}", p.name, p.description));
-                    }
+                let summary = t.prompt_summary();
+                if !summary.is_empty() {
+                    lines.push_str(&format!(" — {}", summary));
                 }
                 lines
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn prompt_summary(&self) -> String {
+        let first_block = self
+            .description
+            .split("\n\n")
+            .next()
+            .unwrap_or("")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if first_block.chars().count() <= 220 {
+            return first_block;
+        }
+        let compact = first_block.chars().take(217).collect::<String>();
+        format!("{compact}...")
     }
 
     /// Convert the tool signature into a basic JSON Schema object for structured tool-calling APIs.
@@ -466,7 +409,6 @@ impl ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
 
     // ── ToolParam ──
 
@@ -492,12 +434,12 @@ mod tests {
     fn signature_required_params() {
         let td = ToolDefinition {
             name: "foo".into(),
-            description: vec![],
+            description: String::new(),
             params: vec![ToolParam::typed("x", "int"), ToolParam::typed("y", "str")],
             returns: "bool".into(),
             examples: vec![],
-            hidden: false,
-            inject_into_prompt: true,
+            enabled: true,
+            injected: true,
         };
         assert_eq!(td.signature(), "foo(x: int, y: str) -> bool");
     }
@@ -506,12 +448,12 @@ mod tests {
     fn signature_optional_params() {
         let td = ToolDefinition {
             name: "bar".into(),
-            description: vec![],
+            description: String::new(),
             params: vec![ToolParam::optional("limit", "int")],
             returns: "list".into(),
             examples: vec![],
-            hidden: false,
-            inject_into_prompt: true,
+            enabled: true,
+            injected: true,
         };
         assert_eq!(td.signature(), "bar(limit: int = None) -> list");
     }
@@ -520,12 +462,12 @@ mod tests {
     fn signature_empty_params() {
         let td = ToolDefinition {
             name: "noop".into(),
-            description: vec![],
+            description: String::new(),
             params: vec![],
             returns: "None".into(),
             examples: vec![],
-            hidden: false,
-            inject_into_prompt: true,
+            enabled: true,
+            injected: true,
         };
         assert_eq!(td.signature(), "noop() -> None");
     }
@@ -534,12 +476,12 @@ mod tests {
     fn signature_empty_returns_defaults_to_any() {
         let td = ToolDefinition {
             name: "f".into(),
-            description: vec![],
+            description: String::new(),
             params: vec![],
             returns: String::new(),
             examples: vec![],
-            hidden: false,
-            inject_into_prompt: true,
+            enabled: true,
+            injected: true,
         };
         assert_eq!(td.signature(), "f() -> any");
     }
@@ -550,10 +492,7 @@ mod tests {
     fn format_tool_docs_with_descriptions() {
         let tools = vec![ToolDefinition {
             name: "read".into(),
-            description: vec![ToolText::new(
-                "Read a file",
-                [ExecutionMode::Repl, ExecutionMode::Standard],
-            )],
+            description: "Read a file".into(),
             params: vec![ToolParam {
                 name: "path".into(),
                 r#type: "str".into(),
@@ -562,18 +501,18 @@ mod tests {
             }],
             returns: "str".into(),
             examples: vec![],
-            hidden: false,
-            inject_into_prompt: true,
+            enabled: true,
+            injected: true,
         }];
-        let docs = ToolDefinition::format_tool_docs(&tools, ExecutionMode::Repl);
+        let docs = ToolDefinition::format_tool_docs(&tools);
         assert!(docs.contains("- `read(path: str) -> str`"));
         assert!(docs.contains("— Read a file"));
-        assert!(docs.contains("- `path`: File path"));
+        assert!(!docs.contains("File path"));
     }
 
     #[test]
     fn format_tool_docs_empty() {
-        let docs = ToolDefinition::format_tool_docs(&[], ExecutionMode::Repl);
+        let docs = ToolDefinition::format_tool_docs(&[]);
         assert!(docs.is_empty());
     }
 
@@ -600,41 +539,6 @@ mod tests {
             .is_err()
         );
     }
-
-    struct MockToolProvider;
-
-    #[async_trait::async_trait]
-    impl ToolProvider for MockToolProvider {
-        fn definitions(&self) -> Vec<ToolDefinition> {
-            vec![ToolDefinition {
-                name: "alpha".into(),
-                description: vec![ToolText::new(
-                    "Alpha tool",
-                    [ExecutionMode::Repl, ExecutionMode::Standard],
-                )],
-                params: vec![],
-                returns: "str".into(),
-                examples: vec![],
-                hidden: false,
-                inject_into_prompt: true,
-            }]
-        }
-
-        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
-            ToolResult::ok(serde_json::json!("ok"))
-        }
-    }
-
-    #[test]
-    fn capability_payload_preserves_explicit_enabled_tools_for_static_providers() {
-        let capabilities = crate::AgentCapabilities {
-            enabled_capabilities: BTreeSet::new(),
-            enabled_tools: BTreeSet::from(["alpha".to_string()]),
-        };
-        let payload = resolve_tool_capability_payload(&MockToolProvider, &capabilities);
-        assert_eq!(payload.enabled_tools, vec!["alpha".to_string()]);
-        assert_eq!(payload.explicit_enabled_tools, vec!["alpha".to_string()]);
-    }
 }
 
 /// Record of a tool call (for context/logging).
@@ -647,82 +551,34 @@ pub struct ToolCallRecord {
     pub duration_ms: u64,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ToolPromptContext {
+#[derive(Clone, Debug, Default)]
+pub struct PromptContext {
     pub mode: ExecutionMode,
+    pub tool_list: String,
+    pub tool_names: Vec<String>,
     pub omitted_tool_count: usize,
+    pub is_subagent: bool,
+    pub can_write: bool,
+    pub include_soul: bool,
+    pub contributions: Vec<crate::plugin::PromptContribution>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ToolCapabilityPayload {
-    pub enabled_capabilities: Vec<String>,
-    pub enabled_tools: Vec<String>,
-    pub helper_bindings: Vec<String>,
-    #[serde(default)]
-    pub explicit_enabled_tools: Vec<String>,
-}
-
-impl ToolCapabilityPayload {
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
+impl PromptContext {
+    pub fn has_tool(&self, tool_name: &str) -> bool {
+        self.tool_names.iter().any(|name| name == tool_name)
     }
 }
 
-pub fn resolve_tool_capability_payload(
-    tools: &dyn ToolProvider,
-    capabilities: &crate::AgentCapabilities,
-) -> ToolCapabilityPayload {
-    if let Some(payload) = tools.dynamic_capability_payload() {
-        return payload;
-    }
-
-    if let Some(projection) = tools.dynamic_projection() {
-        return ToolCapabilityPayload {
-            enabled_capabilities: projection.enabled_capabilities.into_iter().collect(),
-            enabled_tools: projection.effective_tools.into_iter().collect(),
-            helper_bindings: projection.helper_bindings.into_iter().collect(),
-            explicit_enabled_tools: capabilities.enabled_tools.iter().cloned().collect(),
-        };
-    }
-
-    let available_defs = tools.definitions();
-    let capability_defs = crate::default_dynamic_capability_defs();
-    let resolved =
-        crate::resolve_capability_projection(&capability_defs, capabilities, &available_defs)
-            .unwrap_or_else(|_| crate::ResolvedProjection {
-                enabled_capabilities: capabilities
-                    .enabled_capabilities
-                    .iter()
-                    .map(|id| id.as_str().to_string())
-                    .collect(),
-                effective_tools: capabilities
-                    .enabled_tools
-                    .iter()
-                    .filter(|tool| available_defs.iter().any(|def| def.name == tool.as_str()))
-                    .cloned()
-                    .collect(),
-                helper_bindings: std::collections::BTreeSet::new(),
-                prompt_sections: Vec::new(),
-            });
-
-    ToolCapabilityPayload {
-        enabled_capabilities: resolved.enabled_capabilities.into_iter().collect(),
-        enabled_tools: resolved.effective_tools.into_iter().collect(),
-        helper_bindings: resolved.helper_bindings.into_iter().collect(),
-        explicit_enabled_tools: capabilities.enabled_tools.iter().cloned().collect(),
-    }
+#[derive(Clone)]
+pub struct ToolExecutionContext {
+    pub session_id: String,
+    pub host: std::sync::Arc<dyn crate::plugin::SessionManager>,
 }
 
 /// Trait for providing tools to the sandbox. Implement this per-project.
 #[async_trait::async_trait]
 pub trait ToolProvider: Send + Sync + 'static {
     fn definitions(&self) -> Vec<ToolDefinition>;
-    fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
-        Vec::new()
-    }
-    fn dynamic_projection(&self) -> Option<crate::dynamic::ResolvedProjection> {
-        None
-    }
     fn dynamic_snapshot(&self) -> Option<crate::dynamic::DynamicStateSnapshot> {
         None
     }
@@ -732,13 +588,19 @@ pub trait ToolProvider: Send + Sync + 'static {
     ) -> Option<std::sync::Arc<dyn ToolProvider>> {
         None
     }
-    fn dynamic_capability_payload(&self) -> Option<ToolCapabilityPayload> {
-        None
-    }
     fn dynamic_generation(&self) -> Option<u64> {
         None
     }
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult;
+
+    async fn execute_with_context(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        _context: &ToolExecutionContext,
+    ) -> ToolResult {
+        self.execute(name, args).await
+    }
 
     /// Execute with progress streaming. Default: delegates to execute().
     async fn execute_streaming(
@@ -748,5 +610,17 @@ pub trait ToolProvider: Send + Sync + 'static {
         _progress: Option<&ProgressSender>,
     ) -> ToolResult {
         self.execute(name, args).await
+    }
+
+    /// Execute with progress streaming and session context. Default: delegates to
+    /// `execute_streaming()`.
+    async fn execute_streaming_with_context(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        _context: &ToolExecutionContext,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        self.execute_streaming(name, args, progress).await
     }
 }

@@ -32,7 +32,7 @@ impl SessionPlugin for ForkPlugin {
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        reg.register_external_op(
+        reg.external().op(
             ExternalOpDef {
                 name: "session.fork".to_string(),
                 description: "Create a detached fork snapshot of the current session.".to_string(),
@@ -81,6 +81,7 @@ async fn fork_snapshot_via_manager(
             agent_id: None,
             start,
             config_overrides: SessionConfigOverrides::default(),
+            tool_surface: lash_core::ToolSurfaceContribution::default(),
             initial_messages: Vec::new(),
         })
         .await?;

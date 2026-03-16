@@ -5,165 +5,18 @@ use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::capabilities::{AgentCapabilities, CAPABILITY_DEFINITIONS, CapabilityId};
-use crate::{ProgressSender, ToolDefinition, ToolProvider, ToolResult};
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DynamicCapabilityDef {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_section: Option<String>,
-    #[serde(default)]
-    pub helper_bindings: BTreeSet<String>,
-    #[serde(default)]
-    pub tool_names: BTreeSet<String>,
-    #[serde(default)]
-    pub enabled_by_default: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CapabilityProfile {
-    #[serde(default)]
-    pub enabled_capabilities: BTreeSet<String>,
-    #[serde(default)]
-    pub enabled_tools: BTreeSet<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ResolvedProjection {
-    #[serde(default)]
-    pub enabled_capabilities: BTreeSet<String>,
-    #[serde(default)]
-    pub effective_tools: BTreeSet<String>,
-    #[serde(default)]
-    pub helper_bindings: BTreeSet<String>,
-    #[serde(default)]
-    pub prompt_sections: Vec<String>,
-}
-
-pub fn resolve_projection(
-    defs: &BTreeMap<String, DynamicCapabilityDef>,
-    profile: &CapabilityProfile,
-    available_tools: &BTreeSet<String>,
-) -> Result<ResolvedProjection, ReconfigureError> {
-    let mut effective_tools = BTreeSet::new();
-    let mut helper_bindings = BTreeSet::new();
-    let mut prompt_sections = Vec::new();
-
-    for id in &profile.enabled_capabilities {
-        let Some(def) = defs.get(id) else {
-            return Err(ReconfigureError::Validation(format!(
-                "enabled capability not defined: {id}"
-            )));
-        };
-
-        for tool in &def.tool_names {
-            if available_tools.contains(tool) {
-                effective_tools.insert(tool.clone());
-            }
-        }
-
-        for helper in &def.helper_bindings {
-            if available_tools.contains(helper) {
-                helper_bindings.insert(helper.clone());
-            }
-        }
-
-        if let Some(section) = &def.prompt_section
-            && !section.trim().is_empty()
-        {
-            prompt_sections.push(section.clone());
-        }
-    }
-
-    for tool in &profile.enabled_tools {
-        if !available_tools.contains(tool) {
-            return Err(ReconfigureError::Validation(format!(
-                "explicitly enabled tool not registered: {tool}"
-            )));
-        }
-        effective_tools.insert(tool.clone());
-    }
-
-    Ok(ResolvedProjection {
-        enabled_capabilities: profile.enabled_capabilities.clone(),
-        effective_tools,
-        helper_bindings,
-        prompt_sections,
-    })
-}
-
-pub fn default_dynamic_capability_defs() -> BTreeMap<String, DynamicCapabilityDef> {
-    let mut defs = BTreeMap::new();
-    for def in CAPABILITY_DEFINITIONS {
-        defs.insert(
-            def.id.as_str().to_string(),
-            DynamicCapabilityDef {
-                id: def.id.as_str().to_string(),
-                name: def.name.to_string(),
-                description: def.description.to_string(),
-                // Core capability guidance is owned by prompt_sections_for_capabilities().
-                // Dynamic projection should only surface sections for genuinely dynamic
-                // capabilities so the prompt builder has a single source of truth.
-                prompt_section: None,
-                helper_bindings: def
-                    .helper_bindings
-                    .iter()
-                    .map(|v| (*v).to_string())
-                    .collect(),
-                tool_names: def.tools.iter().map(|v| (*v).to_string()).collect(),
-                enabled_by_default: def.enabled_by_default,
-            },
-        );
-    }
-    #[cfg(feature = "sqlite-store")]
-    defs.extend(crate::plugin::builtin_dynamic_capability_defs());
-    defs
-}
-
-pub fn resolve_capability_projection(
-    defs: &BTreeMap<String, DynamicCapabilityDef>,
-    caps: &AgentCapabilities,
-    available_defs: &[ToolDefinition],
-) -> Result<ResolvedProjection, ReconfigureError> {
-    let available_tools: BTreeSet<String> =
-        available_defs.iter().map(|def| def.name.clone()).collect();
-    resolve_projection(
-        defs,
-        &profile_from_agent_capabilities(caps),
-        &available_tools,
-    )
-}
-
-pub fn profile_from_agent_capabilities(caps: &AgentCapabilities) -> CapabilityProfile {
-    CapabilityProfile {
-        enabled_capabilities: caps
-            .enabled_capabilities
-            .iter()
-            .map(|c| c.as_str().to_string())
-            .collect(),
-        enabled_tools: caps.enabled_tools.clone(),
-    }
-}
-
-pub fn agent_capabilities_from_profile(profile: &CapabilityProfile) -> AgentCapabilities {
-    let mut enabled = BTreeSet::new();
-    for id in &profile.enabled_capabilities {
-        if let Some(parsed) = CapabilityId::parse(id) {
-            enabled.insert(parsed);
-        }
-    }
-    AgentCapabilities {
-        enabled_capabilities: enabled,
-        enabled_tools: profile.enabled_tools.clone(),
-    }
-}
+use crate::{ProgressSender, ToolDefinition, ToolExecutionContext, ToolProvider, ToolResult};
 
 pub type InProcessToolFuture = Pin<Box<dyn Future<Output = ToolResult> + Send>>;
-pub type InProcessToolHandler =
-    Arc<dyn Fn(serde_json::Value, Option<ProgressSender>) -> InProcessToolFuture + Send + Sync>;
+pub type InProcessToolHandler = Arc<
+    dyn Fn(
+            serde_json::Value,
+            Option<ToolExecutionContext>,
+            Option<ProgressSender>,
+        ) -> InProcessToolFuture
+        + Send
+        + Sync,
+>;
 
 #[async_trait::async_trait]
 pub trait ToolExecutionAdapter: Send + Sync + 'static {
@@ -173,6 +26,7 @@ pub trait ToolExecutionAdapter: Send + Sync + 'static {
         &self,
         tool: &str,
         args: &serde_json::Value,
+        context: Option<ToolExecutionContext>,
         progress: Option<&ProgressSender>,
     ) -> ToolResult;
 }
@@ -265,6 +119,7 @@ impl ToolExecutionAdapter for InProcessToolExecutionAdapter {
         &self,
         tool: &str,
         args: &serde_json::Value,
+        context: Option<ToolExecutionContext>,
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
         let Some(handler) = self
@@ -277,7 +132,7 @@ impl ToolExecutionAdapter for InProcessToolExecutionAdapter {
             return ToolResult::err_fmt(format_args!("Unknown tool: {tool}"));
         };
         let progress = progress.cloned();
-        handler(args.clone(), progress).await
+        handler(args.clone(), context, progress).await
     }
 }
 
@@ -291,17 +146,15 @@ pub struct DynamicToolSpec {
 pub struct DynamicStateSnapshot {
     pub base_generation: u64,
     pub tools: BTreeMap<String, DynamicToolSpec>,
-    pub capability_defs: BTreeMap<String, DynamicCapabilityDef>,
-    pub profile: CapabilityProfile,
+    #[serde(default)]
+    pub enabled_tools: BTreeSet<String>,
 }
 
 #[derive(Clone)]
 struct DynamicRegistryState {
     generation: u64,
     tools: BTreeMap<String, DynamicToolSpec>,
-    capability_defs: BTreeMap<String, DynamicCapabilityDef>,
-    profile: CapabilityProfile,
-    resolved: ResolvedProjection,
+    enabled_tools: BTreeSet<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -322,11 +175,7 @@ pub struct DynamicToolProvider {
 }
 
 impl DynamicToolProvider {
-    pub fn from_tool_provider(
-        provider: Arc<dyn ToolProvider>,
-        capability_defs: BTreeMap<String, DynamicCapabilityDef>,
-        mut profile: CapabilityProfile,
-    ) -> Result<Self, ReconfigureError> {
+    pub fn from_tool_provider(provider: Arc<dyn ToolProvider>) -> Result<Self, ReconfigureError> {
         let inprocess = Arc::new(InProcessToolExecutionAdapter::new("inprocess"));
 
         let mut tools = BTreeMap::new();
@@ -334,13 +183,27 @@ impl DynamicToolProvider {
             let tool_name = def.name.clone();
             let delegate = Arc::clone(&provider);
             let delegate_name = tool_name.clone();
-            let handler: InProcessToolHandler = Arc::new(move |args, progress| {
+            let handler: InProcessToolHandler = Arc::new(move |args, context, progress| {
                 let delegate = Arc::clone(&delegate);
                 let delegate_name = delegate_name.clone();
                 Box::pin(async move {
-                    delegate
-                        .execute_streaming(&delegate_name, &args, progress.as_ref())
-                        .await
+                    match context.as_ref() {
+                        Some(context) => {
+                            delegate
+                                .execute_streaming_with_context(
+                                    &delegate_name,
+                                    &args,
+                                    context,
+                                    progress.as_ref(),
+                                )
+                                .await
+                        }
+                        None => {
+                            delegate
+                                .execute_streaming(&delegate_name, &args, progress.as_ref())
+                                .await
+                        }
+                    }
                 })
             });
             inprocess.register_tool(def.clone(), handler);
@@ -359,19 +222,14 @@ impl DynamicToolProvider {
             Arc::clone(&inprocess) as Arc<dyn ToolExecutionAdapter>,
         );
 
-        let available: BTreeSet<String> = tools.keys().cloned().collect();
-        let resolved = resolve_projection(&capability_defs, &profile, &available)?;
-        profile.enabled_capabilities = resolved.enabled_capabilities.clone();
-
+        let enabled_tools = tools.keys().cloned().collect();
         Ok(Self {
             adapters: Arc::new(RwLock::new(adapters)),
             inprocess,
             state: Arc::new(RwLock::new(DynamicRegistryState {
                 generation: 1,
                 tools,
-                capability_defs,
-                profile,
-                resolved,
+                enabled_tools,
             })),
         })
     }
@@ -392,36 +250,16 @@ impl DynamicToolProvider {
         DynamicStateSnapshot {
             base_generation: state.generation,
             tools: state.tools.clone(),
-            capability_defs: state.capability_defs.clone(),
-            profile: state.profile.clone(),
+            enabled_tools: state.enabled_tools.clone(),
         }
     }
 
-    pub fn profile(&self) -> CapabilityProfile {
+    pub fn enabled_tools(&self) -> BTreeSet<String> {
         self.state
             .read()
             .expect("dynamic state lock poisoned")
-            .profile
+            .enabled_tools
             .clone()
-    }
-
-    pub fn resolved_projection(&self) -> ResolvedProjection {
-        self.state
-            .read()
-            .expect("dynamic state lock poisoned")
-            .resolved
-            .clone()
-    }
-
-    pub fn capabilities_payload(&self) -> crate::ToolCapabilityPayload {
-        let resolved = self.resolved_projection();
-        let profile = self.profile();
-        crate::ToolCapabilityPayload {
-            enabled_capabilities: resolved.enabled_capabilities.into_iter().collect(),
-            enabled_tools: resolved.effective_tools.into_iter().collect(),
-            helper_bindings: resolved.helper_bindings.into_iter().collect(),
-            explicit_enabled_tools: profile.enabled_tools.into_iter().collect(),
-        }
     }
 
     pub fn apply_state(&self, next: DynamicStateSnapshot) -> Result<u64, ReconfigureError> {
@@ -454,9 +292,13 @@ impl DynamicToolProvider {
         }
 
         let available: BTreeSet<String> = next.tools.keys().cloned().collect();
-        let resolved = resolve_projection(&next.capability_defs, &next.profile, &available)?;
-        let mut normalized_profile = next.profile.clone();
-        normalized_profile.enabled_capabilities = resolved.enabled_capabilities.clone();
+        for name in &next.enabled_tools {
+            if !available.contains(name) {
+                return Err(ReconfigureError::Validation(format!(
+                    "enabled tool not registered: {name}"
+                )));
+            }
+        }
 
         let mut state = self.state.write().expect("dynamic state lock poisoned");
         if state.generation != next.base_generation {
@@ -466,9 +308,7 @@ impl DynamicToolProvider {
             });
         }
         state.tools = next.tools;
-        state.capability_defs = next.capability_defs;
-        state.profile = normalized_profile;
-        state.resolved = resolved;
+        state.enabled_tools = next.enabled_tools;
         state.generation += 1;
 
         Ok(state.generation)
@@ -506,10 +346,13 @@ impl DynamicToolProvider {
         );
 
         let available: BTreeSet<String> = snapshot.tools.keys().cloned().collect();
-        let resolved =
-            resolve_projection(&snapshot.capability_defs, &snapshot.profile, &available)?;
-        let mut profile = snapshot.profile;
-        profile.enabled_capabilities = resolved.enabled_capabilities.clone();
+        for name in &snapshot.enabled_tools {
+            if !available.contains(name) {
+                return Err(ReconfigureError::Validation(format!(
+                    "enabled tool not registered: {name}"
+                )));
+            }
+        }
 
         let generation = snapshot.base_generation.max(1);
         Ok(Self {
@@ -518,9 +361,7 @@ impl DynamicToolProvider {
             state: Arc::new(RwLock::new(DynamicRegistryState {
                 generation,
                 tools: snapshot.tools,
-                capability_defs: snapshot.capability_defs,
-                profile,
-                resolved,
+                enabled_tools: snapshot.enabled_tools,
             })),
         })
     }
@@ -533,24 +374,14 @@ impl ToolProvider for DynamicToolProvider {
         state
             .tools
             .values()
-            .filter(|spec| {
-                state
-                    .resolved
-                    .effective_tools
-                    .contains(&spec.definition.name)
-            })
+            .filter(|spec| state.enabled_tools.contains(&spec.definition.name))
             .map(|spec| spec.definition.clone())
             .collect()
-    }
-
-    fn dynamic_projection(&self) -> Option<ResolvedProjection> {
-        Some(self.resolved_projection())
     }
 
     fn dynamic_snapshot(&self) -> Option<DynamicStateSnapshot> {
         Some(self.export_state())
     }
-
     fn fork_dynamic_with_snapshot(
         &self,
         snapshot: DynamicStateSnapshot,
@@ -560,15 +391,22 @@ impl ToolProvider for DynamicToolProvider {
             .map(|fork| Arc::new(fork) as Arc<dyn ToolProvider>)
     }
 
-    fn dynamic_capability_payload(&self) -> Option<crate::ToolCapabilityPayload> {
-        Some(self.capabilities_payload())
-    }
-
     fn dynamic_generation(&self) -> Option<u64> {
         Some(self.generation())
     }
+
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
         self.execute_streaming(name, args, None).await
+    }
+
+    async fn execute_with_context(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        context: &ToolExecutionContext,
+    ) -> ToolResult {
+        self.execute_streaming_with_context(name, args, context, None)
+            .await
     }
 
     async fn execute_streaming(
@@ -579,8 +417,8 @@ impl ToolProvider for DynamicToolProvider {
     ) -> ToolResult {
         let (adapter_id, allowed) = {
             let state = self.state.read().expect("dynamic state lock poisoned");
-            let allowed = state.resolved.effective_tools.contains(name);
-            let adapter_id = state.tools.get(name).map(|s| s.adapter_id.clone());
+            let allowed = state.enabled_tools.contains(name);
+            let adapter_id = state.tools.get(name).map(|spec| spec.adapter_id.clone());
             (adapter_id, allowed)
         };
 
@@ -604,7 +442,46 @@ impl ToolProvider for DynamicToolProvider {
             return ToolResult::err_fmt(format_args!("Tool adapter missing for tool `{name}`"));
         };
 
-        adapter.execute(name, args, progress).await
+        adapter.execute(name, args, None, progress).await
+    }
+
+    async fn execute_streaming_with_context(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        context: &ToolExecutionContext,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        let (adapter_id, allowed) = {
+            let state = self.state.read().expect("dynamic state lock poisoned");
+            let allowed = state.enabled_tools.contains(name);
+            let adapter_id = state.tools.get(name).map(|spec| spec.adapter_id.clone());
+            (adapter_id, allowed)
+        };
+
+        if !allowed {
+            return ToolResult::err_fmt(format_args!("Unknown tool: {name}"));
+        }
+
+        let Some(adapter_id) = adapter_id else {
+            return ToolResult::err_fmt(format_args!("Unknown tool: {name}"));
+        };
+
+        let adapter = {
+            self.adapters
+                .read()
+                .expect("adapters lock poisoned")
+                .get(&adapter_id)
+                .cloned()
+        };
+
+        let Some(adapter) = adapter else {
+            return ToolResult::err_fmt(format_args!("Tool adapter missing for tool `{name}`"));
+        };
+
+        adapter
+            .execute(name, args, Some(context.clone()), progress)
+            .await
     }
 }
 
@@ -619,15 +496,12 @@ mod tests {
         fn definitions(&self) -> Vec<ToolDefinition> {
             vec![ToolDefinition {
                 name: "mock_tool".to_string(),
-                description: vec![crate::ToolText::new(
-                    "mock",
-                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-                )],
+                description: "mock".to_string(),
                 params: vec![],
                 returns: "str".to_string(),
                 examples: vec![],
-                hidden: false,
-                inject_into_prompt: false,
+                enabled: true,
+                injected: false,
             }]
         }
 
@@ -636,141 +510,24 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn dynamic_provider_executes_enabled_tool() {
-        let provider: Arc<dyn ToolProvider> = Arc::new(MockTool);
-        let mut enabled_tools = BTreeSet::new();
-        enabled_tools.insert("mock_tool".to_string());
-        let registry = DynamicToolProvider::from_tool_provider(
-            provider,
-            BTreeMap::new(),
-            CapabilityProfile {
-                enabled_capabilities: BTreeSet::new(),
-                enabled_tools,
-            },
-        )
-        .expect("registry builds");
-
-        let result = registry.execute("mock_tool", &serde_json::json!({})).await;
-        assert!(result.success);
-        assert_eq!(result.result, serde_json::json!("ok"));
-    }
-
-    #[tokio::test]
-    async fn dynamic_provider_blocks_disabled_tool() {
-        let provider: Arc<dyn ToolProvider> = Arc::new(MockTool);
-        let registry = DynamicToolProvider::from_tool_provider(
-            provider,
-            BTreeMap::new(),
-            CapabilityProfile {
-                enabled_capabilities: BTreeSet::new(),
-                enabled_tools: BTreeSet::new(),
-            },
-        )
-        .expect("registry builds");
-
-        let result = registry.execute("mock_tool", &serde_json::json!({})).await;
-        assert!(!result.success);
+    #[test]
+    fn dynamic_registry_enables_all_tools_by_default() {
+        let registry =
+            DynamicToolProvider::from_tool_provider(Arc::new(MockTool)).expect("dynamic registry");
+        let defs = registry.definitions();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "mock_tool");
     }
 
     #[test]
-    fn apply_state_increments_generation() {
-        let provider: Arc<dyn ToolProvider> = Arc::new(MockTool);
-        let mut enabled_tools = BTreeSet::new();
-        enabled_tools.insert("mock_tool".to_string());
-        let registry = DynamicToolProvider::from_tool_provider(
-            provider,
-            BTreeMap::new(),
-            CapabilityProfile {
-                enabled_capabilities: BTreeSet::new(),
-                enabled_tools,
-            },
-        )
-        .expect("registry builds");
-
+    fn apply_state_rejects_unknown_enabled_tools() {
+        let registry =
+            DynamicToolProvider::from_tool_provider(Arc::new(MockTool)).expect("dynamic registry");
         let mut snapshot = registry.export_state();
-        snapshot.profile.enabled_tools.clear();
-        let generation = registry.apply_state(snapshot).expect("apply succeeds");
-        assert_eq!(generation, 2);
-    }
-
-    #[test]
-    fn capability_payload_includes_explicit_enabled_tools() {
-        let provider: Arc<dyn ToolProvider> = Arc::new(MockTool);
-        let enabled_tools = BTreeSet::from(["mock_tool".to_string()]);
-        let registry = DynamicToolProvider::from_tool_provider(
-            provider,
-            BTreeMap::new(),
-            CapabilityProfile {
-                enabled_capabilities: BTreeSet::new(),
-                enabled_tools: enabled_tools.clone(),
-            },
-        )
-        .expect("registry builds");
-
-        let payload = registry.capabilities_payload();
-        assert_eq!(
-            payload.explicit_enabled_tools,
-            vec!["mock_tool".to_string()]
-        );
-    }
-
-    #[test]
-    fn default_core_capability_defs_do_not_embed_prompt_sections() {
-        let defs = default_dynamic_capability_defs();
-        assert!(
-            defs.get(CapabilityId::CoreRead.as_str())
-                .expect("core read def")
-                .prompt_section
-                .is_none()
-        );
-        assert!(
-            defs.get(CapabilityId::Planning.as_str())
-                .expect("planning def")
-                .prompt_section
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn resolve_projection_rejects_missing_capability() {
-        let mut enabled_caps = BTreeSet::new();
-        enabled_caps.insert("missing".to_string());
-        let result = resolve_projection(
-            &BTreeMap::new(),
-            &CapabilityProfile {
-                enabled_capabilities: enabled_caps,
-                enabled_tools: BTreeSet::new(),
-            },
-            &BTreeSet::new(),
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn resolve_projection_skips_unavailable_capability_tools() {
-        let mut defs = BTreeMap::new();
-        defs.insert(
-            "planning".to_string(),
-            DynamicCapabilityDef {
-                id: "planning".to_string(),
-                name: "Planning".to_string(),
-                description: "Plan tracking tools".to_string(),
-                prompt_section: Some("plan section".to_string()),
-                helper_bindings: BTreeSet::new(),
-                tool_names: BTreeSet::from(["update_plan".to_string()]),
-                enabled_by_default: true,
-            },
-        );
-
-        let profile = CapabilityProfile {
-            enabled_capabilities: BTreeSet::from(["planning".to_string()]),
-            enabled_tools: BTreeSet::new(),
-        };
-        let available_tools = BTreeSet::new();
-
-        let result = resolve_projection(&defs, &profile, &available_tools);
-        assert!(result.is_ok());
-        assert!(result.unwrap().effective_tools.is_empty());
+        snapshot.enabled_tools.insert("missing".to_string());
+        assert!(matches!(
+            registry.apply_state(snapshot),
+            Err(ReconfigureError::Validation(_))
+        ));
     }
 }

@@ -1,37 +1,34 @@
 mod agent_call;
 mod apply_patch;
 mod ask;
+mod batch;
+mod default_plugins;
 mod fetch_url;
-mod filtered;
 mod glob;
 mod grep;
-pub mod hashline;
 mod ls;
 mod read_file;
 mod shell;
 mod skills;
 #[cfg(feature = "sqlite-store")]
 mod state;
-mod switchable;
-mod toolset;
 mod update_plan;
 mod web_search;
 
-pub use agent_call::{AgentCall, AgentCallConfig};
+pub use agent_call::{AgentCall, AgentCallConfig, AgentCallPluginFactory};
 pub use apply_patch::ApplyPatchTool;
 pub use ask::AskTool;
+pub(crate) use default_plugins::CompositeToolProvider;
+pub use default_plugins::{DefaultToolPluginDeps, default_tool_plugin_factories};
 pub use fetch_url::FetchUrl;
-pub use filtered::FilteredTools;
 pub use glob::Glob;
 pub use grep::Grep;
 pub use ls::Ls;
-pub use read_file::ReadFile;
-pub use shell::{ReplShell, StandardShell};
-pub use skills::SkillStore;
+pub use read_file::{ReadFile, ReadFilePluginFactory};
+pub use shell::StandardShell;
+pub use skills::SkillsPluginFactory;
 #[cfg(feature = "sqlite-store")]
-pub use state::StateStore;
-pub use switchable::SwitchableTools;
-pub use toolset::{ToolSet, ToolSetDeps};
+pub use state::{StateStore, StateToolsPluginFactory};
 pub use update_plan::UpdatePlanTool;
 pub use web_search::WebSearch;
 
@@ -40,7 +37,42 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(crate) const INTERNAL_TOOL_CATALOG_ARG: &str = "__tool_catalog";
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeTool {
+    Batch,
+}
+
+impl NativeTool {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Batch => "batch",
+        }
+    }
+
+    pub(crate) fn definition(self) -> crate::ToolDefinition {
+        match self {
+            Self::Batch => batch::batch_tool_definition(),
+        }
+    }
+}
+
+pub(crate) fn native_tools(mode: crate::ExecutionMode) -> &'static [NativeTool] {
+    match mode {
+        crate::ExecutionMode::Standard => &[NativeTool::Batch],
+        crate::ExecutionMode::Repl => &[],
+    }
+}
+
+pub(crate) fn all_native_tool_names() -> impl Iterator<Item = &'static str> {
+    [NativeTool::Batch].into_iter().map(NativeTool::name)
+}
+
+pub(crate) fn find_native_tool(mode: crate::ExecutionMode, name: &str) -> Option<NativeTool> {
+    native_tools(mode)
+        .iter()
+        .copied()
+        .find(|tool| tool.name() == name)
+}
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct PathEntry {
@@ -148,45 +180,22 @@ pub(crate) fn parse_optional_usize_arg(
 
 pub(crate) fn project_tool_catalog(
     definitions: impl IntoIterator<Item = crate::ToolDefinition>,
-    mode: crate::ExecutionMode,
 ) -> Vec<serde_json::Value> {
     definitions
         .into_iter()
-        .filter(|d| !d.hidden && !d.description_for(mode).is_empty())
+        .filter(|d| d.enabled)
         .map(|d| {
-            let p = d.project(mode);
             serde_json::json!({
-                "name": p.name,
-                "description": p.description,
-                "params": p.params,
-                "returns": p.returns,
-                "examples": p.examples,
-                "inject_into_prompt": p.inject_into_prompt,
-                "hidden": d.hidden,
+                "name": d.name,
+                "description": d.description,
+                "params": d.params,
+                "returns": d.returns,
+                "examples": d.examples,
+                "injected": d.injected,
+                "enabled": d.enabled,
             })
         })
         .collect()
-}
-
-pub(crate) fn preflight_tool_args(
-    tool_name: &str,
-    mut args: serde_json::Value,
-    definitions: impl IntoIterator<Item = crate::ToolDefinition>,
-    mode: crate::ExecutionMode,
-) -> serde_json::Value {
-    if tool_name == "search_tools" && args.get(INTERNAL_TOOL_CATALOG_ARG).is_none() {
-        if !args.is_object() {
-            args = serde_json::Value::Object(serde_json::Map::new());
-        }
-        let obj = args
-            .as_object_mut()
-            .expect("search_tools args should be normalized to an object");
-        obj.insert(
-            INTERNAL_TOOL_CATALOG_ARG.to_string(),
-            serde_json::Value::Array(project_tool_catalog(definitions, mode)),
-        );
-    }
-    args
 }
 
 /// Read a file to string, or return ToolResult::err.
@@ -320,63 +329,20 @@ mod tests {
     fn dummy_tool(name: &str) -> crate::ToolDefinition {
         crate::ToolDefinition {
             name: name.to_string(),
-            description: vec![crate::ToolText::new(
-                format!("desc for {name}"),
-                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-            )],
+            description: format!("desc for {name}"),
             params: Vec::new(),
             returns: String::new(),
             examples: Vec::new(),
-            hidden: false,
-            inject_into_prompt: true,
+            enabled: true,
+            injected: true,
         }
     }
 
     #[test]
-    fn preflight_tool_args_injects_catalog_for_search_tools() {
-        let args = preflight_tool_args(
-            "search_tools",
-            serde_json::json!({}),
-            [dummy_tool("read_file"), dummy_tool("search_tools")],
-            crate::ExecutionMode::Repl,
-        );
-
-        let catalog = args
-            .get(INTERNAL_TOOL_CATALOG_ARG)
-            .and_then(|value| value.as_array())
-            .cloned()
-            .expect("catalog should be injected");
+    fn project_tool_catalog_keeps_enabled_tools_with_prompt_metadata() {
+        let catalog = project_tool_catalog([dummy_tool("read_file"), dummy_tool("search_tools")]);
         assert_eq!(catalog.len(), 2);
-    }
-
-    #[test]
-    fn preflight_tool_args_preserves_existing_catalog() {
-        let args = preflight_tool_args(
-            "search_tools",
-            serde_json::json!({
-                "__tool_catalog": [{"name":"already_here"}]
-            }),
-            [dummy_tool("read_file")],
-            crate::ExecutionMode::Repl,
-        );
-
-        assert_eq!(
-            args.get(INTERNAL_TOOL_CATALOG_ARG),
-            Some(&serde_json::json!([{ "name": "already_here" }]))
-        );
-    }
-
-    #[test]
-    fn preflight_tool_args_leaves_other_tools_unchanged() {
-        let args = serde_json::json!({"path":"Cargo.toml"});
-        assert_eq!(
-            preflight_tool_args(
-                "read_file",
-                args.clone(),
-                [dummy_tool("read_file")],
-                crate::ExecutionMode::Repl,
-            ),
-            args
-        );
+        assert_eq!(catalog[0]["name"], serde_json::json!("read_file"));
+        assert_eq!(catalog[1]["injected"], serde_json::json!(true));
     }
 }

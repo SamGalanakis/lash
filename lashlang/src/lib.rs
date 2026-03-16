@@ -68,4 +68,14 @@ mod tests {
             Value::Bool(true)
         );
     }
+
+    #[test]
+    fn execute_allows_bare_finish() {
+        let mut state = State::new();
+        let outcome = execute("finish", &mut state, &Host).expect("should succeed");
+        let ExecutionOutcome::Finished(value) = outcome else {
+            panic!("expected finish");
+        };
+        assert_eq!(value, Value::Null);
+    }
 }

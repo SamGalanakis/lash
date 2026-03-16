@@ -1,65 +1,43 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use serde_json::json;
 
+use crate::plugin::{
+    PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
+    ToolSurfaceContribution, ToolSurfaceOverride,
+};
 use crate::search::{SearchDoc, SearchMode, limit_from_args, rank_docs};
-use crate::{ToolDefinition, ToolParam, ToolPromptContext, ToolProvider, ToolResult};
+use crate::{
+    ExecutionMode, PromptContext, PromptContribution, ToolDefinition, ToolExecutionContext,
+    ToolParam, ToolProvider, ToolResult,
+};
 
-use super::skills::discover_installed_skills;
-use super::{INTERNAL_TOOL_CATALOG_ARG, run_blocking};
+use super::run_blocking;
 
-type SkillCatalogEntry = (String, String, usize);
-type SkillCatalogCache = Arc<RwLock<Option<Vec<SkillCatalogEntry>>>>;
+pub struct StateToolsPluginFactory {
+    execution_mode: ExecutionMode,
+}
+
+struct StateToolsPlugin {
+    provider: Arc<StateStore>,
+}
 
 #[derive(Clone)]
 pub struct StateStore {
-    skill_dirs: Vec<PathBuf>,
-    skill_catalog_cache: SkillCatalogCache,
+    execution_mode: ExecutionMode,
 }
 
 impl StateStore {
-    pub fn new(skill_dirs: Vec<PathBuf>) -> Self {
-        Self {
-            skill_dirs,
-            skill_catalog_cache: Arc::new(RwLock::new(None)),
-        }
+    pub fn new(execution_mode: ExecutionMode) -> Self {
+        Self { execution_mode }
     }
 
-    fn build_skill_catalog(&self) -> Vec<(String, String, usize)> {
-        discover_installed_skills(&self.skill_dirs)
-            .into_iter()
-            .map(|skill| (skill.name, skill.description, skill.files.len()))
-            .collect()
-    }
-
-    fn discover_skills(&self) -> Vec<(String, String, usize)> {
-        if let Ok(cache) = self.skill_catalog_cache.read()
-            && let Some(skills) = cache.as_ref()
-        {
-            return skills.clone();
-        }
-
-        let skills = self.build_skill_catalog();
-        if let Ok(mut cache) = self.skill_catalog_cache.write() {
-            *cache = Some(skills.clone());
-        }
-        skills
-    }
-
-    fn tool_catalog(&self, args: &serde_json::Value) -> Result<Vec<serde_json::Value>, ToolResult> {
-        args.get(INTERNAL_TOOL_CATALOG_ARG)
-            .and_then(|v| v.as_array())
-            .cloned()
-            .ok_or_else(|| {
-                ToolResult::err(json!(
-                    "search_tools requires the active session tool catalog; call it through the runtime or plugin host"
-                ))
-            })
-    }
-
-    fn search_tools(&self, args: &serde_json::Value) -> ToolResult {
+    fn search_tools(
+        &self,
+        args: &serde_json::Value,
+        catalog: Vec<serde_json::Value>,
+    ) -> ToolResult {
         let query = args
             .get("query")
             .and_then(|v| v.as_str())
@@ -74,26 +52,26 @@ impl StateStore {
             limit_from_args(args)
         };
         let injected_only = args.get("injected_only").and_then(|v| v.as_bool());
-        let catalog = match self.tool_catalog(args) {
-            Ok(catalog) => catalog,
-            Err(err) => return err,
-        };
 
         let mut filtered = Vec::new();
-        for t in &catalog {
-            if t.get("hidden").and_then(|v| v.as_bool()).unwrap_or(false) {
+        for tool in &catalog {
+            if !tool
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true)
+            {
                 continue;
             }
             if let Some(injected) = injected_only {
-                let inject = t
-                    .get("inject_into_prompt")
+                let inject = tool
+                    .get("injected")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 if injected != inject {
                     continue;
                 }
             }
-            filtered.push(t.clone());
+            filtered.push(tool.clone());
         }
 
         if browse_all {
@@ -113,8 +91,8 @@ impl StateStore {
 
         let docs: Vec<SearchDoc> = filtered
             .iter()
-            .map(|t| {
-                let examples = t
+            .map(|tool| {
+                let examples = tool
                     .get("examples")
                     .and_then(|v| v.as_array())
                     .map(|arr| {
@@ -127,14 +105,14 @@ impl StateStore {
                 let mut fields = HashMap::new();
                 fields.insert(
                     "name",
-                    t.get("name")
+                    tool.get("name")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
                         .to_string(),
                 );
                 fields.insert(
                     "description",
-                    t.get("description")
+                    tool.get("description")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
                         .to_string(),
@@ -163,79 +141,96 @@ impl StateStore {
             .collect();
         ToolResult::ok(json!(items))
     }
+}
 
-    fn search_skills(&self, args: &serde_json::Value) -> ToolResult {
-        let query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let browse_all = query.trim().is_empty();
-        let mode = SearchMode::parse(args.get("mode").and_then(|v| v.as_str()));
-        let regex = args.get("regex").and_then(|v| v.as_str());
-        let limit = if browse_all && args.get("limit").is_none() {
-            usize::MAX
-        } else {
-            limit_from_args(args)
-        };
-        let skills = self.discover_skills();
-        if browse_all {
-            return ToolResult::ok(json!(
-                skills
-                    .into_iter()
-                    .take(limit)
-                    .map(|(name, description, file_count)| {
-                        json!({
-                            "name": name,
-                            "description": description,
-                            "file_count": file_count,
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            ));
-        }
-        let docs: Vec<SearchDoc> = skills
-            .iter()
-            .map(|(name, description, _)| {
-                let mut fields = HashMap::new();
-                fields.insert("name", name.clone());
-                fields.insert("description", description.clone());
-                SearchDoc { fields }
+impl StateToolsPluginFactory {
+    pub fn new(execution_mode: ExecutionMode) -> Self {
+        Self { execution_mode }
+    }
+}
+
+impl PluginFactory for StateToolsPluginFactory {
+    fn id(&self) -> &'static str {
+        "state"
+    }
+
+    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        Ok(Arc::new(StateToolsPlugin {
+            provider: Arc::new(StateStore::new(self.execution_mode)),
+        }))
+    }
+}
+
+pub(crate) fn state_prompt_contributions(context: &PromptContext) -> Vec<PromptContribution> {
+    if context.omitted_tool_count == 0 {
+        return Vec::new();
+    }
+
+    vec![PromptContribution::guidance(
+        "### Tool Discovery\nUse `search_tools` to inspect the additional available tools that are omitted from Available Tools for brevity. With no query, it browses the full active tool catalog; use focused queries when you know the kind of tool you need.",
+    )]
+}
+
+impl SessionPlugin for StateToolsPlugin {
+    fn id(&self) -> &'static str {
+        "state"
+    }
+
+    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
+        reg.tools()
+            .provider(Arc::clone(&self.provider) as Arc<dyn ToolProvider>)?;
+        reg.prompt().contribute(Arc::new(move |ctx| {
+            Box::pin(async move { Ok(state_prompt_contributions(&ctx.prompt)) })
+        }));
+        reg.surface().contribute(Arc::new(|ctx| {
+            let omitted_tool_count = ctx
+                .tools
+                .iter()
+                .filter(|tool| tool.enabled)
+                .filter(|tool| tool.name != "search_tools")
+                .filter(|tool| !tool.injected)
+                .count();
+            let has_search_tools = ctx.tools.iter().any(|tool| tool.name == "search_tools");
+            let mut overrides = Vec::new();
+            if has_search_tools {
+                overrides.push(ToolSurfaceOverride {
+                    tool_name: "search_tools".to_string(),
+                    enabled: Some(omitted_tool_count > 0),
+                    injected: Some(false),
+                });
+            }
+            let tool_list_notes = if omitted_tool_count > 0 {
+                vec![format!(
+                    "- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity."
+                )]
+            } else {
+                Vec::new()
+            };
+            Ok(ToolSurfaceContribution {
+                overrides,
+                tool_list_notes,
             })
-            .collect();
-        let ranked = rank_docs(
-            &docs,
-            &query,
-            mode,
-            regex,
-            &[("name", 4.0), ("description", 2.0)],
-        );
-        let items: Vec<serde_json::Value> = ranked
-            .into_iter()
-            .take(limit)
-            .map(|(idx, score, _)| {
-                let (name, description, file_count) = &skills[idx];
-                json!({
-                    "name": name,
-                    "description": description,
-                    "file_count": file_count,
-                    "score": score,
-                })
-            })
-            .collect();
-        ToolResult::ok(json!(items))
+        }));
+        Ok(())
     }
 }
 
 #[async_trait::async_trait]
 impl ToolProvider for StateStore {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        let mut defs = vec![ToolDefinition {
+        let examples = match self.execution_mode {
+            ExecutionMode::Repl => vec![
+                "call search_tools { query: \"task planning\" }".into(),
+                "call search_tools {}".into(),
+            ],
+            ExecutionMode::Standard => vec![
+                "search_tools(query=\"task planning\")".into(),
+                "search_tools()".into(),
+            ],
+        };
+        vec![ToolDefinition {
             name: "search_tools".into(),
-            description: vec![crate::ToolText::new(
-                "Discover available tools. With a focused `query`, returns ranked matches using hybrid/literal/regex search. With no `query`, returns the full active tool catalog in stable name order.",
-                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-            )],
+            description: "Discover available tools. With a focused `query`, returns ranked matches using hybrid/literal/regex search. With no `query`, returns the full active tool catalog in stable name order.".into(),
             params: vec![
                 ToolParam::optional("query", "str"),
                 ToolParam::optional("mode", "str"),
@@ -244,218 +239,223 @@ impl ToolProvider for StateStore {
                 ToolParam::optional("injected_only", "bool"),
             ],
             returns: "list".into(),
-            examples: vec![
-                crate::ToolText::new(
-                    "call search_tools { query: \"task planning\" }",
-                    [crate::ExecutionMode::Repl],
-                ),
-                crate::ToolText::new(
-                    "search_tools(query=\"task planning\")",
-                    [crate::ExecutionMode::Standard],
-                ),
-                crate::ToolText::new("call search_tools {}", [crate::ExecutionMode::Repl]),
-                crate::ToolText::new("search_tools()", [crate::ExecutionMode::Standard]),
-            ],
-            hidden: false,
-            inject_into_prompt: false,
-        }];
-        if !self.discover_skills().is_empty() {
-            defs.push(ToolDefinition {
-                name: "search_skills".into(),
-                description: vec![crate::ToolText::new(
-                    "Discover installed skills. With a focused `query`, returns ranked matches using hybrid/literal/regex search. With no `query`, returns the full installed skill catalog in stable name order.",
-                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-                )],
-                params: vec![
-                    ToolParam::optional("query", "str"),
-                    ToolParam::optional("mode", "str"),
-                    ToolParam::optional("regex", "str"),
-                    ToolParam::optional("limit", "int"),
-                ],
-                returns: "list[SkillSummary]".into(),
-                examples: vec![
-                    crate::ToolText::new(
-                        "call search_skills { query: \"benchmarking\" }",
-                        [crate::ExecutionMode::Repl],
-                    ),
-                    crate::ToolText::new(
-                        "search_skills(query=\"benchmarking\")",
-                        [crate::ExecutionMode::Standard],
-                    ),
-                    crate::ToolText::new(
-                        "call search_skills {}",
-                        [crate::ExecutionMode::Repl],
-                    ),
-                    crate::ToolText::new(
-                        "search_skills()",
-                        [crate::ExecutionMode::Standard],
-                    ),
-                ],
-                hidden: false,
-                inject_into_prompt: true,
-            });
+            examples,
+            enabled: true,
+            injected: false,
+        }]
+    }
+
+    async fn execute(&self, name: &str, _args: &serde_json::Value) -> ToolResult {
+        ToolResult::err_fmt(format_args!("Unknown tool: {name}"))
+    }
+
+    async fn execute_with_context(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        context: &ToolExecutionContext,
+    ) -> ToolResult {
+        match name {
+            "search_tools" => match context.host.tool_catalog(&context.session_id).await {
+                Ok(catalog) => {
+                    let this = self.clone();
+                    let args = args.clone();
+                    run_blocking(move || this.search_tools(&args, catalog)).await
+                }
+                Err(err) => ToolResult::err_fmt(err.to_string()),
+            },
+            _ => self.execute(name, args).await,
         }
-        defs
-    }
-
-    fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
-        Vec::new()
-    }
-
-    async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
-        let this = self.clone();
-        let name = name.to_string();
-        let args = args.clone();
-        run_blocking(move || match name.as_str() {
-            "search_tools" => this.search_tools(&args),
-            "search_skills" => this.search_skills(&args),
-            _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
-        })
-        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
-    fn provider() -> StateStore {
-        StateStore::new(Vec::new())
+    struct MockSessionManager {
+        catalog: Vec<serde_json::Value>,
     }
 
-    fn write_skill(root: &std::path::Path, dir_name: &str, name: &str, description: &str) {
-        let skill_dir = root.join(dir_name);
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(
-            skill_dir.join("SKILL.md"),
-            format!("---\nname: {name}\ndescription: {description}\n---\n# {name}\n"),
-        )
-        .unwrap();
+    #[async_trait::async_trait]
+    impl crate::SessionManager for MockSessionManager {
+        async fn snapshot_current(&self) -> Result<crate::SessionSnapshot, crate::PluginError> {
+            Ok(crate::AgentStateEnvelope::default())
+        }
+
+        async fn snapshot_session(
+            &self,
+            _session_id: &str,
+        ) -> Result<crate::SessionSnapshot, crate::PluginError> {
+            Ok(crate::AgentStateEnvelope::default())
+        }
+
+        async fn tool_catalog(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<serde_json::Value>, crate::PluginError> {
+            Ok(self.catalog.clone())
+        }
+
+        async fn create_session(
+            &self,
+            request: crate::SessionCreateRequest,
+        ) -> Result<crate::SessionHandle, crate::PluginError> {
+            Ok(crate::SessionHandle {
+                session_id: request.agent_id.unwrap_or_else(|| "child".to_string()),
+                config: crate::SessionConfigSnapshot {
+                    provider_kind: crate::provider::ProviderKind::OpenAiGeneric,
+                    model: "mock-model".to_string(),
+                    model_variant: None,
+                    execution_mode: ExecutionMode::Standard,
+                    context_folding: crate::ContextFoldingConfig::default(),
+                    context_window: None,
+                    max_turns: None,
+                    include_soul: false,
+                    sub_agent: false,
+                },
+            })
+        }
+
+        async fn close_session(&self, _session_id: &str) -> Result<(), crate::PluginError> {
+            Ok(())
+        }
+
+        async fn start_turn_stream(
+            &self,
+            session_id: &str,
+            _input: crate::TurnInput,
+        ) -> Result<crate::plugin::SessionTurnHandle, crate::PluginError> {
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            Ok(crate::plugin::SessionTurnHandle {
+                turn_id: format!("{session_id}-turn"),
+                session_id: session_id.to_string(),
+                config: crate::SessionConfigSnapshot {
+                    provider_kind: crate::provider::ProviderKind::OpenAiGeneric,
+                    model: "mock-model".to_string(),
+                    model_variant: None,
+                    execution_mode: ExecutionMode::Standard,
+                    context_folding: crate::ContextFoldingConfig::default(),
+                    context_window: None,
+                    max_turns: None,
+                    include_soul: false,
+                    sub_agent: false,
+                },
+                events: rx,
+            })
+        }
+
+        async fn await_turn(
+            &self,
+            _turn_id: &str,
+        ) -> Result<crate::AssembledTurn, crate::PluginError> {
+            Ok(crate::AssembledTurn {
+                state: crate::AgentStateEnvelope::default(),
+                status: crate::TurnStatus::Completed,
+                assistant_output: crate::AssistantOutput {
+                    safe_text: String::new(),
+                    raw_text: String::new(),
+                    state: crate::OutputState::Usable,
+                },
+                done_reason: crate::DoneReason::ModelStop,
+                execution: crate::ExecutionSummary {
+                    mode: ExecutionMode::Standard,
+                    had_tool_calls: false,
+                    had_code_execution: false,
+                },
+                token_usage: crate::TokenUsage::default(),
+                tool_calls: Vec::new(),
+                code_outputs: Vec::new(),
+                errors: Vec::new(),
+            })
+        }
+
+        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), crate::PluginError> {
+            Ok(())
+        }
     }
 
-    #[test]
-    fn tool_search_uses_internal_catalog() {
-        let p = provider();
-        let result = p.search_tools(&json!({
-            "query":"patch",
-            "mode":"hybrid",
-            "limit":10,
-            "__tool_catalog":[
-                {"name":"read_file","description":"Read file","examples":[],"inject_into_prompt":true},
-                {"name":"apply_patch","description":"Apply structured patch","examples":[],"inject_into_prompt":true}
-            ]
-        }));
+    #[tokio::test]
+    async fn search_tools_lists_all_without_query() {
+        let store = StateStore::new(ExecutionMode::Standard);
+        let context = ToolExecutionContext {
+            session_id: "root".to_string(),
+            host: Arc::new(MockSessionManager {
+                catalog: vec![
+                    json!({"name":"read_file","description":"Read files","enabled":true,"injected":true,"examples":[]}),
+                    json!({"name":"apply_patch","description":"Apply patches","enabled":true,"injected":true,"examples":[]}),
+                ],
+            }),
+        };
+
+        let result = store
+            .execute_with_context("search_tools", &json!({}), &context)
+            .await;
+
         assert!(result.success);
-        let items = result.result.as_array().cloned().unwrap_or_default();
-        assert!(!items.is_empty());
+        let items = result.result.as_array().expect("array");
+        assert_eq!(items.len(), 2);
         assert_eq!(
             items[0].get("name").and_then(|v| v.as_str()),
             Some("apply_patch")
         );
-    }
-
-    #[test]
-    fn search_tools_errors_without_session_catalog() {
-        let p = provider();
-        let result = p.search_tools(&json!({
-            "query":"search tools",
-            "mode":"hybrid",
-            "limit":10
-        }));
-        assert!(!result.success);
-        assert!(
-            result
-                .result
-                .as_str()
-                .unwrap_or_default()
-                .contains("active session tool catalog")
-        );
-    }
-
-    #[test]
-    fn search_tools_lists_all_without_query() {
-        let p = provider();
-        let result = p.search_tools(&json!({
-            "__tool_catalog":[
-                {"name":"search_tools","description":"Discover tools","examples":[],"inject_into_prompt":true},
-                {"name":"read_file","description":"Read file","examples":[],"inject_into_prompt":true}
-            ]
-        }));
-        assert!(result.success);
-        let items = result.result.as_array().cloned().unwrap_or_default();
-        assert_eq!(items.len(), 2);
-        assert_eq!(
-            items[0].get("name").and_then(|v| v.as_str()),
-            Some("read_file")
-        );
         assert_eq!(
             items[1].get("name").and_then(|v| v.as_str()),
-            Some("search_tools")
+            Some("read_file")
         );
-        assert!(items[0].get("score").is_none());
     }
 
     #[test]
-    fn search_tools_hybrid_matches_broader_query_terms() {
-        let p = provider();
-        let result = p.search_tools(&json!({
-            "query":"asking users",
-            "mode":"hybrid",
-            "limit":10,
-            "__tool_catalog":[
-                {"name":"ask","description":"Pause and ask the user a targeted question, then wait for the answer before continuing.","examples":[],"inject_into_prompt":true},
-                {"name":"read_file","description":"Read file contents from disk.","examples":[],"inject_into_prompt":true}
-            ]
-        }));
-        assert!(result.success);
-        let items = result.result.as_array().cloned().unwrap_or_default();
-        assert!(!items.is_empty());
-        assert_eq!(items[0].get("name").and_then(|v| v.as_str()), Some("ask"));
+    fn prompt_contributions_only_describe_tool_discovery_when_needed() {
+        let mut prompt = PromptContext::default();
+        prompt.omitted_tool_count = 1;
+        let with_omissions = state_prompt_contributions(&prompt);
+        assert_eq!(with_omissions.len(), 1);
+        assert!(with_omissions[0].content.contains("search_tools"));
+
+        prompt.omitted_tool_count = 0;
+        assert!(state_prompt_contributions(&prompt).is_empty());
     }
 
     #[test]
-    fn state_store_definitions_exclude_plugin_owned_tools() {
-        let p = provider();
-        let names: Vec<String> = p.definitions().into_iter().map(|def| def.name).collect();
-        assert!(!names.iter().any(|name| name == "search_history"));
-        assert!(!names.iter().any(|name| name == "search_mem"));
-        assert!(!names.iter().any(|name| name == "mem_set"));
-        assert!(!names.iter().any(|name| name == "history_add_turn"));
-        assert!(!names.iter().any(|name| name == "mem_load"));
-    }
+    fn tool_surface_plugin_hides_search_tools_when_nothing_is_omitted() {
+        let host = crate::PluginHost::new(vec![Arc::new(StateToolsPluginFactory::new(
+            ExecutionMode::Standard,
+        ))]);
+        let session = host.build_standard_session("root", None).expect("session");
 
-    #[test]
-    fn skills_search_is_omitted_when_no_skills_exist() {
-        let p = StateStore::new(Vec::new());
-        let names: Vec<String> = p.definitions().into_iter().map(|d| d.name).collect();
-        assert!(!names.iter().any(|n| n == "search_skills"));
-    }
+        let surface = session
+            .resolve_tool_surface(crate::plugin::ToolSurfaceContext {
+                session_id: "root".to_string(),
+                mode: ExecutionMode::Standard,
+                tools: vec![
+                    ToolDefinition {
+                        name: "search_tools".to_string(),
+                        description: "Discover tools".to_string(),
+                        params: vec![],
+                        returns: "list".to_string(),
+                        examples: vec![],
+                        enabled: true,
+                        injected: false,
+                    },
+                    ToolDefinition {
+                        name: "read_file".to_string(),
+                        description: "Read files".to_string(),
+                        params: vec![],
+                        returns: "str".to_string(),
+                        examples: vec![],
+                        enabled: true,
+                        injected: true,
+                    },
+                ],
+            })
+            .expect("tool surface");
 
-    #[test]
-    fn skills_search_is_defined_when_skills_exist() {
-        let dir = TempDir::new().unwrap();
-        write_skill(dir.path(), "alpha", "alpha", "Alpha skill");
-        let p = StateStore::new(vec![dir.path().to_path_buf()]);
-        let defs = p.definitions();
         assert!(
-            defs.iter()
-                .any(|def| def.name == "search_skills" && def.inject_into_prompt)
+            surface
+                .tools
+                .iter()
+                .any(|tool| tool.name == "search_tools" && !tool.enabled && !tool.injected)
         );
-    }
-
-    #[test]
-    fn search_skills_lists_all_without_query() {
-        let dir = TempDir::new().unwrap();
-        write_skill(dir.path(), "alpha", "alpha", "Alpha skill");
-        write_skill(dir.path(), "beta", "beta", "Beta skill");
-        let p = StateStore::new(vec![dir.path().to_path_buf()]);
-        let result = p.search_skills(&json!({}));
-        assert!(result.success);
-        let items = result.result.as_array().cloned().unwrap_or_default();
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].get("name").and_then(|v| v.as_str()), Some("alpha"));
-        assert_eq!(items[1].get("name").and_then(|v| v.as_str()), Some("beta"));
-        assert!(items[0].get("score").is_none());
     }
 }

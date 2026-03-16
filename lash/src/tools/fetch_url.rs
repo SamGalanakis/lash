@@ -33,18 +33,12 @@ impl ToolProvider for FetchUrl {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "fetch_url".into(),
-            description: vec![crate::ToolText::new(
-                "Fetch one known URL and extract readable page text.",
-                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-            )],
+            description: "Fetch one known URL and extract readable page text.".into(),
             params: vec![ToolParam::typed("url", "str")],
             returns: "str".into(),
-            examples: vec![crate::ToolText::new(
-                "fetch_url(url=\"https://www.rust-lang.org/\")",
-                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-            )],
-            hidden: false,
-            inject_into_prompt: true,
+            examples: vec!["fetch_url(url=\"https://www.rust-lang.org/\")".into()],
+            enabled: true,
+            injected: true,
         }]
     }
 

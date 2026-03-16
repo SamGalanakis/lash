@@ -1036,7 +1036,11 @@ impl Compiler {
                 self.compile_parallel(branches, false);
             }
             Stmt::Finish(expr) => {
-                self.compile_expr(expr);
+                if let Some(expr) = expr {
+                    self.compile_expr(expr);
+                } else {
+                    self.compile_expr(&Expr::Null);
+                }
                 self.code.push(Instruction::Finish);
             }
         }
@@ -2747,6 +2751,9 @@ mod tests {
     fn continuation_and_undefined_variable_are_reported() {
         let outcome = exec_outcome("x = 1").expect("missing finish should continue");
         assert_eq!(outcome, ExecutionOutcome::Continued);
+
+        let value = exec("finish").expect("bare finish should succeed");
+        assert_eq!(value, Value::Null);
 
         let err = exec("finish x").expect_err("undefined variable should fail");
         assert_eq!(

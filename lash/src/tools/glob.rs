@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::{ToolDefinition, ToolParam, ToolPromptContext, ToolProvider, ToolResult};
+use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
 use super::{
     build_path_entry, filesystem_entries_result, parse_optional_bool, parse_optional_usize_arg,
@@ -18,13 +18,10 @@ impl ToolProvider for Glob {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "glob".into(),
-            description: vec![crate::ToolText::new(
-                format!(
-                    "Find filesystem entries by glob. Returns a record with `items` sorted by `modified_at` (newest first). Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: limit={}, with_lines=false.",
-                    MAX_RESULTS
-                ),
-                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-            )],
+            description: format!(
+                "Find filesystem entries by glob. Returns a record with `items` sorted by `modified_at` (newest first). Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: limit={}, with_lines=false.",
+                MAX_RESULTS
+            ),
             params: vec![
                 ToolParam::typed("pattern", "str"),
                 ToolParam {
@@ -52,15 +49,10 @@ impl ToolProvider for Glob {
             ],
             returns: "dict".into(),
             examples: vec![],
-            hidden: false,
-            inject_into_prompt: true,
+            enabled: true,
+            injected: true,
         }]
     }
-
-    fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
-        vec!["### Filesystem Listing Results\n`glob` and `ls` both return a record `{ items: [...], truncated: ... }`. In REPL tool calls, read listing paths from `result.value.items`; there is no extra wrapper like `result.value.path_entries`. `glob` sorts `items` by modification time (newest first); `ls` sorts `items` alphabetically by path. If `truncated` is non-null, rerun with `limit=None` when needed.".to_string()]
-    }
-
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
         let pattern = match require_str(args, "pattern") {
             Ok(s) => s,

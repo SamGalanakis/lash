@@ -110,7 +110,12 @@ impl Parser {
 
     fn parse_finish(&mut self) -> Result<Stmt, ParseError> {
         self.bump();
-        Ok(Stmt::Finish(self.parse_expr()?))
+        let expr = if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+            None
+        } else {
+            Some(self.parse_expr()?)
+        };
+        Ok(Stmt::Finish(expr))
     }
 
     fn parse_observe(&mut self) -> Result<Stmt, ParseError> {
@@ -655,6 +660,27 @@ mod tests {
             panic!("expected if statement");
         };
         assert!(matches!(else_block.as_slice(), [Stmt::If { .. }]));
+    }
+
+    #[test]
+    fn parses_bare_finish_at_program_and_block_end() {
+        let program = parse(
+            r#"
+            if true {
+              finish
+            }
+            finish
+            "#,
+        )
+        .expect("program should parse");
+
+        assert!(matches!(
+            program.statements.as_slice(),
+            [
+                Stmt::If { then_block, .. },
+                Stmt::Finish(None)
+            ] if matches!(then_block.as_slice(), [Stmt::Finish(None)])
+        ));
     }
 
     #[test]

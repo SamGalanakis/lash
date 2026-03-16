@@ -2,21 +2,22 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use serde_json::json;
-use tokio::sync::{Notify, mpsc};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::Notify;
 
-use crate::capabilities::{CapabilityId, tools_for_capability};
+use crate::plugin::{
+    PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
+    SessionReadyContext, ToolSurfaceContribution, ToolSurfaceOverride,
+};
 use crate::provider::AgentModels;
 use crate::{
-    AgentConfig, AgentEvent, AgentStateEnvelope, DynamicStateSnapshot, EventSink, LashRuntime,
-    Message, MessageRole, Part, PartKind, PluginSession, ProgressSender, PruneState, RuntimeConfig,
-    RuntimeServices, SandboxMessage, ToolDefinition, ToolParam, ToolPromptContext, ToolProvider,
-    ToolResult,
+    AgentConfig, AgentEvent, InputItem, PluginSession, ProgressSender, PromptContribution,
+    SandboxMessage, SessionConfigOverrides, SessionCreateRequest, SessionStartPoint,
+    ToolDefinition, ToolExecutionContext, ToolParam, ToolProvider, ToolResult, TurnInput,
 };
 
-use super::{FilteredTools, ToolSet, require_str};
+use super::require_str;
 
-/// Intelligence tier determines model choice, capabilities, and turn limits.
+/// Intelligence tier determines model choice, tool access, and turn limits.
 enum Tier {
     Low,
     Medium,
@@ -108,75 +109,66 @@ fn preferred_override_variant(
     provider.default_model_variant(model).map(str::to_string)
 }
 
-/// A running sub-agent managed by AgentCall.
+fn low_tier_denied_tools() -> HashSet<&'static str> {
+    [
+        "apply_patch",
+        "agent_call",
+        "agent_result",
+        "agent_kill",
+        "ask",
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// A running delegated child session managed by AgentCall.
 struct RunningAgent {
+    session_id: String,
+    turn_id: String,
+    host: Arc<dyn crate::SessionManager>,
     /// Accumulated prose output from the agent (drainable).
     buffer: Arc<StdMutex<String>>,
     /// Final result once the agent completes.
     result: Arc<StdMutex<Option<serde_json::Value>>>,
     /// Notified when the agent finishes.
     done_notify: Arc<Notify>,
-    /// Cancel token to kill the agent.
-    cancel: CancellationToken,
 }
 
-struct ChannelEventSink {
-    tx: mpsc::Sender<AgentEvent>,
-}
-
-#[async_trait::async_trait]
-impl EventSink for ChannelEventSink {
-    async fn emit(&self, event: AgentEvent) {
-        if !self.tx.is_closed() {
-            let _ = self.tx.send(event).await;
-        }
-    }
-}
-
-/// Single agent-call tool that spawns sub-agents at different intelligence tiers.
+/// Single agent-call tool that spawns delegated child sessions at different intelligence tiers.
 /// Returns a handle immediately; use agent_result/agent_kill to interact.
 pub struct AgentCall {
-    tools: Arc<dyn ToolProvider>,
+    #[cfg(test)]
     plugins: Arc<PluginSession>,
     config: AgentConfig,
+    execution_mode: crate::ExecutionMode,
     tool_config: AgentCallConfig,
     agent_models: Option<AgentModels>,
-    cancel: CancellationToken,
     agents: Arc<StdMutex<HashMap<String, RunningAgent>>>,
 }
 
 impl AgentCall {
     pub fn new(
-        tools: Arc<dyn ToolProvider>,
         plugins: Arc<PluginSession>,
         config: &AgentConfig,
         tool_config: AgentCallConfig,
         agent_models: Option<AgentModels>,
-        cancel: CancellationToken,
     ) -> Self {
+        #[cfg(not(test))]
+        let _ = &plugins;
         Self {
-            tools,
+            #[cfg(test)]
             plugins,
             config: config.clone(),
+            execution_mode: config.execution_mode,
             tool_config,
             agent_models,
-            cancel,
             agents: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
     fn build_agent_config(&self, tier: &Tier) -> AgentConfig {
         let (model, model_variant) = pick_model_and_variant(&self.config, &self.agent_models, tier);
-        let capabilities = if matches!(tier, Tier::Low) {
-            self.config
-                .capabilities
-                .clone()
-                .disable(CapabilityId::CoreWrite)
-        } else {
-            self.config.capabilities.clone()
-        };
         AgentConfig {
-            capabilities,
             model,
             model_variant,
             session_id: self.config.session_id.clone(),
@@ -187,6 +179,7 @@ impl AgentCall {
             max_turns: None,
             llm_log_path: self.config.llm_log_path.clone(),
             prompt_overrides: self.config.prompt_overrides.clone(),
+            prompt_renderer: Arc::clone(&self.config.prompt_renderer),
             instruction_source: self.config.instruction_source.clone(),
             execution_mode: match tier {
                 Tier::Low => self.tool_config.low_tier_execution_mode,
@@ -196,92 +189,82 @@ impl AgentCall {
         }
     }
 
-    fn low_tier_execution_mode_summary(&self) -> &'static str {
-        match self.tool_config.low_tier_execution_mode {
-            crate::ExecutionMode::Standard => "by default, low runs in standard mode",
-            crate::ExecutionMode::Repl => "in this session, low runs in repl mode",
-        }
-    }
-
-    fn low_tier_filtered_snapshot(
-        &self,
-        mut snapshot: DynamicStateSnapshot,
-    ) -> DynamicStateSnapshot {
-        // Default policy: no file mutation tools and no nested delegation in low tier.
-        let denied: HashSet<&str> = ["apply_patch", "agent_call", "agent_result", "agent_kill"]
-            .into_iter()
-            .collect();
-
-        snapshot
-            .tools
-            .retain(|name, _| !denied.contains(name.as_str()));
-        snapshot
-            .profile
-            .enabled_tools
-            .retain(|name| !denied.contains(name.as_str()));
-        snapshot.profile.enabled_capabilities.remove("core_write");
-        snapshot.profile.enabled_capabilities.remove("delegation");
-        for def in snapshot.capability_defs.values_mut() {
-            def.tool_names
-                .retain(|name| !denied.contains(name.as_str()));
-        }
-        snapshot
-    }
-
-    /// Build the toolset for a spawned sub-agent:
-    /// - low: read-only base tools only (no nested delegation)
-    /// - medium/high: base tools + agent_call for nested delegation
-    fn session_tools_for_tier(&self, tier: &Tier) -> Arc<dyn ToolProvider> {
-        if let Some(snapshot) = self.tools.dynamic_snapshot() {
-            let snapshot = if matches!(tier, Tier::Low) {
-                self.low_tier_filtered_snapshot(snapshot)
-            } else {
-                snapshot
-            };
-            if let Some(fork) = self.tools.fork_dynamic_with_snapshot(snapshot) {
-                return fork;
-            }
-        }
-
-        if matches!(tier, Tier::Low) {
-            let write_tools: std::collections::HashSet<&str> =
-                tools_for_capability(CapabilityId::CoreWrite)
-                    .iter()
-                    .copied()
-                    .collect();
-            let allowed: BTreeSet<String> = self
-                .tools
-                .definitions()
+    fn tool_surface_for_tier(&self, tier: &Tier) -> ToolSurfaceContribution {
+        let denied = match tier {
+            Tier::Low => low_tier_denied_tools()
                 .into_iter()
-                .map(|d| d.name)
-                .filter(|name| !write_tools.contains(name.as_str()))
-                .filter(|name| {
-                    !matches!(
-                        name.as_str(),
-                        "agent_call" | "agent_result" | "agent_kill" | "ask"
-                    )
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>(),
+            Tier::Medium | Tier::High => BTreeSet::from(["ask".to_string()]),
+        };
+        ToolSurfaceContribution {
+            overrides: denied
+                .into_iter()
+                .map(|tool_name| ToolSurfaceOverride {
+                    tool_name,
+                    enabled: Some(false),
+                    injected: Some(false),
                 })
-                .collect();
-            return Arc::new(FilteredTools::new(Arc::clone(&self.tools), allowed));
+                .collect(),
+            tool_list_notes: Vec::new(),
         }
+    }
 
-        Arc::new(
-            ToolSet::new()
-                .with_arc_provider(Arc::clone(&self.tools))
-                .with_provider(AgentCall::new(
-                    Arc::clone(&self.tools),
-                    Arc::clone(&self.plugins),
-                    &self.config,
-                    self.tool_config,
-                    self.agent_models.clone(),
-                    self.cancel.clone(),
-                ))
-                .without_tool("ask"),
+    #[cfg(test)]
+    fn session_plugins_for_tier(
+        &self,
+        agent_id: &str,
+        tier: &Tier,
+    ) -> Result<Arc<PluginSession>, PluginError> {
+        let execution_mode = self.build_agent_config(tier).execution_mode;
+        self.plugins.fork_for_agent_with_tool_surface(
+            agent_id,
+            execution_mode,
+            self.tool_surface_for_tier(tier),
         )
     }
 
-    /// Spawn a sub-agent in the background and return a handle ID.
-    async fn spawn_agent(&self, args: &serde_json::Value) -> ToolResult {
+    #[cfg(test)]
+    fn visible_tool_names_for_tier(&self, tier: &Tier) -> Result<Vec<String>, PluginError> {
+        let session = self.session_plugins_for_tier("__tier_probe__", tier)?;
+        let surface = session.execution_surface(
+            session.agent_id(),
+            self.build_agent_config(tier).execution_mode,
+        );
+        Ok(surface
+            .enabled_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect())
+    }
+
+    fn build_create_request(&self, agent_id: String, tier: &Tier) -> SessionCreateRequest {
+        let agent_config = self.build_agent_config(tier);
+        SessionCreateRequest {
+            agent_id: Some(agent_id),
+            start: SessionStartPoint::Empty,
+            config_overrides: SessionConfigOverrides {
+                model: Some(agent_config.model),
+                model_variant: agent_config.model_variant,
+                max_context_tokens: agent_config.max_context_tokens,
+                execution_mode: Some(agent_config.execution_mode),
+                context_folding: Some(agent_config.context_folding),
+                session_id: agent_config.session_id,
+                max_turns: agent_config.max_turns,
+                include_soul: Some(agent_config.include_soul),
+                sub_agent: Some(true),
+            },
+            tool_surface: self.tool_surface_for_tier(tier),
+            initial_messages: Vec::new(),
+        }
+    }
+
+    /// Spawn a child session in the background and return its handle ID.
+    async fn spawn_agent(
+        &self,
+        args: &serde_json::Value,
+        context: &ToolExecutionContext,
+    ) -> ToolResult {
         let prompt = args
             .get("prompt")
             .and_then(|v| v.as_str())
@@ -310,44 +293,20 @@ impl AgentCall {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let agent_config = self.build_agent_config(&tier);
-        let agent_execution_mode = agent_config.execution_mode;
-
-        // Generate agent ID for the sub-agent
         let agent_id = uuid::Uuid::new_v4().to_string();
-        let handle_id = uuid::Uuid::new_v4().to_string();
-
-        // Create a new runtime with tier-specific tools.
-        let session_tools = self.session_tools_for_tier(&tier);
-        let session_plugins = match self.plugins.fork_for_agent(&agent_id) {
-            Ok(plugins) => plugins,
+        let session = match context
+            .host
+            .create_session(self.build_create_request(agent_id, &tier))
+            .await
+        {
+            Ok(session) => session,
             Err(err) => {
                 return ToolResult::err_fmt(format_args!(
-                    "Failed to prepare sub-agent plugins: {err}"
+                    "Failed to create delegate session: {err}"
                 ));
             }
         };
-        let runtime_state = AgentStateEnvelope {
-            agent_id: agent_id.clone(),
-            execution_mode: agent_execution_mode,
-            context_folding: agent_config.context_folding,
-            ..Default::default()
-        };
-        let runtime_config: RuntimeConfig = agent_config.clone().into();
-        let mut runtime = match LashRuntime::from_state(
-            runtime_config,
-            RuntimeServices::new(Arc::clone(&session_tools), session_plugins),
-            runtime_state,
-        )
-        .await
-        {
-            Ok(runtime) => runtime,
-            Err(e) => {
-                return ToolResult::err_fmt(format_args!(
-                    "Failed to create sub-agent runtime: {e}"
-                ));
-            }
-        };
+        let agent_execution_mode = session.config.execution_mode;
 
         // Build the user message, optionally appending schema instructions
         let user_content = if let Some(ref schema_str) = schema {
@@ -367,54 +326,49 @@ impl AgentCall {
             prompt.to_string()
         };
 
-        let messages = vec![Message {
-            id: uuid::Uuid::new_v4().to_string(),
-            role: MessageRole::User,
-            parts: vec![Part {
-                id: "p0".to_string(),
-                kind: PartKind::Text,
-                content: user_content,
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: PruneState::Intact,
-            }],
-            origin: None,
-        }];
-
-        let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
-        let agent_cancel = self.cancel.child_token();
-        let kill_token = agent_cancel.clone();
+        let mut turn = match context
+            .host
+            .start_turn_stream(
+                &session.session_id,
+                TurnInput {
+                    items: vec![InputItem::Text { text: user_content }],
+                    image_blobs: HashMap::new(),
+                    mode: None,
+                },
+            )
+            .await
+        {
+            Ok(turn) => turn,
+            Err(err) => {
+                let _ = context.host.close_session(&session.session_id).await;
+                return ToolResult::err_fmt(format_args!(
+                    "Failed to start delegate session: {err}"
+                ));
+            }
+        };
 
         // Set up shared state
         let buffer = Arc::new(StdMutex::new(String::new()));
-        let context = Arc::new(StdMutex::new(Vec::new()));
+        let context_chunks = Arc::new(StdMutex::new(Vec::new()));
         let result: Arc<StdMutex<Option<serde_json::Value>>> = Arc::new(StdMutex::new(None));
         let done_notify = Arc::new(Notify::new());
 
         let buf_clone = buffer.clone();
-        let ctx_clone = context.clone();
+        let ctx_clone = context_chunks.clone();
         let res_clone = result.clone();
         let done_clone = done_notify.clone();
-
-        // Spawn the agent run
-        let run_handle = tokio::spawn(async move {
-            let sink = ChannelEventSink { tx: event_tx };
-            let turn = runtime
-                .stream_prepared_turn(messages, vec![], None, &sink, agent_cancel)
-                .await;
-            (runtime, turn)
-        });
-
+        let host = Arc::clone(&context.host);
         let prompt_for_meta = prompt.to_string();
+        let session_id = session.session_id.clone();
+        let turn_id = turn.turn_id.clone();
+        let session_config = session.config.clone();
 
         // Spawn event drainer
         tokio::spawn(async move {
             let mut final_message: Option<String> = None;
             let mut current_prose = String::new();
-            let mut cumulative_usage = crate::TokenUsage::default();
-            let mut tool_call_count: usize = 0;
 
-            while let Some(event) = event_rx.recv().await {
+            while let Some(event) = turn.events.recv().await {
                 match event {
                     AgentEvent::TextDelta { content } => {
                         current_prose.push_str(&content);
@@ -432,58 +386,67 @@ impl AgentCall {
                         }
                         current_prose.clear();
                     }
-                    AgentEvent::TokenUsage { usage, .. } => {
-                        cumulative_usage.add(&usage);
-                    }
-                    AgentEvent::ToolCall { .. } => {
-                        tool_call_count += 1;
-                    }
-                    AgentEvent::Done => break,
                     _ => {}
                 }
             }
 
-            // Wait for the agent task to finish
-            let (_, turn_result) = match run_handle.await {
-                Ok(result) => result,
-                Err(_) => {
-                    *res_clone.lock().unwrap() = Some(json!({
-                        "result": "",
-                        "context": [],
+            let assembled = host.await_turn(&turn_id).await;
+            let mut result_json = match assembled {
+                Ok(turn) => {
+                    let result_text = if let Some(msg) = final_message {
+                        msg
+                    } else if !current_prose.trim().is_empty() {
+                        current_prose.trim().to_string()
+                    } else if !turn.assistant_output.raw_text.trim().is_empty() {
+                        turn.assistant_output.raw_text.trim().to_string()
+                    } else {
+                        ctx_clone.lock().unwrap().join("\n\n")
+                    };
+                    let status = match turn.status {
+                        crate::TurnStatus::Completed => "completed",
+                        crate::TurnStatus::Interrupted => "interrupted",
+                        crate::TurnStatus::Failed => "failed",
+                    };
+                    json!({
+                        "result": result_text,
+                        "context": ctx_clone.lock().unwrap().clone(),
                         "_sub_agent": {
                             "task": prompt_for_meta,
-                            "usage": cumulative_usage,
-                            "tool_calls": tool_call_count,
-                            "iterations": 0,
+                            "session_id": session_id,
+                            "turn_id": turn_id,
+                            "config": session_config,
+                            "usage": turn.token_usage,
+                            "tool_calls": turn.tool_calls.len(),
+                            "iterations": turn.state.iteration,
+                            "status": status,
                         }
-                    }));
-                    done_clone.notify_waiters();
-                    return;
+                    })
                 }
+                Err(err) => json!({
+                    "result": "",
+                    "context": [],
+                    "_sub_agent": {
+                        "task": prompt_for_meta,
+                        "session_id": session_id,
+                        "turn_id": turn_id,
+                        "config": session_config,
+                        "usage": crate::TokenUsage::default(),
+                        "tool_calls": 0,
+                        "iterations": 0,
+                        "status": "failed",
+                        "error": err.to_string(),
+                    }
+                }),
             };
-            let assembled = turn_result.ok();
-            let iterations = assembled
-                .as_ref()
-                .map(|turn| turn.state.iteration)
-                .unwrap_or(0);
 
-            let result_text = if let Some(msg) = final_message {
-                msg
-            } else if !current_prose.trim().is_empty() {
-                current_prose.trim().to_string()
-            } else {
-                ctx_clone.lock().unwrap().join("\n\n")
-            };
-
-            let context_vec = ctx_clone.lock().unwrap().clone();
-            let mut result_json = json!({"result": result_text, "context": context_vec});
-
-            result_json["_sub_agent"] = json!({
-                "task": prompt_for_meta,
-                "usage": cumulative_usage,
-                "tool_calls": tool_call_count,
-                "iterations": iterations,
-            });
+            if result_json
+                .get("result")
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| value.is_empty())
+                && !current_prose.trim().is_empty()
+            {
+                result_json["result"] = json!(current_prose.trim());
+            }
 
             *res_clone.lock().unwrap() = Some(result_json);
             done_clone.notify_waiters();
@@ -491,16 +454,22 @@ impl AgentCall {
 
         // Store the running agent
         self.agents.lock().unwrap().insert(
-            handle_id.clone(),
+            session.session_id.clone(),
             RunningAgent {
+                session_id: session.session_id.clone(),
+                turn_id: turn.turn_id,
+                host: Arc::clone(&context.host),
                 buffer,
                 result,
                 done_notify,
-                cancel: kill_token,
             },
         );
 
-        ToolResult::ok(json!({"__handle__": "agent", "id": handle_id}))
+        ToolResult::ok(json!({
+            "__handle__": "agent",
+            "id": session.session_id,
+            "config": session.config,
+        }))
     }
 
     /// Wait for agent completion and return the result.
@@ -510,10 +479,17 @@ impl AgentCall {
         timeout: Option<f64>,
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
-        let (result_arc, done_notify, buffer) = {
+        let (result_arc, done_notify, buffer, session_id, turn_id, host) = {
             let agents = self.agents.lock().unwrap();
             match agents.get(id) {
-                Some(a) => (a.result.clone(), a.done_notify.clone(), a.buffer.clone()),
+                Some(a) => (
+                    a.result.clone(),
+                    a.done_notify.clone(),
+                    a.buffer.clone(),
+                    a.session_id.clone(),
+                    a.turn_id.clone(),
+                    Arc::clone(&a.host),
+                ),
                 None => return ToolResult::err_fmt(format_args!("No agent with id: {id}")),
             }
         };
@@ -546,14 +522,11 @@ impl AgentCall {
             if let Some(dl) = deadline
                 && tokio::time::Instant::now() >= dl
             {
-                // Cancel the agent on timeout
-                let cancel = {
-                    let agents = self.agents.lock().unwrap();
-                    agents.get(id).map(|a| a.cancel.clone())
-                };
-                if let Some(c) = cancel {
-                    c.cancel();
-                }
+                let _ = host.cancel_turn(&turn_id).await;
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), done_notify.notified())
+                        .await;
+                let _ = host.close_session(&session_id).await;
                 self.agents.lock().unwrap().remove(id);
                 return ToolResult::err(json!("Agent timed out"));
             }
@@ -564,33 +537,29 @@ impl AgentCall {
             }
         }
 
-        let result = result_arc.lock().unwrap().take().unwrap_or(json!(null));
+        let result = result_arc.lock().unwrap().clone().unwrap_or(json!(null));
         ToolResult::ok(result)
     }
 
     /// Cancel a running agent.
     async fn agent_kill(&self, id: &str) -> ToolResult {
-        let cancel = {
+        let (turn_id, session_id, done_notify, host) = {
             let agents = self.agents.lock().unwrap();
             match agents.get(id) {
-                Some(a) => a.cancel.clone(),
+                Some(a) => (
+                    a.turn_id.clone(),
+                    a.session_id.clone(),
+                    a.done_notify.clone(),
+                    Arc::clone(&a.host),
+                ),
                 None => return ToolResult::err_fmt(format_args!("No agent with id: {id}")),
             }
         };
 
-        cancel.cancel();
-
-        // Wait briefly for the agent to finish
-        let done_notify = {
-            let agents = self.agents.lock().unwrap();
-            agents.get(id).map(|a| a.done_notify.clone())
-        };
-
-        if let Some(notify) = done_notify {
-            let _ =
-                tokio::time::timeout(std::time::Duration::from_secs(5), notify.notified()).await;
-        }
-
+        let _ = host.cancel_turn(&turn_id).await;
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_secs(5), done_notify.notified()).await;
+        let _ = host.close_session(&session_id).await;
         self.agents.lock().unwrap().remove(id);
         ToolResult::ok(json!(null))
     }
@@ -599,96 +568,15 @@ impl AgentCall {
 #[async_trait::async_trait]
 impl ToolProvider for AgentCall {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![
-            ToolDefinition {
-                name: "agent_call".into(),
-                description: vec![
-                    crate::ToolText::new(
-                        format!(
-                            "Spawn a sub-agent for scoped work and return a handle. In REPL mode, use `call agent_result {{ id: handle.value.id }}` or `call agent_kill {{ id: handle.value.id }}` with the returned id. Use `intelligence=\"low\"` for fast read-only work; {}. Medium/high inherit the parent execution mode and parent history/memory read-only.",
-                            self.low_tier_execution_mode_summary()
-                        ),
-                        [crate::ExecutionMode::Repl],
-                    ),
-                    crate::ToolText::new(
-                        format!(
-                            "Spawn a sub-agent for scoped work and return a handle. Use `agent_result(id)` or `agent_kill(id)` with the returned id. Use `intelligence=\"low\"` for fast read-only work; {}. Medium/high inherit the parent execution mode and parent history/memory read-only.",
-                            self.low_tier_execution_mode_summary()
-                        ),
-                        [crate::ExecutionMode::Standard],
-                    ),
-                ],
-                params: vec![
-                    ToolParam::typed("prompt", "str"),
-                    ToolParam::typed("intelligence", "str"),
-                    ToolParam {
-                        name: "schema".into(),
-                        r#type: "str".into(),
-                        description: "JSON schema to include in the agent's prompt as output guidance (not enforced at runtime)".into(),
-                        required: false,
-                    },
-                ],
-                returns: "dict".into(),
-                examples: vec![
-                    crate::ToolText::new(
-                        r#"handle = call agent_call { prompt: "Summarize the auth flow", intelligence: "low" }"#,
-                        [crate::ExecutionMode::Repl],
-                    ),
-                    crate::ToolText::new(
-                        r#"result = call agent_result { id: handle.value.id }"#,
-                        [crate::ExecutionMode::Repl],
-                    ),
-                    crate::ToolText::new(
-                        "handle = agent_call(prompt=\"Summarize the auth flow\", intelligence=\"low\")",
-                        [crate::ExecutionMode::Standard],
-                    ),
-                ],
-                hidden: false,
-        inject_into_prompt: true,
-            },
-            ToolDefinition {
-                name: "agent_result".into(),
-                description: vec![crate::ToolText::new(
-                    "Wait for a sub-agent to finish and return its final result.",
-                    [
-                        crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::Standard,
-                    ],
-                )],
-                params: vec![
-                    ToolParam::typed("id", "str"),
-                    ToolParam::optional("timeout", "float"),
-                ],
-                returns: "dict".into(),
-                examples: vec![],
-                hidden: false,
-                inject_into_prompt: true,
-            },
-            ToolDefinition {
-                name: "agent_kill".into(),
-                description: vec![crate::ToolText::new(
-                    "Cancel a running sub-agent.",
-                    [
-                        crate::ExecutionMode::Repl,
-                        crate::ExecutionMode::Standard,
-                    ],
-                )],
-                params: vec![ToolParam::typed("id", "str")],
-                returns: "None".into(),
-                examples: vec![],
-                hidden: false,
-                inject_into_prompt: true,
-            },
-        ]
-    }
-
-    fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
-        vec!["### Agent Lifecycle\n`agent_result(id)` blocks until the agent finishes and returns an object in `result.value` with fields like `result`, `context`, and `_sub_agent`. The agent ID remains valid afterwards, so you can call `agent_result` again or use `agent_kill` to clean up. Delegate progress is surfaced by the runtime and UI rather than through a separate tool call.".to_string()]
+        agent_call_definitions(
+            self.execution_mode,
+            self.tool_config.low_tier_execution_mode,
+        )
     }
 
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
         match name {
-            "agent_call" => self.spawn_agent(args).await,
+            "agent_call" => ToolResult::err_fmt("agent_call requires session context"),
             "agent_result" => {
                 let id = match require_str(args, "id") {
                     Ok(s) => s,
@@ -714,16 +602,302 @@ impl ToolProvider for AgentCall {
         args: &serde_json::Value,
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
-        if name == "agent_result" {
-            let id = match require_str(args, "id") {
-                Ok(s) => s,
-                Err(e) => return e,
-            };
-            let timeout = args.get("timeout").and_then(|v| v.as_f64());
-            self.agent_result(id, timeout, progress).await
-        } else {
-            self.execute(name, args).await
+        match name {
+            "agent_result" => {
+                let id = match require_str(args, "id") {
+                    Ok(s) => s,
+                    Err(e) => return e,
+                };
+                let timeout = args.get("timeout").and_then(|v| v.as_f64());
+                self.agent_result(id, timeout, progress).await
+            }
+            "agent_call" => ToolResult::err_fmt("agent_call requires session context"),
+            _ => self.execute(name, args).await,
         }
+    }
+
+    async fn execute_with_context(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        context: &ToolExecutionContext,
+    ) -> ToolResult {
+        match name {
+            "agent_call" => self.spawn_agent(args, context).await,
+            _ => self.execute(name, args).await,
+        }
+    }
+
+    async fn execute_streaming_with_context(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        context: &ToolExecutionContext,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        match name {
+            "agent_call" => self.spawn_agent(args, context).await,
+            "agent_result" => {
+                let id = match require_str(args, "id") {
+                    Ok(s) => s,
+                    Err(e) => return e,
+                };
+                let timeout = args.get("timeout").and_then(|v| v.as_f64());
+                self.agent_result(id, timeout, progress).await
+            }
+            _ => self.execute_with_context(name, args, context).await,
+        }
+    }
+}
+
+fn agent_call_prompt_contributions() -> Vec<PromptContribution> {
+    vec![
+        PromptContribution::guidance(
+            "### Delegation\nUse `agent_call` for scoped sub-tasks. Each delegate runs in its own session. Prefer low-intelligence delegates for read-only lookup or summarization work, and avoid overlapping file edits across concurrent delegates.",
+        ),
+        PromptContribution::guidance(
+            "### Agent Lifecycle\n`agent_result(id)` blocks until the child session finishes and returns an object in `result.value` with fields like `result`, `context`, and `_sub_agent` (including session/config metadata). The agent ID remains valid afterwards, so you can call `agent_result` again or use `agent_kill` to clean up.",
+        ),
+    ]
+}
+
+fn agent_call_definitions(
+    execution_mode: crate::ExecutionMode,
+    low_tier_execution_mode: crate::ExecutionMode,
+) -> Vec<ToolDefinition> {
+    let low_tier_summary = match low_tier_execution_mode {
+        crate::ExecutionMode::Standard => "by default, low runs in standard mode",
+        crate::ExecutionMode::Repl => "in this session, low runs in repl mode",
+    };
+    let (agent_call_description, agent_call_examples) = match execution_mode {
+        crate::ExecutionMode::Repl => (
+            format!(
+                "Spawn a child session for scoped work and return a handle. In REPL mode, use `call agent_result {{ id: handle.value.id }}` or `call agent_kill {{ id: handle.value.id }}` with the returned id. Use `intelligence=\"low\"` for fast read-only work; {}. Medium/high inherit the parent execution mode.",
+                low_tier_summary
+            ),
+            vec![
+                r#"handle = call agent_call { prompt: "Summarize the auth flow", intelligence: "low" }"#.into(),
+                r#"result = call agent_result { id: handle.value.id }"#.into(),
+            ],
+        ),
+        crate::ExecutionMode::Standard => (
+            format!(
+                "Spawn a child session for scoped work and return a handle. Use `agent_result(id)` or `agent_kill(id)` with the returned id. Use `intelligence=\"low\"` for fast read-only work; {}. Medium/high inherit the parent execution mode.",
+                low_tier_summary
+            ),
+            vec![
+                "handle = agent_call(prompt=\"Summarize the auth flow\", intelligence=\"low\")"
+                    .into(),
+            ],
+        ),
+    };
+    vec![
+        ToolDefinition {
+            name: "agent_call".into(),
+            description: agent_call_description,
+            params: vec![
+                ToolParam::typed("prompt", "str"),
+                ToolParam::typed("intelligence", "str"),
+                ToolParam {
+                    name: "schema".into(),
+                    r#type: "str".into(),
+                    description: "JSON schema to include in the agent's prompt as output guidance (not enforced at runtime)".into(),
+                    required: false,
+                },
+            ],
+            returns: "dict".into(),
+            examples: agent_call_examples,
+            enabled: true,
+            injected: true,
+        },
+        ToolDefinition {
+            name: "agent_result".into(),
+            description: "Wait for a child session to finish and return its final result.".into(),
+            params: vec![
+                ToolParam::typed("id", "str"),
+                ToolParam::optional("timeout", "float"),
+            ],
+            returns: "dict".into(),
+            examples: vec![],
+            enabled: true,
+            injected: true,
+        },
+        ToolDefinition {
+            name: "agent_kill".into(),
+            description: "Cancel a running child session.".into(),
+            params: vec![ToolParam::typed("id", "str")],
+            returns: "None".into(),
+            examples: vec![],
+            enabled: true,
+            injected: true,
+        },
+    ]
+}
+
+struct AgentCallPluginProvider {
+    config: AgentConfig,
+    execution_mode: crate::ExecutionMode,
+    tool_config: AgentCallConfig,
+    agent_models: Option<AgentModels>,
+    delegate: StdMutex<Option<Arc<AgentCall>>>,
+}
+
+impl AgentCallPluginProvider {
+    fn bind(&self, session: Arc<PluginSession>) {
+        let delegate = AgentCall::new(
+            session,
+            &self.config,
+            self.tool_config,
+            self.agent_models.clone(),
+        );
+        *self
+            .delegate
+            .lock()
+            .expect("agent_call delegate lock poisoned") = Some(Arc::new(delegate));
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolProvider for AgentCallPluginProvider {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        agent_call_definitions(
+            self.execution_mode,
+            self.tool_config.low_tier_execution_mode,
+        )
+    }
+
+    async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
+        let delegate = self
+            .delegate
+            .lock()
+            .expect("agent_call delegate lock poisoned")
+            .clone();
+        let Some(delegate) = delegate else {
+            return ToolResult::err_fmt("agent_call plugin is not ready");
+        };
+        delegate.execute(name, args).await
+    }
+
+    async fn execute_with_context(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        context: &ToolExecutionContext,
+    ) -> ToolResult {
+        let delegate = self
+            .delegate
+            .lock()
+            .expect("agent_call delegate lock poisoned")
+            .clone();
+        let Some(delegate) = delegate else {
+            return ToolResult::err_fmt("agent_call plugin is not ready");
+        };
+        delegate.execute_with_context(name, args, context).await
+    }
+
+    async fn execute_streaming(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        let delegate = self
+            .delegate
+            .lock()
+            .expect("agent_call delegate lock poisoned")
+            .clone();
+        let Some(delegate) = delegate else {
+            return ToolResult::err_fmt("agent_call plugin is not ready");
+        };
+        delegate.execute_streaming(name, args, progress).await
+    }
+
+    async fn execute_streaming_with_context(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        context: &ToolExecutionContext,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        let delegate = self
+            .delegate
+            .lock()
+            .expect("agent_call delegate lock poisoned")
+            .clone();
+        let Some(delegate) = delegate else {
+            return ToolResult::err_fmt("agent_call plugin is not ready");
+        };
+        delegate
+            .execute_streaming_with_context(name, args, context, progress)
+            .await
+    }
+}
+
+pub struct AgentCallPluginFactory {
+    config: AgentConfig,
+    tool_config: AgentCallConfig,
+    agent_models: Option<AgentModels>,
+}
+
+impl AgentCallPluginFactory {
+    pub fn new(
+        config: AgentConfig,
+        tool_config: AgentCallConfig,
+        agent_models: Option<AgentModels>,
+    ) -> Self {
+        Self {
+            config,
+            tool_config,
+            agent_models,
+        }
+    }
+}
+
+impl PluginFactory for AgentCallPluginFactory {
+    fn id(&self) -> &'static str {
+        "agent_call"
+    }
+
+    fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        let mut config = self.config.clone();
+        config.execution_mode = ctx.execution_mode;
+        Ok(Arc::new(AgentCallPlugin {
+            provider: Arc::new(AgentCallPluginProvider {
+                config,
+                execution_mode: ctx.execution_mode,
+                tool_config: self.tool_config,
+                agent_models: self.agent_models.clone(),
+                delegate: StdMutex::new(None),
+            }),
+        }))
+    }
+}
+
+struct AgentCallPlugin {
+    provider: Arc<AgentCallPluginProvider>,
+}
+
+impl SessionPlugin for AgentCallPlugin {
+    fn id(&self) -> &'static str {
+        "agent_call"
+    }
+
+    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
+        reg.tools()
+            .provider(Arc::clone(&self.provider) as Arc<dyn ToolProvider>)?;
+        reg.prompt().contribute(Arc::new(|_ctx| {
+            Box::pin(async move { Ok(agent_call_prompt_contributions()) })
+        }));
+        Ok(())
+    }
+
+    fn session_ready(&self, ctx: SessionReadyContext) -> Result<(), PluginError> {
+        let session = ctx
+            .host
+            .session(&ctx.agent_id)
+            .map_err(|err| PluginError::Session(err.to_string()))?;
+        self.provider.bind(session);
+        Ok(())
     }
 }
 
@@ -731,6 +905,154 @@ impl ToolProvider for AgentCall {
 mod tests {
     use super::*;
     use crate::provider::Provider;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct MockSessionManager {
+        created: Mutex<Vec<crate::SessionCreateRequest>>,
+        cancelled: Mutex<Vec<String>>,
+        closed: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::SessionManager for MockSessionManager {
+        async fn snapshot_current(&self) -> Result<crate::SessionSnapshot, crate::PluginError> {
+            Ok(crate::AgentStateEnvelope::default())
+        }
+
+        async fn snapshot_session(
+            &self,
+            _session_id: &str,
+        ) -> Result<crate::SessionSnapshot, crate::PluginError> {
+            Ok(crate::AgentStateEnvelope::default())
+        }
+
+        async fn tool_catalog(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<serde_json::Value>, crate::PluginError> {
+            Ok(Vec::new())
+        }
+
+        async fn create_session(
+            &self,
+            request: crate::SessionCreateRequest,
+        ) -> Result<crate::SessionHandle, crate::PluginError> {
+            self.created.lock().unwrap().push(request.clone());
+            Ok(crate::SessionHandle {
+                session_id: "child-session".to_string(),
+                config: crate::SessionConfigSnapshot {
+                    provider_kind: crate::provider::ProviderKind::Codex,
+                    model: request
+                        .config_overrides
+                        .model
+                        .unwrap_or_else(|| "mock-model".to_string()),
+                    model_variant: request.config_overrides.model_variant,
+                    execution_mode: request
+                        .config_overrides
+                        .execution_mode
+                        .unwrap_or(crate::ExecutionMode::Standard),
+                    context_folding: request.config_overrides.context_folding.unwrap_or_default(),
+                    context_window: request
+                        .config_overrides
+                        .max_context_tokens
+                        .map(|tokens| tokens as u64),
+                    max_turns: request.config_overrides.max_turns.map(|turns| turns as u64),
+                    include_soul: request.config_overrides.include_soul.unwrap_or(false),
+                    sub_agent: request.config_overrides.sub_agent.unwrap_or(false),
+                },
+            })
+        }
+
+        async fn close_session(&self, session_id: &str) -> Result<(), crate::PluginError> {
+            self.closed.lock().unwrap().push(session_id.to_string());
+            Ok(())
+        }
+
+        async fn start_turn_stream(
+            &self,
+            session_id: &str,
+            _input: crate::TurnInput,
+        ) -> Result<crate::plugin::SessionTurnHandle, crate::PluginError> {
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let _ = tx
+                    .send(crate::AgentEvent::TextDelta {
+                        content: "delegate".to_string(),
+                    })
+                    .await;
+                let _ = tx
+                    .send(crate::AgentEvent::Message {
+                        text: "delegate result".to_string(),
+                        kind: "final".to_string(),
+                    })
+                    .await;
+            });
+            Ok(crate::plugin::SessionTurnHandle {
+                turn_id: "turn-1".to_string(),
+                session_id: session_id.to_string(),
+                config: crate::SessionConfigSnapshot {
+                    provider_kind: crate::provider::ProviderKind::Codex,
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    model_variant: Some("low".to_string()),
+                    execution_mode: crate::ExecutionMode::Standard,
+                    context_folding: crate::ContextFoldingConfig::default(),
+                    context_window: Some(128_000),
+                    max_turns: None,
+                    include_soul: false,
+                    sub_agent: true,
+                },
+                events: rx,
+            })
+        }
+
+        async fn await_turn(
+            &self,
+            _turn_id: &str,
+        ) -> Result<crate::AssembledTurn, crate::PluginError> {
+            Ok(crate::AssembledTurn {
+                state: crate::AgentStateEnvelope {
+                    agent_id: "child-session".to_string(),
+                    execution_mode: crate::ExecutionMode::Standard,
+                    context_folding: crate::ContextFoldingConfig::default(),
+                    iteration: 2,
+                    ..Default::default()
+                },
+                status: crate::TurnStatus::Completed,
+                assistant_output: crate::AssistantOutput {
+                    safe_text: "delegate result".to_string(),
+                    raw_text: "delegate result".to_string(),
+                    state: crate::OutputState::Usable,
+                },
+                done_reason: crate::DoneReason::ModelStop,
+                execution: crate::ExecutionSummary {
+                    mode: crate::ExecutionMode::Standard,
+                    had_tool_calls: true,
+                    had_code_execution: false,
+                },
+                token_usage: crate::TokenUsage {
+                    input_tokens: 3,
+                    output_tokens: 4,
+                    cached_input_tokens: 0,
+                    reasoning_tokens: 2,
+                },
+                tool_calls: vec![crate::ToolCallRecord {
+                    tool: "read_file".to_string(),
+                    args: json!({"path":"foo"}),
+                    result: json!("bar"),
+                    success: true,
+                    duration_ms: 12,
+                }],
+                code_outputs: Vec::new(),
+                errors: Vec::new(),
+            })
+        }
+
+        async fn cancel_turn(&self, turn_id: &str) -> Result<(), crate::PluginError> {
+            self.cancelled.lock().unwrap().push(turn_id.to_string());
+            Ok(())
+        }
+    }
 
     fn codex_provider() -> Provider {
         Provider::Codex {
@@ -738,6 +1060,7 @@ mod tests {
             refresh_token: "ref".into(),
             expires_at: u64::MAX,
             account_id: Some("acct".into()),
+            options: crate::provider::ProviderOptions::default(),
         }
     }
 
@@ -782,28 +1105,35 @@ mod tests {
 
     #[test]
     fn agent_call_docs_are_mode_specific() {
-        let defs = test_agent_call().definitions();
-        let agent_call = defs
+        let repl = test_agent_call(crate::ExecutionMode::Repl)
+            .definitions()
+            .into_iter()
+            .find(|def| def.name == "agent_call")
+            .expect("agent_call definition");
+        let standard = test_agent_call(crate::ExecutionMode::Standard)
+            .definitions()
             .into_iter()
             .find(|def| def.name == "agent_call")
             .expect("agent_call definition");
 
-        let repl_desc = agent_call.description_for(crate::ExecutionMode::Repl);
-        let standard_desc = agent_call.description_for(crate::ExecutionMode::Standard);
-
-        assert!(repl_desc.contains("return a handle"));
-        assert!(repl_desc.contains("call agent_result { id: handle.value.id }"));
-        assert!(!standard_desc.contains("AgentHandle"));
+        assert!(repl.description.contains("return a handle"));
+        assert!(
+            repl.description
+                .contains("call agent_result { id: handle.value.id }")
+        );
+        assert!(!standard.description.contains("AgentHandle"));
+        assert!(
+            !standard
+                .description
+                .contains("call agent_result { id: handle.value.id }")
+        );
     }
 
     #[test]
     fn agent_lifecycle_tools_are_prompt_injected() {
-        let defs = test_agent_call().definitions();
+        let defs = test_agent_call(crate::ExecutionMode::Standard).definitions();
         for name in ["agent_call", "agent_result", "agent_kill"] {
-            assert!(
-                defs.iter()
-                    .any(|def| def.name == name && def.inject_into_prompt)
-            );
+            assert!(defs.iter().any(|def| def.name == name && def.injected));
         }
     }
 
@@ -815,39 +1145,30 @@ mod tests {
             vec![
                 ToolDefinition {
                     name: "mock_base".into(),
-                    description: vec![crate::ToolText::new(
-                        "mock",
-                        [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-                    )],
+                    description: "mock".into(),
                     params: vec![],
                     returns: "None".into(),
                     examples: vec![],
-                    hidden: false,
-                    inject_into_prompt: true,
+                    enabled: true,
+                    injected: true,
                 },
                 ToolDefinition {
                     name: "read_file".into(),
-                    description: vec![crate::ToolText::new(
-                        "mock read",
-                        [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-                    )],
+                    description: "mock read".into(),
                     params: vec![],
                     returns: "str".into(),
                     examples: vec![],
-                    hidden: false,
-                    inject_into_prompt: true,
+                    enabled: true,
+                    injected: true,
                 },
                 ToolDefinition {
                     name: "apply_patch".into(),
-                    description: vec![crate::ToolText::new(
-                        "mock patch",
-                        [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-                    )],
+                    description: "mock patch".into(),
                     params: vec![],
                     returns: "None".into(),
                     examples: vec![],
-                    hidden: false,
-                    inject_into_prompt: true,
+                    enabled: true,
+                    injected: true,
                 },
             ]
         }
@@ -857,30 +1178,38 @@ mod tests {
         }
     }
 
-    fn test_agent_call() -> AgentCall {
+    fn test_agent_call(execution_mode: crate::ExecutionMode) -> AgentCall {
         let config = AgentConfig {
             model: "custom-parent-model".to_string(),
             provider: codex_provider(),
+            execution_mode,
             ..Default::default()
         };
-        let plugins = crate::PluginHost::empty()
-            .build_session("root", None)
-            .expect("plugins");
-        AgentCall::new(
-            Arc::new(MockBaseTool),
-            plugins,
-            &config,
-            AgentCallConfig::default(),
-            None,
-            CancellationToken::new(),
-        )
+        let plugins = crate::PluginHost::new(vec![
+            Arc::new(crate::PluginSpecFactory::new(
+                "mock_base",
+                Arc::new(|_ctx| {
+                    Ok(crate::PluginSpec::new()
+                        .with_tool_provider(Arc::new(MockBaseTool) as Arc<dyn ToolProvider>))
+                }),
+            )),
+            Arc::new(AgentCallPluginFactory::new(
+                config.clone(),
+                AgentCallConfig::default(),
+                None,
+            )),
+        ])
+        .build_session("root", execution_mode, None)
+        .expect("plugins");
+        AgentCall::new(plugins, &config, AgentCallConfig::default(), None)
     }
 
     #[test]
     fn low_tier_subagent_tools_do_not_include_agent_call() {
-        let agent_call = test_agent_call();
-        let tools = agent_call.session_tools_for_tier(&Tier::Low);
-        let tool_names: Vec<String> = tools.definitions().into_iter().map(|d| d.name).collect();
+        let agent_call = test_agent_call(crate::ExecutionMode::Standard);
+        let tool_names = agent_call
+            .visible_tool_names_for_tier(&Tier::Low)
+            .expect("tier tools");
         assert!(!tool_names.iter().any(|n| n == "agent_call"));
         assert!(tool_names.iter().any(|n| n == "mock_base"));
         assert!(tool_names.iter().any(|n| n == "read_file"));
@@ -889,24 +1218,18 @@ mod tests {
 
     #[test]
     fn medium_and_high_tier_subagent_tools_include_agent_call() {
-        let agent_call = test_agent_call();
+        let agent_call = test_agent_call(crate::ExecutionMode::Standard);
 
-        let medium_tools = agent_call.session_tools_for_tier(&Tier::Medium);
-        let medium_names: Vec<String> = medium_tools
-            .definitions()
-            .into_iter()
-            .map(|d| d.name)
-            .collect();
+        let medium_names = agent_call
+            .visible_tool_names_for_tier(&Tier::Medium)
+            .expect("medium tools");
         assert!(medium_names.iter().any(|n| n == "agent_call"));
         assert!(medium_names.iter().any(|n| n == "mock_base"));
         assert!(medium_names.iter().any(|n| n == "apply_patch"));
 
-        let high_tools = agent_call.session_tools_for_tier(&Tier::High);
-        let high_names: Vec<String> = high_tools
-            .definitions()
-            .into_iter()
-            .map(|d| d.name)
-            .collect();
+        let high_names = agent_call
+            .visible_tool_names_for_tier(&Tier::High)
+            .expect("high tools");
         assert!(high_names.iter().any(|n| n == "agent_call"));
         assert!(high_names.iter().any(|n| n == "mock_base"));
         assert!(high_names.iter().any(|n| n == "apply_patch"));
@@ -914,11 +1237,9 @@ mod tests {
 
     #[test]
     fn low_tier_subagent_config_is_read_only() {
-        let agent_call = test_agent_call();
+        let agent_call = test_agent_call(crate::ExecutionMode::Standard);
         let low = agent_call.build_agent_config(&Tier::Low);
         let medium = agent_call.build_agent_config(&Tier::Medium);
-        assert!(!low.capabilities.enabled(CapabilityId::CoreWrite));
-        assert!(medium.capabilities.enabled(CapabilityId::CoreWrite));
         assert_eq!(
             low.execution_mode,
             AgentCallConfig::default().low_tier_execution_mode
@@ -932,18 +1253,31 @@ mod tests {
             execution_mode: crate::ExecutionMode::Standard,
             ..AgentConfig::default()
         };
-        let plugins = crate::PluginHost::empty()
-            .build_session("root", None)
-            .expect("plugins");
+        let plugins = crate::PluginHost::new(vec![
+            Arc::new(crate::PluginSpecFactory::new(
+                "mock_base",
+                Arc::new(|_ctx| {
+                    Ok(crate::PluginSpec::new()
+                        .with_tool_provider(Arc::new(MockBaseTool) as Arc<dyn ToolProvider>))
+                }),
+            )),
+            Arc::new(AgentCallPluginFactory::new(
+                config.clone(),
+                AgentCallConfig {
+                    low_tier_execution_mode: crate::ExecutionMode::Repl,
+                },
+                None,
+            )),
+        ])
+        .build_standard_session("root", None)
+        .expect("plugins");
         let agent_call = AgentCall::new(
-            Arc::new(MockBaseTool),
             plugins,
             &config,
             AgentCallConfig {
                 low_tier_execution_mode: crate::ExecutionMode::Repl,
             },
             None,
-            CancellationToken::new(),
         );
 
         let low = agent_call.build_agent_config(&Tier::Low);
@@ -951,5 +1285,100 @@ mod tests {
 
         assert_eq!(low.execution_mode, crate::ExecutionMode::Repl);
         assert_eq!(medium.execution_mode, crate::ExecutionMode::Standard);
+    }
+
+    #[tokio::test]
+    async fn agent_call_uses_session_manager_and_returns_child_session_metadata() {
+        let agent_call = test_agent_call(crate::ExecutionMode::Standard);
+        let host = Arc::new(MockSessionManager::default());
+        let context = crate::ToolExecutionContext {
+            session_id: "root".to_string(),
+            host: host.clone(),
+        };
+
+        let handle = agent_call
+            .execute_with_context(
+                "agent_call",
+                &json!({
+                    "prompt": "Summarize the auth flow",
+                    "intelligence": "low"
+                }),
+                &context,
+            )
+            .await;
+
+        assert!(handle.success);
+        assert_eq!(
+            handle.result.get("id").and_then(|value| value.as_str()),
+            Some("child-session")
+        );
+        assert_eq!(
+            handle
+                .result
+                .get("config")
+                .and_then(|value| value.get("sub_agent"))
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+
+        let result = agent_call
+            .execute_streaming_with_context(
+                "agent_result",
+                &json!({ "id": "child-session" }),
+                &context,
+                None,
+            )
+            .await;
+
+        assert!(result.success);
+        assert_eq!(
+            result.result.get("result").and_then(|value| value.as_str()),
+            Some("delegate result")
+        );
+        assert_eq!(
+            result
+                .result
+                .get("_sub_agent")
+                .and_then(|value| value.get("session_id"))
+                .and_then(|value| value.as_str()),
+            Some("child-session")
+        );
+        assert_eq!(
+            result
+                .result
+                .get("_sub_agent")
+                .and_then(|value| value.get("status"))
+                .and_then(|value| value.as_str()),
+            Some("completed")
+        );
+
+        let repeated = agent_call
+            .execute_streaming_with_context(
+                "agent_result",
+                &json!({ "id": "child-session" }),
+                &context,
+                None,
+            )
+            .await;
+        assert!(repeated.success);
+        assert_eq!(
+            repeated
+                .result
+                .get("result")
+                .and_then(|value| value.as_str()),
+            Some("delegate result")
+        );
+
+        let created = host.created.lock().unwrap();
+        assert_eq!(created.len(), 1);
+        assert_eq!(
+            created[0]
+                .tool_surface
+                .overrides
+                .iter()
+                .find(|override_| override_.tool_name == "apply_patch")
+                .and_then(|override_| override_.enabled),
+            Some(false)
+        );
     }
 }

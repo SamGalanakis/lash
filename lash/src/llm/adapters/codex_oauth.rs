@@ -2,7 +2,10 @@ use async_trait::async_trait;
 use base64::Engine;
 use serde_json::{Value, json};
 
-use crate::llm::adapters::streaming::{drive_sse_response, emit_progress, stream_chunk_timeout};
+use crate::llm::adapters::streaming::{drive_sse_response, emit_progress};
+use crate::llm::timeouts::{
+    LlmTimeouts, build_http_client, read_response_text, response_start_timeout, send_request,
+};
 use crate::llm::transport::{LlmTransport, LlmTransportError};
 use crate::llm::types::{
     LlmOutputPart, LlmPromptPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage, ModelSelection,
@@ -11,18 +14,22 @@ use crate::provider::Provider;
 
 pub struct CodexOAuthAdapter {
     client: reqwest::Client,
+    request_timeout: Option<std::time::Duration>,
+    chunk_timeout: std::time::Duration,
 }
 
 impl Default for CodexOAuthAdapter {
     fn default() -> Self {
-        Self::new()
+        Self::new(LlmTimeouts::default())
     }
 }
 
 impl CodexOAuthAdapter {
-    pub fn new() -> Self {
+    pub fn new(timeouts: LlmTimeouts) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: build_http_client(),
+            request_timeout: timeouts.request_timeout,
+            chunk_timeout: timeouts.chunk_timeout,
         }
     }
 
@@ -463,14 +470,23 @@ impl LlmTransport for CodexOAuthAdapter {
             http = http.header("ChatGPT-Account-Id", id);
         }
 
-        let resp = http
-            .send()
-            .await
-            .map_err(|e| LlmTransportError::new(format!("HTTP request failed: {e}")))?;
+        let resp = send_request(
+            http,
+            response_start_timeout(
+                self.request_timeout,
+                self.chunk_timeout,
+                stream_events.is_some(),
+            ),
+            "Codex response start timed out",
+        )
+        .await?;
 
         let status = resp.status();
         if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
+            let text =
+                read_response_text(resp, self.request_timeout, "Codex response body timed out")
+                    .await
+                    .unwrap_or_default();
             return Err(LlmTransportError {
                 message: format!("Codex request failed with {}", status.as_u16()),
                 retryable: status.as_u16() == 429 || status.as_u16() >= 500,
@@ -487,7 +503,9 @@ impl LlmTransport for CodexOAuthAdapter {
             .unwrap_or(false);
 
         if !is_sse {
-            let text = resp.text().await.unwrap_or_default();
+            let text =
+                read_response_text(resp, self.request_timeout, "Codex response body timed out")
+                    .await?;
             if Self::looks_like_sse_payload(&text) {
                 let mut full = String::new();
                 let mut deltas = Vec::new();
@@ -564,7 +582,7 @@ impl LlmTransport for CodexOAuthAdapter {
         let mut final_response = None;
         drive_sse_response(
             resp,
-            stream_chunk_timeout(),
+            self.chunk_timeout,
             "Codex stream chunk timed out",
             |raw| {
                 let prev_len = deltas.len();
@@ -711,7 +729,7 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
 
     #[test]
     fn codex_transport_requires_streaming() {
-        let adapter = CodexOAuthAdapter::new();
+        let adapter = CodexOAuthAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
         assert!(LlmTransport::requires_streaming(&adapter));
     }
 

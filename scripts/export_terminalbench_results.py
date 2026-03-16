@@ -13,6 +13,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("job_dir", type=Path)
     parser.add_argument("--results-dir", type=Path, required=True)
+    parser.add_argument("--agent", required=True)
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--execution-mode", required=True)
     parser.add_argument("--requested-model")
@@ -22,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-concurrent", type=int, required=True)
     parser.add_argument("--attempts", type=int, required=True)
     parser.add_argument("--timeout-multiplier", type=float, required=True)
-    parser.add_argument("--binary-path", required=True)
+    parser.add_argument("--binary-path")
     parser.add_argument("--provider-config", type=Path)
     parser.add_argument("--delete-after-run", action="store_true")
     parser.add_argument("--debug", action="store_true")
@@ -39,6 +40,7 @@ def main() -> int:
         ExportArgs(
             job_dir=ns.job_dir,
             results_dir=ns.results_dir,
+            agent=ns.agent,
             dataset=ns.dataset,
             execution_mode=ns.execution_mode,
             requested_model=ns.requested_model,

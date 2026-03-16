@@ -180,6 +180,7 @@ mod tests {
             refresh_token: "ref".into(),
             expires_at: u64::MAX,
             account_id: None,
+            options: crate::provider::ProviderOptions::default(),
         }
     }
 
@@ -188,6 +189,7 @@ mod tests {
             access_token: "tok".into(),
             refresh_token: "ref".into(),
             expires_at: u64::MAX,
+            options: crate::provider::ProviderOptions::default(),
         }
     }
 
@@ -197,6 +199,7 @@ mod tests {
             refresh_token: "ref".into(),
             expires_at: u64::MAX,
             project_id: None,
+            options: crate::provider::ProviderOptions::default(),
         }
     }
 
@@ -204,6 +207,7 @@ mod tests {
         Provider::OpenAiGeneric {
             api_key: "key".into(),
             base_url: OPENAI_GENERIC_DEFAULT_BASE_URL.into(),
+            options: crate::provider::ProviderOptions::default(),
         }
     }
 

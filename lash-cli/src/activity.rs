@@ -12,7 +12,6 @@ pub enum ActivityKind {
     Edit,
     Delegate,
     PlanUpdate,
-    SkillAction,
     Parallel,
     GenericTool,
 }
@@ -108,7 +107,67 @@ impl ActivityState {
         success: bool,
         duration_ms: u64,
     ) -> Vec<ActivityBlock> {
+        if name == "batch" {
+            let blocks = self.blocks_for_batch_tool_call(&args, &result);
+            if !blocks.is_empty() {
+                return blocks;
+            }
+        }
         vec![self.block_for_single_tool_call(name, args, result, success, duration_ms)]
+    }
+
+    fn blocks_for_batch_tool_call(&mut self, args: &Value, result: &Value) -> Vec<ActivityBlock> {
+        let Some(results) = result.get("results").and_then(|value| value.as_array()) else {
+            return Vec::new();
+        };
+        let calls = args
+            .get("tool_calls")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        results
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let child_name = item
+                    .get("tool")
+                    .and_then(|value| value.as_str())
+                    .or_else(|| {
+                        calls
+                            .get(index)
+                            .and_then(|value| value.get("tool"))
+                            .and_then(|value| value.as_str())
+                    })
+                    .unwrap_or("tool");
+                let child_args = calls
+                    .get(index)
+                    .and_then(|value| value.get("parameters"))
+                    .cloned()
+                    .unwrap_or_else(|| Value::Object(Default::default()));
+                let child_success = item
+                    .get("success")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                let child_duration = item
+                    .get("duration_ms")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0);
+                let child_result = if child_success {
+                    item.get("result").cloned().unwrap_or(Value::Null)
+                } else {
+                    item.get("error").cloned().unwrap_or(Value::Null)
+                };
+
+                self.block_for_single_tool_call(
+                    child_name,
+                    child_args,
+                    child_result,
+                    child_success,
+                    child_duration,
+                )
+            })
+            .collect()
     }
 
     fn block_for_single_tool_call(
@@ -182,34 +241,6 @@ impl ActivityState {
                         subject,
                     },
                 )
-            }
-            "shell" => {
-                let command = tool_arg_str(&args, "command")
-                    .unwrap_or("shell")
-                    .to_string();
-                if success && let Some(id) = tool_result_handle_id(&result) {
-                    self.shell_handles.insert(id.to_string(), command.clone());
-                }
-                let detail_lines = if status == ActivityStatus::Failed {
-                    tool_arg_str(&args, "workdir")
-                        .map(|workdir| vec![format!("In {}", workdir)])
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-                ActivityBlock {
-                    kind: ActivityKind::ShellCommand,
-                    status,
-                    tool_name: name.to_string(),
-                    summary: shell_start_summary(&command, status),
-                    detail_lines,
-                    duration_ms,
-                    args,
-                    result,
-                    artifact: None,
-                    children: Vec::new(),
-                    extra: None,
-                }
             }
             "exec_command" => {
                 let command = tool_arg_str(&args, "cmd")
@@ -307,194 +338,12 @@ impl ActivityState {
                     extra: None,
                 }
             }
-            "shell_wait" => {
-                let handle_id = tool_arg_str(&args, "id").unwrap_or_default().to_string();
-                let command = self
-                    .shell_handles
-                    .get(&handle_id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("shell {}", handle_id));
-                let running = shell_result_running(&result);
-                let exit_code = shell_result_exit_code(&result);
-                if !running {
-                    self.shell_handles.remove(&handle_id);
-                }
-                let status = if !success || exit_code.is_some_and(|value| value != 0) {
-                    ActivityStatus::Failed
-                } else {
-                    ActivityStatus::Completed
-                };
-                let mut detail_lines = Vec::new();
-                if shell_result_timed_out(&result) {
-                    detail_lines.push("Timed out; handle still running".to_string());
-                }
-                let artifact = shell_output_artifact(&result);
-                ActivityBlock {
-                    kind: ActivityKind::ShellCommand,
-                    status,
-                    tool_name: name.to_string(),
-                    summary: shell_wait_summary(&command, &result, status),
-                    detail_lines,
-                    duration_ms,
-                    args,
-                    result,
-                    artifact,
-                    children: Vec::new(),
-                    extra: None,
-                }
-            }
-            "shell_read" => {
-                let handle_id = tool_arg_str(&args, "id").unwrap_or_default().to_string();
-                let command = self
-                    .shell_handles
-                    .get(&handle_id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("shell {}", handle_id));
-                let exit_code = shell_result_exit_code(&result);
-                let status = if !success || exit_code.is_some_and(|value| value != 0) {
-                    ActivityStatus::Failed
-                } else {
-                    ActivityStatus::Completed
-                };
-                let artifact = shell_output_artifact(&result);
-                ActivityBlock {
-                    kind: ActivityKind::ShellInteraction,
-                    status,
-                    tool_name: name.to_string(),
-                    summary: shell_read_summary(&command, &result, status),
-                    detail_lines: Vec::new(),
-                    duration_ms,
-                    args,
-                    result,
-                    artifact,
-                    children: Vec::new(),
-                    extra: None,
-                }
-            }
-            "shell_write" => {
-                let handle_id = tool_arg_str(&args, "id").unwrap_or_default().to_string();
-                let command = self
-                    .shell_handles
-                    .get(&handle_id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("shell {}", handle_id));
-                let input = tool_arg_str(&args, "input")
-                    .map(inline_text)
-                    .unwrap_or_else(|| "stdin".to_string());
-                let exit_code = shell_result_exit_code(&result);
-                let running = shell_result_running(&result);
-                if exit_code.is_some() {
-                    self.shell_handles.remove(&handle_id);
-                } else if running && !handle_id.is_empty() {
-                    self.shell_handles
-                        .entry(handle_id.clone())
-                        .or_insert_with(|| command.clone());
-                }
-                let status = if !success || exit_code.is_some_and(|value| value != 0) {
-                    ActivityStatus::Failed
-                } else {
-                    ActivityStatus::Completed
-                };
-                let artifact = shell_output_artifact(&result);
-                ActivityBlock {
-                    kind: ActivityKind::ShellInteraction,
-                    status,
-                    tool_name: name.to_string(),
-                    summary: shell_write_summary(&command, &input, &result, status),
-                    detail_lines: if status == ActivityStatus::Failed {
-                        vec![format!("Input {}", input)]
-                    } else {
-                        Vec::new()
-                    },
-                    duration_ms,
-                    args,
-                    result,
-                    artifact,
-                    children: Vec::new(),
-                    extra: None,
-                }
-            }
-            "shell_kill" => {
-                let handle_id = tool_arg_str(&args, "id").unwrap_or_default().to_string();
-                let command = self
-                    .shell_handles
-                    .remove(&handle_id)
-                    .unwrap_or_else(|| format!("shell {}", handle_id));
-                ActivityBlock {
-                    kind: ActivityKind::ShellInteraction,
-                    status,
-                    tool_name: name.to_string(),
-                    summary: format!("stopped {}", inline_text(&command)),
-                    detail_lines: Vec::new(),
-                    duration_ms,
-                    args,
-                    result,
-                    artifact: None,
-                    children: Vec::new(),
-                    extra: None,
-                }
-            }
             "search_history" => ActivityBlock {
                 kind: ActivityKind::GenericTool,
                 status,
                 tool_name: name.to_string(),
                 summary: history_search_summary(&args),
                 detail_lines: history_search_detail_lines(&result),
-                duration_ms,
-                args,
-                artifact: None,
-                children: Vec::new(),
-                extra: None,
-                result,
-            },
-            "search_mem" => ActivityBlock {
-                kind: ActivityKind::GenericTool,
-                status,
-                tool_name: name.to_string(),
-                summary: memory_search_summary(&args),
-                detail_lines: memory_search_detail_lines(&result),
-                duration_ms,
-                args,
-                artifact: None,
-                children: Vec::new(),
-                extra: None,
-                result,
-            },
-            "mem_set" => ActivityBlock {
-                kind: ActivityKind::GenericTool,
-                status,
-                tool_name: name.to_string(),
-                summary: memory_set_summary(&args),
-                detail_lines: memory_set_detail_lines(&args),
-                duration_ms,
-                args,
-                artifact: None,
-                children: Vec::new(),
-                extra: None,
-                result,
-            },
-            "mem_get" => ActivityBlock {
-                kind: ActivityKind::GenericTool,
-                status,
-                tool_name: name.to_string(),
-                summary: memory_get_summary(&args, &result),
-                detail_lines: memory_entry_detail_lines(&result),
-                duration_ms,
-                args,
-                artifact: None,
-                children: Vec::new(),
-                extra: None,
-                result,
-            },
-            "mem_delete" => ActivityBlock {
-                kind: ActivityKind::GenericTool,
-                status,
-                tool_name: name.to_string(),
-                summary: format!(
-                    "deleted memory {}",
-                    tool_arg_str(&args, "key").unwrap_or("key")
-                ),
-                detail_lines: Vec::new(),
                 duration_ms,
                 args,
                 artifact: None,
@@ -691,45 +540,6 @@ impl ActivityState {
                 extra: None,
                 result,
             },
-            "search_skills" => ActivityBlock {
-                kind: ActivityKind::SkillAction,
-                status,
-                tool_name: name.to_string(),
-                summary: skill_search_summary(&args),
-                detail_lines: skill_search_detail_lines(&result),
-                duration_ms,
-                args,
-                artifact: None,
-                children: Vec::new(),
-                extra: None,
-                result,
-            },
-            "load_skill" => ActivityBlock {
-                kind: ActivityKind::SkillAction,
-                status,
-                tool_name: name.to_string(),
-                summary: load_skill_summary(&args, &result),
-                detail_lines: load_skill_detail_lines(&result),
-                duration_ms,
-                args,
-                artifact: None,
-                children: Vec::new(),
-                extra: None,
-                result,
-            },
-            "read_skill_file" => ActivityBlock {
-                kind: ActivityKind::SkillAction,
-                status,
-                tool_name: name.to_string(),
-                summary: read_skill_file_summary(&args),
-                detail_lines: Vec::new(),
-                duration_ms,
-                args,
-                artifact: text_preview_artifact(Some("Skill file"), &result),
-                children: Vec::new(),
-                extra: None,
-                result,
-            },
             _ => ActivityBlock {
                 kind: ActivityKind::GenericTool,
                 status,
@@ -797,13 +607,8 @@ fn rebuild_exploration_summary(block: &mut ActivityBlock) {
     let Some(ActivityExtra::Exploration(ops)) = block.extra.as_ref() else {
         return;
     };
-    let detail_lines = exploration_detail_lines(ops);
-    let summary_bits = detail_lines
-        .iter()
-        .map(|line| line.to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    block.summary = format!("explored · {}", summary_bits.join(", "));
-    block.detail_lines = detail_lines;
+    block.summary = "EXPLORE".to_string();
+    block.detail_lines = exploration_detail_lines(ops);
 }
 
 fn semantic_tool_summary(name: &str, args: &Value) -> String {
@@ -835,13 +640,6 @@ fn semantic_tool_summary(name: &str, args: &Value) -> String {
                 }
             })
             .unwrap_or_else(|| "write to command".to_string()),
-        "shell" => tool_arg_str(args, "command")
-            .map(|cmd| format!("shell {}", inline_text(cmd)))
-            .unwrap_or_else(|| "shell".to_string()),
-        "shell_wait" => "wait for shell".to_string(),
-        "shell_read" => "read shell output".to_string(),
-        "shell_write" => "write to shell".to_string(),
-        "shell_kill" => "kill shell".to_string(),
         "fetch_url" => tool_arg_str(args, "url")
             .map(|url| format!("fetch {}", display_url(url)))
             .unwrap_or_else(|| "fetch url".to_string()),
@@ -1029,7 +827,10 @@ fn text_preview_artifact(title: Option<&str>, result: &Value) -> Option<Activity
 }
 
 fn tool_result_handle_id(result: &Value) -> Option<&str> {
-    result.get("id").and_then(|value| value.as_str())
+    result
+        .get("id")
+        .and_then(|value| value.as_str())
+        .or_else(|| result.get("session_id").and_then(|value| value.as_str()))
 }
 
 fn tool_result_shell_id(result: &Value) -> Option<String> {
@@ -1037,12 +838,45 @@ fn tool_result_shell_id(result: &Value) -> Option<String> {
         .get("id")
         .and_then(|value| value.as_str())
         .map(str::to_string)
+        .or_else(|| {
+            result
+                .get("session_id")
+                .and_then(|value| value.as_i64())
+                .map(|value| value.to_string())
+        })
+        .or_else(|| {
+            result
+                .get("session_id")
+                .and_then(|value| value.as_u64())
+                .map(|value| value.to_string())
+        })
+        .or_else(|| {
+            result
+                .get("session_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
 }
 
 fn tool_arg_shell_id(args: &Value) -> Option<String> {
     args.get("id")
         .and_then(|value| value.as_str())
         .map(str::to_string)
+        .or_else(|| {
+            args.get("session_id")
+                .and_then(|value| value.as_i64())
+                .map(|value| value.to_string())
+        })
+        .or_else(|| {
+            args.get("session_id")
+                .and_then(|value| value.as_u64())
+                .map(|value| value.to_string())
+        })
+        .or_else(|| {
+            args.get("session_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
 }
 
 fn shell_result_output(result: &Value) -> Option<String> {
@@ -1089,75 +923,12 @@ fn tool_search_detail_lines(result: &Value) -> Vec<String> {
     named_description_detail_lines(result, 4)
 }
 
-fn skill_search_summary(args: &Value) -> String {
-    tool_arg_str(args, "query")
-        .map(|query| format!("searched skills for {:?}", inline_text(query)))
-        .unwrap_or_else(|| "browsed skills".to_string())
-}
-
-fn skill_search_detail_lines(result: &Value) -> Vec<String> {
-    named_description_detail_lines(result, 4)
-}
-
-fn load_skill_summary(args: &Value, result: &Value) -> String {
-    result
-        .get("name")
-        .and_then(|value| value.as_str())
-        .or_else(|| tool_arg_str(args, "name"))
-        .map(|name| format!("loaded skill {name}"))
-        .unwrap_or_else(|| "loaded skill".to_string())
-}
-
-fn load_skill_detail_lines(result: &Value) -> Vec<String> {
-    let mut lines = Vec::new();
-    if let Some(description) = result.get("description").and_then(|value| value.as_str())
-        && !description.trim().is_empty()
-    {
-        lines.push(inline_snippet(description, 72));
-    }
-    if let Some(file_count) = result.get("file_count").and_then(|value| value.as_u64()) {
-        lines.push(format!("{file_count} supporting file(s)"));
-    }
-    lines
-}
-
-fn read_skill_file_summary(args: &Value) -> String {
-    match (tool_arg_str(args, "name"), tool_arg_str(args, "path")) {
-        (Some(name), Some(path)) => format!("read skill file {name}/{path}"),
-        (_, Some(path)) => format!("read skill file {path}"),
-        _ => "read skill file".to_string(),
-    }
-}
-
 fn shell_start_summary(command: &str, status: ActivityStatus) -> String {
     if status == ActivityStatus::Failed {
         format!("failed {}", inline_text(command))
     } else {
         format!("started {}", inline_text(command))
     }
-}
-
-fn shell_wait_summary(command: &str, result: &Value, status: ActivityStatus) -> String {
-    if status == ActivityStatus::Failed {
-        return format!("failed {}", inline_text(command));
-    }
-    if shell_result_running(result) {
-        return format!("still running {}", inline_text(command));
-    }
-    format!("finished {}", inline_text(command))
-}
-
-fn shell_read_summary(command: &str, result: &Value, status: ActivityStatus) -> String {
-    if status == ActivityStatus::Failed {
-        return format!("failed {}", inline_text(command));
-    }
-    if shell_result_output(result).is_some_and(|text| !text.trim().is_empty()) {
-        return format!("read {}", inline_text(command));
-    }
-    if shell_result_running(result) {
-        return format!("polled {}", inline_text(command));
-    }
-    format!("finished {}", inline_text(command))
 }
 
 fn shell_write_summary(
@@ -1219,97 +990,19 @@ fn history_search_detail_lines(result: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn memory_search_summary(args: &Value) -> String {
-    match tool_arg_str(args, "query").map(str::trim) {
-        Some("") | None => "listed memory".to_string(),
-        Some(query) => format!("searched memory for {:?}", inline_text(query)),
-    }
-}
-
-fn memory_search_detail_lines(result: &Value) -> Vec<String> {
-    result
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .take(3)
-                .filter_map(|item| {
-                    let key = item.get("key").and_then(|value| value.as_str())?;
-                    let description = item
-                        .get("description")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or_default();
-                    let value = item
-                        .get("value")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or_default();
-                    Some(memory_entry_line(key, description, value))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn memory_set_summary(args: &Value) -> String {
-    format!(
-        "saved memory {}",
-        tool_arg_str(args, "key").unwrap_or("key")
-    )
-}
-
-fn memory_set_detail_lines(args: &Value) -> Vec<String> {
-    let description = tool_arg_str(args, "description").unwrap_or_default();
-    let value = args
-        .get("value")
-        .and_then(|value| value.as_str())
-        .unwrap_or(description);
-    let key = tool_arg_str(args, "key").unwrap_or_default();
-    if key.is_empty() {
-        Vec::new()
-    } else {
-        vec![memory_entry_line(key, description, value)]
-    }
-}
-
-fn memory_get_summary(args: &Value, result: &Value) -> String {
-    let key = tool_arg_str(args, "key").unwrap_or("key");
-    if result.is_null() {
-        format!("memory {} missing", key)
-    } else {
-        format!("loaded memory {}", key)
-    }
-}
-
-fn memory_entry_detail_lines(result: &Value) -> Vec<String> {
-    let key = result.get("key").and_then(|value| value.as_str());
-    let description = result
-        .get("description")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let value = result
-        .get("value")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    key.map(|key| vec![memory_entry_line(key, description, value)])
-        .unwrap_or_default()
-}
-
 fn shell_result_running(result: &Value) -> bool {
     result
         .get("running")
         .and_then(|value| value.as_bool())
-        .unwrap_or(false)
+        .unwrap_or_else(|| {
+            result
+                .get("session_id")
+                .is_some_and(|value| !value.is_null())
+        })
 }
 
 fn shell_result_exit_code(result: &Value) -> Option<i64> {
     result.get("exit_code").and_then(|value| value.as_i64())
-}
-
-fn shell_result_timed_out(result: &Value) -> bool {
-    result
-        .get("timed_out")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
 }
 
 fn named_description_detail_lines(result: &Value, limit: usize) -> Vec<String> {
@@ -1509,19 +1202,6 @@ fn inline_snippet(text: &str, max_chars: usize) -> String {
     }
 }
 
-fn memory_entry_line(key: &str, description: &str, value: &str) -> String {
-    let content = if !value.trim().is_empty() {
-        value
-    } else {
-        description
-    };
-    if content.trim().is_empty() {
-        key.to_string()
-    } else {
-        format!("{key}: {}", inline_snippet(content, 72))
-    }
-}
-
 fn display_url(url: &str) -> String {
     url.trim_start_matches("https://")
         .trim_start_matches("http://")
@@ -1615,176 +1295,111 @@ mod tests {
     }
 
     #[test]
-    fn shell_lifecycle_summaries_are_distinct() {
+    fn exec_command_running_uses_session_id_handle() {
         let mut state = ActivityState::default();
-        let start = state.blocks_for_tool_call(
-            "shell",
-            json!({"command":"mktemp -d /tmp/lash_tool_test_XXXXXX"}),
+        let blocks = state.blocks_for_tool_call(
+            "exec_command",
             json!({
-                "__handle__": "shell",
-                "id": "sh-1",
-                "pid": 42,
-                "command": "mktemp -d /tmp/lash_tool_test_XXXXXX",
-                "workdir": "/tmp",
-                "timeout_ms": null,
-                "login": false,
-                "running": true
+                "cmd": "python3 -q",
+            }),
+            json!({
+                "output": ">>> ",
+                "session_id": 7,
+                "wall_time_seconds": 0.01
             }),
             true,
-            1,
-        );
-        let waited = state.blocks_for_tool_call(
-            "shell_wait",
-            json!({"id":"sh-1","timeout_ms":3000}),
-            json!({
-                "id":"sh-1",
-                "running": false,
-                "exit_code": 0,
-                "output": "/tmp/lash_tool_test_abc123\n",
-                "timed_out": false
-            }),
-            true,
-            3,
+            13,
         );
 
-        assert_eq!(
-            start[0].summary,
-            "started mktemp -d /tmp/lash_tool_test_XXXXXX"
-        );
-        assert_eq!(
-            waited[0].summary,
-            "finished mktemp -d /tmp/lash_tool_test_XXXXXX"
-        );
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].summary, "started python3 -q");
+        assert!(blocks[0].detail_lines.iter().any(|line| line == "Handle 7"));
     }
 
     #[test]
-    fn shell_write_summary_uses_input_preview() {
+    fn batch_expands_into_child_tool_blocks() {
+        let mut state = ActivityState::default();
+        let blocks = state.blocks_for_tool_call(
+            "batch",
+            json!({
+                "tool_calls": [
+                    {"tool": "read_file", "parameters": {"path": "a.rs"}},
+                    {"tool": "grep", "parameters": {"pattern": "foo", "path": "."}}
+                ]
+            }),
+            json!({
+                "summary": "Executed 1/2 tools successfully. 1 failed.",
+                "results": [
+                    {"tool": "read_file", "success": true, "result": "x"},
+                    {"tool": "grep", "success": false, "error": "boom"}
+                ]
+            }),
+            true,
+            12,
+        );
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].tool_name, "read_file");
+        assert_eq!(blocks[0].summary, "EXPLORE");
+        assert_eq!(blocks[0].detail_lines, vec!["Read a.rs"]);
+        assert_eq!(blocks[1].tool_name, "grep");
+        assert_eq!(blocks[1].summary, "EXPLORE");
+        assert_eq!(blocks[1].detail_lines, vec!["Search \"foo\" in ."]);
+        assert_ne!(blocks[0].tool_name, "batch");
+        assert_ne!(blocks[1].tool_name, "batch");
+    }
+
+    #[test]
+    fn write_stdin_uses_session_id_argument() {
+        let mut state = ActivityState::default();
+        state.shell_handles.insert("7".into(), "python3 -q".into());
+        let blocks = state.blocks_for_tool_call(
+            "write_stdin",
+            json!({
+                "session_id": 7,
+                "chars": "print(2 + 2)\n"
+            }),
+            json!({
+                "output": ">>> print(2 + 2)\n4\n>>> ",
+                "session_id": 7,
+                "wall_time_seconds": 0.01
+            }),
+            true,
+            13,
+        );
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].summary, "sent print(2 + 2) → python3 -q");
+        assert!(blocks[0].detail_lines.iter().any(|line| line == "Handle 7"));
+    }
+
+    #[test]
+    fn write_stdin_summary_uses_input_preview() {
         let mut state = ActivityState::default();
         state.blocks_for_tool_call(
-            "shell",
-            json!({"command":"python3 -q"}),
+            "exec_command",
+            json!({"cmd":"python3 -q"}),
             json!({
-                "__handle__": "shell",
-                "id": "py-1",
-                "pid": 77,
-                "command": "python3 -q",
-                "workdir": "/tmp",
-                "timeout_ms": null,
-                "login": false,
-                "running": true
+                "session_id": 7,
+                "output": ""
             }),
             true,
             1,
         );
 
         let wrote = state.blocks_for_tool_call(
-            "shell_write",
-            json!({"id":"py-1","input":"print(2 + 2)\n","timeout_ms":1000}),
+            "write_stdin",
+            json!({"session_id":7,"chars":"print(2 + 2)\n","yield_time_ms":1000}),
             json!({
-                "id":"py-1",
-                "running": true,
                 "exit_code": null,
+                "session_id": 7,
                 "output": ">>> print(2 + 2)\n4\n>>> ",
-                "timed_out": false
             }),
             true,
             7,
         );
 
         assert_eq!(wrote[0].summary, "sent print(2 + 2) → python3 -q");
-    }
-
-    #[test]
-    fn memory_tools_show_keys_and_snippets() {
-        let mut state = ActivityState::default();
-
-        let set_blocks = state.blocks_for_tool_call(
-            "mem_set",
-            json!({
-                "key": "repo_convention",
-                "description": "Use snake_case for tool names",
-                "value": "Use snake_case for tool names"
-            }),
-            json!(null),
-            true,
-            0,
-        );
-        let search_blocks = state.blocks_for_tool_call(
-            "search_mem",
-            json!({"query":"snake_case"}),
-            json!([
-                {
-                    "key":"repo_convention",
-                    "description":"Use snake_case for tool names",
-                    "value":"Use snake_case for tool names",
-                    "turn": 2,
-                    "score": 1.0,
-                    "field_hits": ["value"]
-                }
-            ]),
-            true,
-            0,
-        );
-
-        assert_eq!(set_blocks[0].summary, "saved memory repo_convention");
-        assert_eq!(
-            set_blocks[0].detail_lines,
-            vec!["repo_convention: Use snake_case for tool names"]
-        );
-        assert_eq!(
-            search_blocks[0].summary,
-            "searched memory for \"snake_case\""
-        );
-        assert_eq!(
-            search_blocks[0].detail_lines,
-            vec!["repo_convention: Use snake_case for tool names"]
-        );
-    }
-
-    #[test]
-    fn skill_search_and_load_show_match_details() {
-        let mut state = ActivityState::default();
-        let search_blocks = state.blocks_for_tool_call(
-            "search_skills",
-            json!({"query":"frontend"}),
-            json!([
-                {
-                    "name":"frontend-design",
-                    "description":"Create distinctive production-grade frontend interfaces.",
-                    "file_count": 3,
-                    "score": 1.0
-                }
-            ]),
-            true,
-            0,
-        );
-        let load_blocks = state.blocks_for_tool_call(
-            "load_skill",
-            json!({"name":"frontend-design"}),
-            json!({
-                "name":"frontend-design",
-                "description":"Create distinctive production-grade frontend interfaces.",
-                "instructions":"...",
-                "files":["refs.md", "template.html"],
-                "file_count": 2
-            }),
-            true,
-            0,
-        );
-
-        assert_eq!(search_blocks[0].summary, "searched skills for \"frontend\"");
-        assert_eq!(
-            search_blocks[0].detail_lines,
-            vec!["frontend-design: Create distinctive production-grade frontend interfaces."]
-        );
-        assert_eq!(load_blocks[0].summary, "loaded skill frontend-design");
-        assert_eq!(
-            load_blocks[0].detail_lines,
-            vec![
-                "Create distinctive production-grade frontend interfaces.",
-                "2 supporting file(s)"
-            ]
-        );
     }
 
     #[test]

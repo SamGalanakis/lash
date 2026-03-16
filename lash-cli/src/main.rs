@@ -11,12 +11,13 @@ mod replay;
 mod resume;
 mod session_log;
 mod setup;
-mod skill;
+#[cfg(test)]
+mod test_support;
 mod theme;
 mod ui;
 mod util;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -25,9 +26,7 @@ use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
 use lash_core::agent::{Message, MessageRole};
 use lash_core::provider::{LashConfig, OPENAI_GENERIC_DEFAULT_BASE_URL, Provider, ProviderKind};
-use lash_core::tools::{
-    AgentCall, AgentCallConfig, FilteredTools, SwitchableTools, ToolSet, ToolSetDeps,
-};
+use lash_core::tools::{AgentCallConfig, DefaultToolPluginDeps};
 use lash_core::*;
 use ratatui::DefaultTerminal;
 use sha2::{Digest, Sha256};
@@ -52,12 +51,12 @@ const LONG_VERSION: &str = concat!(
 fn autonomous_prompt_overrides() -> Vec<PromptSectionOverride> {
     vec![
         PromptSectionOverride {
-            section: PromptSectionName::Identity,
+            section: PromptSectionName::Intro,
             mode: PromptOverrideMode::Prepend,
             content: "You are an autonomous AI coding agent running without a human in the loop.\nComplete the task end-to-end without asking for user input.".to_string(),
         },
         PromptSectionOverride {
-            section: PromptSectionName::ExecutionContract,
+            section: PromptSectionName::Execution,
             mode: PromptOverrideMode::Append,
             content: "- No user is available during this run. Do not rely on `ask`; make the best reasonable decision from local context and continue.".to_string(),
         },
@@ -288,6 +287,7 @@ async fn main() -> anyhow::Result<()> {
             let provider = Provider::OpenAiGeneric {
                 api_key: key.clone(),
                 base_url: args.base_url.clone(),
+                options: lash_core::provider::ProviderOptions::default(),
             };
             let mut cfg = existing_config
                 .clone()
@@ -302,6 +302,7 @@ async fn main() -> anyhow::Result<()> {
                 access_token: key,
                 refresh_token: String::new(),
                 expires_at: u64::MAX,
+                options: lash_core::provider::ProviderOptions::default(),
             };
             let mut cfg = existing_config
                 .clone()
@@ -408,11 +409,6 @@ async fn main() -> anyhow::Result<()> {
             .or_else(|| Some(uuid::Uuid::new_v4().to_string()))
     };
     let instruction_source: Arc<dyn InstructionSource> = Arc::new(FsInstructionSource::new());
-    let mut capabilities = lash_core::AgentCapabilities::default();
-    if autonomous {
-        capabilities = capabilities.disable(lash_core::CapabilityId::Ask);
-    }
-
     let config = AgentConfig {
         model: model.clone(),
         provider: lash_config.active_provider().clone(),
@@ -424,7 +420,6 @@ async fn main() -> anyhow::Result<()> {
         execution_mode,
         context_folding,
         instruction_source: Arc::clone(&instruction_source),
-        capabilities,
         ..Default::default()
     };
 
@@ -439,17 +434,21 @@ async fn main() -> anyhow::Result<()> {
     };
     let store = Arc::new(Store::open(&db_path).expect("Failed to open session database"));
 
-    let skill_dirs = vec![
-        lash_core::lash_home().join("skills"),
-        lash_core::legacy_repo_local_lash_dir().join("skills"),
-        lash_core::repo_local_lash_dir().join("skills"),
-    ];
+    let skill_dirs = lash_core::default_skill_dirs();
     let tavily_key = lash_config.tavily_api_key().unwrap_or_default().to_string();
     let prompt_bridge = PromptBridge::new();
     let turn_injection_bridge = TurnInjectionBridge::new();
-    let base_all = ToolSet::defaults_for(
+
+    let agent_call_config = AgentCallConfig {
+        low_tier_execution_mode: lash_config
+            .runtime
+            .low_tier_subagent_execution_mode
+            .unwrap_or(ExecutionMode::Standard),
+    };
+
+    let mut plugin_factories = default_tool_plugin_factories(
         execution_mode,
-        ToolSetDeps {
+        DefaultToolPluginDeps {
             store: Some(Arc::clone(&store)),
             tavily_api_key: if tavily_key.is_empty() {
                 None
@@ -458,111 +457,30 @@ async fn main() -> anyhow::Result<()> {
             },
             skill_dirs: Some(skill_dirs),
             prompt_bridge: (!autonomous).then_some(prompt_bridge.clone()),
+            instruction_source: Some(Arc::clone(&instruction_source)),
         },
     );
-    let base_provider: Arc<dyn ToolProvider> = Arc::new(base_all);
-    let plugin_host = PluginHost::new(vec![
+    plugin_factories.extend(vec![
         Arc::new(BuiltinPromptContextPluginFactory::new(
             Arc::clone(&instruction_source),
             PromptContextPluginConfig::default(),
-        )),
+        )) as Arc<dyn PluginFactory>,
         Arc::new(BuiltinHistoryPluginFactory::new(Arc::clone(&store))),
-        Arc::new(BuiltinMemoryPluginFactory::new(Arc::clone(&store))),
         Arc::new(BuiltinPlanTrackerPluginFactory),
         Arc::new(BuiltinPlanModePluginFactory::default()),
-        Arc::new(BuiltinToolSurfacePluginFactory),
         Arc::new(fork::ForkPluginFactory),
-    ]);
-    let root_plugins = plugin_host.build_session("root", None)?;
-
-    let mut all_base = ToolSet::new().with_arc_provider(Arc::clone(&base_provider));
-    let mut tool_names: BTreeSet<String> = base_provider
-        .definitions()
-        .into_iter()
-        .map(|def| def.name)
-        .collect();
-    for provider in root_plugins.tool_providers() {
-        for def in provider.definitions() {
-            if !tool_names.insert(def.name.clone()) {
-                return Err(anyhow::anyhow!(format!(
-                    "duplicate tool name registered by plugin runtime: {}",
-                    def.name
-                )));
-            }
-        }
-        all_base = all_base.with_arc_provider(Arc::clone(provider));
-    }
-    let all_base_tools: Arc<dyn ToolProvider> = Arc::new(all_base);
-
-    let agent_parent_tools: Arc<SwitchableTools> =
-        Arc::new(SwitchableTools::new(Arc::clone(&all_base_tools)));
-
-    // Root cancel token — lives for the whole app lifetime, child tokens are created per run
-    let root_cancel = CancellationToken::new();
-    let agent_call_config = AgentCallConfig {
-        low_tier_execution_mode: lash_config
-            .runtime
-            .low_tier_subagent_execution_mode
-            .unwrap_or(ExecutionMode::Standard),
-    };
-    let probe_agent_call = AgentCall::new(
-        Arc::clone(&agent_parent_tools) as Arc<dyn ToolProvider>,
-        Arc::clone(&root_plugins),
-        &config,
-        agent_call_config,
-        lash_config.agent_models.clone(),
-        root_cancel.clone(),
-    );
-    let mut capability_defs = default_dynamic_capability_defs();
-    for (id, def) in root_plugins.capability_defs() {
-        capability_defs.insert(id.clone(), def.clone());
-    }
-    let mut resolver_catalog = all_base_tools.definitions();
-    resolver_catalog.extend(probe_agent_call.definitions());
-    let resolved =
-        resolve_capability_projection(&capability_defs, &config.capabilities, &resolver_catalog)?;
-
-    let base_allowed: BTreeSet<String> = all_base_tools
-        .definitions()
-        .into_iter()
-        .map(|d| d.name)
-        .filter(|n| resolved.effective_tools.contains(n))
-        .collect();
-    let filtered_base: Arc<dyn ToolProvider> = Arc::new(FilteredTools::new(
-        Arc::clone(&all_base_tools),
-        base_allowed,
-    ));
-    agent_parent_tools.swap(Arc::clone(&filtered_base));
-
-    let agent_allowed: BTreeSet<String> = probe_agent_call
-        .definitions()
-        .into_iter()
-        .map(|d| d.name)
-        .filter(|n| resolved.effective_tools.contains(n))
-        .collect();
-
-    let mut tools_comp = ToolSet::new().with_arc_provider(Arc::clone(&filtered_base));
-    if !agent_allowed.is_empty() {
-        let agent_call = AgentCall::new(
-            Arc::clone(&agent_parent_tools) as Arc<dyn ToolProvider>,
-            Arc::clone(&root_plugins),
-            &config,
+        Arc::new(AgentCallPluginFactory::new(
+            config.clone(),
             agent_call_config,
             lash_config.agent_models.clone(),
-            root_cancel.clone(),
-        );
-        let filtered_agent: Arc<dyn ToolProvider> =
-            Arc::new(FilteredTools::new(Arc::new(agent_call), agent_allowed));
-        tools_comp = tools_comp.with_arc_provider(filtered_agent);
-    }
-    let tools: Arc<dyn ToolProvider> = Arc::new(tools_comp);
-    let dynamic_tools = Arc::new(DynamicToolProvider::from_tool_provider(
-        Arc::clone(&tools),
-        capability_defs,
-        profile_from_agent_capabilities(&config.capabilities),
-    )?);
+        )),
+    ]);
+    let plugin_host = PluginHost::new(plugin_factories).with_dynamic_tools();
+    let root_plugins = plugin_host.build_session("root", execution_mode, None)?;
+    let dynamic_tools = root_plugins
+        .dynamic_tools()
+        .ok_or_else(|| anyhow::anyhow!("root dynamic tool provider was not initialized"))?;
     let dynamic_tools_provider: Arc<dyn ToolProvider> = dynamic_tools.clone();
-    agent_parent_tools.swap(dynamic_tools_provider.clone());
     let toolset_hash = hash12(
         &serde_json::to_vec(&dynamic_tools_provider.definitions())
             .unwrap_or_else(|_| b"[]".to_vec()),
@@ -593,7 +511,6 @@ async fn main() -> anyhow::Result<()> {
     let runtime = LashRuntime::from_state(
         runtime_config,
         RuntimeServices::new_with_bridges(
-            dynamic_tools_provider,
             root_plugins,
             prompt_bridge,
             turn_injection_bridge.clone(),
@@ -1042,25 +959,24 @@ fn persist_root_agent_state(
             "soft_limit_pct": context_folding.soft_limit_pct,
             "hard_limit_pct": context_folding.hard_limit_pct,
         },
+        "last_prompt_usage": state.last_prompt_usage.clone(),
         "plugin_snapshot": state.plugin_snapshot,
         "task_state": state.task_state,
-        "subagent_state": state.subagent_state,
         "dynamic_state": dynamic_state,
     })
     .to_string();
     let messages_json = serde_json::to_string(&state.messages).unwrap_or_else(|_| "[]".to_string());
-    store.save_agent_state(
-        "root",
-        None,
-        "active",
-        &messages_json,
-        state.iteration as i64,
-        &config_json,
-        state.repl_snapshot.as_deref(),
-        state.token_usage.input_tokens,
-        state.token_usage.output_tokens,
-        state.token_usage.cached_input_tokens,
-    );
+    store.save_agent_state(lash_core::store::AgentStateSave {
+        agent_id: "root",
+        messages_json: &messages_json,
+        iteration: state.iteration as i64,
+        config_json: &config_json,
+        repl_snapshot: state.repl_snapshot.as_deref(),
+        input_tokens: state.token_usage.input_tokens,
+        output_tokens: state.token_usage.output_tokens,
+        cached_input_tokens: state.token_usage.cached_input_tokens,
+        reasoning_tokens: state.token_usage.reasoning_tokens,
+    });
 }
 
 fn push_system_message(app: &mut App, msg: impl Into<String>) {
@@ -1142,7 +1058,7 @@ fn info_text(
 }
 
 /// Build the help text shown by /help.
-fn help_text(skills: &skill::SkillRegistry) -> String {
+fn help_text(skills: &SkillCatalog) -> String {
     let mut lines = vec![
         "Commands:".to_string(),
         "  /clear, /new       Reset conversation".to_string(),
@@ -1162,7 +1078,6 @@ fn help_text(skills: &skill::SkillRegistry) -> String {
         "  /resume [name]     Browse or load a previous session".to_string(),
         "  /skills            Browse loaded skills".to_string(),
         "  /tools ...         Inspect/edit dynamic tools".to_string(),
-        "  /caps ...          Inspect/edit dynamic capabilities".to_string(),
         "  /reconfigure ...   Apply/status/clear pending changes".to_string(),
         "  /help, /?          Show this help".to_string(),
         "  /exit, /quit       Quit".to_string(),
@@ -1170,15 +1085,16 @@ fn help_text(skills: &skill::SkillRegistry) -> String {
 
     if !skills.is_empty() {
         lines.push(String::new());
-        lines.push("Skills:".to_string());
+        lines.push("Installed skills:".to_string());
         for skill in skills.iter() {
             let desc = if skill.description.is_empty() {
                 String::new()
             } else {
                 format!("  {}", skill.description)
             };
-            lines.push(format!("  /{}{}", skill.name, desc));
+            lines.push(format!("  ${}{}", skill.name, desc));
         }
+        lines.push("  Use /skills to browse and insert a skill mention.".to_string());
     }
 
     lines.extend([
@@ -1188,11 +1104,7 @@ fn help_text(skills: &skill::SkillRegistry) -> String {
         "  /tools add <name> <handler> [description]".to_string(),
         "  /tools rm <name>".to_string(),
         "  /tools update <name> key=value ...".to_string(),
-        "  /caps".to_string(),
-        "  /caps add <id> name=<n> tools=a,b helpers=h1,h2 prompt=<text>".to_string(),
-        "  /caps rm <id>".to_string(),
-        "  /caps enable <id> | /caps disable <id>".to_string(),
-        "  /caps tool-enable <tool> | /caps tool-disable <tool>".to_string(),
+        "  /tools enable <name> | /tools disable <name>".to_string(),
         "  /reconfigure status|apply|clear".to_string(),
     ]);
 
@@ -1488,7 +1400,7 @@ async fn run_app(
                         history.clear();
                         turn_counter = 0;
                         app.token_usage = TokenUsage::default();
-                        app.running = false;
+                        app.stop_turn();
                         app.set_plan_mode_enabled(false);
                         app.set_model_variant(current_model_variant.clone());
                         runtime_return_rx = None;
@@ -1562,6 +1474,7 @@ async fn run_app(
                     history = state.messages.clone();
                     turn_counter = state.iteration;
                     app.token_usage = state.token_usage.clone();
+                    app.last_prompt_usage = state.last_prompt_usage.clone();
                     current_context_folding = state.context_folding;
 
                     let persisted_execution_mode = state.execution_mode;
@@ -1641,7 +1554,7 @@ async fn run_app(
                     }
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    app.running = false;
+                    app.stop_turn();
                     runtime_return_rx = None;
                     cancel_token = None;
                 }
@@ -1745,10 +1658,7 @@ async fn run_app(
                 }
 
                 // CTRL+V: paste image from clipboard (no text fallback)
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && key.code == KeyCode::Char('v')
-                    && !app.running
-                {
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('v') {
                     if let Ok(mut clipboard) = arboard::Clipboard::new() {
                         let got_image = clipboard.get_image().ok().and_then(|img_data| {
                             let w = img_data.width as u32;
@@ -1826,7 +1736,7 @@ async fn run_app(
                         KeyCode::Down | KeyCode::Char('j') => app.skill_picker_down(),
                         KeyCode::Enter => {
                             if let Some(name) = app.take_skill_pick() {
-                                app.input = format!("/{} ", name);
+                                app.input = format!("${} ", name);
                                 app.cursor_pos = app.input.len();
                             }
                         }
@@ -1901,7 +1811,9 @@ async fn run_app(
                         KeyCode::Down => app.prompt_down(),
                         KeyCode::BackTab => app.prompt_toggle_extra(),
                         KeyCode::Enter => {
-                            app.take_prompt_response();
+                            if let Some(response) = app.take_prompt_response() {
+                                logger.log_user_input(&response);
+                            }
                         }
                         KeyCode::Char(c)
                             if app.is_prompt_editing_extra() || app.is_prompt_freeform() =>
@@ -2155,7 +2067,6 @@ async fn run_app(
                                             last_prompt_usage: None,
                                             execution_mode: current_execution_mode,
                                             task_state: None,
-                                            subagent_state: None,
                                             replay_manifest: None,
                                             plugin_snapshot: None,
                                             repl_snapshot: None,
@@ -2816,16 +2727,14 @@ async fn run_app(
                                             ),
                                         ];
                                         for (name, spec) in &desired_dynamic.tools {
-                                            let enabled = desired_dynamic
-                                                .profile
-                                                .enabled_tools
-                                                .contains(name);
+                                            let enabled =
+                                                desired_dynamic.enabled_tools.contains(name);
                                             lines.push(format!(
                                                 "  - {} [{}] adapter={}{}",
                                                 name,
                                                 spec.definition.returns,
                                                 spec.adapter_id,
-                                                if enabled { " (explicitly enabled)" } else { "" }
+                                                if enabled { " (enabled)" } else { " (disabled)" }
                                             ));
                                         }
                                         if desired_dynamic.tools.is_empty() {
@@ -2873,7 +2782,6 @@ async fn run_app(
                                                         },
                                                     );
                                                     desired_dynamic
-                                                        .profile
                                                         .enabled_tools
                                                         .insert(name.to_string());
                                                     pending_reconfigure = true;
@@ -2897,12 +2805,7 @@ async fn run_app(
                                                 continue;
                                             };
                                             if desired_dynamic.tools.remove(name).is_some() {
-                                                desired_dynamic.profile.enabled_tools.remove(name);
-                                                for cap in
-                                                    desired_dynamic.capability_defs.values_mut()
-                                                {
-                                                    cap.tool_names.remove(name);
-                                                }
+                                                desired_dynamic.enabled_tools.remove(name);
                                                 pending_reconfigure = true;
                                                 push_system_message(
                                                     &mut app,
@@ -2936,17 +2839,13 @@ async fn run_app(
                                                 continue;
                                             };
                                             if let Some(desc) = kv.get("description") {
-                                                spec.definition.set_description_for(
-                                                    current_execution_mode,
-                                                    desc.clone(),
-                                                );
+                                                spec.definition.description = desc.clone();
                                             }
                                             if let Some(returns) = kv.get("returns") {
                                                 spec.definition.returns = returns.clone();
                                             }
-                                            if let Some(inject) = kv.get("inject_into_prompt") {
-                                                spec.definition.inject_into_prompt =
-                                                    inject == "true";
+                                            if let Some(inject) = kv.get("injected") {
+                                                spec.definition.injected = inject == "true";
                                             }
                                             pending_reconfigure = true;
                                             push_system_message(
@@ -2954,184 +2853,55 @@ async fn run_app(
                                                 format!("Tool `{name}` staged for update."),
                                             );
                                         }
-                                        _ => push_system_message(
-                                            &mut app,
-                                            "Unknown /tools subcommand. Try: add, rm, update",
-                                        ),
-                                    }
-                                }
-                                command::Command::Caps(raw) => {
-                                    let raw = raw.unwrap_or_default();
-                                    let raw_trim = raw.trim();
-                                    if raw_trim.is_empty() {
-                                        let mut lines = vec![
-                                            "Dynamic capabilities:".to_string(),
-                                            format!(
-                                                "Enabled ids: {}",
-                                                desired_dynamic
-                                                    .profile
-                                                    .enabled_capabilities
-                                                    .iter()
-                                                    .cloned()
-                                                    .collect::<Vec<_>>()
-                                                    .join(", ")
-                                            ),
-                                        ];
-                                        for (id, cap) in &desired_dynamic.capability_defs {
-                                            lines.push(format!(
-                                                "  - {} ({}) tools=[{}]",
-                                                id,
-                                                cap.name,
-                                                cap.tool_names
-                                                    .iter()
-                                                    .cloned()
-                                                    .collect::<Vec<_>>()
-                                                    .join(", ")
-                                            ));
-                                        }
-                                        push_system_message(&mut app, lines.join("\n"));
-                                        continue;
-                                    }
-
-                                    let mut parts = raw_trim.split_whitespace();
-                                    let sub = parts.next().unwrap_or_default();
-                                    match sub {
-                                        "add" => {
-                                            let mut add_parts = raw_trim.splitn(3, ' ');
-                                            let _ = add_parts.next();
-                                            let Some(id) = add_parts.next() else {
-                                                push_system_message(
-                                                    &mut app,
-                                                    "Usage: /caps add <id> name=<n> tools=a,b helpers=h1,h2 prompt=<text>",
-                                                );
-                                                continue;
-                                            };
-                                            let kv =
-                                                parse_kv_args(add_parts.next().unwrap_or_default());
-                                            let name = kv
-                                                .get("name")
-                                                .cloned()
-                                                .unwrap_or_else(|| id.to_string());
-                                            let tools = kv
-                                                .get("tools")
-                                                .map_or_else(BTreeSet::new, |v| parse_csv(v));
-                                            let helpers = kv
-                                                .get("helpers")
-                                                .map_or_else(BTreeSet::new, |v| parse_csv(v));
-                                            let prompt = kv.get("prompt").cloned();
-                                            desired_dynamic.capability_defs.insert(
-                                                id.to_string(),
-                                                DynamicCapabilityDef {
-                                                    id: id.to_string(),
-                                                    name,
-                                                    description: kv
-                                                        .get("description")
-                                                        .cloned()
-                                                        .unwrap_or_default(),
-                                                    prompt_section: prompt,
-                                                    helper_bindings: helpers,
-                                                    tool_names: tools,
-                                                    enabled_by_default: kv
-                                                        .get("enabled_by_default")
-                                                        .map(|v| v == "true")
-                                                        .unwrap_or(false),
-                                                },
-                                            );
-                                            pending_reconfigure = true;
-                                            push_system_message(
-                                                &mut app,
-                                                format!("Capability `{id}` staged."),
-                                            );
-                                        }
-                                        "rm" | "remove" => {
-                                            let Some(id) = parts.next() else {
-                                                push_system_message(
-                                                    &mut app,
-                                                    "Usage: /caps rm <id>",
-                                                );
-                                                continue;
-                                            };
-                                            desired_dynamic.capability_defs.remove(id);
-                                            desired_dynamic.profile.enabled_capabilities.remove(id);
-                                            pending_reconfigure = true;
-                                            push_system_message(
-                                                &mut app,
-                                                format!("Capability `{id}` staged for removal."),
-                                            );
-                                        }
                                         "enable" => {
-                                            let Some(id) = parts.next() else {
+                                            let Some(name) = parts.next() else {
                                                 push_system_message(
                                                     &mut app,
-                                                    "Usage: /caps enable <id>",
+                                                    "Usage: /tools enable <name>",
                                                 );
                                                 continue;
                                             };
-                                            desired_dynamic
-                                                .profile
-                                                .enabled_capabilities
-                                                .insert(id.to_string());
-                                            pending_reconfigure = true;
-                                            push_system_message(
-                                                &mut app,
-                                                format!("Capability `{id}` staged for enable."),
-                                            );
+                                            if desired_dynamic.tools.contains_key(name) {
+                                                desired_dynamic
+                                                    .enabled_tools
+                                                    .insert(name.to_string());
+                                                pending_reconfigure = true;
+                                                push_system_message(
+                                                    &mut app,
+                                                    format!("Tool `{name}` staged for enable."),
+                                                );
+                                            } else {
+                                                push_system_message(
+                                                    &mut app,
+                                                    format!("Tool `{name}` not found."),
+                                                );
+                                            }
                                         }
                                         "disable" => {
-                                            let Some(id) = parts.next() else {
-                                                push_system_message(
-                                                    &mut app,
-                                                    "Usage: /caps disable <id>",
-                                                );
-                                                continue;
-                                            };
-                                            desired_dynamic.profile.enabled_capabilities.remove(id);
-                                            pending_reconfigure = true;
-                                            push_system_message(
-                                                &mut app,
-                                                format!("Capability `{id}` staged for disable."),
-                                            );
-                                        }
-                                        "tool-enable" => {
                                             let Some(name) = parts.next() else {
                                                 push_system_message(
                                                     &mut app,
-                                                    "Usage: /caps tool-enable <tool>",
+                                                    "Usage: /tools disable <name>",
                                                 );
                                                 continue;
                                             };
-                                            desired_dynamic
-                                                .profile
-                                                .enabled_tools
-                                                .insert(name.to_string());
-                                            pending_reconfigure = true;
-                                            push_system_message(
-                                                &mut app,
-                                                format!(
-                                                    "Tool `{name}` staged as explicitly enabled."
-                                                ),
-                                            );
-                                        }
-                                        "tool-disable" => {
-                                            let Some(name) = parts.next() else {
+                                            if desired_dynamic.tools.contains_key(name) {
+                                                desired_dynamic.enabled_tools.remove(name);
+                                                pending_reconfigure = true;
                                                 push_system_message(
                                                     &mut app,
-                                                    "Usage: /caps tool-disable <tool>",
+                                                    format!("Tool `{name}` staged for disable."),
                                                 );
-                                                continue;
-                                            };
-                                            desired_dynamic.profile.enabled_tools.remove(name);
-                                            pending_reconfigure = true;
-                                            push_system_message(
-                                                &mut app,
-                                                format!(
-                                                    "Tool `{name}` staged as explicitly disabled."
-                                                ),
-                                            );
+                                            } else {
+                                                push_system_message(
+                                                    &mut app,
+                                                    format!("Tool `{name}` not found."),
+                                                );
+                                            }
                                         }
                                         _ => push_system_message(
                                             &mut app,
-                                            "Unknown /caps subcommand. Try: add, rm, enable, disable, tool-enable, tool-disable",
+                                            "Unknown /tools subcommand. Try: add, rm, update, enable, disable",
                                         ),
                                     }
                                 }
@@ -3195,7 +2965,7 @@ async fn run_app(
                                 }
                                 command::Command::Skills => {
                                     // Refresh from disk so new/removed skills are picked up
-                                    app.skills = skill::SkillRegistry::load();
+                                    app.skills = SkillCatalog::load();
                                     let items: Vec<(String, String)> = app
                                         .skills
                                         .iter()
@@ -3213,57 +2983,6 @@ async fn run_app(
                                     } else {
                                         app.skill_picker = items;
                                         app.skill_picker_idx = 0;
-                                    }
-                                }
-                                command::Command::Skill(name, args) => {
-                                    if app.skills.get(&name).is_some() {
-                                        if let Err(e) = apply_pending_reconfigure(
-                                            &dynamic_tools,
-                                            &mut desired_dynamic,
-                                            &mut pending_reconfigure,
-                                            &mut runtime,
-                                        )
-                                        .await
-                                        {
-                                            push_system_message(
-                                                &mut app,
-                                                format!(
-                                                    "Pending runtime reconfigure failed; skill turn blocked: {}",
-                                                    e
-                                                ),
-                                            );
-                                            continue;
-                                        }
-                                        toolset_hash = hash12(
-                                            &serde_json::to_vec(&dynamic_tools.definitions())
-                                                .unwrap_or_else(|_| b"[]".to_vec()),
-                                        );
-                                        // Display original slash command input in UI, but send
-                                        // structured SKILL payload to the runtime turn.
-                                        let skill_item = InputItem::SkillRef { name, args };
-                                        let display_input = input.clone();
-                                        let turn_input = make_turn_input(
-                                            &mut app,
-                                            vec![skill_item],
-                                            HashMap::new(),
-                                        );
-                                        send_user_message(
-                                            display_input.clone(),
-                                            turn_input.clone(),
-                                            &mut app,
-                                            logger,
-                                            &mut runtime,
-                                            &mut history,
-                                            &mut runtime_return_rx,
-                                            &mut cancel_token,
-                                            &mut active_stream_id,
-                                            &app_tx,
-                                        );
-                                        last_turn = Some(TurnReplayPayload {
-                                            display_input,
-                                            turn_input,
-                                            execution_mode: current_execution_mode,
-                                        });
                                     }
                                 }
                             }
@@ -3376,10 +3095,7 @@ async fn run_app(
                 app.dirty = true;
             }
             AppEvent::Tick => {
-                if app.running {
-                    app.tick += 1;
-                    app.dirty = true;
-                }
+                app.on_tick();
             }
             AppEvent::Agent { stream_id, event } => {
                 if stream_id != active_stream_id {
@@ -3448,25 +3164,17 @@ fn parse_kv_args(raw: &str) -> HashMap<String, String> {
     out
 }
 
-fn parse_csv(raw: &str) -> BTreeSet<String> {
-    raw.split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
 fn register_builtin_tool(
     dynamic_tools: &Arc<DynamicToolProvider>,
     tool_name: &str,
     handler_id: &str,
     description_override: Option<String>,
-    execution_mode: ExecutionMode,
+    _execution_mode: ExecutionMode,
 ) -> Result<ToolDefinition, String> {
     let adapter = dynamic_tools.inprocess_adapter();
     let def = match handler_id {
         "echo" => {
-            let handler: InProcessToolHandler = Arc::new(|args, _progress| {
+            let handler: InProcessToolHandler = Arc::new(|args, _context, _progress| {
                 Box::pin(async move {
                     let text = args
                         .get("text")
@@ -3478,64 +3186,51 @@ fn register_builtin_tool(
             });
             let def = ToolDefinition {
                 name: tool_name.to_string(),
-                description: vec![ToolText::new(
-                    description_override
-                        .unwrap_or_else(|| "Echoes back the `text` argument.".to_string()),
-                    [execution_mode],
-                )],
+                description: description_override
+                    .unwrap_or_else(|| "Echoes back the `text` argument.".to_string()),
                 params: vec![ToolParam::typed("text", "str")],
                 returns: "str".to_string(),
-                examples: vec![ToolText::new(
-                    format!("{tool_name}(text=\"hello\")"),
-                    [execution_mode],
-                )],
-                hidden: false,
-                inject_into_prompt: false,
+                examples: vec![format!("{tool_name}(text=\"hello\")")],
+                enabled: true,
+                injected: false,
             };
             adapter.register_tool(def.clone(), handler);
             def
         }
         "time" => {
-            let handler: InProcessToolHandler = Arc::new(|_args, _progress| {
+            let handler: InProcessToolHandler = Arc::new(|_args, _context, _progress| {
                 Box::pin(async move {
                     ToolResult::ok(serde_json::json!(chrono::Utc::now().to_rfc3339()))
                 })
             });
             let def = ToolDefinition {
                 name: tool_name.to_string(),
-                description: vec![ToolText::new(
-                    description_override.unwrap_or_else(|| {
-                        "Returns the current UTC timestamp (RFC3339).".to_string()
-                    }),
-                    [execution_mode],
-                )],
+                description: description_override
+                    .unwrap_or_else(|| "Returns the current UTC timestamp (RFC3339).".to_string()),
                 params: vec![],
                 returns: "str".to_string(),
-                examples: vec![ToolText::new(format!("{tool_name}()"), [execution_mode])],
-                hidden: false,
-                inject_into_prompt: false,
+                examples: vec![format!("{tool_name}()")],
+                enabled: true,
+                injected: false,
             };
             adapter.register_tool(def.clone(), handler);
             def
         }
         "uuid" => {
-            let handler: InProcessToolHandler = Arc::new(|_args, _progress| {
+            let handler: InProcessToolHandler = Arc::new(|_args, _context, _progress| {
                 Box::pin(async move {
                     ToolResult::ok(serde_json::json!(uuid::Uuid::new_v4().to_string()))
                 })
             });
             let def = ToolDefinition {
                 name: tool_name.to_string(),
-                description: vec![ToolText::new(
-                    description_override
-                        .unwrap_or_else(|| "Returns a random UUIDv4 string.".to_string()),
-                    [execution_mode],
-                )],
+                description: description_override
+                    .unwrap_or_else(|| "Returns a random UUIDv4 string.".to_string()),
                 params: vec![],
                 returns: "str".to_string(),
-                examples: vec![ToolText::new(format!("{tool_name}()"), [execution_mode])],
-                hidden: false,
-                inject_into_prompt: false,
+                examples: vec![format!("{tool_name}()")],
+                enabled: true,
+                injected: false,
             };
             adapter.register_tool(def.clone(), handler);
             def
@@ -3569,20 +3264,17 @@ async fn apply_pending_reconfigure(
         }
     };
 
-    let prompt_caps = agent_capabilities_from_profile(&dynamic_tools.profile());
-    if let Some(rt) = runtime.as_mut() {
-        rt.set_capabilities(prompt_caps);
-        if let Err(e) = rt.refresh_session_execution_surface().await {
-            let mut rollback = previous.clone();
-            rollback.base_generation = dynamic_tools.generation();
-            let _ = dynamic_tools.apply_state(rollback);
-            rt.set_capabilities(agent_capabilities_from_profile(&dynamic_tools.profile()));
-            let _ = rt.refresh_session_execution_surface().await;
-            desired_dynamic.base_generation = dynamic_tools.generation();
-            return Err(format!(
-                "Failed to apply runtime reconfigure (state rolled back): {e}"
-            ));
-        }
+    if let Some(rt) = runtime.as_mut()
+        && let Err(e) = rt.refresh_session_execution_surface().await
+    {
+        let mut rollback = previous.clone();
+        rollback.base_generation = dynamic_tools.generation();
+        let _ = dynamic_tools.apply_state(rollback);
+        let _ = rt.refresh_session_execution_surface().await;
+        desired_dynamic.base_generation = dynamic_tools.generation();
+        return Err(format!(
+            "Failed to apply runtime reconfigure (state rolled back): {e}"
+        ));
     }
 
     *desired_dynamic = dynamic_tools.export_state();
@@ -3614,8 +3306,7 @@ fn send_user_message(
             .push(DisplayBlock::UserInput(display_input.clone()));
         app.invalidate_height_cache();
     }
-    app.running = true;
-    app.iteration = 0;
+    app.start_turn();
     app.resume_follow_output();
     app.keep_latest_user_block_visible();
 
@@ -3870,7 +3561,6 @@ mod tests {
                 InputItem::ImageRef { .. } => "image",
                 InputItem::FileRef { .. } => "file",
                 InputItem::DirRef { .. } => "dir",
-                InputItem::SkillRef { .. } => "skill",
             })
             .collect();
         assert_eq!(kinds, vec!["text", "image", "text", "file", "text"]);

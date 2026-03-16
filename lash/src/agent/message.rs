@@ -148,10 +148,7 @@ struct TranscriptTurn {
     assistant: Vec<String>,
 }
 
-pub fn render_transcript_prompt(
-    msgs: &[Message],
-    turn_prompt_sections: &[String],
-) -> RenderedPrompt {
+pub fn render_transcript_prompt(msgs: &[Message]) -> RenderedPrompt {
     let mut image_indices = Vec::new();
     let mut turns = Vec::new();
     let mut current = TranscriptTurn::default();
@@ -210,16 +207,6 @@ pub fn render_transcript_prompt(
         }
         text.push('\n');
     }
-    let turn_prompt_sections = turn_prompt_sections
-        .iter()
-        .map(|section| section.trim())
-        .filter(|section| !section.is_empty())
-        .collect::<Vec<_>>();
-    if !turn_prompt_sections.is_empty() {
-        text.push_str("Runtime Notes:\n");
-        text.push_str(&turn_prompt_sections.join("\n\n"));
-        text.push_str("\n\n");
-    }
     text.push_str(
         "Continue from the latest turn as Lash.\nIf the task is complete, provide the final answer.\nOtherwise produce the next valid step for this runtime.",
     );
@@ -268,7 +255,7 @@ mod tests {
             },
         ];
 
-        let rendered = render_transcript_prompt(&msgs, &[]);
+        let rendered = render_transcript_prompt(&msgs);
         let text = match &rendered.user_prompt[0] {
             LlmPromptPart::Text(text) => text,
             LlmPromptPart::Image(_) => panic!("expected text prompt"),
@@ -288,7 +275,7 @@ mod tests {
             origin: None,
         }];
 
-        let rendered = render_transcript_prompt(&msgs, &[]);
+        let rendered = render_transcript_prompt(&msgs);
         assert_eq!(rendered.image_indices, vec![3]);
         let text = match &rendered.user_prompt[0] {
             LlmPromptPart::Text(text) => text,
@@ -320,7 +307,7 @@ mod tests {
             },
         ];
 
-        let rendered = render_transcript_prompt(&msgs, &[]);
+        let rendered = render_transcript_prompt(&msgs);
         let text = match &rendered.user_prompt[0] {
             LlmPromptPart::Text(text) => text,
             LlmPromptPart::Image(_) => panic!("expected text prompt"),
@@ -354,7 +341,7 @@ mod tests {
             },
         ];
 
-        let rendered = render_transcript_prompt(&msgs, &[]);
+        let rendered = render_transcript_prompt(&msgs);
         let text = match &rendered.user_prompt[0] {
             LlmPromptPart::Text(text) => text,
             LlmPromptPart::Image(_) => panic!("expected text prompt"),
@@ -364,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn render_transcript_prompt_appends_runtime_notes_before_continue_line() {
+    fn render_transcript_prompt_omits_runtime_notes_section() {
         let msgs = vec![Message {
             id: "m0".to_string(),
             role: MessageRole::User,
@@ -372,18 +359,11 @@ mod tests {
             origin: None,
         }];
 
-        let rendered = render_transcript_prompt(&msgs, &["Archived note".to_string()]);
+        let rendered = render_transcript_prompt(&msgs);
         let text = match &rendered.user_prompt[0] {
             LlmPromptPart::Text(text) => text,
             LlmPromptPart::Image(_) => panic!("expected text prompt"),
         };
-
-        let notes_idx = text
-            .find("Runtime Notes:\nArchived note")
-            .expect("runtime notes");
-        let continue_idx = text
-            .find("Continue from the latest turn as Lash.")
-            .expect("continue line");
-        assert!(notes_idx < continue_idx);
+        assert!(!text.contains("Runtime Notes:"));
     }
 }

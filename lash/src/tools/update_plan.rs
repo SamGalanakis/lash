@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 
-use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
+use crate::{ExecutionMode, ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct PlanItem {
@@ -23,12 +23,14 @@ struct PlanState {
 }
 
 pub struct UpdatePlanTool {
+    execution_mode: ExecutionMode,
     state: Arc<Mutex<PlanState>>,
 }
 
 impl UpdatePlanTool {
-    pub fn new() -> Self {
+    pub fn new(execution_mode: ExecutionMode) -> Self {
         Self {
+            execution_mode,
             state: Arc::new(Mutex::new(PlanState::default())),
         }
     }
@@ -57,36 +59,34 @@ impl UpdatePlanTool {
 
 impl Default for UpdatePlanTool {
     fn default() -> Self {
-        Self::new()
+        Self::new(ExecutionMode::Standard)
     }
 }
 
 #[async_trait::async_trait]
 impl ToolProvider for UpdatePlanTool {
     fn definitions(&self) -> Vec<ToolDefinition> {
+        let examples = match self.execution_mode {
+            ExecutionMode::Repl => vec![
+                "call update_plan { explanation: \"I found the main renderer.\", plan: [{ step: \"Inspect renderer\", status: \"completed\" }, { step: \"Patch layout\", status: \"in_progress\" }, { step: \"Run tests\", status: \"pending\" }] }"
+                    .into(),
+            ],
+            ExecutionMode::Standard => vec![
+                "{\"explanation\":\"I found the main renderer.\",\"plan\":[{\"step\":\"Inspect renderer\",\"status\":\"completed\"},{\"step\":\"Patch layout\",\"status\":\"in_progress\"},{\"step\":\"Run tests\",\"status\":\"pending\"}]}"
+                    .into(),
+            ],
+        };
         vec![ToolDefinition {
             name: "update_plan".into(),
-            description: vec![crate::ToolText::new(
-                "Update the task plan for substantial multi-step work. Provide an optional explanation and a list of short plan items, each with a step and status. Valid statuses: pending, in_progress, completed. At most one step can be in_progress at a time.",
-                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-            )],
+            description: "Update the task plan for substantial multi-step work. Provide an optional explanation and a list of short plan items, each with a step and status. Valid statuses: pending, in_progress, completed. At most one step can be in_progress at a time.".into(),
             params: vec![
                 ToolParam::optional("explanation", "str"),
                 ToolParam::typed("plan", "list"),
             ],
             returns: "str".into(),
-            examples: vec![
-                crate::ToolText::new(
-                    "call update_plan { explanation: \"I found the main renderer.\", plan: [{ step: \"Inspect renderer\", status: \"completed\" }, { step: \"Patch layout\", status: \"in_progress\" }, { step: \"Run tests\", status: \"pending\" }] }",
-                    [crate::ExecutionMode::Repl],
-                ),
-                crate::ToolText::new(
-                    "{\"explanation\":\"I found the main renderer.\",\"plan\":[{\"step\":\"Inspect renderer\",\"status\":\"completed\"},{\"step\":\"Patch layout\",\"status\":\"in_progress\"},{\"step\":\"Run tests\",\"status\":\"pending\"}]}",
-                    [crate::ExecutionMode::Standard],
-                ),
-            ],
-            hidden: false,
-            inject_into_prompt: true,
+            examples,
+            enabled: true,
+            injected: true,
         }]
     }
 
@@ -169,7 +169,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_plan_validates_shape() {
-        let tool = UpdatePlanTool::new();
+        let tool = UpdatePlanTool::new(ExecutionMode::Standard);
         let result = tool
             .execute(
                 "update_plan",
@@ -187,7 +187,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_plan_returns_text_acknowledgement() {
-        let tool = UpdatePlanTool::new();
+        let tool = UpdatePlanTool::new(ExecutionMode::Standard);
         let result = tool
             .execute(
                 "update_plan",
@@ -206,7 +206,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_plan_rejects_multiple_in_progress_steps() {
-        let tool = UpdatePlanTool::new();
+        let tool = UpdatePlanTool::new(ExecutionMode::Standard);
         let result = tool
             .execute(
                 "update_plan",
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn update_plan_snapshot_round_trip() {
-        let tool = UpdatePlanTool::new();
+        let tool = UpdatePlanTool::new(ExecutionMode::Standard);
         tool.restore(PlanSnapshot {
             explanation: Some("Found the entry point.".to_string()),
             plan: vec![PlanItem {

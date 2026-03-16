@@ -46,8 +46,38 @@ BENCHMARK_GUIDELINES_APPEND = """## Benchmark Constraints
 - Optimize for correctness and task completion, not for narration.
 """
 
+INSTALL_GNU_TIME_COMMAND = """
+if [ ! -x /usr/bin/time ]; then
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update && apt-get install -y time
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache time
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y time
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y time
+  elif command -v microdnf >/dev/null 2>&1; then
+    microdnf install -y time
+  elif command -v zypper >/dev/null 2>&1; then
+    zypper --non-interactive install time
+  fi
+fi
+"""
+
 
 class LashAgent(BaseInstalledAgent):
+    @staticmethod
+    def _timed_command(command: str, index: int) -> str:
+        output_path = f"/logs/agent/command-{index}/resource-usage.txt"
+        escaped_command = shlex.quote(f"set -o pipefail; {command}")
+        return (
+            f"if [ -x /usr/bin/time ]; then "
+            f"mkdir -p /logs/agent/command-{index} && "
+            f"/usr/bin/time -v -o {shlex.quote(output_path)} bash -lc {escaped_command}; "
+            f"else bash -lc {escaped_command}; fi"
+        )
+
     def version(self) -> str | None:
         version = super().version()
         if version is not None:
@@ -77,6 +107,7 @@ class LashAgent(BaseInstalledAgent):
 
     async def setup(self, environment: BaseEnvironment) -> None:
         await environment.exec(command=f"mkdir -p {REMOTE_HOME} {REMOTE_LASH_HOME}")
+        await environment.exec(command=INSTALL_GNU_TIME_COMMAND)
 
         binary_path = Path(os.environ.get("LASH_BENCH_BINARY", str(DEFAULT_LASH_BINARY)))
         if not binary_path.exists():
@@ -142,9 +173,9 @@ class LashAgent(BaseInstalledAgent):
         execution_mode_flag = f"--execution-mode {shlex.quote(execution_mode)} "
         prompt_flags = ""
         for env_key, section in (
-            ("LASH_PROMPT_REPLACE_IDENTITY", "identity"),
-            ("LASH_PROMPT_REPLACE_GUIDELINES", "guidelines"),
-            ("LASH_PROMPT_REPLACE_TOOL_GUIDES", "tool_guides"),
+            ("LASH_PROMPT_REPLACE_IDENTITY", "intro"),
+            ("LASH_PROMPT_REPLACE_GUIDELINES", "guidance"),
+            ("LASH_PROMPT_REPLACE_TOOL_GUIDES", "available_tools"),
         ):
             value = os.environ.get(env_key)
             if value:
@@ -157,7 +188,7 @@ class LashAgent(BaseInstalledAgent):
         )
         if benchmark_guidelines.strip():
             prompt_flags += (
-                f"--prompt-append {shlex.quote(f'guidelines={benchmark_guidelines}')} "
+                f"--prompt-append {shlex.quote(f'guidance={benchmark_guidelines}')} "
             )
 
         disable_sections = os.environ.get("LASH_PROMPT_DISABLE", "").strip()
@@ -196,7 +227,7 @@ class LashAgent(BaseInstalledAgent):
             (command_dir / "command.txt").write_text(exec_input.command)
 
             result = await environment.exec(
-                command=exec_input.command,
+                command=self._timed_command(exec_input.command, i),
                 cwd=exec_input.cwd,
                 env=exec_input.env,
                 timeout_sec=exec_input.timeout_sec,
@@ -207,6 +238,15 @@ class LashAgent(BaseInstalledAgent):
                 (command_dir / "stdout.txt").write_text(result.stdout)
             if result.stderr:
                 (command_dir / "stderr.txt").write_text(result.stderr)
+            try:
+                await environment.download_file(
+                    source_path=f"/logs/agent/command-{i}/resource-usage.txt",
+                    target_path=command_dir / "resource-usage.txt",
+                )
+            except Exception:  # pragma: no cover - best effort
+                self.logger.debug(
+                    "Failed to download resource usage for command-%s", i, exc_info=True
+                )
         self.populate_context_post_run(context)
 
     def _read_assistant_response(self) -> str | None:

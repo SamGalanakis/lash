@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
+use serde::de::{self, Visitor};
 use serde::{Deserialize, Serialize};
 
 use crate::ContextFoldingConfig;
 use crate::llm::factory::adapter_for;
+use crate::llm::timeouts::{DEFAULT_CHUNK_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS, LlmTimeouts};
 use crate::model_info::{ModelCatalog, ResolvedModelSpec};
 use crate::oauth::{self, OAuthError};
 
@@ -102,6 +105,87 @@ impl AuxiliarySecrets {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestTimeout {
+    Disabled,
+    Millis(u64),
+}
+
+impl Serialize for RequestTimeout {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Disabled => serializer.serialize_bool(false),
+            Self::Millis(value) => serializer.serialize_u64(*value),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RequestTimeout {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct RequestTimeoutVisitor;
+
+        impl Visitor<'_> for RequestTimeoutVisitor {
+            type Value = RequestTimeout;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a positive timeout in milliseconds or false")
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if value {
+                    return Err(E::custom("timeout must be a positive integer or false"));
+                }
+                Ok(RequestTimeout::Disabled)
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if value == 0 {
+                    return Err(E::custom("timeout must be greater than 0"));
+                }
+                Ok(RequestTimeout::Millis(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if value <= 0 {
+                    return Err(E::custom("timeout must be greater than 0"));
+                }
+                Ok(RequestTimeout::Millis(value as u64))
+            }
+        }
+
+        deserializer.deserialize_any(RequestTimeoutVisitor)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ProviderOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<RequestTimeout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_timeout: Option<u64>,
+}
+
+impl ProviderOptions {
+    pub fn is_default(&self) -> bool {
+        self.timeout.is_none() && self.chunk_timeout.is_none()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct RuntimeSettings {
     #[serde(default, skip_serializing_if = "ContextFoldingConfig::is_default")]
@@ -138,17 +222,23 @@ pub enum Provider {
         api_key: String,
         #[serde(default = "default_base_url")]
         base_url: String,
+        #[serde(default, skip_serializing_if = "ProviderOptions::is_default")]
+        options: ProviderOptions,
     },
     Claude {
         access_token: String,
         refresh_token: String,
         expires_at: u64,
+        #[serde(default, skip_serializing_if = "ProviderOptions::is_default")]
+        options: ProviderOptions,
     },
     Codex {
         access_token: String,
         refresh_token: String,
         expires_at: u64,
         account_id: Option<String>,
+        #[serde(default, skip_serializing_if = "ProviderOptions::is_default")]
+        options: ProviderOptions,
     },
     GoogleOAuth {
         access_token: String,
@@ -156,6 +246,8 @@ pub enum Provider {
         expires_at: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project_id: Option<String>,
+        #[serde(default, skip_serializing_if = "ProviderOptions::is_default")]
+        options: ProviderOptions,
     },
 }
 
@@ -218,6 +310,41 @@ impl Provider {
         matches!(self, Provider::Claude { .. })
     }
 
+    pub fn options(&self) -> &ProviderOptions {
+        match self {
+            Provider::OpenAiGeneric { options, .. }
+            | Provider::Claude { options, .. }
+            | Provider::Codex { options, .. }
+            | Provider::GoogleOAuth { options, .. } => options,
+        }
+    }
+
+    pub fn options_mut(&mut self) -> &mut ProviderOptions {
+        match self {
+            Provider::OpenAiGeneric { options, .. }
+            | Provider::Claude { options, .. }
+            | Provider::Codex { options, .. }
+            | Provider::GoogleOAuth { options, .. } => options,
+        }
+    }
+
+    pub fn llm_timeouts(&self) -> LlmTimeouts {
+        let request_timeout = match self.options().timeout {
+            Some(RequestTimeout::Disabled) => None,
+            Some(RequestTimeout::Millis(ms)) => Some(Duration::from_millis(ms)),
+            None => Some(Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS)),
+        };
+        let chunk_timeout_ms = self
+            .options()
+            .chunk_timeout
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_CHUNK_TIMEOUT_MS);
+        LlmTimeouts {
+            request_timeout,
+            chunk_timeout: Duration::from_millis(chunk_timeout_ms),
+        }
+    }
+
     /// Validate model syntax only.
     pub fn validate_model_name(&self, model: &str) -> Result<(), String> {
         let m = model.trim();
@@ -267,6 +394,7 @@ impl Provider {
                 access_token,
                 refresh_token,
                 expires_at,
+                ..
             } => {
                 if now + 300 >= *expires_at {
                     let tokens = oauth::refresh_tokens(refresh_token).await?;
@@ -281,6 +409,7 @@ impl Provider {
                 refresh_token,
                 expires_at,
                 account_id,
+                ..
             } => {
                 if now + 300 >= *expires_at {
                     let tokens = oauth::codex_refresh_tokens(refresh_token).await?;
@@ -471,6 +600,7 @@ mod tests {
         Provider::OpenAiGeneric {
             api_key: "test-key".into(),
             base_url: "https://openrouter.ai/api/v1".into(),
+            options: ProviderOptions::default(),
         }
     }
 
@@ -479,6 +609,7 @@ mod tests {
             access_token: "tok".into(),
             refresh_token: "ref".into(),
             expires_at: u64::MAX,
+            options: ProviderOptions::default(),
         }
     }
 
@@ -488,6 +619,7 @@ mod tests {
             refresh_token: "ref".into(),
             expires_at: u64::MAX,
             account_id: Some("acct".into()),
+            options: ProviderOptions::default(),
         }
     }
 
@@ -497,6 +629,7 @@ mod tests {
             refresh_token: "ref".into(),
             expires_at: u64::MAX,
             project_id: Some("test-proj".into()),
+            options: ProviderOptions::default(),
         }
     }
 
@@ -782,6 +915,54 @@ mod tests {
         let cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
         assert_eq!(cfg.context_folding().soft_limit_pct, 45);
         assert_eq!(cfg.context_folding().hard_limit_pct, 58);
+    }
+
+    #[test]
+    fn provider_timeouts_default_to_opencode_style_values() {
+        let timeouts = openai_generic().llm_timeouts();
+        assert_eq!(
+            timeouts.request_timeout,
+            Some(Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS))
+        );
+        assert_eq!(
+            timeouts.chunk_timeout,
+            Duration::from_millis(DEFAULT_CHUNK_TIMEOUT_MS)
+        );
+    }
+
+    #[test]
+    fn provider_timeout_false_disables_request_deadline() {
+        let raw = serde_json::json!({
+            "type": "openai-generic",
+            "api_key": "k",
+            "base_url": "https://openrouter.ai/api/v1",
+            "options": {
+                "timeout": false,
+                "chunk_timeout": 45000
+            }
+        });
+
+        let provider: Provider = serde_json::from_value(raw).expect("valid provider json");
+        let timeouts = provider.llm_timeouts();
+        assert_eq!(timeouts.request_timeout, None);
+        assert_eq!(timeouts.chunk_timeout, Duration::from_millis(45_000));
+    }
+
+    #[test]
+    fn provider_timeout_requires_false_or_positive_integer() {
+        let err = serde_json::from_value::<Provider>(serde_json::json!({
+            "type": "openai-generic",
+            "api_key": "k",
+            "base_url": "https://openrouter.ai/api/v1",
+            "options": {
+                "timeout": true
+            }
+        }))
+        .expect_err("true timeout should be rejected");
+        assert!(
+            err.to_string()
+                .contains("timeout must be a positive integer or false")
+        );
     }
 
     #[test]

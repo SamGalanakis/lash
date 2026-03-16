@@ -15,8 +15,6 @@ use crate::app::{
 };
 use crate::markdown;
 use crate::theme;
-use lash_core::TokenUsage;
-
 fn input_height(app: &App, frame_width: u16) -> u16 {
     if app.has_prompt() {
         prompt_height(app, frame_width)
@@ -34,10 +32,10 @@ fn queue_preview_height(app: &App, frame_width: u16) -> u16 {
 
 /// Exact history viewport height based on the same layout math used in draw().
 pub fn history_viewport_height(app: &App, frame_width: u16, frame_height: u16) -> usize {
-    let strike_h = if app.running { 1 } else { 0 };
+    let status_h = if app.live_turn.is_some() { 3 } else { 0 };
     let queued_h = queue_preview_height(app, frame_width);
     let input_h = input_height(app, frame_width);
-    let overhead = 1 + strike_h + queued_h + input_h;
+    let overhead = 1 + status_h + queued_h + input_h;
     frame_height.saturating_sub(overhead) as usize
 }
 
@@ -45,14 +43,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // Paint entire frame with FORM bg so no terminal background bleeds through
     frame.render_widget(Block::default().style(theme::history_bg()), frame.area());
 
-    let strike_h = if app.running { 1 } else { 0 };
+    let status_h = if app.live_turn.is_some() { 3 } else { 0 };
     let queued_h = queue_preview_height(app, frame.area().width);
     let input_h = input_height(app, frame.area().width);
 
     let chunks = Layout::vertical([
         Constraint::Length(1),        // [0] status bar
         Constraint::Min(3),           // [1] history
-        Constraint::Length(strike_h), // [2] strike zone (only when running)
+        Constraint::Length(status_h), // [2] turn status (only during an active turn)
         Constraint::Length(queued_h), // [3] pending input preview
         Constraint::Length(input_h),  // [4] input (dynamic height)
     ])
@@ -60,8 +58,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     draw_status_bar(frame, app, chunks[0]);
     draw_history(frame, app, chunks[1]);
-    if app.running {
-        draw_strike_zone(frame, app, chunks[2]);
+    if app.live_turn.is_some() {
+        draw_turn_status(frame, app, chunks[2]);
     }
     draw_queue_preview(frame, app, chunks[3]);
     if app.has_prompt() {
@@ -97,19 +95,24 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let display_output_tokens = app.token_usage.output_tokens + app.live_output_tokens_estimate;
     let display_total_tokens = display_input_tokens + display_output_tokens;
     let has_usage = display_total_tokens > 0;
+    let live_context_budget = current_context_budget_tokens(app);
     let ctx_pct = app.context_window.and_then(|ctx_win| {
-        context_usage_pct(
-            &app.last_response_usage,
-            ctx_win,
-            app.context_usage_excludes_cached_input,
-        )
+        live_context_budget
+            .and_then(|used| context_usage_pct_from_total(used, ctx_win))
+            .or_else(|| {
+                app.last_prompt_usage
+                    .as_ref()
+                    .and_then(|usage| context_usage_pct(usage, ctx_win))
+            })
     });
     let ctx_display = app.context_window.and_then(|ctx_win| {
-        format_context_usage(
-            &app.last_response_usage,
-            ctx_win,
-            app.context_usage_excludes_cached_input,
-        )
+        live_context_budget
+            .and_then(|used| format_context_usage_from_total(used, ctx_win))
+            .or_else(|| {
+                app.last_prompt_usage
+                    .as_ref()
+                    .and_then(|usage| format_context_usage(usage, ctx_win))
+            })
     });
     let ctx_display_pct = ctx_pct.map(|pct| format!("{pct:.1}%"));
 
@@ -235,46 +238,50 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(bar, area);
 }
 
-fn context_usage_total(usage: &TokenUsage, excludes_cached_input: bool) -> i64 {
-    let adjusted_input = if excludes_cached_input {
-        usage.input_tokens
-    } else {
-        usage.input_tokens.saturating_sub(usage.cached_input_tokens)
-    };
-    adjusted_input
-        .saturating_add(usage.output_tokens)
-        .saturating_add(usage.reasoning_tokens)
-        .saturating_add(usage.cached_input_tokens)
+fn context_usage_total(usage: &lash_core::PromptUsage) -> i64 {
+    usage.context_budget_tokens as i64
 }
 
-fn context_usage_pct(
-    usage: &TokenUsage,
-    context_window: u64,
-    excludes_cached_input: bool,
-) -> Option<f64> {
-    let used = context_usage_total(usage, excludes_cached_input);
+fn current_context_budget_tokens(app: &App) -> Option<i64> {
+    if !app.running {
+        return None;
+    }
+    let input = app.last_response_usage.input_tokens.max(0);
+    let cached = app.last_response_usage.cached_input_tokens.max(0);
+    let output = (app.last_response_usage.output_tokens + app.live_output_tokens_estimate).max(0);
+    if input == 0 && cached == 0 && output == 0 {
+        return None;
+    }
+    Some(if app.context_usage_excludes_cached_input {
+        input + output + cached
+    } else {
+        (input - cached).max(0) + output + cached
+    })
+}
+
+fn context_usage_pct_from_total(used: i64, context_window: u64) -> Option<f64> {
     if used <= 0 || context_window == 0 {
         return None;
     }
     Some(used as f64 / context_window as f64 * 100.0)
 }
 
-fn format_context_usage(
-    usage: &TokenUsage,
-    context_window: u64,
-    excludes_cached_input: bool,
-) -> Option<String> {
-    let used = context_usage_total(usage, excludes_cached_input);
-    let pct = context_usage_pct(usage, context_window, excludes_cached_input)?;
-    if used <= 0 || context_window == 0 {
-        return None;
-    }
+fn context_usage_pct(usage: &lash_core::PromptUsage, context_window: u64) -> Option<f64> {
+    context_usage_pct_from_total(context_usage_total(usage), context_window)
+}
+
+fn format_context_usage_from_total(used: i64, context_window: u64) -> Option<String> {
+    let pct = context_usage_pct_from_total(used, context_window)?;
     Some(format!(
         "{} / {} ({:.1}%)",
         crate::app::format_tokens(used),
         crate::app::format_tokens(context_window as i64),
         pct
     ))
+}
+
+fn format_context_usage(usage: &lash_core::PromptUsage, context_window: u64) -> Option<String> {
+    format_context_usage_from_total(context_usage_total(usage), context_window)
 }
 
 fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
@@ -301,24 +308,6 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
         );
         if lines.len() >= viewport_height + skip_lines {
             break;
-        }
-    }
-
-    // Render live streaming LLM text (pending_text accumulates TextDelta events).
-    // Use a uniform 2-space indent on every line — no marker or empty-line
-    // special-casing — so that re-rendering partial markdown each frame
-    // produces a stable line count (avoids flicker / vertical oscillation).
-    // The ■ marker appears once the text is committed as an AssistantText block.
-    if !app.pending_text.is_empty() && lines.len() < viewport_height + skip_lines {
-        let rendered =
-            markdown::render_markdown_compact(&app.pending_text, viewport_width.saturating_sub(2));
-        for line in rendered {
-            let mut spans = vec![Span::raw("  ")];
-            spans.extend(line.spans);
-            lines.push(Line::from(spans));
-            if lines.len() >= viewport_height + skip_lines {
-                break;
-            }
         }
     }
 
@@ -701,17 +690,58 @@ fn is_code_workflow_block(block: &DisplayBlock) -> bool {
     }
 }
 
+fn is_code_workflow_bridge_block(block: &DisplayBlock) -> bool {
+    match block {
+        DisplayBlock::PlanContent(_) | DisplayBlock::PluginPanel(_) => true,
+        DisplayBlock::Activity(activity) => activity.kind == ActivityKind::PlanUpdate,
+        _ => false,
+    }
+}
+
+fn has_code_workflow_neighbor(blocks: &[DisplayBlock], idx: usize, step: isize) -> bool {
+    let mut cursor = idx as isize + step;
+    while cursor >= 0 && cursor < blocks.len() as isize {
+        let block = &blocks[cursor as usize];
+        if is_code_workflow_block(block) {
+            return true;
+        }
+        if is_code_workflow_bridge_block(block) {
+            cursor += step;
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
 fn code_workflow_lane(blocks: &[DisplayBlock], idx: usize) -> Option<CodeWorkflowLane> {
     if !is_code_workflow_block(&blocks[idx]) {
         return None;
     }
 
-    let prev = idx > 0 && is_code_workflow_block(&blocks[idx - 1]);
-    let next = idx + 1 < blocks.len() && is_code_workflow_block(&blocks[idx + 1]);
+    let prev = has_code_workflow_neighbor(blocks, idx, -1);
+    let next = has_code_workflow_neighbor(blocks, idx, 1);
     Some(CodeWorkflowLane {
         is_first: !prev,
         is_last: !next,
     })
+}
+
+fn code_workflow_bridge_gutter(
+    blocks: &[DisplayBlock],
+    idx: usize,
+) -> Option<(&'static str, Style)> {
+    if !is_code_workflow_bridge_block(&blocks[idx]) {
+        return None;
+    }
+
+    let prev = has_code_workflow_neighbor(blocks, idx, -1);
+    let next = has_code_workflow_neighbor(blocks, idx, 1);
+    if prev && next {
+        Some(("│ ", theme::code_scribe()))
+    } else {
+        None
+    }
 }
 
 fn code_workflow_summary_prefix(lane: CodeWorkflowLane) -> &'static str {
@@ -732,12 +762,38 @@ fn code_workflow_artifact_indent(lane: CodeWorkflowLane) -> &'static str {
     if lane.is_last { "  " } else { "│ " }
 }
 
-fn default_activity_lane(activity: &ActivityBlock, nested: bool) -> ActivityLane {
+fn activity_uses_connected_lane(activity: &ActivityBlock, expand_level: u8) -> bool {
+    let hide_success_shell_details = matches!(
+        activity.kind,
+        ActivityKind::ShellCommand | ActivityKind::ShellInteraction
+    ) && activity.status != ActivityStatus::Failed;
+
+    let has_detail_rows =
+        expand_level >= 1 && !hide_success_shell_details && !activity.detail_lines.is_empty();
+    let has_parallel_children = expand_level >= 1
+        && activity.kind == ActivityKind::Parallel
+        && !activity.children.is_empty();
+    let has_patch_preview = expand_level == 1
+        && matches!(
+            activity.artifact,
+            Some(ActivityArtifact::PatchPreview { .. })
+        );
+    let has_expanded_artifact = expand_level >= 2 && activity.artifact.is_some();
+
+    has_detail_rows || has_parallel_children || has_patch_preview || has_expanded_artifact
+}
+
+fn default_activity_lane(activity: &ActivityBlock, nested: bool, expand_level: u8) -> ActivityLane {
     let prefix = if nested { "  " } else { "" };
+    let connected = activity_uses_connected_lane(activity, expand_level);
     let (summary_prefix, summary_prefix_style, detail_prefix, detail_prefix_style) =
         match activity.kind {
             ActivityKind::Exploration => (
-                format!("{prefix}├─ "),
+                if connected {
+                    format!("{prefix}╭─ ")
+                } else {
+                    format!("{prefix}─ ")
+                },
                 Style::default()
                     .fg(theme::SODIUM)
                     .add_modifier(Modifier::BOLD),
@@ -761,7 +817,11 @@ fn default_activity_lane(activity: &ActivityBlock, nested: bool) -> ActivityLane
                 Style::default().fg(theme::LICHEN),
             ),
             ActivityKind::Edit => (
-                format!("{prefix}╭─ "),
+                if connected {
+                    format!("{prefix}╭─ ")
+                } else {
+                    format!("{prefix}─ ")
+                },
                 if activity.status == ActivityStatus::Failed {
                     theme::error().add_modifier(Modifier::BOLD)
                 } else {
@@ -812,10 +872,39 @@ fn render_activity_block_with_lane<'a>(
     viewport_width: usize,
     lane: ActivityLane,
 ) {
-    let style = if activity.kind == ActivityKind::Delegate {
+    let summary_style = if activity.kind == ActivityKind::Exploration {
+        if activity.status == ActivityStatus::Failed {
+            theme::error().add_modifier(Modifier::BOLD)
+        } else {
+            theme::explore_label()
+        }
+    } else if activity.kind == ActivityKind::Delegate {
         Style::default().fg(theme::CHALK_MID)
     } else {
         activity_style(activity.status)
+    };
+    let summary_prefix_style = if activity.kind == ActivityKind::Exploration {
+        if activity.status == ActivityStatus::Failed {
+            theme::error().add_modifier(Modifier::BOLD)
+        } else {
+            theme::explore_marker()
+        }
+    } else {
+        lane.summary_prefix_style
+    };
+    let detail_prefix = if activity.kind == ActivityKind::Exploration {
+        format!("{} ", lane.detail_prefix)
+    } else {
+        lane.detail_prefix.clone()
+    };
+    let detail_prefix_style = if activity.kind == ActivityKind::Exploration {
+        if activity.status == ActivityStatus::Failed {
+            theme::error()
+        } else {
+            theme::explore_marker()
+        }
+    } else {
+        lane.detail_prefix_style
     };
     let summary_text = truncate_to_display_width(
         &format!(
@@ -826,8 +915,8 @@ fn render_activity_block_with_lane<'a>(
         viewport_width.saturating_sub(UnicodeWidthStr::width(lane.summary_prefix.as_str())),
     );
     lines.push(Line::from(vec![
-        Span::styled(lane.summary_prefix.clone(), lane.summary_prefix_style),
-        Span::styled(summary_text, style),
+        Span::styled(lane.summary_prefix.clone(), summary_prefix_style),
+        Span::styled(summary_text, summary_style),
     ]));
 
     let hide_success_shell_details = matches!(
@@ -838,12 +927,12 @@ fn render_activity_block_with_lane<'a>(
     if expand_level >= 1 && !hide_success_shell_details {
         for detail in &activity.detail_lines {
             lines.push(Line::from(vec![
-                Span::styled(lane.detail_prefix.clone(), lane.detail_prefix_style),
+                Span::styled(detail_prefix.clone(), detail_prefix_style),
                 Span::styled(
                     truncate_to_display_width(
                         detail,
                         viewport_width
-                            .saturating_sub(UnicodeWidthStr::width(lane.detail_prefix.as_str())),
+                            .saturating_sub(UnicodeWidthStr::width(detail_prefix.as_str())),
                     ),
                     Style::default().fg(theme::ASH_TEXT),
                 ),
@@ -919,8 +1008,15 @@ fn render_activity_block<'a>(
         expand_level,
         lines,
         viewport_width,
-        default_activity_lane(activity, nested),
+        default_activity_lane(activity, nested, expand_level),
     );
+}
+
+fn prefix_rendered_lines(lines: &mut [Line<'_>], prefix: &str, style: Style) {
+    for line in lines.iter_mut() {
+        line.spans
+            .insert(0, Span::styled(prefix.to_string(), style));
+    }
 }
 
 fn render_block<'a>(
@@ -1159,6 +1255,17 @@ fn render_block<'a>(
                     viewport_width,
                     code_workflow_activity_lane(lane),
                 );
+            } else if let Some((gutter, gutter_style)) = code_workflow_bridge_gutter(blocks, idx) {
+                let start = lines.len();
+                let gutter_width = UnicodeWidthStr::width(gutter);
+                render_activity_block(
+                    activity,
+                    expand_level,
+                    lines,
+                    viewport_width.saturating_sub(gutter_width),
+                    false,
+                );
+                prefix_rendered_lines(&mut lines[start..], gutter, gutter_style);
             } else {
                 render_activity_block(activity, expand_level, lines, viewport_width, false);
             }
@@ -1238,68 +1345,22 @@ fn render_block<'a>(
                 lines.push(Line::from(Span::styled(line, theme::system_message())));
             }
         }
-        DisplayBlock::SubAgentResult {
-            task,
-            usage,
-            tool_calls,
-            iterations,
-            success,
-            is_last: _,
-        } => {
-            let connector = "◆";
-            let status_connector = "│ ";
-
-            // Truncate task to fit: connector(2) + space(1) + task + sep(3) + stats(~30)
-            let stats_str = format!(
-                " \u{b7} {} turns \u{b7} {} tool uses \u{b7} {} tokens",
-                iterations,
-                tool_calls,
-                crate::app::format_tokens(usage.total()),
-            );
-            let label = "delegate \u{b7} ";
-            let max_task_w = viewport_width
-                .saturating_sub(3 + label.chars().count() + stats_str.chars().count());
-            let task_display: String = task.chars().take(max_task_w).collect();
-            let truncated = task.chars().count() > max_task_w;
-            let task_final = if truncated {
-                format!("{}\u{2026}", task_display)
-            } else {
-                task_display
-            };
-
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{connector} "),
-                    Style::default()
-                        .fg(theme::LICHEN)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "delegate",
-                    Style::default()
-                        .fg(theme::LICHEN)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" \u{b7} ", Style::default().fg(theme::ASH_MID)),
-                Span::styled(task_final, Style::default().fg(theme::CHALK_MID)),
-                Span::styled(stats_str, Style::default().fg(theme::CHALK_DIM)),
-            ]));
-
-            let (status_label, status_style) = if *success {
-                ("done", Style::default().fg(theme::LICHEN))
-            } else {
-                ("failed", Style::default().fg(theme::ERROR))
-            };
-            lines.push(Line::from(vec![
-                Span::styled(status_connector, Style::default().fg(theme::LICHEN)),
-                Span::styled(status_label, status_style),
-            ]));
-        }
         DisplayBlock::PlanContent(content) => {
-            render_plan_block(content, lines, viewport_width);
+            render_plan_block(
+                content,
+                lines,
+                viewport_width,
+                code_workflow_bridge_gutter(blocks, idx),
+            );
         }
         DisplayBlock::PluginPanel(panel) => {
-            render_panel_block(&panel.title, &panel.content, lines, viewport_width);
+            render_panel_block(
+                &panel.title,
+                &panel.content,
+                lines,
+                viewport_width,
+                code_workflow_bridge_gutter(blocks, idx),
+            );
         }
         DisplayBlock::Splash => {
             let chalk = theme::assistant_text();
@@ -1359,8 +1420,95 @@ fn render_block<'a>(
 }
 
 /// Render plan content as a bordered block with markdown inside.
-fn render_plan_block<'a>(content: &'a str, lines: &mut Vec<Line<'a>>, viewport_width: usize) {
-    render_panel_block("PLAN", content, lines, viewport_width);
+fn render_plan_block<'a>(
+    content: &'a str,
+    lines: &mut Vec<Line<'a>>,
+    viewport_width: usize,
+    gutter: Option<(&'static str, Style)>,
+) {
+    let start = lines.len();
+    let gutter_width = gutter.map_or(0, |(prefix, _)| UnicodeWidthStr::width(prefix));
+    let viewport_width = viewport_width.saturating_sub(gutter_width);
+    let title = " PLAN ".to_string();
+    let title_w = UnicodeWidthStr::width(title.as_str());
+    let fill_w = viewport_width.saturating_sub(3 + title_w);
+
+    lines.push(Line::from(vec![
+        Span::styled("\u{250c}\u{2500}", Style::default().fg(theme::ASH)),
+        Span::styled(
+            title,
+            Style::default()
+                .fg(theme::SODIUM)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("\u{2500}".repeat(fill_w), Style::default().fg(theme::ASH)),
+        Span::styled("\u{2510}", Style::default().fg(theme::ASH)),
+    ]));
+
+    let inner_w = viewport_width.saturating_sub(4).max(1);
+    for raw_line in content.lines() {
+        let segments = if raw_line.is_empty() {
+            vec![(0usize, 0usize)]
+        } else {
+            wrap_line(raw_line, 0, inner_w)
+        };
+
+        for (start, end) in segments {
+            let chunk = if raw_line.is_empty() {
+                String::new()
+            } else {
+                truncate_to_display_width(&raw_line[start..end], inner_w)
+            };
+            let styled = styled_plan_chunk(&chunk);
+            let visible_width: usize = styled
+                .iter()
+                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                .sum();
+            let pad = inner_w.saturating_sub(visible_width);
+            let mut row = Vec::with_capacity(styled.len() + 3);
+            row.push(Span::styled("\u{2502} ", Style::default().fg(theme::ASH)));
+            row.extend(styled);
+            row.push(Span::raw(" ".repeat(pad)));
+            row.push(Span::styled(" \u{2502}", Style::default().fg(theme::ASH)));
+            lines.push(Line::from(row));
+        }
+    }
+
+    let bottom_fill = viewport_width.saturating_sub(2);
+    lines.push(Line::from(Span::styled(
+        format!("\u{2514}{}\u{2518}", "\u{2500}".repeat(bottom_fill)),
+        Style::default().fg(theme::ASH),
+    )));
+
+    if let Some((prefix, style)) = gutter {
+        prefix_rendered_lines(&mut lines[start..], prefix, style);
+    }
+}
+
+fn styled_plan_chunk(chunk: &str) -> Vec<Span<'static>> {
+    let Some(rest) = chunk.strip_prefix("\u{2713} ") else {
+        if let Some(rest) = chunk.strip_prefix("\u{25b8} ") {
+            return vec![
+                Span::styled("\u{25b8}", theme::plan_active_marker()),
+                Span::raw(" "),
+                Span::styled(rest.to_string(), theme::assistant_text()),
+            ];
+        };
+        if let Some(rest) = chunk.strip_prefix("\u{25cb} ") {
+            return vec![
+                Span::styled("\u{25cb}", theme::plan_pending_marker()),
+                Span::raw(" "),
+                Span::styled(rest.to_string(), theme::assistant_text()),
+            ];
+        };
+        return vec![Span::styled(chunk.to_string(), theme::assistant_text())];
+    };
+
+    vec![
+        Span::styled("\u{2713}", theme::plan_done_marker()),
+        Span::raw(" "),
+        Span::styled(rest.to_string(), theme::assistant_text()),
+    ]
 }
 
 fn render_panel_block<'a>(
@@ -1368,7 +1516,11 @@ fn render_panel_block<'a>(
     content: &'a str,
     lines: &mut Vec<Line<'a>>,
     viewport_width: usize,
+    gutter: Option<(&'static str, Style)>,
 ) {
+    let start = lines.len();
+    let gutter_width = gutter.map_or(0, |(prefix, _)| UnicodeWidthStr::width(prefix));
+    let viewport_width = viewport_width.saturating_sub(gutter_width);
     let title = format!(" {} ", title_text);
     let title_w = UnicodeWidthStr::width(title.as_str());
     let fill_w = viewport_width.saturating_sub(3 + title_w); // ┌─ + title + ┐
@@ -1425,109 +1577,66 @@ fn render_panel_block<'a>(
         format!("\u{2514}{}\u{2518}", "\u{2500}".repeat(bottom_fill)),
         Style::default().fg(theme::ASH),
     )));
+
+    if let Some((prefix, style)) = gutter {
+        prefix_rendered_lines(&mut lines[start..], prefix, style);
+    }
 }
 
-// ── Strike zone ─────────────────────────────────────────────────────
-// The brand slash rotates during normal work. Delegate work switches to
-// a fixed branch marker so sub-agent activity reads as a separate lane.
-
-fn draw_strike_zone(frame: &mut Frame, app: &App, area: Rect) {
-    // Four angles of the slash mark rotating in place
-    const ANGLES: &[char] = &['╲', '─', '╱', '│'];
-    // Divide tick by 2 → 200ms per angle, 800ms full rotation
-    let idx = (app.tick / 2) % ANGLES.len();
-    let trail_idx = (idx + ANGLES.len() - 1) % ANGLES.len();
-
-    let lead = ANGLES[idx];
-    let trail = ANGLES[trail_idx];
-
-    let delegate_active = app.active_delegate.is_some();
-    let (status, details, elapsed) = if let Some((_, task, started)) = &app.active_delegate {
-        (
-            "delegate".to_string(),
-            Some(task.clone()),
-            Some(started.elapsed()),
-        )
-    } else {
-        (
-            app.status_text.clone().unwrap_or_default(),
-            app.status_detail.clone(),
-            app.status_started_at.map(|started| started.elapsed()),
-        )
+fn draw_turn_status(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(turn) = app.live_turn.as_ref() else {
+        return;
     };
-    let details = effective_status_detail(app, &status, details, elapsed);
+    frame.render_widget(Block::default().style(theme::turn_status_bar()), area);
 
-    let mut spans = if delegate_active {
-        vec![
-            Span::raw("  "),
-            Span::styled(
-                "\u{251c}\u{2500}",
-                Style::default()
-                    .fg(theme::SODIUM)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]
+    let elapsed_text =
+        crate::util::format_duration_ms(turn.turn_started_at.elapsed().as_millis() as u64);
+    let brand = animated_lash_word(turn.turn_started_at.elapsed());
+    let (label, label_style) = if turn.status_text == "error" {
+        ("Error", theme::error().add_modifier(Modifier::BOLD))
     } else {
-        vec![
-            Span::raw("  "),
-            Span::styled(trail.to_string(), Style::default().fg(theme::ASH_TEXT)),
-            Span::styled(
-                lead.to_string(),
-                Style::default()
-                    .fg(theme::SODIUM)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]
+        ("Working", theme::turn_status_state())
     };
+    let mut spans = Vec::new();
+    spans.extend(brand);
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(label, label_style));
+    spans.push(Span::raw("    "));
+    spans.push(Span::styled(elapsed_text, theme::turn_status_elapsed()));
 
-    if !status.is_empty() {
-        spans.push(Span::styled(
-            format!("  {}", status),
-            Style::default().fg(theme::ASH_MID),
-        ));
-    }
-    if let Some(details) = details
-        && !details.is_empty()
-    {
-        spans.push(Span::styled(
-            format!(" \u{b7} {}", truncate_to_display_width(&details, 48)),
-            Style::default().fg(theme::ASH_TEXT),
-        ));
-    }
-    if let Some(elapsed) = elapsed {
-        spans.push(Span::styled(
-            format!(
-                "  {}",
-                crate::util::format_duration_ms(elapsed.as_millis() as u64)
-            ),
-            Style::default().fg(theme::ASH_MID),
-        ));
-    }
-
-    let paragraph = Paragraph::new(Line::from(spans)).style(theme::history_bg());
-    frame.render_widget(paragraph, area);
+    let line_y = area.y + area.height.saturating_sub(1) / 2;
+    let line_area = Rect {
+        x: area.x,
+        y: line_y,
+        width: area.width,
+        height: 1,
+    };
+    let status_line = Paragraph::new(Line::from(spans))
+        .style(theme::turn_status_bar())
+        .alignment(ratatui::layout::Alignment::Center);
+    frame.render_widget(status_line, line_area);
 }
 
-fn effective_status_detail(
-    app: &App,
-    status: &str,
-    details: Option<String>,
-    elapsed: Option<std::time::Duration>,
-) -> Option<String> {
-    if details.as_deref() != Some("waiting for first token") {
-        return details;
-    }
-    if status != "thinking" || !app.pending_text.is_empty() || app.live_output_chars_estimate > 0 {
-        return details;
-    }
-    let secs = elapsed.map(|d| d.as_secs()).unwrap_or(0);
-    if secs >= 120 {
-        Some("still waiting on the model; no visible output yet".into())
-    } else if secs >= 30 {
-        Some("model is still reasoning; no visible output yet".into())
-    } else {
-        None
-    }
+fn animated_lash_word(elapsed: std::time::Duration) -> Vec<Span<'static>> {
+    let frame = ((elapsed.as_millis() / 180) % 5) as usize;
+    let glyphs = match frame {
+        0 => vec!['/', 'L', 'A', 'S', 'H'],
+        1 => vec!['L', '/', 'A', 'S', 'H'],
+        2 => vec!['L', 'A', '/', 'S', 'H'],
+        3 => vec!['L', 'A', 'S', '/', 'H'],
+        _ => vec!['L', 'A', 'S', 'H', '/'],
+    };
+
+    glyphs
+        .into_iter()
+        .map(|glyph| {
+            if glyph == '/' {
+                Span::styled(glyph.to_string(), theme::turn_status_slash())
+            } else {
+                Span::styled(glyph.to_string(), theme::turn_status_brand())
+            }
+        })
+        .collect()
 }
 
 const QUEUE_SECTION_ITEM_LIMIT: usize = 2;
@@ -2290,9 +2399,48 @@ fn input_cursor_position(input: &str, cursor_pos: usize, full_width: usize) -> (
 mod tests {
     use super::*;
     use crate::app::App;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn workflow_activity(summary: &str) -> DisplayBlock {
+        DisplayBlock::Activity(ActivityBlock {
+            kind: ActivityKind::ShellCommand,
+            status: ActivityStatus::Completed,
+            tool_name: "exec_command".into(),
+            summary: summary.into(),
+            detail_lines: Vec::new(),
+            duration_ms: 1,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: None,
+            children: Vec::new(),
+            extra: None,
+        })
+    }
+
+    fn plan_update_activity(summary: &str) -> DisplayBlock {
+        DisplayBlock::Activity(ActivityBlock {
+            kind: ActivityKind::PlanUpdate,
+            status: ActivityStatus::Completed,
+            tool_name: "update_plan".into(),
+            summary: summary.into(),
+            detail_lines: Vec::new(),
+            duration_ms: 1,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: None,
+            children: Vec::new(),
+            extra: None,
+        })
+    }
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn buffer_row_text(backend: &TestBackend, y: u16, width: u16) -> String {
+        (0..width)
+            .map(|x| backend.buffer().cell((x, y)).expect("buffer cell").symbol())
+            .collect::<String>()
     }
 
     #[test]
@@ -2300,7 +2448,7 @@ mod tests {
         let mut lines = Vec::new();
         let content = "A long paragraph that should wrap inside the plan box without escaping the right border.";
         let width = 32usize;
-        render_plan_block(content, &mut lines, width);
+        render_plan_block(content, &mut lines, width, None);
 
         assert!(lines.len() >= 3, "expected top/content/bottom lines");
 
@@ -2322,6 +2470,69 @@ mod tests {
     }
 
     #[test]
+    fn plan_block_renders_plain_text_without_markdown_list_bullets() {
+        let mut lines = Vec::new();
+        let content =
+            "Testing all available tools one by one\n\n▸ Test filesystem tools\n○ Report results";
+        render_plan_block(content, &mut lines, 64, None);
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("▸ Test filesystem tools"))
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("○ Report results"))
+        );
+        assert!(!rendered.iter().any(|line| line.contains("•")));
+        assert!(!rendered.iter().any(|line| line.contains("1.")));
+    }
+
+    #[test]
+    fn plan_block_bridges_code_workflow_lane() {
+        let blocks = [
+            workflow_activity("first command"),
+            DisplayBlock::PlanContent("Do the next thing".into()),
+            workflow_activity("second command"),
+        ];
+
+        let mut lines = Vec::new();
+        for idx in 0..blocks.len() {
+            render_block(&blocks, idx, 1, &mut lines, 48, 20);
+        }
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert_eq!(rendered[0], "╭─ first command · 1ms");
+        assert!(rendered.iter().any(|line| line.starts_with("│ ┌─ PLAN ")));
+        assert_eq!(
+            rendered.last().map(String::as_str),
+            Some("╰─ second command · 1ms")
+        );
+    }
+
+    #[test]
+    fn plan_update_bridges_code_workflow_lane() {
+        let blocks = [
+            workflow_activity("first command"),
+            plan_update_activity("updated plan"),
+            workflow_activity("second command"),
+        ];
+
+        let mut lines = Vec::new();
+        for idx in 0..blocks.len() {
+            render_block(&blocks, idx, 1, &mut lines, 48, 20);
+        }
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert_eq!(rendered[0], "╭─ first command · 1ms");
+        assert_eq!(rendered[1], "│ ◆ updated plan · 1ms");
+        assert_eq!(rendered[2], "╰─ second command · 1ms");
+    }
+
+    #[test]
     fn history_viewport_height_respects_dynamic_input_and_trays() {
         let mut app = App::new("model".into(), "session".into());
         app.blocks.clear(); // avoid splash-specific influence on expectations
@@ -2337,6 +2548,62 @@ mod tests {
 
         let got = history_viewport_height(&app, fw, fh);
         assert_eq!(got, fh.saturating_sub(expected_overhead) as usize);
+    }
+
+    #[test]
+    fn turn_status_footer_only_renders_working_line() {
+        let backend = TestBackend::new(48, 3);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut app = App::new("model".into(), "session".into());
+        app.live_turn = Some(crate::app::LiveTurnState {
+            status_text: "thinking".into(),
+            status_detail: Some("waiting".into()),
+            phase_started_at: std::time::Instant::now(),
+            turn_started_at: std::time::Instant::now(),
+            assistant_block_idx: None,
+            has_visible_output: false,
+            transient_until: None,
+        });
+
+        terminal
+            .draw(|frame| draw_turn_status(frame, &app, frame.area()))
+            .expect("draw footer");
+
+        let backend = terminal.backend();
+        let top = buffer_row_text(backend, 0, 48);
+        let middle = buffer_row_text(backend, 1, 48);
+        let bottom = buffer_row_text(backend, 2, 48);
+
+        assert!(top.trim().is_empty());
+        assert!(middle.contains("Working"));
+        assert!(!middle.contains("thinking"));
+        assert!(!middle.contains("waiting"));
+        assert!(bottom.trim().is_empty());
+    }
+
+    #[test]
+    fn turn_status_footer_replaces_working_with_error() {
+        let backend = TestBackend::new(48, 3);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut app = App::new("model".into(), "session".into());
+        app.live_turn = Some(crate::app::LiveTurnState {
+            status_text: "error".into(),
+            status_detail: Some("provider timeout".into()),
+            phase_started_at: std::time::Instant::now(),
+            turn_started_at: std::time::Instant::now(),
+            assistant_block_idx: None,
+            has_visible_output: false,
+            transient_until: None,
+        });
+
+        terminal
+            .draw(|frame| draw_turn_status(frame, &app, frame.area()))
+            .expect("draw footer");
+
+        let middle = buffer_row_text(terminal.backend(), 1, 48);
+        assert!(middle.contains("Error"));
+        assert!(!middle.contains("Working"));
+        assert!(!middle.contains("provider timeout"));
     }
 
     #[test]
@@ -2627,91 +2894,91 @@ mod tests {
 
     #[test]
     fn context_usage_pct_returns_fractional_percent() {
-        let usage = TokenUsage {
+        let usage = lash_core::PromptUsage {
+            prompt_context_tokens: 81_182,
             input_tokens: 78_182,
-            output_tokens: 1_200,
             cached_input_tokens: 3_000,
-            reasoning_tokens: 400,
+            context_budget_tokens: 82_382,
         };
-        let pct = context_usage_pct(&usage, 1_050_000, true).expect("context pct");
+        let pct = context_usage_pct(&usage, 1_050_000).expect("context pct");
         assert!(pct > 7.8 && pct < 7.9, "unexpected pct: {pct}");
     }
 
     #[test]
     fn format_context_usage_shows_provider_adjusted_values() {
-        let usage = TokenUsage {
-            input_tokens: 78_182,
-            output_tokens: 1_200,
-            cached_input_tokens: 3_000,
-            reasoning_tokens: 400,
+        let usage = lash_core::PromptUsage {
+            prompt_context_tokens: 84_000,
+            input_tokens: 82_800,
+            cached_input_tokens: 1_200,
+            context_budget_tokens: 82_800,
         };
         assert_eq!(
-            format_context_usage(&usage, 1_050_000, true).as_deref(),
+            format_context_usage(&usage, 1_050_000).as_deref(),
             Some("82.8k / 1.1M (7.9%)")
         );
         assert_eq!(
             format_context_usage(
-                &TokenUsage {
+                &lash_core::PromptUsage {
+                    prompt_context_tokens: 1_000,
                     input_tokens: 1_000,
-                    output_tokens: 0,
                     cached_input_tokens: 0,
-                    reasoning_tokens: 0,
+                    context_budget_tokens: 1_000,
                 },
                 1_050_000,
-                false,
             )
             .as_deref(),
             Some("1.0k / 1.1M (0.1%)")
         );
         assert_eq!(
-            format_context_usage(&TokenUsage::default(), 1_050_000, false),
+            format_context_usage(&lash_core::PromptUsage::default(), 1_050_000),
             None
         );
     }
 
     #[test]
-    fn format_context_usage_avoids_double_counting_cached_input_for_openai_like_providers() {
-        let usage = TokenUsage {
-            input_tokens: 1_000,
-            output_tokens: 50,
-            cached_input_tokens: 200,
-            reasoning_tokens: 10,
+    fn current_context_budget_tokens_uses_live_stream_usage() {
+        let mut app = App::new("claude-opus-4-6".into(), "test".into());
+        app.running = true;
+        app.context_usage_excludes_cached_input = true;
+        app.last_response_usage = lash_core::TokenUsage {
+            input_tokens: 10_000,
+            output_tokens: 2_000,
+            cached_input_tokens: 1_500,
+            reasoning_tokens: 0,
         };
-        assert_eq!(
-            format_context_usage(&usage, 10_000, false).as_deref(),
-            Some("1.1k / 10.0k (10.6%)")
-        );
-        assert_eq!(
-            format_context_usage(&usage, 10_000, true).as_deref(),
-            Some("1.3k / 10.0k (12.6%)")
-        );
+        app.live_output_tokens_estimate = 300;
+
+        assert_eq!(current_context_budget_tokens(&app), Some(13_800));
     }
 
     #[test]
-    fn subagent_result_renders_delegate_label() {
-        let block = DisplayBlock::SubAgentResult {
-            task: "Inspect the skills system".into(),
-            usage: TokenUsage {
-                input_tokens: 800,
-                output_tokens: 200,
-                cached_input_tokens: 0,
-                reasoning_tokens: 0,
-            },
-            tool_calls: 3,
-            iterations: 2,
-            success: true,
-            is_last: true,
+    fn current_context_budget_tokens_adjusts_when_input_includes_cached() {
+        let mut app = App::new("claude-opus-4-6".into(), "test".into());
+        app.running = true;
+        app.context_usage_excludes_cached_input = false;
+        app.last_response_usage = lash_core::TokenUsage {
+            input_tokens: 10_000,
+            output_tokens: 2_000,
+            cached_input_tokens: 1_500,
+            reasoning_tokens: 0,
         };
+        app.live_output_tokens_estimate = 300;
 
-        let blocks = [block];
-        let mut lines = Vec::new();
-        render_block(&blocks, 0, 1, &mut lines, 80, 20);
+        assert_eq!(current_context_budget_tokens(&app), Some(12_300));
+    }
 
+    #[test]
+    fn format_context_usage_uses_normalized_context_budget() {
+        let usage = lash_core::PromptUsage {
+            prompt_context_tokens: 1_000,
+            input_tokens: 1_000,
+            cached_input_tokens: 200,
+            context_budget_tokens: 1_050,
+        };
         assert_eq!(
-            line_text(&lines[0]),
-            "◆ delegate · Inspect the skills system · 2 turns · 3 tool uses · 1.0k tokens"
+            format_context_usage(&usage, 10_000).as_deref(),
+            Some("1.1k / 10.0k (10.5%)")
         );
-        assert_eq!(line_text(&lines[1]), "│ done");
     }
 
     #[test]
@@ -2720,7 +2987,7 @@ mod tests {
             kind: ActivityKind::Exploration,
             status: ActivityStatus::Completed,
             tool_name: "read_file".into(),
-            summary: "explored".into(),
+            summary: "EXPLORE".into(),
             detail_lines: vec!["list .".into(), "read src/main.rs".into()],
             duration_ms: 3,
             args: serde_json::Value::Null,
@@ -2733,9 +3000,9 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 80, false);
 
-        assert_eq!(line_text(&lines[0]), "├─ explored · 3ms");
-        assert_eq!(line_text(&lines[1]), "│  list .");
-        assert_eq!(line_text(&lines[2]), "│  read src/main.rs");
+        assert_eq!(line_text(&lines[0]), "╭─ EXPLORE · 3ms");
+        assert_eq!(line_text(&lines[1]), "│   list .");
+        assert_eq!(line_text(&lines[2]), "│   read src/main.rs");
     }
 
     #[test]
@@ -2744,7 +3011,7 @@ mod tests {
             kind: ActivityKind::Exploration,
             status: ActivityStatus::Completed,
             tool_name: "read_file".into(),
-            summary: "explored".into(),
+            summary: "EXPLORE".into(),
             detail_lines: vec!["read src/components/really_long_file_name.rs".into()],
             duration_ms: 3,
             args: serde_json::Value::Null,
@@ -2757,8 +3024,31 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 20, false);
 
-        assert_eq!(line_text(&lines[0]), "├─ explored · 3ms");
-        assert_eq!(line_text(&lines[1]), "│  read src/compone…");
+        assert_eq!(line_text(&lines[0]), "╭─ EXPLORE · 3ms");
+        assert_eq!(line_text(&lines[1]), "│   read src/compon…");
+    }
+
+    #[test]
+    fn exploration_activity_without_details_uses_single_line_marker() {
+        let activity = ActivityBlock {
+            kind: ActivityKind::Exploration,
+            status: ActivityStatus::Completed,
+            tool_name: "read_file".into(),
+            summary: "EXPLORE".into(),
+            detail_lines: Vec::new(),
+            duration_ms: 3,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: None,
+            children: Vec::new(),
+            extra: None,
+        };
+
+        let mut lines = Vec::new();
+        render_activity_block(&activity, 1, &mut lines, 80, false);
+
+        assert_eq!(line_text(&lines[0]), "─ EXPLORE · 3ms");
+        assert_eq!(lines.len(), 1);
     }
 
     #[test]
@@ -2767,7 +3057,7 @@ mod tests {
             kind: ActivityKind::Exploration,
             status: ActivityStatus::Completed,
             tool_name: "read_file".into(),
-            summary: "explored a deeply nested workspace tree".into(),
+            summary: "EXPLORE".into(),
             detail_lines: vec!["read src/components/really_long_file_name.rs".into()],
             duration_ms: 3,
             args: serde_json::Value::Null,
@@ -2790,7 +3080,7 @@ mod tests {
             kind: ActivityKind::Exploration,
             status: ActivityStatus::Completed,
             tool_name: "read_file".into(),
-            summary: "explored".into(),
+            summary: "EXPLORE".into(),
             detail_lines: vec!["read src/app.rs".into()],
             duration_ms: 3,
             args: serde_json::Value::Null,
@@ -2811,81 +3101,19 @@ mod tests {
     }
 
     #[test]
-    fn thinking_status_shows_long_wait_detail_after_30s() {
-        let mut app = App::new("test-model".into(), "test".into());
-        app.status_text = Some("thinking".into());
-        app.status_detail = Some("waiting for first token".into());
-        app.status_started_at =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(35));
+    fn animated_lash_word_cycles_slash_through_wordmark() {
+        let frames = [0_u64, 200, 400, 600, 800]
+            .into_iter()
+            .map(std::time::Duration::from_millis)
+            .map(animated_lash_word)
+            .map(|spans| {
+                spans
+                    .into_iter()
+                    .map(|span| span.content.to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
 
-        assert_eq!(
-            effective_status_detail(
-                &app,
-                "thinking",
-                app.status_detail.clone(),
-                app.status_started_at.map(|started| started.elapsed()),
-            )
-            .as_deref(),
-            Some("model is still reasoning; no visible output yet")
-        );
-    }
-
-    #[test]
-    fn thinking_status_shows_very_long_wait_detail_after_120s() {
-        let mut app = App::new("test-model".into(), "test".into());
-        app.status_text = Some("thinking".into());
-        app.status_detail = Some("waiting for first token".into());
-        app.status_started_at =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(125));
-
-        assert_eq!(
-            effective_status_detail(
-                &app,
-                "thinking",
-                app.status_detail.clone(),
-                app.status_started_at.map(|started| started.elapsed()),
-            )
-            .as_deref(),
-            Some("still waiting on the model; no visible output yet")
-        );
-    }
-
-    #[test]
-    fn thinking_status_keeps_original_detail_once_output_starts() {
-        let mut app = App::new("test-model".into(), "test".into());
-        app.status_text = Some("thinking".into());
-        app.status_detail = Some("waiting for first token".into());
-        app.status_started_at =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(125));
-        app.pending_text = "partial reply".into();
-
-        assert_eq!(
-            effective_status_detail(
-                &app,
-                "thinking",
-                app.status_detail.clone(),
-                app.status_started_at.map(|started| started.elapsed()),
-            )
-            .as_deref(),
-            Some("waiting for first token")
-        );
-    }
-
-    #[test]
-    fn thinking_status_hides_initial_waiting_detail() {
-        let mut app = App::new("test-model".into(), "test".into());
-        app.status_text = Some("thinking".into());
-        app.status_detail = Some("waiting for first token".into());
-        app.status_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
-
-        assert_eq!(
-            effective_status_detail(
-                &app,
-                "thinking",
-                app.status_detail.clone(),
-                app.status_started_at.map(|started| started.elapsed()),
-            ),
-            None
-        );
+        assert_eq!(frames, vec!["/LASH", "L/ASH", "LA/SH", "LAS/H", "LASH/"]);
     }
 }

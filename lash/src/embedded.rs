@@ -14,7 +14,6 @@ pub enum LashlangRequest {
     Init {
         tools_json: String,
         agent_id: String,
-        capabilities_json: String,
     },
     Exec {
         id: String,
@@ -32,7 +31,6 @@ pub enum LashlangRequest {
     },
     Reconfigure {
         tools_json: String,
-        capabilities_json: String,
         generation: u64,
     },
     CheckComplete {
@@ -71,11 +69,6 @@ pub enum LashlangResponse {
     },
     CheckCompleteResult {
         is_complete: bool,
-    },
-    AskUser {
-        question: String,
-        options: Vec<String>,
-        result_tx: std_mpsc::Sender<String>,
     },
 }
 
@@ -140,7 +133,7 @@ struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
-    fn apply(&mut self, _tools_json: &str, agent_id: String, _capabilities_json: &str) {
+    fn apply(&mut self, _tools_json: &str, agent_id: String) {
         self.agent_id = agent_id;
     }
 }
@@ -170,11 +163,8 @@ fn runtime_thread_main(
             LashlangRequest::Init {
                 tools_json,
                 agent_id,
-                capabilities_json,
             } => {
-                state
-                    .config
-                    .apply(&tools_json, agent_id, &capabilities_json);
+                state.config.apply(&tools_json, agent_id);
                 let _ = response_tx.send(LashlangResponse::Ready);
             }
             LashlangRequest::Exec { id, code } => {
@@ -217,14 +207,11 @@ fn runtime_thread_main(
             }
             LashlangRequest::Reconfigure {
                 tools_json,
-                capabilities_json,
                 generation,
             } => {
-                state.config.apply(
-                    &tools_json,
-                    state.config.agent_id.clone(),
-                    &capabilities_json,
-                );
+                state
+                    .config
+                    .apply(&tools_json, state.config.agent_id.clone());
                 let _ = response_tx.send(LashlangResponse::ReconfigureResult {
                     generation,
                     error: None,
@@ -300,20 +287,6 @@ struct HostBridge<'a> {
 
 impl ToolHost for HostBridge<'_> {
     fn call(&self, name: &str, args: &FlowRecord) -> Result<FlowValue, ToolHostError> {
-        if name == "ask" {
-            let question = args
-                .get("question")
-                .and_then(as_flow_string)
-                .ok_or_else(|| ToolHostError::new("ask requires a string `question`"))?;
-            let options = args
-                .get("options")
-                .map(parse_string_list)
-                .transpose()?
-                .unwrap_or_default();
-            let answer = ask_user(self.response_tx, question, options)?;
-            return Ok(FlowValue::String(answer.into()));
-        }
-
         let mut payload = flow_to_json_value(&FlowValue::Record(Arc::new(args.clone())));
         if let Some(obj) = payload.as_object_mut() {
             obj.entry("__agent_id__".to_string())
@@ -332,24 +305,6 @@ impl ToolHost for HostBridge<'_> {
             .push(text);
         Ok(())
     }
-}
-
-fn ask_user(
-    response_tx: &std_mpsc::Sender<LashlangResponse>,
-    question: String,
-    options: Vec<String>,
-) -> Result<String, ToolHostError> {
-    let (result_tx, result_rx) = std_mpsc::channel();
-    response_tx
-        .send(LashlangResponse::AskUser {
-            question,
-            options,
-            result_tx,
-        })
-        .map_err(|_| ToolHostError::new("failed to send prompt to host"))?;
-    result_rx
-        .recv()
-        .map_err(|_| ToolHostError::new("ask_user channel closed"))
 }
 
 fn send_tool_call(
@@ -427,28 +382,6 @@ fn is_code_complete(code: &str) -> bool {
             found != "end of input"
         }
         Err(FlowParseError::Lex(_)) => true,
-    }
-}
-
-fn as_flow_string(value: &FlowValue) -> Option<String> {
-    match value {
-        FlowValue::String(text) => Some(text.to_string()),
-        _ => None,
-    }
-}
-
-fn parse_string_list(value: &FlowValue) -> Result<Vec<String>, ToolHostError> {
-    match value {
-        FlowValue::List(values) => values
-            .iter()
-            .map(|value| {
-                as_flow_string(value)
-                    .ok_or_else(|| ToolHostError::new("ask `options` must contain only strings"))
-            })
-            .collect(),
-        _ => Err(ToolHostError::new(
-            "ask `options` must be a list of strings",
-        )),
     }
 }
 
@@ -633,6 +566,7 @@ mod tests {
     fn completion_check_distinguishes_incomplete_inputs() {
         assert!(!is_code_complete("if true {"));
         assert!(!is_code_complete("finish \"unterminated"));
+        assert!(is_code_complete("finish"));
         assert!(is_code_complete("finish 1"));
         assert!(is_code_complete("oops ]"));
     }

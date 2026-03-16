@@ -1,15 +1,14 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 
 use crate::agent::PromptSectionName;
-use crate::dynamic::DynamicCapabilityDef;
 use crate::instructions::InstructionSource;
 use crate::search::{SearchDoc, SearchMode, limit_from_args, rank_docs, truncate_preview};
-use crate::store::{HistoryTurnRecord, MemRecord, Store};
+use crate::store::{HistoryTurnRecord, Store};
 use crate::tools::{UpdatePlanTool, run_blocking};
-use crate::{ExecutionMode, ToolDefinition, ToolParam, ToolText};
+use crate::{ToolDefinition, ToolParam};
 
 use super::*;
 
@@ -83,23 +82,23 @@ fn keep_from_for_recent_turns(msgs: &[crate::Message], prefix_len: usize) -> usi
 
 fn compact_history_messages(
     msgs: &mut Vec<crate::Message>,
-    last_input_tokens: usize,
+    last_context_budget_tokens: usize,
     max_context: usize,
     policy: crate::ContextFoldingConfig,
 ) -> bool {
-    if last_input_tokens == 0 || msgs.is_empty() {
+    if last_context_budget_tokens == 0 || msgs.is_empty() {
         return false;
     }
 
     let hard_budget = max_context * usize::from(policy.hard_limit_pct) / 100;
-    if last_input_tokens < hard_budget {
+    if last_context_budget_tokens < hard_budget {
         return false;
     }
 
     let soft_budget = max_context * usize::from(policy.soft_limit_pct) / 100;
     let prefix_len = leading_system_prefix_len(msgs);
     let total_chars: usize = msgs.iter().map(crate::Message::char_count).sum();
-    let target_chars = total_chars.saturating_mul(soft_budget) / last_input_tokens.max(1);
+    let target_chars = total_chars.saturating_mul(soft_budget) / last_context_budget_tokens.max(1);
 
     let mut keep_from = msgs.len();
     let mut tail_chars = 0usize;
@@ -206,62 +205,6 @@ fn latest_turn_history_payload(turn: &crate::AssembledTurn) -> serde_json::Value
         "error": error,
         "tool_calls": turn.tool_calls,
     })
-}
-
-fn current_turn_index(turn: &AssembledTurn) -> i64 {
-    turn.state
-        .messages
-        .iter()
-        .filter(|msg| matches!(msg.role, crate::MessageRole::User))
-        .count() as i64
-}
-
-fn history_capability_def() -> DynamicCapabilityDef {
-    DynamicCapabilityDef {
-        id: "history".to_string(),
-        name: "History".to_string(),
-        description: "Persistent turn history and retrieval.".to_string(),
-        prompt_section: Some(
-            "### History\nPrior turns can be searched with `search_history(...)` when earlier context is actually needed."
-                .to_string(),
-        ),
-        helper_bindings: BTreeSet::from(["search_history".to_string()]),
-        tool_names: BTreeSet::from(["search_history".to_string()]),
-        enabled_by_default: true,
-    }
-}
-
-fn memory_capability_def() -> DynamicCapabilityDef {
-    DynamicCapabilityDef {
-        id: "memory".to_string(),
-        name: "Memory".to_string(),
-        description: "Persistent key-value memory and retrieval.".to_string(),
-        prompt_section: Some(
-            "### Memory\nUse `mem_set`, `mem_get`, `mem_delete`, and `search_mem(...)` for durable decisions that should survive context pruning."
-                .to_string(),
-        ),
-        helper_bindings: BTreeSet::from([
-            "search_mem".to_string(),
-            "mem_set".to_string(),
-            "mem_get".to_string(),
-            "mem_delete".to_string(),
-        ]),
-        tool_names: BTreeSet::from([
-            "search_mem".to_string(),
-            "mem_set".to_string(),
-            "mem_get".to_string(),
-            "mem_delete".to_string(),
-        ]),
-        enabled_by_default: true,
-    }
-}
-
-pub fn builtin_dynamic_capability_defs() -> BTreeMap<String, DynamicCapabilityDef> {
-    let mut defs = BTreeMap::new();
-    for def in [history_capability_def(), memory_capability_def()] {
-        defs.insert(def.id.clone(), def);
-    }
-    defs
 }
 
 fn plan_mode_guidance_message() -> PluginMessage {
@@ -382,14 +325,9 @@ impl Default for PlanModePluginConfig {
                 "agent_kill",
                 "agent_result",
                 "apply_patch",
-                "mem_delete",
-                "mem_set",
-                "shell",
-                "shell_kill",
-                "shell_read",
-                "shell_wait",
-                "shell_write",
+                "exec_command",
                 "update_plan",
+                "write_stdin",
             ]
             .into_iter()
             .map(str::to_string)
@@ -809,10 +747,7 @@ impl ToolProvider for HistoryTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "search_history".into(),
-            description: vec![ToolText::new(
-                "Search turn history using hybrid/literal/regex matching. With no `query`, returns the full turn list in stable turn order.",
-                [ExecutionMode::Repl, ExecutionMode::Standard],
-            )],
+            description: "Search turn history using hybrid/literal/regex matching. With no `query`, returns the full turn list in stable turn order.".into(),
             params: vec![
                 ToolParam::optional("query", "str"),
                 ToolParam::optional("mode", "str"),
@@ -823,8 +758,8 @@ impl ToolProvider for HistoryTools {
             ],
             returns: "list".into(),
             examples: vec![],
-            hidden: false,
-            inject_into_prompt: true,
+            enabled: false,
+            injected: false,
         }]
     }
 
@@ -840,226 +775,14 @@ impl ToolProvider for HistoryTools {
     }
 }
 
-#[derive(Clone)]
-struct MemoryTools {
-    store: Arc<Store>,
-}
-
-impl MemoryTools {
-    fn new(store: Arc<Store>) -> Self {
-        Self { store }
+fn history_prompt_contributions(context: &crate::PromptContext) -> Vec<crate::PromptContribution> {
+    if !context.has_tool("search_history") {
+        return Vec::new();
     }
 
-    fn memory_item(entry: &MemRecord) -> serde_json::Value {
-        json!({
-            "key": entry.key,
-            "description": entry.description,
-            "value": entry.value,
-            "turn": entry.turn,
-        })
-    }
-
-    fn search_mem(&self, args: &serde_json::Value) -> ToolResult {
-        let agent_id = agent_id(args);
-        let query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let browse_all = query.trim().is_empty();
-        let mode = SearchMode::parse(args.get("mode").and_then(|v| v.as_str()));
-        let regex = args.get("regex").and_then(|v| v.as_str());
-        let limit = if browse_all && args.get("limit").is_none() {
-            usize::MAX
-        } else {
-            limit_from_args(args)
-        };
-        let key_filter: Option<HashSet<String>> =
-            args.get("keys").and_then(|v| v.as_array()).map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(str::to_string)
-                    .collect::<HashSet<_>>()
-            });
-
-        let entries: Vec<MemRecord> = self
-            .store
-            .mem_export(&agent_id)
-            .into_iter()
-            .filter(|entry| {
-                key_filter
-                    .as_ref()
-                    .is_none_or(|keys| keys.contains(&entry.key))
-            })
-            .collect();
-
-        if browse_all {
-            return ToolResult::ok(json!(
-                entries
-                    .iter()
-                    .take(limit)
-                    .map(Self::memory_item)
-                    .collect::<Vec<_>>()
-            ));
-        }
-
-        let docs: Vec<SearchDoc> = entries
-            .iter()
-            .map(|entry| {
-                let mut fields = HashMap::new();
-                fields.insert("key", entry.key.clone());
-                fields.insert("description", entry.description.clone());
-                fields.insert("value", entry.value.clone());
-                SearchDoc { fields }
-            })
-            .collect();
-        let ranked = rank_docs(
-            &docs,
-            &query,
-            mode,
-            regex,
-            &[("key", 4.0), ("description", 2.0), ("value", 1.0)],
-        );
-        let items: Vec<serde_json::Value> = ranked
-            .into_iter()
-            .take(limit)
-            .map(|(idx, score, field_hits)| {
-                let entry = &entries[idx];
-                let mut item = Self::memory_item(entry);
-                if let Some(obj) = item.as_object_mut() {
-                    obj.insert("score".to_string(), json!(score));
-                    obj.insert("field_hits".to_string(), json!(field_hits));
-                }
-                item
-            })
-            .collect();
-        ToolResult::ok(json!(items))
-    }
-
-    fn mem_set(&self, args: &serde_json::Value) -> ToolResult {
-        let agent_id = agent_id(args);
-        let key = args.get("key").and_then(|v| v.as_str()).unwrap_or_default();
-        if key.is_empty() {
-            return ToolResult::err(json!("Missing required parameter: key"));
-        }
-        let description = args
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let value = args
-            .get("value")
-            .and_then(|v| v.as_str())
-            .unwrap_or(description);
-        self.store.mem_set(&agent_id, key, description, value);
-        ToolResult::ok(json!(null))
-    }
-
-    fn mem_get(&self, args: &serde_json::Value) -> ToolResult {
-        let agent_id = agent_id(args);
-        let key = args.get("key").and_then(|v| v.as_str()).unwrap_or_default();
-        if key.is_empty() {
-            return ToolResult::err(json!("Missing required parameter: key"));
-        }
-        match self.store.mem_get(&agent_id, key) {
-            Some(entry) => ToolResult::ok(json!({
-                "key": entry.key,
-                "description": entry.description,
-                "value": entry.value,
-                "turn": entry.turn,
-            })),
-            None => ToolResult::ok(json!(null)),
-        }
-    }
-
-    fn mem_delete(&self, args: &serde_json::Value) -> ToolResult {
-        let agent_id = agent_id(args);
-        let key = args.get("key").and_then(|v| v.as_str()).unwrap_or_default();
-        if key.is_empty() {
-            return ToolResult::err(json!("Missing required parameter: key"));
-        }
-        let _ = self.store.mem_delete(&agent_id, key);
-        ToolResult::ok(json!(null))
-    }
-}
-
-#[async_trait::async_trait]
-impl ToolProvider for MemoryTools {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![
-            ToolDefinition {
-                name: "search_mem".into(),
-                description: vec![ToolText::new(
-                    "Search persistent memory using hybrid/literal/regex matching. With no `query`, returns the full memory list in stable key order.",
-                    [ExecutionMode::Repl, ExecutionMode::Standard],
-                )],
-                params: vec![
-                    ToolParam::optional("query", "str"),
-                    ToolParam::optional("mode", "str"),
-                    ToolParam::optional("regex", "str"),
-                    ToolParam::optional("limit", "int"),
-                    ToolParam::optional("keys", "list"),
-                ],
-                returns: "list".into(),
-                examples: vec![],
-                hidden: false,
-                inject_into_prompt: true,
-            },
-            ToolDefinition {
-                name: "mem_set".into(),
-                description: vec![ToolText::new(
-                    "Store or update a persistent memory entry.",
-                    [ExecutionMode::Repl, ExecutionMode::Standard],
-                )],
-                params: vec![
-                    ToolParam::typed("key", "str"),
-                    ToolParam::typed("description", "str"),
-                    ToolParam::optional("value", "str"),
-                ],
-                returns: "None".into(),
-                examples: vec![],
-                hidden: false,
-                inject_into_prompt: true,
-            },
-            ToolDefinition {
-                name: "mem_get".into(),
-                description: vec![ToolText::new(
-                    "Fetch a persistent memory entry by key.",
-                    [ExecutionMode::Repl, ExecutionMode::Standard],
-                )],
-                params: vec![ToolParam::typed("key", "str")],
-                returns: "dict".into(),
-                examples: vec![],
-                hidden: false,
-                inject_into_prompt: true,
-            },
-            ToolDefinition {
-                name: "mem_delete".into(),
-                description: vec![ToolText::new(
-                    "Delete a persistent memory entry by key.",
-                    [ExecutionMode::Repl, ExecutionMode::Standard],
-                )],
-                params: vec![ToolParam::typed("key", "str")],
-                returns: "None".into(),
-                examples: vec![],
-                hidden: false,
-                inject_into_prompt: true,
-            },
-        ]
-    }
-
-    async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
-        let tools = self.clone();
-        let name = name.to_string();
-        let args = args.clone();
-        run_blocking(move || match name.as_str() {
-            "search_mem" => tools.search_mem(&args),
-            "mem_set" => tools.mem_set(&args),
-            "mem_get" => tools.mem_get(&args),
-            "mem_delete" => tools.mem_delete(&args),
-            _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
-        })
-        .await
-    }
+    vec![crate::PromptContribution::guidance(
+        "### History\nUse `search_history` only when older context actually matters. With no query, it lists archived turns in stable turn order; add a focused query when you need retrieval instead of browsing.",
+    )]
 }
 
 pub struct HistoryPluginFactory {
@@ -1107,97 +830,8 @@ impl Default for PromptContextPluginConfig {
 }
 
 pub struct PromptContextPluginFactory {
-    base_context: String,
-    project_instructions: String,
+    instruction_source: Arc<dyn InstructionSource>,
     config: PromptContextPluginConfig,
-}
-
-pub struct ToolSurfacePluginFactory;
-
-impl PluginFactory for ToolSurfacePluginFactory {
-    fn id(&self) -> &'static str {
-        "tool_surface"
-    }
-
-    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        Ok(Arc::new(ToolSurfacePlugin))
-    }
-}
-
-struct ToolSurfacePlugin;
-
-impl SessionPlugin for ToolSurfacePlugin {
-    fn id(&self) -> &'static str {
-        "tool_surface"
-    }
-
-    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        reg.register_tool_surface_contributor(Arc::new(|ctx| {
-            let omitted_tool_count = ctx
-                .tools
-                .iter()
-                .filter(|tool| !tool.hidden)
-                .filter(|tool| tool.name != "search_tools")
-                .filter(|tool| !tool.inject_into_prompt)
-                .filter(|tool| !tool.description_for(ctx.mode).is_empty())
-                .count();
-            let has_tool_search_tool = ctx
-                .tools
-                .iter()
-                .any(|tool| tool.name == "search_tools" && !tool.hidden);
-            let show_tool_search = has_tool_search_tool && omitted_tool_count > 0;
-            let has_skill_search = ctx
-                .tools
-                .iter()
-                .any(|tool| tool.name == "search_skills" && !tool.hidden);
-
-            let mut overrides = Vec::new();
-            if has_tool_search_tool {
-                overrides.push(ToolSurfaceOverride {
-                    tool_name: "search_tools".to_string(),
-                    inject_into_prompt: Some(show_tool_search),
-                    discoverable: Some(show_tool_search),
-                });
-            }
-
-            let mut guide_sections = Vec::new();
-            if show_tool_search {
-                guide_sections.push(match ctx.mode {
-                    ExecutionMode::Repl => "### Tool Discovery\nUse `call search_tools {}` to inspect the additional available tools that are omitted from Available Tools for brevity. With no query, it browses the full active tool catalog; use focused queries when you know the kind of tool you need.".to_string(),
-                    ExecutionMode::Standard => "### Tool Discovery\nUse `search_tools(...)` to inspect the additional available tools that are omitted from Available Tools for brevity. With no query, it browses the full active tool catalog; use focused queries when you know the kind of tool you need.".to_string(),
-                });
-            }
-            if has_skill_search {
-                guide_sections.push(match ctx.mode {
-                    ExecutionMode::Repl => "### Skill Discovery\nUse `call search_skills {}` to inspect installed skills before choosing one to load with `load_skill`.".to_string(),
-                    ExecutionMode::Standard => "### Skill Discovery\nUse `search_skills(...)` to inspect installed skills before choosing one to load with `load_skill`.".to_string(),
-                });
-            }
-
-            let tool_list_notes = if omitted_tool_count > 0 {
-                vec![match ctx.mode {
-                    ExecutionMode::Repl if show_tool_search => format!(
-                        "- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Use `call search_tools {{ ... }}` to inspect them when needed."
-                    ),
-                    ExecutionMode::Standard if show_tool_search => format!(
-                        "- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity. Use `search_tools(...)` to inspect them when needed."
-                    ),
-                    _ => format!(
-                        "- **Note:** {omitted_tool_count} additional tool(s) are available but omitted from this prompt for brevity."
-                    ),
-                }]
-            } else {
-                Vec::new()
-            };
-
-            Ok(ToolSurfaceContribution {
-                overrides,
-                guide_sections,
-                tool_list_notes,
-            })
-        }));
-        Ok(())
-    }
 }
 
 impl PromptContextPluginFactory {
@@ -1206,8 +840,7 @@ impl PromptContextPluginFactory {
         config: PromptContextPluginConfig,
     ) -> Self {
         Self {
-            base_context: build_prompt_environment_context(),
-            project_instructions: instruction_source.system_instructions(),
+            instruction_source,
             config,
         }
     }
@@ -1220,16 +853,14 @@ impl PluginFactory for PromptContextPluginFactory {
 
     fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         Ok(Arc::new(PromptContextPlugin {
-            base_context: self.base_context.clone(),
-            project_instructions: self.project_instructions.clone(),
+            instruction_source: Arc::clone(&self.instruction_source),
             config: self.config.clone(),
         }))
     }
 }
 
 struct PromptContextPlugin {
-    base_context: String,
-    project_instructions: String,
+    instruction_source: Arc<dyn InstructionSource>,
     config: PromptContextPluginConfig,
 }
 
@@ -1239,26 +870,31 @@ impl SessionPlugin for PromptContextPlugin {
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        let base_context = self.base_context.clone();
-        let project_instructions = self.project_instructions.clone();
+        let instruction_source = Arc::clone(&self.instruction_source);
         let config = self.config.clone();
-        reg.register_prompt_contributor(Arc::new(move |_ctx| {
-            let mut contributions = Vec::new();
-            if config.include_environment && !base_context.trim().is_empty() {
-                contributions.push(PromptContribution {
-                    section: PromptSectionName::Environment,
-                    priority: 0,
-                    content: base_context.clone(),
-                });
-            }
-            if config.include_project_instructions && !project_instructions.trim().is_empty() {
-                contributions.push(PromptContribution {
-                    section: PromptSectionName::ProjectInstructions,
-                    priority: 0,
-                    content: project_instructions.clone(),
-                });
-            }
-            Ok(contributions)
+        reg.prompt().contribute(Arc::new(move |_ctx| {
+            let instruction_source = Arc::clone(&instruction_source);
+            let config = config.clone();
+            Box::pin(async move {
+                let mut contributions = Vec::new();
+                let base_context = build_prompt_environment_context();
+                if config.include_environment && !base_context.trim().is_empty() {
+                    contributions.push(PromptContribution {
+                        section: PromptSectionName::Environment,
+                        priority: 0,
+                        content: base_context,
+                    });
+                }
+                let project_instructions = instruction_source.system_instructions();
+                if config.include_project_instructions && !project_instructions.trim().is_empty() {
+                    contributions.push(PromptContribution {
+                        section: PromptSectionName::Guidance,
+                        priority: 0,
+                        content: format!("### Project Instructions\n{}", project_instructions),
+                    });
+                }
+                Ok(contributions)
+            })
         }));
         Ok(())
     }
@@ -1277,10 +913,13 @@ impl SessionPlugin for HistoryPlugin {
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        reg.register_tool_provider(Arc::clone(&self.tools) as Arc<dyn ToolProvider>)?;
-        reg.register_capability(history_capability_def())?;
+        reg.tools()
+            .provider(Arc::clone(&self.tools) as Arc<dyn ToolProvider>)?;
+        reg.prompt().contribute(Arc::new(move |ctx| {
+            Box::pin(async move { Ok(history_prompt_contributions(&ctx.prompt)) })
+        }));
         let state = Arc::clone(&self.state);
-        reg.register_message_mutator(
+        reg.messages().mutator(
             MessageMutatorHook::AfterTokenCount,
             Arc::new(move |ctx, mut messages| {
                 let state = Arc::clone(&state);
@@ -1294,7 +933,7 @@ impl SessionPlugin for HistoryPlugin {
                     let policy = ctx.context_folding.unwrap_or_default();
                     if compact_history_messages(
                         &mut messages,
-                        prompt_usage.prompt_context_tokens,
+                        prompt_usage.context_budget_tokens,
                         max_context,
                         policy,
                     ) {
@@ -1310,7 +949,7 @@ impl SessionPlugin for HistoryPlugin {
             }),
         )?;
         let state = Arc::clone(&self.state);
-        reg.register_tool_surface_contributor(Arc::new(move |ctx| {
+        reg.surface().contribute(Arc::new(move |ctx| {
             let has_archived_history = state
                 .lock()
                 .map_err(|_| PluginError::Session("history plugin state poisoned".to_string()))?
@@ -1321,35 +960,33 @@ impl SessionPlugin for HistoryPlugin {
             Ok(ToolSurfaceContribution {
                 overrides: vec![ToolSurfaceOverride {
                     tool_name: "search_history".to_string(),
-                    inject_into_prompt: Some(has_archived_history),
-                    discoverable: Some(has_archived_history),
+                    enabled: Some(has_archived_history),
+                    injected: Some(has_archived_history),
                 }],
-                guide_sections: Vec::new(),
                 tool_list_notes: Vec::new(),
             })
         }));
         let state = Arc::clone(&self.state);
-        reg.register_turn_prompt_contributor(Arc::new(move |_ctx| {
+        reg.prompt().contribute(Arc::new(move |ctx| {
             let state = Arc::clone(&state);
             Box::pin(async move {
                 let has_archived_history = state
                     .lock()
                     .map_err(|_| PluginError::Session("history plugin state poisoned".to_string()))?
                     .has_archived_history;
-                Ok(if has_archived_history {
-                    vec![TurnPromptContribution {
-                        priority: 0,
-                        content: "Older turns were archived outside the active context. Use `search_history(...)` only when older context actually matters.".to_string(),
-                    }]
-                } else {
-                    Vec::new()
-                })
+                let mut contributions = history_prompt_contributions(&ctx.prompt);
+                if has_archived_history {
+                    contributions.push(PromptContribution::guidance(
+                        "Older turns were archived outside the active context. Use `search_history(...)` only when older context actually matters.",
+                    ));
+                }
+                Ok(contributions)
             })
         }));
 
         let store = Arc::clone(&self.store);
         let agent_id = self.agent_id.clone();
-        reg.on_turn_committed(Arc::new(move |turn| {
+        reg.turn().committed(Arc::new(move |turn| {
             let store = Arc::clone(&store);
             let agent_id = agent_id.clone();
             Box::pin(async move {
@@ -1359,40 +996,41 @@ impl SessionPlugin for HistoryPlugin {
         }));
 
         let plugin_state = Arc::clone(&self.state);
-        reg.register_session_config_mutator(Arc::new(move |ctx, mut state| {
-            let plugin_state = Arc::clone(&plugin_state);
-            Box::pin(async move {
-                let Some(max_context) = ctx.current.context_window else {
-                    return Ok(state);
-                };
-                let Some(prompt_usage) = state.last_prompt_usage.clone() else {
-                    return Ok(state);
-                };
-                if ctx.previous.context_window == Some(max_context)
-                    && ctx.previous.model == ctx.current.model
-                    && ctx.previous.provider_kind == ctx.current.provider_kind
-                {
-                    return Ok(state);
-                }
-                if compact_history_messages(
-                    &mut state.messages,
-                    prompt_usage.prompt_context_tokens,
-                    max_context as usize,
-                    state.context_folding,
-                ) {
-                    plugin_state
-                        .lock()
-                        .map_err(|_| {
-                            PluginError::Session("history plugin state poisoned".to_string())
-                        })?
-                        .has_archived_history = true;
-                }
-                Ok(state)
-            })
-        }));
+        reg.session()
+            .config_mutator(Arc::new(move |ctx, mut state| {
+                let plugin_state = Arc::clone(&plugin_state);
+                Box::pin(async move {
+                    let Some(max_context) = ctx.current.context_window else {
+                        return Ok(state);
+                    };
+                    let Some(prompt_usage) = state.last_prompt_usage.clone() else {
+                        return Ok(state);
+                    };
+                    if ctx.previous.context_window == Some(max_context)
+                        && ctx.previous.model == ctx.current.model
+                        && ctx.previous.provider_kind == ctx.current.provider_kind
+                    {
+                        return Ok(state);
+                    }
+                    if compact_history_messages(
+                        &mut state.messages,
+                        prompt_usage.context_budget_tokens,
+                        max_context as usize,
+                        state.context_folding,
+                    ) {
+                        plugin_state
+                            .lock()
+                            .map_err(|_| {
+                                PluginError::Session("history plugin state poisoned".to_string())
+                            })?
+                            .has_archived_history = true;
+                    }
+                    Ok(state)
+                })
+            }));
 
         let store = Arc::clone(&self.store);
-        reg.register_external_op(
+        reg.external().op(
             ExternalOpDef {
                 name: "history.summary".to_string(),
                 description: "Summarize the recent turn history for a session.".to_string(),
@@ -1525,11 +1163,6 @@ impl SessionPlugin for HistoryPlugin {
     }
 }
 
-pub struct MemoryPluginFactory {
-    store: Arc<Store>,
-    tools: Arc<MemoryTools>,
-}
-
 pub struct PlanTrackerPluginFactory;
 
 impl PluginFactory for PlanTrackerPluginFactory {
@@ -1539,7 +1172,7 @@ impl PluginFactory for PlanTrackerPluginFactory {
 
     fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         Ok(Arc::new(PlanTrackerPlugin {
-            tools: Arc::new(UpdatePlanTool::new()),
+            tools: Arc::new(UpdatePlanTool::default()),
         }))
     }
 }
@@ -1554,7 +1187,8 @@ impl SessionPlugin for PlanTrackerPlugin {
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        reg.register_tool_provider(Arc::clone(&self.tools) as Arc<dyn ToolProvider>)
+        reg.tools()
+            .provider(Arc::clone(&self.tools) as Arc<dyn ToolProvider>)
     }
 
     fn snapshot(
@@ -1635,7 +1269,7 @@ impl SessionPlugin for PlanModePlugin {
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
         let before_turn_state = Arc::clone(&self.state);
-        reg.before_turn(Arc::new(move |_ctx| {
+        reg.turn().before(Arc::new(move |_ctx| {
             let state = Arc::clone(&before_turn_state);
             Box::pin(async move {
                 let mut state = state
@@ -1656,7 +1290,7 @@ impl SessionPlugin for PlanModePlugin {
         }));
 
         let checkpoint_state = Arc::clone(&self.state);
-        reg.at_checkpoint(Arc::new(move |_ctx| {
+        reg.turn().checkpoint(Arc::new(move |_ctx| {
             let state = Arc::clone(&checkpoint_state);
             Box::pin(async move {
                 let mut state = state
@@ -1677,7 +1311,7 @@ impl SessionPlugin for PlanModePlugin {
         }));
 
         let after_turn_state = Arc::clone(&self.state);
-        reg.after_turn(Arc::new(move |_ctx| {
+        reg.turn().after(Arc::new(move |_ctx| {
             let state = Arc::clone(&after_turn_state);
             Box::pin(async move {
                 state
@@ -1689,7 +1323,7 @@ impl SessionPlugin for PlanModePlugin {
         }));
 
         let stream_state = Arc::clone(&self.state);
-        reg.on_assistant_stream(Arc::new(move |ctx| {
+        reg.output().stream(Arc::new(move |ctx| {
             let state = Arc::clone(&stream_state);
             Box::pin(async move {
                 let mut state = state
@@ -1705,7 +1339,7 @@ impl SessionPlugin for PlanModePlugin {
         }));
 
         let response_state = Arc::clone(&self.state);
-        reg.on_assistant_response(Arc::new(move |ctx| {
+        reg.output().response(Arc::new(move |ctx| {
             let state = Arc::clone(&response_state);
             Box::pin(async move {
                 let mut state = state
@@ -1722,7 +1356,7 @@ impl SessionPlugin for PlanModePlugin {
 
         let before_tool_state = Arc::clone(&self.state);
         let before_tool_config = self.config.clone();
-        reg.before_tool_call(Arc::new(move |ctx| {
+        reg.tool_calls().before(Arc::new(move |ctx| {
             let state = Arc::clone(&before_tool_state);
             let config = before_tool_config.clone();
             Box::pin(async move {
@@ -1748,7 +1382,7 @@ impl SessionPlugin for PlanModePlugin {
 
         let tool_surface_state = Arc::clone(&self.state);
         let tool_surface_config = self.config.clone();
-        reg.register_tool_surface_contributor(Arc::new(move |ctx| {
+        reg.surface().contribute(Arc::new(move |ctx| {
             let enabled = tool_surface_state
                 .lock()
                 .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?
@@ -1763,19 +1397,18 @@ impl SessionPlugin for PlanModePlugin {
                 .filter(|tool| !plan_mode_tool_discoverable(&config, &tool.name))
                 .map(|tool| ToolSurfaceOverride {
                     tool_name: tool.name.clone(),
-                    inject_into_prompt: Some(false),
-                    discoverable: Some(false),
+                    enabled: Some(false),
+                    injected: Some(false),
                 })
                 .collect();
             Ok(ToolSurfaceContribution {
                 overrides,
-                guide_sections: Vec::new(),
                 tool_list_notes: Vec::new(),
             })
         }));
 
         let status_state = Arc::clone(&self.state);
-        reg.register_external_op(
+        reg.external().op(
             ExternalOpDef {
                 name: "plan_mode.status".to_string(),
                 description: "Read the current plan-mode state for this session.".to_string(),
@@ -1831,7 +1464,7 @@ impl SessionPlugin for PlanModePlugin {
             ),
         ] {
             let state = Arc::clone(&self.state);
-            reg.register_external_op(
+            reg.external().op(
                 ExternalOpDef {
                     name: name.to_string(),
                     description: description.to_string(),
@@ -1920,110 +1553,17 @@ impl SessionPlugin for PlanModePlugin {
     }
 }
 
-impl MemoryPluginFactory {
-    pub fn new(store: Arc<Store>) -> Self {
-        Self {
-            tools: Arc::new(MemoryTools::new(Arc::clone(&store))),
-            store,
-        }
-    }
-}
-
-impl PluginFactory for MemoryPluginFactory {
-    fn id(&self) -> &'static str {
-        "memory"
-    }
-
-    fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        Ok(Arc::new(MemoryPlugin {
-            store: Arc::clone(&self.store),
-            tools: Arc::clone(&self.tools),
-            agent_id: ctx.agent_id.clone(),
-        }))
-    }
-}
-
-struct MemoryPlugin {
-    store: Arc<Store>,
-    tools: Arc<MemoryTools>,
-    agent_id: String,
-}
-
-impl SessionPlugin for MemoryPlugin {
-    fn id(&self) -> &'static str {
-        "memory"
-    }
-
-    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        reg.register_tool_provider(Arc::clone(&self.tools) as Arc<dyn ToolProvider>)?;
-        reg.register_capability(memory_capability_def())?;
-
-        let store = Arc::clone(&self.store);
-        let agent_id = self.agent_id.clone();
-        reg.on_turn_committed(Arc::new(move |turn| {
-            let store = Arc::clone(&store);
-            let agent_id = agent_id.clone();
-            Box::pin(async move {
-                store.mem_set_turn(&agent_id, current_turn_index(&turn));
-                Ok(())
-            })
-        }));
-        Ok(())
-    }
-
-    fn snapshot(
-        &self,
-        _writer: &mut dyn SnapshotWriter,
-    ) -> Result<PluginSnapshotMeta, PluginError> {
-        let entries = self
-            .store
-            .mem_export(&self.agent_id)
-            .into_iter()
-            .map(|entry| {
-                json!({
-                    "key": entry.key,
-                    "description": entry.description,
-                    "value": entry.value,
-                    "turn": entry.turn,
-                })
-            })
-            .collect::<Vec<_>>();
-        Ok(PluginSnapshotMeta {
-            plugin_id: self.id().to_string(),
-            plugin_version: self.version().to_string(),
-            state: Some(json!({ "entries": entries })),
-        })
-    }
-
-    fn restore(
-        &self,
-        meta: &PluginSnapshotMeta,
-        _reader: &dyn SnapshotReader,
-    ) -> Result<(), PluginError> {
-        let entries = meta
-            .state
-            .as_ref()
-            .and_then(|state| state.get("entries"))
-            .and_then(|value| value.as_array())
-            .cloned()
-            .unwrap_or_default();
-        self.store.mem_load(&self.agent_id, &entries);
-        Ok(())
-    }
-}
-
 pub use HistoryPluginFactory as BuiltinHistoryPluginFactory;
-pub use MemoryPluginFactory as BuiltinMemoryPluginFactory;
 pub use PlanModePluginFactory as BuiltinPlanModePluginFactory;
 pub use PlanTrackerPluginFactory as BuiltinPlanTrackerPluginFactory;
 pub use PromptContextPluginFactory as BuiltinPromptContextPluginFactory;
-pub use ToolSurfacePluginFactory as BuiltinToolSurfacePluginFactory;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::instructions::InstructionSource;
     use crate::plugin::{MessageMutatorContext, MessageMutatorHook, ToolCallHookContext};
+    use crate::tools::StateToolsPluginFactory;
     use crate::{
         AgentStateEnvelope, AssembledTurn, AssistantOutput, ContextFoldingConfig, DoneReason,
         ExecutionMode, MessageRole, OutputState, PluginHost, PromptUsage, SessionCreateRequest,
@@ -2035,6 +1575,7 @@ mod tests {
 
     struct StaticInstructionSource {
         text: String,
+        read_text: String,
     }
 
     impl InstructionSource for StaticInstructionSource {
@@ -2043,7 +1584,7 @@ mod tests {
         }
 
         fn context_instructions_for_reads(&self, _read_paths: &[String]) -> String {
-            String::new()
+            self.read_text.clone()
         }
     }
 
@@ -2073,6 +1614,17 @@ mod tests {
         ) -> Result<SessionHandle, PluginError> {
             Ok(SessionHandle {
                 session_id: request.agent_id.unwrap_or_else(|| "child".to_string()),
+                config: crate::SessionConfigSnapshot {
+                    provider_kind: crate::provider::ProviderKind::OpenAiGeneric,
+                    model: "mock-model".to_string(),
+                    model_variant: None,
+                    execution_mode: ExecutionMode::Standard,
+                    context_folding: ContextFoldingConfig::default(),
+                    context_window: None,
+                    max_turns: None,
+                    include_soul: false,
+                    sub_agent: false,
+                },
             })
         }
 
@@ -2080,35 +1632,36 @@ mod tests {
             Ok(())
         }
 
-        async fn start_turn(
+        async fn start_turn_stream(
             &self,
             session_id: &str,
             _input: TurnInput,
-        ) -> Result<AssembledTurn, PluginError> {
-            Ok(AssembledTurn {
-                state: AgentStateEnvelope {
-                    agent_id: session_id.to_string(),
+        ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            Ok(crate::plugin::SessionTurnHandle {
+                turn_id: format!("{session_id}-turn"),
+                session_id: session_id.to_string(),
+                config: crate::SessionConfigSnapshot {
+                    provider_kind: crate::provider::ProviderKind::OpenAiGeneric,
+                    model: "mock-model".to_string(),
+                    model_variant: None,
                     execution_mode: ExecutionMode::Standard,
                     context_folding: ContextFoldingConfig::default(),
-                    ..Default::default()
+                    context_window: None,
+                    max_turns: None,
+                    include_soul: false,
+                    sub_agent: false,
                 },
-                status: TurnStatus::Completed,
-                assistant_output: AssistantOutput {
-                    safe_text: String::new(),
-                    raw_text: String::new(),
-                    state: OutputState::Usable,
-                },
-                done_reason: DoneReason::ModelStop,
-                execution: crate::ExecutionSummary {
-                    mode: ExecutionMode::Standard,
-                    had_tool_calls: false,
-                    had_code_execution: false,
-                },
-                token_usage: TokenUsage::default(),
-                tool_calls: Vec::new(),
-                code_outputs: Vec::new(),
-                errors: Vec::new(),
+                events: rx,
             })
+        }
+
+        async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError> {
+            Ok(empty_turn(turn_id.trim_end_matches("-turn")))
+        }
+
+        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
+            Ok(())
         }
     }
 
@@ -2144,18 +1697,22 @@ mod tests {
     async fn history_plugin_emits_turn_prompt_note_only_after_compaction() {
         let store = Arc::new(Store::memory().expect("store"));
         let host = PluginHost::new(vec![Arc::new(BuiltinHistoryPluginFactory::new(store))]);
-        let session = host.build_session("root", None).expect("session");
+        let session = host.build_standard_session("root", None).expect("session");
         let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
 
         let empty = session
-            .collect_turn_prompt_contributions(TurnHookContext {
+            .collect_prompt_contributions(PromptHookContext {
                 session_id: "root".to_string(),
-                state: AgentStateEnvelope::default(),
                 host: Arc::clone(&manager),
+                prompt: crate::PromptContext {
+                    tool_names: vec!["search_history".to_string()],
+                    ..Default::default()
+                },
+                state: AgentStateEnvelope::default(),
             })
             .await
-            .expect("turn prompt");
-        assert!(empty.is_empty());
+            .expect("prompt");
+        assert_eq!(empty.len(), 1);
 
         let messages = vec![
             crate::Message {
@@ -2275,6 +1832,7 @@ mod tests {
                         prompt_context_tokens: 70,
                         input_tokens: 70,
                         cached_input_tokens: 0,
+                        context_budget_tokens: 70,
                     }),
                     max_context_tokens: Some(100),
                     context_folding: Some(ContextFoldingConfig::default()),
@@ -2291,18 +1849,22 @@ mod tests {
         }));
 
         let contributions = session
-            .collect_turn_prompt_contributions(TurnHookContext {
+            .collect_prompt_contributions(PromptHookContext {
                 session_id: "root".to_string(),
-                state: AgentStateEnvelope::default(),
                 host: manager,
+                prompt: crate::PromptContext {
+                    tool_names: vec!["search_history".to_string()],
+                    ..Default::default()
+                },
+                state: AgentStateEnvelope::default(),
             })
             .await
-            .expect("turn prompt");
-        assert_eq!(contributions.len(), 1);
+            .expect("prompt");
+        assert_eq!(contributions.len(), 2);
         assert!(
-            contributions[0]
-                .content
-                .contains("Older turns were archived")
+            contributions
+                .iter()
+                .any(|contribution| contribution.content.contains("Older turns were archived"))
         );
     }
 
@@ -2311,16 +1873,17 @@ mod tests {
     async fn history_plugin_hides_search_history_until_context_is_archived() {
         let store = Arc::new(Store::memory().expect("store"));
         let host = PluginHost::new(vec![Arc::new(BuiltinHistoryPluginFactory::new(store))]);
-        let session = host.build_session("root", None).expect("session");
+        let session = host.build_standard_session("root", None).expect("session");
         let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
         let defs = session
-            .tool_providers()
-            .iter()
-            .flat_map(|provider| provider.definitions())
+            .tools()
+            .definitions()
+            .into_iter()
             .filter(|def| def.name == "search_history")
             .collect::<Vec<_>>();
         assert_eq!(defs.len(), 1);
-        assert!(defs[0].inject_into_prompt);
+        assert!(!defs[0].enabled);
+        assert!(!defs[0].injected);
 
         let surface = session
             .resolve_tool_surface(ToolSurfaceContext {
@@ -2330,8 +1893,8 @@ mod tests {
             })
             .expect("tool surface");
         assert_eq!(surface.tools.len(), 1);
-        assert!(!surface.tools[0].inject_into_prompt);
-        assert!(surface.tools[0].hidden);
+        assert!(!surface.tools[0].injected);
+        assert!(!surface.tools[0].enabled);
 
         let archived_result = session
             .mutate_messages(
@@ -2345,6 +1908,7 @@ mod tests {
                         prompt_context_tokens: 70,
                         input_tokens: 70,
                         cached_input_tokens: 0,
+                        context_budget_tokens: 70,
                     }),
                     max_context_tokens: Some(100),
                     context_folding: Some(ContextFoldingConfig::default()),
@@ -2468,40 +2032,8 @@ mod tests {
             })
             .expect("tool surface");
         assert_eq!(surface.tools.len(), 1);
-        assert!(surface.tools[0].inject_into_prompt);
-        assert!(!surface.tools[0].hidden);
-    }
-
-    #[cfg(feature = "sqlite-store")]
-    #[test]
-    fn memory_tools_are_prompt_injected() {
-        let defs = MemoryTools::new(Arc::new(Store::memory().expect("store"))).definitions();
-        for name in ["search_mem", "mem_set", "mem_get", "mem_delete"] {
-            assert!(
-                defs.iter()
-                    .any(|def| def.name == name && def.inject_into_prompt)
-            );
-        }
-    }
-
-    #[cfg(feature = "sqlite-store")]
-    #[test]
-    fn search_mem_lists_all_without_query_in_stable_key_order() {
-        let store = Arc::new(Store::memory().expect("store"));
-        store.mem_set_turn("root", 1);
-        store.mem_set("root", "zeta", "last", "z");
-        store.mem_set("root", "alpha", "first", "a");
-        let tools = MemoryTools::new(store);
-
-        let result = tools.search_mem(&json!({ "__agent_id__": "root" }));
-
-        assert!(result.success);
-        let items = result.result.as_array().cloned().unwrap_or_default();
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0]["key"], "alpha");
-        assert_eq!(items[1]["key"], "zeta");
-        assert!(items[0].get("score").is_none());
-        assert!(items[0].get("field_hits").is_none());
+        assert!(surface.tools[0].injected);
+        assert!(surface.tools[0].enabled);
     }
 
     #[cfg(feature = "sqlite-store")]
@@ -2547,20 +2079,24 @@ mod tests {
         assert!(items[0].get("field_hits").is_none());
     }
 
-    #[test]
-    fn prompt_context_plugin_contributes_environment_and_project_instruction_sections() {
+    #[tokio::test]
+    async fn prompt_context_plugin_contributes_environment_and_project_instruction_sections() {
         let host = PluginHost::new(vec![Arc::new(BuiltinPromptContextPluginFactory::new(
             Arc::new(StaticInstructionSource {
                 text: "Repo rules".to_string(),
+                read_text: String::new(),
             }),
             PromptContextPluginConfig::default(),
         ))]);
-        let session = host.build_session("root", None).expect("session");
+        let session = host.build_standard_session("root", None).expect("session");
         let contributions = session
             .collect_prompt_contributions(PromptHookContext {
                 session_id: "root".to_string(),
                 host: Arc::new(MockSessionManager),
+                prompt: crate::PromptContext::default(),
+                state: AgentStateEnvelope::default(),
             })
+            .await
             .expect("prompt contributions");
 
         assert!(contributions.iter().any(|contribution| {
@@ -2568,15 +2104,17 @@ mod tests {
                 && contribution.content.contains("Working directory:")
         }));
         assert!(contributions.iter().any(|contribution| {
-            contribution.section == PromptSectionName::ProjectInstructions
-                && contribution.content == "Repo rules"
+            contribution.section == PromptSectionName::Guidance
+                && contribution.content == "### Project Instructions\nRepo rules"
         }));
     }
 
     #[test]
-    fn tool_surface_plugin_contributes_discovery_guidance_and_omitted_tool_note() {
-        let host = PluginHost::new(vec![Arc::new(ToolSurfacePluginFactory)]);
-        let session = host.build_session("root", None).expect("session");
+    fn tool_surface_plugin_shapes_search_surface_and_omitted_tool_note() {
+        let host = PluginHost::new(vec![Arc::new(StateToolsPluginFactory::new(
+            ExecutionMode::Standard,
+        ))]);
+        let session = host.build_standard_session("root", None).expect("session");
 
         let surface = session
             .resolve_tool_surface(ToolSurfaceContext {
@@ -2585,48 +2123,30 @@ mod tests {
                 tools: vec![
                     ToolDefinition {
                         name: "search_tools".to_string(),
-                        description: vec![ToolText::new(
-                            "Discover tools",
-                            [ExecutionMode::Standard],
-                        )],
+                        description: "Discover tools".to_string(),
                         params: vec![],
                         returns: "list".to_string(),
                         examples: vec![],
-                        hidden: false,
-                        inject_into_prompt: false,
-                    },
-                    ToolDefinition {
-                        name: "search_skills".to_string(),
-                        description: vec![ToolText::new(
-                            "Discover skills",
-                            [ExecutionMode::Standard],
-                        )],
-                        params: vec![],
-                        returns: "list".to_string(),
-                        examples: vec![],
-                        hidden: false,
-                        inject_into_prompt: true,
+                        enabled: true,
+                        injected: false,
                     },
                     ToolDefinition {
                         name: "read_file".to_string(),
-                        description: vec![ToolText::new("Read files", [ExecutionMode::Standard])],
+                        description: "Read files".to_string(),
                         params: vec![],
                         returns: "str".to_string(),
                         examples: vec![],
-                        hidden: false,
-                        inject_into_prompt: true,
+                        enabled: true,
+                        injected: true,
                     },
                     ToolDefinition {
                         name: "apply_patch".to_string(),
-                        description: vec![ToolText::new(
-                            "Apply patches",
-                            [ExecutionMode::Standard],
-                        )],
+                        description: "Apply patches".to_string(),
                         params: vec![],
                         returns: "str".to_string(),
                         examples: vec![],
-                        hidden: false,
-                        inject_into_prompt: false,
+                        enabled: true,
+                        injected: false,
                     },
                 ],
             })
@@ -2636,20 +2156,8 @@ mod tests {
             surface
                 .tools
                 .iter()
-                .any(|tool| tool.name == "search_tools" && tool.inject_into_prompt)
+                .any(|tool| tool.name == "search_tools" && tool.enabled && !tool.injected)
         );
-        assert!(
-            surface
-                .tools
-                .iter()
-                .any(|tool| tool.name == "search_skills" && tool.inject_into_prompt)
-        );
-        assert!(surface.guide_sections.iter().any(|section| {
-            section.contains("Use `search_tools(...)` to inspect the additional available tools")
-        }));
-        assert!(surface.guide_sections.iter().any(|section| {
-            section.contains("Use `search_skills(...)` to inspect installed skills")
-        }));
         assert!(surface.tool_list_notes.iter().any(|note| {
             note.contains("additional tool(s) are available but omitted from this prompt")
         }));
@@ -2657,8 +2165,10 @@ mod tests {
 
     #[test]
     fn tool_surface_plugin_hides_search_tools_when_nothing_is_omitted() {
-        let host = PluginHost::new(vec![Arc::new(ToolSurfacePluginFactory)]);
-        let session = host.build_session("root", None).expect("session");
+        let host = PluginHost::new(vec![Arc::new(StateToolsPluginFactory::new(
+            ExecutionMode::Standard,
+        ))]);
+        let session = host.build_standard_session("root", None).expect("session");
 
         let surface = session
             .resolve_tool_surface(ToolSurfaceContext {
@@ -2667,24 +2177,21 @@ mod tests {
                 tools: vec![
                     ToolDefinition {
                         name: "search_tools".to_string(),
-                        description: vec![ToolText::new(
-                            "Discover tools",
-                            [ExecutionMode::Standard],
-                        )],
+                        description: "Discover tools".to_string(),
                         params: vec![],
                         returns: "list".to_string(),
                         examples: vec![],
-                        hidden: false,
-                        inject_into_prompt: false,
+                        enabled: true,
+                        injected: false,
                     },
                     ToolDefinition {
                         name: "read_file".to_string(),
-                        description: vec![ToolText::new("Read files", [ExecutionMode::Standard])],
+                        description: "Read files".to_string(),
                         params: vec![],
                         returns: "str".to_string(),
                         examples: vec![],
-                        hidden: false,
-                        inject_into_prompt: true,
+                        enabled: true,
+                        injected: true,
                     },
                 ],
             })
@@ -2695,27 +2202,16 @@ mod tests {
             surface
                 .tools
                 .iter()
-                .any(|tool| tool.name == "search_tools" && !tool.inject_into_prompt && tool.hidden)
+                .any(|tool| tool.name == "search_tools" && !tool.enabled && !tool.injected)
         );
-        assert!(surface.guide_sections.is_empty());
         assert!(surface.tool_list_notes.is_empty());
     }
 
     #[tokio::test]
     async fn plan_tracker_plugin_registers_update_plan_and_restores_state() {
         let host = PluginHost::new(vec![Arc::new(PlanTrackerPluginFactory)]);
-        let session = host.build_session("root", None).expect("session");
-        let tracker = session
-            .tool_providers()
-            .iter()
-            .find(|provider| {
-                provider
-                    .definitions()
-                    .iter()
-                    .any(|definition| definition.name == "update_plan")
-            })
-            .cloned()
-            .expect("update_plan provider");
+        let session = host.build_standard_session("root", None).expect("session");
+        let tracker = session.tools();
 
         let result = tracker
             .execute(
@@ -2734,19 +2230,9 @@ mod tests {
 
         let snapshot = session.snapshot().expect("snapshot");
         let restored = host
-            .build_session("restored", Some(&snapshot))
+            .build_standard_session("restored", Some(&snapshot))
             .expect("restored");
-        let restored_tracker = restored
-            .tool_providers()
-            .iter()
-            .find(|provider| {
-                provider
-                    .definitions()
-                    .iter()
-                    .any(|definition| definition.name == "update_plan")
-            })
-            .cloned()
-            .expect("restored update_plan provider");
+        let restored_tracker = restored.tools();
         let second_result = restored_tracker
             .execute(
                 "update_plan",
@@ -2764,7 +2250,7 @@ mod tests {
     #[tokio::test]
     async fn plan_mode_plugin_toggle_and_status_round_trip() {
         let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
-        let session = host.build_session("root", None).expect("session");
+        let session = host.build_standard_session("root", None).expect("session");
         let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
 
         let status = session
@@ -2801,7 +2287,7 @@ mod tests {
 
         let snapshot = session.snapshot().expect("snapshot");
         let restored = host
-            .build_session("restored", Some(&snapshot))
+            .build_standard_session("restored", Some(&snapshot))
             .expect("restored");
         let restored_status = restored
             .invoke_external("plan_mode.status", json!({}), None, true, manager)
@@ -2837,7 +2323,7 @@ mod tests {
     #[tokio::test]
     async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
-        let session = host.build_session("root", None).expect("session");
+        let session = host.build_standard_session("root", None).expect("session");
         let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
 
         session
@@ -2889,7 +2375,7 @@ mod tests {
             })
             .await
             .expect("before_tool_call");
-        assert!(allowed_exec.is_empty());
+        assert!(!allowed_exec.is_empty());
 
         let allowed = session
             .before_tool_call(ToolCallHookContext {
@@ -2909,33 +2395,30 @@ mod tests {
                 tools: vec![
                     ToolDefinition {
                         name: "search_tools".to_string(),
-                        description: vec![ToolText::new(
-                            "Discover tools",
-                            [ExecutionMode::Standard],
-                        )],
+                        description: "Discover tools".to_string(),
                         params: vec![],
                         returns: "list".to_string(),
                         examples: vec![],
-                        hidden: false,
-                        inject_into_prompt: false,
+                        enabled: true,
+                        injected: false,
                     },
                     ToolDefinition {
                         name: "update_plan".to_string(),
-                        description: vec![ToolText::new("Update plan", [ExecutionMode::Standard])],
+                        description: "Update plan".to_string(),
                         params: vec![],
                         returns: "str".to_string(),
                         examples: vec![],
-                        hidden: false,
-                        inject_into_prompt: true,
+                        enabled: true,
+                        injected: true,
                     },
                     ToolDefinition {
                         name: "read_file".to_string(),
-                        description: vec![ToolText::new("Read files", [ExecutionMode::Standard])],
+                        description: "Read files".to_string(),
                         params: vec![],
                         returns: "str".to_string(),
                         examples: vec![],
-                        hidden: false,
-                        inject_into_prompt: true,
+                        enabled: true,
+                        injected: true,
                     },
                 ],
             })
@@ -2945,7 +2428,7 @@ mod tests {
                 .tools
                 .iter()
                 .find(|tool| tool.name == "update_plan")
-                .is_some_and(|tool| tool.hidden && !tool.inject_into_prompt)
+                .is_some_and(|tool| !tool.enabled && !tool.injected)
         );
 
         let checklist_blocked = session
@@ -3035,7 +2518,7 @@ mod tests {
         let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::new(
             PlanModePluginConfig::default().with_blocked_tools(["read_file"]),
         ))]);
-        let session = host.build_session("root", None).expect("session");
+        let session = host.build_standard_session("root", None).expect("session");
         let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
 
         session
@@ -3080,7 +2563,7 @@ mod tests {
     #[tokio::test]
     async fn plan_mode_plugin_suppresses_proposed_plan_tags_and_emits_panel_events() {
         let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
-        let session = host.build_session("root", None).expect("session");
+        let session = host.build_standard_session("root", None).expect("session");
         let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
 
         session

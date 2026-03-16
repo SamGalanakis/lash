@@ -27,7 +27,7 @@ pub enum Stmt {
     Parallel {
         branches: Vec<Stmt>,
     },
-    Finish(Expr),
+    Finish(Option<Expr>),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

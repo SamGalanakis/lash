@@ -1,4 +1,4 @@
-use crate::skill::SkillRegistry;
+use lash_core::SkillCatalog;
 
 /// Primary commands shown in autocomplete (command, description).
 pub const COMMANDS: &[(&str, &str)] = &[
@@ -17,7 +17,6 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/resume", "Resume a previous session"),
     ("/skills", "Browse loaded skills"),
     ("/tools", "Inspect or edit dynamic tools"),
-    ("/caps", "Inspect or edit dynamic capabilities"),
     (
         "/reconfigure",
         "Apply or inspect pending runtime reconfigure",
@@ -26,23 +25,21 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/exit", "Quit"),
 ];
 
-/// Return commands matching the given prefix, including skills.
-pub fn completions(prefix: &str, skills: &SkillRegistry) -> Vec<(String, String)> {
-    let mut results: Vec<(String, String)> = COMMANDS
+/// Return commands matching the given prefix.
+pub fn completions(prefix: &str, _skills: &SkillCatalog) -> Vec<(String, String)> {
+    COMMANDS
         .iter()
         .filter(|(cmd, _)| cmd.starts_with(prefix))
         .map(|(cmd, desc)| (cmd.to_string(), desc.to_string()))
-        .collect();
-    results.extend(skills.completions(prefix));
-    results
+        .collect()
 }
 
 /// Whether accepting autocomplete should append a trailing space.
-pub fn completion_inserts_space(cmd: &str, skills: &SkillRegistry) -> bool {
+pub fn completion_inserts_space(cmd: &str, _skills: &SkillCatalog) -> bool {
     matches!(
         cmd,
-        "/fork" | "/model" | "/variant" | "/mode" | "/resume" | "/tools" | "/caps" | "/reconfigure"
-    ) || skills.get(cmd.trim_start_matches('/')).is_some()
+        "/fork" | "/model" | "/variant" | "/mode" | "/resume" | "/tools" | "/reconfigure"
+    )
 }
 
 /// Slash commands recognized by the TUI.
@@ -79,17 +76,13 @@ pub enum Command {
     Skills,
     /// Dynamic tool commands (raw args)
     Tools(Option<String>),
-    /// Dynamic capability commands (raw args)
-    Caps(Option<String>),
     /// Reconfigure control commands (raw args)
     Reconfigure(Option<String>),
-    /// Invoke a skill (name, optional args)
-    Skill(String, Option<String>),
 }
 
 /// Try to parse a slash command from user input.
 /// Returns `None` if the input is not a recognized command.
-pub fn parse(input: &str, skills: &SkillRegistry) -> Option<Command> {
+pub fn parse(input: &str, _skills: &SkillCatalog) -> Option<Command> {
     let trimmed = input.trim();
     if !trimmed.starts_with('/') {
         return None;
@@ -99,7 +92,6 @@ pub fn parse(input: &str, skills: &SkillRegistry) -> Option<Command> {
         Some((c, a)) => (c, Some(a.trim())),
         None => (rest, None),
     };
-    // Built-in commands always win
     match cmd {
         "clear" | "new" => Some(Command::Clear),
         "controls" => Some(Command::Controls),
@@ -125,19 +117,8 @@ pub fn parse(input: &str, skills: &SkillRegistry) -> Option<Command> {
         "resume" | "continue" => Some(Command::Resume(arg.map(|a| a.to_string()))),
         "skills" => Some(Command::Skills),
         "tools" => Some(Command::Tools(arg.map(|a| a.to_string()))),
-        "caps" => Some(Command::Caps(arg.map(|a| a.to_string()))),
         "reconfigure" => Some(Command::Reconfigure(arg.map(|a| a.to_string()))),
-        _ => {
-            // Check skills
-            if skills.get(cmd).is_some() {
-                Some(Command::Skill(
-                    cmd.to_string(),
-                    arg.filter(|a| !a.is_empty()).map(|a| a.to_string()),
-                ))
-            } else {
-                None
-            }
-        }
+        _ => None,
     }
 }
 
@@ -147,7 +128,7 @@ mod tests {
 
     #[test]
     fn parses_all_primary_commands() {
-        let skills = SkillRegistry::load();
+        let skills = SkillCatalog::load();
         for (cmd, _) in COMMANDS {
             assert!(
                 parse(cmd, &skills).is_some(),
@@ -158,7 +139,7 @@ mod tests {
 
     #[test]
     fn parses_aliases_and_arguments() {
-        let skills = SkillRegistry::load();
+        let skills = SkillCatalog::load();
         assert!(matches!(parse("/new", &skills), Some(Command::Clear)));
         assert!(matches!(parse("/fork", &skills), Some(Command::Fork(None))));
         assert!(matches!(
@@ -196,18 +177,15 @@ mod tests {
         ));
         assert!(matches!(parse("/tools", &skills), Some(Command::Tools(_))));
         assert!(matches!(
-            parse("/caps enable web", &skills),
-            Some(Command::Caps(_))
-        ));
-        assert!(matches!(
             parse("/reconfigure apply", &skills),
-            Some(Command::Reconfigure(_))
+            Some(Command::Reconfigure(Some(_)))
         ));
+        assert!(parse("/not-a-command", &skills).is_none());
     }
 
     #[test]
-    fn completion_spacing_matches_arg_taking_commands() {
-        let skills = SkillRegistry::load();
+    fn completion_spacing_matches_argument_commands() {
+        let skills = SkillCatalog::load();
         for cmd in [
             "/fork",
             "/model",
@@ -215,25 +193,21 @@ mod tests {
             "/mode",
             "/resume",
             "/tools",
-            "/caps",
             "/reconfigure",
         ] {
             assert!(completion_inserts_space(cmd, &skills));
         }
-        for cmd in [
-            "/clear",
-            "/controls",
-            "/provider",
-            "/login",
-            "/logout",
-            "/retry",
-            "/version",
-            "/info",
-            "/skills",
-            "/help",
-            "/exit",
-        ] {
+
+        for cmd in ["/clear", "/skills", "/help", "/exit"] {
             assert!(!completion_inserts_space(cmd, &skills));
         }
+    }
+
+    #[test]
+    fn completions_only_return_builtin_commands() {
+        let skills = SkillCatalog::load();
+        let results = completions("/s", &skills);
+        assert!(results.iter().any(|(cmd, _)| cmd == "/skills"));
+        assert!(!results.iter().any(|(cmd, _)| cmd == "/some-skill"));
     }
 }

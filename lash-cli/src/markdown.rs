@@ -14,32 +14,280 @@ fn pad_display(s: &str, target: usize) -> String {
     format!("{}{}", s, " ".repeat(padding))
 }
 
-/// Truncate a string to fit within `max_w` display columns, appending `…` if truncated.
-/// Uses Unicode character widths for correct handling of CJK and other wide characters.
-fn truncate_display(s: &str, max_w: usize) -> String {
-    let w = UnicodeWidthStr::width(s);
-    if w <= max_w {
-        return s.to_string();
+fn display_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+fn table_column_gap(max_width: usize, col_count: usize) -> usize {
+    if col_count <= 1 || max_width < 48 {
+        2
+    } else {
+        3
     }
-    // Need to truncate — reserve 1 column for '…'
-    let target = max_w.saturating_sub(1);
-    let mut result = String::new();
-    let mut col = 0;
-    for ch in s.chars() {
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if col + cw > target {
-            break;
+}
+
+fn cell_intrinsic_width(text: &str) -> usize {
+    let width = text.lines().map(display_width).max().unwrap_or(0);
+    width.max(1)
+}
+
+fn wrap_token_chars(token: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0;
+
+    for ch in token.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if ch_width > width {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                current_width = 0;
+            }
+            continue;
         }
-        result.push(ch);
-        col += cw;
+        if current_width + ch_width > width && !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        current.push(ch);
+        current_width += ch_width;
     }
-    result.push('\u{2026}');
-    result
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+
+    lines
+}
+
+fn wrap_text_to_width(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+
+    let mut out = Vec::new();
+    for raw_line in text.lines() {
+        if raw_line.trim().is_empty() {
+            out.push(String::new());
+            continue;
+        }
+
+        let mut current = String::new();
+        let mut current_width = 0;
+
+        for token in raw_line.split_whitespace() {
+            let token_width = display_width(token);
+            if current.is_empty() {
+                if token_width <= width {
+                    current.push_str(token);
+                    current_width = token_width;
+                } else {
+                    out.extend(wrap_token_chars(token, width));
+                }
+                continue;
+            }
+
+            if current_width + 1 + token_width <= width {
+                current.push(' ');
+                current.push_str(token);
+                current_width += 1 + token_width;
+                continue;
+            }
+
+            out.push(std::mem::take(&mut current));
+            current_width = 0;
+
+            if token_width <= width {
+                current.push_str(token);
+                current_width = token_width;
+            } else {
+                out.extend(wrap_token_chars(token, width));
+            }
+        }
+
+        if !current.is_empty() {
+            out.push(current);
+        }
+    }
+
+    if out.is_empty() {
+        out.push(String::new());
+    }
+
+    out
+}
+
+fn expand_column_widths(widths: &[usize], target_content_width: usize) -> Vec<usize> {
+    let mut expanded = widths.to_vec();
+    let total_base_width: usize = expanded.iter().sum();
+    if total_base_width >= target_content_width || expanded.is_empty() {
+        return expanded;
+    }
+
+    let columns = expanded.len();
+    let extra = target_content_width - total_base_width;
+    let shared = extra / columns;
+    let remainder = extra % columns;
+
+    for (idx, width) in expanded.iter_mut().enumerate() {
+        *width += shared;
+        if idx < remainder {
+            *width += 1;
+        }
+    }
+
+    expanded
+}
+
+fn allocate_shrink_by_weight(shrinkable: &[usize], target_shrink: usize) -> Vec<usize> {
+    let mut shrink = vec![0usize; shrinkable.len()];
+    if target_shrink == 0 {
+        return shrink;
+    }
+
+    let weights: Vec<f64> = shrinkable
+        .iter()
+        .map(|value| {
+            if *value == 0 {
+                0.0
+            } else {
+                (*value as f64).sqrt()
+            }
+        })
+        .collect();
+    let total_weight: f64 = weights.iter().sum();
+    if total_weight <= f64::EPSILON {
+        return shrink;
+    }
+
+    let mut fractions = vec![0.0f64; shrinkable.len()];
+    let mut used = 0usize;
+
+    for idx in 0..shrinkable.len() {
+        if shrinkable[idx] == 0 || weights[idx] <= f64::EPSILON {
+            continue;
+        }
+        let exact = weights[idx] / total_weight * target_shrink as f64;
+        let whole = shrinkable[idx].min(exact.floor() as usize);
+        shrink[idx] = whole;
+        fractions[idx] = exact - whole as f64;
+        used += whole;
+    }
+
+    let mut remaining = target_shrink.saturating_sub(used);
+    while remaining > 0 {
+        let mut best_idx = None;
+        let mut best_fraction = -1.0f64;
+
+        for idx in 0..shrinkable.len() {
+            if shrinkable[idx].saturating_sub(shrink[idx]) == 0 {
+                continue;
+            }
+            let fraction = fractions[idx];
+            let better = best_idx.is_none()
+                || fraction > best_fraction
+                || (fraction == best_fraction
+                    && shrinkable[idx]
+                        > shrinkable[best_idx.expect("best idx should exist when compared")]);
+            if better {
+                best_idx = Some(idx);
+                best_fraction = fraction;
+            }
+        }
+
+        let Some(idx) = best_idx else {
+            break;
+        };
+        shrink[idx] += 1;
+        fractions[idx] = 0.0;
+        remaining -= 1;
+    }
+
+    shrink
+}
+
+fn fit_column_widths_balanced(widths: &[usize], target_content_width: usize) -> Vec<usize> {
+    if widths.is_empty() {
+        return Vec::new();
+    }
+
+    let base_widths: Vec<usize> = widths.iter().map(|width| (*width).max(1)).collect();
+    let total_base_width: usize = base_widths.iter().sum();
+    if total_base_width <= target_content_width {
+        return base_widths;
+    }
+
+    let columns = base_widths.len();
+    let hard_min_widths = vec![1usize; columns];
+    let even_share = (target_content_width / columns).max(1);
+    let preferred_min_widths: Vec<usize> = base_widths
+        .iter()
+        .map(|width| (*width).min(even_share.max(3)))
+        .collect();
+    let preferred_min_total: usize = preferred_min_widths.iter().sum();
+    let floor_widths = if preferred_min_total <= target_content_width {
+        preferred_min_widths
+    } else {
+        hard_min_widths
+    };
+    let floor_total: usize = floor_widths.iter().sum();
+    let clamped_target = floor_total.max(target_content_width);
+
+    if total_base_width <= clamped_target {
+        return base_widths;
+    }
+
+    let shrinkable: Vec<usize> = base_widths
+        .iter()
+        .zip(floor_widths.iter())
+        .map(|(width, floor)| width.saturating_sub(*floor))
+        .collect();
+    let total_shrinkable: usize = shrinkable.iter().sum();
+    if total_shrinkable == 0 {
+        return floor_widths;
+    }
+
+    let target_shrink = total_base_width - clamped_target;
+    let shrink = allocate_shrink_by_weight(&shrinkable, target_shrink);
+
+    base_widths
+        .iter()
+        .zip(floor_widths.iter())
+        .zip(shrink.iter())
+        .map(|((width, floor), shrink)| (*width - *shrink).max(*floor))
+        .collect()
+}
+
+fn fit_table_column_widths(widths: &[usize], max_width: usize, column_gap: usize) -> Vec<usize> {
+    if widths.is_empty() || max_width == 0 {
+        return widths.to_vec();
+    }
+
+    let total_gap_width = column_gap * widths.len().saturating_sub(1);
+    let target_content_width = max_width.saturating_sub(total_gap_width).max(1);
+    let current_width: usize = widths.iter().sum();
+
+    if current_width == target_content_width {
+        return widths.to_vec();
+    }
+
+    if current_width < target_content_width {
+        return expand_column_widths(widths, target_content_width);
+    }
+
+    fit_column_widths_balanced(widths, target_content_width)
 }
 
 /// Parse markdown text and return styled ratatui Lines.
 /// `max_width` constrains table rendering so borders are never wider than the viewport.
-/// Used for finalized AssistantText blocks only (not streaming).
 pub fn render_markdown(text: &str, max_width: usize) -> Vec<Line<'static>> {
     let mut renderer = MdRenderer::new(max_width);
     let opts = Options::ENABLE_TABLES;
@@ -148,8 +396,7 @@ impl MdRenderer {
         self.lines.push(Line::from(""));
     }
 
-    /// Render the buffered table as aligned columns with box-drawing borders.
-    /// Column widths are constrained to `self.max_width` so borders never wrap.
+    /// Render the buffered table as a wrapped text-table with stable borders.
     fn flush_table(&mut self) {
         let head = std::mem::take(&mut self.table_head);
         let rows = std::mem::take(&mut self.table_rows);
@@ -158,111 +405,74 @@ impl MdRenderer {
             return;
         }
 
-        // Compute column count and natural display widths (using Unicode width)
         let col_count = head
             .len()
             .max(rows.iter().map(|r| r.len()).max().unwrap_or(0));
-        let mut widths = vec![0usize; col_count];
-        for (i, cell) in head.iter().enumerate() {
-            widths[i] = widths[i].max(UnicodeWidthStr::width(cell.as_str()));
-        }
-        for row in &rows {
-            for (i, cell) in row.iter().enumerate() {
-                widths[i] = widths[i].max(UnicodeWidthStr::width(cell.as_str()));
-            }
+        if col_count == 0 {
+            return;
         }
 
-        // Constrain total table width to max_width
-        if self.max_width > 0 && col_count > 0 {
-            // border_overhead: leading │ + (space + content + space + │) per column
-            let border_overhead = 1 + col_count * 3;
-            let available = self.max_width.saturating_sub(border_overhead);
-            let total: usize = widths.iter().sum();
-            if total > available && available > 0 {
-                let min_col = 3usize;
-                // Shrink each column proportionally, with a minimum of min_col
-                let mut new_widths = vec![0usize; col_count];
-                for (i, &w) in widths.iter().enumerate() {
-                    new_widths[i] = ((w as u64 * available as u64) / total as u64) as usize;
-                    new_widths[i] = new_widths[i].max(min_col);
-                }
-                // If rounding pushed us over, trim the widest columns
-                let mut new_total: usize = new_widths.iter().sum();
-                while new_total > available {
-                    // Find widest column and shrink by 1
-                    if let Some(max_idx) = new_widths
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, w)| **w > min_col)
-                        .max_by_key(|(_, w)| **w)
-                        .map(|(i, _)| i)
-                    {
-                        new_widths[max_idx] -= 1;
-                        new_total -= 1;
-                    } else {
-                        break; // all columns at minimum
+        let column_gap = table_column_gap(self.max_width, col_count);
+        let mut widths = vec![1usize; col_count];
+        for (idx, cell) in head.iter().enumerate() {
+            widths[idx] = widths[idx].max(cell_intrinsic_width(cell));
+        }
+        for row in &rows {
+            for (idx, cell) in row.iter().enumerate() {
+                widths[idx] = widths[idx].max(cell_intrinsic_width(cell));
+            }
+        }
+        if self.max_width > 0 {
+            widths = fit_table_column_widths(&widths, self.max_width, column_gap);
+        }
+
+        let header_style = Style::default()
+            .fg(theme::SODIUM)
+            .add_modifier(Modifier::BOLD);
+        let rule_style = Style::default().fg(theme::ASH_MID);
+        let cell_style = theme::assistant_text();
+        let gap = " ".repeat(column_gap);
+
+        let render_row = |cells: &[String], style: Style, lines: &mut Vec<Line<'static>>| {
+            let wrapped_cells: Vec<Vec<String>> = widths
+                .iter()
+                .enumerate()
+                .map(|(idx, width)| {
+                    let text = cells.get(idx).map(|value| value.as_str()).unwrap_or("");
+                    wrap_text_to_width(text, *width)
+                })
+                .collect();
+            let row_height = wrapped_cells.iter().map(Vec::len).max().unwrap_or(1);
+
+            for line_idx in 0..row_height {
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                for (col_idx, width) in widths.iter().enumerate() {
+                    let content = wrapped_cells[col_idx]
+                        .get(line_idx)
+                        .map(String::as_str)
+                        .unwrap_or("");
+                    spans.push(Span::styled(pad_display(content, *width), style));
+                    if col_idx < widths.len() - 1 {
+                        spans.push(Span::raw(gap.clone()));
                     }
                 }
-                widths = new_widths;
+                lines.push(Line::from(spans));
             }
-        }
-
-        let chrome = theme::code_chrome();
-        let head_style = theme::assistant_text().add_modifier(Modifier::BOLD);
-        let cell_style = theme::assistant_text();
-
-        // Helper: build a row line with display-width-padded, truncated cells
-        let build_row = |cells: &[String], style: Style, widths: &[usize]| -> Line<'static> {
-            let mut spans: Vec<Span<'static>> = Vec::new();
-            spans.push(Span::styled("\u{2502}", chrome)); // │
-            for (i, w) in widths.iter().enumerate() {
-                let text = cells.get(i).map(|s| s.as_str()).unwrap_or("");
-                let display = truncate_display(text, *w);
-                spans.push(Span::styled(
-                    format!(" {} ", pad_display(&display, *w)),
-                    style,
-                ));
-                spans.push(Span::styled("\u{2502}", chrome)); // │
-            }
-            Line::from(spans)
         };
 
-        // Helper: build a separator line (─ is 1 display column wide)
-        let build_sep = |left: &str, mid: &str, right: &str, widths: &[usize]| -> Line<'static> {
-            let mut s = left.to_string();
-            for (i, w) in widths.iter().enumerate() {
-                // +2 for the space padding on each side of the cell
-                for _ in 0..(w + 2) {
-                    s.push('\u{2500}'); // ─
-                }
-                if i < widths.len() - 1 {
-                    s.push_str(mid);
-                }
-            }
-            s.push_str(right);
-            Line::from(Span::styled(s, chrome))
-        };
-
-        // Top border: ┌──┬──┐
-        self.lines
-            .push(build_sep("\u{250c}", "\u{252c}", "\u{2510}", &widths));
-
-        // Header row
         if !head.is_empty() {
-            self.lines.push(build_row(&head, head_style, &widths));
-            // Header separator: ├──┼──┤
-            self.lines
-                .push(build_sep("\u{251c}", "\u{253c}", "\u{2524}", &widths));
+            render_row(&head, header_style, &mut self.lines);
+            let rule_width =
+                widths.iter().sum::<usize>() + column_gap * widths.len().saturating_sub(1);
+            self.lines.push(Line::from(Span::styled(
+                "\u{2500}".repeat(rule_width),
+                rule_style,
+            )));
         }
 
-        // Data rows
         for row in &rows {
-            self.lines.push(build_row(row, cell_style, &widths));
+            render_row(row, cell_style, &mut self.lines);
         }
-
-        // Bottom border: └──┴──┘
-        self.lines
-            .push(build_sep("\u{2514}", "\u{2534}", "\u{2518}", &widths));
         self.blank_line();
     }
 
@@ -570,21 +780,18 @@ mod tests {
     #[test]
     fn render_table() {
         let lines = render_markdown("| A | B |\n|---|---|\n| 1 | 2 |", 80);
-        // Table should have box-drawing characters
         let all_text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter())
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(all_text.contains('\u{250c}')); // ┌
-        assert!(all_text.contains('\u{2514}')); // └
         assert!(all_text.contains("A"));
         assert!(all_text.contains("1"));
+        assert!(all_text.contains('\u{2500}'));
     }
 
     #[test]
-    fn render_table_truncated() {
-        // Table with long content forced into narrow width
+    fn render_table_wraps_long_cells_without_truncating() {
         let lines = render_markdown(
             "| Name | Description |\n|---|---|\n| short | A very long description that should be truncated |",
             30,
@@ -594,9 +801,8 @@ mod tests {
             .flat_map(|l| l.spans.iter())
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(all_text.contains('\u{250c}')); // ┌
-        assert!(all_text.contains('\u{2026}')); // … (truncation marker)
-        // Each line should fit within max_width
+        assert!(all_text.contains("A very long"));
+        assert!(!all_text.contains('\u{2026}'));
         for line in &lines {
             assert!(
                 line.width() <= 30,
@@ -605,6 +811,51 @@ mod tests {
                 line
             );
         }
+        assert!(
+            lines.len() > 5,
+            "wrapped table should span multiple visual rows"
+        );
+    }
+
+    #[test]
+    fn render_table_char_wraps_unbroken_tokens() {
+        let lines = render_markdown(
+            "| Key | Value |\n|---|---|\n| payload | ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890 |",
+            24,
+        );
+
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+
+        assert!(rendered.iter().any(|line| line.contains("ABCDEFG")));
+        assert!(rendered.iter().any(|line| line.contains("UVWXYZ")));
+        assert!(rendered.iter().all(|line| display_width(line) <= 24));
+    }
+
+    #[test]
+    fn render_table_expands_to_fill_available_width() {
+        let lines = render_markdown("| A | B |\n|---|---|\n| 1 | 2 |", 24);
+        assert_eq!(lines[0].width(), 24);
+        assert_eq!(lines[1].width(), 24);
+        assert_eq!(lines[2].width(), 24);
+        assert_eq!(lines[3].width(), 0);
+    }
+
+    #[test]
+    fn render_table_wraps_unicode_cells_with_stable_widths() {
+        let lines = render_markdown(
+            "| Key | Value |\n|---|---|\n| emoji | こんにちは世界 😀😃😄 mixed with long prose for wrapping |",
+            28,
+        );
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+
+        assert!(rendered.iter().any(|line| line.contains("こんにちは")));
+        assert!(rendered.iter().all(|line| display_width(line) <= 28));
     }
 
     // ── markdown_height ──

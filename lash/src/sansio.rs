@@ -4,9 +4,7 @@
 //! execution modes. The host event loop drives the machine by calling
 //! `poll_effect()` and feeding responses back via `handle_response()`.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -16,12 +14,11 @@ use crate::agent::message::IMAGE_REF_PREFIX;
 use crate::agent::message::MessageOrigin;
 use crate::agent::{
     AgentEvent, LLM_MAX_RETRIES, LLM_RETRY_DELAYS, Message, MessageRole, Part, PartKind,
-    PromptComposeInput, PromptProfile, PromptSectionOverride, PruneState, TokenUsage,
-    TurnTerminationPolicyState, build_assistant_parts, compose_system_prompt,
-    format_tool_result_content, is_malformed_assistant_output, log_llm_debug, make_error_event,
-    parse_fence_line, render_transcript_prompt, resolve_context_instructions, truncate_raw_error,
+    PromptSectionOverride, PruneState, TokenUsage, TurnTerminationPolicyState,
+    build_assistant_parts, format_tool_result_content, is_malformed_assistant_output,
+    make_error_envelope, make_error_event, parse_fence_line, render_transcript_prompt,
+    truncate_raw_error,
 };
-use crate::instructions::InstructionSource;
 use crate::llm::types::{
     LlmAttachment, LlmOutputPart, LlmPromptPart, LlmRequest, LlmResponse, LlmToolChoice,
     LlmToolSpec, LlmUsage,
@@ -34,21 +31,49 @@ use crate::{CheckpointKind, ExecutionMode, PluginMessage, ToolCallRecord, ToolRe
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EffectId(pub u64);
 
+#[derive(Clone, Debug)]
+pub struct PendingToolCall {
+    pub call_id: String,
+    pub tool_name: String,
+    pub args: Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct CompletedToolCall {
+    pub call_id: String,
+    pub tool_name: String,
+    pub args: Value,
+    pub raw_result: ToolResult,
+    pub model_result: ToolResult,
+    pub duration_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+pub enum LogEvent {
+    LlmDebug {
+        agent_id: String,
+        iteration: usize,
+        usage: TokenUsage,
+        request_body: Option<String>,
+        response_text: String,
+    },
+}
+
 /// An effect the host must fulfil.
 #[derive(Debug)]
 pub enum Effect {
+    /// Sync the live REPL execution surface before the turn proceeds.
+    SyncExecutionSurface { id: EffectId },
     /// Start an LLM call.
     /// For Standard the host returns `Response::LlmComplete`.
     /// For REPL the host streams via `handle_llm_delta()` then `Response::LlmComplete`.
     LlmCall { id: EffectId, request: LlmRequest },
     /// Cancel an in-progress LLM stream (REPL: code fence detected mid-stream).
     CancelLlm { id: EffectId },
-    /// Execute a standard-mode tool call. Host returns `Response::ToolResult`.
-    ToolCall {
+    /// Execute one or more standard-mode tool calls. Host returns `Response::ToolResults`.
+    ToolCalls {
         id: EffectId,
-        call_id: String,
-        tool_name: String,
-        args: Value,
+        calls: Vec<PendingToolCall>,
     },
     /// Execute a REPL code block. Host returns `Response::ExecResult`.
     ExecCode { id: EffectId, code: String },
@@ -59,6 +84,8 @@ pub enum Effect {
     },
     /// Retry backoff. Host returns `Response::Timeout`.
     Sleep { id: EffectId, duration: Duration },
+    /// Host-implemented fire-and-forget logging.
+    Log { event: LogEvent },
     /// Fire-and-forget event (no response needed).
     Emit(AgentEvent),
     /// Turn is done.
@@ -79,6 +106,11 @@ pub struct LlmCallError {
 
 /// A response to a previously emitted effect.
 pub enum Response {
+    /// Live REPL execution surface sync completed.
+    ExecutionSurfaceSynced {
+        id: EffectId,
+        result: Result<(), String>,
+    },
     /// Full LLM response (Standard), or final response after streaming (REPL).
     LlmComplete {
         id: EffectId,
@@ -87,13 +119,10 @@ pub enum Response {
         /// so the machine should skip emitting `TextDelta` events.
         text_streamed: bool,
     },
-    /// Native tool result.
-    ToolResult {
+    /// Native tool results.
+    ToolResults {
         id: EffectId,
-        call_id: String,
-        tool_name: String,
-        result: ToolResult,
-        duration_ms: u64,
+        results: Vec<CompletedToolCall>,
     },
     /// REPL code execution result.
     ExecResult {
@@ -114,33 +143,17 @@ pub struct TurnMachineConfig {
     pub execution_mode: ExecutionMode,
     pub model: String,
     pub max_turns: Option<usize>,
-    pub sub_agent: bool,
-    pub include_soul: bool,
     pub model_variant: Option<String>,
     pub session_id: Option<String>,
-    pub tool_list: String,
     pub tool_specs: Vec<LlmToolSpec>,
-    pub tool_names: Vec<String>,
-    pub helper_bindings: BTreeSet<String>,
-    pub guide_sections: Vec<String>,
-    pub plugin_prompt_contributions: Vec<crate::PromptContribution>,
-    pub turn_prompt_sections: Vec<String>,
-    pub can_write: bool,
+    pub prompt: crate::PromptContext,
+    pub prompt_renderer: std::sync::Arc<dyn crate::PromptRenderer>,
     pub prompt_overrides: Vec<PromptSectionOverride>,
-    pub instruction_source: Arc<dyn InstructionSource>,
-    pub llm_log_path: Option<PathBuf>,
     pub agent_id: String,
+    pub emit_llm_debug_log: bool,
 }
 
 // ─── Internal state ───
-
-struct CompletedToolCall {
-    call_id: String,
-    tool_name: String,
-    args: Value,
-    result: ToolResult,
-    duration_ms: u64,
-}
 
 /// REPL fence parser state.
 struct FenceState {
@@ -193,6 +206,7 @@ struct ReplTurnState {
 struct WaitingLlmState {
     retry_attempt: usize,
     fence: Option<FenceState>,
+    request: LlmRequest,
 }
 
 enum CheckpointResume {
@@ -201,24 +215,29 @@ enum CheckpointResume {
 }
 
 enum MachineState {
+    PreparingMode,
+    WaitingExecutionSurface {
+        effect_id: EffectId,
+    },
     PrepareIteration,
     WaitingLlm {
         effect_id: EffectId,
+        request: LlmRequest,
         // REPL streaming state (None for Standard)
         fence: Option<FenceState>,
         retry_attempt: usize,
         stop_stream_processing: bool,
     },
     WaitingRetry {
+        effect_id: EffectId,
         retry_attempt: usize,
         last_error: String,
+        request: LlmRequest,
         /// Saved REPL fence state for retry continuation
         fence: Option<FenceState>,
     },
     WaitingTools {
-        pending: HashMap<EffectId, Value>,
-        completed: Vec<CompletedToolCall>,
-        assistant_text: String,
+        effect_id: EffectId,
     },
     WaitingExec {
         repl: ReplTurnState,
@@ -265,7 +284,7 @@ impl TurnMachine {
             .collect();
         Self {
             config,
-            state: MachineState::PrepareIteration,
+            state: MachineState::PreparingMode,
             pending_effects: VecDeque::new(),
             next_effect_id: 1,
             messages,
@@ -327,6 +346,10 @@ impl TurnMachine {
 
         // Otherwise, advance the state machine.
         match &self.state {
+            MachineState::PreparingMode => {
+                self.prepare_mode();
+                self.pending_effects.pop_front()
+            }
             MachineState::PrepareIteration => {
                 self.prepare_iteration();
                 self.pending_effects.pop_front()
@@ -337,33 +360,23 @@ impl TurnMachine {
 
     // ─── State transitions ───
 
-    fn prepare_iteration(&mut self) {
-        self.emit(AgentEvent::LlmRequest {
-            iteration: self.iteration,
-            message_count: self.messages.len(),
-            tool_list: self.config.tool_list.clone(),
-        });
+    fn prepare_mode(&mut self) {
+        if matches!(self.config.execution_mode, ExecutionMode::Repl) {
+            let id = self.next_id();
+            self.state = MachineState::WaitingExecutionSurface { effect_id: id };
+            self.pending_effects
+                .push_back(Effect::SyncExecutionSurface { id });
+            return;
+        }
 
-        let include_soul = if self.config.sub_agent {
-            self.config.include_soul
-        } else {
-            true
-        };
-        let profile = PromptProfile::from_subagent(self.config.sub_agent);
-        let system_prompt = compose_system_prompt(PromptComposeInput {
-            profile,
-            execution_mode: self.config.execution_mode,
-            context: "",
-            tool_list: &self.config.tool_list,
-            tool_names: &self.config.tool_names,
-            helper_bindings: &self.config.helper_bindings,
-            guide_sections: &self.config.guide_sections,
-            plugin_prompt_contributions: &self.config.plugin_prompt_contributions,
-            can_write: self.config.can_write,
-            include_soul,
-            project_instructions: "",
-            overrides: &self.config.prompt_overrides,
-        });
+        self.prepare_iteration();
+    }
+
+    fn prepare_iteration(&mut self) {
+        let system_prompt = self
+            .config
+            .prompt_renderer
+            .render(&self.config.prompt, &self.config.prompt_overrides);
 
         let all_images: Vec<(String, Vec<u8>)> = self
             .user_images
@@ -371,8 +384,7 @@ impl TurnMachine {
             .chain(self.tool_images.iter())
             .map(|(mime, data)| (mime.clone(), data.clone()))
             .collect();
-        let rendered_prompt =
-            render_transcript_prompt(&self.messages, &self.config.turn_prompt_sections);
+        let rendered_prompt = render_transcript_prompt(&self.messages);
 
         let is_standard = matches!(self.config.execution_mode, ExecutionMode::Standard);
 
@@ -406,29 +418,41 @@ impl TurnMachine {
             },
             model_variant: self.config.model_variant.clone(),
             session_id: self.config.session_id.clone(),
-            // The host is responsible for wiring up stream_events
             stream_events: None,
         };
 
-        // Clear tool images since they've been included in the request
         self.tool_images.clear();
+        self.queue_llm_request(llm_request, 0, None);
+    }
+
+    fn queue_llm_request(
+        &mut self,
+        request: LlmRequest,
+        retry_attempt: usize,
+        fence: Option<FenceState>,
+    ) {
+        self.emit(AgentEvent::LlmRequest {
+            iteration: self.iteration,
+            message_count: self.messages.len(),
+            tool_list: self.config.prompt.tool_list.clone(),
+        });
 
         let id = self.next_id();
-        let fence = if !is_standard {
-            Some(FenceState::new())
-        } else {
+        let is_standard = matches!(self.config.execution_mode, ExecutionMode::Standard);
+        let fence = if is_standard {
             None
+        } else {
+            Some(fence.unwrap_or_else(FenceState::new))
         };
         self.state = MachineState::WaitingLlm {
             effect_id: id,
+            request: request.clone(),
             fence,
-            retry_attempt: 0,
+            retry_attempt,
             stop_stream_processing: false,
         };
-        self.pending_effects.push_back(Effect::LlmCall {
-            id,
-            request: llm_request,
-        });
+        self.pending_effects
+            .push_back(Effect::LlmCall { id, request });
     }
 
     /// Feed an incremental LLM text delta (REPL mode only).
@@ -537,29 +561,43 @@ impl TurnMachine {
 
     /// Feed a streaming usage update.
     pub fn handle_llm_usage(&mut self, _id: EffectId, usage: &LlmUsage) {
-        if let MachineState::WaitingLlm {
-            fence: Some(fence), ..
-        } = &mut self.state
+        let usage = TokenUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cached_input_tokens: usage.cached_input_tokens,
+            reasoning_tokens: usage.reasoning_tokens,
+        };
+        let mut cumulative = self.cumulative_usage.clone();
+        cumulative.add(&usage);
+        self.emit(AgentEvent::TokenUsage {
+            iteration: self.iteration,
+            usage: usage.clone(),
+            cumulative,
+        });
+        if let MachineState::WaitingLlm { fence, .. } = &mut self.state
+            && let Some(fence) = fence
         {
-            fence.latest_usage = usage.clone();
+            fence.latest_usage = LlmUsage {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cached_input_tokens: usage.cached_input_tokens,
+                reasoning_tokens: usage.reasoning_tokens,
+            };
         }
     }
 
     /// Feed a response to a previously emitted effect.
     pub fn handle_response(&mut self, response: Response) {
         match response {
+            Response::ExecutionSurfaceSynced { id, result } => {
+                self.handle_execution_surface_synced(id, result)
+            }
             Response::LlmComplete {
                 id,
                 result,
                 text_streamed,
             } => self.handle_llm_complete(id, result, text_streamed),
-            Response::ToolResult {
-                id,
-                call_id,
-                tool_name,
-                result,
-                duration_ms,
-            } => self.handle_tool_result(id, call_id, tool_name, result, duration_ms),
+            Response::ToolResults { id, results } => self.handle_tool_results(id, results),
             Response::ExecResult { id, result } => self.handle_exec_result(id, result),
             Response::Checkpoint { id, messages } => self.handle_checkpoint(id, messages),
             Response::Timeout { id } => self.handle_timeout(id),
@@ -575,6 +613,36 @@ impl TurnMachine {
         };
         self.pending_effects
             .push_back(Effect::Checkpoint { id, checkpoint });
+    }
+
+    fn handle_execution_surface_synced(&mut self, id: EffectId, result: Result<(), String>) {
+        let waiting_id = match std::mem::replace(&mut self.state, MachineState::Finished) {
+            MachineState::WaitingExecutionSurface { effect_id } => effect_id,
+            other => {
+                self.state = other;
+                return;
+            }
+        };
+        if waiting_id != id {
+            self.state = MachineState::WaitingExecutionSurface {
+                effect_id: waiting_id,
+            };
+            return;
+        }
+
+        match result {
+            Ok(()) => {
+                self.state = MachineState::PrepareIteration;
+            }
+            Err(error) => {
+                self.fail_turn(make_error_event(
+                    "execution_surface",
+                    Some("reconfigure_failed"),
+                    format!("Failed to refresh execution surface: {error}"),
+                    Some(error),
+                ));
+            }
+        }
     }
 
     fn append_checkpoint_messages(&mut self, plugin_messages: &[PluginMessage]) {
@@ -667,7 +735,12 @@ impl TurnMachine {
         match result {
             Err(error) => {
                 if error.retryable && waiting.retry_attempt < LLM_MAX_RETRIES {
-                    self.schedule_llm_retry(waiting.retry_attempt, error.message, waiting.fence);
+                    self.schedule_llm_retry(
+                        waiting.retry_attempt,
+                        error,
+                        waiting.request,
+                        waiting.fence,
+                    );
                     return;
                 }
                 self.emit_llm_error(error);
@@ -681,6 +754,7 @@ impl TurnMachine {
                     }
                     ExecutionMode::Repl => self.handle_repl_llm_success(
                         llm_response,
+                        waiting.request,
                         waiting.fence.unwrap_or_else(FenceState::new),
                         waiting.retry_attempt,
                     ),
@@ -692,12 +766,14 @@ impl TurnMachine {
     fn take_waiting_llm_state(&mut self) -> Option<WaitingLlmState> {
         match std::mem::replace(&mut self.state, MachineState::Finished) {
             MachineState::WaitingLlm {
+                request,
                 fence,
                 retry_attempt,
                 ..
             } => Some(WaitingLlmState {
                 retry_attempt,
                 fence,
+                request,
             }),
             other => {
                 self.state = other;
@@ -709,20 +785,30 @@ impl TurnMachine {
     fn schedule_llm_retry(
         &mut self,
         retry_attempt: usize,
-        reason: String,
+        error: LlmCallError,
+        request: LlmRequest,
         fence: Option<FenceState>,
     ) {
         let delay = LLM_RETRY_DELAYS[retry_attempt];
+        let reason = error.message.clone();
         self.emit(AgentEvent::RetryStatus {
             wait_seconds: delay.as_secs(),
             attempt: retry_attempt + 2,
             max_attempts: LLM_MAX_RETRIES + 1,
             reason: reason.clone(),
+            envelope: Some(make_error_envelope(
+                "llm_provider",
+                error.code.as_deref(),
+                format!("LLM error: {}", reason),
+                error.raw,
+            )),
         });
         let sleep_id = self.next_id();
         self.state = MachineState::WaitingRetry {
+            effect_id: sleep_id,
             retry_attempt: retry_attempt + 1,
             last_error: reason,
+            request,
             fence,
         };
         self.pending_effects.push_back(Effect::Sleep {
@@ -756,14 +842,17 @@ impl TurnMachine {
             usage: usage.clone(),
             cumulative: self.cumulative_usage.clone(),
         });
-        log_llm_debug(
-            &self.config.llm_log_path,
-            &self.config.agent_id,
-            self.iteration,
-            &usage,
-            llm_response.request_body.clone(),
-            response_text,
-        );
+        if self.config.emit_llm_debug_log {
+            self.pending_effects.push_back(Effect::Log {
+                event: LogEvent::LlmDebug {
+                    agent_id: self.config.agent_id.clone(),
+                    iteration: self.iteration,
+                    usage,
+                    request_body: llm_response.request_body.clone(),
+                    response_text: response_text.to_string(),
+                },
+            });
+        }
     }
 
     fn emit_llm_error(&mut self, error: LlmCallError) {
@@ -861,7 +950,7 @@ impl TurnMachine {
             });
         }
 
-        let mut pending = HashMap::new();
+        let mut calls = Vec::new();
         for (call_id, tool_name, input_json) in &tool_calls {
             assistant_parts.push(Part {
                 id: format!("{}.p{}", asst_id, assistant_parts.len()),
@@ -874,10 +963,7 @@ impl TurnMachine {
 
             let args =
                 serde_json::from_str::<Value>(input_json).unwrap_or_else(|_| serde_json::json!({}));
-            let effect_id = self.next_id();
-            pending.insert(effect_id, args.clone());
-            self.pending_effects.push_back(Effect::ToolCall {
-                id: effect_id,
+            calls.push(PendingToolCall {
                 call_id: call_id.clone(),
                 tool_name: tool_name.clone(),
                 args,
@@ -893,71 +979,44 @@ impl TurnMachine {
             });
         }
 
-        self.state = MachineState::WaitingTools {
-            pending,
-            completed: Vec::new(),
-            assistant_text,
-        };
-    }
-
-    fn handle_tool_result(
-        &mut self,
-        id: EffectId,
-        call_id: String,
-        tool_name: String,
-        result: ToolResult,
-        duration_ms: u64,
-    ) {
-        // Emit the event first (borrows self.pending_effects, not self.state)
-        let args_val = if let MachineState::WaitingTools { pending, .. } = &self.state {
-            pending
-                .get(&id)
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({}))
-        } else {
-            serde_json::json!({})
-        };
-        self.emit(AgentEvent::ToolCall {
-            name: tool_name.clone(),
-            args: args_val.clone(),
-            result: result.result.clone(),
-            success: result.success,
-            duration_ms,
+        let effect_id = self.next_id();
+        self.pending_effects.push_back(Effect::ToolCalls {
+            id: effect_id,
+            calls,
         });
-
-        let all_done = if let MachineState::WaitingTools {
-            pending, completed, ..
-        } = &mut self.state
-        {
-            let completed_args = pending.remove(&id).unwrap_or_else(|| serde_json::json!({}));
-            completed.push(CompletedToolCall {
-                call_id,
-                tool_name,
-                args: completed_args,
-                result,
-                duration_ms,
-            });
-            pending.is_empty()
-        } else {
-            return;
-        };
-
-        if all_done {
-            self.process_standard_tool_results();
-        }
+        self.state = MachineState::WaitingTools { effect_id };
     }
 
-    fn process_standard_tool_results(&mut self) {
-        let (completed, _assistant_text) =
-            match std::mem::replace(&mut self.state, MachineState::Finished) {
-                MachineState::WaitingTools {
-                    completed,
-                    assistant_text,
-                    ..
-                } => (completed, assistant_text),
-                _ => unreachable!(),
-            };
+    fn handle_tool_results(&mut self, id: EffectId, completed: Vec<CompletedToolCall>) {
+        let waiting_effect_id = match std::mem::replace(&mut self.state, MachineState::Finished) {
+            MachineState::WaitingTools { effect_id } => effect_id,
+            other => {
+                self.state = other;
+                return;
+            }
+        };
 
+        if waiting_effect_id != id {
+            self.state = MachineState::WaitingTools {
+                effect_id: waiting_effect_id,
+            };
+            return;
+        }
+
+        for outcome in &completed {
+            self.emit(AgentEvent::ToolCall {
+                name: outcome.tool_name.clone(),
+                args: outcome.args.clone(),
+                result: outcome.raw_result.result.clone(),
+                success: outcome.raw_result.success,
+                duration_ms: outcome.duration_ms,
+            });
+        }
+
+        self.process_standard_tool_results(completed);
+    }
+
+    fn process_standard_tool_results(&mut self, completed: Vec<CompletedToolCall>) {
         let mut result_parts = Vec::new();
         let mut tool_records = Vec::new();
 
@@ -965,22 +1024,25 @@ impl TurnMachine {
             tool_records.push(ToolCallRecord {
                 tool: outcome.tool_name.clone(),
                 args: outcome.args.clone(),
-                result: outcome.result.result.clone(),
-                success: outcome.result.success,
+                result: outcome.model_result.result.clone(),
+                success: outcome.model_result.success,
                 duration_ms: outcome.duration_ms,
             });
 
             result_parts.push(Part {
                 id: String::new(),
                 kind: PartKind::ToolResult,
-                content: format_tool_result_content(outcome.result.success, &outcome.result.result),
+                content: format_tool_result_content(
+                    outcome.model_result.success,
+                    &outcome.model_result.result,
+                ),
                 tool_call_id: Some(outcome.call_id.clone()),
                 tool_name: Some(outcome.tool_name.clone()),
                 prune_state: PruneState::Intact,
             });
 
             let base_image_idx = self.user_images.len() + self.tool_images.len();
-            for (image_offset, image) in outcome.result.images.into_iter().enumerate() {
+            for (image_offset, image) in outcome.model_result.images.into_iter().enumerate() {
                 self.tool_images
                     .push((image.mime.clone(), image.data.clone()));
                 let image_idx = base_image_idx + image_offset;
@@ -1014,26 +1076,6 @@ impl TurnMachine {
                 parts: result_parts,
                 origin: None,
             });
-            let context_text = resolve_context_instructions(
-                self.config.instruction_source.as_ref(),
-                &tool_records,
-            );
-            if !context_text.is_empty() {
-                let instruction_id = format!("m{}", self.messages.len());
-                self.messages.push(Message {
-                    id: instruction_id.clone(),
-                    role: MessageRole::System,
-                    parts: vec![Part {
-                        id: format!("{}.p0", instruction_id),
-                        kind: PartKind::Text,
-                        content: context_text,
-                        tool_call_id: None,
-                        tool_name: None,
-                        prune_state: PruneState::Intact,
-                    }],
-                    origin: None,
-                });
-            }
         }
 
         self.iteration += 1;
@@ -1071,6 +1113,7 @@ impl TurnMachine {
     fn handle_repl_llm_success(
         &mut self,
         llm_response: LlmResponse,
+        request: LlmRequest,
         mut fence: FenceState,
         retry_attempt: usize,
     ) {
@@ -1233,7 +1276,14 @@ impl TurnMachine {
                 fence.reset_for_retry();
                 self.schedule_llm_retry(
                     retry_attempt,
-                    "malformed assistant output from model (partial repl fragment)".to_string(),
+                    LlmCallError {
+                        message: "malformed assistant output from model (partial repl fragment)"
+                            .to_string(),
+                        retryable: true,
+                        raw: Some(preview.clone()),
+                        code: Some("malformed_output".to_string()),
+                    },
+                    request,
                     Some(fence),
                 );
                 return;
@@ -1509,28 +1559,6 @@ impl TurnMachine {
             });
         }
 
-        // Context instructions
-        let context_text = resolve_context_instructions(
-            self.config.instruction_source.as_ref(),
-            &fence.acc.tool_calls,
-        );
-        if !context_text.is_empty() {
-            let instruction_id = format!("m{}", self.messages.len());
-            self.messages.push(Message {
-                id: instruction_id.clone(),
-                role: MessageRole::System,
-                parts: vec![Part {
-                    id: format!("{}.p0", instruction_id),
-                    kind: PartKind::Text,
-                    content: context_text,
-                    tool_call_id: None,
-                    tool_name: None,
-                    prune_state: PruneState::Intact,
-                }],
-                origin: None,
-            });
-        }
-
         self.iteration += 1;
         if self.termination.should_force_exit_after_grace_turn() {
             self.finish();
@@ -1549,23 +1577,35 @@ impl TurnMachine {
         );
     }
 
-    fn handle_timeout(&mut self, _id: EffectId) {
-        let (_retry_attempt, _last_error, _fence) =
+    fn handle_timeout(&mut self, id: EffectId) {
+        let (effect_id, retry_attempt, last_error, request, fence) =
             match std::mem::replace(&mut self.state, MachineState::Finished) {
                 MachineState::WaitingRetry {
+                    effect_id,
                     retry_attempt,
                     last_error,
+                    request,
                     fence,
                     ..
-                } => (retry_attempt, last_error, fence),
+                } => (effect_id, retry_attempt, last_error, request, fence),
                 other => {
                     self.state = other;
                     return;
                 }
             };
 
-        // Back to PrepareIteration to retry the LLM call
-        self.state = MachineState::PrepareIteration;
+        if effect_id != id {
+            self.state = MachineState::WaitingRetry {
+                effect_id,
+                retry_attempt,
+                last_error,
+                request,
+                fence,
+            };
+            return;
+        }
+
+        self.queue_llm_request(request, retry_attempt, fence);
     }
 }
 
@@ -1576,39 +1616,23 @@ mod tests {
     use super::*;
     use crate::agent::{Message, MessageRole, Part, PartKind, PruneState};
 
-    struct NullInstructionSource;
-
-    impl InstructionSource for NullInstructionSource {
-        fn system_instructions(&self) -> String {
-            String::new()
-        }
-
-        fn context_instructions_for_reads(&self, _paths: &[String]) -> String {
-            String::new()
-        }
-    }
-
     fn test_config(mode: ExecutionMode) -> TurnMachineConfig {
         TurnMachineConfig {
             execution_mode: mode,
             model: "test-model".to_string(),
             max_turns: None,
-            sub_agent: false,
-            include_soul: false,
             model_variant: None,
             session_id: None,
-            tool_list: String::new(),
             tool_specs: Vec::new(),
-            tool_names: Vec::new(),
-            helper_bindings: BTreeSet::new(),
-            guide_sections: Vec::new(),
-            plugin_prompt_contributions: Vec::new(),
-            turn_prompt_sections: Vec::new(),
-            can_write: false,
+            prompt: crate::PromptContext {
+                mode,
+                include_soul: false,
+                ..crate::PromptContext::default()
+            },
+            prompt_renderer: crate::default_prompt_renderer(),
             prompt_overrides: Vec::new(),
-            instruction_source: Arc::new(NullInstructionSource),
-            llm_log_path: None,
             agent_id: "test".to_string(),
+            emit_llm_debug_log: false,
         }
     }
 
@@ -1632,6 +1656,11 @@ mod tests {
     fn drain_effects(machine: &mut TurnMachine) -> Vec<Effect> {
         let mut effects = Vec::new();
         while let Some(effect) = machine.poll_effect() {
+            if let Effect::SyncExecutionSurface { id } = effect {
+                effects.push(effect);
+                machine.handle_response(Response::ExecutionSurfaceSynced { id, result: Ok(()) });
+                continue;
+            }
             effects.push(effect);
         }
         effects
@@ -1658,6 +1687,36 @@ mod tests {
                 iteration,
             } => Some((messages, *iteration)),
             _ => None,
+        })
+    }
+
+    fn find_retry_status(effects: &[Effect]) -> Option<(u64, usize, usize, String)> {
+        effects.iter().find_map(|e| match e {
+            Effect::Emit(AgentEvent::RetryStatus {
+                wait_seconds,
+                attempt,
+                max_attempts,
+                reason,
+                envelope: _,
+            }) => Some((*wait_seconds, *attempt, *max_attempts, reason.clone())),
+            _ => None,
+        })
+    }
+
+    fn find_retry_envelope(effects: &[Effect]) -> Option<crate::agent::ErrorEnvelope> {
+        effects.iter().find_map(|e| match e {
+            Effect::Emit(AgentEvent::RetryStatus {
+                envelope: Some(envelope),
+                ..
+            }) => Some(envelope.clone()),
+            _ => None,
+        })
+    }
+
+    fn has_error_event(effects: &[Effect], needle: &str) -> bool {
+        effects.iter().any(|e| match e {
+            Effect::Emit(AgentEvent::Error { message, .. }) => message.contains(needle),
+            _ => false,
         })
     }
 
@@ -1784,26 +1843,33 @@ mod tests {
         });
 
         let effects = drain_effects(&mut machine);
-        // Should have ToolCall effect
+        // Should have ToolCalls effect
         let tool_effect = effects.iter().find_map(|e| match e {
-            Effect::ToolCall {
-                id,
-                call_id,
-                tool_name,
-                ..
-            } => Some((*id, call_id.clone(), tool_name.clone())),
+            Effect::ToolCalls { id, calls } => calls.first().map(|call| {
+                (
+                    *id,
+                    call.call_id.clone(),
+                    call.tool_name.clone(),
+                    call.args.clone(),
+                )
+            }),
             _ => None,
         });
         assert!(tool_effect.is_some());
-        let (tool_id, call_id, tool_name) = tool_effect.unwrap();
+        let (tool_id, call_id, tool_name, args) = tool_effect.unwrap();
+        assert_eq!(args, serde_json::json!({"path":"foo.txt"}));
 
         // Feed tool result
-        machine.handle_response(Response::ToolResult {
+        machine.handle_response(Response::ToolResults {
             id: tool_id,
-            call_id,
-            tool_name,
-            result: crate::ToolResult::ok(serde_json::json!("file contents")),
-            duration_ms: 10,
+            results: vec![CompletedToolCall {
+                call_id,
+                tool_name,
+                args,
+                raw_result: crate::ToolResult::ok(serde_json::json!("file contents")),
+                model_result: crate::ToolResult::ok(serde_json::json!("file contents")),
+                duration_ms: 10,
+            }],
         });
 
         let effects = drain_effects(&mut machine);
@@ -1872,28 +1938,39 @@ mod tests {
         let (tool_id, call_id, tool_name, args) = effects
             .iter()
             .find_map(|e| match e {
-                Effect::ToolCall {
-                    id,
-                    call_id,
-                    tool_name,
-                    args,
-                } => Some((*id, call_id.clone(), tool_name.clone(), args.clone())),
+                Effect::ToolCalls { id, calls } => calls.first().map(|call| {
+                    (
+                        *id,
+                        call.call_id.clone(),
+                        call.tool_name.clone(),
+                        call.args.clone(),
+                    )
+                }),
                 _ => None,
             })
-            .expect("should emit ToolCall effect");
+            .expect("should emit ToolCalls effect");
         assert_eq!(args, serde_json::json!({"cmd":"date","workdir":"/tmp"}));
 
-        machine.handle_response(Response::ToolResult {
+        machine.handle_response(Response::ToolResults {
             id: tool_id,
-            call_id,
-            tool_name,
-            result: crate::ToolResult::ok(serde_json::json!({
-                "output": "ok",
-                "exit_code": 0,
-                "timed_out": false,
-                "duration_ms": 1
-            })),
-            duration_ms: 1,
+            results: vec![CompletedToolCall {
+                call_id,
+                tool_name,
+                args: args.clone(),
+                raw_result: crate::ToolResult::ok(serde_json::json!({
+                    "output": "ok",
+                    "exit_code": 0,
+                    "timed_out": false,
+                    "duration_ms": 1
+                })),
+                model_result: crate::ToolResult::ok(serde_json::json!({
+                    "output": "ok",
+                    "exit_code": 0,
+                    "timed_out": false,
+                    "duration_ms": 1
+                })),
+                duration_ms: 1,
+            }],
         });
 
         let effects = drain_effects(&mut machine);
@@ -1932,6 +2009,12 @@ mod tests {
         });
 
         let effects = drain_effects(&mut machine);
+        let retry = find_retry_status(&effects).expect("retry status");
+        assert_eq!(retry.1, 2);
+        assert_eq!(retry.2, LLM_MAX_RETRIES + 1);
+        let envelope = find_retry_envelope(&effects).expect("retry envelope");
+        assert_eq!(envelope.kind, "llm_provider");
+        assert_eq!(envelope.user_message, "LLM error: rate limited");
         let sleep_effect = effects.iter().find_map(|e| match e {
             Effect::Sleep { id, .. } => Some(*id),
             _ => None,
@@ -1945,7 +2028,64 @@ mod tests {
 
         // Should get new LlmCall
         let effects = drain_effects(&mut machine);
+        assert!(find_retry_status(&effects).is_none());
         assert!(find_llm_call(&effects).is_some());
+    }
+
+    #[test]
+    fn standard_retryable_error_exhaustion_emits_error_and_done() {
+        let config = test_config(ExecutionMode::Standard);
+        let msgs = vec![user_message("hello")];
+        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+
+        let mut effects = drain_effects(&mut machine);
+        let mut llm_id = *find_llm_call(&effects).expect("initial llm call");
+
+        for expected_attempt in 2..=(LLM_MAX_RETRIES + 1) {
+            machine.handle_response(Response::LlmComplete {
+                id: llm_id,
+                text_streamed: false,
+                result: Err(LlmCallError {
+                    message: "provider unavailable".to_string(),
+                    retryable: true,
+                    raw: None,
+                    code: Some("http_500".to_string()),
+                }),
+            });
+
+            effects = drain_effects(&mut machine);
+
+            let retry = find_retry_status(&effects).expect("retry status");
+            assert_eq!(retry.1, expected_attempt);
+            let envelope = find_retry_envelope(&effects).expect("retry envelope");
+            assert_eq!(envelope.code.as_deref(), Some("http_500"));
+            let sleep_id = effects
+                .iter()
+                .find_map(|e| match e {
+                    Effect::Sleep { id, .. } => Some(*id),
+                    _ => None,
+                })
+                .expect("sleep effect");
+            machine.handle_response(Response::Timeout { id: sleep_id });
+            effects = drain_effects(&mut machine);
+            llm_id = *find_llm_call(&effects).expect("retried llm call");
+        }
+
+        machine.handle_response(Response::LlmComplete {
+            id: llm_id,
+            text_streamed: false,
+            result: Err(LlmCallError {
+                message: "provider unavailable".to_string(),
+                retryable: true,
+                raw: None,
+                code: Some("http_500".to_string()),
+            }),
+        });
+
+        effects = drain_effects(&mut machine);
+        assert!(has_error_event(&effects, "LLM error: provider unavailable"));
+        assert!(find_done(&effects).is_some());
+        assert!(machine.is_done());
     }
 
     #[test]
@@ -2024,17 +2164,21 @@ mod tests {
         let tool_id = effects
             .iter()
             .find_map(|e| match e {
-                Effect::ToolCall { id, .. } => Some(*id),
+                Effect::ToolCalls { id, .. } => Some(*id),
                 _ => None,
             })
             .unwrap();
 
-        machine.handle_response(Response::ToolResult {
+        machine.handle_response(Response::ToolResults {
             id: tool_id,
-            call_id: "tc1".to_string(),
-            tool_name: "test".to_string(),
-            result: crate::ToolResult::ok(serde_json::json!("ok")),
-            duration_ms: 1,
+            results: vec![CompletedToolCall {
+                call_id: "tc1".to_string(),
+                tool_name: "test".to_string(),
+                args: serde_json::json!({}),
+                raw_result: crate::ToolResult::ok(serde_json::json!("ok")),
+                model_result: crate::ToolResult::ok(serde_json::json!("ok")),
+                duration_ms: 1,
+            }],
         });
 
         let effects = drain_effects(&mut machine);

@@ -1,18 +1,99 @@
 use serde_json::json;
 use std::path::Path;
+use std::sync::Arc;
 
-use crate::{ToolDefinition, ToolImage, ToolParam, ToolPromptContext, ToolProvider, ToolResult};
+use crate::instructions::InstructionSource;
+use crate::plugin::{
+    PluginDirective, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
+    SessionPlugin,
+};
+use crate::{
+    MessageRole, PluginMessage, ToolDefinition, ToolImage, ToolParam, ToolProvider, ToolResult,
+};
 
-use super::hashline;
 use super::{parse_optional_usize_arg, read_to_string, require_str, run_blocking};
 
-/// Read files with hashline-prefixed output. Supports images natively.
+/// Read files with line-number-prefixed output. Supports images natively.
 #[derive(Default)]
 pub struct ReadFile;
+
+pub struct ReadFilePluginFactory {
+    instruction_source: Option<Arc<dyn InstructionSource>>,
+}
+
+struct ReadFilePlugin {
+    provider: Arc<ReadFile>,
+    instruction_source: Option<Arc<dyn InstructionSource>>,
+}
 
 impl ReadFile {
     pub fn new() -> Self {
         Self
+    }
+}
+
+impl ReadFilePluginFactory {
+    pub fn new(instruction_source: Option<Arc<dyn InstructionSource>>) -> Self {
+        Self { instruction_source }
+    }
+}
+
+impl PluginFactory for ReadFilePluginFactory {
+    fn id(&self) -> &'static str {
+        "read_file"
+    }
+
+    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        Ok(Arc::new(ReadFilePlugin {
+            provider: Arc::new(ReadFile::new()),
+            instruction_source: self.instruction_source.clone(),
+        }))
+    }
+}
+
+impl SessionPlugin for ReadFilePlugin {
+    fn id(&self) -> &'static str {
+        "read_file"
+    }
+
+    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
+        reg.tools()
+            .provider(Arc::clone(&self.provider) as Arc<dyn ToolProvider>)?;
+
+        let Some(instruction_source) = self.instruction_source.clone() else {
+            return Ok(());
+        };
+
+        reg.tool_calls().after(Arc::new(move |ctx| {
+            let instruction_source = Arc::clone(&instruction_source);
+            Box::pin(async move {
+                if !ctx.result.success || ctx.tool_name != "read_file" {
+                    return Ok(Vec::new());
+                }
+
+                let Some(path) = ctx.args.get("path").and_then(|value| value.as_str()) else {
+                    return Ok(Vec::new());
+                };
+                if path.is_empty() {
+                    return Ok(Vec::new());
+                }
+
+                let instructions =
+                    instruction_source.context_instructions_for_reads(&[path.to_string()]);
+                if instructions.trim().is_empty() {
+                    return Ok(Vec::new());
+                }
+
+                Ok(vec![PluginDirective::EnqueueMessages {
+                    messages: vec![PluginMessage {
+                        role: MessageRole::System,
+                        content: instructions,
+                    }],
+                }])
+            })
+        }));
+
+        Ok(())
     }
 }
 
@@ -27,13 +108,10 @@ impl ToolProvider for ReadFile {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "read_file".into(),
-            description: vec![crate::ToolText::new(
-                format!(
-                    "Read a file. Text returns hashlines (`LINE:8HEX|text`), PDFs return extracted text, and images return visual content. Default: {} lines. Use `ls` for directories.",
-                    DEFAULT_LIMIT
-                ),
-                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-            )],
+            description: format!(
+                "Read a file. Text returns lines prefixed as `LINE: text`, PDFs return extracted text, and images return visual content. Default: {} lines. Use `ls` for directories.",
+                DEFAULT_LIMIT
+            ),
             params: vec![
                 ToolParam::typed("path", "str"),
                 ToolParam {
@@ -54,13 +132,9 @@ impl ToolProvider for ReadFile {
             ],
             returns: "str".into(),
             examples: vec![],
-            hidden: false,
-            inject_into_prompt: true,
+            enabled: true,
+            injected: true,
         }]
-    }
-
-    fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
-        vec!["### Image Reads\nIf `read_file` on an image returns an `[Image: ...]` marker, that marker is metadata only. Use the attached image context to describe what is visibly present; do not just repeat the marker text.".to_string()]
     }
 
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
@@ -126,7 +200,7 @@ fn execute_read_file_sync(path_str: &str, offset: usize, limit: Option<usize>) -
     // Binary detection
     if is_likely_binary(path) {
         return ToolResult::err_fmt(format_args!(
-            "Binary file detected: {path_str}. Use `read_image` for images, or the available command-execution tools (`exec_command` / `shell`) for binary inspection."
+            "Binary file detected: {path_str}. Use `read_image` for images, or `exec_command` for binary inspection."
         ));
     }
 
@@ -157,7 +231,7 @@ fn execute_read_file_sync(path_str: &str, offset: usize, limit: Option<usize>) -
     };
     let selected: Vec<&str> = all_lines[start_idx..end_idx].to_vec();
 
-    // Truncate long lines and format with hashlines
+    // Truncate long lines and format with line numbers.
     let truncated_content: String = selected
         .iter()
         .map(|line| {
@@ -170,7 +244,7 @@ fn execute_read_file_sync(path_str: &str, offset: usize, limit: Option<usize>) -
         .collect::<Vec<_>>()
         .join("\n");
 
-    let mut formatted = hashline::format_hashlines(&truncated_content, offset);
+    let mut formatted = format_numbered_lines(&truncated_content, offset);
 
     append_truncation_notice(&mut formatted, start_idx, end_idx, total_lines);
 
@@ -306,7 +380,7 @@ fn read_pdf(path: &Path, path_str: &str, offset: usize, limit: Option<usize>) ->
         .collect::<Vec<_>>()
         .join("\n");
 
-    let mut formatted = hashline::format_hashlines(&truncated, offset);
+    let mut formatted = format_numbered_lines(&truncated, offset);
 
     let header = format!(
         "[PDF: {} ({}KB, {} lines extracted)]\n",
@@ -388,6 +462,17 @@ fn gif_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     Some((w, h))
 }
 
+fn format_numbered_lines(content: &str, start_line: usize) -> String {
+    let mut out = String::new();
+    for (i, line) in content.lines().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!("{}: {}", start_line + i, line));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,9 +491,10 @@ mod tests {
             .await;
         assert!(result.success);
         let text = result.result.as_str().unwrap();
-        assert!(text.contains("|line1"));
-        assert!(text.contains("|line2"));
-        assert!(text.contains("|line3"));
+        assert!(text.contains("1: line1"));
+        assert!(text.contains("2: line2"));
+        assert!(text.contains("3: line3"));
+        assert!(!text.contains('|'));
     }
 
     #[tokio::test]
@@ -425,10 +511,10 @@ mod tests {
             .await;
         assert!(result.success);
         let text = result.result.as_str().unwrap();
-        assert!(text.contains("|line2"));
-        assert!(text.contains("|line3"));
-        assert!(!text.contains("|line1"));
-        assert!(!text.contains("|line4"));
+        assert!(text.contains("2: line2"));
+        assert!(text.contains("3: line3"));
+        assert!(!text.contains("1: line1"));
+        assert!(!text.contains("4: line4"));
         assert!(text.contains("results truncated"));
         assert!(text.contains("2 more lines"));
         assert!(text.contains("offset=4"));
@@ -448,9 +534,9 @@ mod tests {
             .await;
         assert!(result.success);
         let text = result.result.as_str().unwrap();
-        assert!(text.contains("|line1"));
-        assert!(text.contains("|line2"));
-        assert!(text.contains("|line3"));
+        assert!(text.contains("1: line1"));
+        assert!(text.contains("2: line2"));
+        assert!(text.contains("3: line3"));
         assert!(!text.contains("results truncated"));
     }
 

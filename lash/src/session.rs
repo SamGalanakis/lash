@@ -8,31 +8,11 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::embedded::{LashlangRequest, LashlangResponse, LashlangRuntime};
 use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call};
 use crate::{
-    AgentCapabilities, AgentEvent, PluginMessage, RuntimeServices, SandboxMessage, SessionManager,
-    ToolCallRecord, ToolImage, ToolProvider, resolve_tool_capability_payload,
+    AgentEvent, PluginMessage, RuntimeServices, SandboxMessage, SessionManager, ToolCallRecord,
+    ToolImage, ToolProvider,
 };
 
 const REPL_SNAPSHOT_VERSION: u32 = 3;
-
-fn repl_tools_json(tools: &Arc<dyn ToolProvider>) -> String {
-    let defs: Vec<_> = tools
-        .definitions()
-        .into_iter()
-        .filter(|def| !def.description_for(crate::ExecutionMode::Repl).is_empty())
-        .map(|def| def.project(crate::ExecutionMode::Repl))
-        .collect();
-    serde_json::to_string(&defs).unwrap_or_else(|_| "[]".to_string())
-}
-
-fn execution_surface_json(
-    tools: &Arc<dyn ToolProvider>,
-    capabilities: &AgentCapabilities,
-) -> (String, String) {
-    (
-        repl_tools_json(tools),
-        resolve_tool_capability_payload(tools.as_ref(), capabilities).to_json(),
-    )
-}
 
 /// A prompt from the agent asking the user a question.
 /// The `response_tx` travels all the way to the TUI, which sends the answer
@@ -131,12 +111,12 @@ enum SessionBackend {
 }
 
 pub struct Session {
+    agent_id: String,
     backend: SessionBackend,
     services: RuntimeServices,
     tool_calls: Vec<ToolCallRecord>,
     tool_images: Vec<ToolImage>,
     message_tx: Option<UnboundedSender<SandboxMessage>>,
-    prompt_tx: Option<UnboundedSender<UserPrompt>>,
     scratch_dir: tempfile::TempDir,
 }
 
@@ -144,27 +124,24 @@ impl Session {
     pub async fn new(
         services: RuntimeServices,
         agent_id: &str,
-        capabilities: AgentCapabilities,
         execution_mode: crate::ExecutionMode,
     ) -> Result<Self, SessionError> {
         let scratch_dir = tempfile::TempDir::new()?;
 
         let mut session = Self {
+            agent_id: agent_id.to_string(),
             backend: SessionBackend::Standard,
             services,
             tool_calls: Vec::new(),
             tool_images: Vec::new(),
             message_tx: None,
-            prompt_tx: None,
             scratch_dir,
         };
 
         if matches!(execution_mode, crate::ExecutionMode::Repl) {
             let runtime = LashlangRuntime::start()?;
             session.backend = SessionBackend::Lashlang(runtime);
-            session
-                .initialize_execution_surface(agent_id, &capabilities)
-                .await?;
+            session.initialize_execution_surface(agent_id).await?;
         }
 
         Ok(session)
@@ -181,8 +158,8 @@ impl Session {
         matches!(self.backend, SessionBackend::Lashlang(_))
     }
 
-    pub fn tools(&self) -> &Arc<dyn ToolProvider> {
-        &self.services.tools
+    pub fn tools(&self) -> Arc<dyn ToolProvider> {
+        self.services.plugins.tools()
     }
 
     pub fn plugins(&self) -> &Arc<crate::PluginSession> {
@@ -205,14 +182,12 @@ impl Session {
 
     /// Set the prompt sender for forwarding user prompts during execution.
     pub fn set_prompt_sender(&mut self, tx: UnboundedSender<UserPrompt>) {
-        self.services.prompt_bridge.set_sender(tx.clone());
-        self.prompt_tx = Some(tx);
+        self.services.prompt_bridge.set_sender(tx);
     }
 
     /// Clear the prompt sender.
     pub fn clear_prompt_sender(&mut self) {
         self.services.prompt_bridge.clear_sender();
-        self.prompt_tx = None;
     }
 
     /// Execute code in the persistent lashlang REPL.
@@ -252,12 +227,12 @@ impl Session {
         // Tool calls are spawned as concurrent tokio tasks so REPL parallel branches
         // can dispatch multiple tools at the same time.
         let dispatch = Arc::new(ToolDispatchContext {
-            tool_provider: Arc::clone(self.tools()),
             plugins: Arc::clone(self.plugins()),
             host,
             session_id: session_id.to_string(),
             execution_mode: crate::ExecutionMode::Repl,
             event_tx: event_tx.clone(),
+            turn_injection_bridge: self.turn_injection_bridge().clone(),
         });
         let mut tool_handles: Vec<tokio::task::JoinHandle<(ToolCallRecord, Vec<ToolImage>)>> =
             Vec::new();
@@ -359,22 +334,6 @@ impl Session {
                 LashlangResponse::Ready => {
                     // Unexpected but harmless
                 }
-                LashlangResponse::AskUser {
-                    question,
-                    options,
-                    result_tx,
-                } => {
-                    if let Some(tx) = &self.prompt_tx {
-                        let _ = tx.send(UserPrompt {
-                            question,
-                            options,
-                            response_tx: result_tx,
-                        });
-                    } else {
-                        // No prompt handler — unblock the embedded lashlang runtime with an empty string.
-                        let _ = result_tx.send(String::new());
-                    }
-                }
                 LashlangResponse::SnapshotResult { .. }
                 | LashlangResponse::ResetResult { .. }
                 | LashlangResponse::ReconfigureResult { .. }
@@ -417,21 +376,22 @@ impl Session {
         Ok(())
     }
 
-    /// Re-register the current tool definitions and capability payload in the live REPL.
+    /// Re-register the current tool definitions in the live REPL.
     /// This is intended for turn-boundary runtime reconfiguration.
-    pub async fn refresh_execution_surface(
-        &mut self,
-        capabilities: &AgentCapabilities,
-    ) -> Result<(), SessionError> {
+    pub async fn refresh_execution_surface(&mut self) -> Result<(), SessionError> {
         if !self.supports_repl() {
             return Ok(());
         }
 
-        let (tools_json, capabilities_json) = execution_surface_json(self.tools(), capabilities);
+        let tools_json = serde_json::to_string(
+            &self
+                .plugins()
+                .tool_catalog(&self.agent_id, crate::ExecutionMode::Repl),
+        )
+        .unwrap_or_else(|_| "[]".to_string());
         let generation = self.tools().dynamic_generation().unwrap_or(0);
         self.runtime()?.send(LashlangRequest::Reconfigure {
             tools_json,
-            capabilities_json,
             generation,
         })?;
 
@@ -458,16 +418,16 @@ impl Session {
         Ok(())
     }
 
-    async fn initialize_execution_surface(
-        &mut self,
-        agent_id: &str,
-        capabilities: &AgentCapabilities,
-    ) -> Result<(), SessionError> {
-        let (tools_json, capabilities_json) = execution_surface_json(self.tools(), capabilities);
+    async fn initialize_execution_surface(&mut self, agent_id: &str) -> Result<(), SessionError> {
+        let tools_json = serde_json::to_string(
+            &self
+                .plugins()
+                .tool_catalog(agent_id, crate::ExecutionMode::Repl),
+        )
+        .unwrap_or_else(|_| "[]".to_string());
         self.runtime()?.send(LashlangRequest::Init {
             tools_json,
             agent_id: agent_id.to_string(),
-            capabilities_json,
         })?;
 
         match self.runtime()?.recv()? {

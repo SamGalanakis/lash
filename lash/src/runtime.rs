@@ -9,28 +9,28 @@ use crate::agent::message::IMAGE_REF_PREFIX;
 use crate::agent::message::MessageOrigin;
 use crate::agent::{
     AgentConfig, AgentEvent, Message, MessageRole, Part, PartKind, PromptSectionOverride,
-    PruneState, TokenUsage, build_execution_preamble, make_error_event, resolve_tool_surface,
+    PruneState, TokenUsage, build_execution_preamble, finalize_prompt_context, make_error_event,
     transport_stream_events,
 };
-use crate::capabilities::AgentCapabilities;
 use crate::instructions::{FsInstructionSource, InstructionSource};
 use crate::llm::factory::adapter_for;
 use crate::llm::transport::LlmTransport;
 use crate::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
 use crate::plugin::{
     CheckpointHookContext, MessageMutatorContext, MessageMutatorHook, SessionConfigChangedContext,
-    SessionConfigSnapshot, emit_plugin_surface_events,
+    SessionConfigSnapshot, ToolResultProjectionContext, ToolResultProjectionHook,
+    emit_plugin_surface_events,
 };
 use crate::provider::Provider;
 use crate::sansio::{Effect, LlmCallError, Response, TurnMachine, TurnMachineConfig};
 use crate::strip_repl_fragments;
 use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call};
-use crate::tools::project_tool_catalog;
 use crate::{
     CheckpointKind, ContextFoldingConfig, ExecutionMode, ExternalInvokeError, PluginMessage,
-    PluginSessionSnapshot, PromptHookContext, RuntimeServices, SandboxMessage, Session,
-    SessionConfigOverrides, SessionCreateRequest, SessionError, SessionHandle, SessionManager,
-    SessionSnapshot, SessionStartPoint, ToolCallRecord, TurnHookContext, TurnResultHookContext,
+    PluginSessionSnapshot, PromptHookContext, PromptRenderer, RuntimeServices, SandboxMessage,
+    Session, SessionConfigOverrides, SessionCreateRequest, SessionError, SessionHandle,
+    SessionManager, SessionSnapshot, SessionStartPoint, ToolCallRecord, ToolResult,
+    TurnHookContext, TurnResultHookContext,
 };
 
 /// Runtime execution mode for a turn.
@@ -47,7 +47,6 @@ pub enum InputItem {
     FileRef { path: String },
     DirRef { path: String },
     ImageRef { id: String },
-    SkillRef { name: String, args: Option<String> },
 }
 
 /// Host-provided per-turn input.
@@ -72,6 +71,8 @@ pub struct PromptUsage {
     pub prompt_context_tokens: usize,
     pub input_tokens: usize,
     pub cached_input_tokens: usize,
+    #[serde(default)]
+    pub context_budget_tokens: usize,
 }
 
 /// Serializable host-owned session envelope.
@@ -93,8 +94,6 @@ pub struct AgentStateEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_state: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subagent_state: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_manifest: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_snapshot: Option<PluginSessionSnapshot>,
@@ -113,7 +112,6 @@ impl Default for AgentStateEnvelope {
             token_usage: TokenUsage::default(),
             last_prompt_usage: None,
             task_state: None,
-            subagent_state: None,
             replay_manifest: None,
             plugin_snapshot: None,
             repl_snapshot: None,
@@ -295,8 +293,9 @@ fn default_llm_factory() -> LlmFactory {
 
 fn normalize_prompt_usage(provider: &Provider, usage: &TokenUsage) -> Option<PromptUsage> {
     let input_tokens = usage.input_tokens.max(0) as usize;
+    let output_tokens = usage.output_tokens.max(0) as usize;
     let cached_input_tokens = usage.cached_input_tokens.max(0) as usize;
-    if input_tokens == 0 && cached_input_tokens == 0 {
+    if input_tokens == 0 && cached_input_tokens == 0 && output_tokens == 0 {
         return None;
     }
 
@@ -305,11 +304,20 @@ fn normalize_prompt_usage(provider: &Provider, usage: &TokenUsage) -> Option<Pro
     } else {
         input_tokens
     };
+    let adjusted_input_tokens = if provider.input_usage_excludes_cached_tokens() {
+        input_tokens
+    } else {
+        input_tokens.saturating_sub(cached_input_tokens)
+    };
+    let context_budget_tokens = adjusted_input_tokens
+        .saturating_add(output_tokens)
+        .saturating_add(cached_input_tokens);
 
     Some(PromptUsage {
         prompt_context_tokens,
         input_tokens,
         cached_input_tokens,
+        context_budget_tokens,
     })
 }
 
@@ -460,7 +468,6 @@ impl TurnAssembler {
 /// Runtime config used by embedders to construct an engine.
 #[derive(Clone)]
 pub struct RuntimeConfig {
-    pub capabilities: AgentCapabilities,
     pub model: String,
     pub provider: Provider,
     pub execution_mode: ExecutionMode,
@@ -474,6 +481,7 @@ pub struct RuntimeConfig {
     pub llm_log_path: Option<PathBuf>,
     pub host_profile: HostProfile,
     pub prompt_overrides: Vec<PromptSectionOverride>,
+    pub prompt_renderer: Arc<dyn PromptRenderer>,
     pub base_dir: Option<PathBuf>,
     pub path_resolver: Option<Arc<dyn PathResolver>>,
     pub sanitizer: SanitizerPolicy,
@@ -485,7 +493,6 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         let cfg = AgentConfig::default();
         Self {
-            capabilities: cfg.capabilities,
             model: cfg.model,
             provider: cfg.provider,
             execution_mode: cfg.execution_mode,
@@ -499,6 +506,7 @@ impl Default for RuntimeConfig {
             llm_log_path: cfg.llm_log_path,
             host_profile: HostProfile::Interactive,
             prompt_overrides: cfg.prompt_overrides,
+            prompt_renderer: cfg.prompt_renderer,
             base_dir: None,
             path_resolver: None,
             sanitizer: SanitizerPolicy::default(),
@@ -511,7 +519,6 @@ impl Default for RuntimeConfig {
 impl From<RuntimeConfig> for AgentConfig {
     fn from(value: RuntimeConfig) -> Self {
         Self {
-            capabilities: value.capabilities,
             model: value.model,
             provider: value.provider,
             execution_mode: value.execution_mode,
@@ -524,6 +531,7 @@ impl From<RuntimeConfig> for AgentConfig {
             include_soul: value.include_soul,
             llm_log_path: value.llm_log_path,
             prompt_overrides: value.prompt_overrides,
+            prompt_renderer: value.prompt_renderer,
             instruction_source: value.instruction_source,
         }
     }
@@ -532,7 +540,6 @@ impl From<RuntimeConfig> for AgentConfig {
 impl From<AgentConfig> for RuntimeConfig {
     fn from(value: AgentConfig) -> Self {
         Self {
-            capabilities: value.capabilities,
             model: value.model,
             provider: value.provider,
             execution_mode: value.execution_mode,
@@ -546,6 +553,7 @@ impl From<AgentConfig> for RuntimeConfig {
             llm_log_path: value.llm_log_path,
             host_profile: HostProfile::Interactive,
             prompt_overrides: value.prompt_overrides,
+            prompt_renderer: value.prompt_renderer,
             base_dir: None,
             path_resolver: None,
             sanitizer: SanitizerPolicy::default(),
@@ -560,7 +568,6 @@ pub struct LashRuntime {
     session: Option<Session>,
     config: RuntimeConfig,
     state: AgentStateEnvelope,
-    capabilities: AgentCapabilities,
     host_profile: HostProfile,
     base_dir: PathBuf,
     path_resolver: Option<Arc<dyn PathResolver>>,
@@ -568,6 +575,13 @@ pub struct LashRuntime {
     termination: TerminationPolicy,
     llm_factory: LlmFactory,
     managed_sessions: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
+    managed_turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
+}
+
+struct ManagedSessionTurn {
+    session_id: String,
+    cancel: CancellationToken,
+    task: tokio::task::JoinHandle<Result<AssembledTurn, crate::PluginError>>,
 }
 
 #[derive(Clone)]
@@ -575,9 +589,22 @@ struct RuntimeSessionManager {
     current_agent_id: String,
     current_snapshot: SessionSnapshot,
     current_config: RuntimeConfig,
-    current_tools: Arc<dyn crate::ToolProvider>,
     current_plugins: Arc<crate::PluginSession>,
     registry: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
+    turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
+}
+
+struct ChannelEventSink {
+    tx: mpsc::Sender<AgentEvent>,
+}
+
+#[async_trait::async_trait]
+impl EventSink for ChannelEventSink {
+    async fn emit(&self, event: AgentEvent) {
+        if !self.tx.is_closed() {
+            let _ = self.tx.send(event).await;
+        }
+    }
 }
 
 impl RuntimeSessionManager {
@@ -595,14 +622,20 @@ impl RuntimeSessionManager {
         if let Some(execution_mode) = overrides.execution_mode {
             config.execution_mode = execution_mode;
         }
-        if let Some(capabilities) = &overrides.capabilities {
-            config.capabilities = capabilities.clone();
-        }
         if let Some(context_folding) = overrides.context_folding {
             config.context_folding = context_folding;
         }
         if let Some(session_id) = &overrides.session_id {
             config.session_id = Some(session_id.clone());
+        }
+        if let Some(max_turns) = overrides.max_turns {
+            config.max_turns = Some(max_turns);
+        }
+        if let Some(include_soul) = overrides.include_soul {
+            config.include_soul = include_soul;
+        }
+        if let Some(sub_agent) = overrides.sub_agent {
+            config.sub_agent = sub_agent;
         }
         config
     }
@@ -652,16 +685,9 @@ impl RuntimeSessionManager {
         session_id: &str,
     ) -> Result<Vec<serde_json::Value>, crate::PluginError> {
         if session_id == self.current_agent_id {
-            let surface = resolve_tool_surface(
-                self.current_plugins.as_ref(),
-                &self.current_agent_id,
-                self.current_config.execution_mode,
-                self.current_tools.definitions(),
-            );
-            return Ok(project_tool_catalog(
-                surface.tools,
-                self.current_config.execution_mode,
-            ));
+            return Ok(self
+                .current_plugins
+                .tool_catalog(&self.current_agent_id, self.current_config.execution_mode));
         }
         let runtime = {
             let registry = self.registry.lock().await;
@@ -723,18 +749,26 @@ impl SessionManager for RuntimeSessionManager {
         };
         let state = self.build_runtime_state(agent_id.clone(), &request, snapshot);
         let config = self.build_runtime_config(&request.config_overrides);
-        let tools = if let Some(snapshot) = self.current_tools.dynamic_snapshot() {
-            self.current_tools
-                .fork_dynamic_with_snapshot(snapshot)
-                .unwrap_or_else(|| Arc::clone(&self.current_tools))
-        } else {
-            Arc::clone(&self.current_tools)
+        let config_snapshot = SessionConfigSnapshot {
+            provider_kind: config.provider.kind(),
+            model: config.model.clone(),
+            model_variant: config.model_variant.clone(),
+            execution_mode: config.execution_mode,
+            context_folding: config.context_folding,
+            context_window: config.max_context_tokens.map(|tokens| tokens as u64),
+            max_turns: config.max_turns.map(|turns| turns as u64),
+            include_soul: config.include_soul,
+            sub_agent: config.sub_agent,
         };
         let plugins = self
             .current_plugins
-            .fork_for_agent(&agent_id)
+            .fork_for_agent_with_tool_surface(
+                &agent_id,
+                config.execution_mode,
+                request.tool_surface.clone(),
+            )
             .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-        let runtime = LashRuntime::from_state(config, RuntimeServices::new(tools, plugins), state)
+        let runtime = LashRuntime::from_state(config, RuntimeServices::new(plugins), state)
             .await
             .map_err(|err| crate::PluginError::Session(err.to_string()))?;
         self.registry
@@ -743,6 +777,7 @@ impl SessionManager for RuntimeSessionManager {
             .insert(agent_id.clone(), Arc::new(Mutex::new(runtime)));
         Ok(SessionHandle {
             session_id: agent_id,
+            config: config_snapshot,
         })
     }
 
@@ -752,26 +787,96 @@ impl SessionManager for RuntimeSessionManager {
                 "cannot close the current session".to_string(),
             ));
         }
+        if self
+            .turns
+            .lock()
+            .await
+            .values()
+            .any(|turn| turn.session_id == session_id)
+        {
+            return Err(crate::PluginError::Session(format!(
+                "cannot close session `{session_id}` while a turn is running"
+            )));
+        }
         self.registry.lock().await.remove(session_id);
         self.current_plugins.host().unregister_session(session_id)?;
         Ok(())
     }
 
-    async fn start_turn(
+    async fn start_turn_stream(
         &self,
         session_id: &str,
         input: TurnInput,
-    ) -> Result<AssembledTurn, crate::PluginError> {
+    ) -> Result<crate::plugin::SessionTurnHandle, crate::PluginError> {
+        if self
+            .turns
+            .lock()
+            .await
+            .values()
+            .any(|turn| turn.session_id == session_id)
+        {
+            return Err(crate::PluginError::Session(format!(
+                "session `{session_id}` already has a running turn"
+            )));
+        }
         let runtime = {
             let registry = self.registry.lock().await;
             registry.get(session_id).cloned()
         }
         .ok_or_else(|| crate::PluginError::Session(format!("unknown session `{session_id}`")))?;
-        let mut runtime = runtime.lock().await;
-        runtime
-            .run_turn_assembled(input, CancellationToken::new())
+        let config = {
+            let runtime = runtime.lock().await;
+            runtime.session_config_snapshot()
+        };
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        let cancel = CancellationToken::new();
+        let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(100);
+        let runtime_clone = Arc::clone(&runtime);
+        let cancel_clone = cancel.clone();
+        let task = tokio::spawn(async move {
+            let mut runtime = runtime_clone.lock().await;
+            let sink = ChannelEventSink { tx: event_tx };
+            runtime
+                .stream_turn(input, &sink, cancel_clone)
+                .await
+                .map_err(|err| crate::PluginError::Session(err.to_string()))
+        });
+        self.turns.lock().await.insert(
+            turn_id.clone(),
+            ManagedSessionTurn {
+                session_id: session_id.to_string(),
+                cancel,
+                task,
+            },
+        );
+        Ok(crate::plugin::SessionTurnHandle {
+            turn_id,
+            session_id: session_id.to_string(),
+            config,
+            events: event_rx,
+        })
+    }
+
+    async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, crate::PluginError> {
+        let managed = self
+            .turns
+            .lock()
             .await
-            .map_err(|err| crate::PluginError::Session(err.to_string()))
+            .remove(turn_id)
+            .ok_or_else(|| crate::PluginError::Session(format!("unknown turn `{turn_id}`")))?;
+        managed
+            .task
+            .await
+            .map_err(|err| crate::PluginError::Session(format!("turn task failed: {err}")))?
+    }
+
+    async fn cancel_turn(&self, turn_id: &str) -> Result<(), crate::PluginError> {
+        let turns = self.turns.lock().await;
+        let managed = turns
+            .get(turn_id)
+            .ok_or_else(|| crate::PluginError::Session(format!("unknown turn `{turn_id}`")))?;
+        managed.cancel.cancel();
+        Ok(())
     }
 }
 
@@ -860,6 +965,19 @@ async fn run_message_mutator(
     Ok(messages)
 }
 
+async fn run_tool_result_projector(
+    plugins: Arc<crate::PluginSession>,
+    ctx: ToolResultProjectionContext,
+) -> Result<ToolResult, RuntimeError> {
+    plugins
+        .project_tool_result(ctx)
+        .await
+        .map_err(|err| RuntimeError {
+            code: "plugin_tool_result_projector".to_string(),
+            message: err.to_string(),
+        })
+}
+
 type PreparedMutator = Option<(Arc<crate::PluginSession>, MessageMutatorContext)>;
 type PreparedMessages = (PreparedMutator, Vec<Message>);
 
@@ -874,13 +992,9 @@ impl LashRuntime {
         self.session
             .as_ref()
             .map(|session| {
-                let surface = resolve_tool_surface(
-                    session.plugins().as_ref(),
-                    &self.state.agent_id,
-                    self.config.execution_mode,
-                    session.tools().definitions(),
-                );
-                project_tool_catalog(surface.tools, self.config.execution_mode)
+                session
+                    .plugins()
+                    .tool_catalog(&self.state.agent_id, self.config.execution_mode)
             })
             .unwrap_or_default()
     }
@@ -942,7 +1056,6 @@ impl LashRuntime {
         services: RuntimeServices,
         mut state: AgentStateEnvelope,
     ) -> Result<Self, SessionError> {
-        let capabilities = config.capabilities.clone();
         let host_profile = config.host_profile.clone();
         let base_dir = config
             .base_dir
@@ -967,13 +1080,7 @@ impl LashRuntime {
                 "runtime config missing max_context_tokens; hosts must supply explicit model metadata".to_string(),
             ));
         }
-        let mut session = Session::new(
-            services,
-            &state.agent_id,
-            capabilities.clone(),
-            state.execution_mode,
-        )
-        .await?;
+        let mut session = Session::new(services, &state.agent_id, state.execution_mode).await?;
         if let Some(snapshot) = state.plugin_snapshot.clone() {
             session
                 .plugins()
@@ -990,7 +1097,6 @@ impl LashRuntime {
             session: Some(session),
             config,
             state,
-            capabilities,
             host_profile,
             base_dir,
             path_resolver,
@@ -998,6 +1104,7 @@ impl LashRuntime {
             termination,
             llm_factory: default_llm_factory(),
             managed_sessions: Arc::new(Mutex::new(HashMap::new())),
+            managed_turns: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -1018,9 +1125,9 @@ impl LashRuntime {
             current_agent_id: self.state.agent_id.clone(),
             current_snapshot: self.export_state(),
             current_config: self.config.clone(),
-            current_tools: Arc::clone(session.tools()),
             current_plugins: Arc::clone(session.plugins()),
             registry: Arc::clone(&self.managed_sessions),
+            turns: Arc::clone(&self.managed_turns),
         }))
     }
 
@@ -1036,6 +1143,9 @@ impl LashRuntime {
             execution_mode: self.config.execution_mode,
             context_folding: self.config.context_folding,
             context_window: self.config.max_context_tokens.map(|tokens| tokens as u64),
+            max_turns: self.config.max_turns.map(|turns| turns as u64),
+            include_soul: self.config.include_soul,
+            sub_agent: self.config.sub_agent,
         }
     }
 
@@ -1157,22 +1267,14 @@ impl LashRuntime {
         self.notify_session_config_changed(previous).await;
     }
 
-    /// Update the active prompt-facing capability set.
-    pub fn set_capabilities(&mut self, capabilities: AgentCapabilities) {
-        self.capabilities = capabilities.clone();
-        self.config.capabilities = capabilities;
-    }
-
-    /// Re-register the current tool/capability projection in the live REPL session.
+    /// Re-register the current execution surface in the live REPL session.
     pub async fn refresh_session_execution_surface(&mut self) -> Result<(), SessionError> {
         let Some(session) = self.session.as_mut() else {
             return Err(SessionError::Protocol(
                 "runtime session not available".to_string(),
             ));
         };
-        session
-            .refresh_execution_surface(&self.config.capabilities)
-            .await
+        session.refresh_execution_surface().await
     }
 
     /// Reset the REPL session on the underlying agent.
@@ -1338,7 +1440,7 @@ impl LashRuntime {
             let max_context_tokens = LashRuntime::max_context_tokens(self);
             let hard_budget =
                 max_context_tokens * usize::from(self.state.context_folding.hard_limit_pct) / 100;
-            if prompt_usage.prompt_context_tokens >= hard_budget {
+            if prompt_usage.context_budget_tokens >= hard_budget {
                 let has_mutator = self
                     .session
                     .as_ref()
@@ -1497,33 +1599,6 @@ impl LashRuntime {
                 &self.termination,
             ));
         }
-
-        let plugin_prompt_contributions = plugins
-            .collect_prompt_contributions(PromptHookContext {
-                session_id: self.state.agent_id.clone(),
-                host: Arc::clone(&manager),
-            })
-            .map_err(|err| RuntimeError {
-                code: "plugin_prompt".to_string(),
-                message: err.to_string(),
-            })?;
-        let mut prompt_state = self.export_state();
-        prompt_state.messages = messages.clone();
-        let turn_prompt_sections = plugins
-            .collect_turn_prompt_contributions(TurnHookContext {
-                session_id: self.state.agent_id.clone(),
-                state: prompt_state,
-                host: Arc::clone(&manager),
-            })
-            .await
-            .map_err(|err| RuntimeError {
-                code: "plugin_turn_prompt".to_string(),
-                message: err.to_string(),
-            })?
-            .into_iter()
-            .map(|contribution| contribution.content)
-            .collect::<Vec<_>>();
-
         let cancel_state = cancel.clone();
         let session = self
             .session
@@ -1534,8 +1609,6 @@ impl LashRuntime {
             config: self.config.clone(),
             agent_id: self.state.agent_id.clone(),
             llm_factory: Arc::clone(&self.llm_factory),
-            plugin_prompt_contributions,
-            turn_prompt_sections,
             session_manager: manager,
         };
         let run_offset = self.state.iteration;
@@ -1658,7 +1731,29 @@ impl LashRuntime {
                 }
             }
             assembled.state.messages = self.state.messages.clone();
-            plugins.on_turn_committed(&assembled).await;
+            let mut committed_turn = assembled.clone();
+            for tool_call in &mut committed_turn.tool_calls {
+                let projected = run_tool_result_projector(
+                    Arc::clone(&plugins),
+                    ToolResultProjectionContext {
+                        hook: ToolResultProjectionHook::BeforeHistory,
+                        session_id: self.state.agent_id.clone(),
+                        tool_name: tool_call.tool.clone(),
+                        args: tool_call.args.clone(),
+                        result: crate::ToolResult {
+                            success: tool_call.success,
+                            result: tool_call.result.clone(),
+                            images: Vec::new(),
+                        },
+                        duration_ms: tool_call.duration_ms,
+                        host: Arc::clone(&manager),
+                    },
+                )
+                .await?;
+                tool_call.result = projected.result;
+                tool_call.success = projected.success;
+            }
+            plugins.on_turn_committed(&committed_turn).await;
             self.state.plugin_snapshot = plugins.snapshot().ok();
         }
         Ok(assembled)
@@ -1670,8 +1765,6 @@ struct RuntimeTurnDriver {
     config: RuntimeConfig,
     agent_id: String,
     llm_factory: LlmFactory,
-    plugin_prompt_contributions: Vec<crate::PromptContribution>,
-    turn_prompt_sections: Vec<String>,
     session_manager: Arc<dyn SessionManager>,
 }
 
@@ -1743,45 +1836,23 @@ impl RuntimeTurnDriver {
                         }
                     }
                 }
-                Effect::ToolCall {
-                    id,
-                    call_id,
-                    tool_name,
-                    args,
-                } => {
-                    let mut pending_tools = vec![(id, call_id, tool_name, args)];
-                    while let Some(next) = machine.poll_effect() {
-                        match next {
-                            Effect::ToolCall {
-                                id,
-                                call_id,
-                                tool_name,
-                                args,
-                            } => pending_tools.push((id, call_id, tool_name, args)),
-                            Effect::Emit(event) => emit!(event),
-                            Effect::Done {
-                                messages,
-                                iteration,
-                            } => return (messages, iteration),
-                            _ => break,
-                        }
-                    }
-                    for (id, call_id, tool_name, _args, result, duration_ms) in
-                        self.run_tool_calls(pending_tools, &event_tx).await
-                    {
-                        machine.handle_response(Response::ToolResult {
-                            id,
-                            call_id,
-                            tool_name,
-                            result,
-                            duration_ms,
-                        });
-                    }
+                Effect::SyncExecutionSurface { id } => {
+                    let result = self
+                        .session
+                        .refresh_execution_surface()
+                        .await
+                        .map_err(|err| err.to_string());
+                    machine.handle_response(Response::ExecutionSurfaceSynced { id, result });
+                }
+                Effect::ToolCalls { id, calls } => {
+                    let results = self.run_tool_calls(calls, &event_tx).await;
+                    machine.handle_response(Response::ToolResults { id, results });
                 }
                 Effect::Sleep { id, duration } => {
                     tokio::time::sleep(duration).await;
                     machine.handle_response(Response::Timeout { id });
                 }
+                Effect::Log { event } => self.handle_log_event(event),
                 Effect::CancelLlm { .. } => {}
                 Effect::ExecCode { id, code } => {
                     let result = self.run_exec_code(&code, &event_tx).await;
@@ -1816,12 +1887,6 @@ impl RuntimeTurnDriver {
             };
         }
 
-        if let Err(event) = self.prepare_mode_state().await {
-            emit!(event);
-            emit!(AgentEvent::Done);
-            return Err((messages, run_offset));
-        }
-
         let execution_mode = self.config.execution_mode;
         let mut agent_config = self.runtime_agent_config();
         let model = match self.prepare_provider(&mut agent_config).await {
@@ -1832,13 +1897,40 @@ impl RuntimeTurnDriver {
                 return Err((messages, run_offset));
             }
         };
-        let preamble = build_execution_preamble(
-            &self.session,
-            &agent_config,
+        let mut preamble =
+            build_execution_preamble(&self.session, &agent_config, execution_mode, model);
+        let prompt_state = AgentStateEnvelope {
+            agent_id: self.agent_id.clone(),
             execution_mode,
-            model,
-            self.plugin_prompt_contributions.clone(),
-        );
+            context_folding: self.config.context_folding,
+            messages: messages.clone(),
+            iteration: run_offset,
+            ..Default::default()
+        };
+        let plugin_prompt_contributions = match self
+            .session
+            .plugins()
+            .collect_prompt_contributions(PromptHookContext {
+                session_id: self.agent_id.clone(),
+                host: Arc::clone(&self.session_manager),
+                prompt: preamble.prompt.clone(),
+                state: prompt_state,
+            })
+            .await
+        {
+            Ok(contributions) => contributions,
+            Err(err) => {
+                emit!(make_error_event(
+                    "plugin_prompt",
+                    None,
+                    err.to_string(),
+                    Some(err.to_string()),
+                ));
+                emit!(AgentEvent::Done);
+                return Err((messages, run_offset));
+            }
+        };
+        preamble.prompt = finalize_prompt_context(preamble.prompt, plugin_prompt_contributions);
         self.config = agent_config.into();
         let machine_config = self.machine_config(preamble, execution_mode);
         Ok(TurnMachine::new(
@@ -1847,23 +1939,6 @@ impl RuntimeTurnDriver {
             images,
             run_offset,
         ))
-    }
-
-    async fn prepare_mode_state(&mut self) -> Result<(), AgentEvent> {
-        if let Err(e) = self
-            .session
-            .refresh_execution_surface(&self.config.capabilities)
-            .await
-        {
-            return Err(make_error_event(
-                "execution_surface",
-                Some("reconfigure_failed"),
-                format!("Failed to refresh execution surface: {e}"),
-                Some(e.to_string()),
-            ));
-        }
-
-        Ok(())
     }
 
     async fn run_llm_call(
@@ -1903,7 +1978,6 @@ impl RuntimeTurnDriver {
             token_usage: TokenUsage::default(),
             last_prompt_usage: None,
             task_state: None,
-            subagent_state: None,
             replay_manifest: None,
             plugin_snapshot: self.session.plugins().snapshot().ok(),
             repl_snapshot: None,
@@ -2094,22 +2168,14 @@ impl RuntimeTurnDriver {
             execution_mode,
             model: preamble.model,
             max_turns: self.config.max_turns,
-            sub_agent: self.config.sub_agent,
-            include_soul: self.config.include_soul,
             model_variant: self.config.model_variant.clone(),
             session_id: self.config.session_id.clone(),
-            tool_list: preamble.tool_list,
             tool_specs: preamble.tool_specs,
-            tool_names: preamble.tool_names,
-            helper_bindings: preamble.helper_bindings,
-            guide_sections: preamble.guide_sections,
-            plugin_prompt_contributions: preamble.plugin_prompt_contributions,
-            turn_prompt_sections: self.turn_prompt_sections.clone(),
-            can_write: preamble.can_write,
+            prompt: preamble.prompt,
+            prompt_renderer: Arc::clone(&self.config.prompt_renderer),
             prompt_overrides: self.config.prompt_overrides.clone(),
-            instruction_source: Arc::clone(&self.config.instruction_source),
-            llm_log_path: self.config.llm_log_path.clone(),
             agent_id: self.agent_id.clone(),
+            emit_llm_debug_log: self.config.llm_log_path.is_some(),
         }
     }
 
@@ -2439,16 +2505,9 @@ impl RuntimeTurnDriver {
 
     async fn run_tool_calls(
         &mut self,
-        pending_tools: Vec<(crate::sansio::EffectId, String, String, serde_json::Value)>,
+        pending_tools: Vec<crate::sansio::PendingToolCall>,
         event_tx: &mpsc::Sender<AgentEvent>,
-    ) -> Vec<(
-        crate::sansio::EffectId,
-        String,
-        String,
-        serde_json::Value,
-        crate::ToolResult,
-        u64,
-    )> {
+    ) -> Vec<crate::sansio::CompletedToolCall> {
         let (prompt_tx, mut prompt_rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::session::UserPrompt>();
         self.session.set_prompt_sender(prompt_tx);
@@ -2467,22 +2526,27 @@ impl RuntimeTurnDriver {
             }
         });
 
-        let tool_provider = Arc::clone(self.session.tools());
         let plugins = Arc::clone(self.session.plugins());
         let manager = Arc::clone(&self.session_manager);
+        let projector_manager = Arc::clone(&manager);
         let dispatch = Arc::new(ToolDispatchContext {
-            tool_provider: Arc::clone(&tool_provider),
             plugins: Arc::clone(&plugins),
             host: Arc::clone(&manager),
             session_id: self.agent_id.clone(),
             execution_mode: self.config.execution_mode,
             event_tx: event_tx.clone(),
+            turn_injection_bridge: self.session.turn_injection_bridge().clone(),
         });
         let mut join_set = tokio::task::JoinSet::new();
-        for (eid, call_id, tool_name, args) in pending_tools {
+        for (index, pending_tool) in pending_tools.into_iter().enumerate() {
             let dispatch = Arc::clone(&dispatch);
+            let plugins = Arc::clone(&plugins);
+            let projector_manager = Arc::clone(&projector_manager);
             let event_tx_clone = event_tx.clone();
             join_set.spawn(async move {
+                let call_id = pending_tool.call_id;
+                let tool_name = pending_tool.tool_name;
+                let args = pending_tool.args;
                 let (progress_tx, mut progress_rx) =
                     tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
                 let progress_event_tx = event_tx_clone.clone();
@@ -2502,17 +2566,38 @@ impl RuntimeTurnDriver {
                     dispatch_tool_call(&dispatch, tool_name, args, Some(&progress_tx)).await;
                 drop(progress_tx);
                 let _ = progress_handle.await;
-                (
-                    eid,
-                    call_id,
-                    outcome.record.tool,
-                    outcome.record.args,
-                    crate::ToolResult {
-                        success: outcome.record.success,
-                        result: outcome.record.result,
-                        images: outcome.images,
+                let raw_result = crate::ToolResult {
+                    success: outcome.record.success,
+                    result: outcome.record.result,
+                    images: outcome.images,
+                };
+                let model_result = match run_tool_result_projector(
+                    Arc::clone(&plugins),
+                    ToolResultProjectionContext {
+                        hook: ToolResultProjectionHook::BeforeModel,
+                        session_id: dispatch.session_id.clone(),
+                        tool_name: outcome.record.tool.clone(),
+                        args: outcome.record.args.clone(),
+                        result: raw_result.clone(),
+                        duration_ms: outcome.record.duration_ms,
+                        host: Arc::clone(&projector_manager),
                     },
-                    outcome.record.duration_ms,
+                )
+                .await
+                {
+                    Ok(projected) => projected,
+                    Err(err) => crate::ToolResult::err_fmt(err.to_string()),
+                };
+                (
+                    index,
+                    crate::sansio::CompletedToolCall {
+                        call_id,
+                        tool_name: outcome.record.tool,
+                        args: outcome.record.args,
+                        raw_result,
+                        model_result,
+                        duration_ms: outcome.record.duration_ms,
+                    },
                 )
             });
         }
@@ -2522,18 +2607,62 @@ impl RuntimeTurnDriver {
             match joined {
                 Ok(outcome) => outcomes.push(outcome),
                 Err(e) => outcomes.push((
-                    crate::sansio::EffectId(0),
-                    uuid::Uuid::new_v4().to_string(),
-                    "unknown".to_string(),
-                    serde_json::json!({}),
-                    crate::ToolResult::err_fmt(format!("tool task panicked: {e}")),
-                    0,
+                    usize::MAX,
+                    crate::sansio::CompletedToolCall {
+                        call_id: uuid::Uuid::new_v4().to_string(),
+                        tool_name: "unknown".to_string(),
+                        args: serde_json::json!({}),
+                        raw_result: crate::ToolResult::err_fmt(format!("tool task panicked: {e}")),
+                        model_result: crate::ToolResult::err_fmt(format!(
+                            "tool task panicked: {e}"
+                        )),
+                        duration_ms: 0,
+                    },
                 )),
             }
         }
         self.session.clear_prompt_sender();
         let _ = prompt_forward_handle.await;
-        outcomes
+        outcomes.sort_by_key(|(index, _)| *index);
+        outcomes.into_iter().map(|(_, outcome)| outcome).collect()
+    }
+
+    fn handle_log_event(&self, event: crate::sansio::LogEvent) {
+        let Some(path) = &self.config.llm_log_path else {
+            return;
+        };
+
+        match event {
+            crate::sansio::LogEvent::LlmDebug {
+                agent_id,
+                iteration,
+                usage,
+                request_body,
+                response_text,
+            } => {
+                let entry = serde_json::json!({
+                    "turn": iteration,
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "agent_id": agent_id,
+                    "request": request_body,
+                    "response": response_text,
+                    "usage": {
+                        "input_tokens": usage.input_tokens,
+                        "output_tokens": usage.output_tokens,
+                        "cached_input_tokens": usage.cached_input_tokens,
+                        "reasoning_tokens": usage.reasoning_tokens,
+                    }
+                });
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    use std::io::Write;
+                    let _ = writeln!(file, "{}", entry);
+                }
+            }
+        }
     }
 
     async fn forward_standard_stream_event(
@@ -2680,17 +2809,6 @@ fn normalize_input_items(
                     return Err(format!("Invalid image_ref: missing blob for id '{id}'"));
                 };
                 out.push(NormalizedItem::Image(blob.clone()));
-            }
-            InputItem::SkillRef { name, args } => {
-                if name.is_empty() {
-                    return Err("Invalid skill_ref: name cannot be empty".to_string());
-                }
-                let mut marker = format!("[SKILL:{name}]");
-                if let Some(args) = args.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                    marker.push(' ');
-                    marker.push_str(args);
-                }
-                push_text(&mut out, marker);
             }
         }
     }
@@ -2928,6 +3046,7 @@ mod tests {
             provider: Provider::OpenAiGeneric {
                 api_key: "test-key".to_string(),
                 base_url: "https://example.invalid/v1".to_string(),
+                options: crate::provider::ProviderOptions::default(),
             },
             model: "mock-model".to_string(),
             max_context_tokens: Some(200_000),
@@ -2935,11 +3054,54 @@ mod tests {
         }
     }
 
+    fn plugin_session_with_tools(
+        agent_id: &str,
+        mode: ExecutionMode,
+        tools: Arc<dyn crate::ToolProvider>,
+    ) -> Arc<crate::PluginSession> {
+        let tool_factory = crate::PluginSpecFactory::new(
+            "test_tools",
+            Arc::new(move |_ctx| {
+                Ok(crate::PluginSpec::new().with_tool_provider(Arc::clone(&tools)))
+            }),
+        );
+        crate::PluginHost::new(vec![Arc::new(tool_factory)])
+            .build_session(agent_id, mode, None)
+            .expect("plugins")
+    }
+
+    fn default_tool_session(
+        agent_id: &str,
+        mode: ExecutionMode,
+        deps: crate::DefaultToolPluginDeps,
+    ) -> Arc<crate::PluginSession> {
+        crate::PluginHost::new(crate::default_tool_plugin_factories(mode, deps))
+            .build_session(agent_id, mode, None)
+            .expect("plugins")
+    }
+
+    struct EmptyTools;
+
+    #[async_trait::async_trait]
+    impl crate::ToolProvider for EmptyTools {
+        fn definitions(&self) -> Vec<crate::ToolDefinition> {
+            Vec::new()
+        }
+
+        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> crate::ToolResult {
+            crate::ToolResult::err(serde_json::json!("Unknown tool"))
+        }
+    }
+
     async fn standard_runtime_with_transport(transport: MockTransport) -> LashRuntime {
-        let tools: Arc<dyn crate::ToolProvider> = Arc::new(crate::ToolSet::new());
+        let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
         let mut runtime = LashRuntime::from_state(
             standard_test_config(),
-            crate::RuntimeServices::tools_only(tools, "root").expect("services"),
+            crate::RuntimeServices::new(plugin_session_with_tools(
+                "root",
+                ExecutionMode::Standard,
+                tools,
+            )),
             AgentStateEnvelope::default(),
         )
         .await
@@ -2950,19 +3112,24 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_requires_explicit_max_context_tokens() {
-        let tools: Arc<dyn crate::ToolProvider> = Arc::new(crate::ToolSet::new());
+        let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
         let result = LashRuntime::from_state(
             RuntimeConfig {
                 execution_mode: ExecutionMode::Standard,
                 provider: Provider::OpenAiGeneric {
                     api_key: "test-key".to_string(),
                     base_url: "https://example.invalid/v1".to_string(),
+                    options: crate::provider::ProviderOptions::default(),
                 },
                 model: "mock-model".to_string(),
                 max_context_tokens: None,
                 ..RuntimeConfig::default()
             },
-            crate::RuntimeServices::tools_only(tools, "root").expect("services"),
+            crate::RuntimeServices::new(plugin_session_with_tools(
+                "root",
+                ExecutionMode::Standard,
+                tools,
+            )),
             AgentStateEnvelope::default(),
         )
         .await;
@@ -2981,6 +3148,7 @@ mod tests {
             provider: Provider::OpenAiGeneric {
                 api_key: "test-key".to_string(),
                 base_url: "https://example.invalid/v1".to_string(),
+                options: crate::provider::ProviderOptions::default(),
             },
             model: "mock-model".to_string(),
             max_context_tokens: Some(200_000),
@@ -2990,10 +3158,22 @@ mod tests {
     }
 
     async fn repl_runtime_with_transport(transport: MockTransport) -> LashRuntime {
-        let tools: Arc<dyn crate::ToolProvider> = Arc::new(crate::ToolSet::new());
+        let prompt_bridge = crate::PromptBridge::new();
+        let plugins = default_tool_session(
+            "root",
+            ExecutionMode::Repl,
+            crate::DefaultToolPluginDeps {
+                prompt_bridge: Some(prompt_bridge.clone()),
+                ..Default::default()
+            },
+        );
         let mut runtime = LashRuntime::from_state(
             repl_test_config(),
-            crate::RuntimeServices::tools_only(tools, "root").expect("services"),
+            crate::RuntimeServices::new_with_bridges(
+                plugins,
+                prompt_bridge,
+                crate::TurnInjectionBridge::new(),
+            ),
             AgentStateEnvelope {
                 execution_mode: ExecutionMode::Repl,
                 ..AgentStateEnvelope::default()
@@ -3007,11 +3187,13 @@ mod tests {
 
     #[tokio::test]
     async fn active_tool_catalog_uses_runtime_execution_mode() {
-        let tools: Arc<dyn crate::ToolProvider> =
-            Arc::new(crate::ToolSet::core_for(ExecutionMode::Repl));
         let runtime = LashRuntime::from_state(
             repl_test_config(),
-            crate::RuntimeServices::tools_only(tools, "root").expect("services"),
+            crate::RuntimeServices::new(default_tool_session(
+                "root",
+                ExecutionMode::Repl,
+                crate::DefaultToolPluginDeps::default(),
+            )),
             AgentStateEnvelope {
                 execution_mode: ExecutionMode::Repl,
                 ..AgentStateEnvelope::default()
@@ -3024,25 +3206,21 @@ mod tests {
             .iter()
             .filter_map(|item| item.get("name").and_then(|value| value.as_str()))
             .collect();
-        assert!(names.contains(&"shell_wait"));
-        assert!(names.contains(&"shell_read"));
-        assert!(!names.contains(&"exec_command"));
-        assert!(!names.contains(&"write_stdin"));
+        assert!(names.contains(&"exec_command"));
+        assert!(names.contains(&"write_stdin"));
+        assert!(!names.contains(&"shell_wait"));
+        assert!(!names.contains(&"shell_read"));
     }
 
     async fn standard_runtime_with_bridge(
         transport: MockTransport,
         turn_injection_bridge: crate::TurnInjectionBridge,
     ) -> LashRuntime {
-        let tools: Arc<dyn crate::ToolProvider> = Arc::new(crate::ToolSet::new());
-        let plugins = crate::PluginHost::empty()
-            .build_session("root", None)
-            .expect("plugins");
+        let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
         let mut runtime = LashRuntime::from_state(
             standard_test_config(),
             crate::RuntimeServices::new_with_bridges(
-                tools,
-                plugins,
+                plugin_session_with_tools("root", ExecutionMode::Standard, tools),
                 crate::PromptBridge::new(),
                 turn_injection_bridge,
             ),
@@ -3083,6 +3261,11 @@ mod tests {
         before_turn: Option<crate::plugin::BeforeTurnHook>,
         checkpoint: Option<crate::plugin::CheckpointHook>,
         message_mutators: Vec<(crate::MessageMutatorHook, crate::plugin::MessageMutator)>,
+        tool_result_projectors: Vec<(
+            crate::ToolResultProjectionHook,
+            crate::plugin::ToolResultProjector,
+        )>,
+        turn_committed: Option<crate::plugin::TurnCommittedHook>,
         session_config_changed: Option<crate::plugin::SessionConfigChangedHook>,
         external_registrar: Option<Arc<RuntimeExternalRegistrar>>,
     }
@@ -3094,16 +3277,22 @@ mod tests {
 
         fn register(&self, reg: &mut crate::PluginRegistrar) -> Result<(), crate::PluginError> {
             if let Some(hook) = &self.before_turn {
-                reg.before_turn(Arc::clone(hook));
+                reg.turn().before(Arc::clone(hook));
             }
             if let Some(hook) = &self.checkpoint {
-                reg.at_checkpoint(Arc::clone(hook));
+                reg.turn().checkpoint(Arc::clone(hook));
             }
             for (hook, mutator) in &self.message_mutators {
-                reg.register_message_mutator(*hook, Arc::clone(mutator))?;
+                reg.messages().mutator(*hook, Arc::clone(mutator))?;
+            }
+            for (hook, projector) in &self.tool_result_projectors {
+                reg.tool_results().projector(*hook, Arc::clone(projector))?;
+            }
+            if let Some(hook) = &self.turn_committed {
+                reg.turn().committed(Arc::clone(hook));
             }
             if let Some(hook) = &self.session_config_changed {
-                reg.on_session_config_changed(Arc::clone(hook));
+                reg.session().config_changed(Arc::clone(hook));
             }
             if let Some(register) = &self.external_registrar {
                 register(reg)?;
@@ -3116,18 +3305,63 @@ mod tests {
         plugins: Vec<Arc<dyn crate::PluginFactory>>,
         transport: MockTransport,
     ) -> LashRuntime {
-        let tools: Arc<dyn crate::ToolProvider> = Arc::new(crate::ToolSet::new());
-        let plugin_host = crate::PluginHost::new(plugins);
-        let plugin_session = plugin_host.build_session("root", None).expect("plugins");
+        runtime_with_plugins_and_tools(plugins, Arc::new(EmptyTools), transport).await
+    }
+
+    async fn runtime_with_plugins_and_tools(
+        plugins: Vec<Arc<dyn crate::PluginFactory>>,
+        tools: Arc<dyn crate::ToolProvider>,
+        transport: MockTransport,
+    ) -> LashRuntime {
+        let mut factories = plugins;
+        let tools = Arc::clone(&tools);
+        factories.push(Arc::new(crate::PluginSpecFactory::new(
+            "test_tools",
+            Arc::new(move |_ctx| {
+                Ok(crate::PluginSpec::new().with_tool_provider(Arc::clone(&tools)))
+            }),
+        )));
+        let plugin_host = crate::PluginHost::new(factories);
+        let plugin_session = plugin_host
+            .build_standard_session("root", None)
+            .expect("plugins");
         let mut runtime = LashRuntime::from_state(
             standard_test_config(),
-            crate::RuntimeServices::new(tools, plugin_session),
+            crate::RuntimeServices::new(plugin_session),
             AgentStateEnvelope::default(),
         )
         .await
         .expect("runtime");
         runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
         runtime
+    }
+
+    struct EchoTool;
+
+    #[async_trait::async_trait]
+    impl crate::ToolProvider for EchoTool {
+        fn definitions(&self) -> Vec<crate::ToolDefinition> {
+            vec![crate::ToolDefinition {
+                name: "echo_tool".to_string(),
+                description: "Return a tool payload".to_string(),
+                params: vec![crate::ToolParam::typed("value", "str")],
+                returns: "json".to_string(),
+                examples: vec![],
+                enabled: true,
+                injected: true,
+            }]
+        }
+
+        async fn execute(&self, tool_name: &str, args: &serde_json::Value) -> crate::ToolResult {
+            assert_eq!(tool_name, "echo_tool");
+            let value = args
+                .get("value")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            crate::ToolResult::ok(serde_json::json!({
+                "payload": format!("raw:{value}")
+            }))
+        }
     }
 
     #[tokio::test]
@@ -3141,6 +3375,8 @@ mod tests {
                     before_turn: None,
                     checkpoint: None,
                     message_mutators: Vec::new(),
+                    tool_result_projectors: Vec::new(),
+                    turn_committed: None,
                     session_config_changed: Some(Arc::new(move |ctx| {
                         let observed = Arc::clone(&observed);
                         Box::pin(async move {
@@ -3161,6 +3397,7 @@ mod tests {
                     access_token: "tok".into(),
                     refresh_token: "ref".into(),
                     expires_at: u64::MAX,
+                    options: crate::provider::ProviderOptions::default(),
                 }),
                 Some("claude-opus-4-6".to_string()),
                 Some(None),
@@ -3204,6 +3441,8 @@ mod tests {
                     })),
                     checkpoint: None,
                     message_mutators: Vec::new(),
+                    tool_result_projectors: Vec::new(),
+                    turn_committed: None,
                     session_config_changed: None,
                     external_registrar: None,
                 }))
@@ -3235,6 +3474,68 @@ mod tests {
                 .iter()
                 .any(|part| part.content.contains("plugin preface"))
         }));
+    }
+
+    #[tokio::test]
+    async fn retryable_llm_failures_exhaust_and_fail_turn() {
+        let transport = MockTransport::new(vec![
+            MockCall {
+                stream_events: Vec::new(),
+                response: Err(crate::llm::transport::LlmTransportError::new(
+                    "provider unavailable",
+                )
+                .retryable(true)
+                .with_code("http_500")),
+            },
+            MockCall {
+                stream_events: Vec::new(),
+                response: Err(crate::llm::transport::LlmTransportError::new(
+                    "provider unavailable",
+                )
+                .retryable(true)
+                .with_code("http_500")),
+            },
+            MockCall {
+                stream_events: Vec::new(),
+                response: Err(crate::llm::transport::LlmTransportError::new(
+                    "provider unavailable",
+                )
+                .retryable(true)
+                .with_code("http_500")),
+            },
+            MockCall {
+                stream_events: Vec::new(),
+                response: Err(crate::llm::transport::LlmTransportError::new(
+                    "provider unavailable",
+                )
+                .retryable(true)
+                .with_code("http_500")),
+            },
+        ]);
+        let mut runtime = runtime_with_plugins(Vec::new(), transport).await;
+
+        let turn = runtime
+            .run_turn_assembled(
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "hello".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    mode: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("turn");
+
+        assert_eq!(turn.status, TurnStatus::Failed);
+        assert_eq!(turn.done_reason, DoneReason::RuntimeError);
+        assert!(turn.errors.iter().any(|issue| issue.kind == "llm_provider"));
+        assert!(
+            turn.errors
+                .iter()
+                .any(|issue| issue.message.contains("provider unavailable"))
+        );
     }
 
     #[tokio::test]
@@ -3321,6 +3622,8 @@ mod tests {
                         })
                     })),
                     message_mutators: Vec::new(),
+                    tool_result_projectors: Vec::new(),
+                    turn_committed: None,
                     session_config_changed: None,
                     external_registrar: None,
                 }))
@@ -3381,9 +3684,11 @@ mod tests {
                     before_turn: None,
                     checkpoint: None,
                     message_mutators: Vec::new(),
+                    tool_result_projectors: Vec::new(),
+                    turn_committed: None,
                     session_config_changed: None,
                     external_registrar: Some(Arc::new(|reg| {
-                        reg.register_external_op(
+                        reg.external().op(
                             crate::ExternalOpDef {
                                 name: "test.spawn".to_string(),
                                 description: "spawn".to_string(),
@@ -3401,6 +3706,8 @@ mod tests {
                                             start: crate::SessionStartPoint::CurrentSession,
                                             config_overrides:
                                                 crate::SessionConfigOverrides::default(),
+                                            tool_surface:
+                                                crate::plugin::ToolSurfaceContribution::default(),
                                             initial_messages: vec![crate::PluginMessage {
                                                 role: crate::MessageRole::User,
                                                 content: "branch seed".to_string(),
@@ -3470,6 +3777,77 @@ mod tests {
                 .and_then(|value| value.as_u64()),
             Some(2)
         );
+    }
+
+    #[tokio::test]
+    async fn session_manager_can_stream_and_await_child_session_turns() {
+        let transport = MockTransport::new(vec![MockCall {
+            stream_events: vec![
+                LlmStreamEvent::Delta("child ".to_string()),
+                LlmStreamEvent::Part(LlmOutputPart::Text {
+                    text: "session".to_string(),
+                }),
+                LlmStreamEvent::Usage(LlmUsage {
+                    input_tokens: 7,
+                    output_tokens: 2,
+                    cached_input_tokens: 0,
+                    reasoning_tokens: 1,
+                }),
+            ],
+            response: Ok(LlmResponse {
+                full_text: "child session".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "child session".to_string(),
+                }],
+                ..LlmResponse::default()
+            }),
+        }]);
+        let runtime = runtime_with_plugins(Vec::new(), transport).await;
+        let manager = runtime.session_manager().expect("session manager");
+        let handle = manager
+            .create_session(crate::SessionCreateRequest {
+                agent_id: Some("child".to_string()),
+                start: crate::SessionStartPoint::Empty,
+                config_overrides: crate::SessionConfigOverrides::default(),
+                tool_surface: crate::ToolSurfaceContribution::default(),
+                initial_messages: Vec::new(),
+            })
+            .await
+            .expect("child session");
+        let mut turn = manager
+            .start_turn_stream(
+                &handle.session_id,
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "hello".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    mode: None,
+                },
+            )
+            .await
+            .expect("child turn");
+
+        let mut saw_stream_event = false;
+        while let Some(event) = turn.events.recv().await {
+            if matches!(
+                event,
+                AgentEvent::TextDelta { .. }
+                    | AgentEvent::Message { .. }
+                    | AgentEvent::TokenUsage { .. }
+                    | AgentEvent::Done
+            ) {
+                saw_stream_event = true;
+            }
+        }
+
+        let assembled = manager.await_turn(&turn.turn_id).await.expect("assembled");
+        assert_eq!(handle.session_id, "child");
+        assert_eq!(handle.config.model, "mock-model");
+        assert_eq!(turn.session_id, "child");
+        assert_eq!(turn.config.model, "mock-model");
+        assert!(saw_stream_event);
+        assert_eq!(assembled.state.agent_id, "child");
     }
 
     #[test]
@@ -3726,8 +4104,6 @@ mod tests {
             config: runtime.config.clone(),
             agent_id: runtime.state.agent_id.clone(),
             llm_factory: runtime.llm_factory.clone(),
-            plugin_prompt_contributions: Vec::new(),
-            turn_prompt_sections: Vec::new(),
             session_manager,
         };
         let (event_tx, mut event_rx) = mpsc::channel(8);
@@ -3872,11 +4248,13 @@ mod tests {
                 access_token: "token".into(),
                 refresh_token: "refresh".into(),
                 expires_at: 0,
+                options: crate::provider::ProviderOptions::default(),
             },
             &usage,
         )
         .expect("prompt usage");
         assert_eq!(prompt_usage.prompt_context_tokens, 100);
+        assert_eq!(prompt_usage.context_budget_tokens, 100);
     }
 
     #[test]
@@ -3891,11 +4269,13 @@ mod tests {
             &Provider::OpenAiGeneric {
                 api_key: "key".into(),
                 base_url: "https://example.invalid/v1".into(),
+                options: crate::provider::ProviderOptions::default(),
             },
             &usage,
         )
         .expect("prompt usage");
         assert_eq!(prompt_usage.prompt_context_tokens, 80);
+        assert_eq!(prompt_usage.context_budget_tokens, 80);
     }
 
     #[cfg(feature = "sqlite-store")]
@@ -3918,21 +4298,25 @@ mod tests {
             }),
         }]);
         let store = Arc::new(crate::store::Store::memory().expect("store"));
-        let base_provider: Arc<dyn crate::ToolProvider> = Arc::new(
-            crate::ToolSet::new().with_provider(crate::tools::StateStore::new(Vec::new())),
-        );
-        let plugin_host = crate::PluginHost::new(vec![Arc::new(
-            crate::BuiltinHistoryPluginFactory::new(Arc::clone(&store)),
-        )]);
-        let plugins = plugin_host.build_session("root", None).expect("plugins");
-        let mut toolset = crate::ToolSet::new().with_arc_provider(Arc::clone(&base_provider));
-        for provider in plugins.tool_providers() {
-            toolset = toolset.with_arc_provider(Arc::clone(provider));
-        }
-        let tools: Arc<dyn crate::ToolProvider> = Arc::new(toolset);
+        let base_provider: Arc<dyn crate::ToolProvider> =
+            Arc::new(crate::tools::StateStore::new(ExecutionMode::Standard));
+        let base_provider_factory = Arc::clone(&base_provider);
+        let plugin_host = crate::PluginHost::new(vec![
+            Arc::new(crate::PluginSpecFactory::new(
+                "base_tools",
+                Arc::new(move |_ctx| {
+                    Ok(crate::PluginSpec::new()
+                        .with_tool_provider(Arc::clone(&base_provider_factory)))
+                }),
+            )),
+            Arc::new(crate::BuiltinHistoryPluginFactory::new(Arc::clone(&store))),
+        ]);
+        let plugins = plugin_host
+            .build_standard_session("root", None)
+            .expect("plugins");
         let mut runtime = LashRuntime::from_state(
             standard_test_config(),
-            crate::RuntimeServices::new(tools, Arc::clone(&plugins)),
+            crate::RuntimeServices::new(Arc::clone(&plugins)),
             AgentStateEnvelope::default(),
         )
         .await
@@ -3958,6 +4342,7 @@ mod tests {
                 prompt_context_tokens: 70,
                 input_tokens: 70,
                 cached_input_tokens: 0,
+                context_budget_tokens: 70,
             }),
             ..AgentStateEnvelope::default()
         });
@@ -4015,6 +4400,8 @@ mod tests {
                             })
                         }),
                     )],
+                    tool_result_projectors: Vec::new(),
+                    turn_committed: None,
                     session_config_changed: None,
                     external_registrar: None,
                 }))
@@ -4051,6 +4438,7 @@ mod tests {
                 prompt_context_tokens: 70,
                 input_tokens: 70,
                 cached_input_tokens: 0,
+                context_budget_tokens: 70,
             }),
             ..AgentStateEnvelope::default()
         });
@@ -4084,6 +4472,112 @@ mod tests {
         }));
     }
 
+    #[tokio::test]
+    async fn tool_result_projectors_split_model_and_history_views() {
+        let committed_results = Arc::new(tokio::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let committed_results_hook = Arc::clone(&committed_results);
+        let plugin = Arc::new(RuntimeTestPluginFactory {
+            build: Arc::new(move |_| {
+                let committed_results = Arc::clone(&committed_results_hook);
+                Ok(Arc::new(RuntimeTestPlugin {
+                    before_turn: None,
+                    checkpoint: None,
+                    message_mutators: Vec::new(),
+                    tool_result_projectors: vec![
+                        (
+                            crate::ToolResultProjectionHook::BeforeModel,
+                            Arc::new(|mut ctx| {
+                                Box::pin(async move {
+                                    ctx.result.result = serde_json::json!("model projection");
+                                    Ok(ctx.result)
+                                })
+                            }),
+                        ),
+                        (
+                            crate::ToolResultProjectionHook::BeforeHistory,
+                            Arc::new(|mut ctx| {
+                                Box::pin(async move {
+                                    ctx.result.result = serde_json::json!("history projection");
+                                    Ok(ctx.result)
+                                })
+                            }),
+                        ),
+                    ],
+                    turn_committed: Some(Arc::new(move |turn| {
+                        let committed_results = Arc::clone(&committed_results);
+                        Box::pin(async move {
+                            committed_results.lock().await.push(
+                                turn.tool_calls
+                                    .first()
+                                    .map(|call| call.result.clone())
+                                    .unwrap_or(serde_json::Value::Null),
+                            );
+                            Ok(())
+                        })
+                    })),
+                    session_config_changed: None,
+                    external_registrar: None,
+                }))
+            }),
+        });
+        let transport = MockTransport::new(vec![
+            MockCall {
+                stream_events: Vec::new(),
+                response: Ok(LlmResponse {
+                    parts: vec![
+                        LlmOutputPart::Text {
+                            text: "checking tool".to_string(),
+                        },
+                        LlmOutputPart::ToolCall {
+                            call_id: "tool-1".to_string(),
+                            tool_name: "echo_tool".to_string(),
+                            input_json: r#"{"value":"sample"}"#.to_string(),
+                        },
+                    ],
+                    ..LlmResponse::default()
+                }),
+            },
+            MockCall {
+                stream_events: Vec::new(),
+                response: Ok(LlmResponse {
+                    full_text: "done".to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: "done".to_string(),
+                    }],
+                    ..LlmResponse::default()
+                }),
+            },
+        ]);
+        let tools: Arc<dyn crate::ToolProvider> = Arc::new(EchoTool);
+        let mut runtime = runtime_with_plugins_and_tools(vec![plugin], tools, transport).await;
+
+        let turn = runtime
+            .run_turn_assembled(
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "run the tool".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    mode: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("turn");
+
+        assert!(turn.state.messages.iter().any(|message| {
+            message.parts.iter().any(|part| {
+                part.content.contains("model projection")
+                    && matches!(part.kind, PartKind::ToolResult)
+            })
+        }));
+        let committed = committed_results.lock().await;
+        assert_eq!(
+            committed.as_slice(),
+            &[serde_json::json!("history projection")]
+        );
+    }
+
     #[cfg(feature = "sqlite-store")]
     #[tokio::test]
     async fn completed_turns_are_persisted_for_search_history() {
@@ -4099,21 +4593,25 @@ mod tests {
         }]);
 
         let store = Arc::new(crate::store::Store::memory().expect("store"));
-        let base_provider: Arc<dyn crate::ToolProvider> = Arc::new(
-            crate::ToolSet::new().with_provider(crate::tools::StateStore::new(Vec::new())),
-        );
-        let plugin_host = crate::PluginHost::new(vec![Arc::new(
-            crate::BuiltinHistoryPluginFactory::new(Arc::clone(&store)),
-        )]);
-        let plugins = plugin_host.build_session("root", None).expect("plugins");
-        let mut toolset = crate::ToolSet::new().with_arc_provider(Arc::clone(&base_provider));
-        for provider in plugins.tool_providers() {
-            toolset = toolset.with_arc_provider(Arc::clone(provider));
-        }
-        let tools: Arc<dyn crate::ToolProvider> = Arc::new(toolset);
+        let base_provider: Arc<dyn crate::ToolProvider> =
+            Arc::new(crate::tools::StateStore::new(ExecutionMode::Standard));
+        let base_provider_factory = Arc::clone(&base_provider);
+        let plugin_host = crate::PluginHost::new(vec![
+            Arc::new(crate::PluginSpecFactory::new(
+                "base_tools",
+                Arc::new(move |_ctx| {
+                    Ok(crate::PluginSpec::new()
+                        .with_tool_provider(Arc::clone(&base_provider_factory)))
+                }),
+            )),
+            Arc::new(crate::BuiltinHistoryPluginFactory::new(Arc::clone(&store))),
+        ]);
+        let plugins = plugin_host
+            .build_standard_session("root", None)
+            .expect("plugins");
         let mut runtime = LashRuntime::from_state(
             standard_test_config(),
-            crate::RuntimeServices::new(tools, Arc::clone(&plugins)),
+            crate::RuntimeServices::new(Arc::clone(&plugins)),
             AgentStateEnvelope::default(),
         )
         .await
@@ -4134,17 +4632,7 @@ mod tests {
             .await
             .expect("turn");
 
-        let history_provider = plugins
-            .tool_providers()
-            .iter()
-            .find(|provider| {
-                provider
-                    .definitions()
-                    .iter()
-                    .any(|def| def.name == "search_history")
-            })
-            .cloned()
-            .expect("history provider");
+        let history_provider = plugins.tools();
         let result = history_provider
             .execute(
                 "search_history",
@@ -4174,21 +4662,25 @@ mod tests {
     async fn history_plugin_compacts_messages_when_model_change_shrinks_context_window() {
         let transport = MockTransport::new(Vec::new());
         let store = Arc::new(crate::store::Store::memory().expect("store"));
-        let base_provider: Arc<dyn crate::ToolProvider> = Arc::new(
-            crate::ToolSet::new().with_provider(crate::tools::StateStore::new(Vec::new())),
-        );
-        let plugin_host = crate::PluginHost::new(vec![Arc::new(
-            crate::BuiltinHistoryPluginFactory::new(Arc::clone(&store)),
-        )]);
-        let plugins = plugin_host.build_session("root", None).expect("plugins");
-        let mut toolset = crate::ToolSet::new().with_arc_provider(Arc::clone(&base_provider));
-        for provider in plugins.tool_providers() {
-            toolset = toolset.with_arc_provider(Arc::clone(provider));
-        }
-        let tools: Arc<dyn crate::ToolProvider> = Arc::new(toolset);
+        let base_provider: Arc<dyn crate::ToolProvider> =
+            Arc::new(crate::tools::StateStore::new(ExecutionMode::Standard));
+        let base_provider_factory = Arc::clone(&base_provider);
+        let plugin_host = crate::PluginHost::new(vec![
+            Arc::new(crate::PluginSpecFactory::new(
+                "base_tools",
+                Arc::new(move |_ctx| {
+                    Ok(crate::PluginSpec::new()
+                        .with_tool_provider(Arc::clone(&base_provider_factory)))
+                }),
+            )),
+            Arc::new(crate::BuiltinHistoryPluginFactory::new(Arc::clone(&store))),
+        ]);
+        let plugins = plugin_host
+            .build_standard_session("root", None)
+            .expect("plugins");
         let mut runtime = LashRuntime::from_state(
             standard_test_config(),
-            crate::RuntimeServices::new(tools, Arc::clone(&plugins)),
+            crate::RuntimeServices::new(Arc::clone(&plugins)),
             AgentStateEnvelope {
                 agent_id: "root".to_string(),
                 execution_mode: ExecutionMode::Standard,
@@ -4209,6 +4701,7 @@ mod tests {
                     prompt_context_tokens: 70_000,
                     input_tokens: 70_000,
                     cached_input_tokens: 0,
+                    context_budget_tokens: 70_000,
                 }),
                 ..AgentStateEnvelope::default()
             },
@@ -4224,6 +4717,7 @@ mod tests {
                     refresh_token: "ref".into(),
                     expires_at: u64::MAX,
                     project_id: None,
+                    options: crate::provider::ProviderOptions::default(),
                 }),
                 Some("gemini-2.5-flash-image".to_string()),
                 None,

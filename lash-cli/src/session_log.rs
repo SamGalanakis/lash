@@ -184,7 +184,6 @@ fn should_flush_event(event_type: &str) -> bool {
             | "llm_request"
             | "llm_response"
             | "retry_status"
-            | "sub_agent_done"
             | "plugin_event"
             | "done"
             | "error"
@@ -327,7 +326,6 @@ pub fn load_session(filename: &str) -> Option<LoadedSession> {
 
     let mut messages = Vec::new();
     let mut blocks = Vec::new();
-    let mut sub_agent_count: usize = 0;
     let mut assistant_replay = AssistantReplay::default();
     let mut last_token_usage = TokenUsage::default();
     let mut activity_state = ActivityState::default();
@@ -467,32 +465,6 @@ pub fn load_session(filename: &str) -> Option<LoadedSession> {
                     });
                 }
             }
-            "sub_agent_done" => {
-                assistant_replay.flush(&mut blocks);
-                sub_agent_count += 1;
-                let task = val
-                    .get("task")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let usage: TokenUsage = val
-                    .get("usage")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default();
-                let tool_calls =
-                    val.get("tool_calls").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                let iterations =
-                    val.get("iterations").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                let success = val.get("success").and_then(|v| v.as_bool()).unwrap_or(true);
-                blocks.push(DisplayBlock::SubAgentResult {
-                    task,
-                    usage,
-                    tool_calls,
-                    iterations,
-                    success,
-                    is_last: true, // will be fixed below
-                });
-            }
             "token_usage" => {
                 if let Some(usage) = val
                     .get("usage")
@@ -603,28 +575,6 @@ pub fn load_session(filename: &str) -> Option<LoadedSession> {
 
     assistant_replay.flush(&mut blocks);
 
-    // Fix is_last flags for consecutive SubAgentResult blocks
-    if sub_agent_count > 0 {
-        // Walk backward through blocks; within each consecutive run of SubAgentResults,
-        // only the last one should have is_last = true.
-        let mut in_run = false;
-        for i in (0..blocks.len()).rev() {
-            if let DisplayBlock::SubAgentResult {
-                ref mut is_last, ..
-            } = blocks[i]
-            {
-                if !in_run {
-                    *is_last = true;
-                    in_run = true;
-                } else {
-                    *is_last = false;
-                }
-            } else {
-                in_run = false;
-            }
-        }
-    }
-
     Some(LoadedSession {
         messages,
         blocks,
@@ -636,200 +586,226 @@ pub fn load_session(filename: &str) -> Option<LoadedSession> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
     use lash_core::AgentEvent;
     use serde_json::json;
 
+    fn with_temp_lash_home(test_name: &str, f: impl FnOnce()) {
+        let _env_guard = env_lock().lock().expect("env lock");
+        let temp = TempDirGuard::new(test_name);
+        let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
+        std::fs::create_dir_all(sessions_dir()).expect("sessions dir");
+        f();
+    }
+
     #[test]
     fn load_session_reconstructs_streamed_assistant_blocks() {
-        let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
-        let path = sessions_dir().join(&filename);
-        std::fs::create_dir_all(sessions_dir()).unwrap();
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
-                "{\"type\":\"user_input\",\"content\":\"Hi\"}\n",
-                "{\"type\":\"text_delta\",\"content\":\"Hello\"}\n",
-                "{\"type\":\"text_delta\",\"content\":\" world\"}\n",
-                "{\"type\":\"llm_response\",\"content\":\"Hello world\"}\n",
-                "{\"type\":\"done\"}\n"
-            ),
-        )
-        .unwrap();
+        with_temp_lash_home("lash-session-log-streamed", || {
+            let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
+            let path = sessions_dir().join(&filename);
+            std::fs::write(
+                &path,
+                concat!(
+                    "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
+                    "{\"type\":\"user_input\",\"content\":\"Hi\"}\n",
+                    "{\"type\":\"text_delta\",\"content\":\"Hello\"}\n",
+                    "{\"type\":\"text_delta\",\"content\":\" world\"}\n",
+                    "{\"type\":\"llm_response\",\"content\":\"Hello world\"}\n",
+                    "{\"type\":\"done\"}\n"
+                ),
+            )
+            .unwrap();
 
-        let loaded = load_session(&filename).unwrap();
-        let blocks = loaded.blocks;
-        assert!(matches!(blocks.first(), Some(DisplayBlock::UserInput(text)) if text == "Hi"));
-        assert!(
-            matches!(blocks.get(1), Some(DisplayBlock::AssistantText(text)) if text == "Hello world")
-        );
-
-        let _ = std::fs::remove_file(path);
+            let loaded = load_session(&filename).unwrap();
+            let blocks = loaded.blocks;
+            assert!(matches!(blocks.first(), Some(DisplayBlock::UserInput(text)) if text == "Hi"));
+            assert!(
+                matches!(blocks.get(1), Some(DisplayBlock::AssistantText(text)) if text == "Hello world")
+            );
+        });
     }
 
     #[test]
     fn load_session_ignores_empty_code_output_errors() {
-        let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
-        let path = sessions_dir().join(&filename);
-        std::fs::create_dir_all(sessions_dir()).unwrap();
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
-                "{\"type\":\"user_input\",\"content\":\"Hi\"}\n",
-                "{\"type\":\"code_output\",\"output\":\"\",\"error\":\"\"}\n",
-                "{\"type\":\"done\"}\n"
-            ),
-        )
-        .unwrap();
+        with_temp_lash_home("lash-session-log-empty-code-output", || {
+            let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
+            let path = sessions_dir().join(&filename);
+            std::fs::write(
+                &path,
+                concat!(
+                    "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
+                    "{\"type\":\"user_input\",\"content\":\"Hi\"}\n",
+                    "{\"type\":\"code_output\",\"output\":\"\",\"error\":\"\"}\n",
+                    "{\"type\":\"done\"}\n"
+                ),
+            )
+            .unwrap();
 
-        let loaded = load_session(&filename).unwrap();
-        let blocks = loaded.blocks;
-        assert!(matches!(blocks.first(), Some(DisplayBlock::UserInput(text)) if text == "Hi"));
-        assert_eq!(blocks.len(), 1);
-
-        let _ = std::fs::remove_file(path);
+            let loaded = load_session(&filename).unwrap();
+            let blocks = loaded.blocks;
+            assert!(matches!(blocks.first(), Some(DisplayBlock::UserInput(text)) if text == "Hi"));
+            assert_eq!(blocks.len(), 1);
+        });
     }
 
     #[test]
     fn load_session_maps_cancelled_error_to_system_message() {
-        let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
-        let path = sessions_dir().join(&filename);
-        std::fs::create_dir_all(sessions_dir()).unwrap();
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
-                "{\"type\":\"user_input\",\"content\":\"Hi\"}\n",
-                "{\"type\":\"error\",\"message\":\"LLM error: cancelled\",\"envelope\":{\"kind\":\"llm_provider\",\"code\":\"cancelled\",\"user_message\":\"LLM error: cancelled\"}}\n",
-                "{\"type\":\"done\"}\n"
-            ),
-        )
-        .unwrap();
+        with_temp_lash_home("lash-session-log-cancelled", || {
+            let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
+            let path = sessions_dir().join(&filename);
+            std::fs::write(
+                &path,
+                concat!(
+                    "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
+                    "{\"type\":\"user_input\",\"content\":\"Hi\"}\n",
+                    "{\"type\":\"error\",\"message\":\"LLM error: cancelled\",\"envelope\":{\"kind\":\"llm_provider\",\"code\":\"cancelled\",\"user_message\":\"LLM error: cancelled\"}}\n",
+                    "{\"type\":\"done\"}\n"
+                ),
+            )
+            .unwrap();
 
-        let loaded = load_session(&filename).unwrap();
-        assert!(matches!(
-            loaded.blocks.get(1),
-            Some(DisplayBlock::SystemMessage(msg)) if msg == "Manually interrupted."
-        ));
-
-        let _ = std::fs::remove_file(path);
+            let loaded = load_session(&filename).unwrap();
+            assert!(matches!(
+                loaded.blocks.get(1),
+                Some(DisplayBlock::SystemMessage(msg)) if msg == "Manually interrupted."
+            ));
+        });
     }
 
     #[test]
     fn logger_flushes_tool_calls_before_done() {
-        let mut logger =
-            SessionLogger::new("gpt-test", Some("s1".to_string()), "demo".to_string()).unwrap();
-        let path = sessions_dir().join(logger.filename());
+        with_temp_lash_home("lash-session-log-logger", || {
+            let mut logger =
+                SessionLogger::new("gpt-test", Some("s1".to_string()), "demo".to_string()).unwrap();
+            let path = sessions_dir().join(logger.filename());
 
-        logger.log_user_input("What time is it?");
-        logger.log_event(&AgentEvent::ToolCall {
-            name: "exec_command".to_string(),
-            args: json!({"cmd": "date"}),
-            result: json!({"wall_time_seconds": 0.01, "exit_code": 0, "output": "Thu\n"}),
-            success: true,
-            duration_ms: 0,
+            logger.log_user_input("What time is it?");
+            logger.log_event(&AgentEvent::ToolCall {
+                name: "exec_command".to_string(),
+                args: json!({"cmd": "date"}),
+                result: json!({"wall_time_seconds": 0.01, "exit_code": 0, "output": "Thu\n"}),
+                success: true,
+                duration_ms: 0,
+            });
+
+            let contents = std::fs::read_to_string(&path).unwrap();
+            assert!(contents.contains("\"type\":\"user_input\""));
+            assert!(contents.contains("\"type\":\"tool_call\""));
+            assert!(contents.contains("\"exec_command\""));
         });
+    }
 
-        let contents = std::fs::read_to_string(&path).unwrap();
-        assert!(contents.contains("\"type\":\"user_input\""));
-        assert!(contents.contains("\"type\":\"tool_call\""));
-        assert!(contents.contains("\"exec_command\""));
+    #[test]
+    fn logger_persists_retry_status_envelope() {
+        with_temp_lash_home("lash-session-log-retry-envelope", || {
+            let mut logger =
+                SessionLogger::new("gpt-test", Some("s1".to_string()), "demo".to_string()).unwrap();
+            let path = sessions_dir().join(logger.filename());
 
-        let _ = std::fs::remove_file(path);
+            logger.log_event(&AgentEvent::RetryStatus {
+                wait_seconds: 2,
+                attempt: 2,
+                max_attempts: 4,
+                reason: "Claude request failed with 500".to_string(),
+                envelope: Some(lash_core::agent::ErrorEnvelope {
+                    kind: "llm_provider".to_string(),
+                    code: Some("500".to_string()),
+                    user_message: "LLM error: Claude request failed with 500".to_string(),
+                    raw: Some("{\"type\":\"error\",\"request_id\":\"req_123\"}".to_string()),
+                }),
+            });
+
+            let contents = std::fs::read_to_string(&path).unwrap();
+            assert!(contents.contains("\"type\":\"retry_status\""));
+            assert!(contents.contains("\"code\":\"500\""));
+            assert!(contents.contains("req_123"));
+        });
     }
 
     #[test]
     fn load_session_replays_injected_messages_committed() {
-        let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
-        let path = sessions_dir().join(&filename);
-        std::fs::create_dir_all(sessions_dir()).unwrap();
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
-                "{\"type\":\"user_input\",\"content\":\"Hi\"}\n",
-                "{\"type\":\"injected_messages_committed\",\"messages\":[{\"role\":\"User\",\"content\":\"follow up\"},{\"role\":\"System\",\"content\":\"note\"}],\"checkpoint\":\"after_work\"}\n",
-                "{\"type\":\"done\"}\n"
-            ),
-        )
-        .unwrap();
+        with_temp_lash_home("lash-session-log-injected", || {
+            let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
+            let path = sessions_dir().join(&filename);
+            std::fs::write(
+                &path,
+                concat!(
+                    "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
+                    "{\"type\":\"user_input\",\"content\":\"Hi\"}\n",
+                    "{\"type\":\"injected_messages_committed\",\"messages\":[{\"role\":\"User\",\"content\":\"follow up\"},{\"role\":\"System\",\"content\":\"note\"}],\"checkpoint\":\"after_work\"}\n",
+                    "{\"type\":\"done\"}\n"
+                ),
+            )
+            .unwrap();
 
-        let loaded = load_session(&filename).unwrap();
-        assert!(
-            loaded
-                .blocks
-                .iter()
-                .any(|block| matches!(block, DisplayBlock::UserInput(text) if text == "follow up"))
-        );
-        assert!(
-            loaded
-                .blocks
-                .iter()
-                .any(|block| matches!(block, DisplayBlock::SystemMessage(text) if text == "note"))
-        );
-
-        let _ = std::fs::remove_file(path);
+            let loaded = load_session(&filename).unwrap();
+            assert!(loaded.blocks.iter().any(
+                |block| matches!(block, DisplayBlock::UserInput(text) if text == "follow up")
+            ));
+            assert!(
+                loaded.blocks.iter().any(
+                    |block| matches!(block, DisplayBlock::SystemMessage(text) if text == "note")
+                )
+            );
+        });
     }
 
     #[test]
     fn load_session_reconstructs_plan_block_from_update_plan_args() {
-        let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
-        let path = sessions_dir().join(&filename);
-        std::fs::create_dir_all(sessions_dir()).unwrap();
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
-                "{\"type\":\"tool_call\",\"name\":\"update_plan\",\"args\":{\"explanation\":\"Split tracker and mode.\",\"plan\":[{\"step\":\"Inspect runtime\",\"status\":\"completed\"},{\"step\":\"Refactor plugins\",\"status\":\"in_progress\"}]},\"result\":\"Plan updated\",\"success\":true,\"duration_ms\":0}\n",
-                "{\"type\":\"done\"}\n"
-            ),
-        )
-        .unwrap();
-
-        let loaded = load_session(&filename).unwrap();
-        assert!(loaded.blocks.iter().any(|block| {
-            matches!(
-                block,
-                DisplayBlock::PlanContent(content)
-                    if content.contains("Split tracker and mode.")
-                        && content.contains("1. [x] Inspect runtime")
-                        && content.contains("2. [-] Refactor plugins")
+        with_temp_lash_home("lash-session-log-plan", || {
+            let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
+            let path = sessions_dir().join(&filename);
+            std::fs::write(
+                &path,
+                concat!(
+                    "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
+                    "{\"type\":\"tool_call\",\"name\":\"update_plan\",\"args\":{\"explanation\":\"Split tracker and mode.\",\"plan\":[{\"step\":\"Inspect runtime\",\"status\":\"completed\"},{\"step\":\"Refactor plugins\",\"status\":\"in_progress\"}]},\"result\":\"Plan updated\",\"success\":true,\"duration_ms\":0}\n",
+                    "{\"type\":\"done\"}\n"
+                ),
             )
-        }));
+            .unwrap();
 
-        let _ = std::fs::remove_file(path);
+            let loaded = load_session(&filename).unwrap();
+            assert!(loaded.blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    DisplayBlock::PlanContent(content)
+                        if content.contains("Split tracker and mode.")
+                            && content.contains("✓ Inspect runtime")
+                            && content.contains("▸ Refactor plugins")
+                )
+            }));
+        });
     }
 
     #[test]
     fn load_session_replays_plugin_panel_events() {
-        let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
-        let path = sessions_dir().join(&filename);
-        std::fs::create_dir_all(sessions_dir()).unwrap();
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
-                "{\"type\":\"plugin_event\",\"plugin_id\":\"plan_mode\",\"event\":{\"kind\":\"mode_indicator_upsert\",\"key\":\"mode\",\"label\":\"plan\"}}\n",
-                "{\"type\":\"plugin_event\",\"plugin_id\":\"plan_mode\",\"event\":{\"kind\":\"panel_upsert\",\"key\":\"proposed_plan:1\",\"title\":\"PROPOSED PLAN\",\"content\":\"1. Inspect\\n2. Patch\"}}\n",
-                "{\"type\":\"done\"}\n"
-            ),
-        )
-        .unwrap();
-
-        let loaded = load_session(&filename).unwrap();
-        assert_eq!(
-            loaded.plugin_mode_indicators.get("plan_mode:mode"),
-            Some(&"plan".to_string())
-        );
-        assert!(loaded.blocks.iter().any(|block| {
-            matches!(
-                block,
-                DisplayBlock::PluginPanel(panel)
-                    if panel.title == "PROPOSED PLAN" && panel.content.contains("Inspect")
+        with_temp_lash_home("lash-session-log-plugin-panel", || {
+            let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
+            let path = sessions_dir().join(&filename);
+            std::fs::write(
+                &path,
+                concat!(
+                    "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
+                    "{\"type\":\"plugin_event\",\"plugin_id\":\"plan_mode\",\"event\":{\"kind\":\"mode_indicator_upsert\",\"key\":\"mode\",\"label\":\"plan\"}}\n",
+                    "{\"type\":\"plugin_event\",\"plugin_id\":\"plan_mode\",\"event\":{\"kind\":\"panel_upsert\",\"key\":\"proposed_plan:1\",\"title\":\"PROPOSED PLAN\",\"content\":\"1. Inspect\\n2. Patch\"}}\n",
+                    "{\"type\":\"done\"}\n"
+                ),
             )
-        }));
+            .unwrap();
 
-        let _ = std::fs::remove_file(path);
+            let loaded = load_session(&filename).unwrap();
+            assert_eq!(
+                loaded.plugin_mode_indicators.get("plan_mode:mode"),
+                Some(&"plan".to_string())
+            );
+            assert!(loaded.blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    DisplayBlock::PluginPanel(panel)
+                        if panel.title == "PROPOSED PLAN" && panel.content.contains("Inspect")
+                )
+            }));
+        });
     }
 }

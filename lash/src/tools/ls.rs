@@ -3,7 +3,7 @@ use std::path::Path;
 use super::{
     build_path_entry, filesystem_entries_result, parse_optional_bool, parse_optional_usize_arg,
 };
-use crate::{ToolDefinition, ToolParam, ToolPromptContext, ToolProvider, ToolResult};
+use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
 /// List filesystem entries in a directory tree.
 #[derive(Default)]
@@ -17,13 +17,10 @@ impl ToolProvider for Ls {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "ls".into(),
-            description: vec![crate::ToolText::new(
-                format!(
-                    "List filesystem entries, respecting `.gitignore`. Returns a record with `items` sorted by path. Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: depth={}, limit={}, with_lines=false.",
-                    DEFAULT_DEPTH, MAX_ENTRIES
-                ),
-                [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-            )],
+            description: format!(
+                "List filesystem entries, respecting `.gitignore`. Returns a record with `items` sorted by path. Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: depth={}, limit={}, with_lines=false.",
+                DEFAULT_DEPTH, MAX_ENTRIES
+            ),
             params: vec![
                 ToolParam {
                     name: "path".into(),
@@ -65,15 +62,10 @@ impl ToolProvider for Ls {
             ],
             returns: "dict".into(),
             examples: vec![],
-            hidden: false,
-            inject_into_prompt: true,
+            enabled: true,
+            injected: true,
         }]
     }
-
-    fn prompt_guides(&self, _context: &ToolPromptContext) -> Vec<String> {
-        vec!["### Filesystem Listing Results\n`glob` and `ls` both return a record `{ items: [...], truncated: ... }`. In REPL tool calls, read listing paths from `result.value.items`; there is no extra wrapper like `result.value.path_entries`. `glob` sorts `items` by modification time (newest first); `ls` sorts `items` alphabetically by path. If `truncated` is non-null, rerun with `limit=None` when needed.".to_string()]
-    }
-
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
         let base_dir = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 

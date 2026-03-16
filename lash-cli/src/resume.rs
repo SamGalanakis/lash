@@ -3,7 +3,7 @@ use std::sync::Arc;
 use lash_core::agent::{Message, MessageRole, Part, PartKind, PruneState};
 use lash_core::{
     AgentStateEnvelope, CachedModelCatalog, ContextFoldingConfig, DynamicStateSnapshot,
-    DynamicToolProvider, ExecutionMode, LashRuntime, Provider, Store,
+    DynamicToolProvider, ExecutionMode, LashRuntime, PromptUsage, Provider, Store, TokenUsage,
 };
 
 use crate::app::{App, DisplayBlock};
@@ -30,6 +30,26 @@ fn repl_reset_message() -> String {
     "Session resumed. Your REPL environment was reset — re-import modules and recreate any state you need.".to_string()
 }
 
+fn restored_token_usage(state: &lash_core::store::AgentState) -> Option<TokenUsage> {
+    let usage = TokenUsage {
+        input_tokens: state.input_tokens,
+        output_tokens: state.output_tokens,
+        cached_input_tokens: state.cached_input_tokens,
+        reasoning_tokens: state.reasoning_tokens,
+    };
+    (usage.total() > 0).then_some(usage)
+}
+
+fn restored_last_prompt_usage(config_value: Option<&serde_json::Value>) -> Option<PromptUsage> {
+    let mut usage: PromptUsage = config_value
+        .and_then(|value| value.get("last_prompt_usage").cloned())
+        .and_then(|value| serde_json::from_value(value).ok())?;
+    if usage.context_budget_tokens == 0 && usage.prompt_context_tokens > 0 {
+        usage.context_budget_tokens = usage.prompt_context_tokens;
+    }
+    Some(usage)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn load_resumed_session(
     filename: &str,
@@ -50,6 +70,7 @@ pub async fn load_resumed_session(
     *history = loaded.messages;
     app.blocks = loaded.blocks;
     app.last_response_usage = loaded.last_token_usage;
+    app.last_prompt_usage = None;
     app.plugin_mode_indicators = loaded.plugin_mode_indicators;
     app.blocks.push(DisplayBlock::SystemMessage(format!(
         "Resumed: {}",
@@ -209,13 +230,8 @@ pub async fn restore_agent_state(
                 "This build does not support REPL mode; resuming in `standard`.".to_string(),
             ));
         }
-        if state.input_tokens > 0 || state.output_tokens > 0 {
-            app.token_usage = lash_core::TokenUsage {
-                input_tokens: state.input_tokens,
-                output_tokens: state.output_tokens,
-                cached_input_tokens: state.cached_input_tokens,
-                reasoning_tokens: 0,
-            };
+        if let Some(usage) = restored_token_usage(&state) {
+            app.token_usage = usage;
         }
 
         if matches!(restored_execution_mode, ExecutionMode::Repl) {
@@ -251,37 +267,9 @@ pub async fn restore_agent_state(
             }
         }
 
-        let active_subs = resume_store.list_active_agents(Some("root"));
-        for sub in &active_subs {
-            let prompt = serde_json::from_str::<serde_json::Value>(&sub.config_json)
-                .ok()
-                .and_then(|v| v.get("prompt").and_then(|p| p.as_str()).map(String::from))
-                .unwrap_or_else(|| format!("sub-agent {}", sub.agent_id));
-
-            push_history_system_message(
-                history,
-                format!(
-                    "Sub-agent '{}' was interrupted mid-task (iteration {}). You may re-delegate if needed.",
-                    prompt, sub.iteration,
-                ),
-            );
-
-            resume_store.mark_agent_done(&sub.agent_id);
-        }
-
-        if !active_subs.is_empty() {
-            app.blocks.push(DisplayBlock::SystemMessage(format!(
-                "{} interrupted sub-agent(s) noted in context.",
-                active_subs.len()
-            )));
-        }
-
         if let Some(rt) = runtime.as_mut() {
             rt.update_session_config(None, None, Some(current_model_variant.clone()), None, None)
                 .await;
-            rt.set_capabilities(lash_core::agent_capabilities_from_profile(
-                &dynamic_tools.profile(),
-            ));
             let _ = rt.refresh_session_execution_surface().await;
             let replay_manifest = config_value
                 .as_ref()
@@ -290,16 +278,17 @@ pub async fn restore_agent_state(
                 .as_ref()
                 .and_then(|v| v.get("plugin_snapshot").cloned())
                 .and_then(|v| serde_json::from_value(v).ok());
+            let last_prompt_usage = restored_last_prompt_usage(config_value.as_ref());
+            app.last_prompt_usage = last_prompt_usage.clone();
             rt.set_state(AgentStateEnvelope {
                 agent_id: "root".to_string(),
                 context_folding: restored_context_folding,
                 messages: history.clone(),
                 iteration: *turn_counter,
                 token_usage: app.token_usage.clone(),
-                last_prompt_usage: None,
+                last_prompt_usage,
                 execution_mode: restored_execution_mode,
                 task_state: None,
-                subagent_state: None,
                 replay_manifest,
                 plugin_snapshot,
                 repl_snapshot: state.repl_snapshot.clone(),
@@ -309,4 +298,185 @@ pub async fn restore_agent_state(
         push_history_system_message(history, repl_reset_message());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
+
+    use lash_core::{
+        MemoryModelCatalogStore, PluginHost, PluginSpecFactory, RuntimeConfig, RuntimeServices,
+        ToolProvider,
+    };
+
+    #[test]
+    fn restored_token_usage_includes_reasoning_tokens() {
+        let state = lash_core::store::AgentState {
+            agent_id: "root".into(),
+            messages_json: "[]".into(),
+            iteration: 3,
+            config_json: "{}".into(),
+            repl_snapshot: None,
+            input_tokens: 1200,
+            output_tokens: 340,
+            cached_input_tokens: 80,
+            reasoning_tokens: 55,
+        };
+
+        let usage = restored_token_usage(&state).expect("usage");
+        assert_eq!(usage.input_tokens, 1200);
+        assert_eq!(usage.output_tokens, 340);
+        assert_eq!(usage.cached_input_tokens, 80);
+        assert_eq!(usage.reasoning_tokens, 55);
+    }
+
+    #[test]
+    fn restored_last_prompt_usage_reads_persisted_snapshot() {
+        let config = serde_json::json!({
+            "last_prompt_usage": {
+                "prompt_context_tokens": 4096,
+                "input_tokens": 3900,
+                "cached_input_tokens": 196
+            }
+        });
+
+        let usage = restored_last_prompt_usage(Some(&config)).expect("prompt usage");
+        assert_eq!(usage.prompt_context_tokens, 4096);
+        assert_eq!(usage.input_tokens, 3900);
+        assert_eq!(usage.cached_input_tokens, 196);
+        assert_eq!(usage.context_budget_tokens, 4096);
+    }
+
+    #[tokio::test]
+    async fn restore_agent_state_restores_persisted_usage_into_app_and_runtime() {
+        let _env_guard = env_lock().lock().expect("env lock");
+        let temp = TempDirGuard::new("lash-resume-usage");
+        let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
+        let sessions_dir = lash_core::lash_home().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+
+        let db_path = sessions_dir.join("resume-usage.db");
+        let store = Store::open(&db_path).expect("store");
+        let config_json = serde_json::json!({
+            "manifest": {
+                "execution_mode": "standard"
+            },
+            "last_prompt_usage": {
+                "prompt_context_tokens": 4096,
+                "input_tokens": 3900,
+                "cached_input_tokens": 196
+            }
+        })
+        .to_string();
+        store.save_agent_state(lash_core::store::AgentStateSave {
+            agent_id: "root",
+            messages_json: "[]",
+            iteration: 7,
+            config_json: &config_json,
+            repl_snapshot: None,
+            input_tokens: 1200,
+            output_tokens: 340,
+            cached_input_tokens: 80,
+            reasoning_tokens: 55,
+        });
+
+        let provider = Provider::OpenAiGeneric {
+            api_key: "test-key".into(),
+            base_url: "https://example.invalid/v1".into(),
+            options: lash_core::ProviderOptions::default(),
+        };
+        struct EmptyTools;
+
+        #[async_trait::async_trait]
+        impl ToolProvider for EmptyTools {
+            fn definitions(&self) -> Vec<lash_core::ToolDefinition> {
+                Vec::new()
+            }
+
+            async fn execute(
+                &self,
+                _name: &str,
+                _args: &serde_json::Value,
+            ) -> lash_core::ToolResult {
+                lash_core::ToolResult::err(serde_json::json!("Unknown tool"))
+            }
+        }
+
+        let tools: Arc<dyn ToolProvider> = Arc::new(EmptyTools);
+        let model_catalog =
+            CachedModelCatalog::models_dev(Arc::new(MemoryModelCatalogStore::new(None)), None)
+                .expect("catalog");
+        let plugins = PluginHost::new(vec![Arc::new(PluginSpecFactory::new(
+            "resume_tools",
+            Arc::new(move |_ctx| {
+                Ok(lash_core::PluginSpec::new().with_tool_provider(Arc::clone(&tools)))
+            }),
+        ))])
+        .with_dynamic_tools()
+        .build_standard_session("root", None)
+        .expect("plugins");
+        let dynamic_tools = plugins.dynamic_tools().expect("dynamic tools");
+        let mut desired_dynamic = dynamic_tools.export_state();
+        let runtime_services = RuntimeServices::new(plugins);
+        let runtime = LashRuntime::from_state(
+            RuntimeConfig {
+                execution_mode: ExecutionMode::Standard,
+                provider: provider.clone(),
+                model: "gpt-5".into(),
+                max_context_tokens: Some(200_000),
+                ..RuntimeConfig::default()
+            },
+            runtime_services,
+            AgentStateEnvelope::default(),
+        )
+        .await
+        .expect("runtime");
+
+        let mut app = App::new("gpt-5".into(), "resume-usage".into());
+        let mut history = Vec::new();
+        let mut runtime = Some(runtime);
+        let mut turn_counter = 0;
+        let mut execution_mode = ExecutionMode::Standard;
+        let mut current_model_variant = None;
+
+        restore_agent_state(
+            "resume-usage.jsonl",
+            &mut history,
+            &mut runtime,
+            &mut app,
+            &mut turn_counter,
+            &mut execution_mode,
+            &provider,
+            &mut current_model_variant,
+            &dynamic_tools,
+            &mut desired_dynamic,
+            &model_catalog,
+        )
+        .await
+        .expect("restore");
+
+        assert_eq!(turn_counter, 7);
+        assert_eq!(execution_mode, ExecutionMode::Standard);
+        assert_eq!(app.token_usage.input_tokens, 1200);
+        assert_eq!(app.token_usage.output_tokens, 340);
+        assert_eq!(app.token_usage.cached_input_tokens, 80);
+        assert_eq!(app.token_usage.reasoning_tokens, 55);
+        let app_prompt_usage = app.last_prompt_usage.expect("app prompt usage");
+        assert_eq!(app_prompt_usage.prompt_context_tokens, 4096);
+        assert_eq!(app_prompt_usage.context_budget_tokens, 4096);
+
+        let restored_state = runtime.expect("runtime").export_state();
+        assert_eq!(restored_state.iteration, 7);
+        assert_eq!(restored_state.execution_mode, ExecutionMode::Standard);
+        assert_eq!(restored_state.token_usage.input_tokens, 1200);
+        assert_eq!(restored_state.token_usage.output_tokens, 340);
+        assert_eq!(restored_state.token_usage.cached_input_tokens, 80);
+        assert_eq!(restored_state.token_usage.reasoning_tokens, 55);
+        let prompt_usage = restored_state.last_prompt_usage.expect("prompt usage");
+        assert_eq!(prompt_usage.prompt_context_tokens, 4096);
+        assert_eq!(prompt_usage.input_tokens, 3900);
+        assert_eq!(prompt_usage.cached_input_tokens, 196);
+        assert_eq!(prompt_usage.context_budget_tokens, 4096);
+    }
 }

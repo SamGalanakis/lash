@@ -2,7 +2,6 @@ pub(crate) mod exec;
 pub mod message;
 pub(crate) mod prompt;
 
-use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -10,21 +9,22 @@ use tokio::sync::mpsc;
 
 use crate::ContextFoldingConfig;
 use crate::ExecutionMode;
+use crate::PromptContext;
 use crate::ToolDefinition;
-use crate::ToolPromptContext;
-use crate::capabilities::{AgentCapabilities, prompt_sections_for_capabilities};
 use crate::instructions::{FsInstructionSource, InstructionSource};
 use crate::llm::factory::adapter_for;
 use crate::llm::types::{LlmStreamEvent, LlmToolSpec};
+use crate::plugin::PromptContribution;
 use crate::plugin::{CheckpointKind, PluginMessage, PluginSurfaceEvent};
-use crate::plugin::{PromptContribution, ResolvedToolSurface, ToolSurfaceContext};
 use crate::provider::{OPENAI_GENERIC_DEFAULT_BASE_URL, Provider};
 use crate::session::Session;
 
 pub use message::{Message, MessageRole, Part, PartKind, PruneState, render_transcript_prompt};
 
-pub(crate) use prompt::{PromptComposeInput, PromptProfile, compose_system_prompt};
-pub use prompt::{PromptOverrideMode, PromptSectionName, PromptSectionOverride};
+pub use prompt::{
+    DefaultPromptRenderer, PromptOverrideMode, PromptRenderer, PromptSectionName,
+    PromptSectionOverride, default_prompt_renderer,
+};
 
 /// Send an event to the channel if it's still open.
 pub(crate) async fn send_event(tx: &mpsc::Sender<AgentEvent>, event: AgentEvent) {
@@ -63,9 +63,6 @@ impl TokenUsage {
 /// Configuration for the agent loop.
 #[derive(Clone)]
 pub struct AgentConfig {
-    /// Enabled backend capabilities. Disabled capabilities are omitted from prompt guidance
-    /// and not registered in the REPL globals.
-    pub capabilities: AgentCapabilities,
     /// Model identifier (e.g. "anthropic/claude-sonnet-4.6")
     pub model: String,
     /// LLM provider (OpenAI-generic, Claude OAuth, Codex, or Google OAuth)
@@ -86,6 +83,8 @@ pub struct AgentConfig {
     pub llm_log_path: Option<PathBuf>,
     /// Ordered prompt section overrides applied on top of the selected profile.
     pub prompt_overrides: Vec<PromptSectionOverride>,
+    /// Pluggable prompt renderer. Defaults to the built-in renderer.
+    pub prompt_renderer: Arc<dyn PromptRenderer>,
     /// Host-provided instruction source (filesystem by default).
     pub instruction_source: Arc<dyn InstructionSource>,
     /// Execution backend for turns.
@@ -97,11 +96,11 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            capabilities: AgentCapabilities::default(),
             model: "anthropic/claude-sonnet-4.6".to_string(),
             provider: Provider::OpenAiGeneric {
                 api_key: String::new(),
                 base_url: OPENAI_GENERIC_DEFAULT_BASE_URL.to_string(),
+                options: crate::provider::ProviderOptions::default(),
             },
             max_context_tokens: None,
             sub_agent: false,
@@ -111,6 +110,7 @@ impl Default for AgentConfig {
             include_soul: false,
             llm_log_path: None,
             prompt_overrides: Vec::new(),
+            prompt_renderer: default_prompt_renderer(),
             instruction_source: Arc::new(FsInstructionSource::new()),
             execution_mode: crate::default_execution_mode(),
             context_folding: ContextFoldingConfig::default(),
@@ -182,14 +182,8 @@ pub enum AgentEvent {
         attempt: usize,
         max_attempts: usize,
         reason: String,
-    },
-    #[serde(rename = "sub_agent_done")]
-    SubAgentDone {
-        task: String,
-        usage: TokenUsage,
-        tool_calls: usize,
-        iterations: usize,
-        success: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        envelope: Option<ErrorEnvelope>,
     },
     #[serde(rename = "injected_messages_committed")]
     InjectedMessagesCommitted {
@@ -277,6 +271,21 @@ impl TurnTerminationPolicyState {
     }
 }
 
+pub(crate) fn make_error_envelope(
+    kind: &str,
+    code: Option<&str>,
+    user_message: impl Into<String>,
+    raw: Option<String>,
+) -> ErrorEnvelope {
+    let user_message = user_message.into();
+    ErrorEnvelope {
+        kind: kind.to_string(),
+        code: code.map(str::to_string),
+        user_message,
+        raw: raw.map(|s| truncate_raw_error(s.trim())),
+    }
+}
+
 pub(crate) fn make_error_event(
     kind: &str,
     code: Option<&str>,
@@ -286,12 +295,7 @@ pub(crate) fn make_error_event(
     let user_message = user_message.into();
     AgentEvent::Error {
         message: user_message.clone(),
-        envelope: Some(ErrorEnvelope {
-            kind: kind.to_string(),
-            code: code.map(str::to_string),
-            user_message,
-            raw: raw.map(|s| truncate_raw_error(s.trim())),
-        }),
+        envelope: Some(make_error_envelope(kind, code, user_message, raw)),
     }
 }
 
@@ -347,13 +351,8 @@ pub(crate) fn is_malformed_assistant_output(text: &str) -> bool {
 
 pub(crate) struct ExecutionPreamble {
     pub(crate) model: String,
-    pub(crate) tool_list: String,
     pub(crate) tool_specs: Vec<LlmToolSpec>,
-    pub(crate) tool_names: Vec<String>,
-    pub(crate) helper_bindings: BTreeSet<String>,
-    pub(crate) guide_sections: Vec<String>,
-    pub(crate) plugin_prompt_contributions: Vec<PromptContribution>,
-    pub(crate) can_write: bool,
+    pub(crate) prompt: PromptContext,
 }
 
 pub(crate) fn transport_stream_events(
@@ -379,113 +378,66 @@ pub(crate) fn build_execution_preamble(
     config: &AgentConfig,
     mode: ExecutionMode,
     model: String,
-    plugin_prompt_contributions: Vec<PromptContribution>,
 ) -> ExecutionPreamble {
-    let all_tools = session.tools().definitions();
     let session_id = config.session_id.as_deref().unwrap_or("root");
-    let surface = resolve_tool_surface(
-        session.plugins().as_ref(),
-        session_id,
-        mode,
-        all_tools.clone(),
-    );
-    let prompt_tools: Vec<_> = surface
-        .tools
-        .iter()
-        .filter(|t| t.inject_into_prompt)
-        .cloned()
-        .collect();
-    let mut tool_list = ToolDefinition::format_tool_docs(&prompt_tools, mode);
-    let omitted_tool_count = count_prompt_omitted_tools(&surface.tools, mode);
+    let surface = session.plugins().execution_surface(session_id, mode);
+    let enabled_tools = surface.enabled_tools();
+    let prompt_tools = surface.prompt_tools();
+    let mut tool_list = ToolDefinition::format_tool_docs(&prompt_tools);
+    let omitted_tool_count = count_prompt_omitted_tools(&enabled_tools);
     for note in &surface.tool_list_notes {
         tool_list.push_str("\n\n");
         tool_list.push_str(note);
     }
     let tool_specs = if matches!(mode, ExecutionMode::Standard) {
-        all_tools
+        enabled_tools
             .iter()
-            .filter(|tool| !tool.description_for(ExecutionMode::Standard).is_empty())
             .map(|tool| LlmToolSpec {
                 name: tool.name.clone(),
-                description: tool.description_for(ExecutionMode::Standard),
+                description: tool.description.clone(),
                 input_schema: tool.input_schema(),
             })
             .collect()
     } else {
         Vec::new()
     };
-    let tool_names: Vec<String> = all_tools.iter().map(|t| t.name.clone()).collect();
-    let available_tools: BTreeSet<String> = tool_names.iter().cloned().collect();
-    let dynamic_projection = session.tools().dynamic_projection();
-    let helper_bindings: BTreeSet<String> = dynamic_projection
-        .as_ref()
-        .map(|p| p.helper_bindings.clone())
-        .unwrap_or_default();
-    let mut guide_sections = prompt_sections_for_capabilities(
-        &config.capabilities.enabled_capabilities,
-        &helper_bindings,
-        &available_tools,
-    );
-    if let Some(dynamic_sections) = dynamic_projection.as_ref().map(|p| &p.prompt_sections) {
-        guide_sections.extend(
-            dynamic_sections
-                .iter()
-                .map(|section| section.trim().to_string())
-                .filter(|section| !section.is_empty()),
-        );
-    }
-    for section in surface.guide_sections {
-        if !guide_sections.contains(&section) {
-            guide_sections.push(section);
-        }
-    }
-    let tool_guides = session.tools().prompt_guides(&ToolPromptContext {
-        mode,
-        omitted_tool_count,
-    });
-    for guide in tool_guides {
-        if !guide_sections.contains(&guide) {
-            guide_sections.push(guide);
-        }
-    }
+    let tool_names: Vec<String> = enabled_tools.iter().map(|t| t.name.clone()).collect();
     let can_write = tool_names.iter().any(|name| name == "apply_patch");
+    let prompt = PromptContext {
+        mode,
+        tool_list,
+        tool_names,
+        omitted_tool_count,
+        is_subagent: config.sub_agent,
+        can_write,
+        include_soul: if config.sub_agent {
+            config.include_soul
+        } else {
+            true
+        },
+        contributions: Vec::new(),
+    };
 
     ExecutionPreamble {
         model,
-        tool_list,
         tool_specs,
-        tool_names,
-        helper_bindings,
-        guide_sections,
-        plugin_prompt_contributions,
-        can_write,
+        prompt,
     }
 }
 
-pub(crate) fn resolve_tool_surface(
-    plugins: &crate::PluginSession,
-    session_id: &str,
-    mode: ExecutionMode,
-    tools: Vec<ToolDefinition>,
-) -> ResolvedToolSurface {
-    plugins
-        .resolve_tool_surface(ToolSurfaceContext {
-            session_id: session_id.to_string(),
-            mode,
-            tools: tools.clone(),
-        })
-        .unwrap_or_else(|err| {
-            tracing::warn!("failed to resolve tool surface: {err}");
-            ResolvedToolSurface::from_tools(mode, tools)
-        })
+pub(crate) fn finalize_prompt_context(
+    mut prompt: PromptContext,
+    plugin_prompt_contributions: Vec<PromptContribution>,
+) -> PromptContext {
+    prompt.contributions.extend(plugin_prompt_contributions);
+    prompt
 }
 
-fn count_prompt_omitted_tools(all_tools: &[crate::ToolDefinition], mode: ExecutionMode) -> usize {
+fn count_prompt_omitted_tools(all_tools: &[crate::ToolDefinition]) -> usize {
     all_tools
         .iter()
-        .filter(|t| !t.hidden)
-        .filter(|t| !t.inject_into_prompt)
-        .filter(|t| !t.description_for(mode).is_empty())
+        .filter(|t| t.enabled)
+        .filter(|t| !t.injected)
         .count()
 }
 
@@ -498,66 +450,25 @@ mod execution_preamble_tests {
         let defs = vec![
             crate::ToolDefinition {
                 name: "read_file".into(),
-                description: vec![crate::ToolText::new(
-                    "Read file",
-                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-                )],
+                description: "Read file".into(),
                 params: vec![],
                 returns: "str".into(),
                 examples: vec![],
-                hidden: false,
-                inject_into_prompt: true,
+                enabled: true,
+                injected: true,
             },
             crate::ToolDefinition {
                 name: "search_tools".into(),
-                description: vec![crate::ToolText::new(
-                    "Discover tools",
-                    [crate::ExecutionMode::Repl, crate::ExecutionMode::Standard],
-                )],
+                description: "Discover tools".into(),
                 params: vec![],
                 returns: "list".into(),
                 examples: vec![],
-                hidden: true,
-                inject_into_prompt: false,
+                enabled: true,
+                injected: false,
             },
         ];
 
-        assert_eq!(count_prompt_omitted_tools(&defs, ExecutionMode::Repl), 0);
-    }
-}
-
-/// Log raw LLM request/response to a debug file (if configured).
-pub(crate) fn log_llm_debug(
-    log_path: &Option<PathBuf>,
-    agent_id: &str,
-    iteration: usize,
-    usage: &TokenUsage,
-    request_body: Option<String>,
-    response_text: &str,
-) {
-    let Some(path) = log_path else { return };
-
-    let entry = serde_json::json!({
-        "turn": iteration,
-        "ts": chrono::Utc::now().to_rfc3339(),
-        "agent_id": agent_id,
-        "request": request_body,
-        "response": response_text,
-        "usage": {
-            "input_tokens": usage.input_tokens,
-            "output_tokens": usage.output_tokens,
-            "cached_input_tokens": usage.cached_input_tokens,
-            "reasoning_tokens": usage.reasoning_tokens,
-        }
-    });
-
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        use std::io::Write;
-        let _ = writeln!(f, "{}", entry);
+        assert_eq!(count_prompt_omitted_tools(&defs), 1);
     }
 }
 
@@ -729,24 +640,6 @@ pub(crate) fn parse_fence_line(
     }
 
     out
-}
-
-/// Resolve and aggregate context-aware instructions discovered during this turn.
-/// We currently trigger this on successful `read_file` tool calls with a `path` argument.
-pub(crate) fn resolve_context_instructions(
-    source: &dyn InstructionSource,
-    tool_calls: &[crate::ToolCallRecord],
-) -> String {
-    let mut seen_paths = HashSet::new();
-    let read_paths: Vec<String> = tool_calls
-        .iter()
-        .filter(|tc| tc.success && tc.tool == "read_file")
-        .filter_map(|tc| tc.args.get("path").and_then(|v| v.as_str()))
-        .filter(|p| !p.is_empty())
-        .filter(|p| seen_paths.insert((*p).to_string()))
-        .map(str::to_string)
-        .collect();
-    source.context_instructions_for_reads(&read_paths)
 }
 
 #[cfg(test)]

@@ -76,6 +76,18 @@ pub fn code_scribe() -> Style {
     Style::default().fg(Color::Rgb(100, 72, 28))
 }
 
+/// Exploration lane chrome — softer amber than code/edit rails.
+pub fn explore_marker() -> Style {
+    Style::default()
+        .fg(Color::Rgb(122, 94, 48))
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Exploration section label.
+pub fn explore_label() -> Style {
+    Style::default().fg(CHALK_DIM).add_modifier(Modifier::BOLD)
+}
+
 /// Code block header (▶ code, ▼ code)
 pub fn code_header() -> Style {
     Style::default().fg(ASH_MID)
@@ -126,6 +138,31 @@ pub fn bar_bg() -> Style {
     Style::default().bg(FORM_RAISED)
 }
 
+/// Bottom turn-status strip background.
+pub fn turn_status_bar() -> Style {
+    Style::default().bg(FORM_RAISED)
+}
+
+/// Animated LASH wordmark letters in the turn-status strip.
+pub fn turn_status_brand() -> Style {
+    Style::default().fg(CHALK).add_modifier(Modifier::BOLD)
+}
+
+/// Animated slash accent in the turn-status strip.
+pub fn turn_status_slash() -> Style {
+    Style::default().fg(SODIUM).add_modifier(Modifier::BOLD)
+}
+
+/// Primary state label in the bottom turn-status strip.
+pub fn turn_status_state() -> Style {
+    Style::default().fg(CHALK).add_modifier(Modifier::BOLD)
+}
+
+/// Elapsed turn time in the bottom turn-status strip.
+pub fn turn_status_elapsed() -> Style {
+    Style::default().fg(CHALK_DIM)
+}
+
 /// History area background
 pub fn history_bg() -> Style {
     Style::default().bg(FORM)
@@ -169,4 +206,19 @@ pub fn patch_remove() -> Style {
 /// Patch hunk header styling
 pub fn patch_hunk() -> Style {
     Style::default().fg(PATCH_HUNK)
+}
+
+/// Completed plan-step marker.
+pub fn plan_done_marker() -> Style {
+    Style::default().fg(LICHEN).add_modifier(Modifier::BOLD)
+}
+
+/// In-progress plan-step marker.
+pub fn plan_active_marker() -> Style {
+    Style::default().fg(SODIUM).add_modifier(Modifier::BOLD)
+}
+
+/// Pending plan-step marker.
+pub fn plan_pending_marker() -> Style {
+    Style::default().fg(CHALK_DIM).add_modifier(Modifier::BOLD)
 }

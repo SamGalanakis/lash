@@ -265,8 +265,8 @@
 
     .compare-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-      gap: 12px;
+      grid-template-columns: minmax(280px, 1fr) minmax(320px, 0.9fr) minmax(280px, 1fr);
+      gap: 16px;
     }
 
     .compare-card {
@@ -279,6 +279,129 @@
     .compare-card h4 {
       margin: 0 0 8px;
       font: 700 18px/1.2 var(--serif);
+    }
+
+    .compare-card h5 {
+      margin: 0 0 10px;
+      font: 700 13px/1.1 var(--mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ink-soft);
+    }
+
+    .compare-card.accent-left {
+      background: linear-gradient(180deg, rgba(20, 108, 148, 0.08), rgba(255, 249, 238, 0.96));
+      border-color: rgba(20, 108, 148, 0.22);
+    }
+
+    .compare-card.accent-right {
+      background: linear-gradient(180deg, rgba(212, 98, 45, 0.08), rgba(255, 249, 238, 0.96));
+      border-color: rgba(212, 98, 45, 0.22);
+    }
+
+    .compare-summary {
+      display: grid;
+      gap: 10px;
+    }
+
+    .compare-summary-row {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 12px;
+      border-radius: 16px;
+      background: rgba(17, 25, 38, 0.04);
+      border: 1px solid rgba(17, 25, 38, 0.06);
+    }
+
+    .compare-summary-row label {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ink-soft);
+    }
+
+    .compare-summary-row strong {
+      display: block;
+      font: 700 18px/1.1 var(--mono);
+    }
+
+    .compare-summary-row .delta {
+      min-width: 108px;
+      text-align: center;
+      border-radius: 999px;
+      padding: 7px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      background: rgba(17, 25, 38, 0.08);
+      color: var(--ink);
+    }
+
+    .delta.positive {
+      background: rgba(31, 143, 106, 0.12);
+      color: var(--pass);
+    }
+
+    .delta.negative {
+      background: rgba(180, 35, 24, 0.12);
+      color: var(--danger);
+    }
+
+    .workspace-tabs {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+
+    .workspace-tab {
+      border-radius: 999px;
+      border: 1px solid rgba(17, 25, 38, 0.1);
+      padding: 10px 16px;
+      background: rgba(255, 255, 255, 0.75);
+      color: var(--ink);
+      box-shadow: none;
+    }
+
+    .workspace-tab.active {
+      background: linear-gradient(135deg, rgba(17, 25, 38, 0.94), rgba(20, 108, 148, 0.86));
+      color: white;
+      border-color: transparent;
+      box-shadow: var(--shadow);
+    }
+
+    .workspace-tab:disabled {
+      opacity: 0.5;
+    }
+
+    .workspace {
+      display: none;
+      gap: 20px;
+    }
+
+    .workspace.active {
+      display: grid;
+    }
+
+    .compare-table td {
+      min-width: 220px;
+    }
+
+    .compare-table .delta-cell {
+      min-width: 180px;
+      background: rgba(17, 25, 38, 0.03);
+    }
+
+    .metric-stack {
+      display: grid;
+      gap: 6px;
+    }
+
+    .metric-stack strong {
+      font-size: 15px;
     }
 
     table {
@@ -323,12 +446,16 @@
       min-width: 220px;
     }
 
-    .trial-row {
+    .task-row {
       cursor: pointer;
     }
 
-    .trial-row:hover {
+    .task-row:hover {
       background: rgba(20, 108, 148, 0.05);
+    }
+
+    .task-row.active {
+      background: linear-gradient(135deg, rgba(212, 98, 45, 0.1), rgba(20, 108, 148, 0.08));
     }
 
     .status-pill {
@@ -403,6 +530,7 @@
     @media (max-width: 1180px) {
       .shell, .split { grid-template-columns: 1fr; }
       .sidebar { position: relative; height: auto; }
+      .compare-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -411,7 +539,7 @@
     <aside class="sidebar">
       <div class="masthead">
         <h1>Lash Bench Observatory</h1>
-        <p>Browse persisted benchmark runs, select multiple runs for comparison, and delete stale runs end-to-end, including their exported snapshot and original Harbor job directory.</p>
+        <p>Browse persisted benchmark runs, open one in the explorer, or stage exactly two for a dedicated compare workspace. Deletion still removes both exported snapshots and original Harbor job directories.</p>
       </div>
 
       <div class="toolbar">
@@ -420,7 +548,7 @@
           <button id="refreshButton" class="secondary">Refresh</button>
           <button id="deleteButton" class="danger" disabled>Delete Selected</button>
         </div>
-        <div class="banner" id="selectionBanner">0 selected</div>
+        <div class="banner" id="selectionBanner">Select up to 2 runs for compare mode.</div>
       </div>
 
       <div class="run-list" id="runList"></div>
@@ -429,47 +557,50 @@
     <main class="content">
       <section class="hero">
         <h2>Compare runs like experiments, not log dumps.</h2>
-        <p>The dashboard keeps run-wide aggregates, task rollups, trial detail, and copied artifacts in one place so you can inspect pass rate, time, tokens, failures, and raw evidence without digging back through Harbor job trees.</p>
+        <p>The dashboard now separates single-run inspection from a dedicated two-run compare studio, so selection state stops fighting the detail inspector.</p>
       </section>
 
       <section class="panel">
-        <h3>Selection Snapshot</h3>
-        <div class="compare-grid" id="compareGrid"></div>
+        <div class="workspace-tabs">
+          <button id="exploreTab" class="workspace-tab active">Explore Run</button>
+          <button id="compareTab" class="workspace-tab">Compare Two Runs</button>
+        </div>
+        <div class="banner" id="workspaceBanner">Open any run card to inspect it in detail. Check exactly two runs to enter compare mode.</div>
       </section>
 
-      <section class="panel">
-        <h3>Active Run</h3>
-        <div class="stats-grid" id="runStats"></div>
-        <div class="banner" id="runMeta"></div>
-      </section>
-
-      <div class="split">
+      <section class="workspace active" id="exploreWorkspace">
         <section class="panel">
-          <h3>Task Rollups</h3>
-          <div id="taskRollups"></div>
+          <h3>Active Run</h3>
+          <div class="stats-grid" id="runStats"></div>
+          <div class="banner" id="runMeta"></div>
         </section>
 
         <section class="panel">
-          <h3>Selection Comparison</h3>
-          <div id="comparisonTable"></div>
-        </section>
-      </div>
-
-      <div class="split">
-        <section class="panel">
-          <h3>Trials</h3>
-          <div id="trialsTable"></div>
+          <h3>Tasks</h3>
+          <div id="tasksTable"></div>
         </section>
 
         <section class="panel">
           <h3>Trial Detail</h3>
           <div class="logs">
-            <div id="trialMeta" class="empty">Select a trial to inspect logs and artifacts.</div>
+            <div id="trialMeta" class="empty">Select a task row to inspect logs and artifacts.</div>
             <div class="tab-row" id="logTabs"></div>
             <pre id="logViewer">Select a log tab.</pre>
           </div>
         </section>
-      </div>
+      </section>
+
+      <section class="workspace" id="compareWorkspace">
+        <section class="panel">
+          <h3>Compare Studio</h3>
+          <div class="compare-grid" id="compareGrid"></div>
+        </section>
+
+        <section class="panel">
+          <h3>Task Matchup</h3>
+          <div id="comparisonTable"></div>
+        </section>
+      </section>
     </main>
   </div>
 
@@ -481,6 +612,7 @@
       activeRunId: null,
       activeTrial: null,
       activeLogPath: null,
+      viewMode: "explore",
     };
 
     const fmtPct = value => `${(100 * (value || 0)).toFixed(1)}%`;
@@ -504,6 +636,35 @@
     function tokenInline(tokens) {
       const value = tokens || {};
       return `tot ${fmtInt(value.total)} · in ${fmtInt(value.input)} · out ${fmtInt(value.output)} · cache ${fmtInt(value.cache)}`;
+    }
+    function activityInline(activity) {
+      const value = activity || {};
+      return `turns ${fmtInt(value.llm_turns)} · llm ${fmtInt(value.llm_calls)} · tools ${fmtInt(value.tool_calls)}`;
+    }
+    function fmtMemoryKb(value) {
+      if (value == null) return "-";
+      const mib = value / 1024;
+      return `${mib.toFixed(mib >= 100 ? 0 : 1)} MiB`;
+    }
+    function resourceInline(resource) {
+      const value = resource || {};
+      return `cpu ${fmtSeconds(value.cpu_seconds_sum || value.cpu_seconds_avg)} · rss ${fmtMemoryKb(value.max_rss_kb_max || value.max_rss_kb_avg)}`;
+    }
+    function nonCacheTokens(tokens) {
+      const value = tokens || {};
+      return (value.input || 0) + (value.output || 0);
+    }
+    function fmtSignedNumber(value, suffix = "") {
+      if (value == null) return "-";
+      const rounded = Math.round(value);
+      const sign = rounded > 0 ? "+" : "";
+      return `${sign}${fmtInt(rounded)}${suffix}`;
+    }
+    function fmtSignedSeconds(value) {
+      if (value == null) return "-";
+      const rounded = Math.round(value);
+      const sign = rounded > 0 ? "+" : "";
+      return `${sign}${fmtSeconds(Math.abs(rounded))}`;
     }
     const fmtSeconds = value => {
       if (value == null) return "-";
@@ -562,6 +723,7 @@
         return [
           run.job_name,
           run.dataset,
+          run.agent,
           run.execution_mode,
           run.requested_model,
           run.variant,
@@ -573,18 +735,24 @@
         runList.innerHTML = `<div class="empty">No runs match the current filter.</div>`;
         return;
       }
+      const selectionLocked = state.selectedRunIds.size >= 2;
 
       runList.innerHTML = filtered.map(run => `
         <article class="run-card ${run.run_id === state.activeRunId ? "active" : ""}" data-run-id="${run.run_id}">
           <div class="run-card-top">
-            <input type="checkbox" class="run-select" data-run-id="${run.run_id}" ${state.selectedRunIds.has(run.run_id) ? "checked" : ""}>
+            <input type="checkbox" class="run-select" data-run-id="${run.run_id}" ${state.selectedRunIds.has(run.run_id) ? "checked" : ""} ${!state.selectedRunIds.has(run.run_id) && selectionLocked ? "disabled" : ""}>
             <div style="flex: 1">
               <h3>${escapeHtml(run.job_name)}</h3>
-              <small>${escapeHtml(run.dataset || "-")} · ${escapeHtml(run.execution_mode || "-")} · ${escapeHtml(run.provider || "-")}</small>
+              <small>${escapeHtml(run.dataset || "-")} · ${escapeHtml(run.agent || "-")} · ${escapeHtml(run.execution_mode || "-")} · ${escapeHtml(run.provider || "-")}</small>
               <div class="chips">
                 <span class="chip pass">${fmtPct(run.pass_rate)}</span>
                 <span class="chip">${fmtInt(run.trials_passed)}/${fmtInt(run.trials_total)} passed</span>
                 <span class="chip">${fmtInt(run.tokens_total)} tokens</span>
+                <span class="chip">${fmtSeconds(run.cpu_seconds_total)} cpu</span>
+                <span class="chip">${fmtMemoryKb(run.peak_rss_kb)} rss</span>
+                <span class="chip">${fmtInt(run.turns_total || 0)} turns</span>
+                <span class="chip">${fmtInt(run.llm_calls_total || 0)} llm</span>
+                <span class="chip">${fmtInt(run.tool_calls_total || 0)} tools</span>
               </div>
             </div>
           </div>
@@ -607,10 +775,22 @@
         box.addEventListener("click", event => event.stopPropagation());
         box.addEventListener("change", async () => {
           const runId = box.dataset.runId;
-          if (box.checked) state.selectedRunIds.add(runId);
-          else state.selectedRunIds.delete(runId);
+          if (box.checked) {
+            if (state.selectedRunIds.size >= 2) {
+              box.checked = false;
+              return;
+            }
+            state.selectedRunIds.add(runId);
+          } else {
+            state.selectedRunIds.delete(runId);
+          }
           await ensureRunLoaded(runId);
+          if (state.selectedRunIds.size === 2) {
+            state.viewMode = "compare";
+          }
           renderSelectionBanner();
+          renderWorkspaceTabs();
+          renderRunList();
           render();
         });
       });
@@ -619,7 +799,9 @@
     }
 
     function renderSelectionBanner() {
-      document.getElementById("selectionBanner").textContent = `${state.selectedRunIds.size} selected`;
+      const count = state.selectedRunIds.size;
+      const ready = count === 2 ? "compare studio ready" : "select up to 2 runs";
+      document.getElementById("selectionBanner").textContent = `${count} selected · ${ready}`;
       document.getElementById("deleteButton").disabled = state.selectedRunIds.size === 0;
     }
 
@@ -634,47 +816,185 @@
     }
 
     function render() {
-      renderCompareGrid();
+      renderWorkspaceTabs();
+      renderWorkspace();
       renderActiveRun();
+    }
+
+    function renderWorkspaceTabs() {
+      const compareReady = state.selectedRunIds.size === 2;
+      if (state.viewMode === "compare" && !compareReady) {
+        state.viewMode = "explore";
+      }
+      const exploreTab = document.getElementById("exploreTab");
+      const compareTab = document.getElementById("compareTab");
+      const banner = document.getElementById("workspaceBanner");
+      exploreTab.classList.toggle("active", state.viewMode !== "compare");
+      compareTab.classList.toggle("active", state.viewMode === "compare");
+      compareTab.disabled = !compareReady;
+      if (state.viewMode === "compare") {
+        banner.textContent = compareReady
+          ? "Two runs locked in. The compare studio shows side-by-side summaries and task matchups."
+          : "Check exactly two runs to unlock compare mode.";
+      } else {
+        banner.textContent = "Open any run card to inspect it in detail. Check exactly two runs to enter compare mode.";
+      }
+    }
+
+    function renderWorkspace() {
+      const explore = document.getElementById("exploreWorkspace");
+      const compare = document.getElementById("compareWorkspace");
+      const compareReady = state.selectedRunIds.size === 2;
+      const showCompare = state.viewMode === "compare" && compareReady;
+      explore.classList.toggle("active", !showCompare);
+      compare.classList.toggle("active", showCompare);
+      if (showCompare) {
+        renderCompareGrid();
+      } else {
+        renderComparisonTable([]);
+      }
+    }
+
+    function summaryMetricRow(label, leftValue, rightValue, deltaText, tone) {
+      return `
+        <div class="compare-summary-row">
+          <div>
+            <label>${escapeHtml(label)} · left</label>
+            <strong>${escapeHtml(leftValue)}</strong>
+          </div>
+          <div class="delta ${escapeHtml(tone || "")}">${escapeHtml(deltaText)}</div>
+          <div style="text-align: right">
+            <label>${escapeHtml(label)} · right</label>
+            <strong>${escapeHtml(rightValue)}</strong>
+          </div>
+        </div>
+      `;
     }
 
     function renderCompareGrid() {
       const compareGrid = document.getElementById("compareGrid");
       const selected = [...state.selectedRunIds].map(id => state.runDetails.get(id)).filter(Boolean);
-      if (!selected.length) {
-        compareGrid.innerHTML = `<div class="empty">Select runs in the sidebar to compare pass rate, duration, and token totals side by side.</div>`;
+      if (selected.length !== 2) {
+        compareGrid.innerHTML = `<div class="empty">Check exactly two runs in the sidebar to open the compare studio.</div>`;
         renderComparisonTable([]);
         return;
       }
-      compareGrid.innerHTML = selected.map(run => {
-        const stats = run.global_stats || {};
-        const params = run.params || {};
-        return `
-          <div class="compare-card">
-            <h4>${escapeHtml(run.job_name)}</h4>
-            <div class="muted">${escapeHtml(params.requested_model || "resolved in trial")} · ${escapeHtml(params.execution_mode || "-")} · ${escapeHtml(params.variant || "default variant")}</div>
-            <div class="chips">
-              <span class="chip pass">${fmtPct(stats.pass_rate)}</span>
-              <span class="chip">${fmtInt(stats.trials_passed)}/${fmtInt(stats.trials_total)} passed</span>
-            </div>
-            <table>
-              <tr><td>Avg Duration</td><td>${fmtSeconds(stats.duration_seconds_avg)}</td></tr>
-              <tr><td>Total Tokens</td><td>${tokenInline(stats.tokens_total)}</td></tr>
-              <tr><td>Avg Tokens</td><td>${tokenInline(stats.tokens_avg)}</td></tr>
-              <tr><td>Reward Mean</td><td>${fmtFixed(stats.reward_mean)}</td></tr>
-            </table>
+      const [left, right] = selected;
+      const leftStats = left.global_stats || {};
+      const rightStats = right.global_stats || {};
+      const leftParams = left.params || {};
+      const rightParams = right.params || {};
+      const rightPass = rightStats.pass_rate || 0;
+      const leftPass = leftStats.pass_rate || 0;
+      const rightDuration = rightStats.duration_seconds_avg || 0;
+      const leftDuration = leftStats.duration_seconds_avg || 0;
+      const rightNonCache = nonCacheTokens(rightStats.tokens_total);
+      const leftNonCache = nonCacheTokens(leftStats.tokens_total);
+      const rightCache = (rightStats.tokens_total || {}).cache || 0;
+      const leftCache = (leftStats.tokens_total || {}).cache || 0;
+      const rightCalls = (rightStats.activity_total || {}).llm_calls || 0;
+      const leftCalls = (leftStats.activity_total || {}).llm_calls || 0;
+      const rightTools = (rightStats.activity_total || {}).tool_calls || 0;
+      const leftTools = (leftStats.activity_total || {}).tool_calls || 0;
+      const compareRows = [
+        summaryMetricRow(
+          "Pass Rate",
+          fmtPct(leftPass),
+          fmtPct(rightPass),
+          fmtSignedNumber((rightPass - leftPass) * 100, " pts"),
+          rightPass > leftPass ? "positive" : rightPass < leftPass ? "negative" : ""
+        ),
+        summaryMetricRow(
+          "Avg Duration",
+          fmtSeconds(leftDuration),
+          fmtSeconds(rightDuration),
+          fmtSignedSeconds(rightDuration - leftDuration),
+          rightDuration < leftDuration ? "positive" : rightDuration > leftDuration ? "negative" : ""
+        ),
+        summaryMetricRow(
+          "Non-Cache Tokens",
+          fmtInt(leftNonCache),
+          fmtInt(rightNonCache),
+          fmtSignedNumber(rightNonCache - leftNonCache),
+          rightNonCache < leftNonCache ? "positive" : rightNonCache > leftNonCache ? "negative" : ""
+        ),
+        summaryMetricRow(
+          "Cache Tokens",
+          fmtInt(leftCache),
+          fmtInt(rightCache),
+          fmtSignedNumber(rightCache - leftCache),
+          rightCache < leftCache ? "positive" : rightCache > leftCache ? "negative" : ""
+        ),
+        summaryMetricRow(
+          "LLM Calls",
+          fmtInt(leftCalls),
+          fmtInt(rightCalls),
+          fmtSignedNumber(rightCalls - leftCalls),
+          rightCalls < leftCalls ? "positive" : rightCalls > leftCalls ? "negative" : ""
+        ),
+        summaryMetricRow(
+          "Tool Calls",
+          fmtInt(leftTools),
+          fmtInt(rightTools),
+          fmtSignedNumber(rightTools - leftTools),
+          rightTools < leftTools ? "positive" : rightTools > leftTools ? "negative" : ""
+        ),
+      ];
+      compareGrid.innerHTML = `
+        <div class="compare-card accent-left">
+          <h5>Left Run</h5>
+          <h4>${escapeHtml(left.job_name)}</h4>
+          <div class="muted">${escapeHtml(leftParams.agent || "-")} · ${escapeHtml(leftParams.requested_model || "resolved in trial")} · ${escapeHtml(leftParams.execution_mode || "-")} · ${escapeHtml(leftParams.variant || "default variant")}</div>
+          <div class="chips">
+            <span class="chip pass">${fmtPct(leftStats.pass_rate)}</span>
+            <span class="chip">${fmtInt(leftStats.trials_passed)}/${fmtInt(leftStats.trials_total)} passed</span>
+            <span class="chip">${fmtInt((leftStats.tokens_total || {}).total)} tokens</span>
+            <span class="chip">${fmtSeconds((leftStats.resource_usage || {}).cpu_seconds_sum)} cpu</span>
+            <span class="chip">${fmtMemoryKb((leftStats.resource_usage || {}).max_rss_kb_max)} rss</span>
           </div>
-        `;
-      }).join("");
+          <table>
+            <tr><td>Avg Duration</td><td>${fmtSeconds(leftStats.duration_seconds_avg)}</td></tr>
+            <tr><td>Token Profile</td><td>${tokenInline(leftStats.tokens_total)}</td></tr>
+            <tr><td>Activity</td><td>${activityInline(leftStats.activity_total)}</td></tr>
+            <tr><td>CPU / RSS</td><td>${resourceInline(leftStats.resource_usage)}</td></tr>
+            <tr><td>Reward Mean</td><td>${fmtFixed(leftStats.reward_mean)}</td></tr>
+          </table>
+        </div>
+        <div class="compare-card">
+          <h5>Delta Board</h5>
+          <h4>Run-to-run pressure test</h4>
+          <div class="compare-summary">${compareRows.join("")}</div>
+        </div>
+        <div class="compare-card accent-right">
+          <h5>Right Run</h5>
+          <h4>${escapeHtml(right.job_name)}</h4>
+          <div class="muted">${escapeHtml(rightParams.agent || "-")} · ${escapeHtml(rightParams.requested_model || "resolved in trial")} · ${escapeHtml(rightParams.execution_mode || "-")} · ${escapeHtml(rightParams.variant || "default variant")}</div>
+          <div class="chips">
+            <span class="chip pass">${fmtPct(rightStats.pass_rate)}</span>
+            <span class="chip">${fmtInt(rightStats.trials_passed)}/${fmtInt(rightStats.trials_total)} passed</span>
+            <span class="chip">${fmtInt((rightStats.tokens_total || {}).total)} tokens</span>
+            <span class="chip">${fmtSeconds((rightStats.resource_usage || {}).cpu_seconds_sum)} cpu</span>
+            <span class="chip">${fmtMemoryKb((rightStats.resource_usage || {}).max_rss_kb_max)} rss</span>
+          </div>
+          <table>
+            <tr><td>Avg Duration</td><td>${fmtSeconds(rightStats.duration_seconds_avg)}</td></tr>
+            <tr><td>Token Profile</td><td>${tokenInline(rightStats.tokens_total)}</td></tr>
+            <tr><td>Activity</td><td>${activityInline(rightStats.activity_total)}</td></tr>
+            <tr><td>CPU / RSS</td><td>${resourceInline(rightStats.resource_usage)}</td></tr>
+            <tr><td>Reward Mean</td><td>${fmtFixed(rightStats.reward_mean)}</td></tr>
+          </table>
+        </div>
+      `;
       renderComparisonTable(selected);
     }
 
     function renderComparisonTable(runs) {
       const target = document.getElementById("comparisonTable");
-      if (!runs.length) {
-        target.innerHTML = `<div class="empty">Task-by-task comparison appears here once you select at least one run.</div>`;
+      if (runs.length !== 2) {
+        target.innerHTML = `<div class="empty">Task-by-task comparison appears here once you check exactly two runs.</div>`;
         return;
       }
+      const [left, right] = runs;
       const taskMap = new Map();
       for (const run of runs) {
         for (const rollup of run.task_rollups || []) {
@@ -683,30 +1003,65 @@
         }
       }
       const rows = [...taskMap.values()].sort((a, b) => a.task_name.localeCompare(b.task_name));
-      const columns = runs.map(run => `<th>${escapeHtml(run.job_name)}</th>`).join("");
       target.innerHTML = `
         <div class="table-wrap">
-        <table>
+        <table class="compare-table">
           <thead>
             <tr>
               <th class="compact-task">Task</th>
-              ${columns}
+              <th>${escapeHtml(left.job_name)}</th>
+              <th class="delta-cell">Delta</th>
+              <th>${escapeHtml(right.job_name)}</th>
             </tr>
           </thead>
           <tbody>
             ${rows.map(row => `
               <tr>
                 <td>${escapeHtml(row.task_name)}</td>
-                ${runs.map(run => {
-                  const item = row[run.run_id];
-                  if (!item) return `<td class="muted">-</td>`;
-                  return `<td>${fmtPct(item.pass_rate)} · ${fmtSeconds(item.duration_seconds_avg)}<br><span class="muted">${escapeHtml(tokenInline(item.tokens_total))}</span></td>`;
-                }).join("")}
+                ${renderComparisonCell(row[left.run_id])}
+                ${renderComparisonDeltaCell(row[left.run_id], row[right.run_id])}
+                ${renderComparisonCell(row[right.run_id])}
               </tr>
             `).join("")}
           </tbody>
         </table>
         </div>
+      `;
+    }
+
+    function renderComparisonCell(item) {
+      if (!item) return `<td class="muted">-</td>`;
+      return `
+        <td>
+          <div class="metric-stack">
+            <strong>${fmtPct(item.pass_rate)} · ${fmtSeconds(item.duration_seconds_avg)}</strong>
+            <span class="muted">${escapeHtml(tokenInline(item.tokens_total))}</span>
+            <span class="muted">${escapeHtml(activityInline(item.activity_total))}</span>
+            <span class="muted">${escapeHtml(resourceInline(item.resource_usage))}</span>
+          </div>
+        </td>
+      `;
+    }
+
+    function renderComparisonDeltaCell(left, right) {
+      if (!left && !right) return `<td class="delta-cell muted">-</td>`;
+      if (!left) return `<td class="delta-cell muted">Only right run has this task.</td>`;
+      if (!right) return `<td class="delta-cell muted">Only left run has this task.</td>`;
+      const durationDelta = (right.duration_seconds_avg || 0) - (left.duration_seconds_avg || 0);
+      const tokenDelta = ((right.tokens_total || {}).total || 0) - ((left.tokens_total || {}).total || 0);
+      const nonCacheDelta = nonCacheTokens(right.tokens_total) - nonCacheTokens(left.tokens_total);
+      const toolDelta = ((right.activity_total || {}).tool_calls || 0) - ((left.activity_total || {}).tool_calls || 0);
+      const passDelta = (right.pass_rate || 0) - (left.pass_rate || 0);
+      return `
+        <td class="delta-cell">
+          <div class="metric-stack">
+            <span class="muted">${escapeHtml(`pass ${fmtSignedNumber(passDelta * 100, " pts")}`)}</span>
+            <span class="muted">${escapeHtml(`duration ${fmtSignedSeconds(durationDelta)}`)}</span>
+            <span class="muted">${escapeHtml(`non-cache ${fmtSignedNumber(nonCacheDelta)}`)}</span>
+            <span class="muted">${escapeHtml(`total ${fmtSignedNumber(tokenDelta)}`)}</span>
+            <span class="muted">${escapeHtml(`tools ${fmtSignedNumber(toolDelta)}`)}</span>
+          </div>
+        </td>
       `;
     }
 
@@ -717,9 +1072,8 @@
       if (!run) {
         statsRoot.innerHTML = `<div class="empty">Choose a run from the sidebar.</div>`;
         metaRoot.textContent = "";
-        document.getElementById("taskRollups").innerHTML = `<div class="empty">No run loaded.</div>`;
-        document.getElementById("trialsTable").innerHTML = `<div class="empty">No run loaded.</div>`;
-        document.getElementById("trialMeta").innerHTML = `Select a trial to inspect logs and artifacts.`;
+        document.getElementById("tasksTable").innerHTML = `<div class="empty">No run loaded.</div>`;
+        document.getElementById("trialMeta").innerHTML = `Select a task row to inspect logs and artifacts.`;
         document.getElementById("logTabs").innerHTML = "";
         document.getElementById("logViewer").textContent = "Select a log tab.";
         return;
@@ -736,13 +1090,18 @@
         statCard("Input Tokens", fmtInt((stats.tokens_total || {}).input)),
         statCard("Output Tokens", fmtInt((stats.tokens_total || {}).output)),
         statCard("Cache Tokens", fmtInt((stats.tokens_total || {}).cache)),
+        statCard("LLM Turns", fmtInt((stats.activity_total || {}).llm_turns)),
+        statCard("LLM Calls", fmtInt((stats.activity_total || {}).llm_calls)),
+        statCard("Tool Calls", fmtInt((stats.activity_total || {}).tool_calls)),
+        statCard("Batch Calls", fmtInt((stats.activity_total || {}).tool_batches)),
+        statCard("CPU Seconds", fmtSeconds((stats.resource_usage || {}).cpu_seconds_sum)),
+        statCard("Peak RSS", fmtMemoryKb((stats.resource_usage || {}).max_rss_kb_max)),
         statCard("Reward Mean", fmtFixed(stats.reward_mean)),
         statCard("Errors", fmtInt(stats.trials_errors)),
       ].join("");
-      metaRoot.textContent = `${run.job_name} · ${params.dataset || "-"} · ${params.execution_mode || "-"} · provider ${((params.provider || {}).active_provider || "-")} · model ${params.requested_model || "resolved in trial"} · variant ${params.variant || "default"}`;
+      metaRoot.textContent = `${run.job_name} · ${params.dataset || "-"} · ${params.agent || "-"} · ${params.execution_mode || "-"} · provider ${((params.provider || {}).active_provider || "-")} · model ${params.requested_model || "resolved in trial"} · variant ${params.variant || "default"}`;
 
-      renderTaskRollups(run.task_rollups || []);
-      renderTrials(run.trials || []);
+      renderTasksTable(run.task_rollups || [], run.trials || []);
       renderTrialDetail();
     }
 
@@ -750,46 +1109,31 @@
       return `<div class="stat"><label>${escapeHtml(label)}</label><strong>${escapeHtml(value)}</strong></div>`;
     }
 
-    function renderTaskRollups(rollups) {
-      const root = document.getElementById("taskRollups");
-      if (!rollups.length) {
-        root.innerHTML = `<div class="empty">This run has no task rollups yet.</div>`;
-        return;
+    function renderTasksTable(rollups, trials) {
+      const root = document.getElementById("tasksTable");
+      const trialsByTask = new Map();
+      for (const trial of trials) {
+        if (!trialsByTask.has(trial.task_name)) trialsByTask.set(trial.task_name, []);
+        trialsByTask.get(trial.task_name).push(trial);
       }
-      root.innerHTML = `
-        <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th class="compact-task">Task</th>
-              <th class="num">Pass Rate</th>
-              <th class="num">Attempts</th>
-              <th class="num">Avg Duration</th>
-              ${tokenHeaders}
-            </tr>
-          </thead>
-          <tbody>
-            ${rollups.map(item => `
-              <tr>
-                <td>${escapeHtml(item.task_name)}</td>
-                <td class="num">${fmtPct(item.pass_rate)}</td>
-                <td class="num">${fmtInt(item.attempts)}</td>
-                <td class="num">${fmtSeconds(item.duration_seconds_avg)}</td>
-                ${tokenCells(item.tokens_total)}
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-        </div>
-      `;
-    }
 
-    function renderTrials(trials) {
-      const root = document.getElementById("trialsTable");
-      if (!trials.length) {
-        root.innerHTML = `<div class="empty">This run has no trials.</div>`;
+      const rows = [];
+      for (const item of rollups) {
+        const taskTrials = trialsByTask.get(item.task_name) || [];
+        const latestTrial = taskTrials[taskTrials.length - 1] || null;
+        rows.push({ item, latestTrial });
+      }
+      for (const trial of trials) {
+        if (!rollups.some(item => item.task_name === trial.task_name)) {
+          rows.push({ item: null, latestTrial: trial });
+        }
+      }
+
+      if (!rows.length) {
+        root.innerHTML = `<div class="empty">This run has no task rows yet.</div>`;
         return;
       }
+
       root.innerHTML = `
         <div class="table-wrap">
         <table>
@@ -797,34 +1141,50 @@
             <tr>
               <th class="compact-task">Task</th>
               <th>Status</th>
+              <th class="num">Pass Rate</th>
+              <th class="num">Attempts</th>
+              <th class="num">Avg Duration</th>
               <th class="num">Reward</th>
-              <th class="num">Duration</th>
+              <th class="num">Turns</th>
+              <th class="num">LLM Calls</th>
+              <th class="num">Tool Calls</th>
               ${tokenHeaders}
               <th>Model</th>
             </tr>
           </thead>
           <tbody>
-            ${trials.map(trial => `
-              <tr class="trial-row" data-trial-name="${escapeHtml(trial.trial_name)}">
+            ${rows.map(({ item, latestTrial }) => {
+              const trial = latestTrial || {};
+              const activity = item?.activity_avg || item?.activity_total || trial.metadata || {};
+              const tokens = item?.tokens_avg || item?.tokens_total || trial.tokens || {};
+              const active = state.activeTrial?.trial_name && trial.trial_name === state.activeTrial.trial_name;
+              return `
+              <tr class="task-row ${active ? "active" : ""}" data-trial-name="${escapeHtml(trial.trial_name || "")}">
                 <td>
-                  <strong>${escapeHtml(trial.task_name)}</strong><br>
-                  <small>${escapeHtml(trial.failure_reason || trial.trial_name)}</small>
+                  <strong>${escapeHtml(item?.task_name || trial.task_name)}</strong><br>
+                  <small>${escapeHtml(trial.failure_reason || trial.trial_name || "No trial details yet")}</small>
                 </td>
-                <td><span class="status-pill status-${escapeHtml(trial.status)}">${escapeHtml(trial.status)}</span></td>
+                <td><span class="status-pill status-${escapeHtml(trial.status || "no-reward")}">${escapeHtml(trial.status || "no-reward")}</span></td>
+                <td class="num">${item ? fmtPct(item.pass_rate) : "-"}</td>
+                <td class="num">${item ? fmtInt(item.attempts) : "1"}</td>
+                <td class="num">${item ? fmtSeconds(item.duration_seconds_avg) : escapeHtml(trial.duration_display || "-")}</td>
                 <td class="num">${trial.reward == null ? "-" : escapeHtml(trial.reward)}</td>
-                <td class="num">${escapeHtml(trial.duration_display)}</td>
-                ${tokenCells(trial.tokens)}
+                <td class="num">${fmtInt(activity.llm_turns || activity.llm_turn_count)}</td>
+                <td class="num">${fmtInt(activity.llm_calls || activity.llm_call_count)}</td>
+                <td class="num">${fmtInt(activity.tool_calls || activity.tool_call_count)}</td>
+                ${tokenCells(tokens)}
                 <td>${escapeHtml(((trial.metadata || {}).resolved_models || [])[0] || (trial.metadata || {}).requested_model || "-")}</td>
-              </tr>
-            `).join("")}
+              </tr>`;
+            }).join("")}
           </tbody>
         </table>
         </div>
       `;
-      root.querySelectorAll(".trial-row").forEach(row => {
+      root.querySelectorAll(".task-row").forEach(row => {
         row.addEventListener("click", () => {
-          state.activeTrial = trials.find(trial => trial.trial_name === row.dataset.trialName);
+          state.activeTrial = trials.find(trial => trial.trial_name === row.dataset.trialName) || null;
           state.activeLogPath = null;
+          renderTasksTable(rollups, trials);
           renderTrialDetail();
         });
       });
@@ -836,27 +1196,36 @@
       const viewer = document.getElementById("logViewer");
       const trial = state.activeTrial;
       if (!trial) {
-        meta.innerHTML = `Select a trial to inspect logs and artifacts.`;
+        meta.innerHTML = `Select a task row to inspect logs and artifacts.`;
         tabs.innerHTML = "";
         viewer.textContent = "Select a log tab.";
         return;
       }
 
       const models = ((trial.metadata || {}).resolved_models || []).join(", ") || (trial.metadata || {}).requested_model || "-";
+      const toolBreakdown = Object.entries((trial.metadata || {}).tool_call_breakdown || {})
+        .map(([name, count]) => `${name} ${count}`)
+        .join(" · ") || "no tool breakdown";
+      const resourceUsage = trial.resource_usage || {};
       meta.innerHTML = `
         <strong>${escapeHtml(trial.task_name)}</strong><br>
         <span class="muted">${escapeHtml(trial.trial_name)} · ${escapeHtml(trial.status)} · ${escapeHtml(tokenInline(trial.tokens))} · ${escapeHtml(models)}</span><br>
+        <span class="muted">${escapeHtml(`turns ${(trial.metadata || {}).llm_turn_count || 0} · llm calls ${(trial.metadata || {}).llm_call_count || 0} · tool calls ${(trial.metadata || {}).tool_call_count || 0} · batch calls ${(trial.metadata || {}).tool_batch_count || 0}`)}</span><br>
+        <span class="muted">${escapeHtml(`cpu ${fmtSeconds(resourceUsage.cpu_seconds_sum)} · peak rss ${fmtMemoryKb(resourceUsage.max_rss_kb_max)} · env cpu ${((trial.metadata || {}).environment || {}).override_cpus || "-"} · env mem ${((trial.metadata || {}).environment || {}).override_memory_mb || "-"}`)}</span><br>
+        <span class="muted">${escapeHtml(toolBreakdown)}</span><br>
         <span class="muted">${escapeHtml(trial.failure_reason || "No failure summary.")}</span>
       `;
 
       const tabItems = [];
       const files = (trial.artifacts || {}).files || {};
       const commands = (trial.artifacts || {}).commands || [];
-      if (commands[0]?.stdout) tabItems.push({ label: "Agent stdout", path: commands[0].stdout });
-      if (commands[0]?.stderr) tabItems.push({ label: "Agent stderr", path: commands[0].stderr });
-      if (commands[0]?.command) tabItems.push({ label: "Command", path: commands[0].command });
+      const primaryCommand = [...commands].reverse().find(item => item.stdout || item.stderr) || commands[commands.length - 1];
+      if (primaryCommand?.stdout) tabItems.push({ label: "Agent stdout", path: primaryCommand.stdout });
+      if (primaryCommand?.stderr) tabItems.push({ label: "Agent stderr", path: primaryCommand.stderr });
+      if (primaryCommand?.command) tabItems.push({ label: "Command", path: primaryCommand.command });
       if (files.verifier_stdout) tabItems.push({ label: "Verifier", path: files.verifier_stdout });
       if (files.trial_log) tabItems.push({ label: "Trial log", path: files.trial_log });
+      if (files.trajectory_json) tabItems.push({ label: "Trajectory", path: files.trajectory_json });
       if (files.lash_log) tabItems.push({ label: "Lash log", path: files.lash_log });
       if (files.exception_txt) tabItems.push({ label: "Exception", path: files.exception_txt });
 
@@ -916,6 +1285,17 @@
       await loadRuns();
     }
 
+    document.getElementById("exploreTab").addEventListener("click", () => {
+      state.viewMode = "explore";
+      renderWorkspaceTabs();
+      renderWorkspace();
+    });
+    document.getElementById("compareTab").addEventListener("click", () => {
+      if (state.selectedRunIds.size !== 2) return;
+      state.viewMode = "compare";
+      renderWorkspaceTabs();
+      renderWorkspace();
+    });
     document.getElementById("runSearch").addEventListener("input", renderRunList);
     document.getElementById("refreshButton").addEventListener("click", loadRuns);
     document.getElementById("deleteButton").addEventListener("click", deleteSelectedRuns);

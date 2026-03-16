@@ -7,12 +7,13 @@ cd "${REPO_ROOT}"
 
 usage() {
   cat <<'EOF'
-Run Terminal Bench 2 with lash via Harbor.
+Run Terminal Bench 2 via Harbor.
 
 Usage:
   scripts/run-terminalbench.sh [options] [-- <extra harbor args>]
 
 Options:
+  --agent <name>                Agent to run: lash|opencode (default: lash)
   --dataset <name@version>      Dataset to run (default: terminal-bench-sample@2.0)
   --sample                      Shortcut for --dataset terminal-bench-sample@2.0
   --full                        Shortcut for --dataset terminal-bench@2.0
@@ -20,9 +21,11 @@ Options:
   --tasks <a,b,c>               Exact task names as a comma-separated list
   --task-file <path>            Exact task names from a file (one per line, # comments allowed)
   --exclude-task <glob>         Task exclude pattern (repeatable)
-  --model <model>               Model passed to lash (optional)
-  --variant <name>              Provider-native model variant passed to lash (optional)
-  --execution-mode <mode>       Lash execution mode: repl|standard (required)
+  --model <model>               Model to request from the benchmark agent
+                                (optional for lash, required for opencode)
+  --variant <name>              Provider-native model variant passed through when supported
+  --execution-mode <mode>       Lash execution mode: repl|standard
+                                (required for --agent lash; ignored for opencode)
   --jobs-dir <path>             Harbor jobs output dir (default: jobs)
   --results-dir <path>          Persistent structured results dir (default: .benchmarks/terminalbench)
   --job-name <name>             Harbor job name (optional)
@@ -32,12 +35,12 @@ Options:
   --env <name>                  Harbor environment backend (default: docker)
   --registry-url <url>          Dataset registry URL
                                 (default: https://raw.githubusercontent.com/laude-institute/harbor/main/registry.json)
-  --no-build                    Skip building the benchmark binary
+  --no-build                    Skip building the lash benchmark binary
   --debug                       Enable Harbor debug logging
   --no-debug                    Disable Harbor debug logging (default)
   --delete                      Delete benchmark environments after run
   --no-delete                   Keep benchmark environments after run
-  --allow-no-config             Do not require ~/.lash/config.json
+  --allow-no-config             Do not require ~/.lash/config.json for lash runs
   --dry-run                     Print command and exit
   --help                        Show this help
 
@@ -46,6 +49,7 @@ Examples:
   scripts/run-terminalbench.sh --full --execution-mode standard --task "git-*"
   scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,sqlite-with-gcov
   scripts/run-terminalbench.sh --sample --execution-mode repl --task chess-best-move --model gpt-5.3-codex
+  scripts/run-terminalbench.sh --agent opencode --sample --model openrouter/openai/gpt-5
 EOF
 }
 
@@ -57,6 +61,7 @@ require_cmd() {
 }
 
 DATASET="terminal-bench-sample@2.0"
+AGENT="lash"
 JOBS_DIR="jobs"
 RESULTS_DIR=".benchmarks/terminalbench"
 JOB_NAME=""
@@ -128,6 +133,10 @@ sanitize_job_fragment() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --agent)
+      AGENT="${2:?missing value for --agent}"
+      shift 2
+      ;;
     --dataset)
       DATASET="${2:?missing value for --dataset}"
       shift 2
@@ -246,32 +255,23 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "${AGENT}" != "lash" && "${AGENT}" != "opencode" ]]; then
+  echo "error: unsupported --agent: ${AGENT} (expected lash|opencode)" >&2
+  exit 2
+fi
+
 require_cmd harbor
-if [[ "${DO_BUILD}" -eq 1 || "${ENV_BACKEND}" == "docker" ]]; then
+if [[ "${ENV_BACKEND}" == "docker" ]] || [[ "${AGENT}" == "lash" && "${DO_BUILD}" -eq 1 ]]; then
   require_cmd docker
 fi
 
-if [[ "${REQUIRE_CONFIG}" -eq 1 && ! -f "${HOME}/.lash/config.json" ]]; then
+if [[ "${AGENT}" == "lash" && "${REQUIRE_CONFIG}" -eq 1 && ! -f "${HOME}/.lash/config.json" ]]; then
   cat >&2 <<EOF
 error: ${HOME}/.lash/config.json not found.
 This runner expects your local lash provider config (including OAuth tokens).
 Use --allow-no-config to bypass.
 EOF
   exit 1
-fi
-
-if [[ -z "${EXECUTION_MODE}" ]]; then
-  echo "error: --execution-mode is required (expected repl|standard)" >&2
-  exit 2
-fi
-
-if [[ "${EXECUTION_MODE}" == "native-tools" ]]; then
-  EXECUTION_MODE="standard"
-fi
-
-if [[ "${EXECUTION_MODE}" != "repl" && "${EXECUTION_MODE}" != "standard" ]]; then
-  echo "error: unsupported --execution-mode: ${EXECUTION_MODE} (expected repl|standard)" >&2
-  exit 2
 fi
 
 if [[ ${#EXACT_TASKS[@]} -gt 0 ]]; then
@@ -300,51 +300,85 @@ build_benchmark_binary() {
   echo "${REPO_ROOT}/target-bullseye/release/lash"
 }
 
-BINARY_PATH="${REPO_ROOT}/target-bullseye/release/lash"
-if [[ "${DO_BUILD}" -eq 1 ]]; then
-  BINARY_PATH="$(build_benchmark_binary)"
-fi
+RUN_EXECUTION_MODE="${EXECUTION_MODE}"
+BINARY_PATH=""
 
-if [[ ! -x "${BINARY_PATH}" ]]; then
-  echo "error: expected executable lash binary not found at ${BINARY_PATH}" >&2
-  exit 1
-fi
+if [[ "${AGENT}" == "lash" ]]; then
+  if [[ -z "${EXECUTION_MODE}" ]]; then
+    echo "error: --execution-mode is required for --agent lash (expected repl|standard)" >&2
+    exit 2
+  fi
 
-export LASH_BENCH_BINARY="${BINARY_PATH}"
-export LASH_BENCH_EXECUTION_MODE="${EXECUTION_MODE}"
-export LASH_BENCH_MODEL_VARIANT="${VARIANT}"
+  if [[ "${EXECUTION_MODE}" == "native-tools" ]]; then
+    EXECUTION_MODE="standard"
+  fi
 
-if [[ -z "${LASH_PROMPT_REPLACE_IDENTITY:-}" ]]; then
-  export LASH_PROMPT_REPLACE_IDENTITY="$(cat <<EOF
+  if [[ "${EXECUTION_MODE}" != "repl" && "${EXECUTION_MODE}" != "standard" ]]; then
+    echo "error: unsupported --execution-mode: ${EXECUTION_MODE} (expected repl|standard)" >&2
+    exit 2
+  fi
+
+  RUN_EXECUTION_MODE="${EXECUTION_MODE}"
+  BINARY_PATH="${REPO_ROOT}/target-bullseye/release/lash"
+  if [[ "${DO_BUILD}" -eq 1 ]]; then
+    BINARY_PATH="$(build_benchmark_binary)"
+  fi
+
+  if [[ ! -x "${BINARY_PATH}" ]]; then
+    echo "error: expected executable lash binary not found at ${BINARY_PATH}" >&2
+    exit 1
+  fi
+
+  export LASH_BENCH_BINARY="${BINARY_PATH}"
+  export LASH_BENCH_EXECUTION_MODE="${EXECUTION_MODE}"
+  export LASH_BENCH_MODEL_VARIANT="${VARIANT}"
+
+  if [[ -z "${LASH_PROMPT_REPLACE_IDENTITY:-}" ]]; then
+    export LASH_PROMPT_REPLACE_IDENTITY="$(cat <<EOF
 You are running inside a benchmark harness with an enforced wall-clock time budget.
 Work autonomously and prioritize passing the verifier over polish.
 Do not ask the user questions; there is no interactive user in this run.
 Make concrete progress continuously: inspect, edit, run checks, and converge quickly.
-If you are blocked or near timeout, return the best valid result you can and call done() with a concise status + remaining risks.
+If you are blocked or near timeout, return the best valid result you can with a concise status and remaining risks.
 EOF
 )"
-fi
+  fi
 
-# Always capture LLM request/response traces for benchmark debugging.
-export LASH_LOG="debug"
+  # Always capture LLM request/response traces for benchmark debugging.
+  export LASH_LOG="debug"
+else
+  RUN_EXECUTION_MODE="agent-native"
+  if [[ -n "${EXECUTION_MODE}" ]]; then
+    echo "warning: --execution-mode is ignored for --agent opencode" >&2
+  fi
+  if [[ -z "${MODEL}" ]]; then
+    echo "error: --model provider/model is required for --agent opencode" >&2
+    exit 2
+  fi
+  if [[ "${MODEL}" != */* ]]; then
+    echo "error: --model for opencode must be in provider/model format" >&2
+    exit 2
+  fi
+  export OPENCODE_BENCH_MODEL_VARIANT="${VARIANT}"
+fi
 
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
 if [[ -z "${JOB_NAME}" ]]; then
   dataset_slug="$(sanitize_job_fragment "${DATASET%@*}")"
-  mode_slug="$(sanitize_job_fragment "${EXECUTION_MODE}")"
+  agent_slug="$(sanitize_job_fragment "${AGENT}")"
+  mode_slug="$(sanitize_job_fragment "${RUN_EXECUTION_MODE}")"
   if [[ ${#EXACT_TASKS[@]} -gt 0 ]]; then
     task_slug="$(sanitize_job_fragment "$(join_by "-" "${EXACT_TASKS[@]}")")"
     task_slug="${task_slug:0:48}"
-    JOB_NAME="${dataset_slug}-${mode_slug}-${task_slug}"
+    JOB_NAME="${dataset_slug}-${agent_slug}-${mode_slug}-${task_slug}"
   else
-    JOB_NAME="${dataset_slug}-${mode_slug}-$(date +%Y%m%d-%H%M%S)"
+    JOB_NAME="${dataset_slug}-${agent_slug}-${mode_slug}-$(date +%Y%m%d-%H%M%S)"
   fi
 fi
 
 CMD=(
   harbor run
-  --agent-import-path scripts.harbor_lash_agent:LashAgent
   --dataset "${DATASET}"
   --registry-url "${REGISTRY_URL}"
   --env "${ENV_BACKEND}"
@@ -354,6 +388,12 @@ CMD=(
   --timeout-multiplier "${TIMEOUT_MULT}"
   --job-name "${JOB_NAME}"
 )
+
+if [[ "${AGENT}" == "lash" ]]; then
+  CMD+=(--agent-import-path scripts.harbor_lash_agent:LashAgent)
+else
+  CMD+=(--agent-import-path scripts.harbor_opencode_agent:BenchOpenCodeAgent)
+fi
 
 if [[ -n "${MODEL}" ]]; then
   CMD+=(--model "${MODEL}")
@@ -400,17 +440,20 @@ if [[ -d "${JOB_DIR}" ]]; then
     python3 "${SCRIPT_DIR}/export_terminalbench_results.py"
     "${JOB_DIR}"
     --results-dir "${RESULTS_DIR}"
+    --agent "${AGENT}"
     --dataset "${DATASET}"
-    --execution-mode "${EXECUTION_MODE}"
+    --execution-mode "${RUN_EXECUTION_MODE}"
     --harbor-env "${ENV_BACKEND}"
     --registry-url "${REGISTRY_URL}"
     --n-concurrent "${N_CONCURRENT}"
     --attempts "${ATTEMPTS}"
     --timeout-multiplier "${TIMEOUT_MULT}"
-    --binary-path "${BINARY_PATH}"
   )
 
-  if [[ -f "${HOME}/.lash/config.json" ]]; then
+  if [[ -n "${BINARY_PATH}" ]]; then
+    EXPORT_CMD+=(--binary-path "${BINARY_PATH}")
+  fi
+  if [[ "${AGENT}" == "lash" && -f "${HOME}/.lash/config.json" ]]; then
     EXPORT_CMD+=(--provider-config "${HOME}/.lash/config.json")
   fi
   if [[ -n "${MODEL}" ]]; then

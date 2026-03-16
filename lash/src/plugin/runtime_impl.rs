@@ -5,7 +5,6 @@ use std::sync::{Mutex as StdMutex, Weak};
 use tokio::task::JoinSet;
 
 use super::*;
-use crate::dynamic::DynamicCapabilityDef;
 
 #[derive(Clone)]
 struct RegisteredHook<T> {
@@ -14,9 +13,9 @@ struct RegisteredHook<T> {
 }
 
 #[derive(Clone)]
-struct RegisteredMessageMutator {
+struct RegisteredExclusiveHook<T> {
     plugin_id: String,
-    hook: MessageMutator,
+    hook: T,
 }
 
 fn current_plugin_id(registering_plugin_id: &Option<String>) -> String {
@@ -34,6 +33,46 @@ fn push_registered_hook<T>(
         plugin_id: current_plugin_id(registering_plugin_id),
         hook,
     });
+}
+
+fn exclusive_hook_owner(
+    existing_owner: Option<&str>,
+    registering_plugin_id: &Option<String>,
+    hook_kind: &str,
+    hook_name: &str,
+) -> Result<String, PluginError> {
+    let plugin_id = registering_plugin_id
+        .clone()
+        .ok_or_else(|| PluginError::Registration("missing registering plugin id".to_string()))?;
+    if let Some(existing) = existing_owner {
+        return Err(PluginError::Registration(format!(
+            "duplicate {hook_kind} for `{hook_name}`: `{plugin_id}` conflicts with `{existing}`"
+        )));
+    }
+    Ok(plugin_id)
+}
+
+fn register_exclusive_hook<K, H>(
+    hooks: &mut BTreeMap<K, RegisteredExclusiveHook<H>>,
+    registering_plugin_id: &Option<String>,
+    hook_kind: &str,
+    hook_name: &str,
+    key: K,
+    hook: H,
+) -> Result<(), PluginError>
+where
+    K: Ord,
+{
+    let plugin_id = exclusive_hook_owner(
+        hooks
+            .get(&key)
+            .map(|registered| registered.plugin_id.as_str()),
+        registering_plugin_id,
+        hook_kind,
+        hook_name,
+    )?;
+    hooks.insert(key, RegisteredExclusiveHook { plugin_id, hook });
+    Ok(())
 }
 
 async fn collect_owned_async<C, O, H, F>(
@@ -79,10 +118,8 @@ where
 pub struct PluginRegistrar {
     tool_names: BTreeSet<String>,
     tool_providers: Vec<Arc<dyn ToolProvider>>,
-    capability_defs: BTreeMap<String, DynamicCapabilityDef>,
-    prompt_contributors: Vec<PromptContributor>,
+    prompt_contributors: Vec<RegisteredHook<PromptContributor>>,
     tool_surface_contributors: Vec<RegisteredHook<ToolSurfaceContributor>>,
-    turn_prompt_contributors: Vec<RegisteredHook<TurnPromptContributor>>,
     before_turn_hooks: Vec<RegisteredHook<BeforeTurnHook>>,
     before_tool_call_hooks: Vec<RegisteredHook<BeforeToolCallHook>>,
     after_tool_call_hooks: Vec<RegisteredHook<AfterToolCallHook>>,
@@ -90,7 +127,9 @@ pub struct PluginRegistrar {
     checkpoint_hooks: Vec<RegisteredHook<CheckpointHook>>,
     assistant_stream_hooks: Vec<RegisteredHook<AssistantStreamHook>>,
     assistant_response_hooks: Vec<RegisteredHook<AssistantResponseHook>>,
-    message_mutators: BTreeMap<MessageMutatorHook, RegisteredMessageMutator>,
+    message_mutators: BTreeMap<MessageMutatorHook, RegisteredExclusiveHook<MessageMutator>>,
+    tool_result_projectors:
+        BTreeMap<ToolResultProjectionHook, RegisteredExclusiveHook<ToolResultProjector>>,
     turn_committed_hooks: Vec<TurnCommittedHook>,
     session_restored_hooks: Vec<SessionRestoredHook>,
     session_config_mutators: Vec<SessionConfigMutator>,
@@ -99,15 +138,151 @@ pub struct PluginRegistrar {
     registering_plugin_id: Option<String>,
 }
 
+pub struct ToolRegistrations<'a> {
+    reg: &'a mut PluginRegistrar,
+}
+
+impl ToolRegistrations<'_> {
+    pub fn provider(self, provider: Arc<dyn ToolProvider>) -> Result<(), PluginError> {
+        self.reg.add_tool_provider(provider)
+    }
+}
+
+pub struct PromptRegistrations<'a> {
+    reg: &'a mut PluginRegistrar,
+}
+
+impl PromptRegistrations<'_> {
+    pub fn contribute(self, contributor: PromptContributor) {
+        self.reg.add_prompt_contributor(contributor);
+    }
+}
+
+pub struct SurfaceRegistrations<'a> {
+    reg: &'a mut PluginRegistrar,
+}
+
+impl SurfaceRegistrations<'_> {
+    pub fn contribute(self, contributor: ToolSurfaceContributor) {
+        self.reg.add_tool_surface_contributor(contributor);
+    }
+}
+
+pub struct TurnRegistrations<'a> {
+    reg: &'a mut PluginRegistrar,
+}
+
+impl TurnRegistrations<'_> {
+    pub fn before(self, hook: BeforeTurnHook) {
+        self.reg.add_before_turn_hook(hook);
+    }
+
+    pub fn after(self, hook: AfterTurnHook) {
+        self.reg.add_after_turn_hook(hook);
+    }
+
+    pub fn checkpoint(self, hook: CheckpointHook) {
+        self.reg.add_checkpoint_hook(hook);
+    }
+
+    pub fn committed(self, hook: TurnCommittedHook) {
+        self.reg.turn_committed_hooks.push(hook);
+    }
+}
+
+pub struct ToolCallRegistrations<'a> {
+    reg: &'a mut PluginRegistrar,
+}
+
+impl ToolCallRegistrations<'_> {
+    pub fn before(self, hook: BeforeToolCallHook) {
+        self.reg.add_before_tool_call_hook(hook);
+    }
+
+    pub fn after(self, hook: AfterToolCallHook) {
+        self.reg.add_after_tool_call_hook(hook);
+    }
+}
+
+pub struct OutputRegistrations<'a> {
+    reg: &'a mut PluginRegistrar,
+}
+
+impl OutputRegistrations<'_> {
+    pub fn stream(self, hook: AssistantStreamHook) {
+        self.reg.add_assistant_stream_hook(hook);
+    }
+
+    pub fn response(self, hook: AssistantResponseHook) {
+        self.reg.add_assistant_response_hook(hook);
+    }
+}
+
+pub struct MessageRegistrations<'a> {
+    reg: &'a mut PluginRegistrar,
+}
+
+impl MessageRegistrations<'_> {
+    pub fn mutator(
+        self,
+        hook_name: MessageMutatorHook,
+        hook: MessageMutator,
+    ) -> Result<(), PluginError> {
+        self.reg.add_message_mutator(hook_name, hook)
+    }
+}
+
+pub struct ToolResultRegistrations<'a> {
+    reg: &'a mut PluginRegistrar,
+}
+
+impl ToolResultRegistrations<'_> {
+    pub fn projector(
+        self,
+        hook_name: ToolResultProjectionHook,
+        hook: ToolResultProjector,
+    ) -> Result<(), PluginError> {
+        self.reg.add_tool_result_projector(hook_name, hook)
+    }
+}
+
+pub struct SessionRegistrations<'a> {
+    reg: &'a mut PluginRegistrar,
+}
+
+impl SessionRegistrations<'_> {
+    pub fn restored(self, hook: SessionRestoredHook) {
+        self.reg.session_restored_hooks.push(hook);
+    }
+
+    pub fn config_mutator(self, hook: SessionConfigMutator) {
+        self.reg.session_config_mutators.push(hook);
+    }
+
+    pub fn config_changed(self, hook: SessionConfigChangedHook) {
+        self.reg.session_config_changed_hooks.push(hook);
+    }
+}
+
+pub struct ExternalRegistrations<'a> {
+    reg: &'a mut PluginRegistrar,
+}
+
+impl ExternalRegistrations<'_> {
+    pub fn op(self, def: ExternalOpDef, handler: ExternalInvokeHandler) -> Result<(), PluginError> {
+        self.reg.add_external_op(def, handler)
+    }
+}
+
 impl PluginRegistrar {
     fn new() -> Self {
         Self {
-            tool_names: BTreeSet::new(),
+            tool_names: crate::tools::all_native_tool_names()
+                .map(str::to_string)
+                .collect(),
             tool_providers: Vec::new(),
-            capability_defs: BTreeMap::new(),
             prompt_contributors: Vec::new(),
             tool_surface_contributors: Vec::new(),
-            turn_prompt_contributors: Vec::new(),
             before_turn_hooks: Vec::new(),
             before_tool_call_hooks: Vec::new(),
             after_tool_call_hooks: Vec::new(),
@@ -116,6 +291,7 @@ impl PluginRegistrar {
             assistant_stream_hooks: Vec::new(),
             assistant_response_hooks: Vec::new(),
             message_mutators: BTreeMap::new(),
+            tool_result_projectors: BTreeMap::new(),
             turn_committed_hooks: Vec::new(),
             session_restored_hooks: Vec::new(),
             session_config_mutators: Vec::new(),
@@ -125,10 +301,47 @@ impl PluginRegistrar {
         }
     }
 
-    pub fn register_tool_provider(
-        &mut self,
-        provider: Arc<dyn ToolProvider>,
-    ) -> Result<(), PluginError> {
+    pub fn tools(&mut self) -> ToolRegistrations<'_> {
+        ToolRegistrations { reg: self }
+    }
+
+    pub fn prompt(&mut self) -> PromptRegistrations<'_> {
+        PromptRegistrations { reg: self }
+    }
+
+    pub fn surface(&mut self) -> SurfaceRegistrations<'_> {
+        SurfaceRegistrations { reg: self }
+    }
+
+    pub fn turn(&mut self) -> TurnRegistrations<'_> {
+        TurnRegistrations { reg: self }
+    }
+
+    pub fn tool_calls(&mut self) -> ToolCallRegistrations<'_> {
+        ToolCallRegistrations { reg: self }
+    }
+
+    pub fn output(&mut self) -> OutputRegistrations<'_> {
+        OutputRegistrations { reg: self }
+    }
+
+    pub fn messages(&mut self) -> MessageRegistrations<'_> {
+        MessageRegistrations { reg: self }
+    }
+
+    pub fn tool_results(&mut self) -> ToolResultRegistrations<'_> {
+        ToolResultRegistrations { reg: self }
+    }
+
+    pub fn session(&mut self) -> SessionRegistrations<'_> {
+        SessionRegistrations { reg: self }
+    }
+
+    pub fn external(&mut self) -> ExternalRegistrations<'_> {
+        ExternalRegistrations { reg: self }
+    }
+
+    fn add_tool_provider(&mut self, provider: Arc<dyn ToolProvider>) -> Result<(), PluginError> {
         for def in provider.definitions() {
             if !self.tool_names.insert(def.name.clone()) {
                 return Err(PluginError::Registration(format!(
@@ -141,30 +354,15 @@ impl PluginRegistrar {
         Ok(())
     }
 
-    pub fn register_capability(&mut self, def: DynamicCapabilityDef) -> Result<(), PluginError> {
-        if self.capability_defs.contains_key(&def.id) {
-            return Err(PluginError::Registration(format!(
-                "duplicate plugin capability `{}`",
-                def.id
-            )));
-        }
-        self.capability_defs.insert(def.id.clone(), def);
-        Ok(())
-    }
-
-    pub fn register_prompt_contributor(&mut self, contributor: PromptContributor) {
-        self.prompt_contributors.push(contributor);
-    }
-
-    pub fn register_turn_prompt_contributor(&mut self, contributor: TurnPromptContributor) {
+    fn add_prompt_contributor(&mut self, contributor: PromptContributor) {
         push_registered_hook(
-            &mut self.turn_prompt_contributors,
+            &mut self.prompt_contributors,
             &self.registering_plugin_id,
             contributor,
         );
     }
 
-    pub fn register_tool_surface_contributor(&mut self, contributor: ToolSurfaceContributor) {
+    fn add_tool_surface_contributor(&mut self, contributor: ToolSurfaceContributor) {
         push_registered_hook(
             &mut self.tool_surface_contributors,
             &self.registering_plugin_id,
@@ -172,7 +370,7 @@ impl PluginRegistrar {
         );
     }
 
-    pub fn before_turn(&mut self, hook: BeforeTurnHook) {
+    fn add_before_turn_hook(&mut self, hook: BeforeTurnHook) {
         push_registered_hook(
             &mut self.before_turn_hooks,
             &self.registering_plugin_id,
@@ -180,7 +378,7 @@ impl PluginRegistrar {
         );
     }
 
-    pub fn before_tool_call(&mut self, hook: BeforeToolCallHook) {
+    fn add_before_tool_call_hook(&mut self, hook: BeforeToolCallHook) {
         push_registered_hook(
             &mut self.before_tool_call_hooks,
             &self.registering_plugin_id,
@@ -188,7 +386,7 @@ impl PluginRegistrar {
         );
     }
 
-    pub fn after_tool_call(&mut self, hook: AfterToolCallHook) {
+    fn add_after_tool_call_hook(&mut self, hook: AfterToolCallHook) {
         push_registered_hook(
             &mut self.after_tool_call_hooks,
             &self.registering_plugin_id,
@@ -196,7 +394,7 @@ impl PluginRegistrar {
         );
     }
 
-    pub fn after_turn(&mut self, hook: AfterTurnHook) {
+    fn add_after_turn_hook(&mut self, hook: AfterTurnHook) {
         push_registered_hook(
             &mut self.after_turn_hooks,
             &self.registering_plugin_id,
@@ -204,7 +402,7 @@ impl PluginRegistrar {
         );
     }
 
-    pub fn at_checkpoint(&mut self, hook: CheckpointHook) {
+    fn add_checkpoint_hook(&mut self, hook: CheckpointHook) {
         push_registered_hook(
             &mut self.checkpoint_hooks,
             &self.registering_plugin_id,
@@ -212,7 +410,7 @@ impl PluginRegistrar {
         );
     }
 
-    pub fn on_assistant_stream(&mut self, hook: AssistantStreamHook) {
+    fn add_assistant_stream_hook(&mut self, hook: AssistantStreamHook) {
         push_registered_hook(
             &mut self.assistant_stream_hooks,
             &self.registering_plugin_id,
@@ -220,7 +418,7 @@ impl PluginRegistrar {
         );
     }
 
-    pub fn on_assistant_response(&mut self, hook: AssistantResponseHook) {
+    fn add_assistant_response_hook(&mut self, hook: AssistantResponseHook) {
         push_registered_hook(
             &mut self.assistant_response_hooks,
             &self.registering_plugin_id,
@@ -228,44 +426,37 @@ impl PluginRegistrar {
         );
     }
 
-    pub fn register_message_mutator(
+    fn add_message_mutator(
         &mut self,
         hook_name: MessageMutatorHook,
         hook: MessageMutator,
     ) -> Result<(), PluginError> {
-        let plugin_id = self.registering_plugin_id.clone().ok_or_else(|| {
-            PluginError::Registration("missing registering plugin id".to_string())
-        })?;
-        if let Some(existing) = self.message_mutators.get(&hook_name) {
-            return Err(PluginError::Registration(format!(
-                "duplicate message mutator for `{}`: `{}` conflicts with `{}`",
-                hook_name.as_str(),
-                plugin_id,
-                existing.plugin_id
-            )));
-        }
-        self.message_mutators
-            .insert(hook_name, RegisteredMessageMutator { plugin_id, hook });
-        Ok(())
+        register_exclusive_hook(
+            &mut self.message_mutators,
+            &self.registering_plugin_id,
+            "message mutator",
+            hook_name.as_str(),
+            hook_name,
+            hook,
+        )
     }
 
-    pub fn on_turn_committed(&mut self, hook: TurnCommittedHook) {
-        self.turn_committed_hooks.push(hook);
+    fn add_tool_result_projector(
+        &mut self,
+        hook_name: ToolResultProjectionHook,
+        hook: ToolResultProjector,
+    ) -> Result<(), PluginError> {
+        register_exclusive_hook(
+            &mut self.tool_result_projectors,
+            &self.registering_plugin_id,
+            "tool result projector",
+            hook_name.as_str(),
+            hook_name,
+            hook,
+        )
     }
 
-    pub fn on_session_restored(&mut self, hook: SessionRestoredHook) {
-        self.session_restored_hooks.push(hook);
-    }
-
-    pub fn register_session_config_mutator(&mut self, hook: SessionConfigMutator) {
-        self.session_config_mutators.push(hook);
-    }
-
-    pub fn on_session_config_changed(&mut self, hook: SessionConfigChangedHook) {
-        self.session_config_changed_hooks.push(hook);
-    }
-
-    pub fn register_external_op(
+    fn add_external_op(
         &mut self,
         def: ExternalOpDef,
         handler: ExternalInvokeHandler,
@@ -285,6 +476,7 @@ impl PluginRegistrar {
 #[derive(Clone)]
 pub struct PluginHost {
     factories: Arc<Vec<Arc<dyn PluginFactory>>>,
+    dynamic_tools_enabled: bool,
     sessions: Arc<StdMutex<BTreeMap<String, Weak<PluginSession>>>>,
 }
 
@@ -292,6 +484,7 @@ impl PluginHost {
     pub fn empty() -> Self {
         Self {
             factories: Arc::new(Vec::new()),
+            dynamic_tools_enabled: false,
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
     }
@@ -299,21 +492,62 @@ impl PluginHost {
     pub fn new(factories: Vec<Arc<dyn PluginFactory>>) -> Self {
         Self {
             factories: Arc::new(factories),
+            dynamic_tools_enabled: false,
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
+    }
+
+    pub fn with_dynamic_tools(mut self) -> Self {
+        self.dynamic_tools_enabled = true;
+        self
     }
 
     pub fn factories(&self) -> &[Arc<dyn PluginFactory>] {
         self.factories.as_ref().as_slice()
     }
 
-    pub fn build_session(
+    pub fn build_standard_session(
         &self,
         agent_id: impl Into<String>,
         snapshot: Option<&PluginSessionSnapshot>,
     ) -> Result<Arc<PluginSession>, PluginError> {
+        self.build_session(agent_id, ExecutionMode::Standard, snapshot)
+    }
+
+    pub fn build_repl_session(
+        &self,
+        agent_id: impl Into<String>,
+        snapshot: Option<&PluginSessionSnapshot>,
+    ) -> Result<Arc<PluginSession>, PluginError> {
+        self.build_session(agent_id, ExecutionMode::Repl, snapshot)
+    }
+
+    pub fn build_session(
+        &self,
+        agent_id: impl Into<String>,
+        execution_mode: ExecutionMode,
+        snapshot: Option<&PluginSessionSnapshot>,
+    ) -> Result<Arc<PluginSession>, PluginError> {
+        self.build_session_with_surface(
+            agent_id,
+            execution_mode,
+            snapshot,
+            ToolSurfaceContribution::default(),
+            None,
+        )
+    }
+
+    pub fn build_session_with_surface(
+        &self,
+        agent_id: impl Into<String>,
+        execution_mode: ExecutionMode,
+        snapshot: Option<&PluginSessionSnapshot>,
+        tool_surface_overlay: ToolSurfaceContribution,
+        tool_snapshot: Option<crate::DynamicStateSnapshot>,
+    ) -> Result<Arc<PluginSession>, PluginError> {
         let ctx = PluginSessionContext {
             agent_id: agent_id.into(),
+            execution_mode,
         };
         let session_id = ctx.agent_id.clone();
         let mut plugins = Vec::new();
@@ -325,16 +559,52 @@ impl PluginHost {
             reg.registering_plugin_id = None;
             plugins.push(plugin);
         }
+        let base_tools: Arc<dyn ToolProvider> = Arc::new(
+            crate::tools::CompositeToolProvider::from_providers(reg.tool_providers.clone()),
+        );
+        let (tools, dynamic_tools) = if self.dynamic_tools_enabled {
+            let dynamic = match tool_snapshot {
+                Some(snapshot) => Arc::new(
+                    crate::DynamicToolProvider::from_tool_provider(base_tools)
+                        .map_err(|err| {
+                            PluginError::Registration(format!(
+                                "failed to build dynamic tool provider: {err}"
+                            ))
+                        })?
+                        .fork_with_snapshot(snapshot)
+                        .map_err(|err| {
+                            PluginError::Session(format!(
+                                "tool state cannot be applied to this plugin host session: {err}"
+                            ))
+                        })?,
+                ),
+                None => Arc::new(
+                    crate::DynamicToolProvider::from_tool_provider(base_tools).map_err(|err| {
+                        PluginError::Registration(format!(
+                            "failed to build dynamic tool provider: {err}"
+                        ))
+                    })?,
+                ),
+            };
+            (Arc::clone(&dynamic) as Arc<dyn ToolProvider>, Some(dynamic))
+        } else if tool_snapshot.is_some() {
+            return Err(PluginError::Session(
+                "tool state requires dynamic tools on this plugin host".to_string(),
+            ));
+        } else {
+            (base_tools, None)
+        };
 
         let session = Arc::new(PluginSession {
             host: self.clone(),
             agent_id: ctx.agent_id,
+            execution_mode,
             plugins,
-            tool_providers: reg.tool_providers,
-            capability_defs: reg.capability_defs,
+            tools,
+            dynamic_tools,
+            tool_surface_overlay,
             prompt_contributors: reg.prompt_contributors,
             tool_surface_contributors: reg.tool_surface_contributors,
-            turn_prompt_contributors: reg.turn_prompt_contributors,
             before_turn_hooks: reg.before_turn_hooks,
             before_tool_call_hooks: reg.before_tool_call_hooks,
             after_tool_call_hooks: reg.after_tool_call_hooks,
@@ -343,16 +613,25 @@ impl PluginHost {
             assistant_stream_hooks: reg.assistant_stream_hooks,
             assistant_response_hooks: reg.assistant_response_hooks,
             message_mutators: reg.message_mutators,
+            tool_result_projectors: reg.tool_result_projectors,
             turn_committed_hooks: reg.turn_committed_hooks,
             session_restored_hooks: reg.session_restored_hooks,
             session_config_mutators: reg.session_config_mutators,
             session_config_changed_hooks: reg.session_config_changed_hooks,
             external_ops: reg.external_ops,
         });
+        self.register_session(&session_id, &session)?;
+        let ready = SessionReadyContext {
+            agent_id: session.agent_id.clone(),
+            execution_mode,
+            host: self.clone(),
+        };
+        for plugin in &session.plugins {
+            plugin.session_ready(ready.clone())?;
+        }
         if let Some(snapshot) = snapshot {
             session.restore(snapshot)?;
         }
-        self.register_session(&session_id, &session)?;
         Ok(session)
     }
 
@@ -361,7 +640,7 @@ impl PluginHost {
         name: &str,
         args: serde_json::Value,
     ) -> Result<ToolResult, PluginError> {
-        let session = self.build_session("__external__", None)?;
+        let session = self.build_standard_session("__external__", None)?;
         session
             .invoke_external(name, args, None, false, Arc::new(NoopSessionManager))
             .await
@@ -422,12 +701,13 @@ impl PluginHost {
 pub struct PluginSession {
     host: PluginHost,
     agent_id: String,
+    execution_mode: ExecutionMode,
     plugins: Vec<Arc<dyn SessionPlugin>>,
-    tool_providers: Vec<Arc<dyn ToolProvider>>,
-    capability_defs: BTreeMap<String, DynamicCapabilityDef>,
-    prompt_contributors: Vec<PromptContributor>,
+    tools: Arc<dyn ToolProvider>,
+    dynamic_tools: Option<Arc<crate::DynamicToolProvider>>,
+    tool_surface_overlay: ToolSurfaceContribution,
+    prompt_contributors: Vec<RegisteredHook<PromptContributor>>,
     tool_surface_contributors: Vec<RegisteredHook<ToolSurfaceContributor>>,
-    turn_prompt_contributors: Vec<RegisteredHook<TurnPromptContributor>>,
     before_turn_hooks: Vec<RegisteredHook<BeforeTurnHook>>,
     before_tool_call_hooks: Vec<RegisteredHook<BeforeToolCallHook>>,
     after_tool_call_hooks: Vec<RegisteredHook<AfterToolCallHook>>,
@@ -435,7 +715,9 @@ pub struct PluginSession {
     checkpoint_hooks: Vec<RegisteredHook<CheckpointHook>>,
     assistant_stream_hooks: Vec<RegisteredHook<AssistantStreamHook>>,
     assistant_response_hooks: Vec<RegisteredHook<AssistantResponseHook>>,
-    message_mutators: BTreeMap<MessageMutatorHook, RegisteredMessageMutator>,
+    message_mutators: BTreeMap<MessageMutatorHook, RegisteredExclusiveHook<MessageMutator>>,
+    tool_result_projectors:
+        BTreeMap<ToolResultProjectionHook, RegisteredExclusiveHook<ToolResultProjector>>,
     turn_committed_hooks: Vec<TurnCommittedHook>,
     session_restored_hooks: Vec<SessionRestoredHook>,
     session_config_mutators: Vec<SessionConfigMutator>,
@@ -448,24 +730,51 @@ impl PluginSession {
         &self.agent_id
     }
 
+    pub fn execution_mode(&self) -> ExecutionMode {
+        self.execution_mode
+    }
+
     pub fn host(&self) -> &PluginHost {
         &self.host
     }
 
-    pub fn tool_providers(&self) -> &[Arc<dyn ToolProvider>] {
-        &self.tool_providers
+    pub fn tools(&self) -> Arc<dyn ToolProvider> {
+        Arc::clone(&self.tools)
     }
 
-    pub fn capability_defs(&self) -> &BTreeMap<String, DynamicCapabilityDef> {
-        &self.capability_defs
+    pub fn dynamic_tools(&self) -> Option<Arc<crate::DynamicToolProvider>> {
+        self.dynamic_tools.clone()
+    }
+
+    pub fn execution_surface(&self, session_id: &str, mode: ExecutionMode) -> ExecutionSurface {
+        let mut tools = self.tools.definitions();
+        tools.extend(
+            crate::tools::native_tools(mode)
+                .iter()
+                .copied()
+                .map(crate::tools::NativeTool::definition),
+        );
+        self.resolve_tool_surface(ToolSurfaceContext {
+            session_id: session_id.to_string(),
+            mode,
+            tools: tools.clone(),
+        })
+        .unwrap_or_else(|err| {
+            tracing::warn!("failed to resolve tool surface: {err}");
+            ExecutionSurface::from_tools(tools)
+        })
+    }
+
+    pub fn tool_catalog(&self, session_id: &str, mode: ExecutionMode) -> Vec<serde_json::Value> {
+        crate::tools::project_tool_catalog(self.execution_surface(session_id, mode).enabled_tools())
     }
 
     pub fn resolve_tool_surface(
         &self,
         ctx: ToolSurfaceContext,
-    ) -> Result<ResolvedToolSurface, PluginError> {
+    ) -> Result<ExecutionSurface, PluginError> {
         let mode = ctx.mode;
-        let mut resolved = ResolvedToolSurface::from_tools(mode, ctx.tools.clone());
+        let mut resolved = ExecutionSurface::from_tools(ctx.tools.clone());
         for owned in collect_owned_sync(
             &self.tool_surface_contributors,
             ToolSurfaceContext {
@@ -482,25 +791,17 @@ impl PluginSession {
                     .iter_mut()
                     .find(|tool| tool.name == override_.tool_name)
                 {
-                    if let Some(inject_into_prompt) = override_.inject_into_prompt {
-                        tool.inject_into_prompt = inject_into_prompt;
+                    if let Some(enabled) = override_.enabled {
+                        tool.enabled = enabled;
                     }
-                    if let Some(discoverable) = override_.discoverable {
-                        tool.hidden = !discoverable;
+                    if let Some(injected) = override_.injected {
+                        tool.injected = injected;
                     }
-                    if tool.description_for(mode).is_empty() {
-                        tool.inject_into_prompt = false;
-                        tool.hidden = true;
+                    if !tool.enabled {
+                        tool.injected = false;
                     }
                 }
             }
-            resolved.guide_sections.extend(
-                contribution
-                    .guide_sections
-                    .into_iter()
-                    .map(|section| section.trim().to_string())
-                    .filter(|section| !section.is_empty()),
-            );
             resolved.tool_list_notes.extend(
                 contribution
                     .tool_list_notes
@@ -509,6 +810,30 @@ impl PluginSession {
                     .filter(|note| !note.is_empty()),
             );
         }
+        for override_ in &self.tool_surface_overlay.overrides {
+            if let Some(tool) = resolved
+                .tools
+                .iter_mut()
+                .find(|tool| tool.name == override_.tool_name)
+            {
+                if let Some(enabled) = override_.enabled {
+                    tool.enabled = enabled;
+                }
+                if let Some(injected) = override_.injected {
+                    tool.injected = injected;
+                }
+                if !tool.enabled {
+                    tool.injected = false;
+                }
+            }
+        }
+        resolved.tool_list_notes.extend(
+            self.tool_surface_overlay
+                .tool_list_notes
+                .iter()
+                .map(|note| note.trim().to_string())
+                .filter(|note| !note.is_empty()),
+        );
         Ok(resolved)
     }
 
@@ -519,44 +844,29 @@ impl PluginSession {
             .collect()
     }
 
-    pub fn collect_prompt_contributions(
+    pub async fn collect_prompt_contributions(
         &self,
         ctx: PromptHookContext,
     ) -> Result<Vec<PromptContribution>, PluginError> {
-        let mut out = Vec::new();
-        for contributor in &self.prompt_contributors {
-            out.extend(contributor(ctx.clone())?);
-        }
+        let mut out = collect_owned_async(&self.prompt_contributors, ctx, |hook, ctx| hook(ctx))
+            .await?
+            .into_iter()
+            .map(|owned| owned.value)
+            .collect::<Vec<_>>();
+        let mut seen = BTreeSet::new();
+        out.retain(|contribution| {
+            seen.insert((
+                contribution.section.as_str().to_string(),
+                contribution.priority,
+                contribution.content.trim().to_string(),
+            ))
+        });
         out.sort_by(|a, b| {
             a.section
                 .as_str()
                 .cmp(b.section.as_str())
                 .then(a.priority.cmp(&b.priority))
         });
-        Ok(out)
-    }
-
-    pub async fn collect_turn_prompt_contributions(
-        &self,
-        ctx: TurnHookContext,
-    ) -> Result<Vec<TurnPromptContribution>, PluginError> {
-        let mut out =
-            collect_owned_async(&self.turn_prompt_contributors, ctx, |hook, ctx| hook(ctx))
-                .await?
-                .into_iter()
-                .filter_map(|owned| {
-                    let content = owned.value.content.trim().to_string();
-                    if content.is_empty() {
-                        None
-                    } else {
-                        Some(TurnPromptContribution {
-                            priority: owned.value.priority,
-                            content,
-                        })
-                    }
-                })
-                .collect::<Vec<_>>();
-        out.sort_by(|a, b| a.priority.cmp(&b.priority));
         Ok(out)
     }
 
@@ -656,6 +966,16 @@ impl PluginSession {
 
     pub fn has_message_mutator(&self, hook: MessageMutatorHook) -> bool {
         self.message_mutators.contains_key(&hook)
+    }
+
+    pub async fn project_tool_result(
+        &self,
+        ctx: ToolResultProjectionContext,
+    ) -> Result<ToolResult, PluginError> {
+        let Some(projector) = self.tool_result_projectors.get(&ctx.hook) else {
+            return Ok(ctx.result);
+        };
+        (projector.hook)(ctx).await
     }
 
     pub async fn on_turn_committed(&self, turn: &AssembledTurn) {
@@ -761,9 +1081,32 @@ impl PluginSession {
     pub fn fork_for_agent(
         &self,
         agent_id: impl Into<String>,
+        execution_mode: ExecutionMode,
     ) -> Result<Arc<PluginSession>, PluginError> {
         let snapshot = self.snapshot()?;
-        self.host.build_session(agent_id, Some(&snapshot))
+        self.host.build_session_with_surface(
+            agent_id,
+            execution_mode,
+            Some(&snapshot),
+            self.tool_surface_overlay.clone(),
+            self.tools.dynamic_snapshot(),
+        )
+    }
+
+    pub fn fork_for_agent_with_tool_surface(
+        &self,
+        agent_id: impl Into<String>,
+        execution_mode: ExecutionMode,
+        tool_surface_overlay: ToolSurfaceContribution,
+    ) -> Result<Arc<PluginSession>, PluginError> {
+        let snapshot = self.snapshot()?;
+        self.host.build_session_with_surface(
+            agent_id,
+            execution_mode,
+            Some(&snapshot),
+            tool_surface_overlay,
+            self.tools.dynamic_snapshot(),
+        )
     }
 
     pub async fn invoke_external(
@@ -823,7 +1166,6 @@ pub enum ExternalInvokeError {
 
 #[derive(Clone)]
 pub struct RuntimeServices {
-    pub tools: Arc<dyn ToolProvider>,
     pub plugins: Arc<PluginSession>,
     pub prompt_bridge: crate::session::PromptBridge,
     pub turn_injection_bridge: crate::session::TurnInjectionBridge,
@@ -874,11 +1216,23 @@ impl SessionManager for NoopSessionManager {
         ))
     }
 
-    async fn start_turn(
+    async fn start_turn_stream(
         &self,
         _session_id: &str,
         _input: TurnInput,
-    ) -> Result<AssembledTurn, PluginError> {
+    ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
+        Err(PluginError::Session(
+            "session execution is unavailable in this runtime".to_string(),
+        ))
+    }
+
+    async fn await_turn(&self, _turn_id: &str) -> Result<AssembledTurn, PluginError> {
+        Err(PluginError::Session(
+            "session execution is unavailable in this runtime".to_string(),
+        ))
+    }
+
+    async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
         Err(PluginError::Session(
             "session execution is unavailable in this runtime".to_string(),
         ))
@@ -886,48 +1240,23 @@ impl SessionManager for NoopSessionManager {
 }
 
 impl RuntimeServices {
-    pub fn new(tools: Arc<dyn ToolProvider>, plugins: Arc<PluginSession>) -> Self {
+    pub fn new(plugins: Arc<PluginSession>) -> Self {
         Self::new_with_bridges(
-            tools,
             plugins,
             crate::session::PromptBridge::new(),
             crate::session::TurnInjectionBridge::new(),
         )
     }
 
-    pub fn new_with_prompt_bridge(
-        tools: Arc<dyn ToolProvider>,
-        plugins: Arc<PluginSession>,
-        prompt_bridge: crate::session::PromptBridge,
-    ) -> Self {
-        Self::new_with_bridges(
-            tools,
-            plugins,
-            prompt_bridge,
-            crate::session::TurnInjectionBridge::new(),
-        )
-    }
-
     pub fn new_with_bridges(
-        tools: Arc<dyn ToolProvider>,
         plugins: Arc<PluginSession>,
         prompt_bridge: crate::session::PromptBridge,
         turn_injection_bridge: crate::session::TurnInjectionBridge,
     ) -> Self {
         Self {
-            tools,
             plugins,
             prompt_bridge,
             turn_injection_bridge,
         }
-    }
-
-    pub fn tools_only(
-        tools: Arc<dyn ToolProvider>,
-        agent_id: impl Into<String>,
-    ) -> Result<Self, PluginError> {
-        let host = PluginHost::empty();
-        let plugins = host.build_session(agent_id, None)?;
-        Ok(Self::new(tools, plugins))
     }
 }
