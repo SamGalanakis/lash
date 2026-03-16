@@ -645,7 +645,9 @@ impl StandardShell {
                 progress,
                 max_output_tokens,
                 WaitBehavior {
-                    return_on_output: true,
+                    // When the caller closes stdin, prefer a settled exit over
+                    // returning immediately on echoed output.
+                    return_on_output: !close_stdin,
                     baseline_len,
                     quiet_period: Some(Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)),
                     exit_grace_period: Some(Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)),
