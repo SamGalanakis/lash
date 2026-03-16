@@ -730,9 +730,11 @@
           current session. Prompt assembly is execution-mode aware: the same tool identity is emitted into REPL help/docs or
           provider-native tool schemas depending on the active mode, and plugin factories are built with
           session-scoped <code>agent_id</code> + <code>execution_mode</code> context before any tool surface resolution happens.
-          Declarative plugins can ship through <code>PluginSpecFactory</code>, while stateful plugins
-          register grouped capabilities through <code>PluginRegistrar</code> namespaces such as
-          <code>tools()</code>, <code>prompt()</code>, <code>surface()</code>, and <code>turn()</code>.
+          Static tool plugins can ship through <code>StaticPluginFactory</code>, context-sensitive declarative plugins can still use
+          <code>PluginSpecFactory</code>, and stateful plugins register grouped capabilities through
+          <code>PluginRegistrar</code> namespaces such as <code>tools()</code>, <code>prompt()</code>,
+          <code>surface()</code>, and <code>turn()</code>. The active plugin session also owns turn preparation,
+          checkpoint directive handling, and finalization before committed history is projected.
           Both execution paths are driven by a single synchronous state machine (<code>TurnMachine</code> in <code>lash/src/sansio.rs</code>)
           that emits I/O effects (<code>LlmCall</code>, <code>ToolCall</code>, <code>ExecCode</code>, <code>Sleep</code>) for the async host driver to fulfil.
         </div>
@@ -1205,7 +1207,8 @@ patch = <span class="kw">call</span> apply_patch { input: <span class="str">"""*
             <p>
               The runtime exposes the available tools as native tool call schemas. Prompt-visible docs and <code>search_tools</code>
               browsing come from the active plugin-owned tool surface for the session. In standard mode,
-              the native parallel primitive is multiple independent tool calls in a single assistant response;
+              prompt-visible tool docs are omitted and the provider-native tool schema is the source of truth.
+              The native parallel primitive is multiple independent tool calls in a single assistant response;
               the runtime executes them concurrently and feeds all results back together before the next model step.
               Use that for unrelated reads, searches, shell commands, or diagnostics that should start together. The command-execution surface
               (<code>exec_command</code> / <code>write_stdin</code>) is PTY-backed and streams terminal-style merged output in both execution modes.
@@ -1353,9 +1356,10 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="arch-card-tag tag-tools"><span class="dot"></span>Tools</div>
         <div class="arch-card-title">Composite Tool Graph</div>
         <div class="arch-card-desc">
-          Plugins are the composition boundary. Small tools can use <code>PluginSpecFactory</code>
-          around a <code>ToolProvider</code> and optional prompt/surface hooks, while larger plugins
-          keep custom state and register capabilities through grouped registrar namespaces.
+          Plugins are the composition boundary. Small static tools can use <code>StaticPluginFactory</code>
+          around a <code>ToolProvider</code>, context-sensitive declarative plugins can use
+          <code>PluginSpecFactory</code>, and larger plugins keep custom state while registering
+          capabilities through grouped registrar namespaces.
           When <code>PluginHost</code> enables dynamic tools, each <code>PluginSession</code> owns a
           <code>DynamicToolProvider</code> for session-local tool edits, and the CLI stages those edits
           via <code>/tools</code> with apply on next turn.
@@ -1371,7 +1375,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
           </div>
           <div class="cell">
             <h4>Discovery</h4>
-            <p><code>search_tools</code> is only exposed when additional non-hidden tools are omitted from Available Tools for brevity. With no query, it returns the full active catalog for the current session.</p>
+            <p><code>search_tools</code> is a REPL-only discovery tool. It is exposed when additional non-hidden tools are omitted from Available Tools for brevity; with no query, it returns the full active catalog for the current session.</p>
           </div>
         </div>
       </div>
@@ -1474,7 +1478,8 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="arch-card-title">Plugin-Driven Defaults</div>
         <div class="arch-card-desc">
           First-party tools are assembled as plugins. Small tools use
-          <code>PluginSpecFactory</code>; stateful plugins like history, plan mode, plan
+          <code>StaticPluginFactory</code> when they only need a fixed spec and
+          <code>PluginSpecFactory</code> when they need session-context-dependent construction; stateful plugins like history, plan mode, plan
           tracking, and child-session delegation keep custom hooks and persistence. The registration surface is
           grouped by concern rather than one flat bag of methods.
         </div>

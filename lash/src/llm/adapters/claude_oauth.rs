@@ -791,6 +791,7 @@ mod tests {
                 name: "read_file".to_string(),
                 description: "Read a file".to_string(),
                 input_schema: json!({"type":"object"}),
+                output_schema: json!({"type":"string"}),
             }],
             tool_choice: crate::llm::types::LlmToolChoice::Auto,
             model_variant: None,

@@ -298,7 +298,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn truncates_strings_with_codex_style_marker() {
+    fn truncates_strings_with_terminal_style_marker() {
         let config = ToolResultProjectionPluginConfig {
             mode: ToolResultProjectionMode::Tokens,
             limit: 5,

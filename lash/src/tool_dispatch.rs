@@ -394,7 +394,7 @@ fn outcome(
 mod tests {
     use super::*;
     use crate::plugin::{
-        PluginError, PluginHost, PluginSpecFactory, SessionHandle, SessionSnapshot,
+        PluginError, PluginHost, SessionHandle, SessionSnapshot, StaticPluginFactory,
     };
     use crate::{AgentStateEnvelope, ContextFoldingConfig, ExecutionMode, ToolProvider, TurnInput};
     use serde_json::json;
@@ -485,11 +485,9 @@ mod tests {
     }
 
     fn test_plugins(provider: Arc<dyn ToolProvider>) -> Arc<PluginSession> {
-        PluginHost::new(vec![Arc::new(PluginSpecFactory::new(
+        PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
             "test_tools",
-            Arc::new(move |_| {
-                Ok(crate::PluginSpec::new().with_tool_provider(Arc::clone(&provider)))
-            }),
+            crate::PluginSpec::new().with_tool_provider(Arc::clone(&provider)),
         ))])
         .build_standard_session("root", None)
         .expect("plugin session")

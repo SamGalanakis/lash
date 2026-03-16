@@ -591,7 +591,7 @@ mod tests {
     use serde_json::json;
 
     fn with_temp_lash_home(test_name: &str, f: impl FnOnce()) {
-        let _env_guard = env_lock().lock().expect("env lock");
+        let _env_guard = env_lock().blocking_lock();
         let temp = TempDirGuard::new(test_name);
         let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
         std::fs::create_dir_all(sessions_dir()).expect("sessions dir");

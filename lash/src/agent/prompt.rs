@@ -227,7 +227,7 @@ fn intro_section(ctx: &PromptRenderContext<'_>) -> Option<String> {
 
 fn execution_section(ctx: &PromptRenderContext<'_>) -> Option<String> {
     Some(if ctx.is_repl {
-        "## Execution\n\nYour output can include prose and `<repl>` blocks.\n- Use prose only when no execution is needed\n- `<repl>` executes immediately when `</repl>` is reached\n- Maximum one `<repl>` block per response\n- `finish expr` ends the turn, and bare `finish` implies `null`\n- `finish ...` may only be used inside `<repl>`\n- If you used `<repl>` at any point in the turn, only `finish ...` ends the turn\n- `observe expr` does not end the turn; it sends hidden feedback to the next model step\n- A `<repl>` block may also do work silently and continue without `finish` or `observe`\n- For direct conversational requests that need no tools, respond in prose only\n- The REPL has no `print`; use `observe expr` for intermediate inspection and `finish ...` for the final answer\n- Prefer small REPL blocks over giant one-shot programs\n- Validate one or two steps, inspect intermediate outputs, then extend the workflow\n- Only `observe expr` creates intermediate execution feedback for the next model step; ordinary assignments are silent\n- The user should see only final prose or `finish ...` output, not intermediate observations\n- In interactive mode, prose-only is fine only if you never opened `<repl>`; after REPL execution, use `observe ...` to continue or `finish ...` when your final answer is ready\n- If you want user-visible commentary after an `observe`, put it at the start of the next response before the next `<repl>` block\n\n### REPL Language\n\nThe REPL is `lashlang`, a small workflow language for tool orchestration.\n- Values are null, booleans, numbers, strings, lists, and records\n- Assign with `name = expr`\n- Bare expressions are valid statements; in `parallel { ... }`, a bare expression branch contributes that value to the result list\n- Call tools with `call tool_name { arg: expr }`\n- Use `parallel { ... }` only for independent tool calls; if one call needs another call's output, do not put them in the same `parallel { ... }`\n- `parallel { ... }` returns a list of branch results in source order, and branches that end with `call ...` produce the same wrapped `{ ok, value, error }` records as ordinary tool calls\n- Use `observe expr` to inspect a value and continue execution\n- Use `finish expr` to end the turn and return a final answer; bare `finish` returns `null`\n- Control flow is limited to statement `if`, `for`, and `finish`; `parallel` also works as an expression\n- Use ternary expressions for inline branching: `cond ? yes : no`\n- Boolean negation supports both `!cond` and `not cond`\n- Boolean conjunction/disjunction support both `&&` / `||` and `and` / `or`\n- Tool results are records like `{ ok: true, value: ... }` or `{ ok: false, error: ... }`\n- Access the wrapped payload via `.value` only when `result.ok` is true\n- Do not assume every `value` is a record: many tools return strings, numbers, or lists directly\n- There is no `T` namespace, no imports, no methods, and no wrapper classes; work with plain records, lists, and primitives\n- There are no classes, exceptions, comprehensions, or arbitrary standard library imports; if you need unsupported features, use the appropriate host tool instead of emulating them inside the REPL\n- Builtins: `len`, `empty`, `contains`, `slice`, `json_parse`, `format`, `to_string`, `to_int`, `to_float`\n- Builtins return plain values; invalid builtin usage raises a runtime error instead of returning a `{ ok, error }` record\n- `slice(value, start, end)` treats `null` bounds as omitted: `start=null` means from the beginning, `end=null` means through the end\n- `to_string(value)` stringifies a single value\n- `format(\"...\", args...)` formats templates with `{}` placeholders; use `{0}`, `{1}`, ... only when argument reordering matters\n- Escape literal braces in templates with `{{` and `}}`\n- String `+` concatenation auto-stringifies when either side is already a string\n- If a REPL program fails, read the error carefully, shrink the block, inspect the next uncertain value with `observe expr`, and rerun a smaller block before expanding again".to_string()
+        "## Execution\n\nYour output can include prose and `<repl>` blocks.\n- Use prose only when no execution is needed\n- Work iteratively: inspect, act, observe, continue\n- Most tasks take multiple REPL cycles, not one large block\n- Use `observe` for intermediate state; `observe` output is hidden from the user\n- Use `finish` only when returning the final result of the turn\n- Verify the end state before finishing when possible\n- If no tools are needed, respond in prose only\n\n### REPL Language\n\nThe REPL is `lashlang`, a small workflow language for tool orchestration.\n- Values are null, booleans, numbers, strings, lists, and records\n- List and record literals use comma-separated entries: `[a, b]`, `{ a: 1, b: 2 }`; tool arg records follow the same rule\n- Assign with `name = expr`\n- Bare expressions are valid statements; in `parallel { ... }`, a bare expression branch contributes that value to the result list\n- Call tools with `call tool_name { arg: expr }`\n- Use `parallel { ... }` only for independent tool calls; if one call needs another call's output, do not put them in the same `parallel { ... }`\n- `parallel { ... }` returns a list of branch results in source order, and branches that end with `call ...` produce the same wrapped `{ ok, value, error }` records as ordinary tool calls\n- Use `observe expr` to inspect a value and continue execution\n- Use `finish expr` only for the final result of the turn; bare `finish` returns `null`\n- Control flow is limited to statement `if`, `for`, and `finish`; `parallel` also works as an expression\n- Use ternary expressions for inline branching: `cond ? yes : no`\n- Boolean negation supports both `!cond` and `not cond`\n- Boolean conjunction/disjunction support both `&&` / `||` and `and` / `or`\n- Tool results are records like `{ ok: true, value: ... }` or `{ ok: false, error: ... }`\n- Access the wrapped payload via `.value` only when `result.ok` is true\n- Do not assume every `value` is a record: many tools return strings, numbers, or lists directly\n- Builtins: `len`, `empty`, `contains`, `slice`, `json_parse`, `format`, `to_string`, `to_int`, `to_float`\n- Builtins return plain values; invalid builtin usage raises a runtime error instead of returning a `{ ok, error }` record\n- `slice(value, start, end)` treats `null` bounds as omitted: `start=null` means from the beginning, `end=null` means through the end\n- `to_string(value)` stringifies a single value\n- `format(\"...\", args...)` formats templates with `{}` placeholders; use `{0}`, `{1}`, ... only when argument reordering matters\n- Escape literal braces in templates with `{{` and `}}`\n- String `+` concatenation auto-stringifies when either side is already a string".to_string()
     } else {
         "## Execution\n\nUse direct tool calls when execution is needed.\n- Do not emit `<repl>` blocks or Python code\n- Call tools directly with valid arguments\n- Use `batch` for 2 or more independent tool calls; serialize only when later arguments depend on earlier results\n- Avoid filler prose between tool calls\n- Work in small, concrete steps and verify each meaningful step before broadening scope\n- After edits, run the narrowest check that can falsify the change before moving on to broader validation\n- If a tool fails or returns incomplete output, inspect the current state, fix the cause, and continue; do not repeat the same failing call unchanged\n- Keep going until the task is complete; do not stop after inspection or partial progress\n- If you are unsure, inspect or validate more instead of guessing\n- Before concluding, verify the concrete end-state with tools whenever possible\n- For direct conversational requests that need no tools, respond in prose only\n- Finish by returning a final assistant answer once the task is actually complete\n- In interactive mode, return a concise final user-facing answer when complete".to_string()
     })
@@ -235,7 +235,12 @@ fn execution_section(ctx: &PromptRenderContext<'_>) -> Option<String> {
 
 fn guidance_section(ctx: &PromptRenderContext<'_>) -> Option<String> {
     Some(format!(
-        "## Guidance\n\n- Use only tools shown in Available Tools; read each tool's description and examples before calling it\n- Tool and plugin sections own the syntax, examples, and special affordances for their surfaces\n- Bias toward concrete execution over abstract discussion\n- Keep going until the request is resolved; do not stop at reconnaissance when a concrete deliverable is requested\n- Validate the smallest relevant thing first, then broaden if needed\n- Prefer the next concrete step that reduces uncertainty\n- Do not fix unrelated failures uncovered during validation; report them instead\n- Never invent tool names or arguments\n- For substantial scripts or workflows, create files and run them with host tooling\n- Use isolated environments only when required dependencies are missing\n- Avoid redundant file reads when values already exist in variables\n- Never speculate about files you have not read\n- Be concise and action-oriented{}\n",
+        "## Guidance\n\n- {}read each tool's description and examples when provided before calling it\n- Tool and plugin sections own the syntax, examples, and special affordances for their surfaces\n- Bias toward concrete execution over abstract discussion\n- Keep going until the request is resolved; do not stop at reconnaissance when a concrete deliverable is requested\n- Validate the smallest relevant thing first, then broaden if needed\n- Prefer the next concrete step that reduces uncertainty\n- Do not fix unrelated failures uncovered during validation; report them instead\n- Never invent tool names or arguments\n- For substantial scripts or workflows, create files and run them with host tooling\n- Use isolated environments only when required dependencies are missing\n- Avoid redundant file reads when values already exist in variables\n- Never speculate about files you have not read\n- Be concise and action-oriented{}\n",
+        if ctx.is_repl {
+            "Use only tools shown in Available Tools; "
+        } else {
+            "Use only available tools; "
+        },
         if ctx.prompt.can_write {
             ""
         } else {
@@ -249,7 +254,11 @@ fn environment_section(_ctx: &PromptRenderContext<'_>) -> Option<String> {
 }
 
 fn available_tools_section(ctx: &PromptRenderContext<'_>) -> Option<String> {
-    Some(format!("## Available Tools\n\n{}", ctx.prompt.tool_list))
+    if ctx.is_repl {
+        Some(format!("## Available Tools\n\n{}", ctx.prompt.tool_list))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -300,10 +309,15 @@ mod tests {
     fn repl_prompt_keeps_lashlang_contract() {
         let text = DefaultPromptRenderer.render(&prompt(crate::ExecutionMode::Repl), &[]);
         assert!(text.contains("Call tools with `call tool_name { arg: expr }`"));
+        assert!(text.contains(
+            "List and record literals use comma-separated entries: `[a, b]`, `{ a: 1, b: 2 }`"
+        ));
         assert!(text.contains("Use ternary expressions for inline branching: `cond ? yes : no`"));
         assert!(text.contains("Boolean negation supports both `!cond` and `not cond`"));
         assert!(text.contains("Use `observe expr` to inspect a value and continue execution"));
         assert!(text.contains("bare `finish` returns `null`"));
+        assert!(text.contains("Use `finish expr` only for the final result of the turn"));
+        assert!(text.contains("Work iteratively: inspect, act, observe, continue"));
         assert!(text.contains("## Available Tools"));
     }
 
@@ -315,9 +329,11 @@ mod tests {
         assert!(text.contains(
             "Tool and plugin sections own the syntax, examples, and special affordances"
         ));
+        assert!(text.contains("Use only available tools; read each tool's description"));
         assert!(!text.contains("update_plan"));
         assert!(!text.contains("## Tool Access"));
         assert!(!text.contains("## Memory API"));
+        assert!(!text.contains("## Available Tools"));
     }
 
     #[test]

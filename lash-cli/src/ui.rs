@@ -288,6 +288,10 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
     let viewport_height = area.height as usize;
     let viewport_width = area.width as usize;
 
+    // Expansion changes can reduce the number or width of rendered rows. Clear the
+    // viewport first so stale glyphs from the previous frame do not survive.
+    frame.render_widget(Block::default().style(theme::history_bg()), area);
+
     // scroll_offset is already clamped by the main loop before draw()
     let scroll = app.scroll_offset;
 
@@ -2604,6 +2608,49 @@ mod tests {
         assert!(middle.contains("Error"));
         assert!(!middle.contains("Working"));
         assert!(!middle.contains("provider timeout"));
+    }
+
+    #[test]
+    fn history_redraw_clears_stale_cells_after_full_expand_toggle() {
+        let backend = TestBackend::new(28, 4);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut app = App::new("model".into(), "session".into());
+        app.blocks = vec![DisplayBlock::CodeBlock {
+            code: "VERY_LONG_STALE_MARKER".into(),
+            continuation: false,
+        }];
+        app.expand_level = 2;
+
+        terminal
+            .draw(|frame| {
+                app.ensure_height_cache_pub(
+                    frame.area().width as usize,
+                    frame.area().height as usize,
+                );
+                draw_history(frame, &app, frame.area());
+            })
+            .expect("first draw");
+
+        app.expand_level = 1;
+        app.invalidate_height_cache();
+        terminal
+            .draw(|frame| {
+                app.ensure_height_cache_pub(
+                    frame.area().width as usize,
+                    frame.area().height as usize,
+                );
+                draw_history(frame, &app, frame.area());
+            })
+            .expect("second draw");
+
+        let buffer = terminal.backend();
+        for y in 0..4 {
+            let row = buffer_row_text(buffer, y, 28);
+            assert!(
+                !row.contains("VERY_LONG_STALE_MARKER"),
+                "history redraw left stale text in row {y}: {row:?}"
+            );
+        }
     }
 
     #[test]

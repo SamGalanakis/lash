@@ -229,6 +229,43 @@ impl ExecutionSurface {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct PluginAbort {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TurnPreparation {
+    pub messages: Vec<crate::Message>,
+    pub events: Vec<crate::AgentEvent>,
+    pub abort: Option<PluginAbort>,
+}
+
+#[derive(Clone)]
+pub struct PrepareTurnRequest {
+    pub session_id: String,
+    pub state: AgentStateEnvelope,
+    pub messages: Vec<crate::Message>,
+    pub prompt_usage: Option<PromptUsage>,
+    pub max_context_tokens: Option<usize>,
+    pub context_folding: Option<ContextFoldingConfig>,
+    pub host: Arc<dyn SessionManager>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CheckpointApplication {
+    pub messages: Vec<PluginMessage>,
+    pub events: Vec<crate::AgentEvent>,
+    pub abort: Option<PluginAbort>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TurnFinalization {
+    pub turn: AssembledTurn,
+    pub events: Vec<crate::AgentEvent>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PluginSurfaceEvent {
@@ -788,6 +825,17 @@ impl PluginSpecFactory {
     }
 }
 
+pub struct StaticPluginFactory {
+    id: &'static str,
+    spec: PluginSpec,
+}
+
+impl StaticPluginFactory {
+    pub fn new(id: &'static str, spec: PluginSpec) -> Self {
+        Self { id, spec }
+    }
+}
+
 struct SpecPlugin {
     id: &'static str,
     spec: PluginSpec,
@@ -802,6 +850,19 @@ impl PluginFactory for PluginSpecFactory {
         Ok(Arc::new(SpecPlugin {
             id: self.id,
             spec: (self.builder)(ctx)?,
+        }))
+    }
+}
+
+impl PluginFactory for StaticPluginFactory {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+
+    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        Ok(Arc::new(SpecPlugin {
+            id: self.id,
+            spec: self.spec.clone(),
         }))
     }
 }
@@ -1246,12 +1307,10 @@ mod tests {
 
     #[test]
     fn runtime_services_are_backed_by_plugin_sessions() {
-        let host = PluginHost::new(vec![Arc::new(PluginSpecFactory::new(
+        let host = PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
             "mock_tool",
-            Arc::new(|_ctx| {
-                Ok(PluginSpec::new()
-                    .with_tool_provider(Arc::new(MockToolProvider) as Arc<dyn ToolProvider>))
-            }),
+            PluginSpec::new()
+                .with_tool_provider(Arc::new(MockToolProvider) as Arc<dyn ToolProvider>),
         ))]);
         let services =
             RuntimeServices::new(host.build_standard_session("root", None).expect("session"));

@@ -68,6 +68,15 @@ fi
 
 class LashAgent(BaseInstalledAgent):
     @staticmethod
+    def _command_metadata(command: str) -> dict[str, str]:
+        return {
+            "phase": "main",
+            "purpose": "agent_run",
+            "family": "lash",
+            "is_main": "true",
+        }
+
+    @staticmethod
     def _timed_command(command: str, index: int) -> str:
         output_path = f"/logs/agent/command-{index}/resource-usage.txt"
         escaped_command = shlex.quote(f"set -o pipefail; {command}")
@@ -225,6 +234,9 @@ class LashAgent(BaseInstalledAgent):
             command_dir = self.logs_dir / f"command-{i}"
             command_dir.mkdir(parents=True, exist_ok=True)
             (command_dir / "command.txt").write_text(exec_input.command)
+            (command_dir / "metadata.json").write_text(
+                json.dumps(self._command_metadata(exec_input.command), indent=2) + "\n"
+            )
 
             result = await environment.exec(
                 command=self._timed_command(exec_input.command, i),

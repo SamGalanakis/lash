@@ -38,6 +38,30 @@ fi
 
 
 class BenchOpenCodeAgent(OpenCode):
+    @staticmethod
+    def _command_metadata(command: str) -> dict[str, str]:
+        normalized = command.strip()
+        if " opencode " in f" {normalized} " and " run" in normalized:
+            return {
+                "phase": "main",
+                "purpose": "agent_run",
+                "family": "opencode",
+                "is_main": "true",
+            }
+        if "opencode.json" in normalized:
+            return {
+                "phase": "bootstrap",
+                "purpose": "config",
+                "family": "opencode",
+                "is_main": "false",
+            }
+        return {
+            "phase": "bootstrap",
+            "purpose": "setup",
+            "family": "opencode",
+            "is_main": "false",
+        }
+
     def _build_register_skills_command(self) -> str | None:
         skills_dir = getattr(self, "skills_dir", None)
         if not skills_dir:
@@ -218,6 +242,9 @@ class BenchOpenCodeAgent(OpenCode):
             command_dir = self.logs_dir / f"command-{i}"
             command_dir.mkdir(parents=True, exist_ok=True)
             (command_dir / "command.txt").write_text(exec_input.command)
+            (command_dir / "metadata.json").write_text(
+                json.dumps(self._command_metadata(exec_input.command), indent=2) + "\n"
+            )
 
             env = exec_input.env
             extra_env = getattr(self, "_extra_env", None)

@@ -306,7 +306,7 @@ mod tests {
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
 
     use lash_core::{
-        MemoryModelCatalogStore, PluginHost, PluginSpecFactory, RuntimeConfig, RuntimeServices,
+        MemoryModelCatalogStore, PluginHost, PluginSpecFactory, RuntimeHostConfig, RuntimeServices,
         ToolProvider,
     };
 
@@ -350,7 +350,7 @@ mod tests {
 
     #[tokio::test]
     async fn restore_agent_state_restores_persisted_usage_into_app_and_runtime() {
-        let _env_guard = env_lock().lock().expect("env lock");
+        let _env_guard = env_lock().lock().await;
         let temp = TempDirGuard::new("lash-resume-usage");
         let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
         let sessions_dir = lash_core::lash_home().join("sessions");
@@ -420,13 +420,14 @@ mod tests {
         let mut desired_dynamic = dynamic_tools.export_state();
         let runtime_services = RuntimeServices::new(plugins);
         let runtime = LashRuntime::from_state(
-            RuntimeConfig {
+            lash_core::AgentConfig {
                 execution_mode: ExecutionMode::Standard,
                 provider: provider.clone(),
                 model: "gpt-5".into(),
                 max_context_tokens: Some(200_000),
-                ..RuntimeConfig::default()
+                ..lash_core::AgentConfig::default()
             },
+            RuntimeHostConfig::default(),
             runtime_services,
             AgentStateEnvelope::default(),
         )

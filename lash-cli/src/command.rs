@@ -26,20 +26,42 @@ pub const COMMANDS: &[(&str, &str)] = &[
 ];
 
 /// Return commands matching the given prefix.
-pub fn completions(prefix: &str, _skills: &SkillCatalog) -> Vec<(String, String)> {
-    COMMANDS
+pub fn completions(prefix: &str, skills: &SkillCatalog) -> Vec<(String, String)> {
+    let mut results = COMMANDS
         .iter()
         .filter(|(cmd, _)| cmd.starts_with(prefix))
         .map(|(cmd, desc)| (cmd.to_string(), desc.to_string()))
-        .collect()
+        .collect::<Vec<_>>();
+
+    if prefix.starts_with('/') {
+        for skill in skills.iter() {
+            let cmd = format!("/{}", skill.name);
+            if cmd.starts_with(prefix) && !results.iter().any(|(existing, _)| existing == &cmd) {
+                let desc = if skill.description.is_empty() {
+                    "Invoke skill".to_string()
+                } else {
+                    format!("Invoke skill: {}", skill.description)
+                };
+                results.push((cmd, desc));
+            }
+        }
+    }
+
+    results
 }
 
 /// Whether accepting autocomplete should append a trailing space.
-pub fn completion_inserts_space(cmd: &str, _skills: &SkillCatalog) -> bool {
-    matches!(
+pub fn completion_inserts_space(cmd: &str, skills: &SkillCatalog) -> bool {
+    if matches!(
         cmd,
         "/fork" | "/model" | "/variant" | "/mode" | "/resume" | "/tools" | "/reconfigure"
-    )
+    ) {
+        return true;
+    }
+    if COMMANDS.iter().any(|(builtin, _)| *builtin == cmd) {
+        return false;
+    }
+    slash_skill_prompt(cmd, skills).is_some()
 }
 
 /// Slash commands recognized by the TUI.
@@ -78,6 +100,24 @@ pub enum Command {
     Tools(Option<String>),
     /// Reconfigure control commands (raw args)
     Reconfigure(Option<String>),
+}
+
+/// Convert `/skill ...` into the ordinary `$skill ...` prompt form.
+pub fn slash_skill_prompt(input: &str, skills: &SkillCatalog) -> Option<String> {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+    let rest = &trimmed[1..];
+    let (cmd, arg) = match rest.split_once(' ') {
+        Some((c, a)) => (c, Some(a.trim())),
+        None => (rest, None),
+    };
+    skills.get(cmd)?;
+    Some(match arg.filter(|a| !a.is_empty()) {
+        Some(arg) => format!("${cmd} {arg}"),
+        None => format!("${cmd}"),
+    })
 }
 
 /// Try to parse a slash command from user input.
@@ -125,6 +165,25 @@ pub fn parse(input: &str, _skills: &SkillCatalog) -> Option<Command> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn skill_catalog_with(names: &[(&str, &str)]) -> SkillCatalog {
+        let root =
+            std::env::temp_dir().join(format!("lash-command-skills-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("temp root");
+        for (name, description) in names {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).expect("skill dir");
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {description}\n---\n\nbody\n"),
+            )
+            .expect("skill file");
+        }
+        let catalog = SkillCatalog::from_dirs(&[PathBuf::from(&root)]);
+        let _ = std::fs::remove_dir_all(root);
+        catalog
+    }
 
     #[test]
     fn parses_all_primary_commands() {
@@ -204,10 +263,26 @@ mod tests {
     }
 
     #[test]
-    fn completions_only_return_builtin_commands() {
-        let skills = SkillCatalog::load();
+    fn completions_include_matching_skills() {
+        let skills =
+            skill_catalog_with(&[("yolopush", "ship changes"), ("spring-cleaning", "cleanup")]);
         let results = completions("/s", &skills);
         assert!(results.iter().any(|(cmd, _)| cmd == "/skills"));
-        assert!(!results.iter().any(|(cmd, _)| cmd == "/some-skill"));
+        assert!(results.iter().any(|(cmd, _)| cmd == "/spring-cleaning"));
+        assert!(!results.iter().any(|(cmd, _)| cmd == "/yolopush"));
+    }
+
+    #[test]
+    fn slash_skill_prompts_convert_to_dollar_mentions() {
+        let skills = skill_catalog_with(&[("yolopush", "ship changes")]);
+        assert_eq!(
+            slash_skill_prompt("/yolopush", &skills).as_deref(),
+            Some("$yolopush")
+        );
+        assert_eq!(
+            slash_skill_prompt("/yolopush merge staging", &skills).as_deref(),
+            Some("$yolopush merge staging")
+        );
+        assert!(slash_skill_prompt("/skills", &skills).is_none());
     }
 }

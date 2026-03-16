@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 
 def parse_ts(value: str | None) -> datetime | None:
@@ -200,6 +200,13 @@ def load_llm_metadata(llm_paths: list[Path]) -> dict[str, Any]:
     record_count = 0
     turns: set[int] = set()
     files: list[dict[str, Any]] = []
+    token_totals = {
+        "raw_input": 0,
+        "output": 0,
+        "cache": 0,
+        "reasoning": 0,
+    }
+    usage_record_count = 0
     for llm_path in llm_paths:
         file_record_count = 0
         file_models: list[str] = []
@@ -214,6 +221,13 @@ def load_llm_metadata(llm_paths: list[Path]) -> dict[str, Any]:
                 continue
             record_count += 1
             file_record_count += 1
+            usage = record.get("usage")
+            if isinstance(usage, dict):
+                token_totals["raw_input"] += int(usage.get("input_tokens") or 0)
+                token_totals["output"] += int(usage.get("output_tokens") or 0)
+                token_totals["cache"] += int(usage.get("cached_input_tokens") or 0)
+                token_totals["reasoning"] += int(usage.get("reasoning_tokens") or 0)
+                usage_record_count += 1
             turn = record.get("turn")
             if isinstance(turn, int):
                 turns.add(turn)
@@ -243,6 +257,8 @@ def load_llm_metadata(llm_paths: list[Path]) -> dict[str, Any]:
         "turn_count": len(turns),
         "models": models,
         "files": files,
+        "usage_record_count": usage_record_count,
+        "tokens": token_totals,
     }
 
 
@@ -362,7 +378,15 @@ def load_opencode_metadata(opencode_path: Path | None) -> dict[str, Any]:
         "batch_call_count": 0,
         "tool_call_breakdown": {},
         "assistant_response": None,
-        "tokens": {"input": 0, "output": 0, "cache": 0, "total": 0},
+        "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": 0,
+            "cache_read": 0,
+            "cache_write": 0,
+            "provider_total": 0,
+        },
     }
     if not opencode_path or not opencode_path.exists():
         return empty
@@ -373,7 +397,15 @@ def load_opencode_metadata(opencode_path: Path | None) -> dict[str, Any]:
     turn_message_ids: set[str] = set()
     llm_call_count = 0
     tool_call_count = 0
-    tokens = {"input": 0, "output": 0, "cache": 0, "total": 0}
+    tokens = {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "provider_total": 0,
+    }
 
     def add_model(value: Any) -> None:
         if isinstance(value, str) and value and value not in models:
@@ -420,12 +452,15 @@ def load_opencode_metadata(opencode_path: Path | None) -> dict[str, Any]:
         if isinstance(token_info, dict):
             tokens["input"] += int(token_info.get("input") or 0)
             tokens["output"] += int(token_info.get("output") or 0)
+            tokens["reasoning"] += int(token_info.get("reasoning") or 0)
             cache = token_info.get("cache")
             if isinstance(cache, dict):
-                tokens["cache"] += int(cache.get("read") or 0) + int(
-                    cache.get("write") or 0
-                )
-            tokens["total"] += int(token_info.get("total") or 0)
+                cache_read = int(cache.get("read") or 0)
+                cache_write = int(cache.get("write") or 0)
+                tokens["cache_read"] += cache_read
+                tokens["cache_write"] += cache_write
+                tokens["cache"] += cache_read + cache_write
+            tokens["provider_total"] += int(token_info.get("total") or 0)
 
     return {
         "models": models,
@@ -439,6 +474,44 @@ def load_opencode_metadata(opencode_path: Path | None) -> dict[str, Any]:
     }
 
 
+def token_input_includes_cache(provider_metadata: dict[str, Any], requested_model: str | None) -> bool:
+    provider_type = str(provider_metadata.get("active_provider_type") or "").strip().lower()
+    requested = str(requested_model or "").strip().lower()
+    if provider_type == "claude" or requested.startswith("anthropic/claude"):
+        return False
+    return True
+
+
+def normalize_token_usage(
+    *,
+    raw_input: int,
+    output: int,
+    reasoning: int,
+    cache_total: int,
+    input_includes_cache: bool,
+    provider_total: int | None = None,
+    cache_read: int | None = None,
+    cache_write: int | None = None,
+) -> dict[str, Any]:
+    normalized_input = raw_input - cache_total if input_includes_cache else raw_input
+    normalized_input = max(normalized_input, 0)
+    non_cache_total = normalized_input + output + reasoning
+    total = non_cache_total + cache_total
+    return {
+        "input": normalized_input,
+        "output": output,
+        "reasoning": reasoning,
+        "cache": cache_total,
+        "cache_read": cache_read,
+        "cache_write": cache_write,
+        "non_cache_total": non_cache_total,
+        "total": total,
+        "raw_input": raw_input,
+        "provider_total": provider_total,
+        "input_includes_cache": input_includes_cache,
+    }
+
+
 def parse_resource_usage(path: Path | None) -> dict[str, Any]:
     empty = {
         "user_cpu_seconds": None,
@@ -447,6 +520,13 @@ def parse_resource_usage(path: Path | None) -> dict[str, Any]:
         "cpu_percent": None,
         "wall_clock_seconds": None,
         "max_rss_kb": None,
+        "major_page_faults": None,
+        "minor_page_faults": None,
+        "voluntary_context_switches": None,
+        "involuntary_context_switches": None,
+        "file_system_inputs": None,
+        "file_system_outputs": None,
+        "swaps": None,
     }
     if not path or not path.exists():
         return empty
@@ -469,6 +549,20 @@ def parse_resource_usage(path: Path | None) -> dict[str, Any]:
                 metrics["wall_clock_seconds"] = parse_time_duration(value)
             elif key == "Maximum resident set size (kbytes)":
                 metrics["max_rss_kb"] = int(value)
+            elif key == "Major (requiring I/O) page faults":
+                metrics["major_page_faults"] = int(value)
+            elif key == "Minor (reclaiming a frame) page faults":
+                metrics["minor_page_faults"] = int(value)
+            elif key == "Voluntary context switches":
+                metrics["voluntary_context_switches"] = int(value)
+            elif key == "Involuntary context switches":
+                metrics["involuntary_context_switches"] = int(value)
+            elif key == "File system inputs":
+                metrics["file_system_inputs"] = int(value)
+            elif key == "File system outputs":
+                metrics["file_system_outputs"] = int(value)
+            elif key == "Swaps":
+                metrics["swaps"] = int(value)
         except ValueError:
             continue
 
@@ -503,9 +597,12 @@ def aggregate_resource_usage(items: list[dict[str, Any]]) -> dict[str, Any]:
         "sample_count": len(items),
         "cpu_seconds_sum": sum(cpu_totals),
         "cpu_seconds_avg": numeric_mean(cpu_totals),
+        "cpu_seconds_max": max(cpu_totals) if cpu_totals else None,
         "wall_clock_seconds_sum": sum(wall_clock_seconds),
         "wall_clock_seconds_avg": numeric_mean(wall_clock_seconds),
+        "wall_clock_seconds_max": max(wall_clock_seconds) if wall_clock_seconds else None,
         "cpu_percent_avg": numeric_mean(cpu_percents),
+        "cpu_percent_max": max(cpu_percents) if cpu_percents else None,
         "max_rss_kb_avg": numeric_mean([float(value) for value in rss_values]),
         "max_rss_kb_max": max(rss_values) if rss_values else None,
     }
@@ -618,6 +715,106 @@ def copy_directory_artifacts(src_dir: Path, dst_dir: Path, run_dir: Path) -> lis
     return copied
 
 
+def infer_command_metadata(
+    command_dir: Path,
+    command_text: str,
+    *,
+    command_index: int,
+    command_count: int,
+) -> dict[str, Any]:
+    metadata_path = command_dir / "metadata.json"
+    if metadata_path.exists():
+        data = load_json(metadata_path)
+        if isinstance(data, dict):
+            return data
+
+    normalized = command_text.strip()
+    if " opencode " in f" {normalized} " and " run" in normalized:
+        return {"phase": "main", "purpose": "agent_run", "family": "opencode", "is_main": True}
+    if "opencode.json" in normalized:
+        return {"phase": "bootstrap", "purpose": "config", "family": "opencode", "is_main": False}
+    if "skills" in normalized and "cp -r" in normalized:
+        return {"phase": "bootstrap", "purpose": "skills", "family": "opencode", "is_main": False}
+    if normalized.startswith("lash ") or " lash " in f" {normalized} ":
+        return {"phase": "main", "purpose": "agent_run", "family": "lash", "is_main": True}
+    return {
+        "phase": "main" if command_index == command_count - 1 else "bootstrap",
+        "purpose": "agent_run" if command_index == command_count - 1 else "setup",
+        "family": "unknown",
+        "is_main": command_index == command_count - 1,
+    }
+
+
+def select_resource_usage_scope(
+    command_records: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    all_items = [
+        record["resource_usage"]
+        for record in command_records
+        if isinstance(record.get("resource_usage"), dict)
+    ]
+    main_items = [
+        record["resource_usage"]
+        for record in command_records
+        if isinstance(record.get("resource_usage"), dict)
+        and ((record.get("metadata") or {}).get("phase") == "main")
+    ]
+    overhead_items = [
+        record["resource_usage"]
+        for record in command_records
+        if isinstance(record.get("resource_usage"), dict)
+        and ((record.get("metadata") or {}).get("phase") != "main")
+    ]
+    return (
+        aggregate_resource_usage(all_items),
+        aggregate_resource_usage(main_items),
+        aggregate_resource_usage(overhead_items),
+    )
+
+
+def resource_usage_bucket(resource_usage: dict[str, Any], bucket: str) -> dict[str, Any]:
+    nested = resource_usage.get(bucket)
+    if isinstance(nested, dict):
+        return nested
+    if bucket in {"main_commands", "all_commands"}:
+        return resource_usage
+    return {}
+
+
+def summarize_trial_resource_usage(
+    trials: list[dict[str, Any]],
+    bucket: str,
+) -> dict[str, Any]:
+    resource_cpu_seconds: list[float] = []
+    resource_rss_kb: list[float] = []
+    resource_wall_seconds: list[float] = []
+    sampled_trials = 0
+
+    for trial in trials:
+        resource_usage = resource_usage_bucket(trial.get("resource_usage") or {}, bucket)
+        if int(resource_usage.get("sample_count") or 0) > 0:
+            sampled_trials += 1
+        cpu_seconds = resource_usage.get("cpu_seconds_sum")
+        if isinstance(cpu_seconds, (float, int)):
+            resource_cpu_seconds.append(float(cpu_seconds))
+        wall_seconds = resource_usage.get("wall_clock_seconds_sum")
+        if isinstance(wall_seconds, (float, int)):
+            resource_wall_seconds.append(float(wall_seconds))
+        max_rss_kb = resource_usage.get("max_rss_kb_max")
+        if isinstance(max_rss_kb, (float, int)):
+            resource_rss_kb.append(float(max_rss_kb))
+
+    return {
+        "sampled_trials": sampled_trials,
+        "cpu_seconds_sum": sum(resource_cpu_seconds),
+        "cpu_seconds_avg": numeric_mean(resource_cpu_seconds),
+        "wall_clock_seconds_sum": sum(resource_wall_seconds),
+        "wall_clock_seconds_avg": numeric_mean(resource_wall_seconds),
+        "max_rss_kb_avg": numeric_mean(resource_rss_kb),
+        "max_rss_kb_max": max(resource_rss_kb) if resource_rss_kb else None,
+    }
+
+
 @dataclass
 class ExportArgs:
     job_dir: Path
@@ -665,7 +862,8 @@ def build_trial_record(
     else:
         status = "fail"
 
-    tokens = {
+    provider_metadata = load_provider_metadata(args.provider_config)
+    raw_agent_tokens = {
         "input": int(agent_result.get("n_input_tokens") or 0),
         "output": int(agent_result.get("n_output_tokens") or 0),
         "cache": int(agent_result.get("n_cache_tokens") or 0),
@@ -725,14 +923,23 @@ def build_trial_record(
         )
 
     command_records: list[dict[str, Any]] = []
-    for command_dir in sorted((trial_dir / "agent").glob("command-*")):
+    command_dirs = sorted((trial_dir / "agent").glob("command-*"))
+    for index, command_dir in enumerate(command_dirs):
         command_idx = command_dir.name
         record: dict[str, Any] = {"name": command_idx}
+        command_text = read_text(command_dir / "command.txt")
+        metadata = infer_command_metadata(
+            command_dir,
+            command_text,
+            command_index=index,
+            command_count=len(command_dirs),
+        )
         for label, filename in (
             ("command", "command.txt"),
             ("stdout", "stdout.txt"),
             ("stderr", "stderr.txt"),
             ("return_code", "return-code.txt"),
+            ("metadata_path", "metadata.json"),
             ("resource_usage_path", "resource-usage.txt"),
         ):
             src = command_dir / filename
@@ -744,6 +951,7 @@ def build_trial_record(
         resource_usage = parse_resource_usage(command_dir / "resource-usage.txt")
         if any(value is not None for value in resource_usage.values()):
             record["resource_usage"] = resource_usage
+        record["metadata"] = metadata
         command_records.append(record)
 
     setup_record: dict[str, str] = {}
@@ -761,7 +969,19 @@ def build_trial_record(
     llm_metadata = (
         load_llm_metadata(llm_candidates)
         if llm_candidates
-        else {"record_count": 0, "turn_count": 0, "models": [], "files": []}
+        else {
+            "record_count": 0,
+            "turn_count": 0,
+            "models": [],
+            "files": [],
+            "usage_record_count": 0,
+            "tokens": {
+                "raw_input": 0,
+                "output": 0,
+                "cache": 0,
+                "reasoning": 0,
+            },
+        }
     )
     session_db_candidates = sorted(sessions_dir.glob("*.db"))
     trajectory_metadata = load_trajectory_metadata(trajectory_path)
@@ -781,8 +1001,53 @@ def build_trial_record(
             "batch_call_count": opencode_metadata["batch_call_count"],
             "tool_call_breakdown": opencode_metadata["tool_call_breakdown"],
         }
-        if tokens["total"] == 0:
-            tokens = dict(opencode_metadata["tokens"])
+
+    token_source = "agent_result"
+    token_details = normalize_token_usage(
+        raw_input=raw_agent_tokens["input"],
+        output=raw_agent_tokens["output"],
+        reasoning=0,
+        cache_total=raw_agent_tokens["cache"],
+        input_includes_cache=token_input_includes_cache(provider_metadata, args.requested_model),
+    )
+    if args.agent == "opencode" and (agent_dir / "opencode.txt").exists():
+        opencode_tokens = opencode_metadata["tokens"]
+        token_details = normalize_token_usage(
+            raw_input=int(opencode_tokens.get("input") or 0),
+            output=int(opencode_tokens.get("output") or 0),
+            reasoning=int(opencode_tokens.get("reasoning") or 0),
+            cache_total=int(opencode_tokens.get("cache") or 0),
+            input_includes_cache=False,
+            provider_total=int(opencode_tokens.get("provider_total") or 0),
+            cache_read=int(opencode_tokens.get("cache_read") or 0),
+            cache_write=int(opencode_tokens.get("cache_write") or 0),
+        )
+        token_source = "opencode_log"
+    elif int(llm_metadata.get("usage_record_count") or 0) > 0:
+        llm_tokens = llm_metadata.get("tokens") or {}
+        token_details = normalize_token_usage(
+            raw_input=int(llm_tokens.get("raw_input") or 0),
+            output=int(llm_tokens.get("output") or 0),
+            reasoning=int(llm_tokens.get("reasoning") or 0),
+            cache_total=int(llm_tokens.get("cache") or 0),
+            input_includes_cache=token_input_includes_cache(
+                provider_metadata, args.requested_model
+            ),
+        )
+        token_source = "lash_llm_log"
+    elif raw_agent_tokens["total"] > 0:
+        token_source = "agent_result_fallback"
+
+    tokens = {
+        "input": token_details["input"],
+        "output": token_details["output"],
+        "reasoning": token_details["reasoning"],
+        "cache": token_details["cache"],
+        "cache_read": token_details["cache_read"],
+        "cache_write": token_details["cache_write"],
+        "non_cache_total": token_details["non_cache_total"],
+        "total": token_details["total"],
+    }
     resolved_models: list[str] = []
     for model in [
         *llm_metadata["models"],
@@ -793,9 +1058,35 @@ def build_trial_record(
             resolved_models.append(model)
     if not resolved_models and args.requested_model:
         resolved_models.append(args.requested_model)
-    resource_usage = aggregate_resource_usage(
-        [record["resource_usage"] for record in command_records if "resource_usage" in record]
+    resource_usage_all, resource_usage_main, resource_usage_overhead = (
+        select_resource_usage_scope(command_records)
     )
+    resource_usage = dict(
+        resource_usage_main
+        if int(resource_usage_main.get("sample_count") or 0) > 0
+        else resource_usage_all
+    )
+    resource_usage["scope"] = (
+        "main_commands"
+        if int(resource_usage_main.get("sample_count") or 0) > 0
+        else "all_commands"
+    )
+    resource_usage["all_commands"] = resource_usage_all
+    resource_usage["main_commands"] = resource_usage_main
+    resource_usage["overhead_commands"] = resource_usage_overhead
+    resource_usage["command_phase_counts"] = {
+        "main": sum(
+            1
+            for record in command_records
+            if ((record.get("metadata") or {}).get("phase") == "main")
+        ),
+        "overhead": sum(
+            1
+            for record in command_records
+            if ((record.get("metadata") or {}).get("phase") != "main")
+        ),
+        "total": len(command_records),
+    }
 
     verifier_stdout = read_text(trial_dir / "verifier" / "test-stdout.txt")
     command_stdout = ""
@@ -849,7 +1140,7 @@ def build_trial_record(
             "requested_model": args.requested_model,
             "resolved_models": resolved_models,
             "variant": args.variant or None,
-            "provider": load_provider_metadata(args.provider_config),
+            "provider": provider_metadata,
             "task_path": ((result.get("task_id") or {}).get("path")),
             "task_git_url": ((result.get("task_id") or {}).get("git_url")),
             "task_git_commit_id": ((result.get("task_id") or {}).get("git_commit_id")),
@@ -862,6 +1153,15 @@ def build_trial_record(
             "tool_call_breakdown": activity_metadata["tool_call_breakdown"],
             "llm_debug_files": llm_metadata["files"],
             "assistant_response_present": bool(assistant_response),
+            "token_accounting": {
+                "source": token_source,
+                "raw_input": token_details["raw_input"],
+                "input_includes_cache": token_details["input_includes_cache"],
+                "provider_total": token_details["provider_total"],
+                "non_cache_total": token_details["non_cache_total"],
+                "cache_read": token_details["cache_read"],
+                "cache_write": token_details["cache_write"],
+            },
             "environment": {
                 "type": ((config.get("environment") or {}).get("type")),
                 "override_cpus": ((config.get("environment") or {}).get("override_cpus")),
@@ -888,7 +1188,16 @@ def build_global_stats(trials: list[dict[str, Any]]) -> dict[str, Any]:
     rewards: list[float] = []
     trial_seconds: list[float] = []
     agent_exec_seconds: list[float] = []
-    total_tokens = {"input": 0, "output": 0, "cache": 0, "total": 0}
+    total_tokens = {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "non_cache_total": 0,
+        "total": 0,
+    }
     activity_totals = {
         "llm_records": 0,
         "llm_turns": 0,
@@ -896,11 +1205,6 @@ def build_global_stats(trials: list[dict[str, Any]]) -> dict[str, Any]:
         "tool_calls": 0,
         "tool_batches": 0,
     }
-    resource_cpu_seconds: list[float] = []
-    resource_rss_kb: list[float] = []
-    resource_wall_seconds: list[float] = []
-    sampled_trials = 0
-
     for trial in trials:
         statuses[trial["status"]] += 1
         reward = trial.get("reward")
@@ -920,21 +1224,12 @@ def build_global_stats(trials: list[dict[str, Any]]) -> dict[str, Any]:
         activity_totals["llm_calls"] += int(metadata.get("llm_call_count") or 0)
         activity_totals["tool_calls"] += int(metadata.get("tool_call_count") or 0)
         activity_totals["tool_batches"] += int(metadata.get("tool_batch_count") or 0)
-        resource_usage = trial.get("resource_usage") or {}
-        if int(resource_usage.get("sample_count") or 0) > 0:
-            sampled_trials += 1
-        cpu_seconds = resource_usage.get("cpu_seconds_sum")
-        if isinstance(cpu_seconds, (float, int)):
-            resource_cpu_seconds.append(float(cpu_seconds))
-        wall_seconds = resource_usage.get("wall_clock_seconds_sum")
-        if isinstance(wall_seconds, (float, int)):
-            resource_wall_seconds.append(float(wall_seconds))
-        max_rss_kb = resource_usage.get("max_rss_kb_max")
-        if isinstance(max_rss_kb, (float, int)):
-            resource_rss_kb.append(float(max_rss_kb))
 
     trial_count = len(trials)
     passed = statuses["pass"]
+    resource_usage_main = summarize_trial_resource_usage(trials, "main_commands")
+    resource_usage_all = summarize_trial_resource_usage(trials, "all_commands")
+    resource_usage_overhead = summarize_trial_resource_usage(trials, "overhead_commands")
     return {
         "trials_total": trial_count,
         "trials_passed": passed,
@@ -958,15 +1253,9 @@ def build_global_stats(trials: list[dict[str, Any]]) -> dict[str, Any]:
             key: (value / trial_count if trial_count else 0.0)
             for key, value in activity_totals.items()
         },
-        "resource_usage": {
-            "sampled_trials": sampled_trials,
-            "cpu_seconds_sum": sum(resource_cpu_seconds),
-            "cpu_seconds_avg": numeric_mean(resource_cpu_seconds),
-            "wall_clock_seconds_sum": sum(resource_wall_seconds),
-            "wall_clock_seconds_avg": numeric_mean(resource_wall_seconds),
-            "max_rss_kb_avg": numeric_mean(resource_rss_kb),
-            "max_rss_kb_max": max(resource_rss_kb) if resource_rss_kb else None,
-        },
+        "resource_usage": resource_usage_main,
+        "resource_usage_all_commands": resource_usage_all,
+        "resource_usage_overhead_commands": resource_usage_overhead,
         "status_counts": dict(sorted(statuses.items())),
     }
 
@@ -1091,11 +1380,25 @@ def load_run_summaries(results_dir: Path) -> list[dict[str, Any]]:
                 "trials_errors": stats.get("trials_errors", 0),
                 "pass_rate": stats.get("pass_rate", 0.0),
                 "tokens_total": (stats.get("tokens_total") or {}).get("total", 0),
+                "tokens_non_cache_total": (stats.get("tokens_total") or {}).get(
+                    "non_cache_total", 0
+                ),
+                "tokens_reasoning_total": (stats.get("tokens_total") or {}).get("reasoning", 0),
+                "tokens_cache_total": (stats.get("tokens_total") or {}).get("cache", 0),
                 "llm_calls_total": (stats.get("activity_total") or {}).get("llm_calls", 0),
                 "turns_total": (stats.get("activity_total") or {}).get("llm_turns", 0),
                 "tool_calls_total": (stats.get("activity_total") or {}).get("tool_calls", 0),
                 "cpu_seconds_total": (stats.get("resource_usage") or {}).get("cpu_seconds_sum", 0),
                 "peak_rss_kb": (stats.get("resource_usage") or {}).get("max_rss_kb_max"),
+                "cpu_seconds_all_total": (
+                    stats.get("resource_usage_all_commands") or {}
+                ).get("cpu_seconds_sum", 0),
+                "peak_rss_all_kb": (
+                    stats.get("resource_usage_all_commands") or {}
+                ).get("max_rss_kb_max"),
+                "cpu_seconds_overhead_total": (
+                    stats.get("resource_usage_overhead_commands") or {}
+                ).get("cpu_seconds_sum", 0),
                 "run_dir": str(run_json.parent.resolve()),
             }
         )

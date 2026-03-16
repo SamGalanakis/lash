@@ -174,15 +174,15 @@ lash --prompt-replace-file "guidance=./prompt.md"
 Run Harbor + Terminal Bench with the in-repo lash adapter:
 
 ```bash
-scripts/run-terminalbench.sh --sample --execution-mode repl
-scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,sqlite-with-gcov
-scripts/run-terminalbench.sh --full --execution-mode standard --task "git-*"
+scripts/run-terminalbench.sh --sample --execution-mode repl --model gpt-5.4 --variant high
+scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,sqlite-with-gcov --model gpt-5.4 --variant high
+scripts/run-terminalbench.sh --full --execution-mode standard --task "git-*" --model gpt-5.4 --variant high
 ```
 
 Run the same harness with OpenCode:
 
 ```bash
-scripts/run-terminalbench.sh --agent opencode --sample --model openrouter/openai/gpt-5
+scripts/run-terminalbench.sh --agent opencode --sample --model openrouter/openai/gpt-5 --variant high
 scripts/run-terminalbench.sh --agent opencode --sample --model anthropic/claude-sonnet-4-5 --variant high
 ```
 
@@ -190,6 +190,7 @@ Notes:
 
 - `lash` remains the default agent.
 - `--execution-mode` only applies to `lash`; OpenCode uses its native execution path.
+- `--variant` is required for all benchmark runs so provider-native reasoning settings are explicit and reproducible.
 - OpenCode benchmark runs require an explicit `--model provider/model`.
 - OpenCode benchmark runs automatically copy local `opencode auth login` credentials from `~/.local/share/opencode/auth.json` into the Harbor container when present.
 - OpenCode can still fall back to provider env vars such as `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`.
@@ -246,19 +247,21 @@ as history, planning, and delegation. `PluginHost` can opt sessions into a
 `tool_surface` plugin owns:
 
 - which tools are injected into the prompt
-- whether `search_tools()` is exposed because additional tools were omitted from the prompt
+- whether `search_tools()` is exposed because additional tools were omitted from the REPL prompt
 - omitted-tool notes attached to the available tool list
 
-For plugin authors, `lash-core` exposes `PluginSpecFactory` plus grouped registrar namespaces on
-`PluginRegistrar` such as `reg.tools()`, `reg.prompt()`, `reg.surface()`, `reg.turn()`,
-`reg.tool_calls()`, `reg.output()`, `reg.messages()`, `reg.tool_results()`, `reg.session()`, and
-`reg.external()`. `PluginSpecFactory` covers the common declarative case where a plugin is mostly a
-`ToolProvider` plus prompt/surface hooks, while bespoke `SessionPlugin` implementations can still
-register the full hook set directly. Plugin factories build against a session context that includes
-both `agent_id` and `execution_mode`, so a plugin can choose the correct per-mode tool instance up
-front. The host-facing `SessionManager` also exposes generic child-session orchestration primitives
-such as `create_session`, `start_turn_stream`, `await_turn`, `cancel_turn`, and `close_session`,
-which is how `agent_call` launches delegated workers without special core-level subagent state.
+For plugin authors, `lash-core` exposes grouped registrar namespaces on `PluginRegistrar` such as
+`reg.tools()`, `reg.prompt()`, `reg.surface()`, `reg.turn()`, `reg.tool_calls()`, `reg.output()`,
+`reg.messages()`, `reg.tool_results()`, `reg.session()`, and `reg.external()`. Small static
+plugins can use `StaticPluginFactory`, context-sensitive declarative plugins can use
+`PluginSpecFactory`, and bespoke `SessionPlugin` implementations can still register the full hook
+set directly. Plugin factories build against a session context that includes both `agent_id` and
+`execution_mode`, so a plugin can choose the correct per-mode tool instance up front. Turn
+lifecycle orchestration is plugin-owned: the active `PluginSession` prepares turns, applies
+checkpoint directives, and finalizes committed turns before history is persisted. The host-facing
+`SessionManager` also exposes generic child-session orchestration primitives such as
+`create_session`, `start_turn_stream`, `await_turn`, `cancel_turn`, and `close_session`, which is
+how `agent_call` launches delegated workers without special core-level subagent state.
 
 ## Config
 

@@ -24,6 +24,7 @@ Options:
   --model <model>               Model to request from the benchmark agent
                                 (optional for lash, required for opencode)
   --variant <name>              Provider-native model variant passed through when supported
+                                (required for all benchmark runs)
   --execution-mode <mode>       Lash execution mode: repl|standard
                                 (required for --agent lash; ignored for opencode)
   --jobs-dir <path>             Harbor jobs output dir (default: jobs)
@@ -45,11 +46,11 @@ Options:
   --help                        Show this help
 
 Examples:
-  scripts/run-terminalbench.sh --sample --execution-mode repl
-  scripts/run-terminalbench.sh --full --execution-mode standard --task "git-*"
-  scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,sqlite-with-gcov
-  scripts/run-terminalbench.sh --sample --execution-mode repl --task chess-best-move --model gpt-5.3-codex
-  scripts/run-terminalbench.sh --agent opencode --sample --model openrouter/openai/gpt-5
+  scripts/run-terminalbench.sh --sample --execution-mode repl --variant high
+  scripts/run-terminalbench.sh --full --execution-mode standard --task "git-*" --variant high
+  scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,sqlite-with-gcov --variant high
+  scripts/run-terminalbench.sh --sample --execution-mode repl --task chess-best-move --model gpt-5.3-codex --variant high
+  scripts/run-terminalbench.sh --agent opencode --sample --model openai/gpt-5.4 --variant high
 EOF
 }
 
@@ -257,6 +258,11 @@ done
 
 if [[ "${AGENT}" != "lash" && "${AGENT}" != "opencode" ]]; then
   echo "error: unsupported --agent: ${AGENT} (expected lash|opencode)" >&2
+  exit 2
+fi
+
+if [[ -z "${VARIANT}" ]]; then
+  echo "error: --variant is required for benchmark runs" >&2
   exit 2
 fi
 

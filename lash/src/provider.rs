@@ -918,7 +918,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_timeouts_default_to_opencode_style_values() {
+    fn provider_timeouts_default_to_standard_values() {
         let timeouts = openai_generic().llm_timeouts();
         assert_eq!(
             timeouts.request_timeout,
