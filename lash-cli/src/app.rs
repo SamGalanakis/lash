@@ -1459,6 +1459,12 @@ impl App {
         self.cursor_pos += c.len_utf8();
     }
 
+    /// Insert literal text at the cursor position.
+    pub fn insert_text(&mut self, text: &str) {
+        self.input.insert_str(self.cursor_pos, text);
+        self.cursor_pos += text.len();
+    }
+
     /// Delete character before cursor.
     pub fn backspace(&mut self) {
         if self.cursor_pos > 0 {
@@ -1800,6 +1806,14 @@ impl App {
         if let Some(p) = &mut self.prompt {
             p.extra_text.insert(p.extra_cursor, c);
             p.extra_cursor += c.len_utf8();
+        }
+    }
+
+    /// Insert literal text into the prompt extra text (or freeform input).
+    pub fn prompt_insert_text(&mut self, text: &str) {
+        if let Some(p) = &mut self.prompt {
+            p.extra_text.insert_str(p.extra_cursor, text);
+            p.extra_cursor += text.len();
         }
     }
 
@@ -3061,6 +3075,38 @@ mod tests {
                 other_variant_name(other)
             ),
         }
+    }
+
+    #[test]
+    fn insert_text_inserts_literal_payload_at_cursor() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.input = "startend".into();
+        app.cursor_pos = "start".len();
+
+        app.insert_text("\nplain pasted text\n");
+
+        assert_eq!(app.input, "start\nplain pasted text\nend");
+        assert_eq!(app.cursor_pos, "start\nplain pasted text\n".len());
+    }
+
+    #[test]
+    fn prompt_insert_text_inserts_literal_payload_at_cursor() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.prompt = Some(PromptState {
+            question: "Question?".into(),
+            options: Vec::new(),
+            selected_idx: 0,
+            extra_text: "startend".into(),
+            extra_cursor: "start".len(),
+            editing_extra: true,
+            response_tx: std::sync::mpsc::channel().0,
+        });
+
+        app.prompt_insert_text("\nplain pasted text\n");
+
+        let prompt = app.prompt.as_ref().expect("prompt");
+        assert_eq!(prompt.extra_text, "start\nplain pasted text\nend");
+        assert_eq!(prompt.extra_cursor, "start\nplain pasted text\n".len());
     }
 
     fn other_variant_name(block: &DisplayBlock) -> &'static str {

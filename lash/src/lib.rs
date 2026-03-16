@@ -111,7 +111,7 @@ pub use provider::{LashConfig, Provider, ProviderOptions, RequestTimeout};
 pub use runtime::{
     AgentStateEnvelope, AssembledTurn, AssistantOutput, CodeOutputRecord, DoneReason, EventSink,
     ExecutionSummary, HostProfile, InputItem, LashRuntime, NoopEventSink, OutputState,
-    PathResolver, PromptUsage, RunMode, RuntimeConfig, RuntimeError, SanitizerPolicy,
+    PathResolver, PromptUsage, RunMode, RuntimeError, RuntimeHostConfig, SanitizerPolicy,
     TerminationPolicy, TurnInput, TurnIssue, TurnStatus,
 };
 pub use sansio::{Effect, EffectId, LlmCallError, Response, TurnMachine, TurnMachineConfig};
@@ -200,7 +200,7 @@ pub struct SandboxMessage {
 pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<SandboxMessage>;
 
 /// A typed parameter for a tool definition.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct ToolParam {
     pub name: String,
     /// REPL type: "str", "int", "float", "bool", "list", "dict", "any"
@@ -208,6 +208,8 @@ pub struct ToolParam {
     pub r#type: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<serde_json::Value>,
     #[serde(default = "ToolParam::default_required")]
     pub required: bool,
 }
@@ -225,6 +227,7 @@ impl ToolParam {
             name: name.into(),
             r#type: ty.into(),
             description: String::new(),
+            default_value: None,
             required: true,
         }
     }
@@ -233,6 +236,7 @@ impl ToolParam {
             name: name.into(),
             r#type: ty.into(),
             description: String::new(),
+            default_value: None,
             required: false,
         }
     }
@@ -263,64 +267,67 @@ pub struct ToolDefinition {
     pub injected: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelTool {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+    pub output_schema: serde_json::Value,
+}
+
 impl ToolDefinition {
     fn default_returns() -> String {
         "any".into()
     }
 
-    /// Format as a typed Python signature: `name(param: type, ...) -> ret`
+    /// Format as a compact prompt-facing signature: `name(param: type, ...) -> ret`
     pub fn signature(&self) -> String {
         let params: Vec<String> = self
             .params
             .iter()
             .map(|p| {
-                let mut s = format!("{}: {}", p.name, p.r#type);
-                if !p.required {
-                    s.push_str(" = None");
+                let mut s = if p.default_value.is_none() && !p.required {
+                    format!("{}?: {}", p.name, display_prompt_type(&p.r#type))
+                } else {
+                    format!("{}: {}", p.name, display_prompt_type(&p.r#type))
+                };
+                if let Some(default) = &p.default_value {
+                    s.push_str(" = ");
+                    s.push_str(&display_default_value(default));
                 }
                 s
             })
             .collect();
         let ret = if self.returns.is_empty() {
-            "any"
+            "any".to_string()
         } else {
-            &self.returns
+            display_prompt_type(&self.returns)
         };
         format!("{}({}) -> {}", self.name, params.join(", "), ret)
+    }
+
+    pub fn model_tool(&self) -> ModelTool {
+        ModelTool {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            input_schema: self.input_schema(),
+            output_schema: self.output_schema(),
+        }
     }
 
     /// Format all tools as a documentation block for LLM prompts.
     pub fn format_tool_docs(tools: &[ToolDefinition]) -> String {
         tools
             .iter()
-            .map(|t| {
-                let mut lines = format!("- `{}`", t.signature());
-                let summary = t.prompt_summary();
-                if !summary.is_empty() {
-                    lines.push_str(&format!(" — {}", summary));
+            .map(|tool| {
+                let mut sections = vec![format!("### `{}`", tool.signature())];
+                if !tool.description.trim().is_empty() {
+                    sections.push(tool.description.trim().to_string());
                 }
-                lines
+                sections.join("\n")
             })
             .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    fn prompt_summary(&self) -> String {
-        let first_block = self
-            .description
-            .split("\n\n")
-            .next()
-            .unwrap_or("")
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-        if first_block.chars().count() <= 220 {
-            return first_block;
-        }
-        let compact = first_block.chars().take(217).collect::<String>();
-        format!("{compact}...")
+            .join("\n\n")
     }
 
     /// Convert the tool signature into a basic JSON Schema object for structured tool-calling APIs.
@@ -348,6 +355,9 @@ impl ToolDefinition {
                     serde_json::Value::String(param.description.clone()),
                 );
             }
+            if let Some(default) = &param.default_value {
+                schema_obj.insert("default".to_string(), default.clone());
+            }
             properties.insert(param.name.clone(), serde_json::Value::Object(schema_obj));
             if param.required {
                 required.push(param.name.clone());
@@ -360,6 +370,52 @@ impl ToolDefinition {
             "required": required,
             "additionalProperties": false,
         })
+    }
+
+    pub fn output_schema(&self) -> serde_json::Value {
+        let ty = self.returns.trim();
+        match ty {
+            "" | "any" => serde_json::json!({}),
+            "str" | "string" => serde_json::json!({ "type": "string" }),
+            "int" | "integer" => serde_json::json!({ "type": "integer" }),
+            "float" | "number" => serde_json::json!({ "type": "number" }),
+            "bool" | "boolean" => serde_json::json!({ "type": "boolean" }),
+            "dict" | "json" => {
+                serde_json::json!({ "type": "object", "additionalProperties": true })
+            }
+            "None" | "null" => serde_json::json!({ "type": "null" }),
+            _ if ty.starts_with("list") => serde_json::json!({ "type": "array", "items": {} }),
+            _ => serde_json::json!({}),
+        }
+    }
+}
+
+fn display_prompt_type(ty: &str) -> String {
+    let trimmed = ty.trim();
+    if let Some(inner) = trimmed
+        .strip_prefix("list[")
+        .and_then(|rest| rest.strip_suffix(']'))
+    {
+        return format!("list[{}]", display_prompt_type(inner));
+    }
+    match trimmed {
+        "string" => "str".to_string(),
+        "integer" => "int".to_string(),
+        "number" => "float".to_string(),
+        "boolean" => "bool".to_string(),
+        "dict" | "json" => "record".to_string(),
+        "None" | "null" => "null".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn display_default_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(v) => v.to_string(),
+        serde_json::Value::Number(v) => v.to_string(),
+        serde_json::Value::String(v) => format!("{v:?}"),
+        _ => serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
     }
 }
 
@@ -417,6 +473,7 @@ mod tests {
         let p = ToolParam::typed("name", "str");
         assert_eq!(p.name, "name");
         assert_eq!(p.r#type, "str");
+        assert!(p.default_value.is_none());
         assert!(p.required);
     }
 
@@ -425,6 +482,7 @@ mod tests {
         let p = ToolParam::optional("name", "int");
         assert_eq!(p.name, "name");
         assert_eq!(p.r#type, "int");
+        assert!(p.default_value.is_none());
         assert!(!p.required);
     }
 
@@ -455,7 +513,47 @@ mod tests {
             enabled: true,
             injected: true,
         };
-        assert_eq!(td.signature(), "bar(limit: int = None) -> list");
+        assert_eq!(td.signature(), "bar(limit?: int) -> list");
+    }
+
+    #[test]
+    fn signature_renders_inline_defaults() {
+        let td = ToolDefinition {
+            name: "glob".into(),
+            description: String::new(),
+            params: vec![
+                ToolParam::typed("pattern", "str"),
+                ToolParam {
+                    name: "path".into(),
+                    r#type: "str".into(),
+                    description: String::new(),
+                    default_value: Some(serde_json::json!(".")),
+                    required: false,
+                },
+                ToolParam {
+                    name: "limit".into(),
+                    r#type: "int".into(),
+                    description: String::new(),
+                    default_value: Some(serde_json::json!(100)),
+                    required: false,
+                },
+                ToolParam {
+                    name: "with_lines".into(),
+                    r#type: "bool".into(),
+                    description: String::new(),
+                    default_value: Some(serde_json::json!(false)),
+                    required: false,
+                },
+            ],
+            returns: "dict".into(),
+            examples: vec![],
+            enabled: true,
+            injected: true,
+        };
+        assert_eq!(
+            td.signature(),
+            "glob(pattern: str, path: str = \".\", limit: int = 100, with_lines: bool = false) -> record"
+        );
     }
 
     #[test]
@@ -469,7 +567,7 @@ mod tests {
             enabled: true,
             injected: true,
         };
-        assert_eq!(td.signature(), "noop() -> None");
+        assert_eq!(td.signature(), "noop() -> null");
     }
 
     #[test]
@@ -497,6 +595,7 @@ mod tests {
                 name: "path".into(),
                 r#type: "str".into(),
                 description: "File path".into(),
+                default_value: None,
                 required: true,
             }],
             returns: "str".into(),
@@ -505,9 +604,36 @@ mod tests {
             injected: true,
         }];
         let docs = ToolDefinition::format_tool_docs(&tools);
-        assert!(docs.contains("- `read(path: str) -> str`"));
-        assert!(docs.contains("— Read a file"));
-        assert!(!docs.contains("File path"));
+        assert!(docs.contains("### `read(path: str) -> str`"));
+        assert!(docs.contains("Read a file"));
+        assert!(!docs.contains("Input schema:"));
+        assert!(!docs.contains("Output schema:"));
+    }
+
+    #[test]
+    fn output_schema_maps_common_return_types() {
+        let mut tool = ToolDefinition {
+            name: "f".into(),
+            description: String::new(),
+            params: vec![],
+            returns: "dict".into(),
+            examples: vec![],
+            enabled: true,
+            injected: true,
+        };
+        assert_eq!(
+            tool.output_schema(),
+            serde_json::json!({"type":"object","additionalProperties":true})
+        );
+
+        tool.returns = "list[str]".into();
+        assert_eq!(
+            tool.output_schema(),
+            serde_json::json!({"type":"array","items":{}})
+        );
+
+        tool.returns = "None".into();
+        assert_eq!(tool.output_schema(), serde_json::json!({"type":"null"}));
     }
 
     #[test]

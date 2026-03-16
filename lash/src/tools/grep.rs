@@ -31,12 +31,14 @@ impl ToolProvider for Grep {
                     r#type: "str".into(),
                     description: "Directory or file to search in (default: current directory)"
                         .into(),
+                    default_value: Some(serde_json::json!(".")),
                     required: false,
                 },
                 ToolParam {
                     name: "include".into(),
                     r#type: "str".into(),
                     description: "Glob pattern to filter files (e.g. \"*.rs\", \"*.py\")".into(),
+                    default_value: None,
                     required: false,
                 },
                 ToolParam {
@@ -46,6 +48,7 @@ impl ToolProvider for Grep {
                         "Number of context lines before/after each match (ripgrep `-C`, default: {}). Use 0 for match-only output.",
                         DEFAULT_CONTEXT
                     ),
+                    default_value: Some(serde_json::json!(DEFAULT_CONTEXT)),
                     required: false,
                 },
                 ToolParam {
@@ -55,6 +58,7 @@ impl ToolProvider for Grep {
                         "Maximum matches to return (default: {}). Use null or \"none\" for no cap.",
                         MAX_RESULTS
                     ),
+                    default_value: Some(serde_json::json!(MAX_RESULTS)),
                     required: false,
                 },
             ],

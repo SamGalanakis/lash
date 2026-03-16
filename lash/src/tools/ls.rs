@@ -26,12 +26,14 @@ impl ToolProvider for Ls {
                     name: "path".into(),
                     r#type: "str".into(),
                     description: "Directory to list (default: current directory)".into(),
+                    default_value: Some(serde_json::json!(".")),
                     required: false,
                 },
                 ToolParam {
                     name: "ignore".into(),
                     r#type: "list".into(),
                     description: "Additional patterns to ignore".into(),
+                    default_value: None,
                     required: false,
                 },
                 ToolParam {
@@ -41,6 +43,7 @@ impl ToolProvider for Ls {
                         "Maximum directory depth to traverse (default: {}). Use null or \"none\" for no depth cap.",
                         DEFAULT_DEPTH
                     ),
+                    default_value: Some(serde_json::json!(DEFAULT_DEPTH)),
                     required: false,
                 },
                 ToolParam {
@@ -50,6 +53,7 @@ impl ToolProvider for Ls {
                         "Maximum entries to return (default: {}). Use null or \"none\" for no cap.",
                         MAX_ENTRIES
                     ),
+                    default_value: Some(serde_json::json!(MAX_ENTRIES)),
                     required: false,
                 },
                 ToolParam {
@@ -57,6 +61,7 @@ impl ToolProvider for Ls {
                     r#type: "bool".into(),
                     description: "Count text lines for file entries (`lines`). Default: false."
                         .into(),
+                    default_value: Some(serde_json::json!(false)),
                     required: false,
                 },
             ],

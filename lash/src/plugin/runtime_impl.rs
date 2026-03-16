@@ -5,6 +5,7 @@ use std::sync::{Mutex as StdMutex, Weak};
 use tokio::task::JoinSet;
 
 use super::*;
+use crate::{AgentEvent, Message, MessageOrigin, Part, PartKind, PruneState};
 
 #[derive(Clone)]
 struct RegisteredHook<T> {
@@ -113,6 +114,69 @@ where
         });
     }
     Ok(out)
+}
+
+fn plugin_message_to_message(
+    existing: &[Message],
+    idx: usize,
+    plugin_message: &PluginMessage,
+) -> Message {
+    let msg_idx = existing.len() + idx;
+    Message {
+        id: format!("m{msg_idx}"),
+        role: plugin_message.role,
+        parts: vec![Part {
+            id: format!("m{msg_idx}.p0"),
+            kind: PartKind::Text,
+            content: plugin_message.content.clone(),
+            tool_call_id: None,
+            tool_name: None,
+            prune_state: PruneState::Intact,
+        }],
+        origin: Some(MessageOrigin::Plugin {
+            plugin_id: "plugin".to_string(),
+        }),
+    }
+}
+
+fn append_plugin_messages(messages: &mut Vec<Message>, plugin_messages: &[PluginMessage]) {
+    let new_messages = plugin_messages
+        .iter()
+        .filter(|message| matches!(message.role, MessageRole::User | MessageRole::System))
+        .enumerate()
+        .map(|(idx, message)| plugin_message_to_message(messages, idx, message))
+        .collect::<Vec<_>>();
+    messages.extend(new_messages);
+}
+
+fn normalize_message_ids(messages: &mut [Message]) {
+    for (msg_idx, message) in messages.iter_mut().enumerate() {
+        message.id = format!("m{msg_idx}");
+        if message.parts.is_empty() {
+            message.parts.push(Part {
+                id: String::new(),
+                kind: PartKind::Text,
+                content: String::new(),
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: PruneState::Intact,
+            });
+        }
+        let message_id = message.id.clone();
+        for (part_idx, part) in message.parts.iter_mut().enumerate() {
+            part.id = format!("{message_id}.p{part_idx}");
+        }
+    }
+}
+
+fn plugin_surface_events(plugin_id: &str, events: Vec<PluginSurfaceEvent>) -> Vec<AgentEvent> {
+    events
+        .into_iter()
+        .map(|event| AgentEvent::PluginEvent {
+            plugin_id: plugin_id.to_string(),
+            event,
+        })
+        .collect()
 }
 
 pub struct PluginRegistrar {
@@ -870,6 +934,155 @@ impl PluginSession {
         Ok(out)
     }
 
+    pub async fn mutate_turn_messages(
+        &self,
+        ctx: MessageMutatorContext,
+        messages: Vec<Message>,
+    ) -> Result<Vec<Message>, PluginError> {
+        let mut messages = self.mutate_messages(ctx, messages).await?;
+        normalize_message_ids(&mut messages);
+        Ok(messages)
+    }
+
+    async fn apply_turn_directives(
+        &self,
+        directives: Vec<PluginOwned<PluginDirective>>,
+        mut messages: Vec<Message>,
+        host: Arc<dyn SessionManager>,
+        allow_abort: bool,
+        invalid_context: &'static str,
+    ) -> Result<TurnPreparation, PluginError> {
+        let mut events = Vec::new();
+        let mut abort = None;
+
+        for emitted in directives {
+            match emitted.value {
+                PluginDirective::AbortTurn { code, message } => {
+                    if !allow_abort {
+                        return Err(PluginError::Session(invalid_context.to_string()));
+                    }
+                    abort = Some(PluginAbort { code, message });
+                }
+                PluginDirective::EnqueueMessages {
+                    messages: plugin_messages,
+                } => append_plugin_messages(&mut messages, &plugin_messages),
+                PluginDirective::CreateSession { request } => {
+                    host.create_session(*request)
+                        .await
+                        .map_err(|err| PluginError::Session(err.to_string()))?;
+                }
+                PluginDirective::EmitEvents { events: surface } => {
+                    events.extend(plugin_surface_events(&emitted.plugin_id, surface));
+                }
+                PluginDirective::ReplaceToolArgs { .. }
+                | PluginDirective::ShortCircuitTool { .. } => {
+                    return Err(PluginError::Session(invalid_context.to_string()));
+                }
+            }
+        }
+
+        normalize_message_ids(&mut messages);
+        Ok(TurnPreparation {
+            messages,
+            events,
+            abort,
+        })
+    }
+
+    pub async fn prepare_turn(
+        &self,
+        request: PrepareTurnRequest,
+    ) -> Result<TurnPreparation, PluginError> {
+        let PrepareTurnRequest {
+            session_id,
+            mut state,
+            messages,
+            prompt_usage,
+            max_context_tokens,
+            context_folding,
+            host,
+        } = request;
+        state.messages = messages.clone();
+        if let Some(usage) = prompt_usage.clone() {
+            state.last_prompt_usage = Some(usage);
+        }
+
+        let messages = self
+            .mutate_turn_messages(
+                MessageMutatorContext {
+                    hook: MessageMutatorHook::BeforeTurn,
+                    session_id: session_id.clone(),
+                    state: state.clone(),
+                    host: Arc::clone(&host),
+                    turn: None,
+                    prompt_usage,
+                    max_context_tokens,
+                    context_folding,
+                },
+                messages,
+            )
+            .await?;
+
+        let mut hook_state = state;
+        hook_state.messages = messages.clone();
+        let directives = self
+            .before_turn(TurnHookContext {
+                session_id,
+                state: hook_state,
+                host: Arc::clone(&host),
+            })
+            .await?;
+        self.apply_turn_directives(
+            directives,
+            messages,
+            host,
+            true,
+            "tool directives are not valid in before_turn",
+        )
+        .await
+    }
+
+    pub async fn apply_checkpoint(
+        &self,
+        ctx: CheckpointHookContext,
+    ) -> Result<CheckpointApplication, PluginError> {
+        let directives = self.at_checkpoint(ctx.clone()).await?;
+        let mut messages = Vec::new();
+        let mut events = Vec::new();
+        let mut abort = None;
+
+        for emitted in directives {
+            match emitted.value {
+                PluginDirective::EnqueueMessages { messages: queued } => messages.extend(queued),
+                PluginDirective::CreateSession { request } => {
+                    ctx.host
+                        .create_session(*request)
+                        .await
+                        .map_err(|err| PluginError::Session(err.to_string()))?;
+                }
+                PluginDirective::AbortTurn { code, message } => {
+                    abort = Some(PluginAbort { code, message });
+                }
+                PluginDirective::EmitEvents { events: surface } => {
+                    events.extend(plugin_surface_events(&emitted.plugin_id, surface));
+                }
+                PluginDirective::ReplaceToolArgs { .. }
+                | PluginDirective::ShortCircuitTool { .. } => {
+                    return Err(PluginError::Session(
+                        "checkpoint hooks only support abort, message enqueue, and session creation"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(CheckpointApplication {
+            messages,
+            events,
+            abort,
+        })
+    }
+
     pub async fn before_turn(
         &self,
         ctx: TurnHookContext,
@@ -1041,6 +1254,79 @@ impl PluginSession {
             }
         }
         state
+    }
+
+    pub async fn finalize_turn(
+        &self,
+        mut turn: AssembledTurn,
+        prompt_usage: Option<PromptUsage>,
+        max_context_tokens: Option<usize>,
+        context_folding: Option<ContextFoldingConfig>,
+        host: Arc<dyn SessionManager>,
+    ) -> Result<TurnFinalization, PluginError> {
+        let session_id = turn.state.agent_id.clone();
+        let messages = self
+            .mutate_turn_messages(
+                MessageMutatorContext {
+                    hook: MessageMutatorHook::AfterTurn,
+                    session_id: session_id.clone(),
+                    state: turn.state.clone(),
+                    host: Arc::clone(&host),
+                    turn: Some(turn.clone()),
+                    prompt_usage: prompt_usage.clone(),
+                    max_context_tokens,
+                    context_folding,
+                },
+                turn.state.messages.clone(),
+            )
+            .await?;
+        turn.state.messages = messages;
+
+        let directives = self
+            .after_turn(TurnResultHookContext {
+                session_id: session_id.clone(),
+                turn: turn.clone(),
+                host: Arc::clone(&host),
+            })
+            .await?;
+        let prepared = self
+            .apply_turn_directives(
+                directives,
+                turn.state.messages.clone(),
+                Arc::clone(&host),
+                false,
+                "only message enqueue and session creation are valid in after_turn",
+            )
+            .await?;
+        turn.state.messages = prepared.messages;
+
+        let mut committed_turn = turn.clone();
+        for tool_call in &mut committed_turn.tool_calls {
+            let projected = self
+                .project_tool_result(ToolResultProjectionContext {
+                    hook: ToolResultProjectionHook::BeforeHistory,
+                    session_id: session_id.clone(),
+                    tool_name: tool_call.tool.clone(),
+                    args: tool_call.args.clone(),
+                    result: ToolResult {
+                        success: tool_call.success,
+                        result: tool_call.result.clone(),
+                        images: Vec::new(),
+                    },
+                    duration_ms: tool_call.duration_ms,
+                    host: Arc::clone(&host),
+                })
+                .await?;
+            tool_call.result = projected.result;
+            tool_call.success = projected.success;
+        }
+        self.on_turn_committed(&committed_turn).await;
+        turn.state.plugin_snapshot = self.snapshot().ok();
+
+        Ok(TurnFinalization {
+            turn,
+            events: prepared.events,
+        })
     }
 
     pub fn snapshot(&self) -> Result<PluginSessionSnapshot, PluginError> {

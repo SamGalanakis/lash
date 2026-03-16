@@ -28,6 +28,7 @@ impl ToolProvider for Glob {
                     name: "path".into(),
                     r#type: "str".into(),
                     description: "Base directory to search in (default: current directory)".into(),
+                    default_value: Some(serde_json::json!(".")),
                     required: false,
                 },
                 ToolParam {
@@ -37,6 +38,7 @@ impl ToolProvider for Glob {
                         "Maximum results to return (default: {}). Use null or \"none\" for no cap.",
                         MAX_RESULTS
                     ),
+                    default_value: Some(serde_json::json!(MAX_RESULTS)),
                     required: false,
                 },
                 ToolParam {
@@ -44,6 +46,7 @@ impl ToolProvider for Glob {
                     r#type: "bool".into(),
                     description: "Count text lines for file entries (`lines`). Default: false."
                         .into(),
+                    default_value: Some(serde_json::json!(false)),
                     required: false,
                 },
             ],

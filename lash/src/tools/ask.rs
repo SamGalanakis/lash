@@ -70,6 +70,7 @@ impl ToolProvider for AskTool {
                     name: "question".into(),
                     r#type: "str".into(),
                     description: "Question to show the user.".into(),
+                    default_value: None,
                     required: true,
                 },
                 ToolParam {
@@ -78,6 +79,7 @@ impl ToolProvider for AskTool {
                     description:
                         "Optional list of short choices. Omit or pass null for free-form input."
                             .into(),
+                    default_value: None,
                     required: false,
                 },
             ],

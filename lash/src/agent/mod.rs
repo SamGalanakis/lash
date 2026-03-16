@@ -382,20 +382,29 @@ pub(crate) fn build_execution_preamble(
     let session_id = config.session_id.as_deref().unwrap_or("root");
     let surface = session.plugins().execution_surface(session_id, mode);
     let enabled_tools = surface.enabled_tools();
-    let prompt_tools = surface.prompt_tools();
-    let mut tool_list = ToolDefinition::format_tool_docs(&prompt_tools);
-    let omitted_tool_count = count_prompt_omitted_tools(&enabled_tools);
-    for note in &surface.tool_list_notes {
-        tool_list.push_str("\n\n");
-        tool_list.push_str(note);
-    }
+    let (tool_list, omitted_tool_count) = if matches!(mode, ExecutionMode::Repl) {
+        let prompt_tools = surface.prompt_tools();
+        let mut tool_list = ToolDefinition::format_tool_docs(&prompt_tools);
+        let omitted_tool_count = count_prompt_omitted_tools(&enabled_tools);
+        for note in &surface.tool_list_notes {
+            tool_list.push_str("\n\n");
+            tool_list.push_str(note);
+        }
+        (tool_list, omitted_tool_count)
+    } else {
+        (String::new(), 0)
+    };
     let tool_specs = if matches!(mode, ExecutionMode::Standard) {
         enabled_tools
             .iter()
-            .map(|tool| LlmToolSpec {
-                name: tool.name.clone(),
-                description: tool.description.clone(),
-                input_schema: tool.input_schema(),
+            .map(|tool| {
+                let model_tool = tool.model_tool();
+                LlmToolSpec {
+                    name: model_tool.name,
+                    description: model_tool.description,
+                    input_schema: model_tool.input_schema,
+                    output_schema: model_tool.output_schema,
+                }
             })
             .collect()
     } else {

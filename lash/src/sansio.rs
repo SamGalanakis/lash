@@ -203,6 +203,11 @@ struct ReplTurnState {
     fence: FenceState,
 }
 
+struct PendingReplLlmCompletion {
+    response_text: String,
+    latest_usage: LlmUsage,
+}
+
 struct WaitingLlmState {
     retry_attempt: usize,
     fence: Option<FenceState>,
@@ -267,6 +272,7 @@ pub struct TurnMachine {
     iteration: usize,
     run_offset: usize,
     cumulative_usage: TokenUsage,
+    pending_repl_completion: Option<PendingReplLlmCompletion>,
     termination: TurnTerminationPolicyState,
 }
 
@@ -293,6 +299,7 @@ impl TurnMachine {
             iteration: run_offset,
             run_offset,
             cumulative_usage: TokenUsage::default(),
+            pending_repl_completion: None,
             termination: TurnTerminationPolicyState::new(),
         }
     }
@@ -532,6 +539,10 @@ impl TurnMachine {
                 MachineState::WaitingLlm { fence: Some(f), .. } => f,
                 _ => unreachable!(),
             };
+            self.pending_repl_completion = Some(PendingReplLlmCompletion {
+                response_text: fence_taken.response.clone(),
+                latest_usage: fence_taken.latest_usage.clone(),
+            });
 
             self.pending_effects
                 .push_back(Effect::CancelLlm { id: effect_id });
@@ -728,9 +739,19 @@ impl TurnMachine {
         result: Result<LlmResponse, LlmCallError>,
         text_streamed: bool,
     ) {
-        let Some(waiting) = self.take_waiting_llm_state() else {
+        let waiting = self.take_waiting_llm_state();
+        let Some(waiting) = waiting else {
+            let pending = self.pending_repl_completion.take();
+            if let (Some(pending), Ok(llm_response)) = (pending, &result) {
+                self.record_llm_usage(
+                    llm_response,
+                    &pending.response_text,
+                    Some(&pending.latest_usage),
+                );
+            }
             return;
         };
+        self.pending_repl_completion = None;
 
         match result {
             Err(error) => {
@@ -747,7 +768,11 @@ impl TurnMachine {
             }
             Ok(llm_response) => {
                 let response_text = self.llm_response_text(&llm_response, waiting.fence.as_ref());
-                self.record_llm_usage(&llm_response, response_text);
+                self.record_llm_usage(
+                    &llm_response,
+                    response_text,
+                    waiting.fence.as_ref().map(|fence| &fence.latest_usage),
+                );
                 match self.config.execution_mode {
                     ExecutionMode::Standard => {
                         self.handle_standard_llm_success(llm_response, text_streamed)
@@ -829,12 +854,18 @@ impl TurnMachine {
         }
     }
 
-    fn record_llm_usage(&mut self, llm_response: &LlmResponse, response_text: &str) {
-        let usage = TokenUsage {
-            input_tokens: llm_response.usage.input_tokens,
-            output_tokens: llm_response.usage.output_tokens,
-            cached_input_tokens: llm_response.usage.cached_input_tokens,
-            reasoning_tokens: llm_response.usage.reasoning_tokens,
+    fn record_llm_usage(
+        &mut self,
+        llm_response: &LlmResponse,
+        response_text: &str,
+        fallback_usage: Option<&LlmUsage>,
+    ) {
+        let usage = if llm_usage_is_empty(&llm_response.usage) {
+            fallback_usage
+                .map(token_usage_from_llm_usage)
+                .unwrap_or_default()
+        } else {
+            token_usage_from_llm_usage(&llm_response.usage)
         };
         self.cumulative_usage.add(&usage);
         self.emit(AgentEvent::TokenUsage {
@@ -1609,6 +1640,22 @@ impl TurnMachine {
     }
 }
 
+fn token_usage_from_llm_usage(usage: &LlmUsage) -> TokenUsage {
+    TokenUsage {
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cached_input_tokens: usage.cached_input_tokens,
+        reasoning_tokens: usage.reasoning_tokens,
+    }
+}
+
+fn llm_usage_is_empty(usage: &LlmUsage) -> bool {
+    usage.input_tokens == 0
+        && usage.output_tokens == 0
+        && usage.cached_input_tokens == 0
+        && usage.reasoning_tokens == 0
+}
+
 // ─── Tests ───
 
 #[cfg(test)]
@@ -1723,6 +1770,27 @@ mod tests {
     fn find_checkpoint(effects: &[Effect]) -> Option<(EffectId, CheckpointKind)> {
         effects.iter().find_map(|e| match e {
             Effect::Checkpoint { id, checkpoint } => Some((*id, *checkpoint)),
+            _ => None,
+        })
+    }
+
+    fn find_token_usage(effects: &[Effect]) -> Option<TokenUsage> {
+        effects.iter().find_map(|e| match e {
+            Effect::Emit(AgentEvent::TokenUsage { usage, .. }) => Some(usage.clone()),
+            _ => None,
+        })
+    }
+
+    fn find_llm_debug(effects: &[Effect]) -> Option<(TokenUsage, String)> {
+        effects.iter().find_map(|e| match e {
+            Effect::Log {
+                event:
+                    LogEvent::LlmDebug {
+                        usage,
+                        response_text,
+                        ..
+                    },
+            } => Some((usage.clone(), response_text.clone())),
             _ => None,
         })
     }
@@ -2383,6 +2451,61 @@ mod tests {
 
         let effects = drain_effects(&mut machine);
         assert!(find_done(&effects).is_some());
+    }
+
+    #[test]
+    fn repl_stream_cancel_still_records_usage_and_debug_log() {
+        let mut config = test_config(ExecutionMode::Repl);
+        config.emit_llm_debug_log = true;
+        let msgs = vec![user_message("run some code")];
+        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+
+        let effects = drain_effects(&mut machine);
+        let llm_id = *find_llm_call(&effects).expect("llm call");
+
+        machine.handle_llm_usage(
+            llm_id,
+            &LlmUsage {
+                input_tokens: 321,
+                output_tokens: 123,
+                cached_input_tokens: 45,
+                reasoning_tokens: 67,
+            },
+        );
+        let cont =
+            machine.handle_llm_delta(llm_id, "Here's the code:\n<repl>\nprint('hi')\n</repl>\n");
+        assert!(!cont);
+
+        let effects = drain_effects(&mut machine);
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::ExecCode { .. })),
+            "should emit ExecCode"
+        );
+
+        machine.handle_response(Response::LlmComplete {
+            id: llm_id,
+            text_streamed: true,
+            result: Ok(LlmResponse::default()),
+        });
+
+        let effects = drain_effects(&mut machine);
+        let usage = find_token_usage(&effects).expect("token usage");
+        assert_eq!(usage.input_tokens, 321);
+        assert_eq!(usage.output_tokens, 123);
+        assert_eq!(usage.cached_input_tokens, 45);
+        assert_eq!(usage.reasoning_tokens, 67);
+
+        let (debug_usage, response_text) = find_llm_debug(&effects).expect("llm debug");
+        assert_eq!(debug_usage.input_tokens, 321);
+        assert_eq!(debug_usage.output_tokens, 123);
+        assert_eq!(debug_usage.cached_input_tokens, 45);
+        assert_eq!(debug_usage.reasoning_tokens, 67);
+        assert_eq!(
+            response_text,
+            "Here's the code:\n<repl>\nprint('hi')\n</repl>\n"
+        );
     }
 
     #[test]

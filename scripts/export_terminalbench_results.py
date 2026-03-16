@@ -70,6 +70,7 @@ def main() -> int:
         f"passed={stats.get('trials_passed', 0)}/{stats.get('trials_total', 0)} "
         f"pass_rate={(stats.get('pass_rate', 0.0) * 100):.1f}% "
         f"avg_duration={format_duration(stats.get('duration_seconds_avg'))} "
+        f"tokens_non_cache={(stats.get('tokens_total') or {}).get('non_cache_total', 0)} "
         f"tokens_total={(stats.get('tokens_total') or {}).get('total', 0)} "
         f"wall={format_duration(timing.get('duration_seconds'))}"
     )

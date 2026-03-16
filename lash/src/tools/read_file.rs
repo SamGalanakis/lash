@@ -118,6 +118,7 @@ impl ToolProvider for ReadFile {
                     name: "offset".into(),
                     r#type: "int".into(),
                     description: "Line offset to start reading from (1-based)".into(),
+                    default_value: None,
                     required: false,
                 },
                 ToolParam {
@@ -127,6 +128,7 @@ impl ToolProvider for ReadFile {
                         "Maximum lines to read (default: {}). Use null or \"none\" for no cap.",
                         DEFAULT_LIMIT
                     ),
+                    default_value: Some(serde_json::json!(DEFAULT_LIMIT)),
                     required: false,
                 },
             ],

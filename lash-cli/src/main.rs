@@ -161,6 +161,7 @@ fn cleanup_terminal() {
         std::io::stdout(),
         crossterm::event::PopKeyboardEnhancementFlags
     );
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
     let _ = crossterm::execute!(
         std::io::stdout(),
         crossterm::style::Print("\x1b]111\x1b\\"),
@@ -181,6 +182,8 @@ fn configure_terminal_ui(no_mouse: bool) -> anyhow::Result<()> {
             crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
         )
     );
+    // Bracketed paste tells the terminal we can accept paste payloads as literal text.
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
     if !no_mouse {
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
     }
@@ -507,9 +510,9 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let initial_model_variant = config.model_variant.clone();
-    let runtime_config: RuntimeConfig = config.clone().into();
     let runtime = LashRuntime::from_state(
-        runtime_config,
+        config.clone(),
+        RuntimeHostConfig::default(),
         RuntimeServices::new_with_bridges(
             root_plugins,
             prompt_bridge,
@@ -1077,6 +1080,7 @@ fn help_text(skills: &SkillCatalog) -> String {
         "  /retry             Replay the previous turn payload".to_string(),
         "  /resume [name]     Browse or load a previous session".to_string(),
         "  /skills            Browse loaded skills".to_string(),
+        "  /<skill> [text]    Invoke a loaded skill directly".to_string(),
         "  /tools ...         Inspect/edit dynamic tools".to_string(),
         "  /reconfigure ...   Apply/status/clear pending changes".to_string(),
         "  /help, /?          Show this help".to_string(),
@@ -1094,7 +1098,8 @@ fn help_text(skills: &SkillCatalog) -> String {
             };
             lines.push(format!("  ${}{}", skill.name, desc));
         }
-        lines.push("  Use /skills to browse and insert a skill mention.".to_string());
+        lines
+            .push("  Use /skills to browse or `/<skill-name>` to invoke one directly.".to_string());
     }
 
     lines.extend([
@@ -1586,6 +1591,24 @@ async fn run_app(
         };
 
         match event {
+            AppEvent::Terminal(TermEvent::Paste(text)) => {
+                if !app.mouse_captured && !args.no_mouse {
+                    let _ = crossterm::execute!(
+                        std::io::stdout(),
+                        crossterm::event::EnableMouseCapture
+                    );
+                    app.mouse_captured = true;
+                }
+                app.dirty = true;
+
+                if app.has_prompt() && (app.is_prompt_editing_extra() || app.is_prompt_freeform()) {
+                    app.prompt_insert_text(&text);
+                    continue;
+                }
+
+                app.insert_text(&text);
+                app.update_suggestions();
+            }
             AppEvent::Terminal(TermEvent::Key(key)) => {
                 // With kitty keyboard protocol, ignore Release/Repeat events
                 if key.kind != KeyEventKind::Press {
@@ -1649,9 +1672,7 @@ async fn run_app(
                     if let Ok(mut clipboard) = arboard::Clipboard::new()
                         && let Ok(text) = clipboard.get_text()
                     {
-                        for c in text.chars() {
-                            app.insert_char(c);
-                        }
+                        app.insert_text(&text);
                         app.update_suggestions();
                     }
                     continue;
@@ -1925,9 +1946,16 @@ async fn run_app(
                         let input = app.take_input();
                         let images = app.take_images();
                         app.update_suggestions();
-                        let queued = QueuedTurn::new(input.clone(), images);
+                        let mut queued = QueuedTurn::new(input.clone(), images);
                         if queued.is_empty() {
                             continue;
+                        }
+
+                        if command::parse(&queued.text, &app.skills).is_none()
+                            && let Some(skill_prompt) =
+                                command::slash_skill_prompt(&queued.text, &app.skills)
+                        {
+                            queued.text = skill_prompt;
                         }
 
                         if app.running {

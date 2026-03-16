@@ -9,28 +9,29 @@ use crate::plugin::{
 };
 use crate::search::{SearchDoc, SearchMode, limit_from_args, rank_docs};
 use crate::{
-    ExecutionMode, PromptContext, PromptContribution, ToolDefinition, ToolExecutionContext,
-    ToolParam, ToolProvider, ToolResult,
+    PromptContext, PromptContribution, ToolDefinition, ToolExecutionContext, ToolParam,
+    ToolProvider, ToolResult,
 };
 
 use super::run_blocking;
 
+#[cfg(test)]
+use crate::ExecutionMode;
+
 pub struct StateToolsPluginFactory {
-    execution_mode: ExecutionMode,
+    provider: Arc<StateStore>,
 }
 
-struct StateToolsPlugin {
+struct ReplStateToolsPlugin {
     provider: Arc<StateStore>,
 }
 
 #[derive(Clone)]
-pub struct StateStore {
-    execution_mode: ExecutionMode,
-}
+pub struct StateStore;
 
 impl StateStore {
-    pub fn new(execution_mode: ExecutionMode) -> Self {
-        Self { execution_mode }
+    pub fn new() -> Self {
+        Self
     }
 
     fn search_tools(
@@ -143,9 +144,23 @@ impl StateStore {
     }
 }
 
+impl Default for StateStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StateToolsPluginFactory {
-    pub fn new(execution_mode: ExecutionMode) -> Self {
-        Self { execution_mode }
+    pub fn new() -> Self {
+        Self {
+            provider: Arc::new(StateStore::new()),
+        }
+    }
+}
+
+impl Default for StateToolsPluginFactory {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -155,13 +170,13 @@ impl PluginFactory for StateToolsPluginFactory {
     }
 
     fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        Ok(Arc::new(StateToolsPlugin {
-            provider: Arc::new(StateStore::new(self.execution_mode)),
+        Ok(Arc::new(ReplStateToolsPlugin {
+            provider: Arc::clone(&self.provider),
         }))
     }
 }
 
-pub(crate) fn state_prompt_contributions(context: &PromptContext) -> Vec<PromptContribution> {
+pub(crate) fn repl_state_prompt_contributions(context: &PromptContext) -> Vec<PromptContribution> {
     if context.omitted_tool_count == 0 {
         return Vec::new();
     }
@@ -171,7 +186,7 @@ pub(crate) fn state_prompt_contributions(context: &PromptContext) -> Vec<PromptC
     )]
 }
 
-impl SessionPlugin for StateToolsPlugin {
+impl SessionPlugin for ReplStateToolsPlugin {
     fn id(&self) -> &'static str {
         "state"
     }
@@ -180,7 +195,7 @@ impl SessionPlugin for StateToolsPlugin {
         reg.tools()
             .provider(Arc::clone(&self.provider) as Arc<dyn ToolProvider>)?;
         reg.prompt().contribute(Arc::new(move |ctx| {
-            Box::pin(async move { Ok(state_prompt_contributions(&ctx.prompt)) })
+            Box::pin(async move { Ok(repl_state_prompt_contributions(&ctx.prompt)) })
         }));
         reg.surface().contribute(Arc::new(|ctx| {
             let omitted_tool_count = ctx
@@ -218,16 +233,6 @@ impl SessionPlugin for StateToolsPlugin {
 #[async_trait::async_trait]
 impl ToolProvider for StateStore {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        let examples = match self.execution_mode {
-            ExecutionMode::Repl => vec![
-                "call search_tools { query: \"task planning\" }".into(),
-                "call search_tools {}".into(),
-            ],
-            ExecutionMode::Standard => vec![
-                "search_tools(query=\"task planning\")".into(),
-                "search_tools()".into(),
-            ],
-        };
         vec![ToolDefinition {
             name: "search_tools".into(),
             description: "Discover available tools. With a focused `query`, returns ranked matches using hybrid/literal/regex search. With no `query`, returns the full active tool catalog in stable name order.".into(),
@@ -239,7 +244,10 @@ impl ToolProvider for StateStore {
                 ToolParam::optional("injected_only", "bool"),
             ],
             returns: "list".into(),
-            examples,
+            examples: vec![
+                "call search_tools { query: \"task planning\" }".into(),
+                "call search_tools {}".into(),
+            ],
             enabled: true,
             injected: false,
         }]
@@ -377,7 +385,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_tools_lists_all_without_query() {
-        let store = StateStore::new(ExecutionMode::Standard);
+        let store = StateStore::new();
         let context = ToolExecutionContext {
             session_id: "root".to_string(),
             host: Arc::new(MockSessionManager {
@@ -409,25 +417,23 @@ mod tests {
     fn prompt_contributions_only_describe_tool_discovery_when_needed() {
         let mut prompt = PromptContext::default();
         prompt.omitted_tool_count = 1;
-        let with_omissions = state_prompt_contributions(&prompt);
+        let with_omissions = repl_state_prompt_contributions(&prompt);
         assert_eq!(with_omissions.len(), 1);
         assert!(with_omissions[0].content.contains("search_tools"));
 
         prompt.omitted_tool_count = 0;
-        assert!(state_prompt_contributions(&prompt).is_empty());
+        assert!(repl_state_prompt_contributions(&prompt).is_empty());
     }
 
     #[test]
-    fn tool_surface_plugin_hides_search_tools_when_nothing_is_omitted() {
-        let host = crate::PluginHost::new(vec![Arc::new(StateToolsPluginFactory::new(
-            ExecutionMode::Standard,
-        ))]);
+    fn repl_tool_surface_hides_search_tools_when_nothing_is_omitted() {
+        let host = crate::PluginHost::new(vec![Arc::new(StateToolsPluginFactory::new())]);
         let session = host.build_standard_session("root", None).expect("session");
 
         let surface = session
             .resolve_tool_surface(crate::plugin::ToolSurfaceContext {
                 session_id: "root".to_string(),
-                mode: ExecutionMode::Standard,
+                mode: ExecutionMode::Repl,
                 tools: vec![
                     ToolDefinition {
                         name: "search_tools".to_string(),

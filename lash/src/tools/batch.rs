@@ -8,6 +8,7 @@ pub(crate) fn batch_tool_definition() -> ToolDefinition {
             name: "tool_calls".to_string(),
             r#type: "list".to_string(),
             description: "Array of 1-25 objects like { tool: \"read_file\", parameters: { path: \"src/main.rs\" } }. Use only for independent calls. Do not include another batch call.".to_string(),
+            default_value: None,
             required: true,
         }],
         returns: "dict".to_string(),

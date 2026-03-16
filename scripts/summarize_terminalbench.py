@@ -62,7 +62,7 @@ def trial_rows(job_dir: Path) -> list[dict[str, str]]:
         ):
             value = agent_result.get(key)
             if value is not None:
-                tokens.append(f"{label}={value}")
+                tokens.append(f"raw-{label}={value}")
 
         rows.append(
             {

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::instructions::InstructionSource;
-use crate::plugin::{PluginFactory, PluginSpec, PluginSpecFactory};
+use crate::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
 use crate::{
     ExecutionMode, ProgressSender, ToolDefinition, ToolExecutionContext, ToolProvider, ToolResult,
 };
@@ -26,88 +26,67 @@ pub fn default_tool_plugin_factories(
     mode: ExecutionMode,
     deps: DefaultToolPluginDeps,
 ) -> Vec<Arc<dyn PluginFactory>> {
+    #[cfg(not(feature = "sqlite-store"))]
+    let _ = mode;
+
     let mut factories: Vec<Arc<dyn PluginFactory>> = vec![
         Arc::new(crate::BuiltinToolResultProjectionPluginFactory::default()),
-        Arc::new(PluginSpecFactory::new(
+        Arc::new(StaticPluginFactory::new(
             "shell",
-            Arc::new(move |_ctx| {
-                Ok(PluginSpec::new()
-                    .with_tool_provider(shell_provider())
-                    .with_prompt_contributor(Arc::new(move |_ctx| {
-                        Box::pin(async move { Ok(super::shell::shell_prompt_contributions()) })
-                    })))
-            }),
+            PluginSpec::new()
+                .with_tool_provider(shell_provider())
+                .with_prompt_contributor(Arc::new(move |_ctx| {
+                    Box::pin(async move { Ok(super::shell::shell_prompt_contributions()) })
+                })),
         )),
-        Arc::new(PluginSpecFactory::new(
+        Arc::new(StaticPluginFactory::new(
             "apply_patch",
-            Arc::new(|_ctx| {
-                Ok(PluginSpec::new()
-                    .with_tool_provider(Arc::new(super::ApplyPatchTool) as Arc<dyn ToolProvider>))
-            }),
+            PluginSpec::new()
+                .with_tool_provider(Arc::new(super::ApplyPatchTool) as Arc<dyn ToolProvider>),
         )),
         Arc::new(super::ReadFilePluginFactory::new(
             deps.instruction_source.clone(),
         )),
-        Arc::new(PluginSpecFactory::new(
+        Arc::new(StaticPluginFactory::new(
             "glob",
-            Arc::new(|_ctx| {
-                Ok(PluginSpec::new()
-                    .with_tool_provider(Arc::new(super::Glob) as Arc<dyn ToolProvider>))
-            }),
+            PluginSpec::new().with_tool_provider(Arc::new(super::Glob) as Arc<dyn ToolProvider>),
         )),
-        Arc::new(PluginSpecFactory::new(
+        Arc::new(StaticPluginFactory::new(
             "grep",
-            Arc::new(|_ctx| {
-                Ok(PluginSpec::new()
-                    .with_tool_provider(Arc::new(super::Grep) as Arc<dyn ToolProvider>))
-            }),
+            PluginSpec::new().with_tool_provider(Arc::new(super::Grep) as Arc<dyn ToolProvider>),
         )),
-        Arc::new(PluginSpecFactory::new(
+        Arc::new(StaticPluginFactory::new(
             "ls",
-            Arc::new(|_ctx| {
-                Ok(PluginSpec::new()
-                    .with_tool_provider(Arc::new(super::Ls) as Arc<dyn ToolProvider>))
-            }),
+            PluginSpec::new().with_tool_provider(Arc::new(super::Ls) as Arc<dyn ToolProvider>),
         )),
     ];
 
     if let Some(prompt_bridge) = deps.prompt_bridge {
-        factories.push(Arc::new(PluginSpecFactory::new(
+        factories.push(Arc::new(StaticPluginFactory::new(
             "ask",
-            Arc::new(move |_ctx| {
-                Ok(PluginSpec::new()
-                    .with_tool_provider(Arc::new(super::AskTool::new(prompt_bridge.clone()))
-                        as Arc<dyn ToolProvider>))
-            }),
+            PluginSpec::new().with_tool_provider(
+                Arc::new(super::AskTool::new(prompt_bridge)) as Arc<dyn ToolProvider>
+            ),
         )));
     }
 
     #[cfg(feature = "sqlite-store")]
-    if deps.store.is_some() {
-        factories.push(Arc::new(super::StateToolsPluginFactory::new(mode)));
+    if deps.store.is_some() && matches!(mode, ExecutionMode::Repl) {
+        factories.push(Arc::new(super::StateToolsPluginFactory::new()));
     }
 
     if let Some(key) = deps.tavily_api_key {
         let search_key = key.clone();
-        factories.push(Arc::new(PluginSpecFactory::new(
+        factories.push(Arc::new(StaticPluginFactory::new(
             "search_web",
-            Arc::new(move |_ctx| {
-                Ok(
-                    PluginSpec::new().with_tool_provider(Arc::new(super::WebSearch::new(
-                        search_key.clone(),
-                        mode,
-                    ))
-                        as Arc<dyn ToolProvider>),
-                )
-            }),
+            PluginSpec::new().with_tool_provider(
+                Arc::new(super::WebSearch::new(search_key)) as Arc<dyn ToolProvider>
+            ),
         )));
-        factories.push(Arc::new(PluginSpecFactory::new(
+        factories.push(Arc::new(StaticPluginFactory::new(
             "fetch_url",
-            Arc::new(move |_ctx| {
-                Ok(PluginSpec::new().with_tool_provider(
-                    Arc::new(super::FetchUrl::new(key.clone())) as Arc<dyn ToolProvider>,
-                ))
-            }),
+            PluginSpec::new()
+                .with_tool_provider(Arc::new(super::FetchUrl::new(key)) as Arc<dyn ToolProvider>),
         )));
     }
 

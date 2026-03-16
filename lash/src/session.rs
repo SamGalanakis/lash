@@ -105,14 +105,9 @@ pub enum SessionError {
     Protocol(String),
 }
 
-enum SessionBackend {
-    Standard,
-    Lashlang(LashlangRuntime),
-}
-
 pub struct Session {
     agent_id: String,
-    backend: SessionBackend,
+    repl_runtime: Option<LashlangRuntime>,
     services: RuntimeServices,
     tool_calls: Vec<ToolCallRecord>,
     tool_images: Vec<ToolImage>,
@@ -130,7 +125,7 @@ impl Session {
 
         let mut session = Self {
             agent_id: agent_id.to_string(),
-            backend: SessionBackend::Standard,
+            repl_runtime: None,
             services,
             tool_calls: Vec::new(),
             tool_images: Vec::new(),
@@ -140,7 +135,7 @@ impl Session {
 
         if matches!(execution_mode, crate::ExecutionMode::Repl) {
             let runtime = LashlangRuntime::start()?;
-            session.backend = SessionBackend::Lashlang(runtime);
+            session.repl_runtime = Some(runtime);
             session.initialize_execution_surface(agent_id).await?;
         }
 
@@ -148,14 +143,13 @@ impl Session {
     }
 
     fn runtime(&self) -> Result<&LashlangRuntime, SessionError> {
-        match &self.backend {
-            SessionBackend::Standard => Err(SessionError::ReplUnavailable),
-            SessionBackend::Lashlang(runtime) => Ok(runtime),
-        }
+        self.repl_runtime
+            .as_ref()
+            .ok_or(SessionError::ReplUnavailable)
     }
 
     pub fn supports_repl(&self) -> bool {
-        matches!(self.backend, SessionBackend::Lashlang(_))
+        self.repl_runtime.is_some()
     }
 
     pub fn tools(&self) -> Arc<dyn ToolProvider> {

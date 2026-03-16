@@ -619,23 +619,27 @@
     const fmtInt = value => new Intl.NumberFormat().format(value || 0);
     const fmtFixed = value => value == null ? "-" : value.toFixed(2);
     const tokenHeaders = `
+      <th class="num">Non-Cache</th>
       <th class="num">Total</th>
       <th class="num">Input</th>
       <th class="num">Output</th>
+      <th class="num">Reasoning</th>
       <th class="num">Cache</th>
     `;
     function tokenCells(tokens) {
       const value = tokens || {};
       return `
+        <td class="num">${fmtInt(nonCacheTokens(value))}</td>
         <td class="num">${fmtInt(value.total)}</td>
         <td class="num">${fmtInt(value.input)}</td>
         <td class="num">${fmtInt(value.output)}</td>
+        <td class="num">${fmtInt(value.reasoning)}</td>
         <td class="num">${fmtInt(value.cache)}</td>
       `;
     }
     function tokenInline(tokens) {
       const value = tokens || {};
-      return `tot ${fmtInt(value.total)} · in ${fmtInt(value.input)} · out ${fmtInt(value.output)} · cache ${fmtInt(value.cache)}`;
+      return `nc ${fmtInt(nonCacheTokens(value))} · tot ${fmtInt(value.total)} · in ${fmtInt(value.input)} · out ${fmtInt(value.output)} · rsn ${fmtInt(value.reasoning)} · cache ${fmtInt(value.cache)}`;
     }
     function activityInline(activity) {
       const value = activity || {};
@@ -646,13 +650,26 @@
       const mib = value / 1024;
       return `${mib.toFixed(mib >= 100 ? 0 : 1)} MiB`;
     }
-    function resourceInline(resource) {
+    function resourceBucket(resource, bucket = "main_commands") {
       const value = resource || {};
+      if (value[bucket] && typeof value[bucket] === "object") return value[bucket];
+      if (bucket === "main_commands" || bucket === "all_commands") return value;
+      return {};
+    }
+    function resourceInline(resource, bucket = "main_commands") {
+      const value = resourceBucket(resource, bucket);
       return `cpu ${fmtSeconds(value.cpu_seconds_sum || value.cpu_seconds_avg)} · rss ${fmtMemoryKb(value.max_rss_kb_max || value.max_rss_kb_avg)}`;
+    }
+    function resourceSplitInline(resource) {
+      const main = resourceBucket(resource, "main_commands");
+      const all = resourceBucket(resource, "all_commands");
+      const overhead = resourceBucket(resource, "overhead_commands");
+      return `main ${resourceInline(main, "all_commands")} · all ${resourceInline(all, "all_commands")} · overhead cpu ${fmtSeconds(overhead.cpu_seconds_sum || overhead.cpu_seconds_avg)}`;
     }
     function nonCacheTokens(tokens) {
       const value = tokens || {};
-      return (value.input || 0) + (value.output || 0);
+      if (value.non_cache_total != null) return value.non_cache_total || 0;
+      return (value.input || 0) + (value.output || 0) + (value.reasoning || 0);
     }
     function fmtSignedNumber(value, suffix = "") {
       if (value == null) return "-";
@@ -747,9 +764,11 @@
               <div class="chips">
                 <span class="chip pass">${fmtPct(run.pass_rate)}</span>
                 <span class="chip">${fmtInt(run.trials_passed)}/${fmtInt(run.trials_total)} passed</span>
-                <span class="chip">${fmtInt(run.tokens_total)} tokens</span>
-                <span class="chip">${fmtSeconds(run.cpu_seconds_total)} cpu</span>
-                <span class="chip">${fmtMemoryKb(run.peak_rss_kb)} rss</span>
+                <span class="chip">${fmtInt(run.tokens_non_cache_total || 0)} nc tok</span>
+                <span class="chip">${fmtInt(run.tokens_cache_total || 0)} cache</span>
+                <span class="chip">${fmtSeconds(run.cpu_seconds_total)} main cpu</span>
+                <span class="chip">${fmtMemoryKb(run.peak_rss_kb)} main rss</span>
+                <span class="chip">${fmtSeconds(run.cpu_seconds_overhead_total)} overhead</span>
                 <span class="chip">${fmtInt(run.turns_total || 0)} turns</span>
                 <span class="chip">${fmtInt(run.llm_calls_total || 0)} llm</span>
                 <span class="chip">${fmtInt(run.tool_calls_total || 0)} tools</span>
@@ -896,6 +915,12 @@
       const leftCalls = (leftStats.activity_total || {}).llm_calls || 0;
       const rightTools = (rightStats.activity_total || {}).tool_calls || 0;
       const leftTools = (leftStats.activity_total || {}).tool_calls || 0;
+      const rightMainCpu = ((rightStats.resource_usage || {}).cpu_seconds_sum) || 0;
+      const leftMainCpu = ((leftStats.resource_usage || {}).cpu_seconds_sum) || 0;
+      const rightOverheadCpu = ((rightStats.resource_usage_overhead_commands || {}).cpu_seconds_sum) || 0;
+      const leftOverheadCpu = ((leftStats.resource_usage_overhead_commands || {}).cpu_seconds_sum) || 0;
+      const rightMainRss = ((rightStats.resource_usage || {}).max_rss_kb_max) || 0;
+      const leftMainRss = ((leftStats.resource_usage || {}).max_rss_kb_max) || 0;
       const compareRows = [
         summaryMetricRow(
           "Pass Rate",
@@ -939,6 +964,27 @@
           fmtSignedNumber(rightTools - leftTools),
           rightTools < leftTools ? "positive" : rightTools > leftTools ? "negative" : ""
         ),
+        summaryMetricRow(
+          "Main CPU",
+          fmtSeconds(leftMainCpu),
+          fmtSeconds(rightMainCpu),
+          fmtSignedSeconds(rightMainCpu - leftMainCpu),
+          rightMainCpu < leftMainCpu ? "positive" : rightMainCpu > leftMainCpu ? "negative" : ""
+        ),
+        summaryMetricRow(
+          "Overhead CPU",
+          fmtSeconds(leftOverheadCpu),
+          fmtSeconds(rightOverheadCpu),
+          fmtSignedSeconds(rightOverheadCpu - leftOverheadCpu),
+          rightOverheadCpu < leftOverheadCpu ? "positive" : rightOverheadCpu > leftOverheadCpu ? "negative" : ""
+        ),
+        summaryMetricRow(
+          "Main Peak RSS",
+          fmtMemoryKb(leftMainRss),
+          fmtMemoryKb(rightMainRss),
+          fmtSignedNumber(Math.round((rightMainRss - leftMainRss) / 1024), " MiB"),
+          rightMainRss < leftMainRss ? "positive" : rightMainRss > leftMainRss ? "negative" : ""
+        ),
       ];
       compareGrid.innerHTML = `
         <div class="compare-card accent-left">
@@ -948,15 +994,18 @@
           <div class="chips">
             <span class="chip pass">${fmtPct(leftStats.pass_rate)}</span>
             <span class="chip">${fmtInt(leftStats.trials_passed)}/${fmtInt(leftStats.trials_total)} passed</span>
-            <span class="chip">${fmtInt((leftStats.tokens_total || {}).total)} tokens</span>
-            <span class="chip">${fmtSeconds((leftStats.resource_usage || {}).cpu_seconds_sum)} cpu</span>
-            <span class="chip">${fmtMemoryKb((leftStats.resource_usage || {}).max_rss_kb_max)} rss</span>
+            <span class="chip">${fmtInt(nonCacheTokens(leftStats.tokens_total))} nc tok</span>
+            <span class="chip">${fmtInt((leftStats.tokens_total || {}).cache)} cache</span>
+            <span class="chip">${fmtSeconds((leftStats.resource_usage || {}).cpu_seconds_sum)} main cpu</span>
+            <span class="chip">${fmtMemoryKb((leftStats.resource_usage || {}).max_rss_kb_max)} main rss</span>
           </div>
           <table>
             <tr><td>Avg Duration</td><td>${fmtSeconds(leftStats.duration_seconds_avg)}</td></tr>
             <tr><td>Token Profile</td><td>${tokenInline(leftStats.tokens_total)}</td></tr>
             <tr><td>Activity</td><td>${activityInline(leftStats.activity_total)}</td></tr>
-            <tr><td>CPU / RSS</td><td>${resourceInline(leftStats.resource_usage)}</td></tr>
+            <tr><td>Main CPU / RSS</td><td>${resourceInline(leftStats.resource_usage)}</td></tr>
+            <tr><td>All Cmd CPU / RSS</td><td>${resourceInline(leftStats.resource_usage_all_commands || leftStats.resource_usage, "all_commands")}</td></tr>
+            <tr><td>Overhead CPU</td><td>${fmtSeconds(((leftStats.resource_usage_overhead_commands || {}).cpu_seconds_sum))}</td></tr>
             <tr><td>Reward Mean</td><td>${fmtFixed(leftStats.reward_mean)}</td></tr>
           </table>
         </div>
@@ -972,15 +1021,18 @@
           <div class="chips">
             <span class="chip pass">${fmtPct(rightStats.pass_rate)}</span>
             <span class="chip">${fmtInt(rightStats.trials_passed)}/${fmtInt(rightStats.trials_total)} passed</span>
-            <span class="chip">${fmtInt((rightStats.tokens_total || {}).total)} tokens</span>
-            <span class="chip">${fmtSeconds((rightStats.resource_usage || {}).cpu_seconds_sum)} cpu</span>
-            <span class="chip">${fmtMemoryKb((rightStats.resource_usage || {}).max_rss_kb_max)} rss</span>
+            <span class="chip">${fmtInt(nonCacheTokens(rightStats.tokens_total))} nc tok</span>
+            <span class="chip">${fmtInt((rightStats.tokens_total || {}).cache)} cache</span>
+            <span class="chip">${fmtSeconds((rightStats.resource_usage || {}).cpu_seconds_sum)} main cpu</span>
+            <span class="chip">${fmtMemoryKb((rightStats.resource_usage || {}).max_rss_kb_max)} main rss</span>
           </div>
           <table>
             <tr><td>Avg Duration</td><td>${fmtSeconds(rightStats.duration_seconds_avg)}</td></tr>
             <tr><td>Token Profile</td><td>${tokenInline(rightStats.tokens_total)}</td></tr>
             <tr><td>Activity</td><td>${activityInline(rightStats.activity_total)}</td></tr>
-            <tr><td>CPU / RSS</td><td>${resourceInline(rightStats.resource_usage)}</td></tr>
+            <tr><td>Main CPU / RSS</td><td>${resourceInline(rightStats.resource_usage)}</td></tr>
+            <tr><td>All Cmd CPU / RSS</td><td>${resourceInline(rightStats.resource_usage_all_commands || rightStats.resource_usage, "all_commands")}</td></tr>
+            <tr><td>Overhead CPU</td><td>${fmtSeconds(((rightStats.resource_usage_overhead_commands || {}).cpu_seconds_sum))}</td></tr>
             <tr><td>Reward Mean</td><td>${fmtFixed(rightStats.reward_mean)}</td></tr>
           </table>
         </div>
@@ -1037,7 +1089,11 @@
             <strong>${fmtPct(item.pass_rate)} · ${fmtSeconds(item.duration_seconds_avg)}</strong>
             <span class="muted">${escapeHtml(tokenInline(item.tokens_total))}</span>
             <span class="muted">${escapeHtml(activityInline(item.activity_total))}</span>
-            <span class="muted">${escapeHtml(resourceInline(item.resource_usage))}</span>
+            <span class="muted">${escapeHtml(resourceSplitInline({
+              main_commands: item.resource_usage,
+              all_commands: item.resource_usage_all_commands || item.resource_usage,
+              overhead_commands: item.resource_usage_overhead_commands || {}
+            }))}</span>
           </div>
         </td>
       `;
@@ -1051,6 +1107,7 @@
       const tokenDelta = ((right.tokens_total || {}).total || 0) - ((left.tokens_total || {}).total || 0);
       const nonCacheDelta = nonCacheTokens(right.tokens_total) - nonCacheTokens(left.tokens_total);
       const toolDelta = ((right.activity_total || {}).tool_calls || 0) - ((left.activity_total || {}).tool_calls || 0);
+      const mainCpuDelta = (((right.resource_usage || {}).cpu_seconds_sum) || 0) - ((((left.resource_usage || {}).cpu_seconds_sum) || 0));
       const passDelta = (right.pass_rate || 0) - (left.pass_rate || 0);
       return `
         <td class="delta-cell">
@@ -1060,6 +1117,7 @@
             <span class="muted">${escapeHtml(`non-cache ${fmtSignedNumber(nonCacheDelta)}`)}</span>
             <span class="muted">${escapeHtml(`total ${fmtSignedNumber(tokenDelta)}`)}</span>
             <span class="muted">${escapeHtml(`tools ${fmtSignedNumber(toolDelta)}`)}</span>
+            <span class="muted">${escapeHtml(`main cpu ${fmtSignedSeconds(mainCpuDelta)}`)}</span>
           </div>
         </td>
       `;
@@ -1086,16 +1144,20 @@
         statCard("Trials", `${fmtInt(stats.trials_total)} total`),
         statCard("Passed", fmtInt(stats.trials_passed)),
         statCard("Avg Duration", fmtSeconds(stats.duration_seconds_avg)),
+        statCard("Non-Cache Tokens", fmtInt(nonCacheTokens(stats.tokens_total))),
         statCard("Total Tokens", fmtInt((stats.tokens_total || {}).total)),
         statCard("Input Tokens", fmtInt((stats.tokens_total || {}).input)),
         statCard("Output Tokens", fmtInt((stats.tokens_total || {}).output)),
+        statCard("Reasoning Tokens", fmtInt((stats.tokens_total || {}).reasoning)),
         statCard("Cache Tokens", fmtInt((stats.tokens_total || {}).cache)),
         statCard("LLM Turns", fmtInt((stats.activity_total || {}).llm_turns)),
         statCard("LLM Calls", fmtInt((stats.activity_total || {}).llm_calls)),
         statCard("Tool Calls", fmtInt((stats.activity_total || {}).tool_calls)),
         statCard("Batch Calls", fmtInt((stats.activity_total || {}).tool_batches)),
-        statCard("CPU Seconds", fmtSeconds((stats.resource_usage || {}).cpu_seconds_sum)),
-        statCard("Peak RSS", fmtMemoryKb((stats.resource_usage || {}).max_rss_kb_max)),
+        statCard("Main CPU", fmtSeconds((stats.resource_usage || {}).cpu_seconds_sum)),
+        statCard("Main Peak RSS", fmtMemoryKb((stats.resource_usage || {}).max_rss_kb_max)),
+        statCard("All Cmd CPU", fmtSeconds(((stats.resource_usage_all_commands || {}).cpu_seconds_sum))),
+        statCard("Overhead CPU", fmtSeconds(((stats.resource_usage_overhead_commands || {}).cpu_seconds_sum))),
         statCard("Reward Mean", fmtFixed(stats.reward_mean)),
         statCard("Errors", fmtInt(stats.trials_errors)),
       ].join("");
@@ -1207,11 +1269,14 @@
         .map(([name, count]) => `${name} ${count}`)
         .join(" · ") || "no tool breakdown";
       const resourceUsage = trial.resource_usage || {};
+      const mainResourceUsage = resourceBucket(resourceUsage, "main_commands");
+      const allResourceUsage = resourceBucket(resourceUsage, "all_commands");
+      const overheadResourceUsage = resourceBucket(resourceUsage, "overhead_commands");
       meta.innerHTML = `
         <strong>${escapeHtml(trial.task_name)}</strong><br>
         <span class="muted">${escapeHtml(trial.trial_name)} · ${escapeHtml(trial.status)} · ${escapeHtml(tokenInline(trial.tokens))} · ${escapeHtml(models)}</span><br>
         <span class="muted">${escapeHtml(`turns ${(trial.metadata || {}).llm_turn_count || 0} · llm calls ${(trial.metadata || {}).llm_call_count || 0} · tool calls ${(trial.metadata || {}).tool_call_count || 0} · batch calls ${(trial.metadata || {}).tool_batch_count || 0}`)}</span><br>
-        <span class="muted">${escapeHtml(`cpu ${fmtSeconds(resourceUsage.cpu_seconds_sum)} · peak rss ${fmtMemoryKb(resourceUsage.max_rss_kb_max)} · env cpu ${((trial.metadata || {}).environment || {}).override_cpus || "-"} · env mem ${((trial.metadata || {}).environment || {}).override_memory_mb || "-"}`)}</span><br>
+        <span class="muted">${escapeHtml(`main cpu ${fmtSeconds(mainResourceUsage.cpu_seconds_sum)} · main rss ${fmtMemoryKb(mainResourceUsage.max_rss_kb_max)} · all cpu ${fmtSeconds(allResourceUsage.cpu_seconds_sum)} · overhead cpu ${fmtSeconds(overheadResourceUsage.cpu_seconds_sum)} · env cpu ${((trial.metadata || {}).environment || {}).override_cpus || "-"} · env mem ${((trial.metadata || {}).environment || {}).override_memory_mb || "-"}`)}</span><br>
         <span class="muted">${escapeHtml(toolBreakdown)}</span><br>
         <span class="muted">${escapeHtml(trial.failure_reason || "No failure summary.")}</span>
       `;

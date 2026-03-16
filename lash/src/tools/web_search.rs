@@ -1,20 +1,18 @@
 use serde_json::json;
 
-use crate::{ExecutionMode, ToolDefinition, ToolParam, ToolProvider, ToolResult};
+use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
 /// Web search via Tavily API.
 pub struct WebSearch {
     api_key: String,
     client: reqwest::Client,
-    execution_mode: ExecutionMode,
 }
 
 impl WebSearch {
-    pub fn new(api_key: impl Into<String>, execution_mode: ExecutionMode) -> Self {
+    pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
             client: reqwest::Client::new(),
-            execution_mode,
         }
     }
 }
@@ -22,15 +20,6 @@ impl WebSearch {
 #[async_trait::async_trait]
 impl ToolProvider for WebSearch {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        let examples = match self.execution_mode {
-            ExecutionMode::Repl => vec![
-                "r = search_web(query=\"latest Rust release notes\", max_results=5)\nr[\"answer\"]\nr[\"results\"][0][\"url\"]"
-                    .into(),
-            ],
-            ExecutionMode::Standard => {
-                vec!["search_web(query=\"latest Rust release notes\", max_results=5)".into()]
-            }
-        };
         vec![ToolDefinition {
             name: "search_web".into(),
             description: "Search the web for candidate sources. Returns `{results, answer?}` with snippet text; use `fetch_url` when you need the page itself.".into(),
@@ -40,11 +29,12 @@ impl ToolProvider for WebSearch {
                     name: "max_results".into(),
                     r#type: "int".into(),
                     description: "Maximum results to return (default 5)".into(),
+                    default_value: Some(serde_json::json!(5)),
                     required: false,
                 },
             ],
             returns: "dict".into(),
-            examples,
+            examples: vec!["search_web(query=\"latest Rust release notes\", max_results=5)".into()],
             enabled: true,
             injected: true,
         }]

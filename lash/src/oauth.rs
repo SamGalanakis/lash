@@ -54,7 +54,7 @@ pub fn generate_pkce() -> (String, String) {
 }
 
 /// Build the authorization URL for the browser.
-/// The `verifier` is embedded in the `state` param (matches opencode's convention).
+/// The `verifier` is embedded in the `state` param to keep the callback self-contained.
 pub fn authorize_url(challenge: &str, verifier: &str) -> String {
     format!(
         "{}?code=true&client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}",
