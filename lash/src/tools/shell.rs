@@ -75,10 +75,7 @@ struct ShellRuntime {
 
 #[derive(Clone, Copy)]
 struct WaitBehavior {
-    return_on_output: bool,
     baseline_len: usize,
-    quiet_period: Option<Duration>,
-    exit_grace_period: Option<Duration>,
 }
 
 impl ShellRuntime {
@@ -282,8 +279,6 @@ impl ShellRuntime {
         let state = self.process_state(id)?;
         let deadline = timeout.map(|value| tokio::time::Instant::now() + value);
         let mut sent_len = behavior.baseline_len;
-        let mut observed_len = behavior.baseline_len;
-        let mut quiet_deadline = None;
 
         loop {
             if let Some(tx) = progress {
@@ -308,16 +303,6 @@ impl ShellRuntime {
             }
 
             let exited = state.exit_code.lock().unwrap().is_some();
-            let buffer_len = state.buffer.lock().unwrap().len();
-            if buffer_len > observed_len {
-                observed_len = buffer_len;
-                if behavior.return_on_output {
-                    quiet_deadline = Some(
-                        tokio::time::Instant::now() + behavior.quiet_period.unwrap_or_default(),
-                    );
-                }
-            }
-
             if exited {
                 wait_for_buffer_settle(&state, Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)).await;
                 let (output, original_token_count) =
@@ -327,34 +312,6 @@ impl ShellRuntime {
                     output,
                     original_token_count,
                     exit_code,
-                });
-            }
-
-            if behavior.return_on_output
-                && observed_len > behavior.baseline_len
-                && quiet_deadline
-                    .is_none_or(|quiet_until| tokio::time::Instant::now() >= quiet_until)
-            {
-                if let Some(grace_period) = behavior.exit_grace_period {
-                    let _ = tokio::time::timeout(grace_period, state.exit_notify.notified()).await;
-                }
-                let exit_code = *state.exit_code.lock().unwrap();
-                if let Some(exit_code) = exit_code {
-                    wait_for_buffer_settle(&state, Duration::from_millis(OUTPUT_QUIET_PERIOD_MS))
-                        .await;
-                    let (output, original_token_count) =
-                        self.take_incremental_output(id, max_output_tokens)?;
-                    return Ok(PollOutcome::Exited {
-                        output,
-                        original_token_count,
-                        exit_code,
-                    });
-                }
-                let (output, original_token_count) =
-                    self.take_incremental_output(id, max_output_tokens)?;
-                return Ok(PollOutcome::Running {
-                    output,
-                    original_token_count,
                 });
             }
 
@@ -381,14 +338,7 @@ impl ShellRuntime {
                 });
             }
 
-            let wake_at = match (deadline, quiet_deadline) {
-                (Some(deadline), Some(quiet_until)) => Some(deadline.min(quiet_until)),
-                (Some(deadline), None) => Some(deadline),
-                (None, Some(quiet_until)) => Some(quiet_until),
-                (None, None) => None,
-            };
-
-            if let Some(wake_at) = wake_at {
+            if let Some(wake_at) = deadline {
                 tokio::select! {
                     _ = state.exit_notify.notified() => {}
                     _ = state.output_notify.notified() => {}
@@ -558,12 +508,7 @@ impl StandardShell {
                 Some(Duration::from_millis(params.yield_time_ms)),
                 progress,
                 params.max_output_tokens,
-                WaitBehavior {
-                    return_on_output: false,
-                    baseline_len: 0,
-                    quiet_period: None,
-                    exit_grace_period: None,
-                },
+                WaitBehavior { baseline_len: 0 },
             )
             .await
         {
@@ -644,14 +589,7 @@ impl StandardShell {
                 Some(Duration::from_millis(yield_time_ms)),
                 progress,
                 max_output_tokens,
-                WaitBehavior {
-                    // When the caller closes stdin, prefer a settled exit over
-                    // returning immediately on echoed output.
-                    return_on_output: !close_stdin,
-                    baseline_len,
-                    quiet_period: Some(Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)),
-                    exit_grace_period: Some(Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)),
-                },
+                WaitBehavior { baseline_len },
             )
             .await
         {
