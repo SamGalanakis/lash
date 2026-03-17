@@ -129,8 +129,8 @@ pub use tools::{AgentCallPluginFactory, DefaultToolPluginDeps, default_tool_plug
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
-    #[default]
     Repl,
+    #[default]
     Standard,
 }
 
