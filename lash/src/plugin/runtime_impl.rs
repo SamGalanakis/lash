@@ -191,7 +191,6 @@ pub struct PluginRegistrar {
     checkpoint_hooks: Vec<RegisteredHook<CheckpointHook>>,
     assistant_stream_hooks: Vec<RegisteredHook<AssistantStreamHook>>,
     assistant_response_hooks: Vec<RegisteredHook<AssistantResponseHook>>,
-    message_mutators: BTreeMap<MessageMutatorHook, RegisteredExclusiveHook<MessageMutator>>,
     tool_result_projectors:
         BTreeMap<ToolResultProjectionHook, RegisteredExclusiveHook<ToolResultProjector>>,
     turn_committed_hooks: Vec<TurnCommittedHook>,
@@ -282,20 +281,6 @@ impl OutputRegistrations<'_> {
     }
 }
 
-pub struct MessageRegistrations<'a> {
-    reg: &'a mut PluginRegistrar,
-}
-
-impl MessageRegistrations<'_> {
-    pub fn mutator(
-        self,
-        hook_name: MessageMutatorHook,
-        hook: MessageMutator,
-    ) -> Result<(), PluginError> {
-        self.reg.add_message_mutator(hook_name, hook)
-    }
-}
-
 pub struct ToolResultRegistrations<'a> {
     reg: &'a mut PluginRegistrar,
 }
@@ -354,7 +339,6 @@ impl PluginRegistrar {
             checkpoint_hooks: Vec::new(),
             assistant_stream_hooks: Vec::new(),
             assistant_response_hooks: Vec::new(),
-            message_mutators: BTreeMap::new(),
             tool_result_projectors: BTreeMap::new(),
             turn_committed_hooks: Vec::new(),
             session_restored_hooks: Vec::new(),
@@ -387,10 +371,6 @@ impl PluginRegistrar {
 
     pub fn output(&mut self) -> OutputRegistrations<'_> {
         OutputRegistrations { reg: self }
-    }
-
-    pub fn messages(&mut self) -> MessageRegistrations<'_> {
-        MessageRegistrations { reg: self }
     }
 
     pub fn tool_results(&mut self) -> ToolResultRegistrations<'_> {
@@ -488,21 +468,6 @@ impl PluginRegistrar {
             &self.registering_plugin_id,
             hook,
         );
-    }
-
-    fn add_message_mutator(
-        &mut self,
-        hook_name: MessageMutatorHook,
-        hook: MessageMutator,
-    ) -> Result<(), PluginError> {
-        register_exclusive_hook(
-            &mut self.message_mutators,
-            &self.registering_plugin_id,
-            "message mutator",
-            hook_name.as_str(),
-            hook_name,
-            hook,
-        )
     }
 
     fn add_tool_result_projector(
@@ -676,7 +641,6 @@ impl PluginHost {
             checkpoint_hooks: reg.checkpoint_hooks,
             assistant_stream_hooks: reg.assistant_stream_hooks,
             assistant_response_hooks: reg.assistant_response_hooks,
-            message_mutators: reg.message_mutators,
             tool_result_projectors: reg.tool_result_projectors,
             turn_committed_hooks: reg.turn_committed_hooks,
             session_restored_hooks: reg.session_restored_hooks,
@@ -779,7 +743,6 @@ pub struct PluginSession {
     checkpoint_hooks: Vec<RegisteredHook<CheckpointHook>>,
     assistant_stream_hooks: Vec<RegisteredHook<AssistantStreamHook>>,
     assistant_response_hooks: Vec<RegisteredHook<AssistantResponseHook>>,
-    message_mutators: BTreeMap<MessageMutatorHook, RegisteredExclusiveHook<MessageMutator>>,
     tool_result_projectors:
         BTreeMap<ToolResultProjectionHook, RegisteredExclusiveHook<ToolResultProjector>>,
     turn_committed_hooks: Vec<TurnCommittedHook>,
@@ -934,16 +897,6 @@ impl PluginSession {
         Ok(out)
     }
 
-    pub async fn mutate_turn_messages(
-        &self,
-        ctx: MessageMutatorContext,
-        messages: Vec<Message>,
-    ) -> Result<Vec<Message>, PluginError> {
-        let mut messages = self.mutate_messages(ctx, messages).await?;
-        normalize_message_ids(&mut messages);
-        Ok(messages)
-    }
-
     async fn apply_turn_directives(
         &self,
         directives: Vec<PluginOwned<PluginDirective>>,
@@ -997,32 +950,9 @@ impl PluginSession {
             session_id,
             mut state,
             messages,
-            prompt_usage,
-            max_context_tokens,
-            context_folding,
             host,
         } = request;
         state.messages = messages.clone();
-        if let Some(usage) = prompt_usage.clone() {
-            state.last_prompt_usage = Some(usage);
-        }
-
-        let messages = self
-            .mutate_turn_messages(
-                MessageMutatorContext {
-                    hook: MessageMutatorHook::BeforeTurn,
-                    session_id: session_id.clone(),
-                    state: state.clone(),
-                    host: Arc::clone(&host),
-                    turn: None,
-                    prompt_usage,
-                    max_context_tokens,
-                    context_folding,
-                },
-                messages,
-            )
-            .await?;
-
         let mut hook_state = state;
         hook_state.messages = messages.clone();
         let directives = self
@@ -1166,21 +1096,6 @@ impl PluginSession {
         Ok(transforms)
     }
 
-    pub async fn mutate_messages(
-        &self,
-        ctx: MessageMutatorContext,
-        messages: Vec<crate::Message>,
-    ) -> Result<Vec<crate::Message>, PluginError> {
-        let Some(mutator) = self.message_mutators.get(&ctx.hook) else {
-            return Ok(messages);
-        };
-        (mutator.hook)(ctx, messages).await
-    }
-
-    pub fn has_message_mutator(&self, hook: MessageMutatorHook) -> bool {
-        self.message_mutators.contains_key(&hook)
-    }
-
     pub async fn project_tool_result(
         &self,
         ctx: ToolResultProjectionContext,
@@ -1259,29 +1174,9 @@ impl PluginSession {
     pub async fn finalize_turn(
         &self,
         mut turn: AssembledTurn,
-        prompt_usage: Option<PromptUsage>,
-        max_context_tokens: Option<usize>,
-        context_folding: Option<ContextFoldingConfig>,
         host: Arc<dyn SessionManager>,
     ) -> Result<TurnFinalization, PluginError> {
         let session_id = turn.state.agent_id.clone();
-        let messages = self
-            .mutate_turn_messages(
-                MessageMutatorContext {
-                    hook: MessageMutatorHook::AfterTurn,
-                    session_id: session_id.clone(),
-                    state: turn.state.clone(),
-                    host: Arc::clone(&host),
-                    turn: Some(turn.clone()),
-                    prompt_usage: prompt_usage.clone(),
-                    max_context_tokens,
-                    context_folding,
-                },
-                turn.state.messages.clone(),
-            )
-            .await?;
-        turn.state.messages = messages;
-
         let directives = self
             .after_turn(TurnResultHookContext {
                 session_id: session_id.clone(),
@@ -1455,6 +1350,8 @@ pub struct RuntimeServices {
     pub plugins: Arc<PluginSession>,
     pub prompt_bridge: crate::session::PromptBridge,
     pub turn_injection_bridge: crate::session::TurnInjectionBridge,
+    #[cfg(feature = "sqlite-store")]
+    pub store: Option<Arc<crate::store::Store>>,
 }
 
 struct EmptySnapshotReader;
@@ -1543,6 +1440,14 @@ impl RuntimeServices {
             plugins,
             prompt_bridge,
             turn_injection_bridge,
+            #[cfg(feature = "sqlite-store")]
+            store: None,
         }
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    pub fn with_store(mut self, store: Arc<crate::store::Store>) -> Self {
+        self.store = Some(store);
+        self
     }
 }

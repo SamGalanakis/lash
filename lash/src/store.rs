@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -23,6 +24,7 @@ CREATE TABLE IF NOT EXISTS agents (
     parent_id           TEXT,
     status              TEXT NOT NULL DEFAULT 'active',
     messages            TEXT NOT NULL DEFAULT '[]',
+    tool_calls_json     TEXT NOT NULL DEFAULT '[]',
     iteration           INTEGER NOT NULL DEFAULT 0,
     config_json         TEXT NOT NULL DEFAULT '{}',
     repl_snapshot       BLOB,
@@ -52,7 +54,7 @@ ON history_turns(agent_id, turn_index);
 
 fn apply_pragmas(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
+        "PRAGMA journal_mode = DELETE;
          PRAGMA synchronous = NORMAL;
          PRAGMA busy_timeout = 5000;
          PRAGMA foreign_keys = ON;
@@ -65,6 +67,7 @@ fn apply_pragmas(conn: &Connection) -> rusqlite::Result<()> {
 pub struct AgentState {
     pub agent_id: String,
     pub messages_json: String,
+    pub tool_calls_json: String,
     pub iteration: i64,
     pub config_json: String,
     pub repl_snapshot: Option<Vec<u8>>,
@@ -78,6 +81,7 @@ pub struct AgentState {
 pub struct AgentStateSave<'a> {
     pub agent_id: &'a str,
     pub messages_json: &'a str,
+    pub tool_calls_json: &'a str,
     pub iteration: i64,
     pub config_json: &'a str,
     pub repl_snapshot: Option<&'a [u8]>,
@@ -155,12 +159,13 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO agents (
-                agent_id, messages, iteration, config_json, repl_snapshot,
+                agent_id, messages, tool_calls_json, iteration, config_json, repl_snapshot,
                 input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 state.agent_id,
                 state.messages_json,
+                state.tool_calls_json,
                 state.iteration,
                 state.config_json,
                 state.repl_snapshot,
@@ -177,20 +182,21 @@ impl Store {
     pub fn load_agent_state(&self, agent_id: &str) -> Option<AgentState> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT agent_id, messages, iteration, config_json, repl_snapshot, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
+            "SELECT agent_id, messages, tool_calls_json, iteration, config_json, repl_snapshot, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
              FROM agents WHERE agent_id = ?1",
             params![agent_id],
             |row| {
                 Ok(AgentState {
                     agent_id: row.get(0)?,
                     messages_json: row.get(1)?,
-                    iteration: row.get(2)?,
-                    config_json: row.get(3)?,
-                    repl_snapshot: row.get(4)?,
-                    input_tokens: row.get(5)?,
-                    output_tokens: row.get(6)?,
-                    cached_input_tokens: row.get(7)?,
-                    reasoning_tokens: row.get(8)?,
+                    tool_calls_json: row.get(2)?,
+                    iteration: row.get(3)?,
+                    config_json: row.get(4)?,
+                    repl_snapshot: row.get(5)?,
+                    input_tokens: row.get(6)?,
+                    output_tokens: row.get(7)?,
+                    cached_input_tokens: row.get(8)?,
+                    reasoning_tokens: row.get(9)?,
                 })
             },
         )
@@ -200,8 +206,13 @@ impl Store {
     // ─── History operations ───
 
     pub fn history_add_turn(&self, agent_id: &str, turn: &serde_json::Value) {
+        let record = history_record_from_value(turn);
+        self.history_upsert_turn(agent_id, &record);
+    }
+
+    pub fn history_upsert_turn(&self, agent_id: &str, turn: &HistoryTurnRecord) {
         let conn = self.conn.lock().unwrap();
-        Self::history_add_turn_locked(&conn, agent_id, turn);
+        Self::history_upsert_turn_locked(&conn, agent_id, turn);
     }
 
     pub fn history_export(&self, agent_id: &str) -> Vec<HistoryTurnRecord> {
@@ -276,79 +287,45 @@ impl Store {
             params![agent_id],
         );
         for turn in turns {
-            Self::history_add_turn_locked(&tx, agent_id, turn);
+            let record = history_record_from_value(turn);
+            Self::history_upsert_turn_locked(&tx, agent_id, &record);
         }
         let _ = tx.commit();
     }
 
+    pub fn history_copy(&self, source_agent_id: &str, target_agent_id: &str) {
+        if source_agent_id == target_agent_id {
+            return;
+        }
+        let turns = self.history_export(source_agent_id);
+        let values = turns
+            .into_iter()
+            .map(|turn| {
+                serde_json::json!({
+                    "index": turn.index,
+                    "user_message": turn.user_message,
+                    "prose": turn.prose,
+                    "code": turn.code,
+                    "output": turn.output,
+                    "error": turn.error,
+                    "tool_calls": turn.tool_calls,
+                    "files_read": turn.files_read,
+                    "files_written": turn.files_written,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.history_load(target_agent_id, &values);
+    }
+
     // ─── Internal helpers (require caller to already hold the lock) ───
 
-    fn history_add_turn_locked(conn: &Connection, agent_id: &str, turn: &serde_json::Value) {
-        let index = turn.get("index").and_then(|v| v.as_i64()).unwrap_or(0);
-        let user_message = turn
-            .get("user_message")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let prose = turn
-            .get("prose")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let code = turn
-            .get("code")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let output = turn
-            .get("output")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let error = turn
-            .get("error")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let tool_calls = turn
-            .get("tool_calls")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        let mut files_read = std::collections::BTreeSet::new();
-        let mut files_written = std::collections::BTreeSet::new();
-        for tc in &tool_calls {
-            let tool = tc.get("tool").and_then(|v| v.as_str()).unwrap_or_default();
-            let path = tc
-                .get("args")
-                .and_then(|v| v.as_object())
-                .and_then(|obj| obj.get("path"))
-                .and_then(|v| v.as_str());
-            if let Some(path) = path
-                && matches!(tool, "read_file" | "glob" | "grep")
-            {
-                files_read.insert(path.to_string());
-            }
-            if tool == "apply_patch"
-                && let Some(files) = tc
-                    .get("result")
-                    .and_then(|v| v.get("files"))
-                    .and_then(|v| v.as_array())
-            {
-                for file in files {
-                    if let Some(path) = file.get("path").and_then(|v| v.as_str()) {
-                        files_written.insert(path.to_string());
-                    }
-                }
-            }
-        }
-
-        let tool_calls_json = serde_json::to_string(&tool_calls).unwrap_or_else(|_| "[]".into());
-        let files_read_json = serde_json::to_string(&files_read.into_iter().collect::<Vec<_>>())
-            .unwrap_or_else(|_| "[]".into());
+    fn history_upsert_turn_locked(conn: &Connection, agent_id: &str, turn: &HistoryTurnRecord) {
+        let (files_read, files_written) = derive_history_files(&turn.tool_calls);
+        let tool_calls_json =
+            serde_json::to_string(&turn.tool_calls).unwrap_or_else(|_| "[]".into());
+        let files_read_json = serde_json::to_string(&files_read).unwrap_or_else(|_| "[]".into());
         let files_written_json =
-            serde_json::to_string(&files_written.into_iter().collect::<Vec<_>>())
-                .unwrap_or_else(|_| "[]".into());
+            serde_json::to_string(&files_written).unwrap_or_else(|_| "[]".into());
 
         let _ = conn.execute(
             "INSERT OR REPLACE INTO history_turns
@@ -356,12 +333,12 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 agent_id,
-                index,
-                user_message,
-                prose,
-                code,
-                output,
-                error,
+                turn.index,
+                turn.user_message,
+                turn.prose,
+                turn.code,
+                turn.output,
+                turn.error,
                 tool_calls_json,
                 files_read_json,
                 files_written_json
@@ -370,9 +347,90 @@ impl Store {
     }
 }
 
+fn derive_history_files(tool_calls: &[serde_json::Value]) -> (Vec<String>, Vec<String>) {
+    let mut files_read = BTreeSet::new();
+    let mut files_written = BTreeSet::new();
+    for tc in tool_calls {
+        let tool = tc.get("tool").and_then(|v| v.as_str()).unwrap_or_default();
+        let path = tc
+            .get("args")
+            .and_then(|v| v.as_object())
+            .and_then(|obj| obj.get("path"))
+            .and_then(|v| v.as_str());
+        if let Some(path) = path
+            && matches!(tool, "read_file" | "glob" | "grep")
+        {
+            files_read.insert(path.to_string());
+        }
+        if tool == "apply_patch"
+            && let Some(files) = tc
+                .get("result")
+                .and_then(|v| v.get("files"))
+                .and_then(|v| v.as_array())
+        {
+            for file in files {
+                if let Some(path) = file.get("path").and_then(|v| v.as_str()) {
+                    files_written.insert(path.to_string());
+                }
+            }
+        }
+    }
+
+    (
+        files_read.into_iter().collect(),
+        files_written.into_iter().collect(),
+    )
+}
+
+fn history_record_from_value(turn: &serde_json::Value) -> HistoryTurnRecord {
+    HistoryTurnRecord {
+        index: turn.get("index").and_then(|v| v.as_i64()).unwrap_or(0),
+        user_message: turn
+            .get("user_message")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        prose: turn
+            .get("prose")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        code: turn
+            .get("code")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        output: turn
+            .get("output")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        error: turn
+            .get("error")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        tool_calls: turn
+            .get("tool_calls")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default(),
+        files_read: Vec::new(),
+        files_written: Vec::new(),
+    }
+}
+
 fn apply_migrations(conn: &Connection) -> rusqlite::Result<()> {
     match conn.execute(
         "ALTER TABLE agents ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0",
+        [],
+    ) {
+        Ok(_) => {}
+        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+            if message.contains("duplicate column name") => {}
+        Err(err) => return Err(err),
+    }
+    match conn.execute(
+        "ALTER TABLE agents ADD COLUMN tool_calls_json TEXT NOT NULL DEFAULT '[]'",
         [],
     ) {
         Ok(_) => {}
@@ -424,6 +482,7 @@ mod tests {
         s.save_agent_state(AgentStateSave {
             agent_id: "ag1",
             messages_json: "[]",
+            tool_calls_json: "[]",
             iteration: 5,
             config_json: "{}",
             repl_snapshot: None,
@@ -473,5 +532,17 @@ mod tests {
         assert_eq!(state.output_tokens, 25);
         assert_eq!(state.cached_input_tokens, 5);
         assert_eq!(state.reasoning_tokens, 0);
+    }
+
+    #[test]
+    fn open_uses_delete_journal_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.db");
+        let store = Store::open(&path).unwrap();
+        let conn = store.conn.lock().unwrap();
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_ascii_lowercase(), "delete");
     }
 }

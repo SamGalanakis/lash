@@ -72,7 +72,7 @@ impl AgentCall {
                 ));
             }
         };
-        let agent_execution_mode = session.config.execution_mode;
+        let agent_execution_mode = session.policy.execution_mode;
 
         let user_content = if let Some(ref schema_str) = schema {
             let model_name = serde_json::from_str::<serde_json::Value>(schema_str)
@@ -122,10 +122,7 @@ impl AgentCall {
         let res_clone = result.clone();
         let done_clone = done_notify.clone();
         let host = Arc::clone(&context.host);
-        let prompt_for_meta = prompt.to_string();
-        let session_id = session.session_id.clone();
         let turn_id = turn.turn_id.clone();
-        let session_config = session.config.clone();
 
         tokio::spawn(async move {
             let mut final_message: Option<String> = None;
@@ -172,33 +169,13 @@ impl AgentCall {
                     };
                     json!({
                         "result": result_text,
-                        "context": ctx_clone.lock().unwrap().clone(),
-                        "_sub_agent": {
-                            "task": prompt_for_meta,
-                            "session_id": session_id,
-                            "turn_id": turn_id,
-                            "config": session_config,
-                            "usage": turn.token_usage,
-                            "tool_calls": turn.tool_calls.len(),
-                            "iterations": turn.state.iteration,
-                            "status": status,
-                        }
+                        "status": status,
                     })
                 }
                 Err(err) => json!({
                     "result": "",
-                    "context": [],
-                    "_sub_agent": {
-                        "task": prompt_for_meta,
-                        "session_id": session_id,
-                        "turn_id": turn_id,
-                        "config": session_config,
-                        "usage": crate::TokenUsage::default(),
-                        "tool_calls": 0,
-                        "iterations": 0,
-                        "status": "failed",
-                        "error": err.to_string(),
-                    }
+                    "status": "failed",
+                    "error": err.to_string(),
                 }),
             };
 
@@ -230,7 +207,9 @@ impl AgentCall {
         ToolResult::ok(json!({
             "__handle__": "agent",
             "id": session.session_id,
-            "config": session.config,
+            "model": session.policy.model,
+            "model_variant": session.policy.model_variant,
+            "execution_mode": session.policy.execution_mode,
         }))
     }
 

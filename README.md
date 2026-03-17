@@ -39,6 +39,7 @@ lash --print "explain src/main.rs"
 ```
 
 `--print` runs a single autonomous turn, prints the final response to stdout, and skips the interactive prompt bridge.
+While it runs, live progress and tool activity stream to stderr.
 
 Common flags:
 
@@ -175,6 +176,8 @@ Run Harbor + Terminal Bench with the in-repo lash adapter:
 
 ```bash
 scripts/run-terminalbench.sh --sample --execution-mode repl --model gpt-5.4 --variant high
+scripts/run-terminalbench.sh --sample --preset smoke --execution-mode repl --model gpt-5.4 --variant high
+scripts/run-terminalbench.sh --sample --preset fast-medium --execution-mode standard --model gpt-5.4 --variant high
 scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,sqlite-with-gcov --model gpt-5.4 --variant high
 scripts/run-terminalbench.sh --full --execution-mode standard --task "git-*" --model gpt-5.4 --variant high
 ```
@@ -190,6 +193,8 @@ Notes:
 
 - `lash` remains the default agent.
 - `--execution-mode` only applies to `lash`; OpenCode uses its native execution path.
+- `--preset smoke` expands to `regex-log,log-summary-date-ranges`.
+- `--preset fast-medium` expands to `regex-log,log-summary-date-ranges,fix-code-vulnerability,sqlite-with-gcov`.
 - `--variant` is required for all benchmark runs so provider-native reasoning settings are explicit and reproducible.
 - OpenCode benchmark runs require an explicit `--model provider/model`.
 - OpenCode benchmark runs automatically copy local `opencode auth login` credentials from `~/.local/share/opencode/auth.json` into the Harbor container when present.
@@ -273,9 +278,14 @@ Stored config lives at:
 
 Relevant runtime settings include:
 
-- `runtime.context_folding`
+- `runtime.context_strategy`
 - `runtime.low_tier_subagent_execution_mode`
   `standard` by default for `agent_call` low-tier child sessions; set to `repl` only if you want low-tier delegates to execute via `lashlang`
+
+Supported context strategies:
+
+- `rolling_context`
+- `recall_agent`
 
 Config shape:
 
@@ -298,9 +308,8 @@ Config shape:
     "high": "..."
   },
   "runtime": {
-    "context_folding": {
-      "soft_limit_pct": 50,
-      "hard_limit_pct": 60
+    "context_strategy": {
+      "type": "rolling_context"
     },
     "low_tier_subagent_execution_mode": "standard"
   }

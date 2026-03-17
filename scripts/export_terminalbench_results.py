@@ -18,6 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--execution-mode", required=True)
     parser.add_argument("--requested-model")
     parser.add_argument("--variant")
+    parser.add_argument("--context-strategy")
     parser.add_argument("--harbor-env", required=True)
     parser.add_argument("--registry-url", required=True)
     parser.add_argument("--n-concurrent", type=int, required=True)
@@ -45,6 +46,7 @@ def main() -> int:
             execution_mode=ns.execution_mode,
             requested_model=ns.requested_model,
             variant=ns.variant,
+            context_strategy=ns.context_strategy,
             harbor_env=ns.harbor_env,
             registry_url=ns.registry_url,
             n_concurrent=ns.n_concurrent,

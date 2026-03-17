@@ -10,8 +10,8 @@ use crate::plugin::{
 };
 use crate::provider::AgentModels;
 use crate::{
-    AgentConfig, PluginSession, ProgressSender, ToolDefinition, ToolExecutionContext, ToolProvider,
-    ToolResult,
+    PluginSession, ProgressSender, SessionPolicy, ToolDefinition, ToolExecutionContext,
+    ToolProvider, ToolResult,
 };
 
 use super::require_str;
@@ -36,9 +36,8 @@ impl Default for AgentCallConfig {
 /// Single agent-call tool that spawns delegated child sessions at different intelligence tiers.
 /// Returns a handle immediately; use agent_result/agent_kill to interact.
 pub struct AgentCall {
-    #[cfg(test)]
-    plugins: Arc<PluginSession>,
-    config: AgentConfig,
+    base_tools: Arc<dyn ToolProvider>,
+    policy: SessionPolicy,
     execution_mode: crate::ExecutionMode,
     tool_config: AgentCallConfig,
     agent_models: Option<AgentModels>,
@@ -47,18 +46,15 @@ pub struct AgentCall {
 
 impl AgentCall {
     pub fn new(
-        plugins: Arc<PluginSession>,
-        config: &AgentConfig,
+        base_tools: Arc<dyn ToolProvider>,
+        policy: &SessionPolicy,
         tool_config: AgentCallConfig,
         agent_models: Option<AgentModels>,
     ) -> Self {
-        #[cfg(not(test))]
-        let _ = &plugins;
         Self {
-            #[cfg(test)]
-            plugins,
-            config: config.clone(),
-            execution_mode: config.execution_mode,
+            base_tools,
+            policy: policy.clone(),
+            execution_mode: policy.execution_mode,
             tool_config,
             agent_models,
             agents: Arc::new(StdMutex::new(HashMap::new())),
@@ -152,7 +148,7 @@ impl ToolProvider for AgentCall {
 }
 
 struct AgentCallPluginProvider {
-    config: AgentConfig,
+    policy: SessionPolicy,
     execution_mode: crate::ExecutionMode,
     tool_config: AgentCallConfig,
     agent_models: Option<AgentModels>,
@@ -161,9 +157,10 @@ struct AgentCallPluginProvider {
 
 impl AgentCallPluginProvider {
     fn bind(&self, session: Arc<PluginSession>) {
+        let base_tools = session.tools();
         let delegate = AgentCall::new(
-            session,
-            &self.config,
+            base_tools,
+            &self.policy,
             self.tool_config,
             self.agent_models.clone(),
         );
@@ -251,19 +248,19 @@ impl ToolProvider for AgentCallPluginProvider {
 }
 
 pub struct AgentCallPluginFactory {
-    config: AgentConfig,
+    policy: SessionPolicy,
     tool_config: AgentCallConfig,
     agent_models: Option<AgentModels>,
 }
 
 impl AgentCallPluginFactory {
     pub fn new(
-        config: AgentConfig,
+        policy: SessionPolicy,
         tool_config: AgentCallConfig,
         agent_models: Option<AgentModels>,
     ) -> Self {
         Self {
-            config,
+            policy,
             tool_config,
             agent_models,
         }
@@ -276,11 +273,11 @@ impl PluginFactory for AgentCallPluginFactory {
     }
 
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        let mut config = self.config.clone();
-        config.execution_mode = ctx.execution_mode;
+        let mut policy = self.policy.clone();
+        policy.execution_mode = ctx.execution_mode;
         Ok(Arc::new(AgentCallPlugin {
             provider: Arc::new(AgentCallPluginProvider {
-                config,
+                policy,
                 execution_mode: ctx.execution_mode,
                 tool_config: self.tool_config,
                 agent_models: self.agent_models.clone(),
@@ -361,26 +358,19 @@ mod tests {
             self.created.lock().unwrap().push(request.clone());
             Ok(crate::SessionHandle {
                 session_id: "child-session".to_string(),
-                config: crate::SessionConfigSnapshot {
-                    provider_kind: crate::provider::ProviderKind::Codex,
-                    model: request
-                        .config_overrides
-                        .model
-                        .unwrap_or_else(|| "mock-model".to_string()),
-                    model_variant: request.config_overrides.model_variant,
-                    execution_mode: request
-                        .config_overrides
-                        .execution_mode
-                        .unwrap_or(crate::ExecutionMode::Standard),
-                    context_folding: request.config_overrides.context_folding.unwrap_or_default(),
-                    context_window: request
-                        .config_overrides
-                        .max_context_tokens
-                        .map(|tokens| tokens as u64),
-                    max_turns: request.config_overrides.max_turns.map(|turns| turns as u64),
-                    include_soul: request.config_overrides.include_soul.unwrap_or(false),
-                    sub_agent: request.config_overrides.sub_agent.unwrap_or(false),
-                },
+                policy: request.policy.unwrap_or_else(|| crate::SessionPolicy {
+                    provider: Provider::Codex {
+                        access_token: "t".into(),
+                        refresh_token: "r".into(),
+                        expires_at: 0,
+                        account_id: None,
+                        options: crate::ProviderOptions::default(),
+                    },
+                    model: "mock-model".to_string(),
+                    execution_mode: crate::ExecutionMode::Standard,
+                    max_context_tokens: Some(128_000),
+                    ..Default::default()
+                }),
             })
         }
 
@@ -411,13 +401,21 @@ mod tests {
             Ok(crate::plugin::SessionTurnHandle {
                 turn_id: "turn-1".to_string(),
                 session_id: session_id.to_string(),
-                config: crate::SessionConfigSnapshot {
-                    provider_kind: crate::provider::ProviderKind::Codex,
+                policy: crate::SessionPolicy {
+                    provider: Provider::Codex {
+                        access_token: "t".into(),
+                        refresh_token: "r".into(),
+                        expires_at: 0,
+                        account_id: None,
+                        options: crate::ProviderOptions::default(),
+                    },
                     model: "gpt-5.3-codex-spark".to_string(),
                     model_variant: Some("low".to_string()),
+                    recall_agent_model: None,
+                    session_id: None,
                     execution_mode: crate::ExecutionMode::Standard,
-                    context_folding: crate::ContextFoldingConfig::default(),
-                    context_window: Some(128_000),
+                    context_strategy: crate::default_context_strategy(),
+                    max_context_tokens: Some(128_000),
                     max_turns: None,
                     include_soul: false,
                     sub_agent: true,
@@ -439,8 +437,11 @@ mod tests {
             Ok(crate::AssembledTurn {
                 state: crate::AgentStateEnvelope {
                     agent_id: "child-session".to_string(),
-                    execution_mode: crate::ExecutionMode::Standard,
-                    context_folding: crate::ContextFoldingConfig::default(),
+                    policy: crate::SessionPolicy {
+                        execution_mode: crate::ExecutionMode::Standard,
+                        context_strategy: crate::default_context_strategy(),
+                        ..Default::default()
+                    },
                     iteration: 2,
                     ..Default::default()
                 },
@@ -467,6 +468,7 @@ mod tests {
                     reasoning_tokens: 2,
                 },
                 tool_calls: vec![crate::ToolCallRecord {
+                    call_id: Some("tc1".to_string()),
                     tool: "read_file".to_string(),
                     args: json!({"path":"foo"}),
                     result: json!("bar"),
@@ -496,7 +498,7 @@ mod tests {
 
     #[test]
     fn codex_uses_explicit_tier_models_when_no_overrides() {
-        let config = AgentConfig {
+        let config = SessionPolicy {
             model: "custom-parent-model".to_string(),
             provider: codex_provider(),
             ..Default::default()
@@ -517,13 +519,14 @@ mod tests {
 
     #[test]
     fn override_model_keeps_override_and_inferrs_reasoning() {
-        let config = AgentConfig {
+        let config = SessionPolicy {
             model: "custom-parent-model".to_string(),
             provider: codex_provider(),
             ..Default::default()
         };
         let models = Some(AgentModels {
             low: None,
+            recall_agent: None,
             medium: None,
             high: Some("gpt-5.4".to_string()),
         });
@@ -609,7 +612,7 @@ mod tests {
     }
 
     fn test_agent_call(execution_mode: crate::ExecutionMode) -> AgentCall {
-        let config = AgentConfig {
+        let config = SessionPolicy {
             model: "custom-parent-model".to_string(),
             provider: codex_provider(),
             execution_mode,
@@ -629,7 +632,8 @@ mod tests {
         ])
         .build_session("root", execution_mode, None)
         .expect("plugins");
-        AgentCall::new(plugins, &config, AgentCallConfig::default(), None)
+        let base_tools = plugins.tools();
+        AgentCall::new(base_tools, &config, AgentCallConfig::default(), None)
     }
 
     #[test]
@@ -666,20 +670,20 @@ mod tests {
     #[test]
     fn low_tier_subagent_config_is_read_only() {
         let agent_call = test_agent_call(crate::ExecutionMode::Standard);
-        let low = agent_call.build_agent_config(&Tier::Low);
-        let medium = agent_call.build_agent_config(&Tier::Medium);
+        let low = agent_call.build_session_policy(&Tier::Low);
+        let medium = agent_call.build_session_policy(&Tier::Medium);
         assert_eq!(
             low.execution_mode,
             AgentCallConfig::default().low_tier_execution_mode
         );
-        assert_eq!(medium.execution_mode, agent_call.config.execution_mode);
+        assert_eq!(medium.execution_mode, agent_call.policy.execution_mode);
     }
 
     #[test]
     fn low_tier_execution_mode_is_host_configurable() {
-        let config = AgentConfig {
+        let config = SessionPolicy {
             execution_mode: crate::ExecutionMode::Standard,
-            ..AgentConfig::default()
+            ..SessionPolicy::default()
         };
         let plugins = crate::PluginHost::new(vec![
             Arc::new(StaticPluginFactory::new(
@@ -697,8 +701,9 @@ mod tests {
         ])
         .build_standard_session("root", None)
         .expect("plugins");
+        let base_tools = plugins.tools();
         let agent_call = AgentCall::new(
-            plugins,
+            base_tools,
             &config,
             AgentCallConfig {
                 low_tier_execution_mode: crate::ExecutionMode::Repl,
@@ -706,8 +711,8 @@ mod tests {
             None,
         );
 
-        let low = agent_call.build_agent_config(&Tier::Low);
-        let medium = agent_call.build_agent_config(&Tier::Medium);
+        let low = agent_call.build_session_policy(&Tier::Low);
+        let medium = agent_call.build_session_policy(&Tier::Medium);
 
         assert_eq!(low.execution_mode, crate::ExecutionMode::Repl);
         assert_eq!(medium.execution_mode, crate::ExecutionMode::Standard);
@@ -741,11 +746,11 @@ mod tests {
         assert_eq!(
             handle
                 .result
-                .get("config")
-                .and_then(|value| value.get("sub_agent"))
-                .and_then(|value| value.as_bool()),
-            Some(true)
+                .get("execution_mode")
+                .and_then(|value| value.as_str()),
+            Some("standard")
         );
+        assert!(handle.result.get("config").is_none());
 
         let result = agent_call
             .execute_streaming_with_context(
@@ -762,21 +767,12 @@ mod tests {
             Some("delegate result")
         );
         assert_eq!(
-            result
-                .result
-                .get("_sub_agent")
-                .and_then(|value| value.get("session_id"))
-                .and_then(|value| value.as_str()),
-            Some("child-session")
-        );
-        assert_eq!(
-            result
-                .result
-                .get("_sub_agent")
-                .and_then(|value| value.get("status"))
-                .and_then(|value| value.as_str()),
+            result.result.get("status").and_then(|value| value.as_str()),
             Some("completed")
         );
+        let result_text = result.result.to_string();
+        assert!(!result_text.contains("access_token"));
+        assert!(!result_text.contains("refresh_token"));
 
         let repeated = agent_call
             .execute_streaming_with_context(
@@ -797,15 +793,12 @@ mod tests {
 
         let created = host.created.lock().unwrap();
         assert_eq!(created.len(), 1);
-        assert_eq!(
-            created[0]
-                .tool_surface
-                .overrides
-                .iter()
-                .find(|override_| override_.tool_name == "apply_patch")
-                .and_then(|override_| override_.enabled),
-            Some(false)
-        );
+        let tool_names = created[0].context_surface.tool_providers[0]
+            .definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert!(!tool_names.iter().any(|name| name == "apply_patch"));
     }
 
     #[tokio::test]
@@ -844,11 +837,7 @@ mod tests {
             .await;
         assert!(result.success);
         assert_eq!(
-            result
-                .result
-                .get("_sub_agent")
-                .and_then(|value| value.get("status"))
-                .and_then(|value| value.as_str()),
+            result.result.get("status").and_then(|value| value.as_str()),
             Some("interrupted")
         );
         assert_eq!(
@@ -885,12 +874,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             *result_clone.lock().unwrap() = Some(json!({
                 "result": "delegate result",
-                "context": [],
-                "_sub_agent": {
-                    "session_id": "child-session",
-                    "turn_id": "turn-1",
-                    "status": "interrupted"
-                }
+                "status": "interrupted"
             }));
             done_notify.notify_waiters();
         });

@@ -1,16 +1,14 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
+use std::sync::Arc;
 
-use crate::plugin::{ToolSurfaceContribution, ToolSurfaceOverride};
 use crate::provider::AgentModels;
 use crate::{
-    AgentConfig, PromptContribution, SessionConfigOverrides, SessionCreateRequest,
-    SessionStartPoint, ToolDefinition, ToolParam,
+    PromptContribution, SessionContextSurface, SessionCreateRequest, SessionPluginMode,
+    SessionPolicy, SessionStartPoint, ToolDefinition, ToolParam, ToolProvider,
 };
 
-#[cfg(test)]
-use crate::{PluginSession, plugin::PluginError};
-
 use super::AgentCall;
+use crate::tools::FilteredToolProvider;
 
 /// Intelligence tier determines model choice, tool access, and turn limits.
 pub(super) enum Tier {
@@ -39,7 +37,7 @@ impl Tier {
 }
 
 pub(super) fn pick_model_and_variant(
-    config: &AgentConfig,
+    config: &SessionPolicy,
     models: &Option<AgentModels>,
     tier: &Tier,
 ) -> (String, Option<String>) {
@@ -103,77 +101,64 @@ fn low_tier_denied_tools() -> HashSet<&'static str> {
     .collect()
 }
 
+fn medium_high_denied_tools() -> HashSet<&'static str> {
+    ["ask"].into_iter().collect()
+}
+
 impl AgentCall {
-    pub(super) fn build_agent_config(&self, tier: &Tier) -> AgentConfig {
-        let (model, model_variant) = pick_model_and_variant(&self.config, &self.agent_models, tier);
-        AgentConfig {
+    pub(super) fn build_session_policy(&self, tier: &Tier) -> SessionPolicy {
+        let (model, model_variant) = pick_model_and_variant(&self.policy, &self.agent_models, tier);
+        SessionPolicy {
             model,
             model_variant,
-            session_id: self.config.session_id.clone(),
-            provider: self.config.provider.clone(),
+            session_id: self.policy.session_id.clone(),
+            provider: self.policy.provider.clone(),
             sub_agent: true,
             include_soul: matches!(tier, Tier::High),
-            max_context_tokens: self.config.max_context_tokens,
+            max_context_tokens: self.policy.max_context_tokens,
             max_turns: None,
-            llm_log_path: self.config.llm_log_path.clone(),
-            prompt_overrides: self.config.prompt_overrides.clone(),
-            prompt_renderer: std::sync::Arc::clone(&self.config.prompt_renderer),
-            instruction_source: self.config.instruction_source.clone(),
             execution_mode: match tier {
                 Tier::Low => self.tool_config.low_tier_execution_mode,
-                Tier::Medium | Tier::High => self.config.execution_mode,
+                Tier::Medium | Tier::High => self.policy.execution_mode,
             },
             ..Default::default()
         }
     }
 
-    pub(super) fn tool_surface_for_tier(&self, tier: &Tier) -> ToolSurfaceContribution {
+    fn tier_allowed_tools(&self, tier: &Tier) -> Vec<String> {
         let denied = match tier {
-            Tier::Low => low_tier_denied_tools()
-                .into_iter()
-                .map(str::to_string)
-                .collect::<BTreeSet<_>>(),
-            Tier::Medium | Tier::High => BTreeSet::from(["ask".to_string()]),
+            Tier::Low => low_tier_denied_tools(),
+            Tier::Medium | Tier::High => medium_high_denied_tools(),
         };
-        ToolSurfaceContribution {
-            overrides: denied
-                .into_iter()
-                .map(|tool_name| ToolSurfaceOverride {
-                    tool_name,
-                    enabled: Some(false),
-                    injected: Some(false),
-                })
-                .collect(),
-            tool_list_notes: Vec::new(),
-        }
+        self.base_tools
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .filter(|name| !denied.contains(name.as_str()))
+            .collect()
     }
 
-    #[cfg(test)]
-    pub(super) fn session_plugins_for_tier(
-        &self,
-        agent_id: &str,
-        tier: &Tier,
-    ) -> Result<std::sync::Arc<PluginSession>, PluginError> {
-        let execution_mode = self.build_agent_config(tier).execution_mode;
-        self.plugins.fork_for_agent_with_tool_surface(
-            agent_id,
-            execution_mode,
-            self.tool_surface_for_tier(tier),
-        )
+    fn tier_context_surface(&self, tier: &Tier) -> SessionContextSurface {
+        SessionContextSurface {
+            include_base_tools: false,
+            tool_providers: vec![Arc::new(FilteredToolProvider::new(
+                Arc::clone(&self.base_tools),
+                self.tier_allowed_tools(tier),
+            )) as Arc<dyn ToolProvider>],
+            prompt_contributions: Vec::new(),
+        }
     }
 
     #[cfg(test)]
     pub(super) fn visible_tool_names_for_tier(
         &self,
         tier: &Tier,
-    ) -> Result<Vec<String>, PluginError> {
-        let session = self.session_plugins_for_tier("__tier_probe__", tier)?;
-        let surface = session.execution_surface(
-            session.agent_id(),
-            self.build_agent_config(tier).execution_mode,
-        );
-        Ok(surface
-            .enabled_tools()
+    ) -> Result<Vec<String>, crate::plugin::PluginError> {
+        Ok(self
+            .tier_context_surface(tier)
+            .tool_providers
+            .iter()
+            .flat_map(|provider| provider.definitions())
             .into_iter()
             .map(|tool| tool.name)
             .collect())
@@ -184,23 +169,14 @@ impl AgentCall {
         agent_id: String,
         tier: &Tier,
     ) -> SessionCreateRequest {
-        let agent_config = self.build_agent_config(tier);
+        let policy = self.build_session_policy(tier);
         SessionCreateRequest {
             agent_id: Some(agent_id),
             start: SessionStartPoint::Empty,
-            config_overrides: SessionConfigOverrides {
-                model: Some(agent_config.model),
-                model_variant: agent_config.model_variant,
-                max_context_tokens: agent_config.max_context_tokens,
-                execution_mode: Some(agent_config.execution_mode),
-                context_folding: Some(agent_config.context_folding),
-                session_id: agent_config.session_id,
-                max_turns: agent_config.max_turns,
-                include_soul: Some(agent_config.include_soul),
-                sub_agent: Some(true),
-            },
-            tool_surface: self.tool_surface_for_tier(tier),
+            policy: Some(policy),
+            plugin_mode: SessionPluginMode::InheritCurrent,
             initial_messages: Vec::new(),
+            context_surface: self.tier_context_surface(tier),
         }
     }
 }
@@ -211,7 +187,7 @@ pub(super) fn agent_call_prompt_contributions() -> Vec<PromptContribution> {
             "### Delegation\nUse `agent_call` for scoped sub-tasks. Each delegate runs in its own session. Prefer low-intelligence delegates for read-only lookup or summarization work, and avoid overlapping file edits across concurrent delegates.",
         ),
         PromptContribution::guidance(
-            "### Agent Lifecycle\n`agent_result(id)` blocks until the child session finishes and returns an object in `result.value` with fields like `result`, `context`, and `_sub_agent` (including session/config metadata). The agent ID remains valid afterwards, including after `agent_kill(id)`, so you can query the terminal result again even after the child session has been stopped.",
+            "### Agent Lifecycle\n`agent_result(id)` blocks until the child session finishes and returns an object in `result.value` with the child result and terminal status. The agent ID remains valid afterwards, including after `agent_kill(id)`, so you can query the terminal result again even after the child session has been stopped.",
         ),
     ]
 }

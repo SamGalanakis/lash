@@ -616,7 +616,11 @@ def load_session_activity_metadata(session_db_paths: list[Path]) -> dict[str, An
 
     for db_path in session_db_paths:
         try:
-            connection = sqlite3.connect(db_path)
+            resolved = db_path.resolve()
+            connection = sqlite3.connect(
+                f"file:{resolved.as_posix()}?mode=ro&immutable=1",
+                uri=True,
+            )
         except sqlite3.Error:
             continue
         with connection:
@@ -824,6 +828,7 @@ class ExportArgs:
     execution_mode: str
     requested_model: str | None
     variant: str | None
+    context_strategy: str | None
     harbor_env: str
     registry_url: str
     n_concurrent: int
@@ -1140,6 +1145,7 @@ def build_trial_record(
             "requested_model": args.requested_model,
             "resolved_models": resolved_models,
             "variant": args.variant or None,
+            "context_strategy": args.context_strategy or None,
             "provider": provider_metadata,
             "task_path": ((result.get("task_id") or {}).get("path")),
             "task_git_url": ((result.get("task_id") or {}).get("git_url")),
@@ -1317,6 +1323,7 @@ def export_run(args: ExportArgs) -> Path:
             "execution_mode": args.execution_mode,
             "requested_model": args.requested_model,
             "variant": args.variant or None,
+            "context_strategy": args.context_strategy or None,
             "provider": load_provider_metadata(args.provider_config),
             "harbor_env": args.harbor_env,
             "registry_url": args.registry_url,
@@ -1373,6 +1380,7 @@ def load_run_summaries(results_dir: Path) -> list[dict[str, Any]]:
                 "execution_mode": params.get("execution_mode"),
                 "requested_model": params.get("requested_model"),
                 "variant": params.get("variant"),
+                "context_strategy": params.get("context_strategy"),
                 "provider": (params.get("provider") or {}).get("active_provider"),
                 "trials_total": stats.get("trials_total", 0),
                 "trials_passed": stats.get("trials_passed", 0),

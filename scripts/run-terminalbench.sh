@@ -17,6 +17,7 @@ Options:
   --dataset <name@version>      Dataset to run (default: terminal-bench-sample@2.0)
   --sample                      Shortcut for --dataset terminal-bench-sample@2.0
   --full                        Shortcut for --dataset terminal-bench@2.0
+  --preset <name>               Exact task preset: smoke|fast-medium
   --task <glob>                 Task include pattern (repeatable)
   --tasks <a,b,c>               Exact task names as a comma-separated list
   --task-file <path>            Exact task names from a file (one per line, # comments allowed)
@@ -27,6 +28,8 @@ Options:
                                 (required for all benchmark runs)
   --execution-mode <mode>       Lash execution mode: repl|standard
                                 (required for --agent lash; ignored for opencode)
+  --context-strategy <name>     Lash context strategy: rolling_context|recall_agent
+                                (optional for --agent lash; ignored for opencode)
   --jobs-dir <path>             Harbor jobs output dir (default: jobs)
   --results-dir <path>          Persistent structured results dir (default: .benchmarks/terminalbench)
   --job-name <name>             Harbor job name (optional)
@@ -47,8 +50,12 @@ Options:
 
 Examples:
   scripts/run-terminalbench.sh --sample --execution-mode repl --variant high
+  scripts/run-terminalbench.sh --sample --preset smoke --execution-mode repl --model gpt-5.4 --variant high
+  scripts/run-terminalbench.sh --sample --preset fast-medium --execution-mode standard --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --full --execution-mode standard --task "git-*" --variant high
   scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,sqlite-with-gcov --variant high
+  scripts/run-terminalbench.sh --sample --execution-mode standard --context-strategy rolling_context --model gpt-5.4 --variant high
+  scripts/run-terminalbench.sh --sample --execution-mode repl --context-strategy recall_agent --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --sample --execution-mode repl --task chess-best-move --model gpt-5.3-codex --variant high
   scripts/run-terminalbench.sh --agent opencode --sample --model openai/gpt-5.4 --variant high
 EOF
@@ -69,6 +76,7 @@ JOB_NAME=""
 MODEL=""
 VARIANT=""
 EXECUTION_MODE=""
+CONTEXT_STRATEGY=""
 N_CONCURRENT="1"
 N_CONCURRENT_SET=0
 ATTEMPTS="1"
@@ -80,11 +88,24 @@ DELETE_AFTER_RUN=1
 REQUIRE_CONFIG=1
 DRY_RUN=0
 DEBUG=0
+TASK_PRESET=""
 
 TASK_PATTERNS=()
 EXACT_TASKS=()
 EXCLUDE_PATTERNS=()
 EXTRA_ARGS=()
+
+readonly PRESET_SMOKE_TASKS=(
+  "regex-log"
+  "log-summary-date-ranges"
+)
+
+readonly PRESET_FAST_MEDIUM_TASKS=(
+  "regex-log"
+  "log-summary-date-ranges"
+  "fix-code-vulnerability"
+  "sqlite-with-gcov"
+)
 
 append_exact_tasks() {
   local raw="$1"
@@ -112,6 +133,22 @@ load_task_file() {
       EXACT_TASKS+=("${line}")
     fi
   done <"${path}"
+}
+
+apply_task_preset() {
+  local preset="$1"
+  case "${preset}" in
+    smoke)
+      EXACT_TASKS+=("${PRESET_SMOKE_TASKS[@]}")
+      ;;
+    fast-medium)
+      EXACT_TASKS+=("${PRESET_FAST_MEDIUM_TASKS[@]}")
+      ;;
+    *)
+      echo "error: unsupported --preset: ${preset} (expected smoke|fast-medium)" >&2
+      exit 2
+      ;;
+  esac
 }
 
 join_by() {
@@ -150,6 +187,11 @@ while [[ $# -gt 0 ]]; do
       DATASET="terminal-bench@2.0"
       shift
       ;;
+    --preset)
+      TASK_PRESET="${2:?missing value for --preset}"
+      apply_task_preset "${TASK_PRESET}"
+      shift 2
+      ;;
     --task)
       TASK_PATTERNS+=("${2:?missing value for --task}")
       shift 2
@@ -176,6 +218,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --execution-mode)
       EXECUTION_MODE="${2:?missing value for --execution-mode}"
+      shift 2
+      ;;
+    --context-strategy)
+      CONTEXT_STRATEGY="${2:?missing value for --context-strategy}"
       shift 2
       ;;
     --jobs-dir)
@@ -324,6 +370,11 @@ if [[ "${AGENT}" == "lash" ]]; then
     exit 2
   fi
 
+  if [[ -n "${CONTEXT_STRATEGY}" && "${CONTEXT_STRATEGY}" != "rolling_context" && "${CONTEXT_STRATEGY}" != "recall_agent" ]]; then
+    echo "error: unsupported --context-strategy: ${CONTEXT_STRATEGY} (expected rolling_context|recall_agent)" >&2
+    exit 2
+  fi
+
   RUN_EXECUTION_MODE="${EXECUTION_MODE}"
   BINARY_PATH="${REPO_ROOT}/target-bullseye/release/lash"
   if [[ "${DO_BUILD}" -eq 1 ]]; then
@@ -338,6 +389,7 @@ if [[ "${AGENT}" == "lash" ]]; then
   export LASH_BENCH_BINARY="${BINARY_PATH}"
   export LASH_BENCH_EXECUTION_MODE="${EXECUTION_MODE}"
   export LASH_BENCH_MODEL_VARIANT="${VARIANT}"
+  export LASH_BENCH_CONTEXT_STRATEGY="${CONTEXT_STRATEGY}"
 
   if [[ -z "${LASH_PROMPT_REPLACE_IDENTITY:-}" ]]; then
     export LASH_PROMPT_REPLACE_IDENTITY="$(cat <<EOF
@@ -356,6 +408,9 @@ else
   RUN_EXECUTION_MODE="agent-native"
   if [[ -n "${EXECUTION_MODE}" ]]; then
     echo "warning: --execution-mode is ignored for --agent opencode" >&2
+  fi
+  if [[ -n "${CONTEXT_STRATEGY}" ]]; then
+    echo "warning: --context-strategy is ignored for --agent opencode" >&2
   fi
   if [[ -z "${MODEL}" ]]; then
     echo "error: --model provider/model is required for --agent opencode" >&2
@@ -467,6 +522,9 @@ if [[ -d "${JOB_DIR}" ]]; then
   fi
   if [[ -n "${VARIANT}" ]]; then
     EXPORT_CMD+=(--variant "${VARIANT}")
+  fi
+  if [[ -n "${CONTEXT_STRATEGY}" ]]; then
+    EXPORT_CMD+=(--context-strategy "${CONTEXT_STRATEGY}")
   fi
   if [[ "${DELETE_AFTER_RUN}" -eq 1 ]]; then
     EXPORT_CMD+=(--delete-after-run)

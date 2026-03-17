@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::instructions::InstructionSource;
@@ -13,7 +12,6 @@ pub struct DefaultToolPluginDeps {
     #[cfg(feature = "sqlite-store")]
     pub store: Option<Arc<crate::store::Store>>,
     pub tavily_api_key: Option<String>,
-    pub skill_dirs: Option<Vec<PathBuf>>,
     pub prompt_bridge: Option<crate::PromptBridge>,
     pub instruction_source: Option<Arc<dyn InstructionSource>>,
 }
@@ -89,11 +87,6 @@ pub fn default_tool_plugin_factories(
                 .with_tool_provider(Arc::new(super::FetchUrl::new(key)) as Arc<dyn ToolProvider>),
         )));
     }
-
-    if let Some(skill_dirs) = deps.skill_dirs {
-        factories.push(Arc::new(super::SkillsPluginFactory::new(skill_dirs)));
-    }
-
     factories
 }
 
@@ -130,6 +123,14 @@ impl ToolProvider for CompositeToolProvider {
     fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools.values().map(|(def, _)| def.clone()).collect()
     }
+
+    fn dynamic_generation(&self) -> Option<u64> {
+        self.providers
+            .iter()
+            .filter_map(|(provider, _)| provider.dynamic_generation())
+            .max()
+    }
+
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
         match self.tools.get(name) {
             Some((_, provider_idx)) => self.providers[*provider_idx].0.execute(name, args).await,

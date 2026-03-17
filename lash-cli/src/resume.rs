@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use lash_core::agent::{Message, MessageRole, Part, PartKind, PruneState};
 use lash_core::{
-    AgentStateEnvelope, CachedModelCatalog, ContextFoldingConfig, DynamicStateSnapshot,
+    AgentStateEnvelope, CachedModelCatalog, ContextStrategy, DynamicStateSnapshot,
     DynamicToolProvider, ExecutionMode, LashRuntime, PromptUsage, Provider, Store, TokenUsage,
 };
 
@@ -58,6 +58,7 @@ pub async fn load_resumed_session(
     runtime: &mut Option<LashRuntime>,
     turn_counter: &mut usize,
     execution_mode: &mut ExecutionMode,
+    context_strategy: &mut ContextStrategy,
     provider: &Provider,
     current_model_variant: &mut Option<String>,
     dynamic_tools: &Arc<DynamicToolProvider>,
@@ -83,6 +84,7 @@ pub async fn load_resumed_session(
         app,
         turn_counter,
         execution_mode,
+        context_strategy,
         provider,
         current_model_variant,
         dynamic_tools,
@@ -103,6 +105,7 @@ pub async fn restore_agent_state(
     app: &mut App,
     turn_counter: &mut usize,
     execution_mode: &mut ExecutionMode,
+    context_strategy: &mut ContextStrategy,
     provider: &Provider,
     current_model_variant: &mut Option<String>,
     dynamic_tools: &Arc<DynamicToolProvider>,
@@ -216,13 +219,15 @@ pub async fn restore_agent_state(
         let restored_execution_mode = requested_execution_mode
             .and_then(|mode| crate::ensure_supported_execution_mode(mode).ok())
             .unwrap_or_else(lash_core::default_execution_mode);
-        let restored_context_folding = config_value
+        let restored_context_strategy = config_value
             .as_ref()
-            .and_then(|v| v.get("context_folding").cloned())
-            .and_then(|v| serde_json::from_value::<ContextFoldingConfig>(v).ok())
-            .and_then(|cfg| cfg.validate().ok())
-            .unwrap_or_default();
+            .and_then(|v| v.get("context_strategy").cloned())
+            .and_then(|v| serde_json::from_value::<ContextStrategy>(v).ok())
+            .unwrap_or_else(lash_core::default_context_strategy)
+            .validate()
+            .unwrap_or_else(|_| lash_core::default_context_strategy());
         *execution_mode = restored_execution_mode;
+        *context_strategy = restored_context_strategy;
         if matches!(requested_execution_mode, Some(ExecutionMode::Repl))
             && !lash_core::execution_mode_supported(ExecutionMode::Repl)
         {
@@ -242,7 +247,7 @@ pub async fn restore_agent_state(
                         None,
                         None,
                         None,
-                        Some(restored_context_folding),
+                        Some(restored_context_strategy),
                     )
                     .await;
                     match rt.restore_repl(repl_snapshot).await {
@@ -268,8 +273,14 @@ pub async fn restore_agent_state(
         }
 
         if let Some(rt) = runtime.as_mut() {
-            rt.update_session_config(None, None, Some(current_model_variant.clone()), None, None)
-                .await;
+            rt.update_session_config(
+                None,
+                None,
+                Some(current_model_variant.clone()),
+                None,
+                Some(restored_context_strategy),
+            )
+            .await;
             let _ = rt.refresh_session_execution_surface().await;
             let replay_manifest = config_value
                 .as_ref()
@@ -279,15 +290,20 @@ pub async fn restore_agent_state(
                 .and_then(|v| v.get("plugin_snapshot").cloned())
                 .and_then(|v| serde_json::from_value(v).ok());
             let last_prompt_usage = restored_last_prompt_usage(config_value.as_ref());
+            let tool_calls = serde_json::from_str(&state.tool_calls_json).unwrap_or_default();
             app.last_prompt_usage = last_prompt_usage.clone();
             rt.set_state(AgentStateEnvelope {
                 agent_id: "root".to_string(),
-                context_folding: restored_context_folding,
+                policy: lash_core::SessionPolicy {
+                    execution_mode: restored_execution_mode,
+                    context_strategy: restored_context_strategy,
+                    ..rt.export_state().policy
+                },
                 messages: history.clone(),
+                tool_calls,
                 iteration: *turn_counter,
                 token_usage: app.token_usage.clone(),
                 last_prompt_usage,
-                execution_mode: restored_execution_mode,
                 task_state: None,
                 replay_manifest,
                 plugin_snapshot,
@@ -315,6 +331,7 @@ mod tests {
         let state = lash_core::store::AgentState {
             agent_id: "root".into(),
             messages_json: "[]".into(),
+            tool_calls_json: "[]".into(),
             iteration: 3,
             config_json: "{}".into(),
             repl_snapshot: None,
@@ -362,6 +379,9 @@ mod tests {
             "manifest": {
                 "execution_mode": "standard"
             },
+            "context_strategy": {
+                "type": "rolling_context"
+            },
             "last_prompt_usage": {
                 "prompt_context_tokens": 4096,
                 "input_tokens": 3900,
@@ -372,6 +392,7 @@ mod tests {
         store.save_agent_state(lash_core::store::AgentStateSave {
             agent_id: "root",
             messages_json: "[]",
+            tool_calls_json: "[]",
             iteration: 7,
             config_json: &config_json,
             repl_snapshot: None,
@@ -420,12 +441,12 @@ mod tests {
         let mut desired_dynamic = dynamic_tools.export_state();
         let runtime_services = RuntimeServices::new(plugins);
         let runtime = LashRuntime::from_state(
-            lash_core::AgentConfig {
+            lash_core::SessionPolicy {
                 execution_mode: ExecutionMode::Standard,
                 provider: provider.clone(),
                 model: "gpt-5".into(),
                 max_context_tokens: Some(200_000),
-                ..lash_core::AgentConfig::default()
+                ..lash_core::SessionPolicy::default()
             },
             RuntimeHostConfig::default(),
             runtime_services,
@@ -439,6 +460,7 @@ mod tests {
         let mut runtime = Some(runtime);
         let mut turn_counter = 0;
         let mut execution_mode = ExecutionMode::Standard;
+        let mut context_strategy = lash_core::default_context_strategy();
         let mut current_model_variant = None;
 
         restore_agent_state(
@@ -448,6 +470,7 @@ mod tests {
             &mut app,
             &mut turn_counter,
             &mut execution_mode,
+            &mut context_strategy,
             &provider,
             &mut current_model_variant,
             &dynamic_tools,
@@ -459,6 +482,7 @@ mod tests {
 
         assert_eq!(turn_counter, 7);
         assert_eq!(execution_mode, ExecutionMode::Standard);
+        assert_eq!(context_strategy, lash_core::ContextStrategy::RollingContext);
         assert_eq!(app.token_usage.input_tokens, 1200);
         assert_eq!(app.token_usage.output_tokens, 340);
         assert_eq!(app.token_usage.cached_input_tokens, 80);
@@ -469,7 +493,14 @@ mod tests {
 
         let restored_state = runtime.expect("runtime").export_state();
         assert_eq!(restored_state.iteration, 7);
-        assert_eq!(restored_state.execution_mode, ExecutionMode::Standard);
+        assert_eq!(
+            restored_state.policy.execution_mode,
+            ExecutionMode::Standard
+        );
+        assert_eq!(
+            restored_state.policy.context_strategy,
+            lash_core::ContextStrategy::RollingContext
+        );
         assert_eq!(restored_state.token_usage.input_tokens, 1200);
         assert_eq!(restored_state.token_usage.output_tokens, 340);
         assert_eq!(restored_state.token_usage.cached_input_tokens, 80);

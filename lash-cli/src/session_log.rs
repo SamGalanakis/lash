@@ -681,6 +681,7 @@ mod tests {
 
             logger.log_user_input("What time is it?");
             logger.log_event(&AgentEvent::ToolCall {
+                call_id: Some("tc1".to_string()),
                 name: "exec_command".to_string(),
                 args: json!({"cmd": "date"}),
                 result: json!({"wall_time_seconds": 0.01, "exit_code": 0, "output": "Thu\n"}),

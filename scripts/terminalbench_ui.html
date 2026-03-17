@@ -3,78 +3,133 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Lash Bench Observatory</title>
+  <title>lash / bench observatory</title>
   <style>
+    @import url('https://fonts.googleapis.com/css2?family=Azeret+Mono:wght@400;500;700;800&family=Chivo+Mono:wght@300;400;500;700&family=Spectral:wght@400;500;600;700&display=swap');
+
     :root {
-      --paper: #f4efe2;
-      --paper-2: #fff9ee;
-      --ink: #111926;
-      --ink-soft: #475467;
-      --line: rgba(17, 25, 38, 0.14);
-      --accent: #d4622d;
-      --accent-2: #146c94;
-      --accent-3: #1f8f6a;
-      --danger: #b42318;
-      --pass: #14532d;
-      --fail: #9f1239;
-      --error: #7c2d12;
-      --shadow: 0 18px 50px rgba(17, 25, 38, 0.12);
-      --mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
-      --serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
-      --sans: "Avenir Next", "Segoe UI", sans-serif;
+      --form: #0e0d0b;
+      --form-deep: #080807;
+      --form-raised: #141412;
+      --ghost-bar: #322818;
+
+      --ash: #2a2a28;
+      --ash-light: #3a3a34;
+      --ash-mid: #4a4a44;
+      --ash-text: #5a5a50;
+
+      --chalk-dim: #7a7a70;
+      --chalk-mid: #c8c4b8;
+      --chalk: #e8e4d0;
+
+      --sodium: #e8a33c;
+      --sodium-dim: rgba(232, 163, 60, 0.18);
+      --sodium-ghost: rgba(232, 163, 60, 0.08);
+      --lichen: #8a9e6c;
+      --lichen-dim: rgba(138, 158, 108, 0.18);
+      --error: #cc4444;
+      --error-dim: rgba(204, 68, 68, 0.18);
+      --fail: #d4622d;
+      --fail-dim: rgba(212, 98, 45, 0.18);
+
+      --line: rgba(232, 228, 208, 0.10);
+      --line-strong: rgba(232, 163, 60, 0.22);
+      --panel: rgba(20, 20, 18, 0.82);
+      --shadow: 0 28px 80px rgba(0, 0, 0, 0.42);
+
+      --font-display: "Azeret Mono", monospace;
+      --font-ui: "Chivo Mono", monospace;
+      --font-body: "Spectral", serif;
     }
 
-    * { box-sizing: border-box; }
+    * { box-sizing: border-box; margin: 0; }
+
+    html { scroll-behavior: smooth; }
+
     body {
-      margin: 0;
-      color: var(--ink);
+      color: var(--chalk);
       background:
-        radial-gradient(circle at top left, rgba(212, 98, 45, 0.12), transparent 30%),
-        radial-gradient(circle at top right, rgba(20, 108, 148, 0.16), transparent 28%),
-        linear-gradient(180deg, #f7f2e7 0%, #efe7d7 100%);
-      font-family: var(--sans);
+        radial-gradient(ellipse at 0% 0%, rgba(232, 163, 60, 0.07), transparent 40%),
+        radial-gradient(ellipse at 100% 100%, rgba(138, 158, 108, 0.04), transparent 36%),
+        var(--form);
+      font: 400 13px/1.5 var(--font-ui);
       min-height: 100vh;
+      overflow-x: hidden;
     }
 
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+      background:
+        repeating-linear-gradient(
+          -58deg,
+          transparent 0, transparent 96px,
+          rgba(232, 163, 60, 0.025) 96px,
+          rgba(232, 163, 60, 0.025) 97px
+        );
+    }
+
+    /* ── Shell layout ── */
     .shell {
+      position: relative;
+      z-index: 1;
       display: grid;
-      grid-template-columns: 360px 1fr;
+      grid-template-columns: 340px 1fr;
       min-height: 100vh;
     }
 
+    /* ── Sidebar ── */
     .sidebar {
       border-right: 1px solid var(--line);
-      background: rgba(255, 249, 238, 0.88);
-      backdrop-filter: blur(14px);
-      padding: 26px 20px;
+      background: linear-gradient(180deg, rgba(14, 13, 11, 0.96), rgba(8, 8, 7, 0.99));
+      padding: 0;
       position: sticky;
       top: 0;
       height: 100vh;
       overflow: auto;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .sidebar::-webkit-scrollbar { width: 4px; }
+    .sidebar::-webkit-scrollbar-track { background: transparent; }
+    .sidebar::-webkit-scrollbar-thumb { background: var(--ash-mid); border-radius: 2px; }
+
+    .masthead {
+      padding: 22px 20px 18px;
+      border-bottom: 1px solid var(--line);
     }
 
     .masthead h1 {
-      margin: 0;
-      font: 700 28px/1 var(--serif);
-      letter-spacing: 0.02em;
+      font: 700 11px/1 var(--font-display);
+      letter-spacing: 0.28em;
+      text-transform: uppercase;
+      color: var(--chalk);
+    }
+
+    .masthead h1 .slash {
+      color: var(--sodium);
     }
 
     .masthead p {
-      margin: 8px 0 0;
-      color: var(--ink-soft);
-      line-height: 1.5;
-      font-size: 14px;
+      margin-top: 10px;
+      color: var(--chalk-dim);
+      font: 400 12.5px/1.55 var(--font-body);
     }
 
     .toolbar {
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--line);
       display: grid;
       gap: 10px;
-      margin: 18px 0 20px;
     }
 
     .toolbar-row {
       display: flex;
-      gap: 10px;
+      gap: 8px;
     }
 
     input, button, select {
@@ -83,65 +138,102 @@
 
     input[type="search"] {
       width: 100%;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 12px 14px;
-      background: var(--paper-2);
+      border: 1px solid var(--ash);
+      background: var(--form-deep);
+      color: var(--chalk);
+      padding: 10px 12px;
+      font: 400 12px/1 var(--font-ui);
+      outline: none;
+      transition: border-color 160ms;
+    }
+
+    input[type="search"]::placeholder {
+      color: var(--ash-text);
+    }
+
+    input[type="search"]:focus {
+      border-color: var(--sodium);
     }
 
     button {
-      border: 0;
-      border-radius: 14px;
-      padding: 11px 14px;
+      border: 1px solid var(--ash);
+      background: var(--form-raised);
+      color: var(--chalk-dim);
+      padding: 9px 14px;
+      font: 500 11px/1 var(--font-ui);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
       cursor: pointer;
-      color: white;
-      background: linear-gradient(135deg, var(--accent), #f08b49);
-      box-shadow: var(--shadow);
+      transition: all 160ms;
+    }
+
+    button:hover:not(:disabled) {
+      color: var(--chalk);
+      border-color: var(--line-strong);
     }
 
     button.secondary {
-      background: linear-gradient(135deg, var(--accent-2), #3ca6d4);
+      border-color: rgba(138, 158, 108, 0.28);
+      color: var(--lichen);
     }
 
-    button.ghost {
-      background: rgba(17, 25, 38, 0.08);
-      color: var(--ink);
-      box-shadow: none;
+    button.secondary:hover:not(:disabled) {
+      background: var(--lichen-dim);
     }
 
     button.danger {
-      background: linear-gradient(135deg, #a61b1b, #d64545);
+      border-color: rgba(204, 68, 68, 0.28);
+      color: var(--error);
+    }
+
+    button.danger:hover:not(:disabled) {
+      background: var(--error-dim);
+    }
+
+    button.ghost {
+      border-color: transparent;
+      background: transparent;
+      color: var(--chalk-dim);
     }
 
     button:disabled {
-      opacity: 0.45;
+      opacity: 0.3;
       cursor: not-allowed;
-      box-shadow: none;
     }
 
+    .banner {
+      font: 400 11px/1.4 var(--font-ui);
+      color: var(--ash-text);
+      letter-spacing: 0.04em;
+    }
+
+    /* ── Run list ── */
     .run-list {
+      flex: 1;
+      padding: 10px;
       display: grid;
-      gap: 12px;
+      gap: 6px;
+      align-content: start;
+      overflow: auto;
     }
 
     .run-card {
-      border: 1px solid transparent;
-      border-radius: 20px;
+      border: 1px solid var(--line);
+      background: var(--form-raised);
       padding: 14px;
-      background: rgba(255, 255, 255, 0.74);
-      box-shadow: 0 8px 22px rgba(17, 25, 38, 0.06);
       cursor: pointer;
-      transition: transform 120ms ease, border-color 120ms ease;
+      transition: all 140ms;
     }
 
     .run-card:hover {
-      transform: translateY(-1px);
-      border-color: rgba(20, 108, 148, 0.25);
+      border-color: var(--ash-mid);
+      background: rgba(20, 20, 18, 0.95);
     }
 
     .run-card.active {
-      border-color: rgba(212, 98, 45, 0.55);
-      background: linear-gradient(180deg, rgba(255, 249, 238, 0.94), rgba(255, 255, 255, 0.98));
+      border-color: var(--sodium);
+      background: linear-gradient(135deg, rgba(232, 163, 60, 0.06), var(--form-raised));
+      box-shadow: inset 3px 0 0 var(--sodium);
     }
 
     .run-card-top {
@@ -150,327 +242,641 @@
       align-items: flex-start;
     }
 
-    .run-card-top input {
-      margin-top: 3px;
+    .run-card-top input[type="checkbox"] {
+      margin-top: 2px;
+      accent-color: var(--sodium);
     }
 
     .run-card h3 {
-      margin: 0;
-      font: 700 18px/1.2 var(--serif);
+      font: 600 13px/1.2 var(--font-ui);
+      color: var(--chalk);
+      margin-bottom: 3px;
     }
 
-    .run-card small, .muted {
-      color: var(--ink-soft);
+    .run-card-sub {
+      color: var(--chalk-dim);
+      font-size: 11px;
+      line-height: 1.4;
+      margin-bottom: 8px;
+    }
+
+    .run-card-badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-bottom: 6px;
+    }
+
+    .run-card-stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 10px;
+      font: 400 10px/1.3 var(--font-ui);
+      color: var(--ash-text);
+    }
+
+    .muted {
+      color: var(--chalk-dim);
+      font-size: 11px;
     }
 
     .chips {
       display: flex;
       flex-wrap: wrap;
-      gap: 7px;
-      margin-top: 10px;
+      gap: 5px;
+      margin-top: 8px;
     }
 
     .chip {
-      border-radius: 999px;
-      padding: 4px 9px;
-      font-size: 12px;
-      background: rgba(17, 25, 38, 0.08);
-      color: var(--ink-soft);
+      padding: 3px 7px;
+      font: 400 10px/1 var(--font-ui);
+      letter-spacing: 0.04em;
+      border: 1px solid var(--line);
+      color: var(--chalk-dim);
+      background: var(--form-deep);
+      white-space: nowrap;
     }
 
-    .chip.pass { background: rgba(31, 143, 106, 0.14); color: var(--pass); }
-    .chip.fail { background: rgba(159, 18, 57, 0.14); color: var(--fail); }
-    .chip.error { background: rgba(180, 35, 24, 0.14); color: var(--danger); }
+    .chip.pass { border-color: rgba(138, 158, 108, 0.3); color: var(--lichen); }
+    .chip.fail { border-color: rgba(212, 98, 45, 0.3); color: var(--fail); }
+    .chip.error { border-color: rgba(204, 68, 68, 0.3); color: var(--error); }
+    .chip.mode {
+      border-color: var(--sodium);
+      color: var(--sodium);
+      font-weight: 600;
+      letter-spacing: 0.06em;
+    }
+    .chip.context {
+      border-color: rgba(138, 158, 108, 0.5);
+      color: var(--lichen);
+      font-weight: 600;
+      letter-spacing: 0.06em;
+    }
 
+    /* ── Main content ── */
     .content {
-      padding: 28px;
+      padding: 24px;
       display: grid;
-      gap: 20px;
+      gap: 18px;
+      align-content: start;
     }
 
+    /* ── Hero ── */
     .hero {
-      padding: 26px;
-      border-radius: 28px;
-      color: white;
-      background:
-        linear-gradient(135deg, rgba(17, 25, 38, 0.94), rgba(20, 108, 148, 0.88)),
-        linear-gradient(180deg, rgba(255,255,255,0.06), transparent);
-      box-shadow: var(--shadow);
       position: relative;
+      padding: 28px 28px 24px;
+      border: 1px solid var(--line);
+      background:
+        linear-gradient(135deg, rgba(232, 163, 60, 0.08), transparent 50%),
+        linear-gradient(180deg, var(--form-raised), var(--form-deep));
       overflow: hidden;
     }
 
-    .hero:after {
+    .hero::after {
       content: "";
       position: absolute;
-      right: -40px;
-      top: -60px;
-      width: 240px;
-      height: 240px;
-      border-radius: 50%;
-      background: radial-gradient(circle, rgba(255,255,255,0.18), transparent 68%);
+      right: -20px;
+      top: -40px;
+      width: 180px;
+      height: 180px;
+      background: radial-gradient(circle, rgba(232, 163, 60, 0.08), transparent 70%);
+      pointer-events: none;
+    }
+
+    .hero-eyebrow {
+      font: 500 10px/1 var(--font-display);
+      letter-spacing: 0.32em;
+      text-transform: uppercase;
+      color: var(--ash-text);
+      margin-bottom: 12px;
     }
 
     .hero h2 {
-      margin: 0;
-      font: 700 34px/1 var(--serif);
-      letter-spacing: 0.02em;
+      font: 700 clamp(20px, 3vw, 28px)/1.1 var(--font-display);
+      letter-spacing: -0.04em;
+      text-transform: uppercase;
+      color: var(--chalk);
+    }
+
+    .hero h2 .slash {
+      color: var(--sodium);
     }
 
     .hero p {
-      margin: 10px 0 0;
-      max-width: 920px;
-      color: rgba(255, 255, 255, 0.82);
+      margin-top: 10px;
+      max-width: 72ch;
+      color: var(--chalk-mid);
+      font: 400 14px/1.6 var(--font-body);
     }
 
+    /* ── Panels ── */
     .panel {
-      border: 1px solid rgba(17, 25, 38, 0.1);
-      border-radius: 24px;
-      padding: 20px;
-      background: rgba(255, 255, 255, 0.76);
-      box-shadow: 0 12px 34px rgba(17, 25, 38, 0.08);
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(14, 13, 11, 0.92), rgba(8, 8, 7, 0.96));
+      backdrop-filter: blur(6px);
     }
 
     .panel h3 {
-      margin: 0 0 14px;
-      font: 700 22px/1 var(--serif);
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--line);
+      font: 600 11px/1 var(--font-display);
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--sodium);
     }
 
+    .panel-body {
+      padding: 18px;
+    }
+
+    /* ── Stats grid ── */
     .stats-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-      gap: 12px;
+      grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+      gap: 1px;
+      background: var(--line);
+      border: 1px solid var(--line);
     }
 
     .stat {
-      border-radius: 18px;
-      padding: 14px;
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.84), rgba(244, 239, 226, 0.92));
-      border: 1px solid rgba(17, 25, 38, 0.08);
+      padding: 14px 16px;
+      background: var(--form-raised);
     }
 
     .stat label {
       display: block;
-      font-size: 12px;
-      letter-spacing: 0.08em;
+      font: 400 10px/1 var(--font-ui);
+      letter-spacing: 0.1em;
       text-transform: uppercase;
-      color: var(--ink-soft);
+      color: var(--ash-text);
     }
 
     .stat strong {
       display: block;
       margin-top: 8px;
-      font: 700 24px/1.1 var(--mono);
+      font: 700 18px/1.1 var(--font-ui);
+      color: var(--chalk);
+      font-variant-numeric: tabular-nums;
     }
 
-    .compare-grid {
-      display: grid;
-      grid-template-columns: minmax(280px, 1fr) minmax(320px, 0.9fr) minmax(280px, 1fr);
-      gap: 16px;
-    }
-
-    .compare-card {
-      border: 1px solid rgba(17, 25, 38, 0.08);
-      border-radius: 20px;
-      padding: 16px;
-      background: var(--paper-2);
-    }
-
-    .compare-card h4 {
-      margin: 0 0 8px;
-      font: 700 18px/1.2 var(--serif);
-    }
-
-    .compare-card h5 {
-      margin: 0 0 10px;
-      font: 700 13px/1.1 var(--mono);
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--ink-soft);
-    }
-
-    .compare-card.accent-left {
-      background: linear-gradient(180deg, rgba(20, 108, 148, 0.08), rgba(255, 249, 238, 0.96));
-      border-color: rgba(20, 108, 148, 0.22);
-    }
-
-    .compare-card.accent-right {
-      background: linear-gradient(180deg, rgba(212, 98, 45, 0.08), rgba(255, 249, 238, 0.96));
-      border-color: rgba(212, 98, 45, 0.22);
-    }
-
-    .compare-summary {
-      display: grid;
-      gap: 10px;
-    }
-
-    .compare-summary-row {
-      display: grid;
-      grid-template-columns: 1fr auto 1fr;
-      gap: 10px;
-      align-items: center;
-      padding: 10px 12px;
-      border-radius: 16px;
-      background: rgba(17, 25, 38, 0.04);
-      border: 1px solid rgba(17, 25, 38, 0.06);
-    }
-
-    .compare-summary-row label {
-      display: block;
-      margin-bottom: 5px;
-      font-size: 11px;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--ink-soft);
-    }
-
-    .compare-summary-row strong {
-      display: block;
-      font: 700 18px/1.1 var(--mono);
-    }
-
-    .compare-summary-row .delta {
-      min-width: 108px;
-      text-align: center;
-      border-radius: 999px;
-      padding: 7px 10px;
-      font-size: 12px;
-      font-weight: 700;
-      background: rgba(17, 25, 38, 0.08);
-      color: var(--ink);
-    }
-
-    .delta.positive {
-      background: rgba(31, 143, 106, 0.12);
-      color: var(--pass);
-    }
-
-    .delta.negative {
-      background: rgba(180, 35, 24, 0.12);
-      color: var(--danger);
-    }
-
+    /* ── Workspace tabs ── */
     .workspace-tabs {
       display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      margin-bottom: 10px;
+      gap: 6px;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--line);
     }
 
     .workspace-tab {
-      border-radius: 999px;
-      border: 1px solid rgba(17, 25, 38, 0.1);
-      padding: 10px 16px;
-      background: rgba(255, 255, 255, 0.75);
-      color: var(--ink);
-      box-shadow: none;
+      padding: 9px 16px;
+      font: 600 11px/1 var(--font-ui);
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      border: 1px solid var(--line);
+      background: transparent;
+      color: var(--chalk-dim);
+      cursor: pointer;
+      transition: all 160ms;
+    }
+
+    .workspace-tab:hover:not(:disabled) {
+      color: var(--chalk);
+      border-color: var(--ash-mid);
     }
 
     .workspace-tab.active {
-      background: linear-gradient(135deg, rgba(17, 25, 38, 0.94), rgba(20, 108, 148, 0.86));
-      color: white;
-      border-color: transparent;
-      box-shadow: var(--shadow);
+      color: var(--form-deep);
+      background: var(--sodium);
+      border-color: var(--sodium);
     }
 
     .workspace-tab:disabled {
-      opacity: 0.5;
+      opacity: 0.3;
+      cursor: not-allowed;
+    }
+
+    .workspace-banner {
+      padding: 0 18px 14px;
+      font: 400 12px/1.5 var(--font-body);
+      color: var(--chalk-dim);
     }
 
     .workspace {
       display: none;
-      gap: 20px;
+      gap: 18px;
     }
 
     .workspace.active {
       display: grid;
     }
 
-    .compare-table td {
-      min-width: 220px;
+    /* ── Compare grid ── */
+    .compare-grid {
+      display: grid;
+      grid-template-columns: 1fr minmax(300px, 0.9fr) 1fr;
+      gap: 1px;
+      background: var(--ash);
+      border: 1px solid var(--line);
     }
 
-    .compare-table .delta-cell {
-      min-width: 180px;
-      background: rgba(17, 25, 38, 0.03);
+    .compare-card {
+      padding: 18px;
+      background: var(--form-raised);
     }
 
-    .metric-stack {
+    .compare-card h4 {
+      font: 600 14px/1.2 var(--font-ui);
+      color: var(--chalk);
+      margin-bottom: 6px;
+    }
+
+    .compare-card h5 {
+      font: 600 10px/1 var(--font-display);
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--sodium);
+      margin-bottom: 12px;
+    }
+
+    .compare-card.accent-left {
+      border-left: 3px solid rgba(138, 158, 108, 0.6);
+    }
+
+    .compare-card.accent-right {
+      border-right: 3px solid var(--sodium);
+    }
+
+    .compare-card table {
+      margin-top: 14px;
+    }
+
+    .compare-card table td {
+      padding: 6px 0;
+      border-bottom: 1px solid var(--line);
+      font-size: 11px;
+    }
+
+    .compare-card table td:first-child {
+      color: var(--ash-text);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      font-size: 10px;
+      padding-right: 12px;
+      white-space: nowrap;
+    }
+
+    .compare-summary {
       display: grid;
       gap: 6px;
     }
 
-    .metric-stack strong {
-      font-size: 15px;
+    .compare-summary-row {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 8px;
+      align-items: center;
+      padding: 10px 12px;
+      background: var(--form-deep);
+      border: 1px solid var(--line);
     }
 
+    .compare-summary-row label {
+      display: block;
+      margin-bottom: 4px;
+      font: 400 9px/1 var(--font-ui);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--ash-text);
+    }
+
+    .compare-summary-row strong {
+      display: block;
+      font: 600 14px/1.1 var(--font-ui);
+      color: var(--chalk);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .compare-summary-row .delta {
+      min-width: 100px;
+      text-align: center;
+      padding: 6px 10px;
+      font: 700 11px/1 var(--font-ui);
+      letter-spacing: 0.04em;
+      border: 1px solid var(--line);
+      background: var(--form-raised);
+      color: var(--chalk-dim);
+    }
+
+    .compare-summary-row .side-win strong {
+      color: var(--lichen);
+    }
+
+    .compare-summary-row .side-lose strong {
+      color: var(--error);
+      opacity: 0.7;
+    }
+
+    /* ── Tables ── */
     table {
       width: 100%;
       border-collapse: collapse;
-      font-size: 14px;
+      font-size: 12px;
       table-layout: auto;
     }
 
     th, td {
       padding: 10px 12px;
-      border-bottom: 1px solid rgba(17, 25, 38, 0.08);
+      border-bottom: 1px solid var(--line);
       text-align: left;
       vertical-align: top;
     }
 
     th {
-      font-size: 12px;
-      letter-spacing: 0.08em;
+      font: 500 10px/1 var(--font-ui);
+      letter-spacing: 0.12em;
       text-transform: uppercase;
-      color: var(--ink-soft);
+      color: var(--ash-text);
+      background: var(--form-deep);
+      position: sticky;
+      top: 0;
+      z-index: 2;
     }
 
     .table-wrap {
       overflow-x: auto;
-      margin: 0 -4px;
-      padding: 0 4px 2px;
     }
 
-    .table-wrap table {
-      min-width: 100%;
-    }
+    .table-wrap::-webkit-scrollbar { height: 4px; }
+    .table-wrap::-webkit-scrollbar-track { background: var(--form-deep); }
+    .table-wrap::-webkit-scrollbar-thumb { background: var(--ash-mid); }
 
     .num {
       text-align: right;
       white-space: nowrap;
       font-variant-numeric: tabular-nums;
-      font-family: var(--mono);
+      font-family: var(--font-ui);
     }
 
     .compact-task {
-      min-width: 220px;
+      min-width: 200px;
     }
 
     .task-row {
       cursor: pointer;
+      transition: background 120ms;
     }
 
     .task-row:hover {
-      background: rgba(20, 108, 148, 0.05);
+      background: rgba(232, 163, 60, 0.04);
     }
 
     .task-row.active {
-      background: linear-gradient(135deg, rgba(212, 98, 45, 0.1), rgba(20, 108, 148, 0.08));
+      background: rgba(232, 163, 60, 0.08);
+      box-shadow: inset 3px 0 0 var(--sodium);
     }
 
+    .metric-stack {
+      display: grid;
+      gap: 4px;
+    }
+
+    .metric-stack strong {
+      font: 600 13px/1.2 var(--font-ui);
+      color: var(--chalk);
+    }
+
+    .metric-stack .muted {
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    /* ── Task matchup (expandable) ── */
+    .matchup-list {
+      display: grid;
+      gap: 1px;
+      background: var(--ash);
+      border: 1px solid var(--line);
+    }
+
+    .matchup-row {
+      background: var(--form-raised);
+      cursor: pointer;
+      transition: background 120ms;
+    }
+
+    .matchup-row:hover {
+      background: rgba(20, 20, 18, 0.98);
+    }
+
+    .matchup-row.expanded {
+      background: var(--form-deep);
+    }
+
+    .matchup-header {
+      display: grid;
+      grid-template-columns: minmax(160px, 1fr) 1fr auto 1fr;
+      gap: 1px;
+      align-items: stretch;
+    }
+
+    .matchup-header > div {
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 2px;
+    }
+
+    .matchup-task {
+      font: 600 13px/1.2 var(--font-ui);
+      color: var(--chalk);
+      border-right: 1px solid var(--line);
+    }
+
+    .matchup-task .expand-hint {
+      font: 400 10px/1 var(--font-ui);
+      color: var(--ash-text);
+      margin-top: 4px;
+      transition: color 120ms;
+    }
+
+    .matchup-row:hover .expand-hint {
+      color: var(--chalk-dim);
+    }
+
+    .matchup-row.expanded .expand-hint {
+      color: var(--sodium);
+    }
+
+    .matchup-cell {
+      font: 500 13px/1.3 var(--font-ui);
+      color: var(--chalk-mid);
+    }
+
+    .matchup-cell .pass-badge {
+      display: inline-block;
+      padding: 2px 6px;
+      font: 700 10px/1 var(--font-ui);
+      letter-spacing: 0.06em;
+      margin-right: 6px;
+    }
+
+    .matchup-cell .pass-badge.full { border: 1px solid rgba(138, 158, 108, 0.4); color: var(--lichen); }
+    .matchup-cell .pass-badge.zero { border: 1px solid rgba(204, 68, 68, 0.3); color: var(--error); }
+    .matchup-cell .pass-badge.partial { border: 1px solid rgba(232, 163, 60, 0.3); color: var(--sodium); }
+
+    .matchup-cell .time {
+      color: var(--chalk);
+      font-weight: 600;
+    }
+
+    .matchup-delta {
+      min-width: 120px;
+      background: rgba(232, 163, 60, 0.03);
+      border-left: 1px solid var(--line);
+      border-right: 1px solid var(--line);
+      text-align: center;
+    }
+
+    .matchup-delta .delta-pill {
+      display: inline-block;
+      padding: 3px 8px;
+      font: 700 10px/1 var(--font-ui);
+      letter-spacing: 0.04em;
+      border: 1px solid var(--line);
+    }
+
+    .delta-pill.left-wins {
+      border-color: rgba(138, 158, 108, 0.4);
+      color: var(--lichen);
+    }
+    .delta-pill.right-wins {
+      border-color: rgba(138, 158, 108, 0.4);
+      color: var(--lichen);
+    }
+    .delta-pill.neutral { color: var(--ash-text); }
+
+    .matchup-expand {
+      display: none;
+      background: var(--form-deep);
+      border-top: 1px solid var(--line);
+    }
+
+    .matchup-row.expanded .matchup-expand {
+      display: block;
+    }
+
+    .matchup-detail {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1px;
+      background: var(--ash);
+    }
+
+    .matchup-detail-side {
+      background: var(--form-deep);
+      padding: 16px 18px;
+    }
+
+    .matchup-detail-side h5 {
+      font: 600 10px/1 var(--font-display);
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--sodium);
+      margin-bottom: 14px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .matchup-detail-side.left-side h5 {
+      color: var(--lichen);
+    }
+
+    .detail-grid {
+      display: grid;
+      gap: 0;
+    }
+
+    .detail-row {
+      display: grid;
+      grid-template-columns: 110px 1fr auto;
+      gap: 8px;
+      padding: 6px 0;
+      border-bottom: 1px solid var(--line);
+      align-items: baseline;
+    }
+
+    .detail-row:last-child {
+      border-bottom: none;
+    }
+
+    .detail-label {
+      font: 400 10px/1.2 var(--font-ui);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ash-text);
+    }
+
+    .detail-value {
+      font: 500 12px/1.3 var(--font-ui);
+      color: var(--chalk-mid);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .detail-delta {
+      font: 600 11px/1 var(--font-ui);
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+      min-width: 80px;
+    }
+
+    .detail-delta.flat { color: var(--ash-text); }
+
+    .detail-value.side-win { color: var(--lichen); font-weight: 700; }
+    .detail-value.side-lose { color: var(--error); opacity: 0.7; }
+
+    .matchup-missing {
+      padding: 14px 18px;
+      color: var(--ash-text);
+      font: 400 12px/1.4 var(--font-body);
+      font-style: italic;
+    }
+
+    /* ── Status pills ── */
     .status-pill {
       display: inline-block;
-      border-radius: 999px;
-      padding: 4px 8px;
-      font-size: 12px;
-      font-weight: 700;
+      padding: 3px 8px;
+      font: 700 10px/1 var(--font-ui);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      border: 1px solid;
     }
 
-    .status-pass { background: rgba(31, 143, 106, 0.14); color: var(--pass); }
-    .status-fail { background: rgba(159, 18, 57, 0.14); color: var(--fail); }
-    .status-error { background: rgba(180, 35, 24, 0.14); color: var(--danger); }
-    .status-no-reward { background: rgba(17, 25, 38, 0.12); color: var(--ink-soft); }
+    .status-pass {
+      border-color: rgba(138, 158, 108, 0.4);
+      background: var(--lichen-dim);
+      color: var(--lichen);
+    }
 
+    .status-fail {
+      border-color: rgba(212, 98, 45, 0.4);
+      background: var(--fail-dim);
+      color: var(--fail);
+    }
+
+    .status-error {
+      border-color: rgba(204, 68, 68, 0.4);
+      background: var(--error-dim);
+      color: var(--error);
+    }
+
+    .status-no-reward {
+      border-color: var(--ash);
+      background: rgba(42, 42, 40, 0.5);
+      color: var(--ash-text);
+    }
+
+    /* ── Logs ── */
     .logs {
       display: grid;
       gap: 12px;
@@ -478,59 +884,97 @@
 
     .tab-row {
       display: flex;
-      gap: 8px;
+      gap: 6px;
       flex-wrap: wrap;
     }
 
     .tab {
-      border-radius: 999px;
-      border: 1px solid rgba(17, 25, 38, 0.08);
       padding: 7px 12px;
-      background: rgba(255, 255, 255, 0.72);
+      font: 500 11px/1 var(--font-ui);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      border: 1px solid var(--line);
+      background: transparent;
+      color: var(--chalk-dim);
       cursor: pointer;
+      transition: all 140ms;
+    }
+
+    .tab:hover {
+      border-color: var(--ash-mid);
+      color: var(--chalk);
     }
 
     .tab.active {
-      background: linear-gradient(135deg, rgba(212, 98, 45, 0.16), rgba(20, 108, 148, 0.14));
-      border-color: rgba(212, 98, 45, 0.38);
+      border-color: var(--sodium);
+      color: var(--sodium);
+      background: var(--sodium-ghost);
     }
 
     pre {
       margin: 0;
       padding: 18px;
-      max-height: 520px;
+      max-height: 560px;
       overflow: auto;
-      border-radius: 18px;
-      background: #111926;
-      color: #ecf0f6;
-      font: 13px/1.45 var(--mono);
-      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+      background: var(--form-deep);
+      border: 1px solid var(--line);
+      color: var(--chalk-mid);
+      font: 12px/1.5 var(--font-ui);
     }
+
+    pre::-webkit-scrollbar { width: 4px; height: 4px; }
+    pre::-webkit-scrollbar-track { background: var(--form-deep); }
+    pre::-webkit-scrollbar-thumb { background: var(--ash-mid); }
 
     .empty {
       padding: 18px;
-      border: 1px dashed rgba(17, 25, 38, 0.16);
-      border-radius: 18px;
-      color: var(--ink-soft);
-      background: rgba(255, 255, 255, 0.52);
+      border: 1px dashed var(--ash);
+      color: var(--ash-text);
+      font: 400 13px/1.5 var(--font-body);
+      background: var(--form-deep);
     }
 
     .split {
       display: grid;
       grid-template-columns: 1.15fr 0.85fr;
-      gap: 20px;
+      gap: 18px;
     }
 
-    .banner {
-      margin-top: 10px;
-      font-size: 13px;
-      color: var(--ink-soft);
+    .run-meta-line {
+      padding: 10px 18px;
+      font: 400 11px/1.5 var(--font-ui);
+      color: var(--chalk-dim);
+      border-top: 1px solid var(--line);
     }
 
-    @media (max-width: 1180px) {
-      .shell, .split { grid-template-columns: 1fr; }
-      .sidebar { position: relative; height: auto; }
+    .trial-meta-block {
+      padding: 14px 18px;
+      background: var(--form-deep);
+      border: 1px solid var(--line);
+      display: grid;
+      gap: 4px;
+    }
+
+    .trial-meta-block strong {
+      font: 600 14px/1.2 var(--font-ui);
+      color: var(--chalk);
+    }
+
+    .trial-meta-block .muted {
+      font: 400 11px/1.5 var(--font-ui);
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 1200px) {
+      .shell { grid-template-columns: 1fr; }
+      .sidebar { position: relative; height: auto; max-height: 50vh; }
       .compare-grid { grid-template-columns: 1fr; }
+      .split { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 760px) {
+      .content { padding: 12px; }
+      .stats-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
     }
   </style>
 </head>
@@ -538,15 +982,15 @@
   <div class="shell">
     <aside class="sidebar">
       <div class="masthead">
-        <h1>Lash Bench Observatory</h1>
-        <p>Browse persisted benchmark runs, open one in the explorer, or stage exactly two for a dedicated compare workspace. Deletion still removes both exported snapshots and original Harbor job directories.</p>
+        <h1>lash <span class="slash">/</span> bench observatory</h1>
+        <p>Browse persisted benchmark runs. Open one to inspect, or check two for side-by-side comparison.</p>
       </div>
 
       <div class="toolbar">
-        <input id="runSearch" type="search" placeholder="Filter runs by job, model, mode, dataset">
+        <input id="runSearch" type="search" placeholder="filter runs...">
         <div class="toolbar-row">
           <button id="refreshButton" class="secondary">Refresh</button>
-          <button id="deleteButton" class="danger" disabled>Delete Selected</button>
+          <button id="deleteButton" class="danger" disabled>Delete</button>
         </div>
         <div class="banner" id="selectionBanner">Select up to 2 runs for compare mode.</div>
       </div>
@@ -556,23 +1000,24 @@
 
     <main class="content">
       <section class="hero">
-        <h2>Compare runs like experiments, not log dumps.</h2>
-        <p>The dashboard now separates single-run inspection from a dedicated two-run compare studio, so selection state stops fighting the detail inspector.</p>
+        <div class="hero-eyebrow">bench observatory</div>
+        <h2>Compare runs like experiments <span class="slash">/</span> not log dumps</h2>
+        <p>Single-run inspection and two-run comparison are separate workspaces. Select a run to explore, or check two to enter the compare studio.</p>
       </section>
 
       <section class="panel">
         <div class="workspace-tabs">
           <button id="exploreTab" class="workspace-tab active">Explore Run</button>
-          <button id="compareTab" class="workspace-tab">Compare Two Runs</button>
+          <button id="compareTab" class="workspace-tab">Compare Two</button>
         </div>
-        <div class="banner" id="workspaceBanner">Open any run card to inspect it in detail. Check exactly two runs to enter compare mode.</div>
+        <div class="workspace-banner" id="workspaceBanner">Open any run card to inspect it in detail. Check exactly two runs to enter compare mode.</div>
       </section>
 
       <section class="workspace active" id="exploreWorkspace">
         <section class="panel">
           <h3>Active Run</h3>
           <div class="stats-grid" id="runStats"></div>
-          <div class="banner" id="runMeta"></div>
+          <div class="run-meta-line" id="runMeta"></div>
         </section>
 
         <section class="panel">
@@ -582,10 +1027,12 @@
 
         <section class="panel">
           <h3>Trial Detail</h3>
-          <div class="logs">
-            <div id="trialMeta" class="empty">Select a task row to inspect logs and artifacts.</div>
-            <div class="tab-row" id="logTabs"></div>
-            <pre id="logViewer">Select a log tab.</pre>
+          <div class="panel-body">
+            <div class="logs">
+              <div id="trialMeta" class="empty">Select a task row to inspect logs and artifacts.</div>
+              <div class="tab-row" id="logTabs"></div>
+              <pre id="logViewer">Select a log tab.</pre>
+            </div>
           </div>
         </section>
       </section>
@@ -593,7 +1040,9 @@
       <section class="workspace" id="compareWorkspace">
         <section class="panel">
           <h3>Compare Studio</h3>
-          <div class="compare-grid" id="compareGrid"></div>
+          <div class="panel-body">
+            <div class="compare-grid" id="compareGrid"></div>
+          </div>
         </section>
 
         <section class="panel">
@@ -639,7 +1088,13 @@
     }
     function tokenInline(tokens) {
       const value = tokens || {};
-      return `nc ${fmtInt(nonCacheTokens(value))} · tot ${fmtInt(value.total)} · in ${fmtInt(value.input)} · out ${fmtInt(value.output)} · rsn ${fmtInt(value.reasoning)} · cache ${fmtInt(value.cache)}`;
+      return `nc ${fmtInt(nonCacheTokens(value))} · tot ${fmtInt(value.total)} · in ${fmtInt(value.input)} · out ${fmtInt(value.output)} · rsn ${fmtInt(value.reasoning)} · cache ${fmtInt(value.cache)} (${fmtPct(cacheRatio(value))})`;
+    }
+    function cacheRatio(tokens) {
+      const value = tokens || {};
+      const total = value.total || 0;
+      if (!total) return 0;
+      return (value.cache || 0) / total;
     }
     function activityInline(activity) {
       const value = activity || {};
@@ -744,6 +1199,7 @@
           run.execution_mode,
           run.requested_model,
           run.variant,
+          run.context_strategy,
           run.provider
         ].filter(Boolean).join(" ").toLowerCase().includes(query);
       });
@@ -760,18 +1216,21 @@
             <input type="checkbox" class="run-select" data-run-id="${run.run_id}" ${state.selectedRunIds.has(run.run_id) ? "checked" : ""} ${!state.selectedRunIds.has(run.run_id) && selectionLocked ? "disabled" : ""}>
             <div style="flex: 1">
               <h3>${escapeHtml(run.job_name)}</h3>
-              <small>${escapeHtml(run.dataset || "-")} · ${escapeHtml(run.agent || "-")} · ${escapeHtml(run.execution_mode || "-")} · ${escapeHtml(run.provider || "-")}</small>
-              <div class="chips">
+              <div class="run-card-sub">${escapeHtml(run.dataset || "-")} · ${escapeHtml(run.agent || "-")} · ${escapeHtml(run.provider || "-")}</div>
+              <div class="run-card-badges">
+                <span class="chip mode">${escapeHtml(run.execution_mode || "default")}</span>
+                <span class="chip context">${escapeHtml(run.context_strategy || "default")}</span>
                 <span class="chip pass">${fmtPct(run.pass_rate)}</span>
-                <span class="chip">${fmtInt(run.trials_passed)}/${fmtInt(run.trials_total)} passed</span>
-                <span class="chip">${fmtInt(run.tokens_non_cache_total || 0)} nc tok</span>
-                <span class="chip">${fmtInt(run.tokens_cache_total || 0)} cache</span>
-                <span class="chip">${fmtSeconds(run.cpu_seconds_total)} main cpu</span>
-                <span class="chip">${fmtMemoryKb(run.peak_rss_kb)} main rss</span>
-                <span class="chip">${fmtSeconds(run.cpu_seconds_overhead_total)} overhead</span>
-                <span class="chip">${fmtInt(run.turns_total || 0)} turns</span>
-                <span class="chip">${fmtInt(run.llm_calls_total || 0)} llm</span>
-                <span class="chip">${fmtInt(run.tool_calls_total || 0)} tools</span>
+                <span class="chip">${fmtInt(run.trials_passed)}/${fmtInt(run.trials_total)}</span>
+              </div>
+              <div class="run-card-stats">
+                <span>${fmtInt(run.tokens_non_cache_total || 0)} nc</span>
+                <span>${fmtInt(run.tokens_cache_total || 0)} cache</span>
+                <span>${fmtPct(cacheRatio({ total: run.tokens_total_total, cache: run.tokens_cache_total }))}</span>
+                <span>${fmtSeconds(run.cpu_seconds_total)} cpu</span>
+                <span>${fmtMemoryKb(run.peak_rss_kb)} rss</span>
+                <span>${fmtInt(run.turns_total || 0)} turns</span>
+                <span>${fmtInt(run.tool_calls_total || 0)} tools</span>
               </div>
             </div>
           </div>
@@ -874,20 +1333,31 @@
       }
     }
 
-    function summaryMetricRow(label, leftValue, rightValue, deltaText, tone) {
+    // winner: "left" | "right" | "" (tie)
+    function summaryMetricRow(label, leftValue, rightValue, deltaText, winner) {
+      const leftCls = winner === "left" ? "side-win" : winner === "right" ? "side-lose" : "";
+      const rightCls = winner === "right" ? "side-win" : winner === "left" ? "side-lose" : "";
       return `
         <div class="compare-summary-row">
-          <div>
-            <label>${escapeHtml(label)} · left</label>
+          <div class="${leftCls}">
+            <label>${escapeHtml(label)}</label>
             <strong>${escapeHtml(leftValue)}</strong>
           </div>
-          <div class="delta ${escapeHtml(tone || "")}">${escapeHtml(deltaText)}</div>
-          <div style="text-align: right">
-            <label>${escapeHtml(label)} · right</label>
+          <div class="delta">${escapeHtml(deltaText)}</div>
+          <div style="text-align: right" class="${rightCls}">
+            <label>${escapeHtml(label)}</label>
             <strong>${escapeHtml(rightValue)}</strong>
           </div>
         </div>
       `;
+    }
+
+    // Determine which side wins for a metric.
+    // higherIsBetter: true for pass rate, cache %; false for tokens, duration, cpu, etc.
+    function metricWinner(leftVal, rightVal, higherIsBetter) {
+      if (leftVal === rightVal) return "";
+      if (higherIsBetter) return leftVal > rightVal ? "left" : "right";
+      return leftVal < rightVal ? "left" : "right";
     }
 
     function renderCompareGrid() {
@@ -921,87 +1391,62 @@
       const leftOverheadCpu = ((leftStats.resource_usage_overhead_commands || {}).cpu_seconds_sum) || 0;
       const rightMainRss = ((rightStats.resource_usage || {}).max_rss_kb_max) || 0;
       const leftMainRss = ((leftStats.resource_usage || {}).max_rss_kb_max) || 0;
+      const leftCacheRatio = cacheRatio(leftStats.tokens_total);
+      const rightCacheRatio = cacheRatio(rightStats.tokens_total);
       const compareRows = [
-        summaryMetricRow(
-          "Pass Rate",
-          fmtPct(leftPass),
-          fmtPct(rightPass),
+        summaryMetricRow("Pass Rate", fmtPct(leftPass), fmtPct(rightPass),
           fmtSignedNumber((rightPass - leftPass) * 100, " pts"),
-          rightPass > leftPass ? "positive" : rightPass < leftPass ? "negative" : ""
-        ),
-        summaryMetricRow(
-          "Avg Duration",
-          fmtSeconds(leftDuration),
-          fmtSeconds(rightDuration),
+          metricWinner(leftPass, rightPass, true)),
+        summaryMetricRow("Avg Duration", fmtSeconds(leftDuration), fmtSeconds(rightDuration),
           fmtSignedSeconds(rightDuration - leftDuration),
-          rightDuration < leftDuration ? "positive" : rightDuration > leftDuration ? "negative" : ""
-        ),
-        summaryMetricRow(
-          "Non-Cache Tokens",
-          fmtInt(leftNonCache),
-          fmtInt(rightNonCache),
+          metricWinner(leftDuration, rightDuration, false)),
+        summaryMetricRow("Non-Cache Tokens", fmtInt(leftNonCache), fmtInt(rightNonCache),
           fmtSignedNumber(rightNonCache - leftNonCache),
-          rightNonCache < leftNonCache ? "positive" : rightNonCache > leftNonCache ? "negative" : ""
-        ),
-        summaryMetricRow(
-          "Cache Tokens",
-          fmtInt(leftCache),
-          fmtInt(rightCache),
+          metricWinner(leftNonCache, rightNonCache, false)),
+        summaryMetricRow("Cache Tokens", fmtInt(leftCache), fmtInt(rightCache),
           fmtSignedNumber(rightCache - leftCache),
-          rightCache < leftCache ? "positive" : rightCache > leftCache ? "negative" : ""
-        ),
-        summaryMetricRow(
-          "LLM Calls",
-          fmtInt(leftCalls),
-          fmtInt(rightCalls),
+          metricWinner(leftCache, rightCache, false)),
+        summaryMetricRow("Cache %", fmtPct(leftCacheRatio), fmtPct(rightCacheRatio),
+          fmtSignedNumber((rightCacheRatio - leftCacheRatio) * 100, " pts"),
+          metricWinner(leftCacheRatio, rightCacheRatio, true)),
+        summaryMetricRow("LLM Calls", fmtInt(leftCalls), fmtInt(rightCalls),
           fmtSignedNumber(rightCalls - leftCalls),
-          rightCalls < leftCalls ? "positive" : rightCalls > leftCalls ? "negative" : ""
-        ),
-        summaryMetricRow(
-          "Tool Calls",
-          fmtInt(leftTools),
-          fmtInt(rightTools),
+          metricWinner(leftCalls, rightCalls, false)),
+        summaryMetricRow("Tool Calls", fmtInt(leftTools), fmtInt(rightTools),
           fmtSignedNumber(rightTools - leftTools),
-          rightTools < leftTools ? "positive" : rightTools > leftTools ? "negative" : ""
-        ),
-        summaryMetricRow(
-          "Main CPU",
-          fmtSeconds(leftMainCpu),
-          fmtSeconds(rightMainCpu),
+          metricWinner(leftTools, rightTools, false)),
+        summaryMetricRow("Main CPU", fmtSeconds(leftMainCpu), fmtSeconds(rightMainCpu),
           fmtSignedSeconds(rightMainCpu - leftMainCpu),
-          rightMainCpu < leftMainCpu ? "positive" : rightMainCpu > leftMainCpu ? "negative" : ""
-        ),
-        summaryMetricRow(
-          "Overhead CPU",
-          fmtSeconds(leftOverheadCpu),
-          fmtSeconds(rightOverheadCpu),
+          metricWinner(leftMainCpu, rightMainCpu, false)),
+        summaryMetricRow("Overhead CPU", fmtSeconds(leftOverheadCpu), fmtSeconds(rightOverheadCpu),
           fmtSignedSeconds(rightOverheadCpu - leftOverheadCpu),
-          rightOverheadCpu < leftOverheadCpu ? "positive" : rightOverheadCpu > leftOverheadCpu ? "negative" : ""
-        ),
-        summaryMetricRow(
-          "Main Peak RSS",
-          fmtMemoryKb(leftMainRss),
-          fmtMemoryKb(rightMainRss),
+          metricWinner(leftOverheadCpu, rightOverheadCpu, false)),
+        summaryMetricRow("Main Peak RSS", fmtMemoryKb(leftMainRss), fmtMemoryKb(rightMainRss),
           fmtSignedNumber(Math.round((rightMainRss - leftMainRss) / 1024), " MiB"),
-          rightMainRss < leftMainRss ? "positive" : rightMainRss > leftMainRss ? "negative" : ""
-        ),
+          metricWinner(leftMainRss, rightMainRss, false)),
       ];
       compareGrid.innerHTML = `
         <div class="compare-card accent-left">
           <h5>Left Run</h5>
           <h4>${escapeHtml(left.job_name)}</h4>
-          <div class="muted">${escapeHtml(leftParams.agent || "-")} · ${escapeHtml(leftParams.requested_model || "resolved in trial")} · ${escapeHtml(leftParams.execution_mode || "-")} · ${escapeHtml(leftParams.variant || "default variant")}</div>
+          <div class="muted">${escapeHtml(leftParams.agent || "-")} · ${escapeHtml(leftParams.requested_model || "resolved in trial")} · ${escapeHtml(leftParams.variant || "default variant")}</div>
+          <div class="chips" style="margin-top:6px">
+            ${leftParams.execution_mode ? `<span class="chip mode">${escapeHtml(leftParams.execution_mode)}</span>` : ""}
+            ${leftParams.context_strategy ? `<span class="chip context">${escapeHtml(leftParams.context_strategy)}</span>` : ""}
+          </div>
           <div class="chips">
             <span class="chip pass">${fmtPct(leftStats.pass_rate)}</span>
             <span class="chip">${fmtInt(leftStats.trials_passed)}/${fmtInt(leftStats.trials_total)} passed</span>
             <span class="chip">${fmtInt(nonCacheTokens(leftStats.tokens_total))} nc tok</span>
             <span class="chip">${fmtInt((leftStats.tokens_total || {}).cache)} cache</span>
+            <span class="chip">${fmtPct(cacheRatio(leftStats.tokens_total))} cache %</span>
             <span class="chip">${fmtSeconds((leftStats.resource_usage || {}).cpu_seconds_sum)} main cpu</span>
             <span class="chip">${fmtMemoryKb((leftStats.resource_usage || {}).max_rss_kb_max)} main rss</span>
           </div>
           <table>
             <tr><td>Avg Duration</td><td>${fmtSeconds(leftStats.duration_seconds_avg)}</td></tr>
             <tr><td>Token Profile</td><td>${tokenInline(leftStats.tokens_total)}</td></tr>
+            <tr><td>Cache Percentage</td><td>${fmtPct(cacheRatio(leftStats.tokens_total))}</td></tr>
             <tr><td>Activity</td><td>${activityInline(leftStats.activity_total)}</td></tr>
             <tr><td>Main CPU / RSS</td><td>${resourceInline(leftStats.resource_usage)}</td></tr>
             <tr><td>All Cmd CPU / RSS</td><td>${resourceInline(leftStats.resource_usage_all_commands || leftStats.resource_usage, "all_commands")}</td></tr>
@@ -1017,18 +1462,24 @@
         <div class="compare-card accent-right">
           <h5>Right Run</h5>
           <h4>${escapeHtml(right.job_name)}</h4>
-          <div class="muted">${escapeHtml(rightParams.agent || "-")} · ${escapeHtml(rightParams.requested_model || "resolved in trial")} · ${escapeHtml(rightParams.execution_mode || "-")} · ${escapeHtml(rightParams.variant || "default variant")}</div>
+          <div class="muted">${escapeHtml(rightParams.agent || "-")} · ${escapeHtml(rightParams.requested_model || "resolved in trial")} · ${escapeHtml(rightParams.variant || "default variant")}</div>
+          <div class="chips" style="margin-top:6px">
+            ${rightParams.execution_mode ? `<span class="chip mode">${escapeHtml(rightParams.execution_mode)}</span>` : ""}
+            ${rightParams.context_strategy ? `<span class="chip context">${escapeHtml(rightParams.context_strategy)}</span>` : ""}
+          </div>
           <div class="chips">
             <span class="chip pass">${fmtPct(rightStats.pass_rate)}</span>
             <span class="chip">${fmtInt(rightStats.trials_passed)}/${fmtInt(rightStats.trials_total)} passed</span>
             <span class="chip">${fmtInt(nonCacheTokens(rightStats.tokens_total))} nc tok</span>
             <span class="chip">${fmtInt((rightStats.tokens_total || {}).cache)} cache</span>
+            <span class="chip">${fmtPct(cacheRatio(rightStats.tokens_total))} cache %</span>
             <span class="chip">${fmtSeconds((rightStats.resource_usage || {}).cpu_seconds_sum)} main cpu</span>
             <span class="chip">${fmtMemoryKb((rightStats.resource_usage || {}).max_rss_kb_max)} main rss</span>
           </div>
           <table>
             <tr><td>Avg Duration</td><td>${fmtSeconds(rightStats.duration_seconds_avg)}</td></tr>
             <tr><td>Token Profile</td><td>${tokenInline(rightStats.tokens_total)}</td></tr>
+            <tr><td>Cache Percentage</td><td>${fmtPct(cacheRatio(rightStats.tokens_total))}</td></tr>
             <tr><td>Activity</td><td>${activityInline(rightStats.activity_total)}</td></tr>
             <tr><td>Main CPU / RSS</td><td>${resourceInline(rightStats.resource_usage)}</td></tr>
             <tr><td>All Cmd CPU / RSS</td><td>${resourceInline(rightStats.resource_usage_all_commands || rightStats.resource_usage, "all_commands")}</td></tr>
@@ -1055,72 +1506,142 @@
         }
       }
       const rows = [...taskMap.values()].sort((a, b) => a.task_name.localeCompare(b.task_name));
+
+      function passBadge(rate) {
+        const pct = (100 * (rate || 0)).toFixed(1);
+        const cls = rate >= 1 ? "full" : rate <= 0 ? "zero" : "partial";
+        return `<span class="pass-badge ${cls}">${pct}%</span>`;
+      }
+
+      function matchupHeaderCell(item) {
+        if (!item) return `<div class="matchup-cell"><span class="muted">no data</span></div>`;
+        return `<div class="matchup-cell">${passBadge(item.pass_rate)} <span class="time">${fmtSeconds(item.duration_seconds_avg)}</span></div>`;
+      }
+
+      function matchupDeltaCell(l, r) {
+        if (!l || !r) return `<div class="matchup-delta"><span class="muted">-</span></div>`;
+        const passWinner = metricWinner(l.pass_rate || 0, r.pass_rate || 0, true);
+        const passDelta = (r.pass_rate || 0) - (l.pass_rate || 0);
+        const cls = passWinner === "left" ? "left-wins" : passWinner === "right" ? "right-wins" : "neutral";
+        return `<div class="matchup-delta"><span class="delta-pill ${cls}">${fmtSignedNumber(passDelta * 100, " pts")}</span></div>`;
+      }
+
+      function expandPanel(l, r) {
+        if (!l && !r) return `<div class="matchup-missing">No data for either run.</div>`;
+        if (!l) return `<div class="matchup-missing">Only the right run has this task.</div>`;
+        if (!r) return `<div class="matchup-missing">Only the left run has this task.</div>`;
+
+        const lTok = l.tokens_total || {};
+        const rTok = r.tokens_total || {};
+        const lAct = l.activity_total || {};
+        const rAct = r.activity_total || {};
+        const lRes = l.resource_usage || {};
+        const rRes = r.resource_usage || {};
+        const lOvh = l.resource_usage_overhead_commands || {};
+        const rOvh = r.resource_usage_overhead_commands || {};
+
+        // Each metric: [label, leftFormatted, rightFormatted, deltaFormatted, winner("left"|"right"|"")]
+        const metrics = [
+          ["Pass Rate", fmtPct(l.pass_rate), fmtPct(r.pass_rate),
+            fmtSignedNumber(((r.pass_rate||0)-(l.pass_rate||0))*100, " pts"),
+            metricWinner(l.pass_rate||0, r.pass_rate||0, true)],
+          ["Duration", fmtSeconds(l.duration_seconds_avg), fmtSeconds(r.duration_seconds_avg),
+            fmtSignedSeconds((r.duration_seconds_avg||0)-(l.duration_seconds_avg||0)),
+            metricWinner(l.duration_seconds_avg||0, r.duration_seconds_avg||0, false)],
+          ["Non-Cache", fmtInt(nonCacheTokens(lTok)), fmtInt(nonCacheTokens(rTok)),
+            fmtSignedNumber(nonCacheTokens(rTok)-nonCacheTokens(lTok)),
+            metricWinner(nonCacheTokens(lTok), nonCacheTokens(rTok), false)],
+          ["Total Tokens", fmtInt(lTok.total), fmtInt(rTok.total),
+            fmtSignedNumber((rTok.total||0)-(lTok.total||0)),
+            metricWinner(lTok.total||0, rTok.total||0, false)],
+          ["Cache %", fmtPct(cacheRatio(lTok)), fmtPct(cacheRatio(rTok)),
+            fmtSignedNumber((cacheRatio(rTok)-cacheRatio(lTok))*100, " pts"),
+            metricWinner(cacheRatio(lTok), cacheRatio(rTok), true)],
+          ["Input", fmtInt(lTok.input), fmtInt(rTok.input),
+            fmtSignedNumber((rTok.input||0)-(lTok.input||0)),
+            metricWinner(lTok.input||0, rTok.input||0, false)],
+          ["Output", fmtInt(lTok.output), fmtInt(rTok.output),
+            fmtSignedNumber((rTok.output||0)-(lTok.output||0)),
+            metricWinner(lTok.output||0, rTok.output||0, false)],
+          ["Reasoning", fmtInt(lTok.reasoning), fmtInt(rTok.reasoning),
+            fmtSignedNumber((rTok.reasoning||0)-(lTok.reasoning||0)),
+            metricWinner(lTok.reasoning||0, rTok.reasoning||0, false)],
+          ["Cache", fmtInt(lTok.cache), fmtInt(rTok.cache),
+            fmtSignedNumber((rTok.cache||0)-(lTok.cache||0)),
+            metricWinner(lTok.cache||0, rTok.cache||0, false)],
+          ["Turns", fmtInt(lAct.llm_turns), fmtInt(rAct.llm_turns),
+            fmtSignedNumber((rAct.llm_turns||0)-(lAct.llm_turns||0)),
+            metricWinner(lAct.llm_turns||0, rAct.llm_turns||0, false)],
+          ["LLM Calls", fmtInt(lAct.llm_calls), fmtInt(rAct.llm_calls),
+            fmtSignedNumber((rAct.llm_calls||0)-(lAct.llm_calls||0)),
+            metricWinner(lAct.llm_calls||0, rAct.llm_calls||0, false)],
+          ["Tool Calls", fmtInt(lAct.tool_calls), fmtInt(rAct.tool_calls),
+            fmtSignedNumber((rAct.tool_calls||0)-(lAct.tool_calls||0)),
+            metricWinner(lAct.tool_calls||0, rAct.tool_calls||0, false)],
+          ["Main CPU", fmtSeconds(lRes.cpu_seconds_sum), fmtSeconds(rRes.cpu_seconds_sum),
+            fmtSignedSeconds((rRes.cpu_seconds_sum||0)-(lRes.cpu_seconds_sum||0)),
+            metricWinner(lRes.cpu_seconds_sum||0, rRes.cpu_seconds_sum||0, false)],
+          ["Main RSS", fmtMemoryKb(lRes.max_rss_kb_max), fmtMemoryKb(rRes.max_rss_kb_max),
+            fmtSignedNumber(Math.round(((rRes.max_rss_kb_max||0)-(lRes.max_rss_kb_max||0))/1024), " MiB"),
+            metricWinner(lRes.max_rss_kb_max||0, rRes.max_rss_kb_max||0, false)],
+          ["Overhead CPU", fmtSeconds(lOvh.cpu_seconds_sum), fmtSeconds(rOvh.cpu_seconds_sum),
+            fmtSignedSeconds((rOvh.cpu_seconds_sum||0)-(lOvh.cpu_seconds_sum||0)),
+            metricWinner(lOvh.cpu_seconds_sum||0, rOvh.cpu_seconds_sum||0, false)],
+        ];
+
+        return `
+          <div class="matchup-detail">
+            <div class="matchup-detail-side left-side">
+              <h5>Left</h5>
+              <div class="detail-grid">
+                ${metrics.map(m => `
+                  <div class="detail-row">
+                    <span class="detail-label">${escapeHtml(m[0])}</span>
+                    <span class="detail-value ${m[4] === "left" ? "side-win" : m[4] === "right" ? "side-lose" : ""}">${escapeHtml(m[1])}</span>
+                    <span class="detail-delta flat"></span>
+                  </div>`).join("")}
+              </div>
+            </div>
+            <div class="matchup-detail-side">
+              <h5>Right / Delta</h5>
+              <div class="detail-grid">
+                ${metrics.map(m => `
+                  <div class="detail-row">
+                    <span class="detail-label">${escapeHtml(m[0])}</span>
+                    <span class="detail-value ${m[4] === "right" ? "side-win" : m[4] === "left" ? "side-lose" : ""}">${escapeHtml(m[2])}</span>
+                    <span class="detail-delta flat">${escapeHtml(m[3])}</span>
+                  </div>`).join("")}
+              </div>
+            </div>
+          </div>`;
+      }
+
       target.innerHTML = `
-        <div class="table-wrap">
-        <table class="compare-table">
-          <thead>
-            <tr>
-              <th class="compact-task">Task</th>
-              <th>${escapeHtml(left.job_name)}</th>
-              <th class="delta-cell">Delta</th>
-              <th>${escapeHtml(right.job_name)}</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rows.map(row => `
-              <tr>
-                <td>${escapeHtml(row.task_name)}</td>
-                ${renderComparisonCell(row[left.run_id])}
-                ${renderComparisonDeltaCell(row[left.run_id], row[right.run_id])}
-                ${renderComparisonCell(row[right.run_id])}
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-        </div>
-      `;
-    }
+        <div class="matchup-list">
+          ${rows.map((row, i) => {
+            const l = row[left.run_id];
+            const r = row[right.run_id];
+            return `
+              <div class="matchup-row" data-idx="${i}">
+                <div class="matchup-header">
+                  <div class="matchup-task">
+                    ${escapeHtml(row.task_name)}
+                    <div class="expand-hint">click to expand</div>
+                  </div>
+                  ${matchupHeaderCell(l)}
+                  ${matchupDeltaCell(l, r)}
+                  ${matchupHeaderCell(r)}
+                </div>
+                <div class="matchup-expand">${expandPanel(l, r)}</div>
+              </div>`;
+          }).join("")}
+        </div>`;
 
-    function renderComparisonCell(item) {
-      if (!item) return `<td class="muted">-</td>`;
-      return `
-        <td>
-          <div class="metric-stack">
-            <strong>${fmtPct(item.pass_rate)} · ${fmtSeconds(item.duration_seconds_avg)}</strong>
-            <span class="muted">${escapeHtml(tokenInline(item.tokens_total))}</span>
-            <span class="muted">${escapeHtml(activityInline(item.activity_total))}</span>
-            <span class="muted">${escapeHtml(resourceSplitInline({
-              main_commands: item.resource_usage,
-              all_commands: item.resource_usage_all_commands || item.resource_usage,
-              overhead_commands: item.resource_usage_overhead_commands || {}
-            }))}</span>
-          </div>
-        </td>
-      `;
-    }
-
-    function renderComparisonDeltaCell(left, right) {
-      if (!left && !right) return `<td class="delta-cell muted">-</td>`;
-      if (!left) return `<td class="delta-cell muted">Only right run has this task.</td>`;
-      if (!right) return `<td class="delta-cell muted">Only left run has this task.</td>`;
-      const durationDelta = (right.duration_seconds_avg || 0) - (left.duration_seconds_avg || 0);
-      const tokenDelta = ((right.tokens_total || {}).total || 0) - ((left.tokens_total || {}).total || 0);
-      const nonCacheDelta = nonCacheTokens(right.tokens_total) - nonCacheTokens(left.tokens_total);
-      const toolDelta = ((right.activity_total || {}).tool_calls || 0) - ((left.activity_total || {}).tool_calls || 0);
-      const mainCpuDelta = (((right.resource_usage || {}).cpu_seconds_sum) || 0) - ((((left.resource_usage || {}).cpu_seconds_sum) || 0));
-      const passDelta = (right.pass_rate || 0) - (left.pass_rate || 0);
-      return `
-        <td class="delta-cell">
-          <div class="metric-stack">
-            <span class="muted">${escapeHtml(`pass ${fmtSignedNumber(passDelta * 100, " pts")}`)}</span>
-            <span class="muted">${escapeHtml(`duration ${fmtSignedSeconds(durationDelta)}`)}</span>
-            <span class="muted">${escapeHtml(`non-cache ${fmtSignedNumber(nonCacheDelta)}`)}</span>
-            <span class="muted">${escapeHtml(`total ${fmtSignedNumber(tokenDelta)}`)}</span>
-            <span class="muted">${escapeHtml(`tools ${fmtSignedNumber(toolDelta)}`)}</span>
-            <span class="muted">${escapeHtml(`main cpu ${fmtSignedSeconds(mainCpuDelta)}`)}</span>
-          </div>
-        </td>
-      `;
+      target.querySelectorAll(".matchup-row").forEach(row => {
+        row.addEventListener("click", () => {
+          row.classList.toggle("expanded");
+        });
+      });
     }
 
     function renderActiveRun() {
@@ -1150,6 +1671,7 @@
         statCard("Output Tokens", fmtInt((stats.tokens_total || {}).output)),
         statCard("Reasoning Tokens", fmtInt((stats.tokens_total || {}).reasoning)),
         statCard("Cache Tokens", fmtInt((stats.tokens_total || {}).cache)),
+        statCard("Cache %", fmtPct(cacheRatio(stats.tokens_total))),
         statCard("LLM Turns", fmtInt((stats.activity_total || {}).llm_turns)),
         statCard("LLM Calls", fmtInt((stats.activity_total || {}).llm_calls)),
         statCard("Tool Calls", fmtInt((stats.activity_total || {}).tool_calls)),
@@ -1161,7 +1683,7 @@
         statCard("Reward Mean", fmtFixed(stats.reward_mean)),
         statCard("Errors", fmtInt(stats.trials_errors)),
       ].join("");
-      metaRoot.textContent = `${run.job_name} · ${params.dataset || "-"} · ${params.agent || "-"} · ${params.execution_mode || "-"} · provider ${((params.provider || {}).active_provider || "-")} · model ${params.requested_model || "resolved in trial"} · variant ${params.variant || "default"}`;
+      metaRoot.innerHTML = `${escapeHtml(run.job_name)} · ${escapeHtml(params.dataset || "-")} · ${escapeHtml(params.agent || "-")} · provider ${escapeHtml((params.provider || {}).active_provider || "-")} · model ${escapeHtml(params.requested_model || "resolved in trial")} · variant ${escapeHtml(params.variant || "default")} <span class="chip mode" style="margin-left:6px">${escapeHtml(params.execution_mode || "default")}</span> <span class="chip context">${escapeHtml(params.context_strategy || "default")}</span>`;
 
       renderTasksTable(run.task_rollups || [], run.trials || []);
       renderTrialDetail();
@@ -1224,7 +1746,7 @@
               <tr class="task-row ${active ? "active" : ""}" data-trial-name="${escapeHtml(trial.trial_name || "")}">
                 <td>
                   <strong>${escapeHtml(item?.task_name || trial.task_name)}</strong><br>
-                  <small>${escapeHtml(trial.failure_reason || trial.trial_name || "No trial details yet")}</small>
+                  <small class="muted">${escapeHtml(trial.failure_reason || trial.trial_name || "No trial details yet")}</small>
                 </td>
                 <td><span class="status-pill status-${escapeHtml(trial.status || "no-reward")}">${escapeHtml(trial.status || "no-reward")}</span></td>
                 <td class="num">${item ? fmtPct(item.pass_rate) : "-"}</td>
@@ -1259,11 +1781,13 @@
       const trial = state.activeTrial;
       if (!trial) {
         meta.innerHTML = `Select a task row to inspect logs and artifacts.`;
+        meta.className = "empty";
         tabs.innerHTML = "";
         viewer.textContent = "Select a log tab.";
         return;
       }
 
+      meta.className = "trial-meta-block";
       const models = ((trial.metadata || {}).resolved_models || []).join(", ") || (trial.metadata || {}).requested_model || "-";
       const toolBreakdown = Object.entries((trial.metadata || {}).tool_call_breakdown || {})
         .map(([name, count]) => `${name} ${count}`)
@@ -1273,11 +1797,11 @@
       const allResourceUsage = resourceBucket(resourceUsage, "all_commands");
       const overheadResourceUsage = resourceBucket(resourceUsage, "overhead_commands");
       meta.innerHTML = `
-        <strong>${escapeHtml(trial.task_name)}</strong><br>
-        <span class="muted">${escapeHtml(trial.trial_name)} · ${escapeHtml(trial.status)} · ${escapeHtml(tokenInline(trial.tokens))} · ${escapeHtml(models)}</span><br>
-        <span class="muted">${escapeHtml(`turns ${(trial.metadata || {}).llm_turn_count || 0} · llm calls ${(trial.metadata || {}).llm_call_count || 0} · tool calls ${(trial.metadata || {}).tool_call_count || 0} · batch calls ${(trial.metadata || {}).tool_batch_count || 0}`)}</span><br>
-        <span class="muted">${escapeHtml(`main cpu ${fmtSeconds(mainResourceUsage.cpu_seconds_sum)} · main rss ${fmtMemoryKb(mainResourceUsage.max_rss_kb_max)} · all cpu ${fmtSeconds(allResourceUsage.cpu_seconds_sum)} · overhead cpu ${fmtSeconds(overheadResourceUsage.cpu_seconds_sum)} · env cpu ${((trial.metadata || {}).environment || {}).override_cpus || "-"} · env mem ${((trial.metadata || {}).environment || {}).override_memory_mb || "-"}`)}</span><br>
-        <span class="muted">${escapeHtml(toolBreakdown)}</span><br>
+        <strong>${escapeHtml(trial.task_name)}</strong>
+        <span class="muted">${escapeHtml(trial.trial_name)} · ${escapeHtml(trial.status)} · ${escapeHtml(tokenInline(trial.tokens))} · ${escapeHtml(models)}</span>
+        <span class="muted">${escapeHtml(`turns ${(trial.metadata || {}).llm_turn_count || 0} · llm calls ${(trial.metadata || {}).llm_call_count || 0} · tool calls ${(trial.metadata || {}).tool_call_count || 0} · batch calls ${(trial.metadata || {}).tool_batch_count || 0}`)}</span>
+        <span class="muted">${escapeHtml(`main cpu ${fmtSeconds(mainResourceUsage.cpu_seconds_sum)} · main rss ${fmtMemoryKb(mainResourceUsage.max_rss_kb_max)} · all cpu ${fmtSeconds(allResourceUsage.cpu_seconds_sum)} · overhead cpu ${fmtSeconds(overheadResourceUsage.cpu_seconds_sum)} · env cpu ${((trial.metadata || {}).environment || {}).override_cpus || "-"} · env mem ${((trial.metadata || {}).environment || {}).override_memory_mb || "-"}`)}</span>
+        <span class="muted">${escapeHtml(toolBreakdown)}</span>
         <span class="muted">${escapeHtml(trial.failure_reason || "No failure summary.")}</span>
       `;
 

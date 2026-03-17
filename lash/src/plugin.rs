@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use crate::agent::PromptSectionName;
 use crate::llm::types::LlmResponse;
-use crate::runtime::{AssembledTurn, PromptUsage};
+use crate::runtime::AssembledTurn;
 use crate::{
-    AgentStateEnvelope, ContextFoldingConfig, ExecutionMode, MessageRole, ToolDefinition,
-    ToolProvider, ToolResult, TurnInput,
+    AgentStateEnvelope, ExecutionMode, MessageRole, SessionPolicy, ToolDefinition, ToolProvider,
+    ToolResult, TurnInput,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -42,11 +42,6 @@ pub type PromptContributor =
     Arc<dyn Fn(PromptHookContext) -> PluginFuture<Vec<PromptContribution>> + Send + Sync>;
 pub type ToolSurfaceContributor =
     Arc<dyn Fn(ToolSurfaceContext) -> Result<ToolSurfaceContribution, PluginError> + Send + Sync>;
-pub type MessageMutator = Arc<
-    dyn Fn(MessageMutatorContext, Vec<crate::Message>) -> PluginFuture<Vec<crate::Message>>
-        + Send
-        + Sync,
->;
 pub type AssistantStreamHook =
     Arc<dyn Fn(AssistantStreamHookContext) -> PluginFuture<AssistantStreamTransform> + Send + Sync>;
 pub type AssistantResponseHook = Arc<
@@ -68,57 +63,17 @@ pub enum PluginError {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionHandle {
     pub session_id: String,
-    pub config: SessionConfigSnapshot,
+    pub policy: SessionPolicy,
 }
 
 pub struct SessionTurnHandle {
     pub turn_id: String,
     pub session_id: String,
-    pub config: SessionConfigSnapshot,
+    pub policy: SessionPolicy,
     pub events: mpsc::Receiver<crate::AgentEvent>,
 }
 
 pub type SessionSnapshot = AgentStateEnvelope;
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct SessionConfigOverrides {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_variant: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_context_tokens: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution_mode: Option<ExecutionMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_folding: Option<ContextFoldingConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_turns: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub include_soul: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sub_agent: Option<bool>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionConfigSnapshot {
-    pub provider_kind: crate::provider::ProviderKind,
-    pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_variant: Option<String>,
-    pub execution_mode: ExecutionMode,
-    pub context_folding: ContextFoldingConfig,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_window: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_turns: Option<u64>,
-    #[serde(default)]
-    pub include_soul: bool,
-    #[serde(default)]
-    pub sub_agent: bool,
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -141,17 +96,57 @@ pub struct PluginOwned<T> {
     pub value: T,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionPluginMode {
+    Fresh,
+    #[default]
+    InheritCurrent,
+}
+
+#[derive(Clone)]
+pub struct SessionContextSurface {
+    pub include_base_tools: bool,
+    pub tool_providers: Vec<Arc<dyn ToolProvider>>,
+    pub prompt_contributions: Vec<PromptContribution>,
+}
+
+impl Default for SessionContextSurface {
+    fn default() -> Self {
+        Self {
+            include_base_tools: true,
+            tool_providers: Vec::new(),
+            prompt_contributions: Vec::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for SessionContextSurface {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionContextSurface")
+            .field("include_base_tools", &self.include_base_tools)
+            .field("tool_provider_count", &self.tool_providers.len())
+            .field(
+                "prompt_contribution_count",
+                &self.prompt_contributions.len(),
+            )
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionCreateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
     pub start: SessionStartPoint,
     #[serde(default)]
-    pub config_overrides: SessionConfigOverrides,
-    #[serde(default, skip_serializing_if = "ToolSurfaceContribution::is_empty")]
-    pub tool_surface: ToolSurfaceContribution,
+    pub policy: Option<SessionPolicy>,
+    #[serde(default)]
+    pub plugin_mode: SessionPluginMode,
     #[serde(default)]
     pub initial_messages: Vec<PluginMessage>,
+    #[serde(skip)]
+    pub context_surface: SessionContextSurface,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,9 +242,6 @@ pub struct PrepareTurnRequest {
     pub session_id: String,
     pub state: AgentStateEnvelope,
     pub messages: Vec<crate::Message>,
-    pub prompt_usage: Option<PromptUsage>,
-    pub max_context_tokens: Option<usize>,
-    pub context_folding: Option<ContextFoldingConfig>,
     pub host: Arc<dyn SessionManager>,
 }
 
@@ -406,8 +398,8 @@ pub struct TurnHookContext {
 #[derive(Clone)]
 pub struct SessionConfigChangedContext {
     pub session_id: String,
-    pub previous: SessionConfigSnapshot,
-    pub current: SessionConfigSnapshot,
+    pub previous: SessionPolicy,
+    pub current: SessionPolicy,
     pub host: Arc<dyn SessionManager>,
 }
 
@@ -476,36 +468,6 @@ pub struct CheckpointHookContext {
     pub checkpoint: CheckpointKind,
     pub state: SessionSnapshot,
     pub host: Arc<dyn SessionManager>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MessageMutatorHook {
-    BeforeTurn,
-    AfterTokenCount,
-    AfterTurn,
-}
-
-impl MessageMutatorHook {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::BeforeTurn => "before_turn",
-            Self::AfterTokenCount => "after_token_count",
-            Self::AfterTurn => "after_turn",
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct MessageMutatorContext {
-    pub hook: MessageMutatorHook,
-    pub session_id: String,
-    pub state: SessionSnapshot,
-    pub host: Arc<dyn SessionManager>,
-    pub turn: Option<AssembledTurn>,
-    pub prompt_usage: Option<PromptUsage>,
-    pub max_context_tokens: Option<usize>,
-    pub context_folding: Option<ContextFoldingConfig>,
 }
 
 #[derive(Clone)]
@@ -652,7 +614,6 @@ pub struct PluginSpec {
     pub checkpoint_hooks: Vec<CheckpointHook>,
     pub assistant_stream_hooks: Vec<AssistantStreamHook>,
     pub assistant_response_hooks: Vec<AssistantResponseHook>,
-    pub message_mutators: BTreeMap<MessageMutatorHook, MessageMutator>,
     pub tool_result_projectors: BTreeMap<ToolResultProjectionHook, ToolResultProjector>,
     pub turn_committed_hooks: Vec<TurnCommittedHook>,
     pub session_restored_hooks: Vec<SessionRestoredHook>,
@@ -713,15 +674,6 @@ impl PluginSpec {
 
     pub fn with_assistant_response(mut self, hook: AssistantResponseHook) -> Self {
         self.assistant_response_hooks.push(hook);
-        self
-    }
-
-    pub fn with_message_mutator(
-        mut self,
-        hook: MessageMutatorHook,
-        mutator: MessageMutator,
-    ) -> Self {
-        self.message_mutators.insert(hook, mutator);
         self
     }
 
@@ -903,9 +855,6 @@ impl SessionPlugin for SpecPlugin {
         for hook in &self.spec.assistant_response_hooks {
             reg.output().response(Arc::clone(hook));
         }
-        for (hook, mutator) in &self.spec.message_mutators {
-            reg.messages().mutator(*hook, Arc::clone(mutator))?;
-        }
         for (hook, projector) in &self.spec.tool_result_projectors {
             reg.tool_results().projector(*hook, Arc::clone(projector))?;
         }
@@ -931,10 +880,10 @@ mod runtime_impl;
 mod tool_result_projection_builtin;
 
 pub use runtime_impl::{
-    ExternalInvokeError, ExternalRegistrations, MessageRegistrations, OutputRegistrations,
-    PluginHost, PluginRegistrar, PluginSession, PromptRegistrations, RuntimeServices,
-    SessionRegistrations, SurfaceRegistrations, ToolCallRegistrations, ToolRegistrations,
-    ToolResultRegistrations, TurnRegistrations,
+    ExternalInvokeError, ExternalRegistrations, OutputRegistrations, PluginHost, PluginRegistrar,
+    PluginSession, PromptRegistrations, RuntimeServices, SessionRegistrations,
+    SurfaceRegistrations, ToolCallRegistrations, ToolRegistrations, ToolResultRegistrations,
+    TurnRegistrations,
 };
 pub use tool_result_projection_builtin::{
     BuiltinToolResultProjectionPluginFactory, ToolResultProjectionMode,
@@ -946,8 +895,11 @@ pub use tool_result_projection_builtin::{
 mod builtin;
 
 #[cfg(feature = "sqlite-store")]
+pub(crate) use builtin::history;
+
+#[cfg(feature = "sqlite-store")]
 pub use builtin::{
-    BuiltinHistoryPluginFactory, BuiltinPlanModePluginFactory, BuiltinPlanTrackerPluginFactory,
+    BuiltinPlanModePluginFactory, BuiltinPlanTrackerPluginFactory,
     BuiltinPromptContextPluginFactory, PromptContextPluginConfig,
 };
 
@@ -956,10 +908,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{
-        AgentStateEnvelope, ContextFoldingConfig, ExecutionMode, ToolDefinition, ToolParam,
-        TurnInput,
-    };
+    use crate::{AgentStateEnvelope, ExecutionMode, ToolDefinition, ToolParam, TurnInput};
 
     struct MockToolProvider;
 
@@ -1028,16 +977,16 @@ mod tests {
         ) -> Result<SessionHandle, PluginError> {
             Ok(SessionHandle {
                 session_id: request.agent_id.unwrap_or_else(|| "child".to_string()),
-                config: SessionConfigSnapshot {
-                    provider_kind: crate::provider::ProviderKind::OpenAiGeneric,
+                policy: SessionPolicy {
+                    provider: crate::Provider::OpenAiGeneric {
+                        api_key: String::new(),
+                        base_url: crate::provider::OPENAI_GENERIC_DEFAULT_BASE_URL.to_string(),
+                        options: crate::ProviderOptions::default(),
+                    },
                     model: "mock-model".to_string(),
-                    model_variant: None,
                     execution_mode: ExecutionMode::Standard,
-                    context_folding: ContextFoldingConfig::default(),
-                    context_window: None,
-                    max_turns: None,
-                    include_soul: false,
-                    sub_agent: false,
+                    context_strategy: crate::default_context_strategy(),
+                    ..Default::default()
                 },
             })
         }
@@ -1059,16 +1008,16 @@ mod tests {
             Ok(SessionTurnHandle {
                 turn_id,
                 session_id: session_id.to_string(),
-                config: SessionConfigSnapshot {
-                    provider_kind: crate::provider::ProviderKind::OpenAiGeneric,
+                policy: SessionPolicy {
+                    provider: crate::Provider::OpenAiGeneric {
+                        api_key: String::new(),
+                        base_url: crate::provider::OPENAI_GENERIC_DEFAULT_BASE_URL.to_string(),
+                        options: crate::ProviderOptions::default(),
+                    },
                     model: "mock-model".to_string(),
-                    model_variant: None,
                     execution_mode: ExecutionMode::Standard,
-                    context_folding: ContextFoldingConfig::default(),
-                    context_window: None,
-                    max_turns: None,
-                    include_soul: false,
-                    sub_agent: false,
+                    context_strategy: crate::default_context_strategy(),
+                    ..Default::default()
                 },
                 events: rx,
             })
@@ -1079,8 +1028,11 @@ mod tests {
             Ok(AssembledTurn {
                 state: AgentStateEnvelope {
                     agent_id: session_id.to_string(),
-                    execution_mode: ExecutionMode::Standard,
-                    context_folding: ContextFoldingConfig::default(),
+                    policy: SessionPolicy {
+                        execution_mode: ExecutionMode::Standard,
+                        context_strategy: crate::default_context_strategy(),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
                 status: crate::TurnStatus::Completed,
@@ -1323,81 +1275,6 @@ mod tests {
                 .iter()
                 .any(|tool| tool.name == "mock_tool")
         );
-    }
-
-    struct MutatorPluginFactory {
-        plugin_id: &'static str,
-        hook: MessageMutatorHook,
-    }
-
-    impl PluginFactory for MutatorPluginFactory {
-        fn id(&self) -> &'static str {
-            self.plugin_id
-        }
-
-        fn build(
-            &self,
-            _ctx: &PluginSessionContext,
-        ) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-            Ok(Arc::new(MutatorPlugin {
-                plugin_id: self.plugin_id,
-                hook: self.hook,
-            }))
-        }
-    }
-
-    struct MutatorPlugin {
-        plugin_id: &'static str,
-        hook: MessageMutatorHook,
-    }
-
-    impl SessionPlugin for MutatorPlugin {
-        fn id(&self) -> &'static str {
-            self.plugin_id
-        }
-
-        fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-            reg.messages().mutator(
-                self.hook,
-                Arc::new(|_ctx, messages| Box::pin(async move { Ok(messages) })),
-            )
-        }
-    }
-
-    #[test]
-    fn duplicate_message_mutator_hooks_are_rejected() {
-        let host = PluginHost::new(vec![
-            Arc::new(MutatorPluginFactory {
-                plugin_id: "mutator-a",
-                hook: MessageMutatorHook::AfterTokenCount,
-            }),
-            Arc::new(MutatorPluginFactory {
-                plugin_id: "mutator-b",
-                hook: MessageMutatorHook::AfterTokenCount,
-            }),
-        ]);
-        let err = match host.build_standard_session("root", None) {
-            Ok(_) => panic!("duplicate mutator"),
-            Err(err) => err,
-        };
-        assert!(err.to_string().contains("duplicate message mutator"));
-        assert!(err.to_string().contains("mutator-a"));
-        assert!(err.to_string().contains("mutator-b"));
-    }
-
-    #[test]
-    fn different_message_mutator_hooks_can_coexist() {
-        let host = PluginHost::new(vec![
-            Arc::new(MutatorPluginFactory {
-                plugin_id: "mutator-before",
-                hook: MessageMutatorHook::BeforeTurn,
-            }),
-            Arc::new(MutatorPluginFactory {
-                plugin_id: "mutator-after",
-                hook: MessageMutatorHook::AfterTurn,
-            }),
-        ]);
-        host.build_standard_session("root", None).expect("session");
     }
 
     struct ProjectorPluginFactory {

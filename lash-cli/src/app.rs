@@ -2291,6 +2291,7 @@ mod tests {
             content: "Let me continue testing.".into(),
         });
         app.handle_agent_event(AgentEvent::ToolCall {
+            call_id: Some("tc1".into()),
             name: "read_file".into(),
             args: serde_json::json!({"path":"src/main.rs"}),
             result: serde_json::json!("ok"),
@@ -2318,6 +2319,7 @@ mod tests {
             content: "I’m checking the rendering path first.".into(),
         });
         app.handle_agent_event(AgentEvent::ToolCall {
+            call_id: Some("tc2".into()),
             name: "read_file".into(),
             args: serde_json::json!({"path":"lash-cli/src/app.rs"}),
             result: serde_json::json!("ok"),
@@ -3037,6 +3039,7 @@ mod tests {
         app.blocks.clear();
 
         app.handle_agent_event(AgentEvent::ToolCall {
+            call_id: Some("tc3".into()),
             name: "grep".into(),
             args: serde_json::json!({"pattern": "ctx", "path": "lash-cli/src"}),
             result: serde_json::json!("match"),
@@ -3044,6 +3047,7 @@ mod tests {
             duration_ms: 10,
         });
         app.handle_agent_event(AgentEvent::ToolCall {
+            call_id: Some("tc4".into()),
             name: "read_file".into(),
             args: serde_json::json!({"path": "lash-cli/src/ui.rs"}),
             result: serde_json::json!("==> lash-cli/src/ui.rs <==\nline"),

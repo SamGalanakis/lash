@@ -5,7 +5,6 @@ use std::time::Duration;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Serialize};
 
-use crate::ContextFoldingConfig;
 use crate::llm::factory::adapter_for;
 use crate::llm::timeouts::{DEFAULT_CHUNK_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS, LlmTimeouts};
 use crate::model_info::{ModelCatalog, ResolvedModelSpec};
@@ -86,6 +85,8 @@ impl ProviderKind {
 pub struct AgentModels {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub low: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall_agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub medium: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -188,16 +189,21 @@ impl ProviderOptions {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct RuntimeSettings {
-    #[serde(default, skip_serializing_if = "ContextFoldingConfig::is_default")]
-    pub context_folding: ContextFoldingConfig,
+    #[serde(default, skip_serializing_if = "is_default_context_strategy")]
+    pub context_strategy: crate::ContextStrategy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub low_tier_subagent_execution_mode: Option<crate::ExecutionMode>,
 }
 
 impl RuntimeSettings {
     fn is_default(&self) -> bool {
-        self.context_folding.is_default() && self.low_tier_subagent_execution_mode.is_none()
+        is_default_context_strategy(&self.context_strategy)
+            && self.low_tier_subagent_execution_mode.is_none()
     }
+}
+
+fn is_default_context_strategy(strategy: &crate::ContextStrategy) -> bool {
+    *strategy == crate::default_context_strategy()
 }
 
 /// Stored configuration: provider credentials + service API keys.
@@ -214,7 +220,7 @@ pub struct LashConfig {
     pub runtime: RuntimeSettings,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum Provider {
     #[serde(rename = "openai-generic")]
@@ -559,12 +565,12 @@ impl LashConfig {
         self.auxiliary_secrets.tavily_api_key = key;
     }
 
-    pub fn context_folding(&self) -> ContextFoldingConfig {
-        self.runtime.context_folding
+    pub fn context_strategy(&self) -> crate::ContextStrategy {
+        self.runtime.context_strategy
     }
 
-    pub fn set_context_folding(&mut self, config: ContextFoldingConfig) {
-        self.runtime.context_folding = config;
+    pub fn set_context_strategy(&mut self, strategy: crate::ContextStrategy) {
+        self.runtime.context_strategy = strategy;
     }
 
     /// Delete ~/.lash/config.json
@@ -894,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_context_folding_preserved() {
+    fn runtime_context_strategy_preserved() {
         let raw = serde_json::json!({
             "active_provider": "openai-generic",
             "providers": {
@@ -905,16 +911,17 @@ mod tests {
                 }
             },
             "runtime": {
-                "context_folding": {
-                    "soft_limit_pct": 45,
-                    "hard_limit_pct": 58
+                "context_strategy": {
+                    "type": "rolling_context"
                 }
             }
         });
 
         let cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
-        assert_eq!(cfg.context_folding().soft_limit_pct, 45);
-        assert_eq!(cfg.context_folding().hard_limit_pct, 58);
+        assert_eq!(
+            cfg.context_strategy(),
+            crate::ContextStrategy::RollingContext
+        );
     }
 
     #[test]

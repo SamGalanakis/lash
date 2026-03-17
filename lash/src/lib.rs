@@ -10,10 +10,10 @@ pub mod plugin;
 pub mod provider;
 pub mod runtime;
 pub mod sansio;
-#[cfg(feature = "sqlite-store")]
 mod search;
 pub mod session;
 pub mod skill_catalog;
+pub mod skill_prompt;
 #[cfg(feature = "sqlite-store")]
 pub mod store;
 pub mod text;
@@ -73,8 +73,8 @@ pub fn default_skill_dirs() -> Vec<PathBuf> {
 // Re-exports
 pub use agent::message::MessageOrigin;
 pub use agent::{
-    AgentConfig, AgentEvent, DefaultPromptRenderer, Message, MessageRole, Part, PartKind,
-    PromptOverrideMode, PromptRenderer, PromptSectionName, PromptSectionOverride, PruneState,
+    AgentEvent, DefaultPromptRenderer, Message, MessageRole, Part, PartKind, PromptOverrideMode,
+    PromptRenderer, PromptSectionName, PromptSectionOverride, PruneState, SessionPolicy,
     TokenUsage, default_prompt_renderer,
 };
 pub use dynamic::{
@@ -92,19 +92,19 @@ pub use plugin::{
     AssistantResponseHookContext, AssistantResponseTransform, AssistantStreamHookContext,
     AssistantStreamTransform, BuiltinToolResultProjectionPluginFactory, CheckpointHookContext,
     CheckpointKind, ExternalInvokeContext, ExternalInvokeError, ExternalOpDef, ExternalOpKind,
-    MessageMutatorContext, MessageMutatorHook, PluginDirective, PluginError, PluginFactory,
-    PluginHost, PluginMessage, PluginOwned, PluginRegistrar, PluginSession, PluginSessionContext,
-    PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta,
-    PluginSpec, PluginSpecFactory, PluginSurfaceEvent, PromptContribution, PromptHookContext,
-    RuntimeServices, SessionConfigOverrides, SessionConfigSnapshot, SessionCreateRequest,
-    SessionHandle, SessionManager, SessionParam, SessionPlugin, SessionSnapshot, SessionStartPoint,
-    SessionTurnHandle, SnapshotReader, SnapshotWriter, ToolResultProjectionContext,
-    ToolResultProjectionHook, ToolResultProjectionMode, ToolResultProjectionPluginConfig,
-    ToolResultProjector, ToolSurfaceContribution, TurnHookContext, TurnResultHookContext,
+    PluginDirective, PluginError, PluginFactory, PluginHost, PluginMessage, PluginOwned,
+    PluginRegistrar, PluginSession, PluginSessionContext, PluginSessionSnapshot,
+    PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta, PluginSpec, PluginSpecFactory,
+    PluginSurfaceEvent, PromptContribution, PromptHookContext, RuntimeServices,
+    SessionContextSurface, SessionCreateRequest, SessionHandle, SessionManager, SessionParam,
+    SessionPlugin, SessionPluginMode, SessionSnapshot, SessionStartPoint, SessionTurnHandle,
+    SnapshotReader, SnapshotWriter, ToolResultProjectionContext, ToolResultProjectionHook,
+    ToolResultProjectionMode, ToolResultProjectionPluginConfig, ToolResultProjector,
+    ToolSurfaceContribution, TurnHookContext, TurnResultHookContext,
 };
 #[cfg(feature = "sqlite-store")]
 pub use plugin::{
-    BuiltinHistoryPluginFactory, BuiltinPlanModePluginFactory, BuiltinPlanTrackerPluginFactory,
+    BuiltinPlanModePluginFactory, BuiltinPlanTrackerPluginFactory,
     BuiltinPromptContextPluginFactory, PromptContextPluginConfig,
 };
 pub use provider::{LashConfig, Provider, ProviderOptions, RequestTimeout};
@@ -119,6 +119,7 @@ pub use session::{
     ExecResponse, PromptBridge, Session, SessionError, TurnInjectionBridge, UserPrompt,
 };
 pub use skill_catalog::{LoadedSkill, SkillCatalog};
+pub use skill_prompt::{append_skill_blocks, collect_skill_mentions};
 #[cfg(feature = "sqlite-store")]
 pub use store::{AgentState, Store};
 pub use text::strip_repl_fragments;
@@ -143,49 +144,55 @@ pub fn default_execution_mode() -> ExecutionMode {
     ExecutionMode::default()
 }
 
-/// Watermark policy for folding old context out of the active prompt window.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ContextFoldingConfig {
-    #[serde(default = "ContextFoldingConfig::default_soft_limit_pct")]
-    pub soft_limit_pct: u8,
-    #[serde(default = "ContextFoldingConfig::default_hard_limit_pct")]
-    pub hard_limit_pct: u8,
+/// Strategy for selecting and rendering session context into the next turn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContextStrategy {
+    /// Keep recent context active, clear old tool-result bodies, and synthesize summary turns when context overflows.
+    #[default]
+    RollingContext,
+    /// Keep only a recent tail in active context and let a cheap recall agent fetch older same-session context on demand.
+    RecallAgent {
+        #[serde(default = "ContextStrategy::default_recall_agent_keep_recent_pct")]
+        keep_recent_pct: u8,
+    },
 }
 
-impl ContextFoldingConfig {
-    pub const fn default_soft_limit_pct() -> u8 {
-        50
+impl ContextStrategy {
+    pub const fn default_recall_agent_keep_recent_pct() -> u8 {
+        10
     }
 
-    pub const fn default_hard_limit_pct() -> u8 {
-        60
+    pub fn recall_agent(keep_recent_pct: u8) -> Result<Self, String> {
+        let strategy = Self::RecallAgent { keep_recent_pct };
+        strategy.validate()?;
+        Ok(strategy)
+    }
+
+    pub fn recall_agent_default() -> Self {
+        Self::RecallAgent {
+            keep_recent_pct: Self::default_recall_agent_keep_recent_pct(),
+        }
     }
 
     pub fn validate(self) -> Result<Self, String> {
-        if self.soft_limit_pct == 0 || self.hard_limit_pct == 0 {
-            return Err("context folding percentages must be greater than 0".to_string());
+        match self {
+            Self::RollingContext => Ok(self),
+            Self::RecallAgent { keep_recent_pct } => {
+                if keep_recent_pct == 0 || keep_recent_pct >= 100 {
+                    return Err(
+                        "recall_agent keep_recent_pct must be greater than 0 and less than 100"
+                            .to_string(),
+                    );
+                }
+                Ok(self)
+            }
         }
-        if self.soft_limit_pct >= self.hard_limit_pct {
-            return Err("context folding soft limit must be less than hard limit".to_string());
-        }
-        if self.hard_limit_pct >= 100 {
-            return Err("context folding hard limit must be less than 100".to_string());
-        }
-        Ok(self)
-    }
-
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
     }
 }
 
-impl Default for ContextFoldingConfig {
-    fn default() -> Self {
-        Self {
-            soft_limit_pct: Self::default_soft_limit_pct(),
-            hard_limit_pct: Self::default_hard_limit_pct(),
-        }
-    }
+pub fn default_context_strategy() -> ContextStrategy {
+    ContextStrategy::default()
 }
 
 /// A message sent from the sandbox to the host during execution.
@@ -643,33 +650,18 @@ mod tests {
     }
 
     #[test]
-    fn context_folding_defaults_and_validation() {
-        let cfg = ContextFoldingConfig::default();
-        assert_eq!(cfg.soft_limit_pct, 50);
-        assert_eq!(cfg.hard_limit_pct, 60);
-        assert!(cfg.validate().is_ok());
-        assert!(
-            ContextFoldingConfig {
-                soft_limit_pct: 60,
-                hard_limit_pct: 50,
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            ContextFoldingConfig {
-                soft_limit_pct: 50,
-                hard_limit_pct: 100,
-            }
-            .validate()
-            .is_err()
-        );
+    fn context_strategy_defaults_to_rolling_context() {
+        assert_eq!(default_context_strategy(), ContextStrategy::RollingContext);
+        let encoded = serde_json::to_string(&ContextStrategy::RollingContext).expect("encode");
+        assert_eq!(encoded, "{\"type\":\"rolling_context\"}");
     }
 }
 
 /// Record of a tool call (for context/logging).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolCallRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
     pub tool: String,
     pub args: serde_json::Value,
     pub result: serde_json::Value,

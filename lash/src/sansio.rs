@@ -16,8 +16,7 @@ use crate::agent::{
     AgentEvent, LLM_MAX_RETRIES, LLM_RETRY_DELAYS, Message, MessageRole, Part, PartKind,
     PromptSectionOverride, PruneState, TokenUsage, TurnTerminationPolicyState,
     build_assistant_parts, format_tool_result_content, is_malformed_assistant_output,
-    make_error_envelope, make_error_event, parse_fence_line, render_transcript_prompt,
-    truncate_raw_error,
+    make_error_envelope, make_error_event, parse_fence_line, render_prompt, truncate_raw_error,
 };
 use crate::llm::types::{
     LlmAttachment, LlmOutputPart, LlmPromptPart, LlmRequest, LlmResponse, LlmToolChoice,
@@ -141,6 +140,7 @@ pub enum Response {
 /// Configuration for a `TurnMachine` instance.
 pub struct TurnMachineConfig {
     pub execution_mode: ExecutionMode,
+    pub context_strategy: crate::ContextStrategy,
     pub model: String,
     pub max_turns: Option<usize>,
     pub model_variant: Option<String>,
@@ -391,27 +391,40 @@ impl TurnMachine {
             .chain(self.tool_images.iter())
             .map(|(mime, data)| (mime.clone(), data.clone()))
             .collect();
-        let rendered_prompt = render_transcript_prompt(&self.messages);
+        let rendered_prompt = render_prompt(&self.messages, self.config.execution_mode);
 
         let is_standard = matches!(self.config.execution_mode, ExecutionMode::Standard);
+        let has_structured_messages = !rendered_prompt.messages.is_empty();
 
-        let attachments: Vec<LlmAttachment> = rendered_prompt
-            .image_indices
-            .into_iter()
-            .filter_map(|idx| all_images.get(idx))
-            .map(|(mime, data)| LlmAttachment {
-                mime: mime.clone(),
-                data: data.clone(),
-            })
-            .collect();
+        let attachments: Vec<LlmAttachment> = if has_structured_messages {
+            all_images
+                .iter()
+                .map(|(mime, data)| LlmAttachment {
+                    mime: mime.clone(),
+                    data: data.clone(),
+                })
+                .collect()
+        } else {
+            rendered_prompt
+                .image_indices
+                .into_iter()
+                .filter_map(|idx| all_images.get(idx))
+                .map(|(mime, data)| LlmAttachment {
+                    mime: mime.clone(),
+                    data: data.clone(),
+                })
+                .collect()
+        };
         let mut user_prompt = rendered_prompt.user_prompt;
-        user_prompt.extend((0..attachments.len()).map(LlmPromptPart::Image));
+        if !has_structured_messages {
+            user_prompt.extend((0..attachments.len()).map(LlmPromptPart::Image));
+        }
 
         let llm_request = LlmRequest {
             model: self.config.model.clone(),
             system_prompt,
             user_prompt,
-            messages: Vec::new(),
+            messages: rendered_prompt.messages,
             attachments,
             tools: if is_standard {
                 self.config.tool_specs.clone()
@@ -589,6 +602,14 @@ impl TurnMachine {
             && let Some(fence) = fence
         {
             fence.latest_usage = LlmUsage {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cached_input_tokens: usage.cached_input_tokens,
+                reasoning_tokens: usage.reasoning_tokens,
+            };
+        }
+        if let Some(pending) = &mut self.pending_repl_completion {
+            pending.latest_usage = LlmUsage {
                 input_tokens: usage.input_tokens,
                 output_tokens: usage.output_tokens,
                 cached_input_tokens: usage.cached_input_tokens,
@@ -1036,6 +1057,7 @@ impl TurnMachine {
 
         for outcome in &completed {
             self.emit(AgentEvent::ToolCall {
+                call_id: Some(outcome.call_id.clone()),
                 name: outcome.tool_name.clone(),
                 args: outcome.args.clone(),
                 result: outcome.raw_result.result.clone(),
@@ -1053,6 +1075,7 @@ impl TurnMachine {
 
         for outcome in completed {
             tool_records.push(ToolCallRecord {
+                call_id: Some(outcome.call_id.clone()),
                 tool: outcome.tool_name.clone(),
                 args: outcome.args.clone(),
                 result: outcome.model_result.result.clone(),
@@ -1348,6 +1371,7 @@ impl TurnMachine {
             Ok(r) => {
                 for tc in &r.tool_calls {
                     self.emit(AgentEvent::ToolCall {
+                        call_id: None,
                         name: tc.tool.clone(),
                         args: tc.args.clone(),
                         result: tc.result.clone(),
@@ -1666,6 +1690,7 @@ mod tests {
     fn test_config(mode: ExecutionMode) -> TurnMachineConfig {
         TurnMachineConfig {
             execution_mode: mode,
+            context_strategy: crate::default_context_strategy(),
             model: "test-model".to_string(),
             max_turns: None,
             model_variant: None,
