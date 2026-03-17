@@ -1844,15 +1844,18 @@ mod tests {
             .expect("llm call");
 
         assert_eq!(request.attachments.len(), 1);
-        assert!(request.user_prompt.iter().any(|part| matches!(
-            part,
-            LlmPromptPart::Text(text) if text.contains("[Image attached]") && text.contains("explain this")
-        )));
+        // In structured mode, images and text go to messages, not user_prompt.
         assert!(
             request
-                .user_prompt
+                .messages
                 .iter()
-                .any(|part| matches!(part, LlmPromptPart::Image(0)))
+                .any(|msg| msg.kind == "image" && msg.image_idx == 0)
+        );
+        assert!(
+            request
+                .messages
+                .iter()
+                .any(|msg| msg.kind == "text" && msg.content.contains("explain this"))
         );
     }
 

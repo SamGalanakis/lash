@@ -1237,12 +1237,12 @@
       for (const config of FILTER_CONFIG) {
         data[config.key] = document.getElementById(config.id).value;
       }
-      try { sessionStorage.setItem("bench_filters", JSON.stringify(data)); } catch {}
+      try { localStorage.setItem("bench_filters", JSON.stringify(data)); } catch {}
     }
 
     function restoreFiltersFromSession() {
       try {
-        const raw = sessionStorage.getItem("bench_filters");
+        const raw = localStorage.getItem("bench_filters");
         if (!raw) return;
         const data = JSON.parse(raw);
         if (data.query) document.getElementById("runSearch").value = data.query;
@@ -2211,14 +2211,14 @@
 
       function setSidebarCollapsed(collapsed) {
         shell.classList.toggle("sidebar-collapsed", collapsed);
-        try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ collapsed })); } catch {}
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ collapsed })); } catch {}
       }
 
       document.getElementById("sidebarHideBtn").addEventListener("click", () => setSidebarCollapsed(true));
       document.getElementById("sidebarToggle").addEventListener("click", () => setSidebarCollapsed(false));
 
       try {
-        const saved = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || "{}");
+        const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
         if (saved.collapsed) shell.classList.add("sidebar-collapsed");
       } catch {}
     }
