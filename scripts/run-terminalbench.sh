@@ -17,7 +17,7 @@ Options:
   --dataset <name@version>      Dataset to run (default: terminal-bench-sample@2.0)
   --sample                      Shortcut for --dataset terminal-bench-sample@2.0
   --full                        Shortcut for --dataset terminal-bench@2.0
-  --preset <name>               Exact task preset: trivial|smoke|fast-3|fast-medium
+  --preset <name>               Exact task preset: trivial|smoke|fast-3|fast-medium|representative-10
   --task <glob>                 Task include pattern (repeatable)
   --tasks <a,b,c>               Exact task names as a comma-separated list
   --task-file <path>            Exact task names from a file (one per line, # comments allowed)
@@ -56,6 +56,7 @@ Examples:
   scripts/run-terminalbench.sh --sample --preset smoke --execution-mode repl --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --sample --preset fast-3 --execution-mode standard --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --sample --preset fast-medium --execution-mode standard --model gpt-5.4 --variant high
+  scripts/run-terminalbench.sh --sample --preset representative-10 --execution-mode standard --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --full --execution-mode standard --task "git-*" --variant high
   scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,fix-code-vulnerability --variant high
   scripts/run-terminalbench.sh --sample --execution-mode standard --context-strategy rolling_context --model gpt-5.4 --variant high
@@ -122,6 +123,19 @@ readonly PRESET_FAST_MEDIUM_TASKS=(
   "sqlite-with-gcov"
 )
 
+readonly PRESET_REPRESENTATIVE_10_TASKS=(
+  "build-cython-ext"
+  "configure-git-webserver"
+  "db-wal-recovery"
+  "fix-code-vulnerability"
+  "git-leak-recovery"
+  "log-summary-date-ranges"
+  "nginx-request-logging"
+  "polyglot-c-py"
+  "regex-log"
+  "sqlite-with-gcov"
+)
+
 append_exact_tasks() {
   local raw="$1"
   local part trimmed
@@ -165,8 +179,11 @@ apply_task_preset() {
     fast-medium)
       EXACT_TASKS+=("${PRESET_FAST_MEDIUM_TASKS[@]}")
       ;;
+    representative-10)
+      EXACT_TASKS+=("${PRESET_REPRESENTATIVE_10_TASKS[@]}")
+      ;;
     *)
-      echo "error: unsupported --preset: ${preset} (expected trivial|smoke|fast-3|fast-medium)" >&2
+      echo "error: unsupported --preset: ${preset} (expected trivial|smoke|fast-3|fast-medium|representative-10)" >&2
       exit 2
       ;;
   esac
