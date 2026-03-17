@@ -557,6 +557,34 @@ fn latest_user_index(messages: &[Message]) -> Option<usize> {
         .rposition(|message| matches!(message.role, MessageRole::User))
 }
 
+/// Run compaction eagerly on current messages when the context window shrinks.
+pub async fn compact_messages_if_needed(
+    session_id: &str,
+    state: &AgentStateEnvelope,
+    messages: &[Message],
+    prompt_usage: Option<PromptUsage>,
+    max_context_tokens: Option<usize>,
+    host: Arc<dyn SessionManager>,
+) -> Result<Option<Vec<Message>>, ContextBuildError> {
+    if !compaction_needed(prompt_usage, max_context_tokens) {
+        return Ok(None);
+    }
+    let prefix_len = leading_system_prefix_len(messages);
+    let Some(last_user_idx) = latest_user_index(messages) else {
+        return Ok(None);
+    };
+    if last_user_idx <= prefix_len {
+        return Ok(None);
+    }
+    let prefix_messages = messages[prefix_len..last_user_idx].to_vec();
+    let Some(summary) =
+        summarize_compaction_prefix(session_id, state, prefix_messages, host).await?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(apply_compaction_summary(messages, &summary)))
+}
+
 fn compaction_needed(prompt_usage: Option<PromptUsage>, max_context_tokens: Option<usize>) -> bool {
     let Some(usage) = prompt_usage else {
         return false;
@@ -593,6 +621,7 @@ async fn summarize_compaction_prefix(
     snapshot.policy.max_turns = Some(1);
     snapshot.plugin_snapshot = None;
     snapshot.repl_snapshot = None;
+    snapshot.last_prompt_usage = None;
     let referenced = referenced_tool_call_ids(&snapshot.messages);
     snapshot.tool_calls.retain(|record| {
         record
