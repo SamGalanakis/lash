@@ -15,14 +15,19 @@ from harbor.models.trial.paths import EnvironmentPaths
 from harbor.utils.templating import render_prompt_template
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_LASH_BINARY = (
-    REPO_ROOT / "target-bullseye" / "release" / "lash"
+DEFAULT_LASH_BINARY_CANDIDATES = (
+    REPO_ROOT / "target" / "release" / "lash",
+    REPO_ROOT / "target-bookworm" / "release" / "lash",
+    REPO_ROOT / "target-bullseye" / "release" / "lash",
 )
 HOST_LASH_CONFIG = Path.home() / ".lash" / "config.json"
+HOST_CA_CERT_BUNDLE = Path("/etc/ssl/certs/ca-certificates.crt")
 
 REMOTE_HOME = "/installed-agent/home"
 REMOTE_LASH_HOME = (EnvironmentPaths.agent_dir / "lash-home").as_posix()
 REMOTE_LASH_CONFIG = f"{REMOTE_LASH_HOME}/config.json"
+REMOTE_CA_CERT_DIR = "/etc/ssl/certs"
+REMOTE_CA_CERT_BUNDLE = f"{REMOTE_CA_CERT_DIR}/ca-certificates.crt"
 
 BENCHMARK_GUIDELINES_APPEND = """## Benchmark Constraints
 
@@ -67,6 +72,13 @@ fi
 
 
 class LashAgent(BaseInstalledAgent):
+    @staticmethod
+    def _default_binary_path() -> Path:
+        for candidate in DEFAULT_LASH_BINARY_CANDIDATES:
+            if candidate.exists():
+                return candidate
+        return DEFAULT_LASH_BINARY_CANDIDATES[0]
+
     @staticmethod
     def _command_metadata(command: str) -> dict[str, str]:
         return {
@@ -115,10 +127,33 @@ class LashAgent(BaseInstalledAgent):
         return Path(__file__).resolve().parent / "install-lash.sh.j2"
 
     async def setup(self, environment: BaseEnvironment) -> None:
-        await environment.exec(command=f"mkdir -p {REMOTE_HOME} {REMOTE_LASH_HOME}")
+        await environment.exec(
+            command=f"mkdir -p {REMOTE_HOME} {REMOTE_LASH_HOME} {REMOTE_CA_CERT_DIR}"
+        )
+
+        if HOST_CA_CERT_BUNDLE.exists():
+            await environment.upload_file(
+                source_path=str(HOST_CA_CERT_BUNDLE.resolve()),
+                target_path=REMOTE_CA_CERT_BUNDLE,
+            )
+            await environment.exec(
+                command=(
+                    "if command -v update-ca-certificates >/dev/null 2>&1; then "
+                    "update-ca-certificates >/dev/null 2>&1 || true; "
+                    "fi"
+                )
+            )
+        else:
+            self.logger.warning(
+                "No host CA bundle found at %s; benchmark containers may fail TLS checks.",
+                HOST_CA_CERT_BUNDLE,
+            )
+
         await environment.exec(command=INSTALL_GNU_TIME_COMMAND)
 
-        binary_path = Path(os.environ.get("LASH_BENCH_BINARY", str(DEFAULT_LASH_BINARY)))
+        binary_path = Path(
+            os.environ.get("LASH_BENCH_BINARY", str(self._default_binary_path()))
+        )
         if not binary_path.exists():
             raise FileNotFoundError(
                 f"Expected lash binary at {binary_path}. Build it before running Harbor."
@@ -154,6 +189,10 @@ class LashAgent(BaseInstalledAgent):
         env: dict[str, str] = {
             "HOME": REMOTE_HOME,
             "LASH_HOME": REMOTE_LASH_HOME,
+            "SSL_CERT_FILE": REMOTE_CA_CERT_BUNDLE,
+            "CURL_CA_BUNDLE": REMOTE_CA_CERT_BUNDLE,
+            "REQUESTS_CA_BUNDLE": REMOTE_CA_CERT_BUNDLE,
+            "NODE_EXTRA_CA_CERTS": REMOTE_CA_CERT_BUNDLE,
             # Bench tasks can involve long thinking phases with sparse stream chunks.
             # Use a higher default than interactive runs; allow override from host env.
             "LASH_LLM_STREAM_TIMEOUT_SECS": os.environ.get(
@@ -214,11 +253,14 @@ class LashAgent(BaseInstalledAgent):
                     prompt_flags += f"--prompt-disable {shlex.quote(sec)} "
         prompt = shlex.quote(instruction)
 
+        lash_binary = "/installed-agent/lash"
+
         return [
             ExecInput(
                 command=(
-                    f"lash {provider_flag}{model_flag}{variant_flag}{context_strategy_flag}{execution_mode_flag}"
-                    f"{prompt_flags}--print {prompt}"
+                    f"chmod +x {shlex.quote(lash_binary)} && "
+                    f"{shlex.quote(lash_binary)} {provider_flag}{model_flag}{variant_flag}"
+                    f"{context_strategy_flag}{execution_mode_flag}{prompt_flags}--print {prompt}"
                 ),
                 env=env,
                 timeout_sec=None,

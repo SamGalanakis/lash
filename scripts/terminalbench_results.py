@@ -13,7 +13,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
+
+PRESET_TASKS: dict[str, tuple[str, ...]] = {
+    "trivial": ("log-summary-date-ranges",),
+    "smoke": (
+        "log-summary-date-ranges",
+        "fix-code-vulnerability",
+    ),
+    "fast-3": (
+        "log-summary-date-ranges",
+        "fix-code-vulnerability",
+        "regex-log",
+    ),
+    "fast-medium": (
+        "regex-log",
+        "log-summary-date-ranges",
+        "fix-code-vulnerability",
+        "sqlite-with-gcov",
+    ),
+}
 
 
 def parse_ts(value: str | None) -> datetime | None:
@@ -60,6 +79,46 @@ def load_json(path: Path) -> dict[str, Any]:
 
 def read_text(path: Path) -> str:
     return path.read_text(errors="replace") if path.exists() else ""
+
+
+def normalize_task_names(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        stripped = value.strip()
+        if not stripped or stripped in seen:
+            continue
+        seen.add(stripped)
+        normalized.append(stripped)
+    return normalized
+
+
+def infer_preset(exact_tasks: Any) -> str | None:
+    normalized = sorted(normalize_task_names(exact_tasks))
+    if not normalized:
+        return None
+    for name, tasks in PRESET_TASKS.items():
+        if normalized == sorted(tasks):
+            return name
+    return None
+
+
+def resolve_preset(
+    preset: Any,
+    exact_tasks: Any,
+) -> tuple[str | None, str | None]:
+    if isinstance(preset, str):
+        stripped = preset.strip()
+        if stripped:
+            return stripped, "explicit"
+    inferred = infer_preset(exact_tasks)
+    if inferred:
+        return inferred, "inferred"
+    return None, None
 
 
 def shorten(text: str, limit: int = 2400, from_end: bool = False) -> str | None:
@@ -733,7 +792,7 @@ def infer_command_metadata(
             return data
 
     normalized = command_text.strip()
-    if " opencode " in f" {normalized} " and " run" in normalized:
+    if "opencode" in normalized and " run" in normalized:
         return {"phase": "main", "purpose": "agent_run", "family": "opencode", "is_main": True}
     if "opencode.json" in normalized:
         return {"phase": "bootstrap", "purpose": "config", "family": "opencode", "is_main": False}
@@ -826,6 +885,7 @@ class ExportArgs:
     agent: str
     dataset: str
     execution_mode: str
+    preset: str | None
     requested_model: str | None
     variant: str | None
     context_strategy: str | None
@@ -849,6 +909,7 @@ def build_trial_record(
     run_dir: Path,
     args: ExportArgs,
 ) -> dict[str, Any]:
+    preset, preset_source = resolve_preset(args.preset, args.exact_tasks)
     result = load_json(trial_dir / "result.json")
     config = load_json(trial_dir / "config.json")
     agent_result = result.get("agent_result") or {}
@@ -1142,6 +1203,8 @@ def build_trial_record(
         "metadata": {
             "agent": args.agent,
             "execution_mode": args.execution_mode,
+            "preset": preset,
+            "preset_source": preset_source,
             "requested_model": args.requested_model,
             "resolved_models": resolved_models,
             "variant": args.variant or None,
@@ -1295,6 +1358,7 @@ def build_task_rollups(trials: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def export_run(args: ExportArgs) -> Path:
+    preset, preset_source = resolve_preset(args.preset, args.exact_tasks)
     job_result = load_json(args.job_dir / "result.json")
     run_id = resolve_run_id(args.job_dir, job_result.get("started_at"))
     run_dir = args.results_dir / "runs" / run_id
@@ -1321,6 +1385,8 @@ def export_run(args: ExportArgs) -> Path:
             "agent": args.agent,
             "dataset": args.dataset,
             "execution_mode": args.execution_mode,
+            "preset": preset,
+            "preset_source": preset_source,
             "requested_model": args.requested_model,
             "variant": args.variant or None,
             "context_strategy": args.context_strategy or None,
@@ -1356,13 +1422,40 @@ def export_run(args: ExportArgs) -> Path:
 
 
 def load_run(run_dir: Path) -> dict[str, Any]:
-    return load_json(run_dir / "run.json")
+    run = load_json(run_dir / "run.json")
+    params = run.get("params")
+    if not isinstance(params, dict):
+        return run
+
+    preset, preset_source = resolve_preset(
+        params.get("preset") or params.get("task_preset"),
+        params.get("exact_tasks"),
+    )
+    if preset and not params.get("preset"):
+        params["preset"] = preset
+    if preset_source and not params.get("preset_source"):
+        params["preset_source"] = preset_source
+
+    trials = run.get("trials")
+    if isinstance(trials, list):
+        for trial in trials:
+            if not isinstance(trial, dict):
+                continue
+            metadata = trial.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            if preset and not metadata.get("preset"):
+                metadata["preset"] = preset
+            if preset_source and not metadata.get("preset_source"):
+                metadata["preset_source"] = preset_source
+
+    return run
 
 
 def load_run_summaries(results_dir: Path) -> list[dict[str, Any]]:
     runs: list[dict[str, Any]] = []
     for run_json in sorted((results_dir / "runs").glob("*/run.json"), reverse=True):
-        run = load_json(run_json)
+        run = load_run(run_json.parent)
         if not run:
             continue
         stats = run.get("global_stats") or {}
@@ -1378,6 +1471,7 @@ def load_run_summaries(results_dir: Path) -> list[dict[str, Any]]:
                 "dataset": params.get("dataset"),
                 "agent": params.get("agent"),
                 "execution_mode": params.get("execution_mode"),
+                "preset": params.get("preset"),
                 "requested_model": params.get("requested_model"),
                 "variant": params.get("variant"),
                 "context_strategy": params.get("context_strategy"),
