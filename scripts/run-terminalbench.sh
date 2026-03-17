@@ -17,7 +17,7 @@ Options:
   --dataset <name@version>      Dataset to run (default: terminal-bench-sample@2.0)
   --sample                      Shortcut for --dataset terminal-bench-sample@2.0
   --full                        Shortcut for --dataset terminal-bench@2.0
-  --preset <name>               Exact task preset: smoke|fast-medium
+  --preset <name>               Exact task preset: trivial|smoke|fast-3|fast-medium
   --task <glob>                 Task include pattern (repeatable)
   --tasks <a,b,c>               Exact task names as a comma-separated list
   --task-file <path>            Exact task names from a file (one per line, # comments allowed)
@@ -39,6 +39,8 @@ Options:
   --env <name>                  Harbor environment backend (default: docker)
   --registry-url <url>          Dataset registry URL
                                 (default: https://raw.githubusercontent.com/laude-institute/harbor/main/registry.json)
+  --build-mode <mode>           Lash build mode: host|docker-bookworm|docker-bullseye
+                                (default: docker-bookworm)
   --no-build                    Skip building the lash benchmark binary
   --debug                       Enable Harbor debug logging
   --no-debug                    Disable Harbor debug logging (default)
@@ -50,10 +52,12 @@ Options:
 
 Examples:
   scripts/run-terminalbench.sh --sample --execution-mode repl --variant high
+  scripts/run-terminalbench.sh --sample --preset trivial --execution-mode repl --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --sample --preset smoke --execution-mode repl --model gpt-5.4 --variant high
+  scripts/run-terminalbench.sh --sample --preset fast-3 --execution-mode standard --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --sample --preset fast-medium --execution-mode standard --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --full --execution-mode standard --task "git-*" --variant high
-  scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,sqlite-with-gcov --variant high
+  scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,fix-code-vulnerability --variant high
   scripts/run-terminalbench.sh --sample --execution-mode standard --context-strategy rolling_context --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --sample --execution-mode repl --context-strategy recall_agent --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --sample --execution-mode repl --task chess-best-move --model gpt-5.3-codex --variant high
@@ -77,6 +81,7 @@ MODEL=""
 VARIANT=""
 EXECUTION_MODE=""
 CONTEXT_STRATEGY=""
+BUILD_MODE="docker-bookworm"
 N_CONCURRENT="1"
 N_CONCURRENT_SET=0
 ATTEMPTS="1"
@@ -95,9 +100,19 @@ EXACT_TASKS=()
 EXCLUDE_PATTERNS=()
 EXTRA_ARGS=()
 
-readonly PRESET_SMOKE_TASKS=(
-  "regex-log"
+readonly PRESET_TRIVIAL_TASKS=(
   "log-summary-date-ranges"
+)
+
+readonly PRESET_SMOKE_TASKS=(
+  "log-summary-date-ranges"
+  "fix-code-vulnerability"
+)
+
+readonly PRESET_FAST_3_TASKS=(
+  "log-summary-date-ranges"
+  "fix-code-vulnerability"
+  "regex-log"
 )
 
 readonly PRESET_FAST_MEDIUM_TASKS=(
@@ -138,14 +153,20 @@ load_task_file() {
 apply_task_preset() {
   local preset="$1"
   case "${preset}" in
+    trivial)
+      EXACT_TASKS+=("${PRESET_TRIVIAL_TASKS[@]}")
+      ;;
     smoke)
       EXACT_TASKS+=("${PRESET_SMOKE_TASKS[@]}")
+      ;;
+    fast-3)
+      EXACT_TASKS+=("${PRESET_FAST_3_TASKS[@]}")
       ;;
     fast-medium)
       EXACT_TASKS+=("${PRESET_FAST_MEDIUM_TASKS[@]}")
       ;;
     *)
-      echo "error: unsupported --preset: ${preset} (expected smoke|fast-medium)" >&2
+      echo "error: unsupported --preset: ${preset} (expected trivial|smoke|fast-3|fast-medium)" >&2
       exit 2
       ;;
   esac
@@ -257,6 +278,10 @@ while [[ $# -gt 0 ]]; do
       REGISTRY_URL="${2:?missing value for --registry-url}"
       shift 2
       ;;
+    --build-mode)
+      BUILD_MODE="${2:?missing value for --build-mode}"
+      shift 2
+      ;;
     --no-build)
       DO_BUILD=0
       shift
@@ -313,8 +338,11 @@ if [[ -z "${VARIANT}" ]]; then
 fi
 
 require_cmd harbor
-if [[ "${ENV_BACKEND}" == "docker" ]] || [[ "${AGENT}" == "lash" && "${DO_BUILD}" -eq 1 ]]; then
+if [[ "${ENV_BACKEND}" == "docker" ]] || [[ "${AGENT}" == "lash" && "${DO_BUILD}" -eq 1 && "${BUILD_MODE}" != "host" ]]; then
   require_cmd docker
+fi
+if [[ "${AGENT}" == "lash" && "${DO_BUILD}" -eq 1 && "${BUILD_MODE}" == "host" ]]; then
+  require_cmd cargo
 fi
 
 if [[ "${AGENT}" == "lash" && "${REQUIRE_CONFIG}" -eq 1 && ! -f "${HOME}/.lash/config.json" ]]; then
@@ -334,11 +362,18 @@ if [[ ${#EXACT_TASKS[@]} -gt 0 && "${N_CONCURRENT_SET}" -eq 0 ]]; then
   N_CONCURRENT="${#EXACT_TASKS[@]}"
 fi
 
-build_benchmark_binary() {
-  local target_dir="${REPO_ROOT}/target-bullseye"
-  local image="rust:1-bullseye"
+build_host_binary() {
+  echo "==> Building lash benchmark binary on host" >&2
+  cargo build --release --manifest-path "${REPO_ROOT}/Cargo.toml" --bin lash >/dev/null
+  BINARY_PATH="${REPO_ROOT}/target/release/lash"
+}
+
+build_docker_binary() {
+  local image="$1"
+  local target_subdir="$2"
+  local target_dir="${REPO_ROOT}/${target_subdir}"
   mkdir -p "${target_dir}"
-  echo "==> Building lash benchmark binary in rust:1-bullseye" >&2
+  echo "==> Building lash benchmark binary in ${image}" >&2
   docker run --rm -u root \
     -v "${REPO_ROOT}:/work" \
     -w /work \
@@ -347,9 +382,9 @@ build_benchmark_binary() {
       '. /usr/local/cargo/env &&
        apt-get update >/dev/null &&
        apt-get install -y protobuf-compiler zstd python3-dev >/dev/null &&
-       CARGO_TARGET_DIR=/work/target-bullseye cargo build --release --manifest-path /work/Cargo.toml --bin lash &&
-       chown -R $(stat -c "%u:%g" /work) /work/target-bullseye' >/dev/null
-  echo "${REPO_ROOT}/target-bullseye/release/lash"
+       CARGO_TARGET_DIR=/work/'"${target_subdir}"' cargo build --release --manifest-path /work/Cargo.toml --bin lash &&
+       chown -R $(stat -c "%u:%g" /work) /work/'"${target_subdir}"'' >/dev/null
+  BINARY_PATH="${REPO_ROOT}/${target_subdir}/release/lash"
 }
 
 RUN_EXECUTION_MODE="${EXECUTION_MODE}"
@@ -375,10 +410,36 @@ if [[ "${AGENT}" == "lash" ]]; then
     exit 2
   fi
 
+  if [[ "${BUILD_MODE}" != "host" && "${BUILD_MODE}" != "docker-bookworm" && "${BUILD_MODE}" != "docker-bullseye" ]]; then
+    echo "error: unsupported --build-mode: ${BUILD_MODE} (expected host|docker-bookworm|docker-bullseye)" >&2
+    exit 2
+  fi
+
   RUN_EXECUTION_MODE="${EXECUTION_MODE}"
-  BINARY_PATH="${REPO_ROOT}/target-bullseye/release/lash"
+  case "${BUILD_MODE}" in
+    host)
+      BINARY_PATH="${REPO_ROOT}/target/release/lash"
+      ;;
+    docker-bookworm)
+      BINARY_PATH="${REPO_ROOT}/target-bookworm/release/lash"
+      ;;
+    docker-bullseye)
+      BINARY_PATH="${REPO_ROOT}/target-bullseye/release/lash"
+      ;;
+  esac
+
   if [[ "${DO_BUILD}" -eq 1 ]]; then
-    BINARY_PATH="$(build_benchmark_binary)"
+    case "${BUILD_MODE}" in
+      host)
+        build_host_binary
+        ;;
+      docker-bookworm)
+        build_docker_binary "rust:1-bookworm" "target-bookworm"
+        ;;
+      docker-bullseye)
+        build_docker_binary "rust:1-bullseye" "target-bullseye"
+        ;;
+    esac
   fi
 
   if [[ ! -x "${BINARY_PATH}" ]]; then
@@ -511,6 +572,9 @@ if [[ -d "${JOB_DIR}" ]]; then
     --timeout-multiplier "${TIMEOUT_MULT}"
   )
 
+  if [[ -n "${TASK_PRESET}" ]]; then
+    EXPORT_CMD+=(--preset "${TASK_PRESET}")
+  fi
   if [[ -n "${BINARY_PATH}" ]]; then
     EXPORT_CMD+=(--binary-path "${BINARY_PATH}")
   fi

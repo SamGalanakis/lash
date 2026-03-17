@@ -77,7 +77,7 @@
       position: relative;
       z-index: 1;
       display: grid;
-      grid-template-columns: 340px 1fr;
+      grid-template-columns: 368px 1fr;
       min-height: 100vh;
     }
 
@@ -99,7 +99,7 @@
     .sidebar::-webkit-scrollbar-thumb { background: var(--ash-mid); border-radius: 2px; }
 
     .masthead {
-      padding: 22px 20px 18px;
+      padding: 30px 24px 24px;
       border-bottom: 1px solid var(--line);
     }
 
@@ -115,21 +115,23 @@
     }
 
     .masthead p {
-      margin-top: 10px;
+      margin-top: 14px;
       color: var(--chalk-dim);
-      font: 400 12.5px/1.55 var(--font-body);
+      font: 400 12.5px/1.65 var(--font-body);
     }
 
     .toolbar {
-      padding: 14px 20px;
+      padding: 18px 24px 16px;
       border-bottom: 1px solid var(--line);
       display: grid;
-      gap: 10px;
+      gap: 12px;
     }
 
     .toolbar-row {
       display: flex;
       gap: 8px;
+      align-items: center;
+      justify-content: space-between;
     }
 
     input, button, select {
@@ -141,7 +143,7 @@
       border: 1px solid var(--ash);
       background: var(--form-deep);
       color: var(--chalk);
-      padding: 10px 12px;
+      padding: 12px 13px;
       font: 400 12px/1 var(--font-ui);
       outline: none;
       transition: border-color 160ms;
@@ -153,6 +155,48 @@
 
     input[type="search"]:focus {
       border-color: var(--sodium);
+    }
+
+    select {
+      width: 100%;
+      border: 1px solid var(--ash);
+      background: var(--form-deep);
+      color: var(--chalk);
+      padding: 10px 12px;
+      font: 400 11px/1.1 var(--font-ui);
+      outline: none;
+      transition: border-color 160ms;
+      appearance: none;
+      background-image:
+        linear-gradient(45deg, transparent 50%, var(--ash-text) 50%),
+        linear-gradient(135deg, var(--ash-text) 50%, transparent 50%);
+      background-position:
+        calc(100% - 16px) calc(50% - 2px),
+        calc(100% - 11px) calc(50% - 2px);
+      background-size: 5px 5px, 5px 5px;
+      background-repeat: no-repeat;
+    }
+
+    select:focus {
+      border-color: var(--sodium);
+    }
+
+    .filter-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .filter-field {
+      display: grid;
+      gap: 5px;
+    }
+
+    .filter-field span {
+      font: 500 9px/1 var(--font-display);
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--ash-text);
     }
 
     button {
@@ -210,9 +254,9 @@
     /* ── Run list ── */
     .run-list {
       flex: 1;
-      padding: 10px;
+      padding: 8px;
       display: grid;
-      gap: 6px;
+      gap: 5px;
       align-content: start;
       overflow: auto;
     }
@@ -220,7 +264,7 @@
     .run-card {
       border: 1px solid var(--line);
       background: var(--form-raised);
-      padding: 14px;
+      padding: 11px 12px;
       cursor: pointer;
       transition: all 140ms;
     }
@@ -233,45 +277,45 @@
     .run-card.active {
       border-color: var(--sodium);
       background: linear-gradient(135deg, rgba(232, 163, 60, 0.06), var(--form-raised));
-      box-shadow: inset 3px 0 0 var(--sodium);
+      box-shadow: inset 2px 0 0 var(--sodium);
     }
 
     .run-card-top {
       display: flex;
-      gap: 10px;
+      gap: 8px;
       align-items: flex-start;
     }
 
     .run-card-top input[type="checkbox"] {
-      margin-top: 2px;
+      margin-top: 1px;
       accent-color: var(--sodium);
     }
 
     .run-card h3 {
-      font: 600 13px/1.2 var(--font-ui);
+      font: 600 12px/1.25 var(--font-ui);
       color: var(--chalk);
-      margin-bottom: 3px;
+      margin-bottom: 2px;
     }
 
     .run-card-sub {
       color: var(--chalk-dim);
-      font-size: 11px;
+      font-size: 10px;
       line-height: 1.4;
-      margin-bottom: 8px;
+      margin-bottom: 6px;
     }
 
     .run-card-badges {
       display: flex;
       flex-wrap: wrap;
-      gap: 5px;
-      margin-bottom: 6px;
+      gap: 4px;
+      margin-bottom: 5px;
     }
 
     .run-card-stats {
       display: flex;
       flex-wrap: wrap;
-      gap: 4px 10px;
-      font: 400 10px/1.3 var(--font-ui);
+      gap: 3px 8px;
+      font: 400 9.5px/1.3 var(--font-ui);
       color: var(--ash-text);
     }
 
@@ -311,6 +355,11 @@
       color: var(--lichen);
       font-weight: 600;
       letter-spacing: 0.06em;
+    }
+    .chip.preset {
+      border-color: rgba(232, 163, 60, 0.26);
+      color: var(--chalk-mid);
+      background: rgba(232, 163, 60, 0.06);
     }
 
     /* ── Main content ── */
@@ -988,8 +1037,34 @@
 
       <div class="toolbar">
         <input id="runSearch" type="search" placeholder="filter runs...">
+        <div class="filter-grid">
+          <label class="filter-field">
+            <span>Preset</span>
+            <select id="presetFilter"></select>
+          </label>
+          <label class="filter-field">
+            <span>Agent</span>
+            <select id="agentFilter"></select>
+          </label>
+          <label class="filter-field">
+            <span>Mode</span>
+            <select id="executionModeFilter"></select>
+          </label>
+          <label class="filter-field">
+            <span>Variant</span>
+            <select id="variantFilter"></select>
+          </label>
+          <label class="filter-field">
+            <span>Context</span>
+            <select id="contextFilter"></select>
+          </label>
+          <label class="filter-field">
+            <span>Provider</span>
+            <select id="providerFilter"></select>
+          </label>
+        </div>
         <div class="toolbar-row">
-          <button id="refreshButton" class="secondary">Refresh</button>
+          <button id="clearFiltersButton" class="ghost">Clear Filters</button>
           <button id="deleteButton" class="danger" disabled>Delete</button>
         </div>
         <div class="banner" id="selectionBanner">Select up to 2 runs for compare mode.</div>
@@ -1054,6 +1129,15 @@
   </div>
 
   <script>
+    const AUTO_REFRESH_MS = 15000;
+    const FILTER_CONFIG = [
+      { id: "presetFilter", key: "preset", allLabel: "all presets" },
+      { id: "agentFilter", key: "agent", allLabel: "all agents" },
+      { id: "executionModeFilter", key: "execution_mode", allLabel: "all modes" },
+      { id: "variantFilter", key: "variant", allLabel: "all variants" },
+      { id: "contextFilter", key: "context_strategy", allLabel: "all contexts" },
+      { id: "providerFilter", key: "provider", allLabel: "all providers" },
+    ];
     const state = {
       runs: [],
       runDetails: new Map(),
@@ -1158,17 +1242,91 @@
       return contentType.includes("application/json") ? response.json() : response.text();
     }
 
+    function runField(run, key) {
+      const value = run?.[key];
+      return value == null ? "" : String(value);
+    }
+
+    function sortedFilterValues(key) {
+      return [...new Set(state.runs.map(run => runField(run, key)).filter(Boolean))]
+        .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" }));
+    }
+
+    function currentFilters() {
+      const filters = {
+        query: document.getElementById("runSearch").value.trim().toLowerCase(),
+      };
+      for (const config of FILTER_CONFIG) {
+        filters[config.key] = document.getElementById(config.id).value;
+      }
+      return filters;
+    }
+
+    function renderFilterControls() {
+      for (const config of FILTER_CONFIG) {
+        const select = document.getElementById(config.id);
+        const current = select.value;
+        const values = sortedFilterValues(config.key);
+        select.innerHTML = [
+          `<option value="">${escapeHtml(config.allLabel)}</option>`,
+          ...values.map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`),
+        ].join("");
+        select.value = values.includes(current) ? current : "";
+      }
+    }
+
+    function getFilteredRuns(filters = currentFilters()) {
+      return state.runs.filter(run => {
+        if (filters.query) {
+          const haystack = [
+            run.job_name,
+            run.dataset,
+            run.agent,
+            run.execution_mode,
+            run.preset,
+            run.requested_model,
+            run.variant,
+            run.context_strategy,
+            run.provider,
+          ].filter(Boolean).join(" ").toLowerCase();
+          if (!haystack.includes(filters.query)) {
+            return false;
+          }
+        }
+
+        for (const config of FILTER_CONFIG) {
+          const selected = filters[config.key];
+          if (!selected) continue;
+          if (runField(run, config.key) !== selected) {
+            return false;
+          }
+        }
+
+        return true;
+      });
+    }
+
     async function loadRuns() {
       const data = await api("/api/runs");
       state.runs = data.runs || [];
+      const trackedRunIds = [state.activeRunId, ...state.selectedRunIds].filter(Boolean);
+      for (const runId of trackedRunIds) {
+        state.runDetails.delete(runId);
+      }
       if (!state.activeRunId && state.runs[0]) {
         state.activeRunId = state.runs[0].run_id;
       }
       if (state.activeRunId && !state.runs.some(run => run.run_id === state.activeRunId)) {
         state.activeRunId = state.runs[0]?.run_id || null;
       }
+      renderFilterControls();
       renderRunList();
       await ensureActiveRunLoaded();
+      if (state.activeTrial && state.activeRunId) {
+        const activeRun = state.runDetails.get(state.activeRunId);
+        const refreshedTrial = (activeRun?.trials || []).find(trial => trial.trial_name === state.activeTrial?.trial_name);
+        state.activeTrial = refreshedTrial || null;
+      }
       render();
     }
 
@@ -1188,21 +1346,9 @@
     }
 
     function renderRunList() {
-      const query = document.getElementById("runSearch").value.trim().toLowerCase();
       const runList = document.getElementById("runList");
-      const filtered = state.runs.filter(run => {
-        if (!query) return true;
-        return [
-          run.job_name,
-          run.dataset,
-          run.agent,
-          run.execution_mode,
-          run.requested_model,
-          run.variant,
-          run.context_strategy,
-          run.provider
-        ].filter(Boolean).join(" ").toLowerCase().includes(query);
-      });
+      const filtered = getFilteredRuns();
+      renderSelectionBanner(filtered.length);
 
       if (!filtered.length) {
         runList.innerHTML = `<div class="empty">No runs match the current filter.</div>`;
@@ -1220,13 +1366,14 @@
               <div class="run-card-badges">
                 <span class="chip mode">${escapeHtml(run.execution_mode || "default")}</span>
                 <span class="chip context">${escapeHtml(run.context_strategy || "default")}</span>
+                ${run.preset ? `<span class="chip preset">${escapeHtml(run.preset)}</span>` : ""}
                 <span class="chip pass">${fmtPct(run.pass_rate)}</span>
                 <span class="chip">${fmtInt(run.trials_passed)}/${fmtInt(run.trials_total)}</span>
               </div>
               <div class="run-card-stats">
                 <span>${fmtInt(run.tokens_non_cache_total || 0)} nc</span>
                 <span>${fmtInt(run.tokens_cache_total || 0)} cache</span>
-                <span>${fmtPct(cacheRatio({ total: run.tokens_total_total, cache: run.tokens_cache_total }))}</span>
+                <span>${fmtPct(cacheRatio({ total: run.tokens_total, cache: run.tokens_cache_total }))}</span>
                 <span>${fmtSeconds(run.cpu_seconds_total)} cpu</span>
                 <span>${fmtMemoryKb(run.peak_rss_kb)} rss</span>
                 <span>${fmtInt(run.turns_total || 0)} turns</span>
@@ -1272,15 +1419,25 @@
           render();
         });
       });
-
-      renderSelectionBanner();
     }
 
-    function renderSelectionBanner() {
+    function renderSelectionBanner(filteredCount = getFilteredRuns().length) {
       const count = state.selectedRunIds.size;
       const ready = count === 2 ? "compare studio ready" : "select up to 2 runs";
-      document.getElementById("selectionBanner").textContent = `${count} selected · ${ready}`;
+      const total = state.runs.length;
+      const visible = filteredCount === total
+        ? `${fmtInt(total)} visible`
+        : `${fmtInt(filteredCount)}/${fmtInt(total)} visible`;
+      document.getElementById("selectionBanner").textContent = `${visible} · ${count} selected · ${ready}`;
       document.getElementById("deleteButton").disabled = state.selectedRunIds.size === 0;
+    }
+
+    function clearFilters() {
+      document.getElementById("runSearch").value = "";
+      for (const config of FILTER_CONFIG) {
+        document.getElementById(config.id).value = "";
+      }
+      renderRunList();
     }
 
     function escapeHtml(value) {
@@ -1433,6 +1590,7 @@
           <div class="chips" style="margin-top:6px">
             ${leftParams.execution_mode ? `<span class="chip mode">${escapeHtml(leftParams.execution_mode)}</span>` : ""}
             ${leftParams.context_strategy ? `<span class="chip context">${escapeHtml(leftParams.context_strategy)}</span>` : ""}
+            ${leftParams.preset ? `<span class="chip preset">${escapeHtml(leftParams.preset)}</span>` : ""}
           </div>
           <div class="chips">
             <span class="chip pass">${fmtPct(leftStats.pass_rate)}</span>
@@ -1466,6 +1624,7 @@
           <div class="chips" style="margin-top:6px">
             ${rightParams.execution_mode ? `<span class="chip mode">${escapeHtml(rightParams.execution_mode)}</span>` : ""}
             ${rightParams.context_strategy ? `<span class="chip context">${escapeHtml(rightParams.context_strategy)}</span>` : ""}
+            ${rightParams.preset ? `<span class="chip preset">${escapeHtml(rightParams.preset)}</span>` : ""}
           </div>
           <div class="chips">
             <span class="chip pass">${fmtPct(rightStats.pass_rate)}</span>
@@ -1683,7 +1842,7 @@
         statCard("Reward Mean", fmtFixed(stats.reward_mean)),
         statCard("Errors", fmtInt(stats.trials_errors)),
       ].join("");
-      metaRoot.innerHTML = `${escapeHtml(run.job_name)} · ${escapeHtml(params.dataset || "-")} · ${escapeHtml(params.agent || "-")} · provider ${escapeHtml((params.provider || {}).active_provider || "-")} · model ${escapeHtml(params.requested_model || "resolved in trial")} · variant ${escapeHtml(params.variant || "default")} <span class="chip mode" style="margin-left:6px">${escapeHtml(params.execution_mode || "default")}</span> <span class="chip context">${escapeHtml(params.context_strategy || "default")}</span>`;
+      metaRoot.innerHTML = `${escapeHtml(run.job_name)} · ${escapeHtml(params.dataset || "-")} · ${escapeHtml(params.agent || "-")} · provider ${escapeHtml((params.provider || {}).active_provider || "-")} · model ${escapeHtml(params.requested_model || "resolved in trial")} · variant ${escapeHtml(params.variant || "default")} <span class="chip mode" style="margin-left:6px">${escapeHtml(params.execution_mode || "default")}</span> <span class="chip context">${escapeHtml(params.context_strategy || "default")}</span>${params.preset ? ` <span class="chip preset">${escapeHtml(params.preset)}</span>` : ""}`;
 
       renderTasksTable(run.task_rollups || [], run.trials || []);
       renderTrialDetail();
@@ -1798,7 +1957,7 @@
       const overheadResourceUsage = resourceBucket(resourceUsage, "overhead_commands");
       meta.innerHTML = `
         <strong>${escapeHtml(trial.task_name)}</strong>
-        <span class="muted">${escapeHtml(trial.trial_name)} · ${escapeHtml(trial.status)} · ${escapeHtml(tokenInline(trial.tokens))} · ${escapeHtml(models)}</span>
+        <span class="muted">${escapeHtml(trial.trial_name)} · ${escapeHtml(trial.status)}${(trial.metadata || {}).preset ? ` · preset ${escapeHtml((trial.metadata || {}).preset)}` : ""} · ${escapeHtml(tokenInline(trial.tokens))} · ${escapeHtml(models)}</span>
         <span class="muted">${escapeHtml(`turns ${(trial.metadata || {}).llm_turn_count || 0} · llm calls ${(trial.metadata || {}).llm_call_count || 0} · tool calls ${(trial.metadata || {}).tool_call_count || 0} · batch calls ${(trial.metadata || {}).tool_batch_count || 0}`)}</span>
         <span class="muted">${escapeHtml(`main cpu ${fmtSeconds(mainResourceUsage.cpu_seconds_sum)} · main rss ${fmtMemoryKb(mainResourceUsage.max_rss_kb_max)} · all cpu ${fmtSeconds(allResourceUsage.cpu_seconds_sum)} · overhead cpu ${fmtSeconds(overheadResourceUsage.cpu_seconds_sum)} · env cpu ${((trial.metadata || {}).environment || {}).override_cpus || "-"} · env mem ${((trial.metadata || {}).environment || {}).override_memory_mb || "-"}`)}</span>
         <span class="muted">${escapeHtml(toolBreakdown)}</span>
@@ -1886,8 +2045,19 @@
       renderWorkspace();
     });
     document.getElementById("runSearch").addEventListener("input", renderRunList);
-    document.getElementById("refreshButton").addEventListener("click", loadRuns);
+    for (const config of FILTER_CONFIG) {
+      document.getElementById(config.id).addEventListener("change", renderRunList);
+    }
+    document.getElementById("clearFiltersButton").addEventListener("click", clearFilters);
     document.getElementById("deleteButton").addEventListener("click", deleteSelectedRuns);
+
+    setInterval(() => {
+      if (document.hidden) return;
+      loadRuns().catch(error => console.error("Auto-refresh failed", error));
+    }, AUTO_REFRESH_MS);
+    window.addEventListener("focus", () => {
+      loadRuns().catch(error => console.error("Refresh on focus failed", error));
+    });
 
     loadRuns().catch(error => {
       document.getElementById("runList").innerHTML = `<div class="empty">Failed to load runs: ${escapeHtml(error.message)}</div>`;

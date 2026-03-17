@@ -16,6 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--agent", required=True)
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--execution-mode", required=True)
+    parser.add_argument("--preset")
     parser.add_argument("--requested-model")
     parser.add_argument("--variant")
     parser.add_argument("--context-strategy")
@@ -44,6 +45,7 @@ def main() -> int:
             agent=ns.agent,
             dataset=ns.dataset,
             execution_mode=ns.execution_mode,
+            preset=ns.preset,
             requested_model=ns.requested_model,
             variant=ns.variant,
             context_strategy=ns.context_strategy,

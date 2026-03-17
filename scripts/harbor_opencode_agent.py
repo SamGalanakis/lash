@@ -13,10 +13,15 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 from harbor.utils.templating import render_prompt_template
 
+DEFAULT_OPENCODE_BINARY = Path("/usr/bin/opencode")
 HOST_OPENCODE_AUTH = Path.home() / ".local" / "share" / "opencode" / "auth.json"
 HOST_OPENCODE_CONFIG = Path.home() / ".config" / "opencode" / "opencode.json"
+HOST_CA_CERT_BUNDLE = Path("/etc/ssl/certs/ca-certificates.crt")
 REMOTE_OPENCODE_AUTH = "/root/.local/share/opencode/auth.json"
 REMOTE_OPENCODE_CONFIG = "/root/.config/opencode/opencode.json"
+REMOTE_OPENCODE_BINARY = "/installed-agent/opencode"
+REMOTE_CA_CERT_DIR = "/etc/ssl/certs"
+REMOTE_CA_CERT_BUNDLE = f"{REMOTE_CA_CERT_DIR}/ca-certificates.crt"
 INSTALL_GNU_TIME_COMMAND = """
 if [ ! -x /usr/bin/time ]; then
   if command -v apt-get >/dev/null 2>&1; then
@@ -41,7 +46,7 @@ class BenchOpenCodeAgent(OpenCode):
     @staticmethod
     def _command_metadata(command: str) -> dict[str, str]:
         normalized = command.strip()
-        if " opencode " in f" {normalized} " and " run" in normalized:
+        if "opencode" in normalized and " run" in normalized:
             return {
                 "phase": "main",
                 "purpose": "agent_run",
@@ -76,6 +81,9 @@ class BenchOpenCodeAgent(OpenCode):
         config: dict[str, object] = {
             "autoupdate": False,
             "formatter": False,
+            # Benchmark containers are already isolated. Avoid interactive permission
+            # gates or external-directory denials skewing task outcomes.
+            "permission": "allow",
         }
 
         mcp_servers = getattr(self, "mcp_servers", None) or []
@@ -173,6 +181,10 @@ class BenchOpenCodeAgent(OpenCode):
                 env[key] = value
 
         env["OPENCODE_FAKE_VCS"] = "git"
+        env["SSL_CERT_FILE"] = REMOTE_CA_CERT_BUNDLE
+        env["CURL_CA_BUNDLE"] = REMOTE_CA_CERT_BUNDLE
+        env["REQUESTS_CA_BUNDLE"] = REMOTE_CA_CERT_BUNDLE
+        env["NODE_EXTRA_CA_CERTS"] = REMOTE_CA_CERT_BUNDLE
 
         commands: list[ExecInput] = []
 
@@ -190,8 +202,9 @@ class BenchOpenCodeAgent(OpenCode):
         commands.append(
             ExecInput(
                 command=(
-                    ". ~/.nvm/nvm.sh; "
-                    f"opencode --agent=build --model={self.model_name} "
+                    f"chmod +x {shlex.quote(REMOTE_OPENCODE_BINARY)} && "
+                    f"{shlex.quote(REMOTE_OPENCODE_BINARY)} "
+                    f"--agent=build --model={self.model_name} "
                     f"run{variant_flag} --format=json -- "
                     f"{escaped_instruction} 2>&1 </dev/null | stdbuf -oL tee /logs/agent/opencode.txt"
                 ),
@@ -202,12 +215,45 @@ class BenchOpenCodeAgent(OpenCode):
         return commands
 
     async def setup(self, environment: BaseEnvironment) -> None:
-        await super().setup(environment)
-
         await environment.exec(
-            command="mkdir -p /root/.local/share/opencode /root/.config/opencode"
+            command=(
+                "mkdir -p /installed-agent /root/.local/share/opencode "
+                f"/root/.config/opencode {REMOTE_CA_CERT_DIR}"
+            )
         )
+
+        if HOST_CA_CERT_BUNDLE.exists():
+            await environment.upload_file(
+                source_path=str(HOST_CA_CERT_BUNDLE.resolve()),
+                target_path=REMOTE_CA_CERT_BUNDLE,
+            )
+            await environment.exec(
+                command=(
+                    "if command -v update-ca-certificates >/dev/null 2>&1; then "
+                    "update-ca-certificates >/dev/null 2>&1 || true; "
+                    "fi"
+                )
+            )
+        else:
+            self.logger.warning(
+                "No host CA bundle found at %s; benchmark containers may fail TLS checks.",
+                HOST_CA_CERT_BUNDLE,
+            )
+
         await environment.exec(command=INSTALL_GNU_TIME_COMMAND)
+
+        binary_path = Path(
+            os.environ.get("OPENCODE_BENCH_BINARY", str(DEFAULT_OPENCODE_BINARY))
+        )
+        if not binary_path.exists():
+            raise FileNotFoundError(
+                f"Expected opencode binary at {binary_path}. Install it before running Harbor."
+            )
+
+        await environment.upload_file(
+            source_path=str(binary_path),
+            target_path=REMOTE_OPENCODE_BINARY,
+        )
 
         if HOST_OPENCODE_AUTH.exists():
             await environment.upload_file(
@@ -225,6 +271,13 @@ class BenchOpenCodeAgent(OpenCode):
                 source_path=str(HOST_OPENCODE_CONFIG),
                 target_path=REMOTE_OPENCODE_CONFIG,
             )
+
+        setup_dir = self.logs_dir / "setup"
+        setup_dir.mkdir(parents=True, exist_ok=True)
+        (setup_dir / "return-code.txt").write_text("0")
+        (setup_dir / "stdout.txt").write_text(
+            "Skipped Harbor OpenCode installer; using uploaded local opencode binary.\n"
+        )
 
     async def run(
         self,
