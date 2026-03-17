@@ -56,7 +56,7 @@ Examples:
   scripts/run-terminalbench.sh --sample --preset smoke --execution-mode repl --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --sample --preset fast-3 --execution-mode standard --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --sample --preset fast-medium --execution-mode standard --model gpt-5.4 --variant high
-  scripts/run-terminalbench.sh --sample --preset representative-10 --execution-mode standard --model gpt-5.4 --variant high
+  scripts/run-terminalbench.sh --full --preset representative-10 --execution-mode standard --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --full --execution-mode standard --task "git-*" --variant high
   scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,fix-code-vulnerability --variant high
   scripts/run-terminalbench.sh --sample --execution-mode standard --context-strategy rolling_context --model gpt-5.4 --variant high
@@ -135,6 +135,37 @@ readonly PRESET_REPRESENTATIVE_10_TASKS=(
   "regex-log"
   "sqlite-with-gcov"
 )
+
+validate_task_preset_scope() {
+  case "${TASK_PRESET}" in
+    representative-10)
+      if [[ "${DATASET}" != "terminal-bench@2.0" ]]; then
+        echo "error: --preset representative-10 requires --dataset terminal-bench@2.0 (or --full)." >&2
+        echo "requested dataset: ${DATASET}" >&2
+        exit 2
+      fi
+      ;;
+  esac
+}
+
+validate_exact_task_execution() {
+  local job_dir="$1"
+  if [[ ${#EXACT_TASKS[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  local requested_csv actual_csv
+  requested_csv="$(printf '%s\n' "${EXACT_TASKS[@]}" | sort -u | paste -sd, -)"
+  actual_csv="$(find "${job_dir}" -mindepth 1 -maxdepth 1 -type d -name '*__*' -printf '%f\n' | sed 's/__.*//' | sort -u | paste -sd, -)"
+
+  if [[ "${requested_csv}" != "${actual_csv}" ]]; then
+    echo "error: exact-task benchmark scope mismatch; refusing to export an ambiguous run." >&2
+    echo "dataset: ${DATASET}" >&2
+    echo "requested exact tasks (${#EXACT_TASKS[@]}): ${requested_csv}" >&2
+    echo "executed task dirs: ${actual_csv:-<none>}" >&2
+    return 1
+  fi
+}
 
 append_exact_tasks() {
   local raw="$1"
@@ -375,6 +406,8 @@ if [[ ${#EXACT_TASKS[@]} -gt 0 ]]; then
   mapfile -t EXACT_TASKS < <(printf '%s\n' "${EXACT_TASKS[@]}" | awk '!seen[$0]++')
 fi
 
+validate_task_preset_scope
+
 if [[ ${#EXACT_TASKS[@]} -gt 0 && "${N_CONCURRENT_SET}" -eq 0 ]]; then
   N_CONCURRENT="${#EXACT_TASKS[@]}"
 fi
@@ -575,6 +608,8 @@ set -e
 
 JOB_DIR="${JOBS_DIR}/${JOB_NAME}"
 if [[ -d "${JOB_DIR}" ]]; then
+  validate_exact_task_execution "${JOB_DIR}"
+
   EXPORT_CMD=(
     python3 "${SCRIPT_DIR}/export_terminalbench_results.py"
     "${JOB_DIR}"

@@ -299,6 +299,17 @@
       justify-content: space-between;
     }
 
+    .workspace-banner {
+      margin-bottom: 12px;
+      padding: 10px 12px;
+      border: 1px solid rgba(212, 98, 45, 0.28);
+      background: rgba(212, 98, 45, 0.08);
+      color: var(--warn);
+      font: 500 10px/1.5 var(--font-ui);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
     button {
       border: 1px solid var(--ash);
       background: var(--form-raised);
@@ -1412,12 +1423,13 @@
       runList.innerHTML = filtered.map(run => {
         const pct = fmtPct(run.pass_rate);
         const nc = fmtInt(run.tokens_non_cache_total || 0);
+        const scope = scopeSummaryFromSource(run, run.trials_total);
         return `
         <div class="run-card ${run.run_id === state.activeRunId ? "active" : ""}" data-run-id="${run.run_id}">
           <input type="checkbox" class="run-select" data-run-id="${run.run_id}" ${state.selectedRunIds.has(run.run_id) ? "checked" : ""}>
           <div class="run-card-body">
             <h3>${escapeHtml(run.job_name)}</h3>
-            <div class="run-card-meta"><span class="pass-pct">${pct}</span> ${escapeHtml(run.agent || "")} · ${nc} nc · ${fmtSeconds(run.cpu_seconds_total)}</div>
+            <div class="run-card-meta"><span class="pass-pct">${pct}</span> ${escapeHtml(run.dataset || "-")} · ${escapeHtml(run.agent || "")} · ${escapeHtml(scopeSummaryText(scope))}${scope.mismatch ? " · scope mismatch" : ""} · ${nc} nc · ${fmtSeconds(run.cpu_seconds_total)}</div>
           </div>
         </div>`;
       }).join("");
@@ -1487,6 +1499,20 @@
       }[char]));
     }
 
+    function scopeSummaryFromSource(source, fallbackTrialsTotal = 0) {
+      const params = source?.params || source || {};
+      const scope = params.task_scope || {};
+      const requested = Number.isFinite(scope.requested_task_count) ? scope.requested_task_count : (Array.isArray(params.exact_tasks) ? params.exact_tasks.length : 0);
+      const executed = Number.isFinite(scope.executed_task_count) ? scope.executed_task_count : (source?.trials_total ?? fallbackTrialsTotal ?? 0);
+      const mismatch = !!scope.scope_mismatch || (requested > 0 && requested !== executed);
+      return { requested, executed, mismatch };
+    }
+
+    function scopeSummaryText(scope) {
+      if (scope.requested > 0) return `${fmtInt(scope.executed)}/${fmtInt(scope.requested)} tasks`;
+      return `${fmtInt(scope.executed)} tasks`;
+    }
+
     function render() {
       renderWorkspaceTabs();
       renderWorkspace();
@@ -1508,8 +1534,11 @@
     function renderWorkspace() {
       const explore = document.getElementById("exploreWorkspace");
       const compare = document.getElementById("compareWorkspace");
+      const banner = document.getElementById("workspaceBanner");
       const compareReady = state.selectedRunIds.size >= 2;
       const showCompare = state.viewMode === "compare" && compareReady;
+      banner.hidden = true;
+      banner.textContent = "";
       explore.classList.toggle("active", !showCompare);
       compare.classList.toggle("active", showCompare);
       if (showCompare) {
@@ -1559,11 +1588,13 @@
       const runData = selected.map(run => {
         const s = run.global_stats || {};
         const p = run.params || {};
+        const scope = scopeSummaryFromSource({ params: p, trials_total: s.trials_total }, s.trials_total || 0);
         return {
           run,
           name: run.job_name,
           params: p,
           stats: s,
+          scope,
           passRate: s.pass_rate || 0,
           duration: s.duration_seconds_avg || 0,
           nonCache: nonCacheTokens(s.tokens_total),
@@ -1578,6 +1609,20 @@
           rewardMean: s.reward_mean,
         };
       });
+
+      const datasets = [...new Set(runData.map(d => d.params.dataset || "-"))];
+      const requestedCounts = [...new Set(runData.map(d => d.scope.requested || 0))];
+      const executedCounts = [...new Set(runData.map(d => d.scope.executed || 0))];
+      const warningBits = [];
+      if (datasets.length > 1) warningBits.push(`datasets differ: ${datasets.join(" vs ")}`);
+      if (requestedCounts.length > 1) warningBits.push(`requested task counts differ: ${requestedCounts.join(" vs ")}`);
+      if (executedCounts.length > 1) warningBits.push(`executed task counts differ: ${executedCounts.join(" vs ")}`);
+      if (runData.some(d => d.scope.mismatch)) warningBits.push("at least one run did not execute the full requested task set");
+      const banner = document.getElementById("workspaceBanner");
+      if (warningBits.length) {
+        banner.hidden = false;
+        banner.textContent = `Invalid side-by-side compare: ${warningBits.join(" · ")}`;
+      }
 
       // Code letters for runs
       const CODE_LETTERS = "ABCDEFGHIJKLMNOP";
@@ -1609,6 +1654,9 @@
               ${d.params.agent ? `<span class="run-tag tag-agent">${escapeHtml(d.params.agent)}</span>` : ""}
               ${d.params.execution_mode ? `<span class="run-tag tag-mode">${escapeHtml(d.params.execution_mode)}</span>` : ""}
               ${d.params.context_strategy ? `<span class="run-tag tag-mode">${escapeHtml(d.params.context_strategy)}</span>` : ""}
+              ${d.params.dataset ? `<span class="run-tag">${escapeHtml(d.params.dataset)}</span>` : ""}
+              <span class="run-tag">${escapeHtml(scopeSummaryText(d.scope))}</span>
+              ${d.scope.mismatch ? `<span class="run-tag" style="border-color: rgba(212, 98, 45, 0.3); color: var(--warn)">scope mismatch</span>` : ""}
               ${d.params.preset ? `<span class="run-tag">${escapeHtml(d.params.preset)}</span>` : ""}
             </div>
           </div>
@@ -1618,6 +1666,8 @@
       // Metrics comparison table
       const metrics = [
         { label: "Pass Rate",       vals: runData.map(d => d.passRate),   fmt: runData.map(d => fmtPct(d.passRate)),        higher: true  },
+        { label: "Requested Tasks", vals: runData.map(d => d.scope.requested || d.scope.executed), fmt: runData.map(d => fmtInt(d.scope.requested || d.scope.executed)), higher: false },
+        { label: "Executed Tasks",  vals: runData.map(d => d.scope.executed), fmt: runData.map(d => fmtInt(d.scope.executed)), higher: false },
         { label: "Avg Duration",    vals: runData.map(d => d.duration),   fmt: runData.map(d => fmtSeconds(d.duration)),     higher: false },
         { label: "Non-Cache Tok",   vals: runData.map(d => d.nonCache),   fmt: runData.map(d => fmtInt(d.nonCache)),         higher: false },
         { label: "Cache Tokens",    vals: runData.map(d => d.cache),      fmt: runData.map(d => fmtInt(d.cache)),            higher: false },
@@ -1780,10 +1830,13 @@
 
       const stats = run.global_stats || {};
       const params = run.params || {};
+      const activeScope = scopeSummaryFromSource({ params, trials_total: stats.trials_total }, stats.trials_total || 0);
       statsRoot.innerHTML = [
         statCard("Pass Rate", fmtPct(stats.pass_rate)),
         statCard("Trials", `${fmtInt(stats.trials_total)} total`),
         statCard("Passed", fmtInt(stats.trials_passed)),
+        statCard("Requested Tasks", fmtInt(activeScope.requested || activeScope.executed)),
+        statCard("Executed Tasks", fmtInt(activeScope.executed)),
         statCard("Avg Duration", fmtSeconds(stats.duration_seconds_avg)),
         statCard("Non-Cache Tokens", fmtInt(nonCacheTokens(stats.tokens_total))),
         statCard("Total Tokens", fmtInt((stats.tokens_total || {}).total)),
@@ -1803,7 +1856,7 @@
         statCard("Reward Mean", fmtFixed(stats.reward_mean)),
         statCard("Errors", fmtInt(stats.trials_errors)),
       ].join("");
-      metaRoot.innerHTML = `${escapeHtml(run.job_name)} · ${escapeHtml(params.dataset || "-")} · ${escapeHtml(params.agent || "-")} · provider ${escapeHtml((params.provider || {}).active_provider || "-")} · model ${escapeHtml(params.requested_model || "resolved in trial")} · variant ${escapeHtml(params.variant || "default")} <span class="chip mode" style="margin-left:6px">${escapeHtml(params.execution_mode || "default")}</span> <span class="chip context">${escapeHtml(params.context_strategy || "default")}</span>${params.preset ? ` <span class="chip preset">${escapeHtml(params.preset)}</span>` : ""}`;
+      metaRoot.innerHTML = `${escapeHtml(run.job_name)} · ${escapeHtml(params.dataset || "-")} · ${escapeHtml(params.agent || "-")} · provider ${escapeHtml((params.provider || {}).active_provider || "-")} · model ${escapeHtml(params.requested_model || "resolved in trial")} · variant ${escapeHtml(params.variant || "default")} · ${escapeHtml(scopeSummaryText(activeScope))}${activeScope.mismatch ? ` <span class="chip fail">scope mismatch</span>` : ""} <span class="chip mode" style="margin-left:6px">${escapeHtml(params.execution_mode || "default")}</span> <span class="chip context">${escapeHtml(params.context_strategy || "default")}</span>${params.preset ? ` <span class="chip preset">${escapeHtml(params.preset)}</span>` : ""}`;
 
       renderTasksTable(run.task_rollups || [], run.trials || []);
       renderTrialDetail();

@@ -51,8 +51,6 @@ pub enum LashlangResponse {
     ExecResult {
         id: String,
         output: String,
-        response: String,
-        finished: bool,
         observations: Vec<String>,
         error: Option<String>,
     },
@@ -172,8 +170,6 @@ fn runtime_thread_main(
                 let _ = response_tx.send(LashlangResponse::ExecResult {
                     id,
                     output: result.output,
-                    response: result.response,
-                    finished: result.finished,
                     observations: result.observations,
                     error: result.error,
                 });
@@ -195,8 +191,6 @@ fn runtime_thread_main(
                 let _ = response_tx.send(LashlangResponse::ExecResult {
                     id,
                     output: String::new(),
-                    response: String::new(),
-                    finished: false,
                     observations: Vec::new(),
                     error,
                 });
@@ -229,8 +223,6 @@ fn runtime_thread_main(
 
 struct ExecOutcome {
     output: String,
-    response: String,
-    finished: bool,
     observations: Vec<String>,
     error: Option<String>,
 }
@@ -248,31 +240,25 @@ fn execute_code(
     };
 
     match lashlang::execute(code, &mut state.repl, &host) {
-        Ok(ExecutionOutcome::Finished(value)) => ExecOutcome {
+        Ok(ExecutionOutcome::Finished(_)) => ExecOutcome {
             output: String::new(),
-            response: format_output_value(&value),
-            finished: true,
             observations: observations.into_inner().unwrap_or_default(),
-            error: None,
+            error: Some(
+                "`finish` is no longer supported in `<repl>`. End the task by replying without a `<repl>` block once you are done.".to_string(),
+            ),
         },
         Ok(ExecutionOutcome::Continued) => ExecOutcome {
             output: String::new(),
-            response: String::new(),
-            finished: false,
             observations: observations.into_inner().unwrap_or_default(),
             error: None,
         },
         Err(ExecuteError::Parse(err)) => ExecOutcome {
             output: String::new(),
-            response: String::new(),
-            finished: false,
             observations: observations.into_inner().unwrap_or_default(),
             error: Some(format_parse_error(code, &err)),
         },
         Err(ExecuteError::Runtime(err)) => ExecOutcome {
             output: String::new(),
-            response: String::new(),
-            finished: false,
             observations: observations.into_inner().unwrap_or_default(),
             error: Some(err.to_string()),
         },
@@ -605,7 +591,6 @@ mod tests {
 
         let result = execute_code(&mut state, "value = 1 finish value.name", &tx);
 
-        assert!(!result.finished);
         assert_eq!(
             result.error,
             Some("can't read `.name` from number".to_string())
@@ -621,14 +606,11 @@ mod tests {
             &mut state,
             r#"
             observe { ok: true, count: 2 }
-            finish "done"
             "#,
             &tx,
         );
 
         assert_eq!(result.output, "");
-        assert_eq!(result.response, "done");
-        assert!(result.finished);
         assert_eq!(result.error, None);
         assert_eq!(result.observations.len(), 1);
         let parsed: serde_json::Value =
@@ -645,13 +627,11 @@ mod tests {
             &mut state,
             r#"
             observe null
-            finish "done"
             "#,
             &tx,
         );
 
-        assert!(result.finished);
-        assert_eq!(result.response, "done");
+        assert_eq!(result.error, None);
         assert_eq!(result.observations, vec!["null".to_string()]);
     }
 
@@ -660,7 +640,7 @@ mod tests {
         let result = execute_code_with_tool_reply(
             r#"
             listing = call glob { pattern: "*.rs" }
-            finish {
+            observe {
               count: len(listing.value.items),
               first: listing.value.items[0].path
             }
@@ -675,10 +655,9 @@ mod tests {
             }),
         );
 
-        assert!(result.finished);
         assert_eq!(result.error, None);
         let parsed: serde_json::Value =
-            serde_json::from_str(&result.response).expect("response should be json");
+            serde_json::from_str(&result.observations[0]).expect("observation should be json");
         assert_eq!(
             parsed,
             json!({
@@ -689,22 +668,25 @@ mod tests {
     }
 
     #[test]
-    fn finish_with_empty_text_still_marks_execution_finished() {
+    fn finish_is_rejected_with_guidance() {
         let mut state = RuntimeState::new();
         let (tx, _rx) = std_mpsc::channel();
 
         let result = execute_code(&mut state, "finish \"\"", &tx);
 
-        assert!(result.finished);
-        assert_eq!(result.response, "");
-        assert_eq!(result.error, None);
+        assert_eq!(
+            result.error,
+            Some(
+                "`finish` is no longer supported in `<repl>`. End the task by replying without a `<repl>` block once you are done.".to_string()
+            )
+        );
     }
 
     #[test]
     fn snapshot_round_trips_state() {
         let mut state = FlowState::new();
         let host = TestHost;
-        lashlang::execute("value = 41 finish value", &mut state, &host).expect("exec succeeds");
+        lashlang::execute("value = 41", &mut state, &host).expect("exec succeeds");
 
         let snap = snapshot_runtime(&state).expect("snapshot succeeds");
         let restored = restore_runtime(&snap).expect("restore succeeds");

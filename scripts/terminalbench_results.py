@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 PRESET_TASKS: dict[str, tuple[str, ...]] = {
     "trivial": ("log-summary-date-ranges",),
@@ -30,6 +30,18 @@ PRESET_TASKS: dict[str, tuple[str, ...]] = {
         "regex-log",
         "log-summary-date-ranges",
         "fix-code-vulnerability",
+        "sqlite-with-gcov",
+    ),
+    "representative-10": (
+        "build-cython-ext",
+        "configure-git-webserver",
+        "db-wal-recovery",
+        "fix-code-vulnerability",
+        "git-leak-recovery",
+        "log-summary-date-ranges",
+        "nginx-request-logging",
+        "polyglot-c-py",
+        "regex-log",
         "sqlite-with-gcov",
     ),
 }
@@ -119,6 +131,41 @@ def resolve_preset(
     if inferred:
         return inferred, "inferred"
     return None, None
+
+
+def build_task_scope(
+    exact_tasks: Any,
+    task_patterns: Any,
+    trials: list[dict[str, Any]],
+) -> dict[str, Any]:
+    requested = normalize_task_names(exact_tasks)
+    executed = sorted(
+        {
+            task_name.strip()
+            for trial in trials
+            for task_name in [trial.get("task_name")]
+            if isinstance(task_name, str) and task_name.strip()
+        }
+    )
+    requested_set = set(requested)
+    executed_set = set(executed)
+    task_patterns_list = normalize_task_names(task_patterns)
+    if requested:
+        selection_mode = "exact"
+    elif task_patterns_list:
+        selection_mode = "pattern"
+    else:
+        selection_mode = "dataset"
+    return {
+        "selection_mode": selection_mode,
+        "requested_tasks": requested,
+        "requested_task_count": len(requested),
+        "executed_tasks": executed,
+        "executed_task_count": len(executed),
+        "missing_requested_tasks": [task for task in requested if task not in executed_set],
+        "unexpected_executed_tasks": [task for task in executed if task not in requested_set],
+        "scope_mismatch": bool(requested) and requested_set != executed_set,
+    }
 
 
 def shorten(text: str, limit: int = 2400, from_end: bool = False) -> str | None:
@@ -1375,6 +1422,8 @@ def export_run(args: ExportArgs) -> Path:
     for trial_result in sorted(args.job_dir.glob("*__*/result.json")):
         trials.append(build_trial_record(trial_result.parent, run_dir, args))
 
+    task_scope = build_task_scope(args.exact_tasks, args.task_patterns, trials)
+
     run_payload = {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
@@ -1401,6 +1450,7 @@ def export_run(args: ExportArgs) -> Path:
             "binary_path": args.binary_path,
             "task_patterns": args.task_patterns,
             "exact_tasks": args.exact_tasks,
+            "task_scope": task_scope,
             "exclude_patterns": args.exclude_patterns,
             "extra_args": args.extra_args,
         },
@@ -1435,6 +1485,15 @@ def load_run(run_dir: Path) -> dict[str, Any]:
         params["preset"] = preset
     if preset_source and not params.get("preset_source"):
         params["preset_source"] = preset_source
+
+    task_scope = params.get("task_scope")
+    if not isinstance(task_scope, dict):
+        task_scope = build_task_scope(
+            params.get("exact_tasks"),
+            params.get("task_patterns"),
+            run.get("trials") if isinstance(run.get("trials"), list) else [],
+        )
+        params["task_scope"] = task_scope
 
     trials = run.get("trials")
     if isinstance(trials, list):
@@ -1476,6 +1535,11 @@ def load_run_summaries(results_dir: Path) -> list[dict[str, Any]]:
                 "variant": params.get("variant"),
                 "context_strategy": params.get("context_strategy"),
                 "provider": (params.get("provider") or {}).get("active_provider"),
+                "requested_task_count": ((params.get("task_scope") or {}).get("requested_task_count")),
+                "executed_task_count": ((params.get("task_scope") or {}).get("executed_task_count")),
+                "scope_mismatch": bool((params.get("task_scope") or {}).get("scope_mismatch")),
+                "requested_tasks": ((params.get("task_scope") or {}).get("requested_tasks") or []),
+                "executed_tasks": ((params.get("task_scope") or {}).get("executed_tasks") or []),
                 "trials_total": stats.get("trials_total", 0),
                 "trials_passed": stats.get("trials_passed", 0),
                 "trials_failed": stats.get("trials_failed", 0),

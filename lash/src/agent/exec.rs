@@ -3,8 +3,6 @@ pub(crate) struct ExecAccumulator {
     pub tool_calls: Vec<crate::ToolCallRecord>,
     pub images: Vec<crate::ToolImage>,
     pub combined_output: String,
-    pub finished: bool,
-    pub final_response: String,
     pub exec_error: Option<String>,
     pub had_failure: bool,
 }
@@ -15,8 +13,6 @@ impl ExecAccumulator {
             tool_calls: Vec::new(),
             images: Vec::new(),
             combined_output: String::new(),
-            finished: false,
-            final_response: String::new(),
             exec_error: None,
             had_failure: false,
         }

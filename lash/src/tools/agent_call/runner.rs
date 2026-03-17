@@ -81,7 +81,7 @@ impl AgentCall {
                 .unwrap_or_else(|| "Result".to_string());
             match agent_execution_mode {
                 crate::ExecutionMode::Repl => format!(
-                    "{prompt}\n\nInside `<repl>`, end with `finish {{ ... }}` using a single JSON-compatible record matching this schema exactly:\n{schema_str}\n\nDo not return prose in `finish`. The record should represent a `{model_name}` object."
+                    "{prompt}\n\nWhen you are done, reply in plain text with a single JSON object matching this schema exactly:\n{schema_str}\n\nDo not wrap the final JSON in `<repl>`, markdown fences, or extra commentary. The object should represent a `{model_name}`."
                 ),
                 crate::ExecutionMode::Standard => format!(
                     "{prompt}\n\nReturn your final answer as a single JSON object matching this schema exactly:\n{schema_str}\n\nDo not wrap it in markdown fences or extra commentary."
