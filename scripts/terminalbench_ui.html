@@ -77,7 +77,7 @@
       position: relative;
       z-index: 1;
       display: grid;
-      grid-template-columns: var(--sidebar-width, 320px) 1fr;
+      grid-template-columns: 320px 1fr;
       min-height: 100vh;
     }
 
@@ -96,6 +96,7 @@
       overflow: hidden;
       display: flex;
       flex-direction: column;
+      min-width: 0;
     }
 
     .sidebar-inner {
@@ -482,6 +483,8 @@
       display: grid;
       gap: 18px;
       align-content: start;
+      min-width: 0;
+      overflow-x: auto;
     }
 
 
@@ -1053,8 +1056,7 @@
 
     /* ── Responsive ── */
     @media (max-width: 1200px) {
-      .shell { grid-template-columns: 1fr !important; }
-      .shell.sidebar-collapsed { grid-template-columns: 32px 1fr !important; }
+      .shell, .shell.sidebar-collapsed { grid-template-columns: 1fr !important; }
       .sidebar { position: relative; height: auto; max-height: 50vh; }
       .compare-run-strip { flex-wrap: wrap; }
       .split { grid-template-columns: 1fr; }
@@ -2072,6 +2074,13 @@
       const SIDEBAR_MAX = 600;
       const STORAGE_KEY = "bench_sidebar";
 
+      let currentWidth = 320;
+
+      function setSidebarWidth(w) {
+        currentWidth = w;
+        shell.style.gridTemplateColumns = w + "px 1fr";
+      }
+
       function applySidebarState() {
         try {
           const saved = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || "{}");
@@ -2079,20 +2088,22 @@
             shell.classList.add("sidebar-collapsed");
             collapseBtn.innerHTML = "&rsaquo;";
           } else if (saved.width) {
-            shell.style.setProperty("--sidebar-width", saved.width + "px");
+            setSidebarWidth(saved.width);
           }
         } catch {}
       }
 
       function saveSidebarState() {
         const collapsed = shell.classList.contains("sidebar-collapsed");
-        const width = collapsed ? null : parseInt(getComputedStyle(shell).gridTemplateColumns);
-        try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ collapsed, width: width || 320 })); } catch {}
+        try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ collapsed, width: currentWidth })); } catch {}
       }
 
       collapseBtn.addEventListener("click", () => {
         const wasCollapsed = shell.classList.toggle("sidebar-collapsed");
         collapseBtn.innerHTML = wasCollapsed ? "&rsaquo;" : "&lsaquo;";
+        if (!wasCollapsed) {
+          setSidebarWidth(currentWidth);
+        }
         saveSidebarState();
       });
 
@@ -2107,8 +2118,8 @@
 
       document.addEventListener("mousemove", (e) => {
         if (!dragging) return;
-        const width = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, e.clientX));
-        shell.style.setProperty("--sidebar-width", width + "px");
+        const w = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, e.clientX));
+        setSidebarWidth(w);
       });
 
       document.addEventListener("mouseup", () => {
