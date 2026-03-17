@@ -29,6 +29,7 @@ const PRUNE_MINIMUM_TOKENS: usize = 20_000;
 const PRUNE_PROTECT_TOKENS: usize = 40_000;
 const PRUNE_RECENT_USER_TURNS: usize = 2;
 const COMPACTION_BUFFER_TOKENS: usize = 20_000;
+const RECALL_AGENT_ABSOLUTE_TRIGGER_TOKENS: usize = 16_000;
 const COMPACTION_PLUGIN_ID: &str = "context_strategy";
 const COMPACTION_SUMMARY_TITLE: &str = "Compaction summary:";
 const COMPACTION_PROMPT: &str = "Provide a detailed summary of the conversation above so another agent can continue the work without the full history.\n\nUse this template:\n---\n## Goal\n[What is the user trying to accomplish?]\n\n## Instructions\n- [Relevant instructions or constraints]\n\n## Discoveries\n[Important findings, failures, or decisions]\n\n## Accomplished\n[What is done, what is in progress, what remains]\n\n## Relevant files / directories\n[List important files or directories]\n---";
@@ -183,11 +184,14 @@ impl ContextBuilder for RecallAgentBuilder {
         let tool_calls = tool_record_map(&state.tool_calls);
         hydrate_tool_result_parts(&session_id, &mut messages, &tool_calls);
         prune_old_tool_results(&mut messages, &tool_calls);
+        let mut recall_available = false;
         let mut recall_trimmed = false;
 
         if let (Some(prompt_usage), Some(max_context)) = (prompt_usage, max_context_tokens) {
-            let target_budget = max_context * usize::from(keep_recent_pct) / 100;
+            let target_budget = (max_context * usize::from(keep_recent_pct) / 100)
+                .min(RECALL_AGENT_ABSOLUTE_TRIGGER_TOKENS);
             if prompt_usage.context_budget_tokens > target_budget {
+                recall_available = true;
                 let prefix_len = leading_system_prefix_len(&messages);
                 let total_chars: usize = messages.iter().map(Message::char_count).sum();
                 let target_chars = total_chars.saturating_mul(target_budget)
@@ -214,8 +218,16 @@ impl ContextBuilder for RecallAgentBuilder {
 
         Ok(PreparedContext {
             messages,
-            prompt_contributions: RecallAgentTools::prompt_contributions(recall_trimmed),
-            tool_providers: vec![Arc::new(RecallAgentTools) as Arc<dyn ToolProvider>],
+            prompt_contributions: if recall_available {
+                RecallAgentTools::prompt_contributions(recall_trimmed)
+            } else {
+                Vec::new()
+            },
+            tool_providers: if recall_available {
+                vec![Arc::new(RecallAgentTools) as Arc<dyn ToolProvider>]
+            } else {
+                Vec::new()
+            },
             include_base_tools: true,
         })
     }
@@ -1016,7 +1028,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recall_agent_builder_always_injects_tools() {
+    async fn recall_agent_builder_only_injects_tools_after_threshold() {
         let prepared = build_context(ContextBuildRequest {
             session_id: "root".to_string(),
             state: AgentStateEnvelope {
@@ -1044,13 +1056,41 @@ mod tests {
         .await
         .expect("context");
 
+        assert!(prepared.prompt_contributions.is_empty());
+        assert!(prepared.tool_providers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recall_agent_builder_uses_absolute_trigger_for_large_context_models() {
+        let prepared = build_context(ContextBuildRequest {
+            session_id: "root".to_string(),
+            state: AgentStateEnvelope {
+                policy: SessionPolicy {
+                    context_strategy: ContextStrategy::recall_agent_default(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            messages: vec![
+                text_message("u1", MessageRole::User, &"x".repeat(12_000)),
+                text_message("a1", MessageRole::Assistant, &"y".repeat(12_000)),
+                text_message("u2", MessageRole::User, "latest request"),
+            ],
+            prompt_usage: Some(PromptUsage {
+                prompt_context_tokens: 20_000,
+                input_tokens: 20_000,
+                cached_input_tokens: 0,
+                context_budget_tokens: 20_000,
+            }),
+            max_context_tokens: Some(1_050_000),
+            host: Arc::new(MockSessionManager::default()),
+            #[cfg(feature = "sqlite-store")]
+            store: None,
+        })
+        .await
+        .expect("context");
+
         assert!(!prepared.prompt_contributions.is_empty());
         assert_eq!(prepared.tool_providers.len(), 1);
-        assert!(prepared.messages.iter().any(|message| {
-            message
-                .parts
-                .iter()
-                .any(|part| part.content.contains("short request"))
-        }));
     }
 }

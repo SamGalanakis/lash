@@ -363,7 +363,8 @@
       display: grid;
       gap: 0;
       align-content: start;
-      overflow: auto;
+      overflow-y: auto;
+      overflow-x: hidden;
     }
 
     .run-card {
@@ -383,7 +384,7 @@
 
     .run-card.active {
       background: rgba(232, 163, 60, 0.06);
-      box-shadow: inset 2px 0 0 var(--sodium);
+      box-shadow: inset 3px 0 0 var(--sodium);
     }
 
     .run-card input[type="checkbox"] {
@@ -398,19 +399,30 @@
     }
 
     .run-card h3 {
-      font: 500 10px/1.2 var(--font-ui);
+      font: 500 10px/1.3 var(--font-ui);
       color: var(--chalk);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      word-break: break-word;
+      overflow-wrap: anywhere;
     }
 
-    .run-card-meta {
-      font: 400 9px/1.3 var(--font-ui);
-      color: var(--ash-text);
+    .run-card-top {
+      display: flex; align-items: center; gap: 5px; margin-bottom: 2px;
+    }
+
+    .run-card-pass {
+      font: 700 10px/1 var(--font-ui);
       white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      font-variant-numeric: tabular-nums;
+    }
+    .run-card-pass.high { color: var(--lichen); }
+    .run-card-pass.mid { color: var(--sodium); }
+    .run-card-pass.low { color: var(--error); }
+
+    .run-card-meta {
+      font: 400 9px/1.4 var(--font-ui);
+      color: var(--ash-text);
+      word-break: break-word;
+      overflow-wrap: anywhere;
     }
 
     .run-card-meta .pass-pct {
@@ -614,7 +626,33 @@
     .run-tag.tag-model { border-color: rgba(232, 163, 60, 0.3); color: var(--sodium); }
     .run-tag.tag-mode { border-color: rgba(138, 158, 108, 0.3); color: var(--lichen); }
     .run-tag.tag-agent { border-color: rgba(122, 140, 200, 0.3); color: #7a8cc8; }
+    .run-tag.tag-context { border-color: rgba(108, 200, 184, 0.3); color: #6cc8b8; }
+    .run-tag.tag-dataset { border-color: var(--ash-mid); color: var(--chalk-dim); font-style: italic; }
+    .run-tag.tag-scope { border-color: var(--ash); color: var(--ash-text); }
+    .run-tag.tag-preset { border-color: rgba(232, 163, 60, 0.22); color: var(--chalk-mid); background: rgba(232, 163, 60, 0.04); }
     .run-tag.tag-pass { border-color: rgba(138, 158, 108, 0.4); color: var(--lichen); font-weight: 700; }
+
+    /* ── Agent icons & badges ── */
+    .agent-icon { display: inline-block; width: 18px; height: 18px; flex-shrink: 0; vertical-align: middle; }
+    .agent-lash { color: var(--sodium); }
+    .agent-opencode { color: #6cc8b8; }
+    .agent-codex { color: #c87ab0; }
+    .agent-unknown {
+      color: var(--chalk-dim); font: 700 9px/18px var(--font-display);
+      text-align: center; border: 1px solid var(--ash-mid);
+      display: inline-block; width: 18px; height: 18px;
+    }
+    .agent-badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 3px 8px 3px 5px;
+      font: 600 9px/1 var(--font-ui);
+      letter-spacing: 0.08em; text-transform: uppercase;
+      white-space: nowrap; border: 1px solid;
+    }
+    .agent-badge.badge-lash { border-color: rgba(232, 163, 60, 0.35); color: var(--sodium); background: rgba(232, 163, 60, 0.06); }
+    .agent-badge.badge-opencode { border-color: rgba(108, 200, 184, 0.35); color: #6cc8b8; background: rgba(108, 200, 184, 0.06); }
+    .agent-badge.badge-codex { border-color: rgba(200, 122, 176, 0.35); color: #c87ab0; background: rgba(200, 122, 176, 0.06); }
+    .agent-badge.badge-unknown { border-color: var(--ash-mid); color: var(--chalk-dim); background: rgba(42, 42, 40, 0.3); }
 
     /* ── Compare: run strip ── */
     .compare-run-strip {
@@ -626,13 +664,13 @@
     }
 
     .compare-run-card {
-      flex: 1 1 140px;
+      flex: 1 1 200px;
       min-width: 0;
-      padding: 10px 12px;
+      padding: 12px 14px;
       background: var(--form-raised);
       display: flex;
-      gap: 8px;
-      align-items: flex-start;
+      flex-direction: column;
+      gap: 0;
     }
 
     .compare-run-card-body {
@@ -641,12 +679,15 @@
     }
 
     .compare-run-card h4 {
-      font: 500 10px/1.2 var(--font-ui);
+      font: 500 10px/1.25 var(--font-ui);
       color: var(--chalk);
-      margin-bottom: 3px;
-      white-space: nowrap;
+      margin-bottom: 4px;
       overflow: hidden;
       text-overflow: ellipsis;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      word-break: break-word;
     }
 
     .compare-run-card .tag-row {
@@ -654,6 +695,30 @@
       flex-wrap: wrap;
       gap: 3px;
       margin-top: 3px;
+    }
+
+    .compare-card-top {
+      display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+    }
+    .compare-pass {
+      margin-left: auto;
+      font: 700 14px/1 var(--font-ui);
+      padding: 4px 9px;
+      border: 1px solid;
+      letter-spacing: 0.02em;
+      font-variant-numeric: tabular-nums;
+    }
+    .compare-pass.pass-high { border-color: rgba(138, 158, 108, 0.45); color: var(--lichen); background: rgba(138, 158, 108, 0.08); }
+    .compare-pass.pass-mid { border-color: rgba(232, 163, 60, 0.45); color: var(--sodium); background: rgba(232, 163, 60, 0.08); }
+    .compare-pass.pass-low { border-color: rgba(204, 68, 68, 0.45); color: var(--error); background: rgba(204, 68, 68, 0.08); }
+
+    .compare-tag-grid {
+      display: flex; flex-wrap: wrap; gap: 3px; margin-top: 4px;
+    }
+    .compare-tag-grid + .compare-tag-grid {
+      margin-top: 3px;
+      padding-top: 3px;
+      border-top: 1px solid var(--line);
     }
 
     /* ── Compare: metrics table ── */
@@ -689,6 +754,11 @@
       position: sticky;
       top: 0;
       z-index: 2;
+      white-space: nowrap;
+    }
+
+    .compare-metrics-table th .agent-icon {
+      width: 14px; height: 14px; margin: 0 2px;
     }
 
     .compare-metrics-table .cell-best {
@@ -1397,15 +1467,23 @@
 
     async function ensureRunLoaded(runId) {
       if (!runId || state.runDetails.has(runId)) return;
-      const run = await api(`/api/runs/${runId}`);
-      state.runDetails.set(runId, run);
+      try {
+        const run = await api(`/api/runs/${runId}`);
+        state.runDetails.set(runId, run);
+      } catch {
+        // Run was deleted or is no longer available — clean up stale references.
+        state.selectedRunIds.delete(runId);
+        if (state.activeRunId === runId) {
+          state.activeRunId = state.runs[0]?.run_id || null;
+        }
+      }
     }
 
     async function ensureActiveRunLoaded() {
       if (state.activeRunId) {
         await ensureRunLoaded(state.activeRunId);
       }
-      for (const runId of state.selectedRunIds) {
+      for (const runId of [...state.selectedRunIds]) {
         await ensureRunLoaded(runId);
       }
     }
@@ -1424,12 +1502,17 @@
         const pct = fmtPct(run.pass_rate);
         const nc = fmtInt(run.tokens_non_cache_total || 0);
         const scope = scopeSummaryFromSource(run, run.trials_total);
+        const pCls = passRateClass(run.pass_rate || 0);
         return `
         <div class="run-card ${run.run_id === state.activeRunId ? "active" : ""}" data-run-id="${run.run_id}">
           <input type="checkbox" class="run-select" data-run-id="${run.run_id}" ${state.selectedRunIds.has(run.run_id) ? "checked" : ""}>
           <div class="run-card-body">
+            <div class="run-card-top">
+              ${agentIcon(run.agent)}
+              <span class="run-card-pass ${pCls}">${pct}</span>
+            </div>
             <h3>${escapeHtml(run.job_name)}</h3>
-            <div class="run-card-meta"><span class="pass-pct">${pct}</span> ${escapeHtml(run.dataset || "-")} · ${escapeHtml(run.agent || "")} · ${escapeHtml(scopeSummaryText(scope))}${scope.mismatch ? " · scope mismatch" : ""} · ${nc} nc · ${fmtSeconds(run.cpu_seconds_total)}</div>
+            <div class="run-card-meta">${escapeHtml(run.dataset || "-")} · ${escapeHtml(run.agent || "")} · ${escapeHtml(scopeSummaryText(scope))}${scope.mismatch ? " · mismatch" : ""} · ${nc} nc</div>
           </div>
         </div>`;
       }).join("");
@@ -1497,6 +1580,26 @@
         "\"": "&quot;",
         "'": "&#39;"
       }[char]));
+    }
+
+    function agentIcon(name) {
+      const n = (name || '').toLowerCase();
+      if (n === 'lash') return `<svg class="agent-icon agent-lash" viewBox="0 0 20 20" width="18" height="18"><path d="M13 3L7 10h4l-2 7 6-8h-4l2-6z" fill="currentColor"/></svg>`;
+      if (n === 'opencode') return `<svg class="agent-icon agent-opencode" viewBox="0 0 20 20" width="18" height="18"><path d="M7 5L2 10l5 5M13 5l5 5-5 5" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+      if (n === 'codex') return `<svg class="agent-icon agent-codex" viewBox="0 0 20 20" width="18" height="18"><polygon points="10,2 17,6 17,14 10,18 3,14 3,6" stroke="currentColor" stroke-width="1.5" fill="none"/><circle cx="10" cy="10" r="2.5" fill="currentColor"/></svg>`;
+      return `<span class="agent-icon agent-unknown">${escapeHtml((name || '?')[0].toUpperCase())}</span>`;
+    }
+
+    function agentBadge(name) {
+      const n = (name || '').toLowerCase();
+      const cls = n === 'lash' ? 'badge-lash' : n === 'opencode' ? 'badge-opencode' : n === 'codex' ? 'badge-codex' : 'badge-unknown';
+      return `<span class="agent-badge ${cls}">${agentIcon(name)}${escapeHtml(name || 'unknown')}</span>`;
+    }
+
+    function passRateClass(rate) {
+      if (rate >= 0.8) return 'high';
+      if (rate >= 0.5) return 'mid';
+      return 'low';
     }
 
     function scopeSummaryFromSource(source, fallbackTrialsTotal = 0) {
@@ -1643,25 +1746,29 @@
       }
 
       // Run strip cards
-      const runStrip = `<div class="compare-run-strip">${runData.map((d, i) => `
+      const runStrip = `<div class="compare-run-strip">${runData.map((d, i) => {
+        const pCls = passRateClass(d.passRate);
+        return `
         <div class="compare-run-card">
-          ${runCodeBadge(i)}
-          <div class="compare-run-card-body">
-            <h4 title="${escapeHtml(d.name)}">${escapeHtml(d.name)}</h4>
-            <div class="tag-row">
-              <span class="run-tag tag-pass">${fmtPct(d.passRate)}</span>
-              <span class="run-tag tag-model">${escapeHtml(modelShort(d.params))}</span>
-              ${d.params.agent ? `<span class="run-tag tag-agent">${escapeHtml(d.params.agent)}</span>` : ""}
-              ${d.params.execution_mode ? `<span class="run-tag tag-mode">${escapeHtml(d.params.execution_mode)}</span>` : ""}
-              ${d.params.context_strategy ? `<span class="run-tag tag-mode">${escapeHtml(d.params.context_strategy)}</span>` : ""}
-              ${d.params.dataset ? `<span class="run-tag">${escapeHtml(d.params.dataset)}</span>` : ""}
-              <span class="run-tag">${escapeHtml(scopeSummaryText(d.scope))}</span>
-              ${d.scope.mismatch ? `<span class="run-tag" style="border-color: rgba(212, 98, 45, 0.3); color: var(--warn)">scope mismatch</span>` : ""}
-              ${d.params.preset ? `<span class="run-tag">${escapeHtml(d.params.preset)}</span>` : ""}
-            </div>
+          <div class="compare-card-top">
+            ${runCodeBadge(i)}
+            ${agentBadge(d.params.agent)}
+            <span class="compare-pass pass-${pCls}">${fmtPct(d.passRate)}</span>
           </div>
-        </div>
-      `).join("")}</div>`;
+          <h4 title="${escapeHtml(d.name)}">${escapeHtml(d.name)}</h4>
+          <div class="compare-tag-grid">
+            <span class="run-tag tag-model">${escapeHtml(modelShort(d.params))}</span>
+            ${d.params.execution_mode ? `<span class="run-tag tag-mode">${escapeHtml(d.params.execution_mode)}</span>` : ""}
+            ${d.params.context_strategy ? `<span class="run-tag tag-context">${escapeHtml(d.params.context_strategy)}</span>` : ""}
+          </div>
+          <div class="compare-tag-grid">
+            ${d.params.dataset ? `<span class="run-tag tag-dataset">${escapeHtml(d.params.dataset)}</span>` : ""}
+            <span class="run-tag tag-scope">${escapeHtml(scopeSummaryText(d.scope))}</span>
+            ${d.scope.mismatch ? `<span class="run-tag" style="border-color:rgba(212,98,45,0.3);color:var(--fail)">mismatch</span>` : ""}
+            ${d.params.preset ? `<span class="run-tag tag-preset">${escapeHtml(d.params.preset)}</span>` : ""}
+          </div>
+        </div>`;
+      }).join("")}</div>`;
 
       // Metrics comparison table
       const metrics = [
@@ -1684,8 +1791,8 @@
       const codeHeaders = runData.map((d, i) => {
         const letter = CODE_LETTERS[i] || String(i);
         const cls = codeClasses[i % codeClasses.length];
-        const parts = [modelShort(d.params), d.params.agent, d.params.execution_mode, d.params.context_strategy].filter(Boolean);
-        return `<th><span class="run-code ${cls}" style="width:16px;height:16px;font-size:9px;display:inline-flex;vertical-align:middle;margin-right:4px">${letter}</span>${escapeHtml(parts.join(" · "))}</th>`;
+        const parts = [modelShort(d.params), d.params.execution_mode, d.params.context_strategy].filter(Boolean);
+        return `<th><span class="run-code ${cls}" style="width:16px;height:16px;font-size:9px;display:inline-flex;vertical-align:middle;margin-right:4px">${letter}</span>${agentIcon(d.params.agent)} ${escapeHtml(parts.join(" · "))}</th>`;
       });
 
       const metricsTable = `

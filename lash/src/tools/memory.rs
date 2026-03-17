@@ -445,29 +445,27 @@ fn validate_recall_submission(
 }
 
 fn recall_child_policy(base: &SessionPolicy) -> SessionPolicy {
-    let (model, model_variant) = base
-        .recall_agent_model
-        .as_ref()
-        .map(|model| {
-            (
-                model.clone(),
-                preferred_recall_variant(&base.provider, model.as_str()),
-            )
-        })
-        .or_else(|| {
+    let (model, model_variant) = if let Some(model) = base.recall_agent_model.as_ref() {
+        (
+            model.clone(),
+            preferred_recall_variant(&base.provider, model.as_str()),
+        )
+    } else if matches!(base.provider, crate::Provider::Codex { .. }) {
+        (
+            "gpt-5.4-mini".to_string(),
+            preferred_recall_variant(&base.provider, "gpt-5.4-mini"),
+        )
+    } else if let Some((model, variant)) = base.provider.default_agent_model("low") {
+        (model.to_string(), variant.map(str::to_string))
+    } else {
+        (
+            base.model.clone(),
             base.provider
-                .default_agent_model("low")
-                .map(|(model, variant)| (model.to_string(), variant.map(str::to_string)))
-        })
-        .unwrap_or_else(|| {
-            (
-                base.model.clone(),
-                base.provider
-                    .default_model_variant(&base.model)
-                    .map(str::to_string)
-                    .or_else(|| base.model_variant.clone()),
-            )
-        });
+                .default_model_variant(&base.model)
+                .map(str::to_string)
+                .or_else(|| base.model_variant.clone()),
+        )
+    };
     SessionPolicy {
         model,
         model_variant,
@@ -847,14 +845,14 @@ mod tests {
         let policy = SessionPolicy {
             model: "gpt-5".into(),
             provider,
-            recall_agent_model: Some("gpt-5-mini".into()),
+            recall_agent_model: Some("gpt-5.4-mini".into()),
             ..SessionPolicy::default()
         };
 
         let child = recall_child_policy(&policy);
-        assert_eq!(child.model, "gpt-5-mini");
+        assert_eq!(child.model, "gpt-5.4-mini");
         assert_eq!(child.model_variant.as_deref(), Some("low"));
-        assert_eq!(child.recall_agent_model.as_deref(), Some("gpt-5-mini"));
+        assert_eq!(child.recall_agent_model.as_deref(), Some("gpt-5.4-mini"));
         assert!(child.max_turns.is_none());
     }
 
@@ -873,7 +871,7 @@ mod tests {
         };
 
         let child = recall_child_policy(&policy);
-        assert_eq!(child.model, "gpt-5.3-codex-spark");
+        assert_eq!(child.model, "gpt-5.4-mini");
         assert_eq!(child.model_variant.as_deref(), Some("low"));
     }
 

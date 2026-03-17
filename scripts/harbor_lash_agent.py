@@ -74,9 +74,9 @@ fi
 class LashAgent(BaseInstalledAgent):
     @staticmethod
     def _default_binary_path() -> Path:
-        for candidate in DEFAULT_LASH_BINARY_CANDIDATES:
-            if candidate.exists():
-                return candidate
+        existing = [candidate for candidate in DEFAULT_LASH_BINARY_CANDIDATES if candidate.exists()]
+        if existing:
+            return max(existing, key=lambda path: path.stat().st_mtime_ns)
         return DEFAULT_LASH_BINARY_CANDIDATES[0]
 
     @staticmethod

@@ -633,39 +633,35 @@ def _load_codex_metadata(codex_path: Path | None) -> dict[str, Any]:
 
         event_type = record.get("type", "")
 
-        if event_type in ("response.completed", "message"):
+        # Token usage from turn.completed events
+        if event_type == "turn.completed":
             llm_call_count += 1
             add_model(record.get("model"))
             usage = record.get("usage") or {}
-            tokens["input"] += int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
-            tokens["output"] += int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+            tokens["input"] += int(usage.get("input_tokens") or 0)
+            tokens["output"] += int(usage.get("output_tokens") or 0)
             tokens["reasoning"] += int(usage.get("reasoning_tokens") or 0)
-            cached = int(
-                usage.get("cached_tokens")
-                or usage.get("cache_read_input_tokens")
-                or usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
-                or 0
-            )
+            cached = int(usage.get("cached_input_tokens") or 0)
             tokens["cache"] += cached
             tokens["cache_read"] += cached
-            total = int(usage.get("total_tokens") or 0)
+            total = tokens["input"] + tokens["output"]
             tokens["provider_total"] += total
 
-        if event_type in ("function_call", "tool_use", "exec"):
-            tool_call_count += 1
-            tool_name = record.get("name") or record.get("function", {}).get("name") or "unknown"
-            tool_call_breakdown[tool_name] += 1
+        # Tool calls and assistant text from item.completed events
+        if event_type == "item.completed":
+            item = record.get("item") or {}
+            item_type = item.get("type", "")
 
-        if event_type == "message" and record.get("role") == "assistant":
-            content = record.get("content")
-            if isinstance(content, str) and content.strip():
-                assistant_parts.append(content.strip())
-            elif isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "text":
-                        text = part.get("text", "").strip()
-                        if text:
-                            assistant_parts.append(text)
+            if item_type == "command_execution":
+                tool_call_count += 1
+                tool_call_breakdown["command_execution"] += 1
+            elif item_type == "file_change":
+                tool_call_count += 1
+                tool_call_breakdown["file_change"] += 1
+            elif item_type == "agent_message":
+                text = (item.get("text") or "").strip()
+                if text:
+                    assistant_parts.append(text)
 
     return {
         "models": models,
