@@ -77,8 +77,12 @@
       position: relative;
       z-index: 1;
       display: grid;
-      grid-template-columns: 320px 1fr;
+      grid-template-columns: var(--sidebar-width, 320px) 1fr;
       min-height: 100vh;
+    }
+
+    .shell.sidebar-collapsed {
+      grid-template-columns: 32px 1fr;
     }
 
     /* ── Sidebar ── */
@@ -89,14 +93,90 @@
       position: sticky;
       top: 0;
       height: 100vh;
-      overflow: auto;
+      overflow: hidden;
       display: flex;
       flex-direction: column;
+    }
+
+    .sidebar-inner {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      min-width: 0;
     }
 
     .sidebar::-webkit-scrollbar { width: 4px; }
     .sidebar::-webkit-scrollbar-track { background: transparent; }
     .sidebar::-webkit-scrollbar-thumb { background: var(--ash-mid); border-radius: 2px; }
+
+    /* ── Resize handle ── */
+    .sidebar-resize {
+      position: absolute;
+      right: -3px;
+      top: 0;
+      bottom: 0;
+      width: 6px;
+      cursor: col-resize;
+      z-index: 10;
+      transition: background 150ms;
+    }
+
+    .sidebar-resize:hover,
+    .sidebar-resize.dragging {
+      background: var(--sodium);
+      opacity: 0.4;
+    }
+
+    /* ── Collapse toggle ── */
+    .sidebar-collapse-btn {
+      position: absolute;
+      top: 5px;
+      right: 4px;
+      width: 18px;
+      height: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--ash);
+      background: var(--form-deep);
+      color: var(--chalk-dim);
+      font: 500 10px/1 var(--font-ui);
+      cursor: pointer;
+      z-index: 11;
+      padding: 0;
+      letter-spacing: 0;
+      text-transform: none;
+      transition: all 120ms;
+    }
+
+    .sidebar-collapse-btn:hover {
+      color: var(--chalk);
+      border-color: var(--ash-mid);
+    }
+
+    /* ── Collapsed sidebar ── */
+    .shell.sidebar-collapsed .sidebar {
+      overflow: visible;
+    }
+
+    .shell.sidebar-collapsed .sidebar-inner {
+      display: none;
+    }
+
+    .shell.sidebar-collapsed .sidebar-resize {
+      display: none;
+    }
+
+    .shell.sidebar-collapsed .sidebar-collapse-btn {
+      position: static;
+      width: 100%;
+      height: 28px;
+      right: auto;
+      top: auto;
+      border: none;
+      border-bottom: 1px solid var(--line);
+    }
 
     /* ── Sidebar header ── */
     .sidebar-header {
@@ -932,7 +1012,8 @@
 
     /* ── Responsive ── */
     @media (max-width: 1200px) {
-      .shell { grid-template-columns: 1fr; }
+      .shell { grid-template-columns: 1fr !important; }
+      .shell.sidebar-collapsed { grid-template-columns: 32px 1fr !important; }
       .sidebar { position: relative; height: auto; max-height: 50vh; }
       .compare-run-strip { flex-wrap: wrap; }
       .split { grid-template-columns: 1fr; }
@@ -946,7 +1027,10 @@
 </head>
 <body>
   <div class="shell">
-    <aside class="sidebar">
+    <aside class="sidebar" style="position:relative">
+      <button class="sidebar-collapse-btn" id="sidebarCollapseBtn" title="Toggle sidebar">&lsaquo;</button>
+      <div class="sidebar-resize" id="sidebarResize"></div>
+      <div class="sidebar-inner">
       <div class="sidebar-header">
         <h1>lash <span class="slash">/</span> bench</h1>
         <span class="spacer"></span>
@@ -970,6 +1054,7 @@
       <div class="sidebar-banner"><span id="selectionBanner"></span></div>
 
       <div class="run-list" id="runList"></div>
+      </div><!-- .sidebar-inner -->
     </aside>
 
     <main class="content">
@@ -1886,6 +1971,66 @@
         filterBtn.classList.toggle("active", activeFilterEntries().length > 0);
       }
     });
+
+    // ── Sidebar resize ──
+    {
+      const shell = document.querySelector(".shell");
+      const handle = document.getElementById("sidebarResize");
+      const collapseBtn = document.getElementById("sidebarCollapseBtn");
+      const SIDEBAR_MIN = 180;
+      const SIDEBAR_MAX = 600;
+      const STORAGE_KEY = "bench_sidebar";
+
+      function applySidebarState() {
+        try {
+          const saved = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || "{}");
+          if (saved.collapsed) {
+            shell.classList.add("sidebar-collapsed");
+            collapseBtn.innerHTML = "&rsaquo;";
+          } else if (saved.width) {
+            shell.style.setProperty("--sidebar-width", saved.width + "px");
+          }
+        } catch {}
+      }
+
+      function saveSidebarState() {
+        const collapsed = shell.classList.contains("sidebar-collapsed");
+        const width = collapsed ? null : parseInt(getComputedStyle(shell).gridTemplateColumns);
+        try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ collapsed, width: width || 320 })); } catch {}
+      }
+
+      collapseBtn.addEventListener("click", () => {
+        const wasCollapsed = shell.classList.toggle("sidebar-collapsed");
+        collapseBtn.innerHTML = wasCollapsed ? "&rsaquo;" : "&lsaquo;";
+        saveSidebarState();
+      });
+
+      let dragging = false;
+      handle.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        dragging = true;
+        handle.classList.add("dragging");
+        document.body.style.cursor = "col-resize";
+        document.body.style.userSelect = "none";
+      });
+
+      document.addEventListener("mousemove", (e) => {
+        if (!dragging) return;
+        const width = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, e.clientX));
+        shell.style.setProperty("--sidebar-width", width + "px");
+      });
+
+      document.addEventListener("mouseup", () => {
+        if (!dragging) return;
+        dragging = false;
+        handle.classList.remove("dragging");
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+        saveSidebarState();
+      });
+
+      applySidebarState();
+    }
 
     setInterval(() => {
       if (document.hidden) return;
