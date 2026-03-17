@@ -179,6 +179,12 @@ class LashAgent(BaseInstalledAgent):
         )
         variant = os.environ.get("LASH_BENCH_MODEL_VARIANT", "").strip()
         variant_flag = f"--variant {shlex.quote(variant)} " if variant else ""
+        context_strategy = os.environ.get("LASH_BENCH_CONTEXT_STRATEGY", "").strip()
+        context_strategy_flag = (
+            f"--context-strategy {shlex.quote(context_strategy)} "
+            if context_strategy
+            else ""
+        )
         execution_mode_flag = f"--execution-mode {shlex.quote(execution_mode)} "
         prompt_flags = ""
         for env_key, section in (
@@ -211,7 +217,7 @@ class LashAgent(BaseInstalledAgent):
         return [
             ExecInput(
                 command=(
-                    f"lash {provider_flag}{model_flag}{variant_flag}{execution_mode_flag}"
+                    f"lash {provider_flag}{model_flag}{variant_flag}{context_strategy_flag}{execution_mode_flag}"
                     f"{prompt_flags}--print {prompt}"
                 ),
                 env=env,

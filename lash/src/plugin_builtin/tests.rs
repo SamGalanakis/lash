@@ -9,16 +9,15 @@ use super::*;
 use crate::agent::PromptSectionName;
 use crate::instructions::InstructionSource;
 use crate::plugin::{
-    MessageMutatorContext, MessageMutatorHook, PluginDirective, PluginError, PromptHookContext,
-    ToolCallHookContext, ToolSurfaceContext,
+    PluginDirective, PluginError, PromptHookContext, ToolCallHookContext, ToolSurfaceContext,
 };
 use crate::store::Store;
 use crate::tools::StateToolsPluginFactory;
 use crate::{
-    AgentStateEnvelope, AssembledTurn, AssistantOutput, ContextFoldingConfig, DoneReason,
-    ExecutionMode, MessageRole, OutputState, PluginHost, PromptUsage, SessionCreateRequest,
-    SessionHandle, SessionManager, SessionSnapshot, TokenUsage, ToolDefinition, TurnHookContext,
-    TurnInput, TurnResultHookContext, TurnStatus,
+    AgentStateEnvelope, AssembledTurn, AssistantOutput, DoneReason, ExecutionMode, MessageRole,
+    OutputState, PluginHost, SessionCreateRequest, SessionHandle, SessionManager, SessionPolicy,
+    SessionSnapshot, TokenUsage, ToolDefinition, ToolProvider, TurnHookContext, TurnInput,
+    TurnResultHookContext, TurnStatus,
 };
 
 struct MockSessionManager;
@@ -58,16 +57,16 @@ impl SessionManager for MockSessionManager {
     ) -> Result<SessionHandle, PluginError> {
         Ok(SessionHandle {
             session_id: request.agent_id.unwrap_or_else(|| "child".to_string()),
-            config: crate::SessionConfigSnapshot {
-                provider_kind: crate::provider::ProviderKind::OpenAiGeneric,
+            policy: crate::SessionPolicy {
+                provider: crate::Provider::OpenAiGeneric {
+                    api_key: String::new(),
+                    base_url: crate::provider::OPENAI_GENERIC_DEFAULT_BASE_URL.to_string(),
+                    options: crate::ProviderOptions::default(),
+                },
                 model: "mock-model".to_string(),
-                model_variant: None,
                 execution_mode: ExecutionMode::Standard,
-                context_folding: ContextFoldingConfig::default(),
-                context_window: None,
-                max_turns: None,
-                include_soul: false,
-                sub_agent: false,
+                context_strategy: crate::ContextStrategy::RollingContext,
+                ..Default::default()
             },
         })
     }
@@ -85,16 +84,16 @@ impl SessionManager for MockSessionManager {
         Ok(crate::plugin::SessionTurnHandle {
             turn_id: format!("{session_id}-turn"),
             session_id: session_id.to_string(),
-            config: crate::SessionConfigSnapshot {
-                provider_kind: crate::provider::ProviderKind::OpenAiGeneric,
+            policy: crate::SessionPolicy {
+                provider: crate::Provider::OpenAiGeneric {
+                    api_key: String::new(),
+                    base_url: crate::provider::OPENAI_GENERIC_DEFAULT_BASE_URL.to_string(),
+                    options: crate::ProviderOptions::default(),
+                },
                 model: "mock-model".to_string(),
-                model_variant: None,
                 execution_mode: ExecutionMode::Standard,
-                context_folding: ContextFoldingConfig::default(),
-                context_window: None,
-                max_turns: None,
-                include_soul: false,
-                sub_agent: false,
+                context_strategy: crate::ContextStrategy::RollingContext,
+                ..Default::default()
             },
             events: rx,
         })
@@ -113,8 +112,11 @@ fn empty_turn(session_id: &str) -> AssembledTurn {
     AssembledTurn {
         state: AgentStateEnvelope {
             agent_id: session_id.to_string(),
-            execution_mode: ExecutionMode::Standard,
-            context_folding: ContextFoldingConfig::default(),
+            policy: SessionPolicy {
+                execution_mode: ExecutionMode::Standard,
+                context_strategy: crate::ContextStrategy::RollingContext,
+                ..Default::default()
+            },
             ..Default::default()
         },
         status: TurnStatus::Completed,
@@ -137,347 +139,18 @@ fn empty_turn(session_id: &str) -> AssembledTurn {
 }
 
 #[cfg(feature = "sqlite-store")]
-#[tokio::test]
-async fn history_plugin_emits_turn_prompt_note_only_after_compaction() {
+#[test]
+fn history_tools_expose_search_history_tool() {
     let store = Arc::new(Store::memory().expect("store"));
-    let host = PluginHost::new(vec![Arc::new(BuiltinHistoryPluginFactory::new(store))]);
-    let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
-
-    let empty = session
-        .collect_prompt_contributions(PromptHookContext {
-            session_id: "root".to_string(),
-            host: Arc::clone(&manager),
-            prompt: crate::PromptContext {
-                tool_names: vec!["search_history".to_string()],
-                ..Default::default()
-            },
-            state: AgentStateEnvelope::default(),
-        })
-        .await
-        .expect("prompt");
-    assert_eq!(empty.len(), 1);
-
-    let messages = vec![
-        crate::Message {
-            id: "u1".to_string(),
-            role: MessageRole::User,
-            parts: vec![crate::Part {
-                id: "u1.p0".to_string(),
-                kind: crate::PartKind::Text,
-                content: "oldest user".repeat(20),
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: crate::PruneState::Intact,
-            }],
-            origin: None,
-        },
-        crate::Message {
-            id: "a1".to_string(),
-            role: MessageRole::Assistant,
-            parts: vec![crate::Part {
-                id: "a1.p0".to_string(),
-                kind: crate::PartKind::Text,
-                content: "oldest assistant".repeat(20),
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: crate::PruneState::Intact,
-            }],
-            origin: None,
-        },
-        crate::Message {
-            id: "u2".to_string(),
-            role: MessageRole::User,
-            parts: vec![crate::Part {
-                id: "u2.p0".to_string(),
-                kind: crate::PartKind::Text,
-                content: "older user".repeat(20),
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: crate::PruneState::Intact,
-            }],
-            origin: None,
-        },
-        crate::Message {
-            id: "a2".to_string(),
-            role: MessageRole::Assistant,
-            parts: vec![crate::Part {
-                id: "a2.p0".to_string(),
-                kind: crate::PartKind::Text,
-                content: "older assistant".repeat(20),
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: crate::PruneState::Intact,
-            }],
-            origin: None,
-        },
-        crate::Message {
-            id: "u3".to_string(),
-            role: MessageRole::User,
-            parts: vec![crate::Part {
-                id: "u3.p0".to_string(),
-                kind: crate::PartKind::Text,
-                content: "recent user".repeat(20),
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: crate::PruneState::Intact,
-            }],
-            origin: None,
-        },
-        crate::Message {
-            id: "a3".to_string(),
-            role: MessageRole::Assistant,
-            parts: vec![crate::Part {
-                id: "a3.p0".to_string(),
-                kind: crate::PartKind::Text,
-                content: "recent assistant".repeat(20),
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: crate::PruneState::Intact,
-            }],
-            origin: None,
-        },
-        crate::Message {
-            id: "u4".to_string(),
-            role: MessageRole::User,
-            parts: vec![crate::Part {
-                id: "u4.p0".to_string(),
-                kind: crate::PartKind::Text,
-                content: "latest user".repeat(20),
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: crate::PruneState::Intact,
-            }],
-            origin: None,
-        },
-        crate::Message {
-            id: "a4".to_string(),
-            role: MessageRole::Assistant,
-            parts: vec![crate::Part {
-                id: "a4.p0".to_string(),
-                kind: crate::PartKind::Text,
-                content: "latest assistant".repeat(20),
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: crate::PruneState::Intact,
-            }],
-            origin: None,
-        },
-    ];
-    let compacted = session
-        .mutate_messages(
-            MessageMutatorContext {
-                hook: MessageMutatorHook::AfterTokenCount,
-                session_id: "root".to_string(),
-                state: AgentStateEnvelope::default(),
-                host: Arc::clone(&manager),
-                turn: None,
-                prompt_usage: Some(PromptUsage {
-                    prompt_context_tokens: 70,
-                    input_tokens: 70,
-                    cached_input_tokens: 0,
-                    context_budget_tokens: 70,
-                }),
-                max_context_tokens: Some(100),
-                context_folding: Some(ContextFoldingConfig::default()),
-            },
-            messages,
-        )
-        .await
-        .expect("mutate messages");
-    assert!(!compacted.iter().any(|message| {
-        message
-            .parts
-            .iter()
-            .any(|part| part.content.contains("oldest user"))
-    }));
-
-    let contributions = session
-        .collect_prompt_contributions(PromptHookContext {
-            session_id: "root".to_string(),
-            host: manager,
-            prompt: crate::PromptContext {
-                tool_names: vec!["search_history".to_string()],
-                ..Default::default()
-            },
-            state: AgentStateEnvelope::default(),
-        })
-        .await
-        .expect("prompt");
-    assert_eq!(contributions.len(), 2);
-    assert!(
-        contributions
-            .iter()
-            .any(|contribution| contribution.content.contains("Older turns were archived"))
-    );
-}
-
-#[cfg(feature = "sqlite-store")]
-#[tokio::test]
-async fn history_plugin_hides_search_history_until_context_is_archived() {
-    let store = Arc::new(Store::memory().expect("store"));
-    let host = PluginHost::new(vec![Arc::new(BuiltinHistoryPluginFactory::new(store))]);
-    let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
-    let defs = session
-        .tools()
-        .definitions()
+    let defs = HistoryTools::new(store).definitions();
+    let defs = defs
         .into_iter()
         .filter(|def| def.name == "search_history")
         .collect::<Vec<_>>();
+
     assert_eq!(defs.len(), 1);
-    assert!(!defs[0].enabled);
-    assert!(!defs[0].injected);
-
-    let surface = session
-        .resolve_tool_surface(ToolSurfaceContext {
-            session_id: "root".to_string(),
-            mode: ExecutionMode::Standard,
-            tools: defs.clone(),
-        })
-        .expect("tool surface");
-    assert_eq!(surface.tools.len(), 1);
-    assert!(!surface.tools[0].injected);
-    assert!(!surface.tools[0].enabled);
-
-    let archived_result = session
-        .mutate_messages(
-            MessageMutatorContext {
-                hook: MessageMutatorHook::AfterTokenCount,
-                session_id: "root".to_string(),
-                state: AgentStateEnvelope::default(),
-                host: Arc::clone(&manager),
-                turn: None,
-                prompt_usage: Some(PromptUsage {
-                    prompt_context_tokens: 70,
-                    input_tokens: 70,
-                    cached_input_tokens: 0,
-                    context_budget_tokens: 70,
-                }),
-                max_context_tokens: Some(100),
-                context_folding: Some(ContextFoldingConfig::default()),
-            },
-            vec![
-                crate::Message {
-                    id: "u1".to_string(),
-                    role: MessageRole::User,
-                    parts: vec![crate::Part {
-                        id: "u1.p0".to_string(),
-                        kind: crate::PartKind::Text,
-                        content: "oldest user".repeat(20),
-                        tool_call_id: None,
-                        tool_name: None,
-                        prune_state: crate::PruneState::Intact,
-                    }],
-                    origin: None,
-                },
-                crate::Message {
-                    id: "a1".to_string(),
-                    role: MessageRole::Assistant,
-                    parts: vec![crate::Part {
-                        id: "a1.p0".to_string(),
-                        kind: crate::PartKind::Text,
-                        content: "oldest assistant".repeat(20),
-                        tool_call_id: None,
-                        tool_name: None,
-                        prune_state: crate::PruneState::Intact,
-                    }],
-                    origin: None,
-                },
-                crate::Message {
-                    id: "u2".to_string(),
-                    role: MessageRole::User,
-                    parts: vec![crate::Part {
-                        id: "u2.p0".to_string(),
-                        kind: crate::PartKind::Text,
-                        content: "older user".repeat(20),
-                        tool_call_id: None,
-                        tool_name: None,
-                        prune_state: crate::PruneState::Intact,
-                    }],
-                    origin: None,
-                },
-                crate::Message {
-                    id: "a2".to_string(),
-                    role: MessageRole::Assistant,
-                    parts: vec![crate::Part {
-                        id: "a2.p0".to_string(),
-                        kind: crate::PartKind::Text,
-                        content: "older assistant".repeat(20),
-                        tool_call_id: None,
-                        tool_name: None,
-                        prune_state: crate::PruneState::Intact,
-                    }],
-                    origin: None,
-                },
-                crate::Message {
-                    id: "u3".to_string(),
-                    role: MessageRole::User,
-                    parts: vec![crate::Part {
-                        id: "u3.p0".to_string(),
-                        kind: crate::PartKind::Text,
-                        content: "recent user".repeat(20),
-                        tool_call_id: None,
-                        tool_name: None,
-                        prune_state: crate::PruneState::Intact,
-                    }],
-                    origin: None,
-                },
-                crate::Message {
-                    id: "a3".to_string(),
-                    role: MessageRole::Assistant,
-                    parts: vec![crate::Part {
-                        id: "a3.p0".to_string(),
-                        kind: crate::PartKind::Text,
-                        content: "recent assistant".repeat(20),
-                        tool_call_id: None,
-                        tool_name: None,
-                        prune_state: crate::PruneState::Intact,
-                    }],
-                    origin: None,
-                },
-                crate::Message {
-                    id: "u4".to_string(),
-                    role: MessageRole::User,
-                    parts: vec![crate::Part {
-                        id: "u4.p0".to_string(),
-                        kind: crate::PartKind::Text,
-                        content: "latest user".repeat(20),
-                        tool_call_id: None,
-                        tool_name: None,
-                        prune_state: crate::PruneState::Intact,
-                    }],
-                    origin: None,
-                },
-                crate::Message {
-                    id: "a4".to_string(),
-                    role: MessageRole::Assistant,
-                    parts: vec![crate::Part {
-                        id: "a4.p0".to_string(),
-                        kind: crate::PartKind::Text,
-                        content: "latest assistant".repeat(20),
-                        tool_call_id: None,
-                        tool_name: None,
-                        prune_state: crate::PruneState::Intact,
-                    }],
-                    origin: None,
-                },
-            ],
-        )
-        .await
-        .expect("mutate messages");
-    assert!(!archived_result.is_empty());
-
-    let surface = session
-        .resolve_tool_surface(ToolSurfaceContext {
-            session_id: "root".to_string(),
-            mode: ExecutionMode::Standard,
-            tools: defs,
-        })
-        .expect("tool surface");
-    assert_eq!(surface.tools.len(), 1);
-    assert!(surface.tools[0].injected);
-    assert!(surface.tools[0].enabled);
+    assert!(defs[0].enabled);
+    assert!(defs[0].injected);
 }
 
 #[cfg(feature = "sqlite-store")]

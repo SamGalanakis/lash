@@ -5,18 +5,20 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::mpsc;
 
 use crate::plugin::{
-    PluginDirective, PluginSession, SessionManager, ToolCallHookContext, ToolResultHookContext,
-    emit_plugin_surface_events,
+    ExecutionSurface, PluginDirective, PluginSession, SessionManager, ToolCallHookContext,
+    ToolResultHookContext, emit_plugin_surface_events,
 };
 use crate::tools::{NativeTool, find_native_tool};
 use crate::{
     AgentEvent, ExecutionMode, ProgressSender, ToolCallRecord, ToolExecutionContext, ToolImage,
-    ToolResult, TurnInjectionBridge,
+    ToolProvider, ToolResult, TurnInjectionBridge,
 };
 
 #[derive(Clone)]
 pub(crate) struct ToolDispatchContext {
     pub plugins: Arc<PluginSession>,
+    pub tools: Arc<dyn ToolProvider>,
+    pub surface: ExecutionSurface,
     pub host: Arc<dyn SessionManager>,
     pub session_id: String,
     pub execution_mode: ExecutionMode,
@@ -37,10 +39,7 @@ pub(crate) async fn dispatch_tool_call(
     args: serde_json::Value,
     progress: Option<&ProgressSender>,
 ) -> ToolDispatchOutcome {
-    let surface = context
-        .plugins
-        .execution_surface(&context.session_id, context.execution_mode);
-    let enabled_tools = surface.enabled_tools();
+    let enabled_tools = context.surface.enabled_tools();
     if !enabled_tools.iter().any(|tool| tool.name == tool_name) {
         return outcome(
             tool_name,
@@ -114,8 +113,7 @@ pub(crate) async fn dispatch_tool_call(
         Some(NativeTool::Batch) => execute_batch_tool_call(context, &args, progress).await,
         None => {
             context
-                .plugins
-                .tools()
+                .tools
                 .execute_streaming_with_context(&tool_name, &args, &tool_context, progress)
                 .await
         }
@@ -381,6 +379,7 @@ fn outcome(
 ) -> ToolDispatchOutcome {
     let images = std::mem::take(&mut result.images);
     let record = ToolCallRecord {
+        call_id: None,
         tool: tool_name,
         args,
         result: result.result,
@@ -396,7 +395,7 @@ mod tests {
     use crate::plugin::{
         PluginError, PluginHost, SessionHandle, SessionSnapshot, StaticPluginFactory,
     };
-    use crate::{AgentStateEnvelope, ContextFoldingConfig, ExecutionMode, ToolProvider, TurnInput};
+    use crate::{AgentStateEnvelope, ExecutionMode, SessionPolicy, ToolProvider, TurnInput};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Barrier;
@@ -521,16 +520,16 @@ mod tests {
         ) -> Result<SessionHandle, PluginError> {
             Ok(SessionHandle {
                 session_id: "s".to_string(),
-                config: crate::SessionConfigSnapshot {
-                    provider_kind: crate::provider::ProviderKind::OpenAiGeneric,
+                policy: SessionPolicy {
+                    provider: crate::Provider::OpenAiGeneric {
+                        api_key: String::new(),
+                        base_url: crate::provider::OPENAI_GENERIC_DEFAULT_BASE_URL.to_string(),
+                        options: crate::ProviderOptions::default(),
+                    },
                     model: "mock-model".to_string(),
-                    model_variant: None,
                     execution_mode: ExecutionMode::Standard,
-                    context_folding: ContextFoldingConfig::default(),
-                    context_window: None,
-                    max_turns: None,
-                    include_soul: false,
-                    sub_agent: false,
+                    context_strategy: crate::default_context_strategy(),
+                    ..Default::default()
                 },
             })
         }
@@ -548,16 +547,16 @@ mod tests {
             Ok(crate::plugin::SessionTurnHandle {
                 turn_id: "turn".to_string(),
                 session_id: session_id.to_string(),
-                config: crate::SessionConfigSnapshot {
-                    provider_kind: crate::provider::ProviderKind::OpenAiGeneric,
+                policy: SessionPolicy {
+                    provider: crate::Provider::OpenAiGeneric {
+                        api_key: String::new(),
+                        base_url: crate::provider::OPENAI_GENERIC_DEFAULT_BASE_URL.to_string(),
+                        options: crate::ProviderOptions::default(),
+                    },
                     model: "mock-model".to_string(),
-                    model_variant: None,
                     execution_mode: ExecutionMode::Standard,
-                    context_folding: ContextFoldingConfig::default(),
-                    context_window: None,
-                    max_turns: None,
-                    include_soul: false,
-                    sub_agent: false,
+                    context_strategy: crate::default_context_strategy(),
+                    ..Default::default()
                 },
                 events: rx,
             })
@@ -578,9 +577,13 @@ mod tests {
     fn dummy_snapshot() -> SessionSnapshot {
         AgentStateEnvelope {
             agent_id: "root".to_string(),
-            execution_mode: ExecutionMode::Standard,
-            context_folding: ContextFoldingConfig::default(),
+            policy: SessionPolicy {
+                execution_mode: ExecutionMode::Standard,
+                context_strategy: crate::default_context_strategy(),
+                ..Default::default()
+            },
             messages: Vec::new(),
+            tool_calls: Vec::new(),
             iteration: 0,
             token_usage: crate::TokenUsage::default(),
             last_prompt_usage: None,
@@ -593,8 +596,13 @@ mod tests {
 
     fn dispatch_context() -> ToolDispatchContext {
         let (event_tx, _event_rx) = mpsc::channel(8);
+        let plugins = test_plugins(Arc::new(MockTools));
+        let tools = plugins.tools();
+        let surface = plugins.execution_surface("session", ExecutionMode::Standard);
         ToolDispatchContext {
-            plugins: test_plugins(Arc::new(MockTools)),
+            plugins,
+            tools,
+            surface,
             host: Arc::new(MockSessionManager),
             session_id: "session".to_string(),
             execution_mode: ExecutionMode::Standard,
@@ -608,8 +616,13 @@ mod tests {
         started: Arc<AtomicUsize>,
     ) -> ToolDispatchContext {
         let (event_tx, _event_rx) = mpsc::channel(8);
+        let plugins = test_plugins(Arc::new(ParallelProbeTools { barrier, started }));
+        let tools = plugins.tools();
+        let surface = plugins.execution_surface("session", ExecutionMode::Standard);
         ToolDispatchContext {
-            plugins: test_plugins(Arc::new(ParallelProbeTools { barrier, started })),
+            plugins,
+            tools,
+            surface,
             host: Arc::new(MockSessionManager),
             session_id: "session".to_string(),
             execution_mode: ExecutionMode::Standard,

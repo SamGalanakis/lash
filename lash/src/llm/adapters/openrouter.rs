@@ -8,7 +8,8 @@ use crate::llm::timeouts::{
 };
 use crate::llm::transport::{LlmTransport, LlmTransportError};
 use crate::llm::types::{
-    LlmOutputPart, LlmPromptPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage, ModelSelection,
+    LlmMessage, LlmOutputPart, LlmPromptPart, LlmReplayChunk, LlmRequest, LlmResponse, LlmRole,
+    LlmStreamEvent, LlmUsage, ModelSelection, coalesce_replay_messages,
 };
 use crate::model_variant::VariantRequestConfig;
 use crate::provider::Provider;
@@ -68,11 +69,158 @@ impl OpenAiGenericAdapter {
         Value::Array(content)
     }
 
+    fn content_json_for_message(req: &LlmRequest, msg: &LlmMessage) -> Value {
+        match msg.kind.as_str() {
+            "image" => {
+                let idx = msg.image_idx.max(0) as usize;
+                if let Some(att) = req.attachments.get(idx) {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
+                    let data_url = format!("data:{};base64,{}", att.mime, b64);
+                    json!([{
+                        "type": "image_url",
+                        "image_url": {"url": data_url}
+                    }])
+                } else {
+                    json!("[Image attached]")
+                }
+            }
+            _ => json!(msg.content),
+        }
+    }
+
+    fn role_name(role: &LlmRole) -> &'static str {
+        match role {
+            LlmRole::User => "user",
+            LlmRole::Assistant => "assistant",
+            LlmRole::System => "system",
+        }
+    }
+
     fn build_messages(&self, req: &LlmRequest) -> Vec<Value> {
+        if !req.messages.is_empty() {
+            let mut out = vec![json!({"role": "system", "content": req.system_prompt})];
+            for chunk in coalesce_replay_messages(&req.messages) {
+                match chunk {
+                    LlmReplayChunk::Message(msg) => {
+                        let role = if msg.kind == "tool_result" {
+                            "tool"
+                        } else {
+                            Self::role_name(&msg.role)
+                        };
+                        let mut item = json!({
+                            "role": role,
+                            "content": Self::content_json_for_message(req, &msg),
+                        });
+                        if role == "tool" {
+                            item["tool_call_id"] =
+                                json!(msg.tool_call_id.clone().unwrap_or_default());
+                        }
+                        out.push(item);
+                    }
+                    LlmReplayChunk::AssistantToolCalls { text, tool_calls } => {
+                        out.push(json!({
+                            "role": "assistant",
+                            "content": text.unwrap_or_default(),
+                            "tool_calls": tool_calls
+                                .into_iter()
+                                .map(|call| json!({
+                                    "id": call.call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": call.tool_name,
+                                        "arguments": call.input_json,
+                                    }
+                                }))
+                                .collect::<Vec<_>>(),
+                        }));
+                    }
+                    LlmReplayChunk::ToolResults { results } => {
+                        out.extend(results.into_iter().map(|msg| {
+                            json!({
+                                "role": "tool",
+                                "tool_call_id": msg.tool_call_id.unwrap_or_default(),
+                                "content": msg.content,
+                            })
+                        }));
+                    }
+                }
+            }
+            return out;
+        }
+
         vec![
             json!({"role": "system", "content": req.system_prompt}),
             json!({"role": "user", "content": Self::user_content_json(req)}),
         ]
+    }
+
+    fn supports_prompt_cache_key(base_url: &str) -> bool {
+        let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+        normalized.contains("openrouter.ai")
+    }
+
+    fn build_request_body(
+        &self,
+        provider: &Provider,
+        req: &LlmRequest,
+        stream: bool,
+    ) -> Result<(Value, String), LlmTransportError> {
+        let (_, base_url) = match provider {
+            Provider::OpenAiGeneric {
+                api_key, base_url, ..
+            } => (api_key.clone(), base_url.clone()),
+            _ => {
+                return Err(LlmTransportError::new(
+                    "OpenAI-generic adapter received non-OpenAI-generic provider",
+                ));
+            }
+        };
+
+        let messages = self.build_messages(req);
+
+        let mut body = json!({
+            "model": req.model,
+            "messages": messages,
+            "temperature": 0,
+            "max_tokens": 32768,
+            "stream": stream,
+        });
+        if let Some(variant) = req.model_variant.as_deref()
+            && let Some(VariantRequestConfig::ReasoningEffort(effort)) =
+                crate::model_variant::request_config(provider, &req.model, variant)
+        {
+            body["reasoning"] = json!({ "effort": effort });
+        }
+        if stream {
+            body["stream_options"] = json!({ "include_usage": true });
+        }
+        if let Some(session_id) = req.session_id.as_deref()
+            && Self::supports_prompt_cache_key(&base_url)
+        {
+            body["prompt_cache_key"] = json!(session_id);
+        }
+        if !req.tools.is_empty() {
+            body["tools"] = json!(
+                req.tools
+                    .iter()
+                    .map(|tool| json!({
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.input_schema,
+                        }
+                    }))
+                    .collect::<Vec<_>>()
+            );
+            body["tool_choice"] = match req.tool_choice {
+                crate::llm::types::LlmToolChoice::Auto => json!("auto"),
+                crate::llm::types::LlmToolChoice::None => json!("none"),
+                crate::llm::types::LlmToolChoice::Required => json!("required"),
+            };
+        }
+
+        Ok((body, base_url))
     }
 
     fn parse_i64(v: Option<&Value>) -> i64 {
@@ -372,7 +520,7 @@ impl LlmTransport for OpenAiGenericAdapter {
         req: LlmRequest,
     ) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
-        let (api_key, base_url) = match provider {
+        let (api_key, _) = match provider {
             Provider::OpenAiGeneric {
                 api_key, base_url, ..
             } => (api_key.clone(), base_url.clone()),
@@ -383,44 +531,7 @@ impl LlmTransport for OpenAiGenericAdapter {
             }
         };
 
-        let messages = self.build_messages(&req);
-
-        let mut body = json!({
-            "model": req.model,
-            "messages": messages,
-            "temperature": 0,
-            "max_tokens": 32768,
-            "stream": stream_events.is_some(),
-        });
-        if let Some(variant) = req.model_variant.as_deref()
-            && let Some(VariantRequestConfig::ReasoningEffort(effort)) =
-                crate::model_variant::request_config(provider, &req.model, variant)
-        {
-            body["reasoning"] = json!({ "effort": effort });
-        }
-        if stream_events.is_some() {
-            body["stream_options"] = json!({ "include_usage": true });
-        }
-        if !req.tools.is_empty() {
-            body["tools"] = json!(
-                req.tools
-                    .iter()
-                    .map(|tool| json!({
-                        "type": "function",
-                        "function": {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.input_schema,
-                        }
-                    }))
-                    .collect::<Vec<_>>()
-            );
-            body["tool_choice"] = match req.tool_choice {
-                crate::llm::types::LlmToolChoice::Auto => json!("auto"),
-                crate::llm::types::LlmToolChoice::None => json!("none"),
-                crate::llm::types::LlmToolChoice::Required => json!("required"),
-            };
-        }
+        let (body, base_url) = self.build_request_body(provider, &req, stream_events.is_some())?;
 
         let request_body = serde_json::to_string(&body).ok();
         let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
@@ -485,11 +596,11 @@ impl LlmTransport for OpenAiGenericAdapter {
                 });
             }
             if let Some(tx) = &stream_events {
-                if !content.is_empty() {
-                    let _ = tx.send(LlmStreamEvent::Delta(content.clone()));
-                }
                 if usage != LlmUsage::default() {
                     let _ = tx.send(LlmStreamEvent::Usage(usage.clone()));
+                }
+                if !content.is_empty() {
+                    let _ = tx.send(LlmStreamEvent::Delta(content.clone()));
                 }
             }
             return Ok(LlmResponse {
@@ -655,5 +766,111 @@ mod tests {
         assert_eq!(messages[0]["role"], "system");
         assert_eq!(messages[1]["role"], "user");
         assert_eq!(messages[1]["content"], "history");
+    }
+
+    #[test]
+    fn build_messages_uses_structured_replay_for_standard_mode() {
+        let adapter = OpenAiGenericAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
+        let req = LlmRequest {
+            model: "gpt-5.4".to_string(),
+            system_prompt: "sys".to_string(),
+            user_prompt: vec![],
+            messages: vec![
+                LlmMessage {
+                    role: LlmRole::User,
+                    content: "question".to_string(),
+                    kind: "text".to_string(),
+                    image_idx: -1,
+                    tool_call_id: None,
+                    tool_name: None,
+                },
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: "{\"path\":\"README.md\"}".to_string(),
+                    kind: "tool_call".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_1".to_string()),
+                    tool_name: Some("read_file".to_string()),
+                },
+                LlmMessage {
+                    role: LlmRole::User,
+                    content: "ok".to_string(),
+                    kind: "tool_result".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_1".to_string()),
+                    tool_name: Some("read_file".to_string()),
+                },
+            ],
+            attachments: vec![],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: None,
+            stream_events: None,
+        };
+
+        let messages = adapter.build_messages(&req);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(
+            messages[2]["tool_calls"][0]["function"]["name"],
+            "read_file"
+        );
+        assert_eq!(messages[3]["role"], "tool");
+        assert_eq!(messages[3]["tool_call_id"], "call_1");
+    }
+
+    #[test]
+    fn build_request_body_sets_prompt_cache_key_for_openrouter() {
+        let adapter = OpenAiGenericAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
+        let provider = Provider::OpenAiGeneric {
+            api_key: "tok".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            options: crate::provider::ProviderOptions::default(),
+        };
+        let req = LlmRequest {
+            model: "openai/gpt-5".to_string(),
+            system_prompt: "sys".to_string(),
+            user_prompt: vec![LlmPromptPart::Text("hi".to_string())],
+            messages: vec![],
+            attachments: vec![],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::None,
+            model_variant: None,
+            session_id: Some("sess-123".to_string()),
+            stream_events: None,
+        };
+
+        let (body, _) = adapter
+            .build_request_body(&provider, &req, false)
+            .expect("request body");
+        assert_eq!(body["prompt_cache_key"], "sess-123");
+    }
+
+    #[test]
+    fn build_request_body_omits_prompt_cache_key_for_non_openrouter() {
+        let adapter = OpenAiGenericAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
+        let provider = Provider::OpenAiGeneric {
+            api_key: "tok".to_string(),
+            base_url: "https://example.com/v1".to_string(),
+            options: crate::provider::ProviderOptions::default(),
+        };
+        let req = LlmRequest {
+            model: "model".to_string(),
+            system_prompt: "sys".to_string(),
+            user_prompt: vec![LlmPromptPart::Text("hi".to_string())],
+            messages: vec![],
+            attachments: vec![],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::None,
+            model_variant: None,
+            session_id: Some("sess-123".to_string()),
+            stream_events: None,
+        };
+
+        let (body, _) = adapter
+            .build_request_body(&provider, &req, false)
+            .expect("request body");
+        assert!(body.get("prompt_cache_key").is_none());
     }
 }

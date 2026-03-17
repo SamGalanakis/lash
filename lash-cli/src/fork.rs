@@ -5,8 +5,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use lash_core::{
     DynamicStateSnapshot, ExecutionMode, ExternalOpDef, ExternalOpKind, PluginError, PluginFactory,
-    PluginRegistrar, PluginSessionContext, SessionConfigOverrides, SessionCreateRequest,
-    SessionManager, SessionParam, SessionPlugin, SessionSnapshot, SessionStartPoint, ToolResult,
+    PluginRegistrar, PluginSessionContext, SessionCreateRequest, SessionManager, SessionParam,
+    SessionPlugin, SessionSnapshot, SessionStartPoint, ToolResult,
 };
 use serde_json::json;
 
@@ -80,9 +80,10 @@ async fn fork_snapshot_via_manager(
         .create_session(SessionCreateRequest {
             agent_id: None,
             start,
-            config_overrides: SessionConfigOverrides::default(),
-            tool_surface: lash_core::ToolSurfaceContribution::default(),
+            policy: None,
+            plugin_mode: lash_core::SessionPluginMode::InheritCurrent,
             initial_messages: Vec::new(),
+            context_surface: lash_core::SessionContextSurface::default(),
         })
         .await?;
     let snapshot = manager.snapshot_session(&handle.session_id).await?;
@@ -323,7 +324,10 @@ pub async fn fork_current_session(
     let mut state: SessionSnapshot = serde_json::from_value(snapshot_value)
         .context("session.fork returned an invalid snapshot")?;
 
-    if matches!(runtime.export_state().execution_mode, ExecutionMode::Repl) {
+    if matches!(
+        runtime.export_state().policy.execution_mode,
+        ExecutionMode::Repl
+    ) {
         let snapshot = runtime.snapshot_repl().await?;
         state.repl_snapshot = Some(snapshot);
     }
@@ -342,8 +346,8 @@ pub async fn fork_current_session(
     let child_db_path =
         sessions_dir.join(format!("{}.db", child_filename.trim_end_matches(".jsonl")));
     let child_store = lash_core::Store::open(&child_db_path)?;
-    let execution_mode = state.execution_mode;
-    let context_folding = state.context_folding;
+    let execution_mode = state.policy.execution_mode;
+    let context_strategy = state.policy.context_strategy;
     let prompt_hash = crate::latest_user_prompt_hash(&state.messages);
     crate::persist_root_agent_state(
         &child_store,
@@ -353,7 +357,7 @@ pub async fn fork_current_session(
         configured_model,
         context_window,
         execution_mode,
-        context_folding,
+        context_strategy,
         model_variant,
         toolset_hash,
         prompt_hash,

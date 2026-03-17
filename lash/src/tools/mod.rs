@@ -7,9 +7,9 @@ mod fetch_url;
 mod glob;
 mod grep;
 mod ls;
+mod memory;
 mod read_file;
 mod shell;
-mod skills;
 #[cfg(feature = "sqlite-store")]
 mod state;
 mod update_plan;
@@ -24,9 +24,9 @@ pub use fetch_url::FetchUrl;
 pub use glob::Glob;
 pub use grep::Grep;
 pub use ls::Ls;
+pub(crate) use memory::{FilteredToolProvider, RecallAgentTools};
 pub use read_file::{ReadFile, ReadFilePluginFactory};
 pub use shell::StandardShell;
-pub use skills::SkillsPluginFactory;
 #[cfg(feature = "sqlite-store")]
 pub use state::{StateStore, StateToolsPluginFactory};
 pub use update_plan::UpdatePlanTool;

@@ -18,6 +18,7 @@ mod ui;
 mod util;
 
 use std::collections::HashMap;
+use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -86,13 +87,9 @@ struct Args {
     #[arg(long = "execution-mode")]
     execution_mode: Option<String>,
 
-    /// Soft context-fold watermark percentage
-    #[arg(long = "context-fold-soft-pct")]
-    context_fold_soft_pct: Option<u8>,
-
-    /// Hard context-fold watermark percentage
-    #[arg(long = "context-fold-hard-pct")]
-    context_fold_hard_pct: Option<u8>,
+    /// Context strategy (`rolling_context` or `recall_agent`)
+    #[arg(long = "context-strategy")]
+    context_strategy: Option<String>,
 
     /// Base URL for the LLM API
     #[arg(long, default_value = OPENAI_GENERIC_DEFAULT_BASE_URL)]
@@ -331,13 +328,19 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ref key) = args.tavily_api_key {
         lash_config.set_tavily_api_key(Some(key.clone()));
     }
-    let context_folding = resolve_context_folding(
-        lash_config.context_folding(),
-        args.context_fold_soft_pct,
-        args.context_fold_hard_pct,
-    )
-    .map_err(anyhow::Error::msg)?;
-    lash_config.set_context_folding(context_folding);
+    if let Some(models) = lash_config.agent_models.as_mut()
+        && models.recall_agent.is_none()
+    {
+        models.recall_agent = models.low.clone();
+    }
+    let requested_context_strategy = match args.context_strategy.as_deref() {
+        Some(raw) => Some(parse_context_strategy(raw).map_err(anyhow::Error::msg)?),
+        None => None,
+    };
+    let context_strategy =
+        resolve_context_strategy(lash_config.context_strategy(), requested_context_strategy)
+            .map_err(anyhow::Error::msg)?;
+    lash_config.set_context_strategy(context_strategy);
     if args.print_prompt.is_none() {
         lash_config.save()?;
     }
@@ -412,18 +415,25 @@ async fn main() -> anyhow::Result<()> {
             .or_else(|| Some(uuid::Uuid::new_v4().to_string()))
     };
     let instruction_source: Arc<dyn InstructionSource> = Arc::new(FsInstructionSource::new());
-    let config = AgentConfig {
+    let session_policy = SessionPolicy {
         model: model.clone(),
         provider: lash_config.active_provider().clone(),
         model_variant,
+        recall_agent_model: lash_config
+            .agent_models
+            .as_ref()
+            .and_then(|models| models.recall_agent.clone()),
         max_context_tokens: Some(resolved_model_spec.context_window() as usize),
         session_id: run_session_id.clone(),
-        llm_log_path,
-        prompt_overrides,
         execution_mode,
-        context_folding,
-        instruction_source: Arc::clone(&instruction_source),
+        context_strategy,
         ..Default::default()
+    };
+    let host_config = RuntimeHostConfig {
+        prompt_renderer: default_prompt_renderer(),
+        prompt_overrides,
+        llm_log_path,
+        ..RuntimeHostConfig::default()
     };
 
     // Build store (SQLite-backed archive)
@@ -437,7 +447,6 @@ async fn main() -> anyhow::Result<()> {
     };
     let store = Arc::new(Store::open(&db_path).expect("Failed to open session database"));
 
-    let skill_dirs = lash_core::default_skill_dirs();
     let tavily_key = lash_config.tavily_api_key().unwrap_or_default().to_string();
     let prompt_bridge = PromptBridge::new();
     let turn_injection_bridge = TurnInjectionBridge::new();
@@ -458,7 +467,6 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 Some(tavily_key)
             },
-            skill_dirs: Some(skill_dirs),
             prompt_bridge: (!autonomous).then_some(prompt_bridge.clone()),
             instruction_source: Some(Arc::clone(&instruction_source)),
         },
@@ -468,12 +476,11 @@ async fn main() -> anyhow::Result<()> {
             Arc::clone(&instruction_source),
             PromptContextPluginConfig::default(),
         )) as Arc<dyn PluginFactory>,
-        Arc::new(BuiltinHistoryPluginFactory::new(Arc::clone(&store))),
         Arc::new(BuiltinPlanTrackerPluginFactory),
         Arc::new(BuiltinPlanModePluginFactory::default()),
         Arc::new(fork::ForkPluginFactory),
         Arc::new(AgentCallPluginFactory::new(
-            config.clone(),
+            session_policy.clone(),
             agent_call_config,
             lash_config.agent_models.clone(),
         )),
@@ -497,31 +504,31 @@ async fn main() -> anyhow::Result<()> {
             info_text(
                 lash_config.active_provider(),
                 &model,
-                config.model_variant.as_deref(),
+                session_policy.model_variant.as_deref(),
                 execution_mode,
                 Some(resolved_model_spec.context_window()),
                 dynamic_tools_provider.definitions().len(),
                 &toolset_hash,
-                context_folding,
+                context_strategy,
                 &cwd,
                 None,
             )
         );
         return Ok(());
     }
-    let initial_model_variant = config.model_variant.clone();
+    let initial_model_variant = session_policy.model_variant.clone();
     let runtime = LashRuntime::from_state(
-        config.clone(),
-        RuntimeHostConfig::default(),
+        session_policy.clone(),
+        host_config,
         RuntimeServices::new_with_bridges(
             root_plugins,
             prompt_bridge,
             turn_injection_bridge.clone(),
-        ),
+        )
+        .with_store(Arc::clone(&store)),
         AgentStateEnvelope {
             agent_id: "root".to_string(),
-            execution_mode,
-            context_folding,
+            policy: session_policy.clone(),
             ..AgentStateEnvelope::default()
         },
     )
@@ -529,7 +536,21 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Autonomous preset: skip TUI, run agent, print response to stdout ──
     if let Some(prompt) = args.print_prompt {
-        return run_autonomous(runtime, prompt).await;
+        return run_autonomous(
+            runtime,
+            prompt,
+            SkillCatalog::load(),
+            AutonomousPersistenceContext {
+                store: Arc::clone(&store),
+                dynamic_state: dynamic_tools.export_state(),
+                provider: session_policy.provider.clone(),
+                configured_model: model.clone(),
+                context_window: resolved_model_spec.context_window(),
+                model_variant: initial_model_variant.clone(),
+                toolset_hash: toolset_hash.clone(),
+            },
+        )
+        .await;
     }
 
     let session_name = resume_start
@@ -593,51 +614,255 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-/// Run the agent autonomously: send prompt, consume events, print final response to stdout.
-async fn run_autonomous(mut runtime: LashRuntime, prompt: String) -> anyhow::Result<()> {
-    use std::sync::atomic::{AtomicBool, Ordering};
+struct AutonomousPersistenceContext {
+    store: Arc<Store>,
+    dynamic_state: DynamicStateSnapshot,
+    provider: Provider,
+    configured_model: String,
+    context_window: u64,
+    model_variant: Option<String>,
+    toolset_hash: String,
+}
 
-    struct AutonomousSink {
-        had_error: AtomicBool,
-    }
-
-    #[async_trait::async_trait]
-    impl EventSink for AutonomousSink {
-        async fn emit(&self, event: AgentEvent) {
-            match event {
-                AgentEvent::Error { message, .. } => {
-                    eprintln!("error: {}", message);
-                    self.had_error.store(true, Ordering::Relaxed);
-                }
-                AgentEvent::Prompt { response_tx, .. } => {
-                    // No human is attached in the autonomous preset.
-                    let _ = response_tx.send(String::new());
-                }
-                _ => {}
+async fn persist_autonomous_runtime_state(
+    runtime: &mut LashRuntime,
+    persistence: &AutonomousPersistenceContext,
+    mut state: AgentStateEnvelope,
+) {
+    let snapshot_hash = if matches!(state.policy.execution_mode, ExecutionMode::Repl) {
+        match runtime.snapshot_repl().await {
+            Ok(blob) => {
+                state = runtime.export_state();
+                Some(hash12(&blob))
             }
+            Err(err) => {
+                tracing::warn!(
+                    "failed to snapshot repl state during autonomous persistence: {err}"
+                );
+                None
+            }
+        }
+    } else {
+        state = runtime.export_state();
+        None
+    };
+
+    let execution_mode = state.policy.execution_mode;
+    let context_strategy = state.policy.context_strategy;
+    let prompt_hash = latest_user_prompt_hash(&state.messages);
+    persist_root_agent_state(
+        &persistence.store,
+        &mut state,
+        &persistence.dynamic_state,
+        &persistence.provider,
+        &persistence.configured_model,
+        persistence.context_window,
+        execution_mode,
+        context_strategy,
+        persistence.model_variant.as_deref(),
+        &persistence.toolset_hash,
+        prompt_hash,
+        snapshot_hash,
+    );
+    runtime.set_state(state);
+}
+
+struct AutonomousChannelSink {
+    tx: mpsc::Sender<AgentEvent>,
+}
+
+#[async_trait::async_trait]
+impl EventSink for AutonomousChannelSink {
+    async fn emit(&self, event: AgentEvent) {
+        let _ = self.tx.send(event).await;
+    }
+}
+
+struct AutonomousRenderer {
+    streamed_text: bool,
+    wrote_stdout: bool,
+    stdout_text: String,
+}
+
+impl AutonomousRenderer {
+    fn new() -> Self {
+        Self {
+            streamed_text: false,
+            wrote_stdout: false,
+            stdout_text: String::new(),
         }
     }
 
-    let (items, image_blobs) = build_items_from_editor_input(&prompt, Vec::new());
-    let sink = AutonomousSink {
-        had_error: AtomicBool::new(false),
-    };
-    let result = runtime
-        .stream_turn(
-            TurnInput {
-                items,
-                image_blobs,
-                mode: Some(RunMode::Normal),
+    fn handle(&mut self, event: AgentEvent) {
+        match event {
+            AgentEvent::TextDelta { content } => {
+                if !content.is_empty() {
+                    self.streamed_text = true;
+                    self.wrote_stdout = true;
+                    self.stdout_text.push_str(&content);
+                    print!("{content}");
+                    let _ = io::stdout().flush();
+                }
+            }
+            AgentEvent::CodeBlock { code } => {
+                if !code.trim().is_empty() {
+                    eprintln!("[code]");
+                    eprintln!("{code}");
+                    eprintln!("[/code]");
+                }
+            }
+            AgentEvent::ToolCall {
+                name,
+                success,
+                duration_ms,
+                ..
+            } => {
+                let status = if success { "ok" } else { "error" };
+                eprintln!(
+                    "[tool] {name} · {status} · {}",
+                    util::format_duration_ms(duration_ms)
+                );
+            }
+            AgentEvent::CodeOutput { output, error } => {
+                if !output.trim().is_empty() {
+                    eprintln!("{output}");
+                }
+                if let Some(error) = error.filter(|value| !value.trim().is_empty()) {
+                    eprintln!("{error}");
+                }
+            }
+            AgentEvent::Message { text, kind } => match kind.as_str() {
+                "tool_output" | "delegate_start" | "final" => {
+                    if !text.trim().is_empty() {
+                        if kind == "final" {
+                            self.streamed_text = true;
+                            self.wrote_stdout = true;
+                            self.stdout_text.push_str(&text);
+                            print!("{text}");
+                            let _ = io::stdout().flush();
+                        } else {
+                            eprintln!("{text}");
+                        }
+                    }
+                }
+                _ => {}
             },
-            &sink,
-            CancellationToken::new(),
-        )
-        .await;
+            AgentEvent::LlmRequest { iteration, .. } => {
+                eprintln!("[thinking] turn {}", iteration + 1);
+            }
+            AgentEvent::RetryStatus {
+                wait_seconds,
+                attempt,
+                max_attempts,
+                reason,
+                ..
+            } => {
+                eprintln!(
+                    "[retry] in {}s · attempt {}/{} · {}",
+                    wait_seconds, attempt, max_attempts, reason
+                );
+            }
+            AgentEvent::Error { message, .. } => {
+                eprintln!("error: {message}");
+            }
+            AgentEvent::Prompt { response_tx, .. } => {
+                let _ = response_tx.send(String::new());
+            }
+            AgentEvent::Done
+            | AgentEvent::TokenUsage { .. }
+            | AgentEvent::PluginEvent { .. }
+            | AgentEvent::InjectedMessagesCommitted { .. }
+            | AgentEvent::LlmResponse { .. } => {}
+        }
+    }
+
+    fn finish_output(&mut self, final_text: &str) {
+        if final_text.is_empty() {
+            return;
+        }
+
+        let remainder = if self.stdout_text.is_empty() {
+            final_text
+        } else if final_text.starts_with(&self.stdout_text) {
+            &final_text[self.stdout_text.len()..]
+        } else if self.stdout_text.ends_with(final_text) {
+            ""
+        } else {
+            final_text
+        };
+
+        if remainder.is_empty() {
+            if self.wrote_stdout && !self.stdout_text.ends_with('\n') {
+                println!();
+            }
+            return;
+        }
+
+        self.wrote_stdout = true;
+        self.stdout_text.push_str(remainder);
+        print!("{remainder}");
+        if !remainder.ends_with('\n') {
+            println!();
+        }
+    }
+}
+
+/// Run the agent autonomously: send prompt, consume events, print final response to stdout.
+async fn run_autonomous(
+    mut runtime: LashRuntime,
+    prompt: String,
+    skills: SkillCatalog,
+    persistence: AutonomousPersistenceContext,
+) -> anyhow::Result<()> {
+    let prompt = expand_prompt_skills(&prompt, &skills);
+    let (items, image_blobs) = build_items_from_editor_input(&prompt, Vec::new());
+    let cancel = CancellationToken::new();
+    #[cfg(unix)]
+    {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            if let Ok(mut sig) = signal(SignalKind::terminate()) {
+                sig.recv().await;
+                cancel.cancel();
+            }
+        });
+    }
+    let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
+    let mut task = tokio::spawn(async move {
+        let sink = AutonomousChannelSink { tx: event_tx };
+        let result = runtime
+            .stream_turn(
+                TurnInput {
+                    items,
+                    image_blobs,
+                    mode: Some(RunMode::Normal),
+                },
+                &sink,
+                cancel.clone(),
+            )
+            .await;
+        (runtime, result, cancel)
+    });
+
+    let mut renderer = AutonomousRenderer::new();
+    let (mut runtime, result, cancel) = loop {
+        tokio::select! {
+            Some(event) = event_rx.recv() => renderer.handle(event),
+            join = &mut task => {
+                match join {
+                    Ok(result) => break result,
+                    Err(err) => return Err(anyhow::anyhow!("autonomous turn task failed: {err}")),
+                }
+            }
+        }
+    };
 
     match result {
         Ok(turn) => {
+            persist_autonomous_runtime_state(&mut runtime, &persistence, turn.state.clone()).await;
             if !turn.assistant_output.safe_text.is_empty() {
-                println!("{}", turn.assistant_output.safe_text);
+                renderer.finish_output(&turn.assistant_output.safe_text);
             } else {
                 let raw = turn.assistant_output.raw_text.trim();
                 if raw.is_empty() {
@@ -654,14 +879,16 @@ async fn run_autonomous(mut runtime: LashRuntime, prompt: String) -> anyhow::Res
                 }
                 std::process::exit(2);
             }
+            if cancel.is_cancelled() {
+                std::process::exit(1);
+            }
         }
         Err(e) => {
+            let state = runtime.export_state();
+            persist_autonomous_runtime_state(&mut runtime, &persistence, state).await;
             eprintln!("error: {}", e);
             std::process::exit(1);
         }
-    }
-    if sink.had_error.load(Ordering::Relaxed) {
-        std::process::exit(1);
     }
     Ok(())
 }
@@ -795,16 +1022,29 @@ fn execution_mode_label(mode: ExecutionMode) -> &'static str {
     }
 }
 
-fn resolve_context_folding(
-    configured: ContextFoldingConfig,
-    soft_override: Option<u8>,
-    hard_override: Option<u8>,
-) -> Result<ContextFoldingConfig, String> {
-    ContextFoldingConfig {
-        soft_limit_pct: soft_override.unwrap_or(configured.soft_limit_pct),
-        hard_limit_pct: hard_override.unwrap_or(configured.hard_limit_pct),
+fn parse_context_strategy(input: &str) -> Result<ContextStrategy, String> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" => Err("Context strategy cannot be empty.".to_string()),
+        "rolling_context" | "rolling-context" | "rolling" => Ok(ContextStrategy::RollingContext),
+        "recall_agent" | "recall-agent" | "recall_agent_context" | "recall-agent-context" => {
+            Ok(ContextStrategy::recall_agent_default())
+        }
+        other => Err(format!(
+            "Unknown context strategy `{other}`. Expected `rolling_context` or `recall_agent`."
+        )),
     }
-    .validate()
+}
+
+fn resolve_context_strategy(
+    configured: ContextStrategy,
+    requested: Option<ContextStrategy>,
+) -> Result<ContextStrategy, String> {
+    match requested.unwrap_or(configured) {
+        ContextStrategy::RollingContext => Ok(ContextStrategy::RollingContext),
+        ContextStrategy::RecallAgent { keep_recent_pct } => {
+            ContextStrategy::recall_agent(keep_recent_pct)
+        }
+    }
 }
 
 fn validate_model_selection(provider: &Provider, selection: &ModelSelection) -> Result<(), String> {
@@ -920,7 +1160,7 @@ fn persist_root_agent_state(
     configured_model: &str,
     context_window: u64,
     execution_mode: ExecutionMode,
-    context_folding: ContextFoldingConfig,
+    context_strategy: ContextStrategy,
     model_variant: Option<&str>,
     toolset_hash: &str,
     prompt_hash: Option<String>,
@@ -946,10 +1186,7 @@ fn persist_root_agent_state(
         "resolved_model": manifest.resolved_model,
         "context_window": manifest.context_window,
         "execution_mode": execution_mode_label(execution_mode),
-        "context_folding": {
-            "soft_limit_pct": context_folding.soft_limit_pct,
-            "hard_limit_pct": context_folding.hard_limit_pct,
-        },
+        "context_strategy": context_strategy,
         "model_variant": manifest.model_variant,
         "toolset_hash": manifest.toolset_hash,
         "prompt_hash": manifest.prompt_hash,
@@ -958,10 +1195,7 @@ fn persist_root_agent_state(
     state.replay_manifest = Some(manifest_json.clone());
     let config_json = serde_json::json!({
         "manifest": manifest_json,
-        "context_folding": {
-            "soft_limit_pct": context_folding.soft_limit_pct,
-            "hard_limit_pct": context_folding.hard_limit_pct,
-        },
+        "context_strategy": context_strategy,
         "last_prompt_usage": state.last_prompt_usage.clone(),
         "plugin_snapshot": state.plugin_snapshot,
         "task_state": state.task_state,
@@ -969,9 +1203,12 @@ fn persist_root_agent_state(
     })
     .to_string();
     let messages_json = serde_json::to_string(&state.messages).unwrap_or_else(|_| "[]".to_string());
+    let tool_calls_json =
+        serde_json::to_string(&state.tool_calls).unwrap_or_else(|_| "[]".to_string());
     store.save_agent_state(lash_core::store::AgentStateSave {
         agent_id: "root",
         messages_json: &messages_json,
+        tool_calls_json: &tool_calls_json,
         iteration: state.iteration as i64,
         config_json: &config_json,
         repl_snapshot: state.repl_snapshot.as_deref(),
@@ -1024,7 +1261,7 @@ fn info_text(
     context_window: Option<u64>,
     tool_count: usize,
     toolset_hash: &str,
-    context_folding: ContextFoldingConfig,
+    context_strategy: ContextStrategy,
     cwd: &str,
     session_name: Option<&str>,
 ) -> String {
@@ -1047,11 +1284,17 @@ fn info_text(
         lines.push("context window: unknown".to_string());
     }
 
+    let context_line = match context_strategy {
+        ContextStrategy::RollingContext => "context strategy: rolling_context".to_string(),
+        ContextStrategy::RecallAgent { keep_recent_pct } => {
+            format!(
+                "context strategy: recall_agent (keep_recent={}%)",
+                keep_recent_pct
+            )
+        }
+    };
     lines.extend([
-        format!(
-            "context folding: soft={}%, hard={}%",
-            context_folding.soft_limit_pct, context_folding.hard_limit_pct
-        ),
+        context_line,
         format!("tools: {} (hash {})", tool_count, toolset_hash),
         format!("cwd: {}", cwd),
         format!("session: {}", session_name.unwrap_or("(not started)")),
@@ -1227,10 +1470,10 @@ async fn run_app(
         .session_manager()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let mut runtime = Some(runtime);
-    let mut current_context_folding = runtime
+    let mut current_context_strategy = runtime
         .as_ref()
-        .map(|rt| rt.export_state().context_folding)
-        .unwrap_or_default();
+        .map(|rt| rt.export_state().policy.context_strategy)
+        .unwrap_or_else(lash_core::default_context_strategy);
     let mut desired_dynamic = dynamic_tools.export_state();
     let mut pending_reconfigure = false;
 
@@ -1317,6 +1560,7 @@ async fn run_app(
             &mut runtime,
             &mut turn_counter,
             &mut current_execution_mode,
+            &mut current_context_strategy,
             &provider,
             &mut current_model_variant,
             &dynamic_tools,
@@ -1368,7 +1612,8 @@ async fn run_app(
                     &serde_json::to_vec(&dynamic_tools.definitions())
                         .unwrap_or_else(|_| b"[]".to_vec()),
                 );
-                let (items, image_blobs) = build_items_from_editor_input(prompt, Vec::new());
+                let prompt_text = expand_prompt_skills(prompt, &app.skills);
+                let (items, image_blobs) = build_items_from_editor_input(&prompt_text, Vec::new());
                 let turn_input = make_turn_input(&mut app, items, image_blobs);
                 send_user_message(
                     prompt.to_string(),
@@ -1451,7 +1696,7 @@ async fn run_app(
 
                     // Snapshot REPL after each completed turn so resume can restore exact state.
                     let snapshot_hash = if let Some(rt) = runtime.as_mut() {
-                        if matches!(state.execution_mode, ExecutionMode::Repl) {
+                        if matches!(state.policy.execution_mode, ExecutionMode::Repl) {
                             match rt.snapshot_repl().await {
                                 Ok(blob) => {
                                     state = rt.export_state();
@@ -1480,10 +1725,10 @@ async fn run_app(
                     turn_counter = state.iteration;
                     app.token_usage = state.token_usage.clone();
                     app.last_prompt_usage = state.last_prompt_usage.clone();
-                    current_context_folding = state.context_folding;
+                    current_context_strategy = state.policy.context_strategy;
 
-                    let persisted_execution_mode = state.execution_mode;
-                    let persisted_context_folding = state.context_folding;
+                    let persisted_execution_mode = state.policy.execution_mode;
+                    let persisted_context_strategy = state.policy.context_strategy;
                     let persisted_dynamic_state = dynamic_tools.export_state();
                     persist_root_agent_state(
                         &store,
@@ -1494,7 +1739,7 @@ async fn run_app(
                         app.context_window
                             .expect("app context_window must be set before persisting state"),
                         persisted_execution_mode,
-                        persisted_context_folding,
+                        persisted_context_strategy,
                         current_model_variant.as_deref(),
                         &toolset_hash,
                         latest_user_prompt_hash(&history),
@@ -1536,8 +1781,9 @@ async fn run_app(
                             &serde_json::to_vec(&dynamic_tools.definitions())
                                 .unwrap_or_else(|_| b"[]".to_vec()),
                         );
+                        let prompt_text = expand_prompt_skills(&queued.text, &app.skills);
                         let (items, image_blobs) =
-                            build_items_from_editor_input(&queued.text, queued.images.clone());
+                            build_items_from_editor_input(&prompt_text, queued.images.clone());
                         let turn_input = make_turn_input(&mut app, items, image_blobs);
                         send_user_message(
                             queued.text.clone(),
@@ -1780,6 +2026,7 @@ async fn run_app(
                                     &mut runtime,
                                     &mut turn_counter,
                                     &mut current_execution_mode,
+                                    &mut current_context_strategy,
                                     &provider,
                                     &mut current_model_variant,
                                     &dynamic_tools,
@@ -1905,8 +2152,9 @@ async fn run_app(
                             continue;
                         }
 
+                        let prompt_text = expand_prompt_skills(&queued.text, &app.skills);
                         let (items, image_blobs) =
-                            build_items_from_editor_input(&queued.text, queued.images);
+                            build_items_from_editor_input(&prompt_text, queued.images);
                         let turn_input = make_turn_input(&mut app, items, image_blobs);
                         send_user_message(
                             queued.text.clone(),
@@ -1980,9 +2228,10 @@ async fn run_app(
                                 app.pending_images = queued.images;
                                 continue;
                             }
+                            let injection_text = expand_prompt_skills(&queued.text, &app.skills);
                             let injection = PluginMessage {
                                 role: MessageRole::User,
-                                content: queued.text.clone(),
+                                content: injection_text,
                             };
                             match turn_injection_bridge.enqueue(vec![injection]) {
                                 Ok(()) => {
@@ -2088,12 +2337,16 @@ async fn run_app(
                                         let _ = rt.reset_session().await;
                                         rt.set_state(AgentStateEnvelope {
                                             agent_id: "root".to_string(),
-                                            context_folding: current_context_folding,
+                                            policy: SessionPolicy {
+                                                execution_mode: current_execution_mode,
+                                                context_strategy: current_context_strategy,
+                                                ..rt.export_state().policy
+                                            },
                                             messages: history.clone(),
+                                            tool_calls: Vec::new(),
                                             iteration: turn_counter,
                                             token_usage: app.token_usage.clone(),
                                             last_prompt_usage: None,
-                                            execution_mode: current_execution_mode,
                                             task_state: None,
                                             replay_manifest: None,
                                             plugin_snapshot: None,
@@ -2140,7 +2393,7 @@ async fn run_app(
                                             context_window,
                                             dynamic_tools.definitions().len(),
                                             &toolset_hash,
-                                            current_context_folding,
+                                            current_context_strategy,
                                             &cwd,
                                             Some(&session_name),
                                         ),
@@ -2681,6 +2934,7 @@ async fn run_app(
                                             &mut runtime,
                                             &mut turn_counter,
                                             &mut current_execution_mode,
+                                            &mut current_context_strategy,
                                             &provider,
                                             &mut current_model_variant,
                                             &dynamic_tools,
@@ -3044,8 +3298,9 @@ async fn run_app(
                             &serde_json::to_vec(&dynamic_tools.definitions())
                                 .unwrap_or_else(|_| b"[]".to_vec()),
                         );
+                        let prompt_text = expand_prompt_skills(&queued.text, &app.skills);
                         let (items, image_blobs) =
-                            build_items_from_editor_input(&queued.text, queued.images);
+                            build_items_from_editor_input(&prompt_text, queued.images);
                         let turn_input = make_turn_input(&mut app, items, image_blobs);
                         send_user_message(
                             queued.text.clone(),
@@ -3180,6 +3435,10 @@ fn make_turn_input(
         image_blobs,
         mode: Some(RunMode::Normal),
     }
+}
+
+fn expand_prompt_skills(text: &str, skills: &SkillCatalog) -> String {
+    lash_core::append_skill_blocks(text, skills)
 }
 
 fn parse_kv_args(raw: &str) -> HashMap<String, String> {
@@ -3377,7 +3636,7 @@ fn send_user_message(
                 },
                 done_reason: DoneReason::RuntimeError,
                 execution: ExecutionSummary {
-                    mode: rt.export_state().execution_mode,
+                    mode: rt.export_state().policy.execution_mode,
                     had_tool_calls: false,
                     had_code_execution: false,
                 },
@@ -3600,5 +3859,20 @@ mod tests {
         let controls = controls_text();
         assert!(controls.contains("Alt+Up             Edit last queued turn"));
         assert!(!controls.contains("Backspace          Restore last next-turn draft"));
+    }
+
+    #[test]
+    fn autonomous_renderer_prints_missing_final_tail_after_streamed_prefix() {
+        let mut renderer = AutonomousRenderer::new();
+        renderer.handle(AgentEvent::TextDelta {
+            content: "Inspected files.\n".to_string(),
+        });
+
+        renderer.finish_output("Inspected files.\nCompleted successfully.");
+
+        assert_eq!(
+            renderer.stdout_text,
+            "Inspected files.\nCompleted successfully."
+        );
     }
 }

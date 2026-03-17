@@ -311,16 +311,16 @@ mod tests {
         ) -> Result<crate::SessionHandle, crate::PluginError> {
             Ok(crate::SessionHandle {
                 session_id: request.agent_id.unwrap_or_else(|| "child".to_string()),
-                config: crate::SessionConfigSnapshot {
-                    provider_kind: crate::provider::ProviderKind::OpenAiGeneric,
+                policy: crate::SessionPolicy {
+                    provider: crate::Provider::OpenAiGeneric {
+                        api_key: String::new(),
+                        base_url: crate::provider::OPENAI_GENERIC_DEFAULT_BASE_URL.to_string(),
+                        options: crate::ProviderOptions::default(),
+                    },
                     model: "mock-model".to_string(),
-                    model_variant: None,
                     execution_mode: ExecutionMode::Standard,
-                    context_folding: crate::ContextFoldingConfig::default(),
-                    context_window: None,
-                    max_turns: None,
-                    include_soul: false,
-                    sub_agent: false,
+                    context_strategy: crate::default_context_strategy(),
+                    ..Default::default()
                 },
             })
         }
@@ -338,16 +338,16 @@ mod tests {
             Ok(crate::plugin::SessionTurnHandle {
                 turn_id: format!("{session_id}-turn"),
                 session_id: session_id.to_string(),
-                config: crate::SessionConfigSnapshot {
-                    provider_kind: crate::provider::ProviderKind::OpenAiGeneric,
+                policy: crate::SessionPolicy {
+                    provider: crate::Provider::OpenAiGeneric {
+                        api_key: String::new(),
+                        base_url: crate::provider::OPENAI_GENERIC_DEFAULT_BASE_URL.to_string(),
+                        options: crate::ProviderOptions::default(),
+                    },
                     model: "mock-model".to_string(),
-                    model_variant: None,
                     execution_mode: ExecutionMode::Standard,
-                    context_folding: crate::ContextFoldingConfig::default(),
-                    context_window: None,
-                    max_turns: None,
-                    include_soul: false,
-                    sub_agent: false,
+                    context_strategy: crate::default_context_strategy(),
+                    ..Default::default()
                 },
                 events: rx,
             })

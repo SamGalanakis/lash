@@ -96,8 +96,11 @@ where
     loop {
         let chunk_opt = tokio::time::timeout(timeout, resp.chunk())
             .await
-            .map_err(|_| LlmTransportError::new(read_timeout_message))?
-            .map_err(|e| LlmTransportError::new(format!("Stream read failed: {e}")))?;
+            .map_err(|_| LlmTransportError::new(read_timeout_message).retryable(true))?
+            .map_err(|e| {
+                LlmTransportError::new(format!("Stream read failed: {e}"))
+                    .retryable(e.is_timeout() || e.is_connect() || e.is_body() || e.is_decode())
+            })?;
         let Some(chunk) = chunk_opt else { break };
         buffer.push_chunk(&chunk, &mut on_event)?;
     }
@@ -114,10 +117,10 @@ pub fn emit_progress(
     let Some(tx) = tx else {
         return;
     };
-    for piece in deltas.iter().skip(prev_len) {
-        let _ = tx.send(LlmStreamEvent::Delta(piece.clone()));
-    }
     if usage != prev_usage && usage != &LlmUsage::default() {
         let _ = tx.send(LlmStreamEvent::Usage(usage.clone()));
+    }
+    for piece in deltas.iter().skip(prev_len) {
+        let _ = tx.send(LlmStreamEvent::Delta(piece.clone()));
     }
 }

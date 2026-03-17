@@ -8,8 +8,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::embedded::{LashlangRequest, LashlangResponse, LashlangRuntime};
 use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call};
 use crate::{
-    AgentEvent, PluginMessage, RuntimeServices, SandboxMessage, SessionManager, ToolCallRecord,
-    ToolImage, ToolProvider,
+    AgentEvent, PluginMessage, PromptContribution, RuntimeServices, SandboxMessage, SessionManager,
+    ToolCallRecord, ToolImage, ToolProvider,
 };
 
 const REPL_SNAPSHOT_VERSION: u32 = 3;
@@ -109,6 +109,9 @@ pub struct Session {
     agent_id: String,
     repl_runtime: Option<LashlangRuntime>,
     services: RuntimeServices,
+    include_base_tools: bool,
+    context_tools: Vec<Arc<dyn ToolProvider>>,
+    context_prompt_contributions: Vec<PromptContribution>,
     tool_calls: Vec<ToolCallRecord>,
     tool_images: Vec<ToolImage>,
     message_tx: Option<UnboundedSender<SandboxMessage>>,
@@ -127,6 +130,9 @@ impl Session {
             agent_id: agent_id.to_string(),
             repl_runtime: None,
             services,
+            include_base_tools: true,
+            context_tools: Vec::new(),
+            context_prompt_contributions: Vec::new(),
             tool_calls: Vec::new(),
             tool_images: Vec::new(),
             message_tx: None,
@@ -153,11 +159,81 @@ impl Session {
     }
 
     pub fn tools(&self) -> Arc<dyn ToolProvider> {
-        self.services.plugins.tools()
+        if self.include_base_tools && self.context_tools.is_empty() {
+            return self.services.plugins.tools();
+        }
+
+        let mut providers = Vec::new();
+        if self.include_base_tools {
+            providers.push(self.services.plugins.tools());
+        }
+        providers.extend(self.context_tools.iter().cloned());
+        Arc::new(crate::tools::CompositeToolProvider::from_providers(
+            providers,
+        ))
     }
 
     pub fn plugins(&self) -> &Arc<crate::PluginSession> {
         &self.services.plugins
+    }
+
+    pub fn set_context_surface(
+        &mut self,
+        tool_providers: Vec<Arc<dyn ToolProvider>>,
+        prompt_contributions: Vec<PromptContribution>,
+        include_base_tools: bool,
+    ) {
+        self.include_base_tools = include_base_tools;
+        self.context_tools = tool_providers;
+        self.context_prompt_contributions = prompt_contributions;
+    }
+
+    pub fn context_prompt_contributions(&self) -> &[PromptContribution] {
+        &self.context_prompt_contributions
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    pub fn history_store(&self) -> Option<Arc<crate::store::Store>> {
+        self.services.store.clone()
+    }
+
+    #[cfg(not(feature = "sqlite-store"))]
+    pub fn history_store(&self) -> Option<()> {
+        None
+    }
+
+    pub fn execution_surface(
+        &self,
+        session_id: &str,
+        mode: crate::ExecutionMode,
+    ) -> crate::plugin::ExecutionSurface {
+        let mut tools = self.tools().definitions();
+        if self.include_base_tools {
+            tools.extend(
+                crate::tools::native_tools(mode)
+                    .iter()
+                    .copied()
+                    .map(crate::tools::NativeTool::definition),
+            );
+        }
+        self.plugins()
+            .resolve_tool_surface(crate::plugin::ToolSurfaceContext {
+                session_id: session_id.to_string(),
+                mode,
+                tools: tools.clone(),
+            })
+            .unwrap_or_else(|err| {
+                tracing::warn!("failed to resolve tool surface: {err}");
+                crate::plugin::ExecutionSurface::from_tools(tools)
+            })
+    }
+
+    pub fn tool_catalog(
+        &self,
+        session_id: &str,
+        mode: crate::ExecutionMode,
+    ) -> Vec<serde_json::Value> {
+        crate::tools::project_tool_catalog(self.execution_surface(session_id, mode).enabled_tools())
     }
 
     pub fn turn_injection_bridge(&self) -> &TurnInjectionBridge {
@@ -222,6 +298,8 @@ impl Session {
         // can dispatch multiple tools at the same time.
         let dispatch = Arc::new(ToolDispatchContext {
             plugins: Arc::clone(self.plugins()),
+            tools: self.tools(),
+            surface: self.execution_surface(session_id, crate::ExecutionMode::Repl),
             host,
             session_id: session_id.to_string(),
             execution_mode: crate::ExecutionMode::Repl,
@@ -304,6 +382,7 @@ impl Session {
                             }
                             Err(e) => {
                                 self.tool_calls.push(ToolCallRecord {
+                                    call_id: None,
                                     tool: "unknown".into(),
                                     args: json!({}),
                                     result: json!({"error": format!("task panicked: {e}")}),
@@ -377,12 +456,9 @@ impl Session {
             return Ok(());
         }
 
-        let tools_json = serde_json::to_string(
-            &self
-                .plugins()
-                .tool_catalog(&self.agent_id, crate::ExecutionMode::Repl),
-        )
-        .unwrap_or_else(|_| "[]".to_string());
+        let tools_json =
+            serde_json::to_string(&self.tool_catalog(&self.agent_id, crate::ExecutionMode::Repl))
+                .unwrap_or_else(|_| "[]".to_string());
         let generation = self.tools().dynamic_generation().unwrap_or(0);
         self.runtime()?.send(LashlangRequest::Reconfigure {
             tools_json,
@@ -413,12 +489,9 @@ impl Session {
     }
 
     async fn initialize_execution_surface(&mut self, agent_id: &str) -> Result<(), SessionError> {
-        let tools_json = serde_json::to_string(
-            &self
-                .plugins()
-                .tool_catalog(agent_id, crate::ExecutionMode::Repl),
-        )
-        .unwrap_or_else(|_| "[]".to_string());
+        let tools_json =
+            serde_json::to_string(&self.tool_catalog(agent_id, crate::ExecutionMode::Repl))
+                .unwrap_or_else(|_| "[]".to_string());
         self.runtime()?.send(LashlangRequest::Init {
             tools_json,
             agent_id: agent_id.to_string(),
@@ -581,4 +654,112 @@ fn restore_files(root: &Path, files: &HashMap<String, String>) -> std::io::Resul
         std::fs::write(&full, content)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugin::StaticPluginFactory;
+    use crate::tools::UpdatePlanTool;
+    use crate::{PluginError, PluginHost, PluginSpec, SessionHandle, SessionSnapshot, TurnInput};
+
+    struct NoopManager;
+
+    #[async_trait::async_trait]
+    impl SessionManager for NoopManager {
+        async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
+            Err(PluginError::Session("snapshot unavailable".to_string()))
+        }
+
+        async fn snapshot_session(
+            &self,
+            _session_id: &str,
+        ) -> Result<SessionSnapshot, PluginError> {
+            Err(PluginError::Session("snapshot unavailable".to_string()))
+        }
+
+        async fn tool_catalog(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<serde_json::Value>, PluginError> {
+            Err(PluginError::Session("tool catalog unavailable".to_string()))
+        }
+
+        async fn create_session(
+            &self,
+            _request: crate::SessionCreateRequest,
+        ) -> Result<SessionHandle, PluginError> {
+            Err(PluginError::Session(
+                "session creation unavailable".to_string(),
+            ))
+        }
+
+        async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
+            Err(PluginError::Session(
+                "session close unavailable".to_string(),
+            ))
+        }
+
+        async fn start_turn_stream(
+            &self,
+            _session_id: &str,
+            _input: TurnInput,
+        ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
+            Err(PluginError::Session(
+                "turn streaming unavailable".to_string(),
+            ))
+        }
+
+        async fn await_turn(&self, _turn_id: &str) -> Result<crate::AssembledTurn, PluginError> {
+            Err(PluginError::Session("await turn unavailable".to_string()))
+        }
+
+        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
+            Err(PluginError::Session("cancel turn unavailable".to_string()))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_code_finishes_after_tool_call_in_same_block() {
+        let tools: Arc<dyn crate::ToolProvider> = Arc::new(UpdatePlanTool::new());
+        let plugin_host = PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
+            "test_tools",
+            PluginSpec::new().with_tool_provider(Arc::clone(&tools)),
+        ))]);
+        let plugin_session = plugin_host
+            .build_session("root", crate::ExecutionMode::Repl, None)
+            .expect("plugin session");
+        let mut session = Session::new(
+            crate::RuntimeServices::new(plugin_session),
+            "root",
+            crate::ExecutionMode::Repl,
+        )
+        .await
+        .expect("session");
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
+        let manager: Arc<dyn SessionManager> = Arc::new(NoopManager);
+
+        let response = session
+            .run_code(
+                "root",
+                manager,
+                &event_tx,
+                r#"
+call update_plan {
+  explanation: "done",
+  plan: [{ step: "ship it", status: "completed" }]
+}
+finish "ok"
+"#,
+            )
+            .await
+            .expect("exec response");
+
+        assert!(response.finished, "finish should terminate the turn");
+        assert_eq!(response.response, "ok");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].tool, "update_plan");
+        assert!(response.tool_calls[0].success);
+    }
 }

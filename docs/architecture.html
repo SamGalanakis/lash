@@ -1690,8 +1690,8 @@ worker = <span class="kw">call</span> agent_call { prompt: <span class="str">"Se
         </div>
         <div class="step">
           <span class="step-num">05</span>
-          <strong>Fold + Output</strong>
-          <p>When the normalized context-budget snapshot reaches the hard watermark, old turns are folded back toward the soft watermark with one stable archive marker; streamed usage updates keep the TUI token counters live, and the final answer + updated envelope return as one canonical <code>AssembledTurn</code>.</p>
+          <strong>Context + Output</strong>
+          <p><code>rolling_context</code> prunes older tool output and compacts oversized prefixes; <code>recall_agent</code> trims older context and exposes retrieval helpers. Streamed usage updates keep the TUI token counters live, and the final answer + updated envelope return as one canonical <code>AssembledTurn</code>.</p>
         </div>
       </div>
     </div>
@@ -1719,7 +1719,7 @@ worker = <span class="kw">call</span> agent_call { prompt: <span class="str">"Se
       <div class="ref"><b>Embedded REPL</b><code>lash/src/embedded.rs</code></div>
       <div class="ref"><b>Tool Model</b><code>lash/src/lib.rs + lash/src/tools/*</code></div>
       <div class="ref"><b>Plugins &amp; Surface</b><code>lash/src/plugin.rs + lash/src/plugin_builtin.rs</code></div>
-      <div class="ref"><b>Skills</b><code>lash/src/tools/skills.rs</code></div>
+      <div class="ref"><b>Skill Expansion</b><code>lash/src/skill_prompt.rs</code></div>
     </div>
   </div>
 

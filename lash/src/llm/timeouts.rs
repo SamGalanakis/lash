@@ -27,6 +27,10 @@ pub fn build_http_client() -> reqwest::Client {
         .expect("failed to build reqwest client for llm transport")
 }
 
+fn is_retryable_http_error(error: &reqwest::Error) -> bool {
+    error.is_timeout() || error.is_connect() || error.is_body() || error.is_decode()
+}
+
 pub fn response_start_timeout(
     request_timeout: Option<Duration>,
     chunk_timeout: Duration,
@@ -68,7 +72,7 @@ pub async fn send_request(
         async move {
             request.send().await.map_err(|e| {
                 LlmTransportError::new(format!("HTTP request failed: {e}"))
-                    .retryable(e.is_timeout())
+                    .retryable(is_retryable_http_error(&e))
             })
         },
         timeout,
@@ -86,7 +90,7 @@ pub async fn read_response_text(
         async move {
             response.text().await.map_err(|e| {
                 LlmTransportError::new(format!("HTTP response read failed: {e}"))
-                    .retryable(e.is_timeout())
+                    .retryable(is_retryable_http_error(&e))
             })
         },
         timeout,

@@ -1,17 +1,14 @@
+pub(crate) mod context;
 pub(crate) mod exec;
 pub mod message;
 pub(crate) mod prompt;
 
-use std::path::PathBuf;
-use std::sync::Arc;
-
 use tokio::sync::mpsc;
 
-use crate::ContextFoldingConfig;
+use crate::ContextStrategy;
 use crate::ExecutionMode;
 use crate::PromptContext;
 use crate::ToolDefinition;
-use crate::instructions::{FsInstructionSource, InstructionSource};
 use crate::llm::factory::adapter_for;
 use crate::llm::types::{LlmStreamEvent, LlmToolSpec};
 use crate::plugin::PromptContribution;
@@ -19,7 +16,9 @@ use crate::plugin::{CheckpointKind, PluginMessage, PluginSurfaceEvent};
 use crate::provider::{OPENAI_GENERIC_DEFAULT_BASE_URL, Provider};
 use crate::session::Session;
 
-pub use message::{Message, MessageRole, Part, PartKind, PruneState, render_transcript_prompt};
+pub use message::{
+    Message, MessageRole, Part, PartKind, PruneState, render_prompt, render_transcript_prompt,
+};
 
 pub use prompt::{
     DefaultPromptRenderer, PromptOverrideMode, PromptRenderer, PromptSectionName,
@@ -60,9 +59,9 @@ impl TokenUsage {
     }
 }
 
-/// Configuration for the agent loop.
-#[derive(Clone)]
-pub struct AgentConfig {
+/// Resolved session policy for a running agent/session.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionPolicy {
     /// Model identifier (e.g. "anthropic/claude-sonnet-4.6")
     pub model: String,
     /// LLM provider (OpenAI-generic, Claude OAuth, Codex, or Google OAuth)
@@ -73,27 +72,22 @@ pub struct AgentConfig {
     pub sub_agent: bool,
     /// Optional provider-native model variant (e.g. "high", "max", "xhigh").
     pub model_variant: Option<String>,
+    /// Optional override model for the recall-agent child session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall_agent_model: Option<String>,
     /// Optional host session ID propagated to provider request metadata.
     pub session_id: Option<String>,
     /// Optional turn limit. None = unlimited (default for root agent).
     pub max_turns: Option<usize>,
     /// When true, include Soul principles in the system prompt.
     pub include_soul: bool,
-    /// When set, append raw LLM request/response JSON to this file (debug logging).
-    pub llm_log_path: Option<PathBuf>,
-    /// Ordered prompt section overrides applied on top of the selected profile.
-    pub prompt_overrides: Vec<PromptSectionOverride>,
-    /// Pluggable prompt renderer. Defaults to the built-in renderer.
-    pub prompt_renderer: Arc<dyn PromptRenderer>,
-    /// Host-provided instruction source (filesystem by default).
-    pub instruction_source: Arc<dyn InstructionSource>,
     /// Execution backend for turns.
     pub execution_mode: ExecutionMode,
-    /// Watermark policy for folding old context out of the active prompt window.
-    pub context_folding: ContextFoldingConfig,
+    /// Strategy for selecting/rendering prior context into the next turn.
+    pub context_strategy: ContextStrategy,
 }
 
-impl Default for AgentConfig {
+impl Default for SessionPolicy {
     fn default() -> Self {
         Self {
             model: "anthropic/claude-sonnet-4.6".to_string(),
@@ -105,15 +99,12 @@ impl Default for AgentConfig {
             max_context_tokens: None,
             sub_agent: false,
             model_variant: None,
+            recall_agent_model: None,
             session_id: None,
             max_turns: None,
             include_soul: false,
-            llm_log_path: None,
-            prompt_overrides: Vec::new(),
-            prompt_renderer: default_prompt_renderer(),
-            instruction_source: Arc::new(FsInstructionSource::new()),
             execution_mode: crate::default_execution_mode(),
-            context_folding: ContextFoldingConfig::default(),
+            context_strategy: crate::default_context_strategy(),
         }
     }
 }
@@ -143,6 +134,8 @@ pub enum AgentEvent {
     TextDelta { content: String },
     #[serde(rename = "tool_call")]
     ToolCall {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
         name: String,
         args: serde_json::Value,
         result: serde_json::Value,
@@ -375,12 +368,12 @@ pub(crate) fn transport_stream_events(
 
 pub(crate) fn build_execution_preamble(
     session: &Session,
-    config: &AgentConfig,
+    policy: &SessionPolicy,
     mode: ExecutionMode,
     model: String,
 ) -> ExecutionPreamble {
-    let session_id = config.session_id.as_deref().unwrap_or("root");
-    let surface = session.plugins().execution_surface(session_id, mode);
+    let session_id = policy.session_id.as_deref().unwrap_or("root");
+    let surface = session.execution_surface(session_id, mode);
     let enabled_tools = surface.enabled_tools();
     let (tool_list, omitted_tool_count) = if matches!(mode, ExecutionMode::Repl) {
         let prompt_tools = surface.prompt_tools();
@@ -417,10 +410,10 @@ pub(crate) fn build_execution_preamble(
         tool_list,
         tool_names,
         omitted_tool_count,
-        is_subagent: config.sub_agent,
+        is_subagent: policy.sub_agent,
         can_write,
-        include_soul: if config.sub_agent {
-            config.include_soul
+        include_soul: if policy.sub_agent {
+            policy.include_soul
         } else {
             true
         },
@@ -636,12 +629,10 @@ pub(crate) fn parse_fence_line(
             append_line_segment(current_code, before, &mut code_started_this_line);
             *in_code_fence = false;
             let code = std::mem::take(current_code);
-            remaining = &remaining[idx + CLOSE_TAG.len()..];
-            code_started_this_line = false;
             if !code.trim().is_empty() {
                 out.codes_to_execute.push(code);
             }
-            continue;
+            break;
         }
 
         append_line_segment(current_code, remaining, &mut code_started_this_line);
@@ -716,13 +707,13 @@ mod tests {
         );
 
         assert_eq!(out.codes_to_execute, vec!["x = 1\nprint(x)"]);
-        assert_eq!(out.prose_delta, " trailing text");
+        assert!(out.prose_delta.is_empty());
         assert!(!in_code_fence);
         assert!(current_code.is_empty());
     }
 
     #[test]
-    fn parses_multiple_inline_blocks_on_same_line() {
+    fn ignores_second_inline_block_after_first_closes() {
         let mut in_code_fence = false;
         let mut current_prose = String::new();
         let mut current_code = String::new();
@@ -737,7 +728,7 @@ mod tests {
         );
 
         assert!(out.prose_delta.is_empty());
-        assert_eq!(out.codes_to_execute, vec!["a=1", "b=2"]);
+        assert_eq!(out.codes_to_execute, vec!["a=1"]);
         assert!(!in_code_fence);
     }
 

@@ -8,7 +8,8 @@ use crate::llm::timeouts::{
 };
 use crate::llm::transport::{LlmTransport, LlmTransportError};
 use crate::llm::types::{
-    LlmOutputPart, LlmPromptPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage, ModelSelection,
+    LlmMessage, LlmOutputPart, LlmPromptPart, LlmReplayChunk, LlmRequest, LlmResponse, LlmRole,
+    LlmStreamEvent, LlmUsage, ModelSelection, coalesce_replay_messages,
 };
 use crate::model_variant::VariantRequestConfig;
 use crate::provider::Provider;
@@ -110,8 +111,115 @@ impl ClaudeOAuthAdapter {
         })
     }
 
+    fn claude_text_block(text: String) -> Value {
+        json!({"type": "text", "text": text})
+    }
+
+    fn message_role(role: &LlmRole) -> &'static str {
+        match role {
+            LlmRole::Assistant => "assistant",
+            LlmRole::User | LlmRole::System => "user",
+        }
+    }
+
+    fn content_blocks_for_message(req: &LlmRequest, msg: &LlmMessage) -> Vec<Value> {
+        match msg.kind.as_str() {
+            "image" if matches!(msg.role, LlmRole::User) => {
+                let idx = msg.image_idx.max(0) as usize;
+                if let Some(att) = req.attachments.get(idx) {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
+                    vec![json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": att.mime,
+                            "data": b64,
+                        }
+                    })]
+                } else {
+                    vec![Self::claude_text_block("[Image attached]".to_string())]
+                }
+            }
+            _ => {
+                let text = if matches!(msg.role, LlmRole::System) {
+                    format!("Runtime note:\n{}", msg.content)
+                } else {
+                    msg.content.clone()
+                };
+                vec![Self::claude_text_block(text)]
+            }
+        }
+    }
+
     fn build_messages(req: &LlmRequest) -> Vec<Value> {
-        vec![Self::user_message_json(req)]
+        if !req.messages.is_empty() {
+            let mut out = Vec::new();
+            for chunk in coalesce_replay_messages(&req.messages) {
+                match chunk {
+                    LlmReplayChunk::Message(msg) => out.push(json!({
+                        "role": Self::message_role(&msg.role),
+                        "content": Self::content_blocks_for_message(req, &msg),
+                    })),
+                    LlmReplayChunk::AssistantToolCalls { text, tool_calls } => {
+                        let mut blocks = Vec::new();
+                        if let Some(text) = text.filter(|text| !text.is_empty()) {
+                            blocks.push(Self::claude_text_block(text));
+                        }
+                        blocks.extend(tool_calls.into_iter().map(|call| {
+                            let input = serde_json::from_str::<Value>(&call.input_json)
+                                .unwrap_or_else(|_| json!({"_raw": call.input_json}));
+                            json!({
+                                "type": "tool_use",
+                                "id": call.call_id,
+                                "name": Self::prefixed_tool_name(&call.tool_name),
+                                "input": input,
+                            })
+                        }));
+                        out.push(json!({
+                            "role": "assistant",
+                            "content": blocks,
+                        }));
+                    }
+                    LlmReplayChunk::ToolResults { results } => {
+                        let blocks = results
+                            .into_iter()
+                            .map(|msg| {
+                                json!({
+                                    "type": "tool_result",
+                                    "tool_use_id": msg.tool_call_id.unwrap_or_default(),
+                                    "content": msg.content,
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        out.push(json!({
+                            "role": "user",
+                            "content": blocks,
+                        }));
+                    }
+                }
+            }
+            Self::mark_recent_messages_ephemeral(&mut out);
+            return out;
+        }
+
+        let mut out = vec![Self::user_message_json(req)];
+        Self::mark_recent_messages_ephemeral(&mut out);
+        out
+    }
+
+    fn mark_recent_messages_ephemeral(messages: &mut [Value]) {
+        let mark_from = messages.len().saturating_sub(2);
+        for message in &mut messages[mark_from..] {
+            let Some(content) = message.get_mut("content").and_then(|v| v.as_array_mut()) else {
+                continue;
+            };
+            let Some(last) = content.last_mut() else {
+                continue;
+            };
+            if last.get("cache_control").is_none() {
+                last["cache_control"] = json!({ "type": "ephemeral" });
+            }
+        }
     }
 
     fn build_request_body(provider: &Provider, req: &LlmRequest) -> Value {
@@ -491,11 +599,11 @@ impl LlmTransport for ClaudeOAuthAdapter {
                 });
             }
             if let Some(tx) = &stream_events {
-                if !content.is_empty() {
-                    let _ = tx.send(LlmStreamEvent::Delta(content.clone()));
-                }
                 if usage != LlmUsage::default() {
                     let _ = tx.send(LlmStreamEvent::Usage(usage.clone()));
+                }
+                if !content.is_empty() {
+                    let _ = tx.send(LlmStreamEvent::Delta(content.clone()));
                 }
             }
             return Ok(LlmResponse {
@@ -718,6 +826,86 @@ mod tests {
         assert_eq!(messages[0]["role"], "user");
         assert_eq!(messages[0]["content"].as_array().map(Vec::len), Some(1));
         assert_eq!(messages[0]["content"][0]["text"], "history");
+    }
+
+    #[test]
+    fn build_messages_uses_structured_replay_for_standard_mode() {
+        let req = LlmRequest {
+            model: "claude-sonnet".to_string(),
+            system_prompt: "sys".to_string(),
+            user_prompt: vec![],
+            messages: vec![
+                LlmMessage {
+                    role: LlmRole::System,
+                    content: "note".to_string(),
+                    kind: "text".to_string(),
+                    image_idx: -1,
+                    tool_call_id: None,
+                    tool_name: None,
+                },
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: "{\"path\":\"README.md\"}".to_string(),
+                    kind: "tool_call".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_1".to_string()),
+                    tool_name: Some("read_file".to_string()),
+                },
+                LlmMessage {
+                    role: LlmRole::User,
+                    content: "ok".to_string(),
+                    kind: "tool_result".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_1".to_string()),
+                    tool_name: Some("read_file".to_string()),
+                },
+            ],
+            attachments: vec![],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: None,
+            stream_events: None,
+        };
+
+        let messages = ClaudeOAuthAdapter::build_messages(&req);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"][0]["text"], "Runtime note:\nnote");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+        assert_eq!(
+            messages[1]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert_eq!(
+            messages[2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    #[test]
+    fn build_messages_marks_recent_user_prompt_ephemeral() {
+        let req = LlmRequest {
+            model: "claude-opus-4-6".to_string(),
+            system_prompt: "sys".to_string(),
+            user_prompt: vec![LlmPromptPart::Text("hi".to_string())],
+            messages: vec![],
+            attachments: vec![],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::None,
+            model_variant: None,
+            session_id: None,
+            stream_events: None,
+        };
+
+        let messages = ClaudeOAuthAdapter::build_messages(&req);
+        assert_eq!(
+            messages[0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
     }
 
     #[test]
