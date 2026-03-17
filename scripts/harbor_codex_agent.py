@@ -14,21 +14,9 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 from harbor.utils.templating import render_prompt_template
 
-def _find_codex_binary() -> Path:
-    """Locate the codex binary on the host, checking common locations."""
-    import shutil
-
-    found = shutil.which("codex")
-    if found:
-        return Path(found)
-    return Path("/usr/bin/codex")
-
-
-DEFAULT_CODEX_BINARY = _find_codex_binary()
 HOST_CA_CERT_BUNDLE = Path("/etc/ssl/certs/ca-certificates.crt")
 REMOTE_CA_CERT_DIR = "/etc/ssl/certs"
 REMOTE_CA_CERT_BUNDLE = f"{REMOTE_CA_CERT_DIR}/ca-certificates.crt"
-REMOTE_CODEX_BINARY = "/installed-agent/codex"
 REMOTE_CODEX_CONFIG_DIR = "/root/.codex"
 
 INSTALL_GNU_TIME_COMMAND = """
@@ -48,6 +36,25 @@ if [ ! -x /usr/bin/time ]; then
     zypper --non-interactive install time
   fi
 fi
+"""
+
+# Install Node.js (if not present) and then install codex globally via npm.
+INSTALL_CODEX_COMMAND = """
+export DEBIAN_FRONTEND=noninteractive
+if ! command -v node >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update && apt-get install -y curl ca-certificates
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+    apt-get install -y nodejs
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache nodejs npm
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y nodejs npm
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y nodejs npm
+  fi
+fi
+npm install -g @openai/codex 2>&1
 """
 
 
@@ -104,42 +111,35 @@ def load_codex_metadata(codex_path: Path | None) -> dict[str, Any]:
 
         event_type = record.get("type", "")
 
-        # Count LLM responses
-        if event_type in ("response.completed", "message"):
+        # Token usage from turn.completed events
+        if event_type == "turn.completed":
             llm_call_count += 1
             add_model(record.get("model"))
             usage = record.get("usage") or {}
-            tokens["input"] += int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
-            tokens["output"] += int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+            tokens["input"] += int(usage.get("input_tokens") or 0)
+            tokens["output"] += int(usage.get("output_tokens") or 0)
             tokens["reasoning"] += int(usage.get("reasoning_tokens") or 0)
-            cached = int(
-                usage.get("cached_tokens")
-                or usage.get("cache_read_input_tokens")
-                or usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
-                or 0
-            )
+            cached = int(usage.get("cached_input_tokens") or 0)
             tokens["cache"] += cached
             tokens["cache_read"] += cached
-            total = int(usage.get("total_tokens") or 0)
+            total = tokens["input"] + tokens["output"]
             tokens["provider_total"] += total
 
-        # Count tool calls from function_call or tool_use events
-        if event_type in ("function_call", "tool_use", "exec"):
-            tool_call_count += 1
-            tool_name = record.get("name") or record.get("function", {}).get("name") or "unknown"
-            tool_call_breakdown[tool_name] += 1
+        # Tool calls and assistant text from item.completed events
+        if event_type == "item.completed":
+            item = record.get("item") or {}
+            item_type = item.get("type", "")
 
-        # Capture assistant text
-        if event_type == "message" and record.get("role") == "assistant":
-            content = record.get("content")
-            if isinstance(content, str) and content.strip():
-                assistant_parts.append(content.strip())
-            elif isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "text":
-                        text = part.get("text", "").strip()
-                        if text:
-                            assistant_parts.append(text)
+            if item_type == "command_execution":
+                tool_call_count += 1
+                tool_call_breakdown["command_execution"] += 1
+            elif item_type == "file_change":
+                tool_call_count += 1
+                tool_call_breakdown["file_change"] += 1
+            elif item_type == "agent_message":
+                text = (item.get("text") or "").strip()
+                if text:
+                    assistant_parts.append(text)
 
     return {
         "models": models,
@@ -160,8 +160,8 @@ class BenchCodexAgent(BaseInstalledAgent):
 
     @property
     def _install_agent_template_path(self) -> Path:
-        # Codex uses a pre-built binary; no install template needed.
-        return Path(__file__).resolve().parent / "install-codex.sh.j2"
+        # Not used — setup() is fully overridden and never calls super().
+        return Path("/dev/null")
 
     @staticmethod
     def _command_metadata(command: str) -> dict[str, str]:
@@ -212,31 +212,24 @@ class BenchCodexAgent(BaseInstalledAgent):
 
         model_flag = f" -m {shlex.quote(self.model_name)}" if self.model_name else ""
 
-        commands: list[ExecInput] = []
-
-        commands.append(
+        return [
             ExecInput(
                 command=(
-                    f"chmod +x {shlex.quote(REMOTE_CODEX_BINARY)} && "
-                    f"{shlex.quote(REMOTE_CODEX_BINARY)} exec"
+                    "codex exec"
                     f"{model_flag}"
-                    f" --dangerously-bypass-approvals-and-sandbox"
-                    f" --skip-git-repo-check"
-                    f" --json"
+                    " --dangerously-bypass-approvals-and-sandbox"
+                    " --skip-git-repo-check"
+                    " --json"
                     f" {escaped_instruction}"
-                    f" 2>&1 </dev/null | stdbuf -oL tee /logs/agent/codex.txt"
+                    " 2>&1 </dev/null | stdbuf -oL tee /logs/agent/codex.txt"
                 ),
                 env=env,
             )
-        )
-
-        return commands
+        ]
 
     async def setup(self, environment: BaseEnvironment) -> None:
         await environment.exec(
-            command=(
-                f"mkdir -p /installed-agent {REMOTE_CODEX_CONFIG_DIR} {REMOTE_CA_CERT_DIR}"
-            )
+            command=f"mkdir -p /installed-agent {REMOTE_CODEX_CONFIG_DIR} {REMOTE_CA_CERT_DIR}"
         )
 
         if HOST_CA_CERT_BUNDLE.exists():
@@ -259,32 +252,38 @@ class BenchCodexAgent(BaseInstalledAgent):
 
         await environment.exec(command=INSTALL_GNU_TIME_COMMAND)
 
-        binary_path = Path(
-            os.environ.get("CODEX_BENCH_BINARY", str(DEFAULT_CODEX_BINARY))
-        )
-        if not binary_path.exists():
-            raise FileNotFoundError(
-                f"Expected codex binary at {binary_path}. Install it before running Harbor."
+        # Install codex inside the container via npm.
+        result = await environment.exec(command=INSTALL_CODEX_COMMAND)
+        if result.return_code != 0:
+            raise RuntimeError(
+                f"Failed to install codex in container (rc={result.return_code}): "
+                f"{result.stderr or result.stdout or 'no output'}"
             )
 
-        await environment.upload_file(
-            source_path=str(binary_path),
-            target_path=REMOTE_CODEX_BINARY,
-        )
-
-        # Upload codex config if it exists
-        host_codex_config = Path.home() / ".codex" / "config.toml"
-        if host_codex_config.exists():
-            await environment.upload_file(
-                source_path=str(host_codex_config),
-                target_path=f"{REMOTE_CODEX_CONFIG_DIR}/config.toml",
-            )
+        # Upload codex config, auth, and instructions from the host if they exist.
+        host_codex_dir = Path.home() / ".codex"
+        for filename, target in (
+            ("auth.json", f"{REMOTE_CODEX_CONFIG_DIR}/auth.json"),
+            ("config.toml", f"{REMOTE_CODEX_CONFIG_DIR}/config.toml"),
+            ("instructions.md", f"{REMOTE_CODEX_CONFIG_DIR}/instructions.md"),
+        ):
+            host_path = host_codex_dir / filename
+            if host_path.exists():
+                await environment.upload_file(
+                    source_path=str(host_path),
+                    target_path=target,
+                )
+            elif filename == "auth.json":
+                self.logger.warning(
+                    "No codex auth found at %s; run may require OPENAI_API_KEY env var.",
+                    host_path,
+                )
 
         setup_dir = self.logs_dir / "setup"
         setup_dir.mkdir(parents=True, exist_ok=True)
         (setup_dir / "return-code.txt").write_text("0")
         (setup_dir / "stdout.txt").write_text(
-            "Skipped Harbor Codex installer; using uploaded local codex binary.\n"
+            "Installed codex via npm inside the benchmark container.\n"
         )
 
     async def run(
