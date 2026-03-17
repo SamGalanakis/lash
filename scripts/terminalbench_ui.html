@@ -1092,7 +1092,7 @@
         </div>
       </div>
 
-      <div class="sidebar-banner"><span id="selectionBanner"></span></div>
+      <div class="sidebar-banner"><span id="selectionBanner"></span> <button id="selectAllBtn" class="ghost" style="padding:1px 4px;font-size:8px;margin-left:auto">all</button></div>
 
       <div class="run-list" id="runList"></div>
       </div><!-- .sidebar-inner -->
@@ -1169,6 +1169,8 @@
       const data = {
         query: document.getElementById("runSearch").value,
         viewMode: state.viewMode,
+        selectedRunIds: [...state.selectedRunIds],
+        activeRunId: state.activeRunId,
       };
       for (const config of FILTER_CONFIG) {
         data[config.key] = document.getElementById(config.id).value;
@@ -1183,6 +1185,10 @@
         const data = JSON.parse(raw);
         if (data.query) document.getElementById("runSearch").value = data.query;
         if (data.viewMode) state.viewMode = data.viewMode;
+        if (data.activeRunId) state.activeRunId = data.activeRunId;
+        if (Array.isArray(data.selectedRunIds)) {
+          for (const id of data.selectedRunIds) state.selectedRunIds.add(id);
+        }
         for (const config of FILTER_CONFIG) {
           if (data[config.key]) {
             document.getElementById(config.id).value = data[config.key];
@@ -1441,6 +1447,7 @@
           state.activeRunId = card.dataset.runId;
           state.activeTrial = null;
           state.activeLogPath = null;
+          saveFiltersToSession();
           await ensureActiveRunLoaded();
           renderRunList();
           render();
@@ -1460,6 +1467,7 @@
           if (state.selectedRunIds.size >= 2) {
             state.viewMode = "compare";
           }
+          saveFiltersToSession();
           renderSelectionBanner();
           renderWorkspaceTabs();
           renderRunList();
@@ -1619,6 +1627,7 @@
               <span class="run-tag tag-model">${escapeHtml(modelShort(d.params))}</span>
               ${d.params.agent ? `<span class="run-tag tag-agent">${escapeHtml(d.params.agent)}</span>` : ""}
               ${d.params.execution_mode ? `<span class="run-tag tag-mode">${escapeHtml(d.params.execution_mode)}</span>` : ""}
+              ${d.params.context_strategy ? `<span class="run-tag tag-mode">${escapeHtml(d.params.context_strategy)}</span>` : ""}
               ${d.params.preset ? `<span class="run-tag">${escapeHtml(d.params.preset)}</span>` : ""}
             </div>
           </div>
@@ -2021,6 +2030,23 @@
     }
     document.getElementById("clearFiltersButton").addEventListener("click", clearFilters);
     document.getElementById("deleteButton").addEventListener("click", deleteSelectedRuns);
+    document.getElementById("selectAllBtn").addEventListener("click", async () => {
+      const filtered = getFilteredRuns();
+      const allSelected = filtered.every(r => state.selectedRunIds.has(r.run_id));
+      if (allSelected) {
+        // Deselect all
+        state.selectedRunIds.clear();
+      } else {
+        for (const r of filtered) state.selectedRunIds.add(r.run_id);
+      }
+      for (const id of state.selectedRunIds) await ensureRunLoaded(id);
+      if (state.selectedRunIds.size >= 2) state.viewMode = "compare";
+      saveFiltersToSession();
+      renderSelectionBanner();
+      renderWorkspaceTabs();
+      renderRunList();
+      render();
+    });
 
     // Filter popover toggle
     const filterBtn = document.getElementById("filterToggleBtn");
