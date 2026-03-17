@@ -529,6 +529,7 @@ struct RuntimeSessionManager {
     current_host: RuntimeHostConfig,
     current_plugins: Arc<crate::PluginSession>,
     current_tool_catalog: Vec<serde_json::Value>,
+    llm_factory: LlmFactory,
     #[cfg(feature = "sqlite-store")]
     current_store: Option<Arc<crate::store::Store>>,
     registry: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
@@ -676,6 +677,7 @@ impl SessionManager for RuntimeSessionManager {
             LashRuntime::from_state(policy.clone(), self.current_host.clone(), services, state)
                 .await
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+        runtime.llm_factory = Arc::clone(&self.llm_factory);
         if let Some(session) = runtime.session.as_mut() {
             session.set_context_surface(
                 request.context_surface.tool_providers.clone(),
@@ -925,6 +927,7 @@ impl LashRuntime {
             current_plugins: Arc::clone(session.plugins()),
             current_tool_catalog: session
                 .tool_catalog(&self.state.agent_id, self.policy.execution_mode),
+            llm_factory: Arc::clone(&self.llm_factory),
             #[cfg(feature = "sqlite-store")]
             current_store: session.history_store(),
             registry: Arc::clone(&self.managed_sessions),
@@ -1059,6 +1062,23 @@ impl LashRuntime {
             self.policy.context_strategy = context_strategy;
         }
         self.state.policy = self.policy.clone();
+        // Eagerly compact messages if the context window shrunk.
+        let new_max = self.policy.max_context_tokens;
+        let old_max = previous.max_context_tokens;
+        if (new_max < old_max || (new_max.is_some() && old_max.is_none()))
+            && let Ok(manager) = self.runtime_session_manager()
+            && let Ok(Some(compacted)) = crate::agent::context::compact_messages_if_needed(
+                &self.state.agent_id,
+                &self.state,
+                &self.state.messages,
+                self.state.last_prompt_usage.clone(),
+                new_max,
+                manager,
+            )
+            .await
+        {
+            self.state.messages = compacted;
+        }
         self.apply_session_config_mutations(previous.clone()).await;
         self.notify_session_config_changed(previous).await;
     }
@@ -4745,7 +4765,22 @@ mod tests {
     #[cfg(feature = "sqlite-store")]
     #[tokio::test]
     async fn history_plugin_compacts_messages_when_model_change_shrinks_context_window() {
-        let transport = MockTransport::new(Vec::new());
+        let transport = MockTransport::new(vec![MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: "compacted summary".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "compacted summary".to_string(),
+                }],
+                usage: LlmUsage {
+                    input_tokens: 20,
+                    output_tokens: 5,
+                    cached_input_tokens: 0,
+                    reasoning_tokens: 0,
+                },
+                ..LlmResponse::default()
+            }),
+        }]);
         let store = Arc::new(crate::store::Store::memory().expect("store"));
         let base_provider: Arc<dyn crate::ToolProvider> = Arc::new(crate::tools::StateStore::new());
         let base_provider_factory = Arc::clone(&base_provider);
