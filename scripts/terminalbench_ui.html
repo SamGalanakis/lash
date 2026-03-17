@@ -581,6 +581,49 @@
       display: grid;
     }
 
+    /* ── Run code colors ── */
+    .run-code-colors { /* just a reference block */ }
+    :root {
+      --rc-a: var(--lichen);
+      --rc-b: var(--sodium);
+      --rc-c: #7a8cc8;
+      --rc-d: #c87ab0;
+      --rc-e: #6cc8b8;
+      --rc-f: #c8a86c;
+    }
+
+    .run-code {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      font: 700 11px/1 var(--font-display);
+      border: 1px solid;
+      flex-shrink: 0;
+    }
+
+    .run-code-a { color: var(--rc-a); border-color: var(--rc-a); }
+    .run-code-b { color: var(--rc-b); border-color: var(--rc-b); }
+    .run-code-c { color: var(--rc-c); border-color: var(--rc-c); }
+    .run-code-d { color: var(--rc-d); border-color: var(--rc-d); }
+    .run-code-e { color: var(--rc-e); border-color: var(--rc-e); }
+    .run-code-f { color: var(--rc-f); border-color: var(--rc-f); }
+
+    .run-tag {
+      display: inline-block;
+      padding: 1px 5px;
+      font: 500 9px/1.2 var(--font-ui);
+      border: 1px solid var(--ash);
+      color: var(--chalk-mid);
+      white-space: nowrap;
+    }
+
+    .run-tag.tag-model { border-color: rgba(232, 163, 60, 0.3); color: var(--sodium); }
+    .run-tag.tag-mode { border-color: rgba(138, 158, 108, 0.3); color: var(--lichen); }
+    .run-tag.tag-agent { border-color: rgba(122, 140, 200, 0.3); color: #7a8cc8; }
+    .run-tag.tag-pass { border-color: rgba(138, 158, 108, 0.4); color: var(--lichen); font-weight: 700; }
+
     /* ── Compare: run strip ── */
     .compare-run-strip {
       display: flex;
@@ -591,28 +634,33 @@
     }
 
     .compare-run-card {
-      flex: 1 0 220px;
-      padding: 14px 16px;
+      flex: 1 0 180px;
+      padding: 10px 12px;
       background: var(--form-raised);
-      border-top: 3px solid var(--ash-mid);
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
     }
 
-    .compare-run-card:nth-child(1) { border-top-color: var(--lichen); }
-    .compare-run-card:nth-child(2) { border-top-color: var(--sodium); }
-    .compare-run-card:nth-child(3) { border-top-color: #7a8cc8; }
-    .compare-run-card:nth-child(4) { border-top-color: #c87ab0; }
-    .compare-run-card:nth-child(5) { border-top-color: #6cc8b8; }
-    .compare-run-card:nth-child(6) { border-top-color: #c8a86c; }
+    .compare-run-card-body {
+      flex: 1;
+      min-width: 0;
+    }
 
     .compare-run-card h4 {
-      font: 600 12px/1.2 var(--font-ui);
+      font: 500 10px/1.2 var(--font-ui);
       color: var(--chalk);
-      margin-bottom: 4px;
-      word-break: break-word;
+      margin-bottom: 3px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
-    .compare-run-card .muted {
-      font-size: 10px;
+    .compare-run-card .tag-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 3px;
+      margin-top: 3px;
     }
 
     /* ── Compare: metrics table ── */
@@ -624,7 +672,7 @@
 
     .compare-metrics-table th,
     .compare-metrics-table td {
-      padding: 7px 12px;
+      padding: 6px 10px;
       border-bottom: 1px solid var(--line);
       text-align: right;
       font-variant-numeric: tabular-nums;
@@ -642,20 +690,13 @@
 
     .compare-metrics-table th {
       font: 600 10px/1 var(--font-display);
-      letter-spacing: 0.12em;
+      letter-spacing: 0.1em;
       text-transform: uppercase;
       background: var(--form-deep);
       position: sticky;
       top: 0;
       z-index: 2;
     }
-
-    .compare-metrics-table th:nth-child(2) { color: var(--lichen); }
-    .compare-metrics-table th:nth-child(3) { color: var(--sodium); }
-    .compare-metrics-table th:nth-child(4) { color: #7a8cc8; }
-    .compare-metrics-table th:nth-child(5) { color: #c87ab0; }
-    .compare-metrics-table th:nth-child(6) { color: #6cc8b8; }
-    .compare-metrics-table th:nth-child(7) { color: #c8a86c; }
 
     .compare-metrics-table .cell-best {
       color: var(--lichen);
@@ -1389,7 +1430,7 @@
           <input type="checkbox" class="run-select" data-run-id="${run.run_id}" ${state.selectedRunIds.has(run.run_id) ? "checked" : ""}>
           <div class="run-card-body">
             <h3>${escapeHtml(run.job_name)}</h3>
-            <div class="run-card-meta"><span class="pass-pct">${pct}</span> ${fmtInt(run.trials_passed)}/${fmtInt(run.trials_total)} · ${nc} nc · ${fmtSeconds(run.cpu_seconds_total)}</div>
+            <div class="run-card-meta"><span class="pass-pct">${pct}</span> ${escapeHtml(run.agent || "")} · ${nc} nc · ${fmtSeconds(run.cpu_seconds_total)}</div>
           </div>
         </div>`;
       }).join("");
@@ -1549,17 +1590,37 @@
         };
       });
 
+      // Code letters for runs
+      const CODE_LETTERS = "ABCDEFGHIJKLMNOP";
+      const codeClasses = ["run-code-a","run-code-b","run-code-c","run-code-d","run-code-e","run-code-f"];
+
+      function runCodeBadge(i) {
+        const letter = CODE_LETTERS[i] || String(i);
+        const cls = codeClasses[i % codeClasses.length];
+        return `<span class="run-code ${cls}">${letter}</span>`;
+      }
+
+      // Derive the distinguishing model name
+      function modelShort(params) {
+        const models = params.resolved_models || [];
+        const m = models[0] || params.requested_model || "";
+        // Shorten common prefixes
+        return m.replace(/^(claude-|gpt-|o[0-9]-)/, "").replace(/-20[0-9]{6}$/, "") || "-";
+      }
+
       // Run strip cards
       const runStrip = `<div class="compare-run-strip">${runData.map((d, i) => `
         <div class="compare-run-card">
-          <h4>${escapeHtml(d.name)}</h4>
-          <div class="muted">${escapeHtml(d.params.agent || "-")} · ${escapeHtml(d.params.requested_model || "resolved")} · ${escapeHtml(d.params.variant || "default")}</div>
-          <div class="chips" style="margin-top:4px">
-            ${d.params.execution_mode ? `<span class="chip mode">${escapeHtml(d.params.execution_mode)}</span>` : ""}
-            ${d.params.context_strategy ? `<span class="chip context">${escapeHtml(d.params.context_strategy)}</span>` : ""}
-            ${d.params.preset ? `<span class="chip preset">${escapeHtml(d.params.preset)}</span>` : ""}
-            <span class="chip pass">${fmtPct(d.passRate)}</span>
-            <span class="chip">${fmtInt(d.stats.trials_passed)}/${fmtInt(d.stats.trials_total)}</span>
+          ${runCodeBadge(i)}
+          <div class="compare-run-card-body">
+            <h4 title="${escapeHtml(d.name)}">${escapeHtml(d.name)}</h4>
+            <div class="tag-row">
+              <span class="run-tag tag-pass">${fmtPct(d.passRate)}</span>
+              <span class="run-tag tag-model">${escapeHtml(modelShort(d.params))}</span>
+              ${d.params.agent ? `<span class="run-tag tag-agent">${escapeHtml(d.params.agent)}</span>` : ""}
+              ${d.params.execution_mode ? `<span class="run-tag tag-mode">${escapeHtml(d.params.execution_mode)}</span>` : ""}
+              ${d.params.preset ? `<span class="run-tag">${escapeHtml(d.params.preset)}</span>` : ""}
+            </div>
           </div>
         </div>
       `).join("")}</div>`;
@@ -1580,9 +1641,12 @@
         { label: "Reward Mean",     vals: runData.map(d => d.rewardMean ?? 0), fmt: runData.map(d => fmtFixed(d.rewardMean)), higher: true },
       ];
 
-      const shortNames = runData.map((d, i) => {
-        const name = d.name || `Run ${i + 1}`;
-        return name.length > 20 ? name.slice(0, 18) + "…" : name;
+      const codeHeaders = runData.map((d, i) => {
+        const letter = CODE_LETTERS[i] || String(i);
+        const cls = codeClasses[i % codeClasses.length];
+        const agent = d.params.agent || "";
+        const model = modelShort(d.params);
+        return `<th><span class="run-code ${cls}" style="width:16px;height:16px;font-size:9px;display:inline-flex;vertical-align:middle;margin-right:4px">${letter}</span>${escapeHtml(model)}${agent ? ` · ${escapeHtml(agent)}` : ""}</th>`;
       });
 
       const metricsTable = `
@@ -1590,7 +1654,7 @@
         <table class="compare-metrics-table">
           <thead><tr>
             <th>Metric</th>
-            ${shortNames.map(n => `<th>${escapeHtml(n)}</th>`).join("")}
+            ${codeHeaders.join("")}
           </tr></thead>
           <tbody>
             ${metrics.map(m => {
@@ -1656,16 +1720,18 @@
           { label: "Main RSS",     extract: d => d ? ((d.resource_usage||{}).max_rss_kb_max||0) : null, format: v => v == null ? "-" : fmtMemoryKb(v), higher: false },
         ];
 
-        const shortNames = runs.map((run, i) => {
-          const name = run.job_name || `Run ${i + 1}`;
-          return name.length > 16 ? name.slice(0, 14) + "…" : name;
-        });
+        const CODE_LETTERS = "ABCDEFGHIJKLMNOP";
+        const codeClasses = ["run-code-a","run-code-b","run-code-c","run-code-d","run-code-e","run-code-f"];
 
         return `
           <table class="matchup-detail-table">
             <thead><tr>
               <th>Metric</th>
-              ${shortNames.map(n => `<th>${escapeHtml(n)}</th>`).join("")}
+              ${runs.map((run, i) => {
+                const letter = CODE_LETTERS[i] || String(i);
+                const cls = codeClasses[i % codeClasses.length];
+                return `<th><span class="run-code ${cls}" style="width:14px;height:14px;font-size:8px;display:inline-flex;vertical-align:middle;margin-right:3px">${letter}</span></th>`;
+              }).join("")}
             </tr></thead>
             <tbody>
               ${metricDefs.map(m => {
