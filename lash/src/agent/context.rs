@@ -182,7 +182,8 @@ impl ContextBuilder for RecallAgentBuilder {
 
         let tool_calls = tool_record_map(&state.tool_calls);
         hydrate_tool_result_parts(&session_id, &mut messages, &tool_calls);
-        let mut recall_available = false;
+        prune_old_tool_results(&mut messages, &tool_calls);
+        let mut recall_trimmed = false;
 
         if let (Some(prompt_usage), Some(max_context)) = (prompt_usage, max_context_tokens) {
             let target_budget = max_context * usize::from(keep_recent_pct) / 100;
@@ -206,23 +207,15 @@ impl ContextBuilder for RecallAgentBuilder {
                 keep_from = keep_from.min(keep_from_for_recent_turns(&messages, prefix_len));
                 if keep_from > prefix_len {
                     messages.drain(prefix_len..keep_from);
-                    recall_available = true;
+                    recall_trimmed = true;
                 }
             }
         }
 
         Ok(PreparedContext {
             messages,
-            prompt_contributions: if recall_available {
-                RecallAgentTools::prompt_contributions()
-            } else {
-                Vec::new()
-            },
-            tool_providers: if recall_available {
-                vec![Arc::new(RecallAgentTools) as Arc<dyn ToolProvider>]
-            } else {
-                Vec::new()
-            },
+            prompt_contributions: RecallAgentTools::prompt_contributions(recall_trimmed),
+            tool_providers: vec![Arc::new(RecallAgentTools) as Arc<dyn ToolProvider>],
             include_base_tools: true,
         })
     }
@@ -897,6 +890,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recall_agent_builder_clears_old_tool_outputs() {
+        let tool_calls = (0..12)
+            .map(|idx| ToolCallRecord {
+                call_id: Some(format!("call-{idx}")),
+                tool: "exec_command".to_string(),
+                args: json!({"cmd": format!("echo {idx}")}),
+                result: json!(format!("{}\n{}", "line".repeat(12_000), idx)),
+                success: true,
+                duration_ms: 1,
+            })
+            .collect::<Vec<_>>();
+        let mut messages = vec![text_message("u0", MessageRole::User, "older")];
+        messages.push(Message {
+            id: "a1".to_string(),
+            role: MessageRole::Assistant,
+            parts: tool_calls
+                .iter()
+                .enumerate()
+                .map(|(idx, record)| Part {
+                    id: format!("a1.p{idx}"),
+                    kind: PartKind::ToolResult,
+                    content: String::new(),
+                    tool_call_id: record.call_id.clone(),
+                    tool_name: Some(record.tool.clone()),
+                    prune_state: crate::PruneState::Intact,
+                })
+                .collect(),
+            origin: None,
+        });
+        messages.push(text_message("u2", MessageRole::User, "recent"));
+        messages.push(text_message("u3", MessageRole::User, "latest"));
+
+        let built = build_context(ContextBuildRequest {
+            session_id: "root".to_string(),
+            state: AgentStateEnvelope {
+                policy: SessionPolicy {
+                    context_strategy: ContextStrategy::recall_agent_default(),
+                    ..Default::default()
+                },
+                tool_calls,
+                ..Default::default()
+            },
+            messages,
+            prompt_usage: None,
+            max_context_tokens: None,
+            host: Arc::new(MockSessionManager::default()),
+            #[cfg(feature = "sqlite-store")]
+            store: None,
+        })
+        .await
+        .expect("context")
+        .messages;
+
+        let cleared = built
+            .iter()
+            .flat_map(|message| message.parts.iter())
+            .filter(|part| matches!(part.prune_state, crate::PruneState::Cleared))
+            .count();
+        assert!(cleared > 0);
+    }
+
+    #[tokio::test]
     async fn rolling_context_builder_replaces_prefix_with_summary() {
         let manager = Arc::new(MockSessionManager::default());
         let built = build_context(ContextBuildRequest {
@@ -961,7 +1016,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recall_agent_builder_only_injects_tools_after_trimming() {
+    async fn recall_agent_builder_always_injects_tools() {
         let prepared = build_context(ContextBuildRequest {
             session_id: "root".to_string(),
             state: AgentStateEnvelope {
@@ -989,7 +1044,13 @@ mod tests {
         .await
         .expect("context");
 
-        assert!(prepared.prompt_contributions.is_empty());
-        assert!(prepared.tool_providers.is_empty());
+        assert!(!prepared.prompt_contributions.is_empty());
+        assert_eq!(prepared.tool_providers.len(), 1);
+        assert!(prepared.messages.iter().any(|message| {
+            message
+                .parts
+                .iter()
+                .any(|part| part.content.contains("short request"))
+        }));
     }
 }

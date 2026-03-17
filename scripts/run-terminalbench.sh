@@ -13,7 +13,7 @@ Usage:
   scripts/run-terminalbench.sh [options] [-- <extra harbor args>]
 
 Options:
-  --agent <name>                Agent to run: lash|opencode (default: lash)
+  --agent <name>                Agent to run: lash|opencode|codex (default: lash)
   --dataset <name@version>      Dataset to run (default: terminal-bench-sample@2.0)
   --sample                      Shortcut for --dataset terminal-bench-sample@2.0
   --full                        Shortcut for --dataset terminal-bench@2.0
@@ -23,7 +23,7 @@ Options:
   --task-file <path>            Exact task names from a file (one per line, # comments allowed)
   --exclude-task <glob>         Task exclude pattern (repeatable)
   --model <model>               Model to request from the benchmark agent
-                                (optional for lash, required for opencode)
+                                (optional for lash, required for opencode and codex)
   --variant <name>              Provider-native model variant passed through when supported
                                 (required for all benchmark runs)
   --execution-mode <mode>       Lash execution mode: repl|standard
@@ -63,6 +63,7 @@ Examples:
   scripts/run-terminalbench.sh --sample --execution-mode repl --context-strategy recall_agent --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --sample --execution-mode repl --task chess-best-move --model gpt-5.3-codex --variant high
   scripts/run-terminalbench.sh --agent opencode --sample --model openai/gpt-5.4 --variant high
+  scripts/run-terminalbench.sh --agent codex --sample --model o3 --variant high
 EOF
 }
 
@@ -375,8 +376,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "${AGENT}" != "lash" && "${AGENT}" != "opencode" ]]; then
-  echo "error: unsupported --agent: ${AGENT} (expected lash|opencode)" >&2
+if [[ "${AGENT}" != "lash" && "${AGENT}" != "opencode" && "${AGENT}" != "codex" ]]; then
+  echo "error: unsupported --agent: ${AGENT} (expected lash|opencode|codex)" >&2
   exit 2
 fi
 
@@ -515,7 +516,7 @@ EOF
 
   # Always capture LLM request/response traces for benchmark debugging.
   export LASH_LOG="debug"
-else
+elif [[ "${AGENT}" == "opencode" ]]; then
   RUN_EXECUTION_MODE="agent-native"
   if [[ -n "${EXECUTION_MODE}" ]]; then
     echo "warning: --execution-mode is ignored for --agent opencode" >&2
@@ -532,6 +533,15 @@ else
     exit 2
   fi
   export OPENCODE_BENCH_MODEL_VARIANT="${VARIANT}"
+elif [[ "${AGENT}" == "codex" ]]; then
+  RUN_EXECUTION_MODE="agent-native"
+  if [[ -n "${EXECUTION_MODE}" ]]; then
+    echo "warning: --execution-mode is ignored for --agent codex" >&2
+  fi
+  if [[ -n "${CONTEXT_STRATEGY}" ]]; then
+    echo "warning: --context-strategy is ignored for --agent codex" >&2
+  fi
+  export CODEX_BENCH_MODEL_VARIANT="${VARIANT}"
 fi
 
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
@@ -563,8 +573,10 @@ CMD=(
 
 if [[ "${AGENT}" == "lash" ]]; then
   CMD+=(--agent-import-path scripts.harbor_lash_agent:LashAgent)
-else
+elif [[ "${AGENT}" == "opencode" ]]; then
   CMD+=(--agent-import-path scripts.harbor_opencode_agent:BenchOpenCodeAgent)
+elif [[ "${AGENT}" == "codex" ]]; then
+  CMD+=(--agent-import-path scripts.harbor_codex_agent:BenchCodexAgent)
 fi
 
 if [[ -n "${MODEL}" ]]; then

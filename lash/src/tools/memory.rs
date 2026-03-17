@@ -491,10 +491,13 @@ fn preferred_recall_variant(provider: &crate::Provider, model: &str) -> Option<S
 }
 
 impl RecallAgentTools {
-    pub fn prompt_contributions() -> Vec<PromptContribution> {
-        vec![PromptContribution::guidance(
-            "### Recall Agent\nUse `recall_memory` when older session history may matter but is no longer visible in the prompt. The result includes a short summary plus a flat list of source-backed memory items. Use `see_full_memory` to expand a returned item by id when needed.",
-        )]
+    pub fn prompt_contributions(trimmed: bool) -> Vec<PromptContribution> {
+        let guidance = if trimmed {
+            "### Recall Agent\nOlder session history has been trimmed from the prompt. Use `recall_memory` to recover high-signal older context when it matters. The result includes a short summary plus a flat list of source-backed memory items. Use `see_full_memory` to expand a returned item by id when needed."
+        } else {
+            "### Recall Agent\nUse `recall_memory` when older session history may matter, even if it is no longer convenient to inspect directly in the prompt. The result includes a short summary plus a flat list of source-backed memory items. Use `see_full_memory` to expand a returned item by id when needed."
+        };
+        vec![PromptContribution::guidance(guidance)]
     }
 }
 
