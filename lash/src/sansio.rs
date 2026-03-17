@@ -536,7 +536,7 @@ impl TurnMachine {
                 fence.code_executed = true;
             }
 
-            if transition_to_exec.is_some() || fence.code_executed || fence.acc.finished {
+            if transition_to_exec.is_some() || fence.code_executed {
                 break;
             }
         }
@@ -574,7 +574,7 @@ impl TurnMachine {
             stop_stream_processing,
             ..
         } = &mut self.state
-            && (f.code_executed || f.acc.finished)
+            && f.code_executed
         {
             *stop_stream_processing = true;
             return false;
@@ -1172,7 +1172,7 @@ impl TurnMachine {
         retry_attempt: usize,
     ) {
         // If we already executed code mid-stream, go to processing
-        if fence.code_executed || fence.acc.finished {
+        if fence.code_executed {
             self.emit(AgentEvent::LlmResponse {
                 iteration: self.iteration,
                 content: fence.response.clone(),
@@ -1232,12 +1232,12 @@ impl TurnMachine {
                         return;
                     }
                 }
-                if fence.code_executed || fence.acc.finished {
+                if fence.code_executed {
                     break;
                 }
             }
 
-            if fence.code_executed || fence.acc.finished {
+            if fence.code_executed {
                 self.emit(AgentEvent::LlmResponse {
                     iteration: self.iteration,
                     content: fence.response.clone(),
@@ -1404,8 +1404,6 @@ impl TurnMachine {
                         }
                     }
                 }
-                repl.fence.acc.finished = r.finished;
-                repl.fence.acc.final_response = r.response;
                 if let Some(raw_error) = r.error {
                     repl.fence.acc.exec_error = Some(raw_error);
                     repl.fence.acc.had_failure = true;
@@ -1444,7 +1442,6 @@ impl TurnMachine {
             && fence.acc.tool_calls.is_empty()
             && fence.acc.combined_output.is_empty()
             && !fence.acc.had_failure
-            && !fence.acc.finished
         {
             self.emit(make_error_event(
                 "llm_provider",
@@ -1464,32 +1461,10 @@ impl TurnMachine {
             next_tool_image_refs.push((base_image_idx + i, img.label.clone()));
         }
 
-        // done() = stop signal
-        if fence.acc.finished {
-            if !fence.acc.final_response.is_empty() {
-                self.emit(AgentEvent::Message {
-                    text: fence.acc.final_response.clone(),
-                    kind: "final".to_string(),
-                });
-            }
-            let mid = format!("m{}", self.messages.len());
-            let asst_parts = build_assistant_parts(&mid, &fence.prose_parts, &fence.code_parts);
-            self.messages.push(Message {
-                id: mid,
-                role: MessageRole::Assistant,
-                parts: asst_parts,
-                origin: None,
-            });
-            self.request_checkpoint(CheckpointKind::BeforeCompletion, CheckpointResume::Finish);
-            return;
-        }
-
         let has_output = !fence.acc.combined_output.is_empty();
         let has_tool_calls = !fence.acc.tool_calls.is_empty();
 
-        let repl_execution_started = self.iteration > self.run_offset;
-
-        // Pure prose response — valid only before any REPL execution has happened in this turn.
+        // Pure prose response finalizes the turn, even after prior REPL cycles.
         if !has_code && !has_output && !has_tool_calls && !fence.acc.had_failure {
             let mid = format!("m{}", self.messages.len());
             let asst_parts = build_assistant_parts(&mid, &fence.prose_parts, &fence.code_parts);
@@ -1499,32 +1474,6 @@ impl TurnMachine {
                 parts: asst_parts,
                 origin: None,
             });
-            if repl_execution_started {
-                let sys_id = format!("m{}", self.messages.len());
-                let guidance = "You have already used <repl> in this turn. Do not stop with prose alone. Continue working and use `finish ...` inside <repl> when the final user-facing answer is ready.";
-                self.messages.push(Message {
-                    id: sys_id.clone(),
-                    role: MessageRole::System,
-                    parts: vec![Part {
-                        id: format!("{}.p0", sys_id),
-                        kind: PartKind::Error,
-                        content: guidance.to_string(),
-                        tool_call_id: None,
-                        tool_name: None,
-                        prune_state: PruneState::Intact,
-                    }],
-                    origin: None,
-                });
-                self.iteration += 1;
-                self.termination.maybe_schedule_turn_limit_final(
-                    self.iteration,
-                    self.run_offset,
-                    self.config.max_turns,
-                    &mut self.messages,
-                );
-                self.state = MachineState::PrepareIteration;
-                return;
-            }
             self.request_checkpoint(CheckpointKind::BeforeCompletion, CheckpointResume::Finish);
             return;
         }
@@ -2384,8 +2333,6 @@ mod tests {
             result: Ok(crate::ExecResponse {
                 output: "hi\n".to_string(),
                 observations: Vec::new(),
-                response: String::new(),
-                finished: false,
                 tool_calls: Vec::new(),
                 images: Vec::new(),
                 error: None,
@@ -2436,14 +2383,12 @@ mod tests {
         let (exec_id, code) = exec_effect.unwrap();
         assert_eq!(code, "print('hi')");
 
-        // Feed exec result with done()
+        // Feed exec result
         machine.handle_response(Response::ExecResult {
             id: exec_id,
             result: Ok(crate::ExecResponse {
                 output: "hi\n".to_string(),
                 observations: Vec::new(),
-                response: "done".to_string(),
-                finished: true,
                 tool_calls: Vec::new(),
                 images: Vec::new(),
                 error: None,
@@ -2468,6 +2413,26 @@ mod tests {
 
         let effects = drain_effects(&mut machine);
         let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
+        assert_eq!(checkpoint, CheckpointKind::AfterWork);
+        machine.handle_response(Response::Checkpoint {
+            id: checkpoint_id,
+            messages: Vec::new(),
+        });
+
+        let effects = drain_effects(&mut machine);
+        let next_llm_id = *find_llm_call(&effects).expect("next llm call");
+        machine.handle_response(Response::LlmComplete {
+            id: next_llm_id,
+            text_streamed: false,
+            result: Ok(LlmResponse {
+                full_text: "done".to_string(),
+                deltas: vec!["done".to_string()],
+                ..LlmResponse::default()
+            }),
+        });
+
+        let effects = drain_effects(&mut machine);
+        let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("completion checkpoint");
         assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
         machine.handle_response(Response::Checkpoint {
             id: checkpoint_id,
@@ -2534,7 +2499,7 @@ mod tests {
     }
 
     #[test]
-    fn repl_prose_after_exec_requires_done() {
+    fn repl_prose_after_exec_finishes_turn() {
         let config = test_config(ExecutionMode::Repl);
         let msgs = vec![user_message("run code then summarize")];
         let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
@@ -2559,8 +2524,6 @@ mod tests {
             result: Ok(crate::ExecResponse {
                 output: "hi\n".to_string(),
                 observations: Vec::new(),
-                response: String::new(),
-                finished: false,
                 tool_calls: Vec::new(),
                 images: Vec::new(),
                 error: None,
@@ -2604,9 +2567,15 @@ mod tests {
         });
 
         let effects = drain_effects(&mut machine);
-        assert!(find_done(&effects).is_none());
-        let follow_up_llm = find_llm_call(&effects);
-        assert!(follow_up_llm.is_some(), "should continue until done()");
+        let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("completion checkpoint");
+        assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
+        machine.handle_response(Response::Checkpoint {
+            id: checkpoint_id,
+            messages: Vec::new(),
+        });
+
+        let effects = drain_effects(&mut machine);
+        assert!(find_done(&effects).is_some());
     }
 
     #[test]
@@ -2635,8 +2604,6 @@ mod tests {
             result: Ok(crate::ExecResponse {
                 output: "hi\n".to_string(),
                 observations: Vec::new(),
-                response: String::new(),
-                finished: false,
                 tool_calls: Vec::new(),
                 images: Vec::new(),
                 error: None,
@@ -2668,9 +2635,25 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("");
+        let replay_text = request
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         let code_block = "<repl>\nprint('hi')\n</repl>";
-        assert_eq!(prompt_text.matches(code_block).count(), 1);
-        assert_eq!(prompt_text.matches("<output>\nhi\n\n</output>").count(), 1);
+        assert_eq!(
+            format!("{prompt_text}\n{replay_text}")
+                .matches(code_block)
+                .count(),
+            1
+        );
+        assert_eq!(
+            format!("{prompt_text}\n{replay_text}")
+                .matches("<output>\nhi\n\n</output>")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -2749,8 +2732,6 @@ mod tests {
             result: Ok(crate::ExecResponse {
                 output: String::new(),
                 observations: vec!["value={\"ok\":true}".to_string()],
-                response: String::new(),
-                finished: false,
                 tool_calls: Vec::new(),
                 images: Vec::new(),
                 error: None,

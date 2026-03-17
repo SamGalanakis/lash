@@ -361,8 +361,6 @@ impl Session {
                 LashlangResponse::ExecResult {
                     id: _,
                     output,
-                    response,
-                    finished,
                     observations,
                     error,
                 } => {
@@ -396,8 +394,6 @@ impl Session {
                     return Ok(ExecResponse {
                         output,
                         observations,
-                        response,
-                        finished,
                         tool_calls: self.tool_calls.clone(),
                         images: std::mem::take(&mut self.tool_images),
                         error,
@@ -605,10 +601,6 @@ pub struct ExecResponse {
     pub output: String,
     /// Hidden intermediate observations surfaced back to the model on the next REPL step.
     pub observations: Vec<String>,
-    /// User-facing final response from `finish`.
-    pub response: String,
-    /// True when execution ended the turn via `finish`, even if `response` is empty.
-    pub finished: bool,
     pub tool_calls: Vec<ToolCallRecord>,
     /// Images returned by tools during this execution (e.g. read_file on a PNG).
     pub images: Vec<ToolImage>,
@@ -720,7 +712,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn run_code_finishes_after_tool_call_in_same_block() {
+    async fn run_code_reports_finish_as_an_error_after_tool_call() {
         let tools: Arc<dyn crate::ToolProvider> = Arc::new(UpdatePlanTool::new());
         let plugin_host = PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
             "test_tools",
@@ -756,8 +748,12 @@ finish "ok"
             .await
             .expect("exec response");
 
-        assert!(response.finished, "finish should terminate the turn");
-        assert_eq!(response.response, "ok");
+        assert_eq!(
+            response.error,
+            Some(
+                "`finish` is no longer supported in `<repl>`. End the task by replying without a `<repl>` block once you are done.".to_string()
+            )
+        );
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].tool, "update_plan");
         assert!(response.tool_calls[0].success);

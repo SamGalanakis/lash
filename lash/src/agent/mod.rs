@@ -248,11 +248,11 @@ impl TurnTerminationPolicyState {
                 id: format!("{}.p0", sys_id),
                 kind: PartKind::Text,
                 content: format!(
-                    "Turn limit reached ({max}). You MUST end with `finish ...` now containing:\n\
+                    "Turn limit reached ({max}). You MUST reply in plain prose now containing:\n\
                         1. Summary of what you accomplished\n\
                         2. List of remaining tasks not yet completed\n\
                         3. Recommended next steps\n\
-                        Do NOT make any more tool calls. End the REPL block immediately."
+                        Do NOT make any more tool calls and do NOT emit `<repl>`."
                 ),
                 tool_call_id: None,
                 tool_name: None,

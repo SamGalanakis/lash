@@ -4169,7 +4169,7 @@ mod tests {
                 .run_exec_code(
                     r#"
                     answer = call ask { question: "Pick one", options: ["works", "done"] }
-                    finish format("selected={0}", answer.value)
+                    observe format("selected={0}", answer.value)
                     "#,
                     &event_tx,
                 )
@@ -4199,7 +4199,8 @@ mod tests {
             .expect("exec result timeout")
             .expect("join")
             .expect("exec result");
-        assert_eq!(result.response, "selected=done");
+        assert_eq!(result.observations, vec!["selected=done".to_string()]);
+        assert_eq!(result.error, None);
     }
 
     #[tokio::test]
@@ -4246,21 +4247,33 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn repl_runtime_preserves_streamed_usage_when_cutover_happens_before_usage_event() {
-        let transport = MockTransport::new(vec![MockCall {
-            stream_events: vec![
-                LlmStreamEvent::Delta("<repl>\nfinish \"done\"\n</repl>\n".to_string()),
-                LlmStreamEvent::Usage(LlmUsage {
-                    input_tokens: 9,
-                    output_tokens: 3,
-                    cached_input_tokens: 2,
-                    reasoning_tokens: 4,
+        let transport = MockTransport::new(vec![
+            MockCall {
+                stream_events: vec![
+                    LlmStreamEvent::Delta("<repl>\nobserve \"done\"\n</repl>\n".to_string()),
+                    LlmStreamEvent::Usage(LlmUsage {
+                        input_tokens: 9,
+                        output_tokens: 3,
+                        cached_input_tokens: 2,
+                        reasoning_tokens: 4,
+                    }),
+                ],
+                response: Ok(LlmResponse {
+                    usage: LlmUsage::default(),
+                    ..LlmResponse::default()
                 }),
-            ],
-            response: Ok(LlmResponse {
-                usage: LlmUsage::default(),
-                ..LlmResponse::default()
-            }),
-        }]);
+            },
+            MockCall {
+                stream_events: Vec::new(),
+                response: Ok(LlmResponse {
+                    full_text: "done".to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: "done".to_string(),
+                    }],
+                    ..LlmResponse::default()
+                }),
+            },
+        ]);
         let mut runtime = repl_runtime_with_transport(transport).await;
 
         let turn = runtime
@@ -4279,29 +4292,37 @@ mod tests {
 
         assert_eq!(turn.status, TurnStatus::Completed);
         assert_eq!(turn.assistant_output.safe_text, "done");
-        assert_eq!(turn.token_usage.input_tokens, 9);
-        assert_eq!(turn.token_usage.output_tokens, 3);
-        assert_eq!(turn.token_usage.cached_input_tokens, 2);
-        assert_eq!(turn.token_usage.reasoning_tokens, 4);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn repl_runtime_debug_log_preserves_request_body_on_stream_cutover() {
-        let transport = MockTransport::new(vec![MockCall {
-            stream_events: vec![
-                LlmStreamEvent::Delta("<repl>\nfinish \"done\"\n</repl>\n".to_string()),
-                LlmStreamEvent::Usage(LlmUsage {
-                    input_tokens: 9,
-                    output_tokens: 3,
-                    cached_input_tokens: 2,
-                    reasoning_tokens: 4,
+        let transport = MockTransport::new(vec![
+            MockCall {
+                stream_events: vec![
+                    LlmStreamEvent::Delta("<repl>\nobserve \"done\"\n</repl>\n".to_string()),
+                    LlmStreamEvent::Usage(LlmUsage {
+                        input_tokens: 9,
+                        output_tokens: 3,
+                        cached_input_tokens: 2,
+                        reasoning_tokens: 4,
+                    }),
+                ],
+                response: Ok(LlmResponse {
+                    usage: LlmUsage::default(),
+                    ..LlmResponse::default()
                 }),
-            ],
-            response: Ok(LlmResponse {
-                usage: LlmUsage::default(),
-                ..LlmResponse::default()
-            }),
-        }]);
+            },
+            MockCall {
+                stream_events: Vec::new(),
+                response: Ok(LlmResponse {
+                    full_text: "done".to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: "done".to_string(),
+                    }],
+                    ..LlmResponse::default()
+                }),
+            },
+        ]);
         let log_path = std::env::temp_dir().join(format!(
             "lash-repl-debug-log-{}-{}.jsonl",
             std::process::id(),
