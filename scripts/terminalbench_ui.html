@@ -77,12 +77,12 @@
       position: relative;
       z-index: 1;
       display: grid;
-      grid-template-columns: 320px 1fr;
+      grid-template-columns: 300px minmax(0, 1fr);
       min-height: 100vh;
     }
 
     .shell.sidebar-collapsed {
-      grid-template-columns: 32px 1fr;
+      grid-template-columns: 0px minmax(0, 1fr);
     }
 
     /* ── Sidebar ── */
@@ -97,6 +97,13 @@
       display: flex;
       flex-direction: column;
       min-width: 0;
+      transition: opacity 120ms;
+    }
+
+    .shell.sidebar-collapsed .sidebar {
+      opacity: 0;
+      pointer-events: none;
+      border-right: none;
     }
 
     .sidebar-inner {
@@ -111,72 +118,35 @@
     .sidebar::-webkit-scrollbar-track { background: transparent; }
     .sidebar::-webkit-scrollbar-thumb { background: var(--ash-mid); border-radius: 2px; }
 
-    /* ── Resize handle ── */
-    .sidebar-resize {
-      position: absolute;
-      right: -3px;
-      top: 0;
-      bottom: 0;
-      width: 6px;
-      cursor: col-resize;
-      z-index: 10;
-      transition: background 150ms;
-    }
-
-    .sidebar-resize:hover,
-    .sidebar-resize.dragging {
-      background: var(--sodium);
-      opacity: 0.4;
-    }
-
-    /* ── Collapse toggle ── */
-    .sidebar-collapse-btn {
-      position: absolute;
-      top: 5px;
-      right: 4px;
-      width: 18px;
-      height: 18px;
-      display: flex;
+    /* ── Sidebar toggle ── */
+    .sidebar-toggle {
+      position: fixed;
+      top: 6px;
+      left: 6px;
+      width: 22px;
+      height: 22px;
+      display: none;
       align-items: center;
       justify-content: center;
-      border: 1px solid var(--ash);
+      border: 1px solid var(--ash-mid);
       background: var(--form-deep);
       color: var(--chalk-dim);
-      font: 500 10px/1 var(--font-ui);
+      font: 500 12px/1 var(--font-ui);
       cursor: pointer;
-      z-index: 11;
+      z-index: 20;
       padding: 0;
       letter-spacing: 0;
       text-transform: none;
       transition: all 120ms;
     }
 
-    .sidebar-collapse-btn:hover {
-      color: var(--chalk);
-      border-color: var(--ash-mid);
+    .sidebar-toggle:hover {
+      color: var(--sodium);
+      border-color: var(--sodium);
     }
 
-    /* ── Collapsed sidebar ── */
-    .shell.sidebar-collapsed .sidebar {
-      overflow: visible;
-    }
-
-    .shell.sidebar-collapsed .sidebar-inner {
-      display: none;
-    }
-
-    .shell.sidebar-collapsed .sidebar-resize {
-      display: none;
-    }
-
-    .shell.sidebar-collapsed .sidebar-collapse-btn {
-      position: static;
-      width: 100%;
-      height: 28px;
-      right: auto;
-      top: auto;
-      border: none;
-      border-bottom: 1px solid var(--line);
+    .shell.sidebar-collapsed .sidebar-toggle {
+      display: flex;
     }
 
     /* ── Sidebar header ── */
@@ -484,7 +454,10 @@
       gap: 18px;
       align-content: start;
       min-width: 0;
-      overflow-x: auto;
+    }
+
+    .content > * {
+      min-width: 0;
     }
 
 
@@ -493,6 +466,8 @@
       border: 1px solid var(--line);
       background: linear-gradient(180deg, rgba(14, 13, 11, 0.92), rgba(8, 8, 7, 0.96));
       backdrop-filter: blur(6px);
+      min-width: 0;
+      overflow: hidden;
     }
 
     .panel h3 {
@@ -630,14 +605,15 @@
     /* ── Compare: run strip ── */
     .compare-run-strip {
       display: flex;
+      flex-wrap: wrap;
       gap: 1px;
       background: var(--ash);
       border: 1px solid var(--line);
-      overflow-x: auto;
     }
 
     .compare-run-card {
-      flex: 1 0 180px;
+      flex: 1 1 140px;
+      min-width: 0;
       padding: 10px 12px;
       background: var(--form-raised);
       display: flex;
@@ -1056,7 +1032,7 @@
 
     /* ── Responsive ── */
     @media (max-width: 1200px) {
-      .shell, .shell.sidebar-collapsed { grid-template-columns: 1fr !important; }
+      .shell { grid-template-columns: 1fr; }
       .sidebar { position: relative; height: auto; max-height: 50vh; }
       .compare-run-strip { flex-wrap: wrap; }
       .split { grid-template-columns: 1fr; }
@@ -1070,11 +1046,11 @@
 </head>
 <body>
   <div class="shell">
-    <aside class="sidebar" style="position:relative">
-      <button class="sidebar-collapse-btn" id="sidebarCollapseBtn" title="Toggle sidebar">&lsaquo;</button>
-      <div class="sidebar-resize" id="sidebarResize"></div>
+    <button class="sidebar-toggle" id="sidebarToggle" title="Show sidebar">&rsaquo;</button>
+    <aside class="sidebar">
       <div class="sidebar-inner">
       <div class="sidebar-header">
+        <button id="sidebarHideBtn" class="ghost" style="padding:2px 5px;font-size:9px" title="Hide sidebar">&lsaquo;</button>
         <h1>lash <span class="slash">/</span> bench</h1>
         <span class="spacer"></span>
         <button id="clearFiltersButton" class="ghost" style="padding:2px 5px;font-size:8px">clr</button>
@@ -2065,73 +2041,23 @@
       }
     });
 
-    // ── Sidebar resize ──
+    // ── Sidebar toggle ──
     {
       const shell = document.querySelector(".shell");
-      const handle = document.getElementById("sidebarResize");
-      const collapseBtn = document.getElementById("sidebarCollapseBtn");
-      const SIDEBAR_MIN = 180;
-      const SIDEBAR_MAX = 600;
       const STORAGE_KEY = "bench_sidebar";
 
-      let currentWidth = 320;
-
-      function setSidebarWidth(w) {
-        currentWidth = w;
-        shell.style.gridTemplateColumns = w + "px 1fr";
+      function setSidebarCollapsed(collapsed) {
+        shell.classList.toggle("sidebar-collapsed", collapsed);
+        try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ collapsed })); } catch {}
       }
 
-      function applySidebarState() {
-        try {
-          const saved = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || "{}");
-          if (saved.collapsed) {
-            shell.classList.add("sidebar-collapsed");
-            collapseBtn.innerHTML = "&rsaquo;";
-          } else if (saved.width) {
-            setSidebarWidth(saved.width);
-          }
-        } catch {}
-      }
+      document.getElementById("sidebarHideBtn").addEventListener("click", () => setSidebarCollapsed(true));
+      document.getElementById("sidebarToggle").addEventListener("click", () => setSidebarCollapsed(false));
 
-      function saveSidebarState() {
-        const collapsed = shell.classList.contains("sidebar-collapsed");
-        try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ collapsed, width: currentWidth })); } catch {}
-      }
-
-      collapseBtn.addEventListener("click", () => {
-        const wasCollapsed = shell.classList.toggle("sidebar-collapsed");
-        collapseBtn.innerHTML = wasCollapsed ? "&rsaquo;" : "&lsaquo;";
-        if (!wasCollapsed) {
-          setSidebarWidth(currentWidth);
-        }
-        saveSidebarState();
-      });
-
-      let dragging = false;
-      handle.addEventListener("mousedown", (e) => {
-        e.preventDefault();
-        dragging = true;
-        handle.classList.add("dragging");
-        document.body.style.cursor = "col-resize";
-        document.body.style.userSelect = "none";
-      });
-
-      document.addEventListener("mousemove", (e) => {
-        if (!dragging) return;
-        const w = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, e.clientX));
-        setSidebarWidth(w);
-      });
-
-      document.addEventListener("mouseup", () => {
-        if (!dragging) return;
-        dragging = false;
-        handle.classList.remove("dragging");
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
-        saveSidebarState();
-      });
-
-      applySidebarState();
+      try {
+        const saved = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || "{}");
+        if (saved.collapsed) shell.classList.add("sidebar-collapsed");
+      } catch {}
     }
 
     setInterval(() => {
