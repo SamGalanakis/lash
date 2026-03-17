@@ -77,7 +77,7 @@
       position: relative;
       z-index: 1;
       display: grid;
-      grid-template-columns: 368px 1fr;
+      grid-template-columns: 320px 1fr;
       min-height: 100vh;
     }
 
@@ -98,40 +98,36 @@
     .sidebar::-webkit-scrollbar-track { background: transparent; }
     .sidebar::-webkit-scrollbar-thumb { background: var(--ash-mid); border-radius: 2px; }
 
-    .masthead {
-      padding: 30px 24px 24px;
-      border-bottom: 1px solid var(--line);
-    }
-
-    .masthead h1 {
-      font: 700 11px/1 var(--font-display);
-      letter-spacing: 0.28em;
-      text-transform: uppercase;
-      color: var(--chalk);
-    }
-
-    .masthead h1 .slash {
-      color: var(--sodium);
-    }
-
-    .masthead p {
-      margin-top: 14px;
-      color: var(--chalk-dim);
-      font: 400 12.5px/1.65 var(--font-body);
-    }
-
-    .toolbar {
-      padding: 18px 24px 16px;
-      border-bottom: 1px solid var(--line);
-      display: grid;
-      gap: 12px;
-    }
-
-    .toolbar-row {
+    /* ── Sidebar header ── */
+    .sidebar-header {
       display: flex;
-      gap: 8px;
       align-items: center;
-      justify-content: space-between;
+      gap: 6px;
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--line);
+      min-height: 0;
+    }
+
+    .sidebar-header h1 {
+      font: 700 9px/1 var(--font-display);
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--chalk-dim);
+      white-space: nowrap;
+    }
+
+    .sidebar-header h1 .slash { color: var(--sodium); }
+
+    .sidebar-header .spacer { flex: 1; }
+
+    /* ── Sidebar toolbar ── */
+    .toolbar {
+      padding: 4px 6px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      gap: 3px;
+      align-items: center;
+      position: relative;
     }
 
     input, button, select {
@@ -139,31 +135,89 @@
     }
 
     input[type="search"] {
-      width: 100%;
+      flex: 1;
+      min-width: 60px;
       border: 1px solid var(--ash);
       background: var(--form-deep);
       color: var(--chalk);
-      padding: 12px 13px;
-      font: 400 12px/1 var(--font-ui);
+      padding: 4px 7px;
+      font: 400 10px/1 var(--font-ui);
       outline: none;
       transition: border-color 160ms;
     }
 
-    input[type="search"]::placeholder {
-      color: var(--ash-text);
+    input[type="search"]::placeholder { color: var(--ash-text); }
+    input[type="search"]:focus { border-color: var(--sodium); }
+
+    .filter-btn {
+      position: relative;
+      padding: 4px 7px;
+      font: 500 9px/1 var(--font-ui);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      border: 1px solid var(--ash);
+      background: var(--form-deep);
+      color: var(--chalk-dim);
+      cursor: pointer;
+      transition: all 120ms;
+      white-space: nowrap;
     }
 
-    input[type="search"]:focus {
-      border-color: var(--sodium);
+    .filter-btn:hover { border-color: var(--ash-mid); color: var(--chalk); }
+    .filter-btn.active { border-color: var(--sodium); color: var(--sodium); }
+    .filter-btn .filter-dot {
+      display: inline-block;
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--sodium);
+      margin-left: 4px;
+      vertical-align: middle;
+    }
+
+    /* ── Filter popover ── */
+    .filter-popover {
+      display: none;
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      z-index: 20;
+      background: var(--form-deep);
+      border: 1px solid var(--ash-mid);
+      border-top: none;
+      padding: 6px;
+      box-shadow: 0 12px 32px rgba(0,0,0,0.5);
+    }
+
+    .filter-popover.open { display: grid; gap: 4px; }
+
+    .filter-row {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .filter-row label {
+      font: 400 8px/1 var(--font-display);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--ash-text);
+      width: 52px;
+      flex-shrink: 0;
+      text-align: right;
+    }
+
+    .filter-row select {
+      flex: 1;
     }
 
     select {
-      width: 100%;
       border: 1px solid var(--ash);
       background: var(--form-deep);
-      color: var(--chalk);
-      padding: 10px 12px;
-      font: 400 11px/1.1 var(--font-ui);
+      color: var(--chalk-dim);
+      padding: 3px 18px 3px 5px;
+      font: 400 9px/1 var(--font-ui);
       outline: none;
       transition: border-color 160ms;
       appearance: none;
@@ -171,41 +225,33 @@
         linear-gradient(45deg, transparent 50%, var(--ash-text) 50%),
         linear-gradient(135deg, var(--ash-text) 50%, transparent 50%);
       background-position:
-        calc(100% - 16px) calc(50% - 2px),
-        calc(100% - 11px) calc(50% - 2px);
+        calc(100% - 8px) calc(50% - 2px),
+        calc(100% - 3px) calc(50% - 2px);
       background-size: 5px 5px, 5px 5px;
       background-repeat: no-repeat;
+      cursor: pointer;
     }
 
-    select:focus {
-      border-color: var(--sodium);
-    }
+    select:focus { border-color: var(--sodium); }
+    select.has-value { color: var(--sodium); border-color: var(--line-strong); }
 
-    .filter-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 8px;
-    }
-
-    .filter-field {
-      display: grid;
-      gap: 5px;
-    }
-
-    .filter-field span {
-      font: 500 9px/1 var(--font-display);
-      letter-spacing: 0.16em;
-      text-transform: uppercase;
+    .sidebar-banner {
+      padding: 2px 8px;
+      font: 400 9px/1.4 var(--font-ui);
       color: var(--ash-text);
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
     }
 
     button {
       border: 1px solid var(--ash);
       background: var(--form-raised);
       color: var(--chalk-dim);
-      padding: 9px 14px;
-      font: 500 11px/1 var(--font-ui);
-      letter-spacing: 0.12em;
+      padding: 3px 7px;
+      font: 500 9px/1 var(--font-ui);
+      letter-spacing: 0.1em;
       text-transform: uppercase;
       cursor: pointer;
       transition: all 160ms;
@@ -245,78 +291,66 @@
       cursor: not-allowed;
     }
 
-    .banner {
-      font: 400 11px/1.4 var(--font-ui);
-      color: var(--ash-text);
-      letter-spacing: 0.04em;
-    }
-
     /* ── Run list ── */
     .run-list {
       flex: 1;
-      padding: 8px;
+      padding: 0;
       display: grid;
-      gap: 5px;
+      gap: 0;
       align-content: start;
       overflow: auto;
     }
 
     .run-card {
-      border: 1px solid var(--line);
-      background: var(--form-raised);
-      padding: 11px 12px;
+      border-bottom: 1px solid var(--line);
+      background: transparent;
+      padding: 5px 8px;
       cursor: pointer;
-      transition: all 140ms;
-    }
-
-    .run-card:hover {
-      border-color: var(--ash-mid);
-      background: rgba(20, 20, 18, 0.95);
-    }
-
-    .run-card.active {
-      border-color: var(--sodium);
-      background: linear-gradient(135deg, rgba(232, 163, 60, 0.06), var(--form-raised));
-      box-shadow: inset 2px 0 0 var(--sodium);
-    }
-
-    .run-card-top {
+      transition: background 100ms;
       display: flex;
-      gap: 8px;
+      gap: 6px;
       align-items: flex-start;
     }
 
-    .run-card-top input[type="checkbox"] {
-      margin-top: 1px;
+    .run-card:hover {
+      background: rgba(232, 228, 208, 0.03);
+    }
+
+    .run-card.active {
+      background: rgba(232, 163, 60, 0.06);
+      box-shadow: inset 2px 0 0 var(--sodium);
+    }
+
+    .run-card input[type="checkbox"] {
+      margin-top: 2px;
       accent-color: var(--sodium);
+      flex-shrink: 0;
+    }
+
+    .run-card-body {
+      flex: 1;
+      min-width: 0;
     }
 
     .run-card h3 {
-      font: 600 12px/1.25 var(--font-ui);
+      font: 500 10px/1.2 var(--font-ui);
       color: var(--chalk);
-      margin-bottom: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
-    .run-card-sub {
-      color: var(--chalk-dim);
-      font-size: 10px;
-      line-height: 1.4;
-      margin-bottom: 6px;
-    }
-
-    .run-card-badges {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 4px;
-      margin-bottom: 5px;
-    }
-
-    .run-card-stats {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 3px 8px;
-      font: 400 9.5px/1.3 var(--font-ui);
+    .run-card-meta {
+      font: 400 9px/1.3 var(--font-ui);
       color: var(--ash-text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .run-card-meta .pass-pct {
+      color: var(--lichen);
+      font-weight: 600;
     }
 
     .muted {
@@ -370,53 +404,6 @@
       align-content: start;
     }
 
-    /* ── Hero ── */
-    .hero {
-      position: relative;
-      padding: 28px 28px 24px;
-      border: 1px solid var(--line);
-      background:
-        linear-gradient(135deg, rgba(232, 163, 60, 0.08), transparent 50%),
-        linear-gradient(180deg, var(--form-raised), var(--form-deep));
-      overflow: hidden;
-    }
-
-    .hero::after {
-      content: "";
-      position: absolute;
-      right: -20px;
-      top: -40px;
-      width: 180px;
-      height: 180px;
-      background: radial-gradient(circle, rgba(232, 163, 60, 0.08), transparent 70%);
-      pointer-events: none;
-    }
-
-    .hero-eyebrow {
-      font: 500 10px/1 var(--font-display);
-      letter-spacing: 0.32em;
-      text-transform: uppercase;
-      color: var(--ash-text);
-      margin-bottom: 12px;
-    }
-
-    .hero h2 {
-      font: 700 clamp(20px, 3vw, 28px)/1.1 var(--font-display);
-      letter-spacing: -0.04em;
-      text-transform: uppercase;
-      color: var(--chalk);
-    }
-
-    .hero h2 .slash {
-      color: var(--sodium);
-    }
-
-    .hero p {
-      margin-top: 10px;
-      max-width: 72ch;
-      color: var(--chalk-mid);
-      font: 400 14px/1.6 var(--font-body);
-    }
 
     /* ── Panels ── */
     .panel {
@@ -504,11 +491,6 @@
       cursor: not-allowed;
     }
 
-    .workspace-banner {
-      padding: 0 18px 14px;
-      font: 400 12px/1.5 var(--font-body);
-      color: var(--chalk-dim);
-    }
 
     .workspace {
       display: none;
@@ -519,108 +501,88 @@
       display: grid;
     }
 
-    /* ── Compare grid ── */
-    .compare-grid {
-      display: grid;
-      grid-template-columns: 1fr minmax(300px, 0.9fr) 1fr;
+    /* ── Compare: run strip ── */
+    .compare-run-strip {
+      display: flex;
       gap: 1px;
       background: var(--ash);
       border: 1px solid var(--line);
+      overflow-x: auto;
     }
 
-    .compare-card {
-      padding: 18px;
+    .compare-run-card {
+      flex: 1 0 220px;
+      padding: 14px 16px;
       background: var(--form-raised);
+      border-top: 3px solid var(--ash-mid);
     }
 
-    .compare-card h4 {
-      font: 600 14px/1.2 var(--font-ui);
+    .compare-run-card:nth-child(1) { border-top-color: var(--lichen); }
+    .compare-run-card:nth-child(2) { border-top-color: var(--sodium); }
+    .compare-run-card:nth-child(3) { border-top-color: #7a8cc8; }
+    .compare-run-card:nth-child(4) { border-top-color: #c87ab0; }
+    .compare-run-card:nth-child(5) { border-top-color: #6cc8b8; }
+    .compare-run-card:nth-child(6) { border-top-color: #c8a86c; }
+
+    .compare-run-card h4 {
+      font: 600 12px/1.2 var(--font-ui);
       color: var(--chalk);
-      margin-bottom: 6px;
-    }
-
-    .compare-card h5 {
-      font: 600 10px/1 var(--font-display);
-      letter-spacing: 0.22em;
-      text-transform: uppercase;
-      color: var(--sodium);
-      margin-bottom: 12px;
-    }
-
-    .compare-card.accent-left {
-      border-left: 3px solid rgba(138, 158, 108, 0.6);
-    }
-
-    .compare-card.accent-right {
-      border-right: 3px solid var(--sodium);
-    }
-
-    .compare-card table {
-      margin-top: 14px;
-    }
-
-    .compare-card table td {
-      padding: 6px 0;
-      border-bottom: 1px solid var(--line);
-      font-size: 11px;
-    }
-
-    .compare-card table td:first-child {
-      color: var(--ash-text);
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      font-size: 10px;
-      padding-right: 12px;
-      white-space: nowrap;
-    }
-
-    .compare-summary {
-      display: grid;
-      gap: 6px;
-    }
-
-    .compare-summary-row {
-      display: grid;
-      grid-template-columns: 1fr auto 1fr;
-      gap: 8px;
-      align-items: center;
-      padding: 10px 12px;
-      background: var(--form-deep);
-      border: 1px solid var(--line);
-    }
-
-    .compare-summary-row label {
-      display: block;
       margin-bottom: 4px;
-      font: 400 9px/1 var(--font-ui);
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: var(--ash-text);
+      word-break: break-word;
     }
 
-    .compare-summary-row strong {
-      display: block;
-      font: 600 14px/1.1 var(--font-ui);
-      color: var(--chalk);
+    .compare-run-card .muted {
+      font-size: 10px;
+    }
+
+    /* ── Compare: metrics table ── */
+    .compare-metrics-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    .compare-metrics-table th,
+    .compare-metrics-table td {
+      padding: 7px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: right;
       font-variant-numeric: tabular-nums;
     }
 
-    .compare-summary-row .delta {
-      min-width: 100px;
-      text-align: center;
-      padding: 6px 10px;
-      font: 700 11px/1 var(--font-ui);
-      letter-spacing: 0.04em;
-      border: 1px solid var(--line);
-      background: var(--form-raised);
-      color: var(--chalk-dim);
+    .compare-metrics-table th:first-child,
+    .compare-metrics-table td:first-child {
+      text-align: left;
+      font: 400 10px/1 var(--font-ui);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ash-text);
+      white-space: nowrap;
     }
 
-    .compare-summary-row .side-win strong {
+    .compare-metrics-table th {
+      font: 600 10px/1 var(--font-display);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      background: var(--form-deep);
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+
+    .compare-metrics-table th:nth-child(2) { color: var(--lichen); }
+    .compare-metrics-table th:nth-child(3) { color: var(--sodium); }
+    .compare-metrics-table th:nth-child(4) { color: #7a8cc8; }
+    .compare-metrics-table th:nth-child(5) { color: #c87ab0; }
+    .compare-metrics-table th:nth-child(6) { color: #6cc8b8; }
+    .compare-metrics-table th:nth-child(7) { color: #c8a86c; }
+
+    .compare-metrics-table .cell-best {
       color: var(--lichen);
+      font-weight: 700;
     }
 
-    .compare-summary-row .side-lose strong {
+    .compare-metrics-table .cell-worst {
       color: var(--error);
       opacity: 0.7;
     }
@@ -723,7 +685,7 @@
 
     .matchup-header {
       display: grid;
-      grid-template-columns: minmax(160px, 1fr) 1fr auto 1fr;
+      grid-template-columns: minmax(160px, 1.2fr) repeat(var(--run-count, 2), 1fr);
       gap: 1px;
       align-items: stretch;
     }
@@ -779,31 +741,13 @@
       font-weight: 600;
     }
 
-    .matchup-delta {
-      min-width: 120px;
-      background: rgba(232, 163, 60, 0.03);
-      border-left: 1px solid var(--line);
-      border-right: 1px solid var(--line);
-      text-align: center;
+    .matchup-cell.cell-best {
+      background: rgba(138, 158, 108, 0.06);
     }
 
-    .matchup-delta .delta-pill {
-      display: inline-block;
-      padding: 3px 8px;
-      font: 700 10px/1 var(--font-ui);
-      letter-spacing: 0.04em;
-      border: 1px solid var(--line);
+    .matchup-cell.cell-best .pass-badge {
+      border-color: rgba(138, 158, 108, 0.5);
     }
-
-    .delta-pill.left-wins {
-      border-color: rgba(138, 158, 108, 0.4);
-      color: var(--lichen);
-    }
-    .delta-pill.right-wins {
-      border-color: rgba(138, 158, 108, 0.4);
-      color: var(--lichen);
-    }
-    .delta-pill.neutral { color: var(--ash-text); }
 
     .matchup-expand {
       display: none;
@@ -815,74 +759,47 @@
       display: block;
     }
 
-    .matchup-detail {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 1px;
-      background: var(--ash);
-    }
-
-    .matchup-detail-side {
+    .matchup-detail-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
       background: var(--form-deep);
-      padding: 16px 18px;
     }
 
-    .matchup-detail-side h5 {
-      font: 600 10px/1 var(--font-display);
-      letter-spacing: 0.2em;
-      text-transform: uppercase;
-      color: var(--sodium);
-      margin-bottom: 14px;
-      padding-bottom: 8px;
+    .matchup-detail-table th,
+    .matchup-detail-table td {
+      padding: 5px 10px;
       border-bottom: 1px solid var(--line);
+      text-align: right;
+      font-variant-numeric: tabular-nums;
     }
 
-    .matchup-detail-side.left-side h5 {
-      color: var(--lichen);
-    }
-
-    .detail-grid {
-      display: grid;
-      gap: 0;
-    }
-
-    .detail-row {
-      display: grid;
-      grid-template-columns: 110px 1fr auto;
-      gap: 8px;
-      padding: 6px 0;
-      border-bottom: 1px solid var(--line);
-      align-items: baseline;
-    }
-
-    .detail-row:last-child {
-      border-bottom: none;
-    }
-
-    .detail-label {
-      font: 400 10px/1.2 var(--font-ui);
+    .matchup-detail-table th:first-child,
+    .matchup-detail-table td:first-child {
+      text-align: left;
+      font: 400 9px/1 var(--font-ui);
       letter-spacing: 0.08em;
       text-transform: uppercase;
       color: var(--ash-text);
     }
 
-    .detail-value {
-      font: 500 12px/1.3 var(--font-ui);
-      color: var(--chalk-mid);
-      font-variant-numeric: tabular-nums;
+    .matchup-detail-table th {
+      font: 600 9px/1 var(--font-display);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--chalk-dim);
+      background: var(--form-raised);
     }
 
-    .detail-delta {
-      font: 600 11px/1 var(--font-ui);
-      font-variant-numeric: tabular-nums;
-      text-align: right;
-      min-width: 80px;
+    .matchup-detail-table .cell-best {
+      color: var(--lichen);
+      font-weight: 700;
     }
 
-    .detail-delta.flat { color: var(--ash-text); }
-
-    .detail-value.side-win { color: var(--lichen); font-weight: 700; }
-    .detail-value.side-lose { color: var(--error); opacity: 0.7; }
+    .matchup-detail-table .cell-worst {
+      color: var(--error);
+      opacity: 0.7;
+    }
 
     .matchup-missing {
       padding: 14px 18px;
@@ -1017,7 +934,7 @@
     @media (max-width: 1200px) {
       .shell { grid-template-columns: 1fr; }
       .sidebar { position: relative; height: auto; max-height: 50vh; }
-      .compare-grid { grid-template-columns: 1fr; }
+      .compare-run-strip { flex-wrap: wrap; }
       .split { grid-template-columns: 1fr; }
     }
 
@@ -1030,62 +947,38 @@
 <body>
   <div class="shell">
     <aside class="sidebar">
-      <div class="masthead">
-        <h1>lash <span class="slash">/</span> bench observatory</h1>
-        <p>Browse persisted benchmark runs. Open one to inspect, or check two for side-by-side comparison.</p>
+      <div class="sidebar-header">
+        <h1>lash <span class="slash">/</span> bench</h1>
+        <span class="spacer"></span>
+        <button id="clearFiltersButton" class="ghost" style="padding:2px 5px;font-size:8px">clr</button>
+        <button id="deleteButton" class="danger" disabled style="padding:2px 5px;font-size:8px">del</button>
       </div>
 
       <div class="toolbar">
-        <input id="runSearch" type="search" placeholder="filter runs...">
-        <div class="filter-grid">
-          <label class="filter-field">
-            <span>Preset</span>
-            <select id="presetFilter"></select>
-          </label>
-          <label class="filter-field">
-            <span>Agent</span>
-            <select id="agentFilter"></select>
-          </label>
-          <label class="filter-field">
-            <span>Mode</span>
-            <select id="executionModeFilter"></select>
-          </label>
-          <label class="filter-field">
-            <span>Variant</span>
-            <select id="variantFilter"></select>
-          </label>
-          <label class="filter-field">
-            <span>Context</span>
-            <select id="contextFilter"></select>
-          </label>
-          <label class="filter-field">
-            <span>Provider</span>
-            <select id="providerFilter"></select>
-          </label>
+        <input id="runSearch" type="search" placeholder="search...">
+        <button class="filter-btn" id="filterToggleBtn">filters</button>
+        <div class="filter-popover" id="filterPopover">
+          <div class="filter-row"><label>preset</label><select id="presetFilter"></select></div>
+          <div class="filter-row"><label>agent</label><select id="agentFilter"></select></div>
+          <div class="filter-row"><label>mode</label><select id="executionModeFilter"></select></div>
+          <div class="filter-row"><label>variant</label><select id="variantFilter"></select></div>
+          <div class="filter-row"><label>context</label><select id="contextFilter"></select></div>
+          <div class="filter-row"><label>provider</label><select id="providerFilter"></select></div>
         </div>
-        <div class="toolbar-row">
-          <button id="clearFiltersButton" class="ghost">Clear Filters</button>
-          <button id="deleteButton" class="danger" disabled>Delete</button>
-        </div>
-        <div class="banner" id="selectionBanner">Select up to 2 runs for compare mode.</div>
       </div>
+
+      <div class="sidebar-banner"><span id="selectionBanner"></span></div>
 
       <div class="run-list" id="runList"></div>
     </aside>
 
     <main class="content">
-      <section class="hero">
-        <div class="hero-eyebrow">bench observatory</div>
-        <h2>Compare runs like experiments <span class="slash">/</span> not log dumps</h2>
-        <p>Single-run inspection and two-run comparison are separate workspaces. Select a run to explore, or check two to enter the compare studio.</p>
-      </section>
-
       <section class="panel">
         <div class="workspace-tabs">
           <button id="exploreTab" class="workspace-tab active">Explore Run</button>
-          <button id="compareTab" class="workspace-tab">Compare Two</button>
+          <button id="compareTab" class="workspace-tab">Compare Runs</button>
         </div>
-        <div class="workspace-banner" id="workspaceBanner">Open any run card to inspect it in detail. Check exactly two runs to enter compare mode.</div>
+        <div class="workspace-banner" id="workspaceBanner" hidden></div>
       </section>
 
       <section class="workspace active" id="exploreWorkspace">
@@ -1104,9 +997,9 @@
           <h3>Trial Detail</h3>
           <div class="panel-body">
             <div class="logs">
-              <div id="trialMeta" class="empty">Select a task row to inspect logs and artifacts.</div>
+              <div id="trialMeta" class="empty"></div>
               <div class="tab-row" id="logTabs"></div>
-              <pre id="logViewer">Select a log tab.</pre>
+              <pre id="logViewer"></pre>
             </div>
           </div>
         </section>
@@ -1115,9 +1008,7 @@
       <section class="workspace" id="compareWorkspace">
         <section class="panel">
           <h3>Compare Studio</h3>
-          <div class="panel-body">
-            <div class="compare-grid" id="compareGrid"></div>
-          </div>
+          <div id="compareGrid" style="padding: 0"></div>
         </section>
 
         <section class="panel">
@@ -1131,12 +1022,12 @@
   <script>
     const AUTO_REFRESH_MS = 15000;
     const FILTER_CONFIG = [
-      { id: "presetFilter", key: "preset", allLabel: "all presets" },
-      { id: "agentFilter", key: "agent", allLabel: "all agents" },
-      { id: "executionModeFilter", key: "execution_mode", allLabel: "all modes" },
-      { id: "variantFilter", key: "variant", allLabel: "all variants" },
-      { id: "contextFilter", key: "context_strategy", allLabel: "all contexts" },
-      { id: "providerFilter", key: "provider", allLabel: "all providers" },
+      { id: "presetFilter", key: "preset", label: "Preset", allLabel: "all presets" },
+      { id: "agentFilter", key: "agent", label: "Agent", allLabel: "all agents" },
+      { id: "executionModeFilter", key: "execution_mode", label: "Mode", allLabel: "all modes" },
+      { id: "variantFilter", key: "variant", label: "Variant", allLabel: "all variants" },
+      { id: "contextFilter", key: "context_strategy", label: "Context", allLabel: "all contexts" },
+      { id: "providerFilter", key: "provider", label: "Provider", allLabel: "all providers" },
     ];
     const state = {
       runs: [],
@@ -1147,6 +1038,32 @@
       activeLogPath: null,
       viewMode: "explore",
     };
+
+    function saveFiltersToSession() {
+      const data = {
+        query: document.getElementById("runSearch").value,
+        viewMode: state.viewMode,
+      };
+      for (const config of FILTER_CONFIG) {
+        data[config.key] = document.getElementById(config.id).value;
+      }
+      try { sessionStorage.setItem("bench_filters", JSON.stringify(data)); } catch {}
+    }
+
+    function restoreFiltersFromSession() {
+      try {
+        const raw = sessionStorage.getItem("bench_filters");
+        if (!raw) return;
+        const data = JSON.parse(raw);
+        if (data.query) document.getElementById("runSearch").value = data.query;
+        if (data.viewMode) state.viewMode = data.viewMode;
+        for (const config of FILTER_CONFIG) {
+          if (data[config.key]) {
+            document.getElementById(config.id).value = data[config.key];
+          }
+        }
+      } catch {}
+    }
 
     const fmtPct = value => `${(100 * (value || 0)).toFixed(1)}%`;
     const fmtInt = value => new Intl.NumberFormat().format(value || 0);
@@ -1273,6 +1190,30 @@
         ].join("");
         select.value = values.includes(current) ? current : "";
       }
+      renderFilterPanel();
+    }
+
+    function activeFilterEntries() {
+      const filters = currentFilters();
+      return FILTER_CONFIG
+        .filter(config => filters[config.key])
+        .map(config => ({ label: config.label, value: filters[config.key] }));
+    }
+
+    function renderFilterPanel() {
+      const entries = activeFilterEntries();
+      const clearButton = document.getElementById("clearFiltersButton");
+      clearButton.disabled = entries.length === 0;
+      for (const config of FILTER_CONFIG) {
+        const el = document.getElementById(config.id);
+        el.classList.toggle("has-value", !!el.value);
+      }
+      const btn = document.getElementById("filterToggleBtn");
+      if (btn) {
+        const hasFilters = entries.length > 0;
+        btn.innerHTML = `filters${hasFilters ? ` <span class="filter-dot"></span>` : ""}`;
+        btn.classList.toggle("active", hasFilters || (document.getElementById("filterPopover")?.classList.contains("open")));
+      }
     }
 
     function getFilteredRuns(filters = currentFilters()) {
@@ -1347,42 +1288,26 @@
 
     function renderRunList() {
       const runList = document.getElementById("runList");
+      renderFilterPanel();
       const filtered = getFilteredRuns();
       renderSelectionBanner(filtered.length);
 
       if (!filtered.length) {
-        runList.innerHTML = `<div class="empty">No runs match the current filter.</div>`;
+        runList.innerHTML = `<div class="empty">No matching runs.</div>`;
         return;
       }
-      const selectionLocked = state.selectedRunIds.size >= 2;
-
-      runList.innerHTML = filtered.map(run => `
-        <article class="run-card ${run.run_id === state.activeRunId ? "active" : ""}" data-run-id="${run.run_id}">
-          <div class="run-card-top">
-            <input type="checkbox" class="run-select" data-run-id="${run.run_id}" ${state.selectedRunIds.has(run.run_id) ? "checked" : ""} ${!state.selectedRunIds.has(run.run_id) && selectionLocked ? "disabled" : ""}>
-            <div style="flex: 1">
-              <h3>${escapeHtml(run.job_name)}</h3>
-              <div class="run-card-sub">${escapeHtml(run.dataset || "-")} · ${escapeHtml(run.agent || "-")} · ${escapeHtml(run.provider || "-")}</div>
-              <div class="run-card-badges">
-                <span class="chip mode">${escapeHtml(run.execution_mode || "default")}</span>
-                <span class="chip context">${escapeHtml(run.context_strategy || "default")}</span>
-                ${run.preset ? `<span class="chip preset">${escapeHtml(run.preset)}</span>` : ""}
-                <span class="chip pass">${fmtPct(run.pass_rate)}</span>
-                <span class="chip">${fmtInt(run.trials_passed)}/${fmtInt(run.trials_total)}</span>
-              </div>
-              <div class="run-card-stats">
-                <span>${fmtInt(run.tokens_non_cache_total || 0)} nc</span>
-                <span>${fmtInt(run.tokens_cache_total || 0)} cache</span>
-                <span>${fmtPct(cacheRatio({ total: run.tokens_total, cache: run.tokens_cache_total }))}</span>
-                <span>${fmtSeconds(run.cpu_seconds_total)} cpu</span>
-                <span>${fmtMemoryKb(run.peak_rss_kb)} rss</span>
-                <span>${fmtInt(run.turns_total || 0)} turns</span>
-                <span>${fmtInt(run.tool_calls_total || 0)} tools</span>
-              </div>
-            </div>
+      runList.innerHTML = filtered.map(run => {
+        const pct = fmtPct(run.pass_rate);
+        const nc = fmtInt(run.tokens_non_cache_total || 0);
+        return `
+        <div class="run-card ${run.run_id === state.activeRunId ? "active" : ""}" data-run-id="${run.run_id}">
+          <input type="checkbox" class="run-select" data-run-id="${run.run_id}" ${state.selectedRunIds.has(run.run_id) ? "checked" : ""}>
+          <div class="run-card-body">
+            <h3>${escapeHtml(run.job_name)}</h3>
+            <div class="run-card-meta"><span class="pass-pct">${pct}</span> ${fmtInt(run.trials_passed)}/${fmtInt(run.trials_total)} · ${nc} nc · ${fmtSeconds(run.cpu_seconds_total)}</div>
           </div>
-        </article>
-      `).join("");
+        </div>`;
+      }).join("");
 
       runList.querySelectorAll(".run-card").forEach(card => {
         card.addEventListener("click", async event => {
@@ -1401,16 +1326,12 @@
         box.addEventListener("change", async () => {
           const runId = box.dataset.runId;
           if (box.checked) {
-            if (state.selectedRunIds.size >= 2) {
-              box.checked = false;
-              return;
-            }
             state.selectedRunIds.add(runId);
           } else {
             state.selectedRunIds.delete(runId);
           }
           await ensureRunLoaded(runId);
-          if (state.selectedRunIds.size === 2) {
+          if (state.selectedRunIds.size >= 2) {
             state.viewMode = "compare";
           }
           renderSelectionBanner();
@@ -1423,7 +1344,7 @@
 
     function renderSelectionBanner(filteredCount = getFilteredRuns().length) {
       const count = state.selectedRunIds.size;
-      const ready = count === 2 ? "compare studio ready" : "select up to 2 runs";
+      const ready = count >= 2 ? `compare ${count} runs` : "check 2+ to compare";
       const total = state.runs.length;
       const visible = filteredCount === total
         ? `${fmtInt(total)} visible`
@@ -1437,6 +1358,7 @@
       for (const config of FILTER_CONFIG) {
         document.getElementById(config.id).value = "";
       }
+      saveFiltersToSession();
       renderRunList();
     }
 
@@ -1457,29 +1379,21 @@
     }
 
     function renderWorkspaceTabs() {
-      const compareReady = state.selectedRunIds.size === 2;
+      const compareReady = state.selectedRunIds.size >= 2;
       if (state.viewMode === "compare" && !compareReady) {
         state.viewMode = "explore";
       }
       const exploreTab = document.getElementById("exploreTab");
       const compareTab = document.getElementById("compareTab");
-      const banner = document.getElementById("workspaceBanner");
       exploreTab.classList.toggle("active", state.viewMode !== "compare");
       compareTab.classList.toggle("active", state.viewMode === "compare");
       compareTab.disabled = !compareReady;
-      if (state.viewMode === "compare") {
-        banner.textContent = compareReady
-          ? "Two runs locked in. The compare studio shows side-by-side summaries and task matchups."
-          : "Check exactly two runs to unlock compare mode.";
-      } else {
-        banner.textContent = "Open any run card to inspect it in detail. Check exactly two runs to enter compare mode.";
-      }
     }
 
     function renderWorkspace() {
       const explore = document.getElementById("exploreWorkspace");
       const compare = document.getElementById("compareWorkspace");
-      const compareReady = state.selectedRunIds.size === 2;
+      const compareReady = state.selectedRunIds.size >= 2;
       const showCompare = state.viewMode === "compare" && compareReady;
       explore.classList.toggle("active", !showCompare);
       compare.classList.toggle("active", showCompare);
@@ -1490,173 +1404,132 @@
       }
     }
 
-    // winner: "left" | "right" | "" (tie)
-    function summaryMetricRow(label, leftValue, rightValue, deltaText, winner) {
-      const leftCls = winner === "left" ? "side-win" : winner === "right" ? "side-lose" : "";
-      const rightCls = winner === "right" ? "side-win" : winner === "left" ? "side-lose" : "";
-      return `
-        <div class="compare-summary-row">
-          <div class="${leftCls}">
-            <label>${escapeHtml(label)}</label>
-            <strong>${escapeHtml(leftValue)}</strong>
-          </div>
-          <div class="delta">${escapeHtml(deltaText)}</div>
-          <div style="text-align: right" class="${rightCls}">
-            <label>${escapeHtml(label)}</label>
-            <strong>${escapeHtml(rightValue)}</strong>
-          </div>
-        </div>
-      `;
+    // For N values, find index of best (higherIsBetter=true: max, false: min). Returns -1 if all equal.
+    function bestIndex(values, higherIsBetter) {
+      if (values.length < 2) return -1;
+      let best = values[0], idx = 0, allEqual = true;
+      for (let i = 1; i < values.length; i++) {
+        if (values[i] !== best) allEqual = false;
+        if (higherIsBetter ? values[i] > best : values[i] < best) {
+          best = values[i]; idx = i;
+        }
+      }
+      return allEqual ? -1 : idx;
     }
 
-    // Determine which side wins for a metric.
-    // higherIsBetter: true for pass rate, cache %; false for tokens, duration, cpu, etc.
-    function metricWinner(leftVal, rightVal, higherIsBetter) {
-      if (leftVal === rightVal) return "";
-      if (higherIsBetter) return leftVal > rightVal ? "left" : "right";
-      return leftVal < rightVal ? "left" : "right";
+    function worstIndex(values, higherIsBetter) {
+      return bestIndex(values, !higherIsBetter);
+    }
+
+    // Build an N-column metrics row: returns array of {formatted, cls} per run
+    function nWayMetricCells(values, formatted, higherIsBetter) {
+      const best = bestIndex(values, higherIsBetter);
+      const worst = worstIndex(values, higherIsBetter);
+      return formatted.map((text, i) => ({
+        text,
+        cls: i === best ? "cell-best" : (values.length > 2 && i === worst) ? "cell-worst" : "",
+      }));
     }
 
     function renderCompareGrid() {
       const compareGrid = document.getElementById("compareGrid");
       const selected = [...state.selectedRunIds].map(id => state.runDetails.get(id)).filter(Boolean);
-      if (selected.length !== 2) {
-        compareGrid.innerHTML = `<div class="empty">Check exactly two runs in the sidebar to open the compare studio.</div>`;
+      if (selected.length < 2) {
+        compareGrid.innerHTML = ``;
         renderComparisonTable([]);
         return;
       }
-      const [left, right] = selected;
-      const leftStats = left.global_stats || {};
-      const rightStats = right.global_stats || {};
-      const leftParams = left.params || {};
-      const rightParams = right.params || {};
-      const rightPass = rightStats.pass_rate || 0;
-      const leftPass = leftStats.pass_rate || 0;
-      const rightDuration = rightStats.duration_seconds_avg || 0;
-      const leftDuration = leftStats.duration_seconds_avg || 0;
-      const rightNonCache = nonCacheTokens(rightStats.tokens_total);
-      const leftNonCache = nonCacheTokens(leftStats.tokens_total);
-      const rightCache = (rightStats.tokens_total || {}).cache || 0;
-      const leftCache = (leftStats.tokens_total || {}).cache || 0;
-      const rightCalls = (rightStats.activity_total || {}).llm_calls || 0;
-      const leftCalls = (leftStats.activity_total || {}).llm_calls || 0;
-      const rightTools = (rightStats.activity_total || {}).tool_calls || 0;
-      const leftTools = (leftStats.activity_total || {}).tool_calls || 0;
-      const rightMainCpu = ((rightStats.resource_usage || {}).cpu_seconds_sum) || 0;
-      const leftMainCpu = ((leftStats.resource_usage || {}).cpu_seconds_sum) || 0;
-      const rightOverheadCpu = ((rightStats.resource_usage_overhead_commands || {}).cpu_seconds_sum) || 0;
-      const leftOverheadCpu = ((leftStats.resource_usage_overhead_commands || {}).cpu_seconds_sum) || 0;
-      const rightMainRss = ((rightStats.resource_usage || {}).max_rss_kb_max) || 0;
-      const leftMainRss = ((leftStats.resource_usage || {}).max_rss_kb_max) || 0;
-      const leftCacheRatio = cacheRatio(leftStats.tokens_total);
-      const rightCacheRatio = cacheRatio(rightStats.tokens_total);
-      const compareRows = [
-        summaryMetricRow("Pass Rate", fmtPct(leftPass), fmtPct(rightPass),
-          fmtSignedNumber((rightPass - leftPass) * 100, " pts"),
-          metricWinner(leftPass, rightPass, true)),
-        summaryMetricRow("Avg Duration", fmtSeconds(leftDuration), fmtSeconds(rightDuration),
-          fmtSignedSeconds(rightDuration - leftDuration),
-          metricWinner(leftDuration, rightDuration, false)),
-        summaryMetricRow("Non-Cache Tokens", fmtInt(leftNonCache), fmtInt(rightNonCache),
-          fmtSignedNumber(rightNonCache - leftNonCache),
-          metricWinner(leftNonCache, rightNonCache, false)),
-        summaryMetricRow("Cache Tokens", fmtInt(leftCache), fmtInt(rightCache),
-          fmtSignedNumber(rightCache - leftCache),
-          metricWinner(leftCache, rightCache, false)),
-        summaryMetricRow("Cache %", fmtPct(leftCacheRatio), fmtPct(rightCacheRatio),
-          fmtSignedNumber((rightCacheRatio - leftCacheRatio) * 100, " pts"),
-          metricWinner(leftCacheRatio, rightCacheRatio, true)),
-        summaryMetricRow("LLM Calls", fmtInt(leftCalls), fmtInt(rightCalls),
-          fmtSignedNumber(rightCalls - leftCalls),
-          metricWinner(leftCalls, rightCalls, false)),
-        summaryMetricRow("Tool Calls", fmtInt(leftTools), fmtInt(rightTools),
-          fmtSignedNumber(rightTools - leftTools),
-          metricWinner(leftTools, rightTools, false)),
-        summaryMetricRow("Main CPU", fmtSeconds(leftMainCpu), fmtSeconds(rightMainCpu),
-          fmtSignedSeconds(rightMainCpu - leftMainCpu),
-          metricWinner(leftMainCpu, rightMainCpu, false)),
-        summaryMetricRow("Overhead CPU", fmtSeconds(leftOverheadCpu), fmtSeconds(rightOverheadCpu),
-          fmtSignedSeconds(rightOverheadCpu - leftOverheadCpu),
-          metricWinner(leftOverheadCpu, rightOverheadCpu, false)),
-        summaryMetricRow("Main Peak RSS", fmtMemoryKb(leftMainRss), fmtMemoryKb(rightMainRss),
-          fmtSignedNumber(Math.round((rightMainRss - leftMainRss) / 1024), " MiB"),
-          metricWinner(leftMainRss, rightMainRss, false)),
+
+      // Extract per-run data
+      const runData = selected.map(run => {
+        const s = run.global_stats || {};
+        const p = run.params || {};
+        return {
+          run,
+          name: run.job_name,
+          params: p,
+          stats: s,
+          passRate: s.pass_rate || 0,
+          duration: s.duration_seconds_avg || 0,
+          nonCache: nonCacheTokens(s.tokens_total),
+          cache: (s.tokens_total || {}).cache || 0,
+          cacheRatio: cacheRatio(s.tokens_total),
+          llmCalls: (s.activity_total || {}).llm_calls || 0,
+          toolCalls: (s.activity_total || {}).tool_calls || 0,
+          turns: (s.activity_total || {}).llm_turns || 0,
+          mainCpu: (s.resource_usage || {}).cpu_seconds_sum || 0,
+          overheadCpu: (s.resource_usage_overhead_commands || {}).cpu_seconds_sum || 0,
+          mainRss: (s.resource_usage || {}).max_rss_kb_max || 0,
+          rewardMean: s.reward_mean,
+        };
+      });
+
+      // Run strip cards
+      const runStrip = `<div class="compare-run-strip">${runData.map((d, i) => `
+        <div class="compare-run-card">
+          <h4>${escapeHtml(d.name)}</h4>
+          <div class="muted">${escapeHtml(d.params.agent || "-")} · ${escapeHtml(d.params.requested_model || "resolved")} · ${escapeHtml(d.params.variant || "default")}</div>
+          <div class="chips" style="margin-top:4px">
+            ${d.params.execution_mode ? `<span class="chip mode">${escapeHtml(d.params.execution_mode)}</span>` : ""}
+            ${d.params.context_strategy ? `<span class="chip context">${escapeHtml(d.params.context_strategy)}</span>` : ""}
+            ${d.params.preset ? `<span class="chip preset">${escapeHtml(d.params.preset)}</span>` : ""}
+            <span class="chip pass">${fmtPct(d.passRate)}</span>
+            <span class="chip">${fmtInt(d.stats.trials_passed)}/${fmtInt(d.stats.trials_total)}</span>
+          </div>
+        </div>
+      `).join("")}</div>`;
+
+      // Metrics comparison table
+      const metrics = [
+        { label: "Pass Rate",       vals: runData.map(d => d.passRate),   fmt: runData.map(d => fmtPct(d.passRate)),        higher: true  },
+        { label: "Avg Duration",    vals: runData.map(d => d.duration),   fmt: runData.map(d => fmtSeconds(d.duration)),     higher: false },
+        { label: "Non-Cache Tok",   vals: runData.map(d => d.nonCache),   fmt: runData.map(d => fmtInt(d.nonCache)),         higher: false },
+        { label: "Cache Tokens",    vals: runData.map(d => d.cache),      fmt: runData.map(d => fmtInt(d.cache)),            higher: false },
+        { label: "Cache %",         vals: runData.map(d => d.cacheRatio), fmt: runData.map(d => fmtPct(d.cacheRatio)),       higher: true  },
+        { label: "LLM Turns",       vals: runData.map(d => d.turns),      fmt: runData.map(d => fmtInt(d.turns)),            higher: false },
+        { label: "LLM Calls",       vals: runData.map(d => d.llmCalls),   fmt: runData.map(d => fmtInt(d.llmCalls)),         higher: false },
+        { label: "Tool Calls",      vals: runData.map(d => d.toolCalls),  fmt: runData.map(d => fmtInt(d.toolCalls)),        higher: false },
+        { label: "Main CPU",        vals: runData.map(d => d.mainCpu),    fmt: runData.map(d => fmtSeconds(d.mainCpu)),      higher: false },
+        { label: "Overhead CPU",    vals: runData.map(d => d.overheadCpu),fmt: runData.map(d => fmtSeconds(d.overheadCpu)),  higher: false },
+        { label: "Main Peak RSS",   vals: runData.map(d => d.mainRss),    fmt: runData.map(d => fmtMemoryKb(d.mainRss)),     higher: false },
+        { label: "Reward Mean",     vals: runData.map(d => d.rewardMean ?? 0), fmt: runData.map(d => fmtFixed(d.rewardMean)), higher: true },
       ];
-      compareGrid.innerHTML = `
-        <div class="compare-card accent-left">
-          <h5>Left Run</h5>
-          <h4>${escapeHtml(left.job_name)}</h4>
-          <div class="muted">${escapeHtml(leftParams.agent || "-")} · ${escapeHtml(leftParams.requested_model || "resolved in trial")} · ${escapeHtml(leftParams.variant || "default variant")}</div>
-          <div class="chips" style="margin-top:6px">
-            ${leftParams.execution_mode ? `<span class="chip mode">${escapeHtml(leftParams.execution_mode)}</span>` : ""}
-            ${leftParams.context_strategy ? `<span class="chip context">${escapeHtml(leftParams.context_strategy)}</span>` : ""}
-            ${leftParams.preset ? `<span class="chip preset">${escapeHtml(leftParams.preset)}</span>` : ""}
-          </div>
-          <div class="chips">
-            <span class="chip pass">${fmtPct(leftStats.pass_rate)}</span>
-            <span class="chip">${fmtInt(leftStats.trials_passed)}/${fmtInt(leftStats.trials_total)} passed</span>
-            <span class="chip">${fmtInt(nonCacheTokens(leftStats.tokens_total))} nc tok</span>
-            <span class="chip">${fmtInt((leftStats.tokens_total || {}).cache)} cache</span>
-            <span class="chip">${fmtPct(cacheRatio(leftStats.tokens_total))} cache %</span>
-            <span class="chip">${fmtSeconds((leftStats.resource_usage || {}).cpu_seconds_sum)} main cpu</span>
-            <span class="chip">${fmtMemoryKb((leftStats.resource_usage || {}).max_rss_kb_max)} main rss</span>
-          </div>
-          <table>
-            <tr><td>Avg Duration</td><td>${fmtSeconds(leftStats.duration_seconds_avg)}</td></tr>
-            <tr><td>Token Profile</td><td>${tokenInline(leftStats.tokens_total)}</td></tr>
-            <tr><td>Cache Percentage</td><td>${fmtPct(cacheRatio(leftStats.tokens_total))}</td></tr>
-            <tr><td>Activity</td><td>${activityInline(leftStats.activity_total)}</td></tr>
-            <tr><td>Main CPU / RSS</td><td>${resourceInline(leftStats.resource_usage)}</td></tr>
-            <tr><td>All Cmd CPU / RSS</td><td>${resourceInline(leftStats.resource_usage_all_commands || leftStats.resource_usage, "all_commands")}</td></tr>
-            <tr><td>Overhead CPU</td><td>${fmtSeconds(((leftStats.resource_usage_overhead_commands || {}).cpu_seconds_sum))}</td></tr>
-            <tr><td>Reward Mean</td><td>${fmtFixed(leftStats.reward_mean)}</td></tr>
-          </table>
-        </div>
-        <div class="compare-card">
-          <h5>Delta Board</h5>
-          <h4>Run-to-run pressure test</h4>
-          <div class="compare-summary">${compareRows.join("")}</div>
-        </div>
-        <div class="compare-card accent-right">
-          <h5>Right Run</h5>
-          <h4>${escapeHtml(right.job_name)}</h4>
-          <div class="muted">${escapeHtml(rightParams.agent || "-")} · ${escapeHtml(rightParams.requested_model || "resolved in trial")} · ${escapeHtml(rightParams.variant || "default variant")}</div>
-          <div class="chips" style="margin-top:6px">
-            ${rightParams.execution_mode ? `<span class="chip mode">${escapeHtml(rightParams.execution_mode)}</span>` : ""}
-            ${rightParams.context_strategy ? `<span class="chip context">${escapeHtml(rightParams.context_strategy)}</span>` : ""}
-            ${rightParams.preset ? `<span class="chip preset">${escapeHtml(rightParams.preset)}</span>` : ""}
-          </div>
-          <div class="chips">
-            <span class="chip pass">${fmtPct(rightStats.pass_rate)}</span>
-            <span class="chip">${fmtInt(rightStats.trials_passed)}/${fmtInt(rightStats.trials_total)} passed</span>
-            <span class="chip">${fmtInt(nonCacheTokens(rightStats.tokens_total))} nc tok</span>
-            <span class="chip">${fmtInt((rightStats.tokens_total || {}).cache)} cache</span>
-            <span class="chip">${fmtPct(cacheRatio(rightStats.tokens_total))} cache %</span>
-            <span class="chip">${fmtSeconds((rightStats.resource_usage || {}).cpu_seconds_sum)} main cpu</span>
-            <span class="chip">${fmtMemoryKb((rightStats.resource_usage || {}).max_rss_kb_max)} main rss</span>
-          </div>
-          <table>
-            <tr><td>Avg Duration</td><td>${fmtSeconds(rightStats.duration_seconds_avg)}</td></tr>
-            <tr><td>Token Profile</td><td>${tokenInline(rightStats.tokens_total)}</td></tr>
-            <tr><td>Cache Percentage</td><td>${fmtPct(cacheRatio(rightStats.tokens_total))}</td></tr>
-            <tr><td>Activity</td><td>${activityInline(rightStats.activity_total)}</td></tr>
-            <tr><td>Main CPU / RSS</td><td>${resourceInline(rightStats.resource_usage)}</td></tr>
-            <tr><td>All Cmd CPU / RSS</td><td>${resourceInline(rightStats.resource_usage_all_commands || rightStats.resource_usage, "all_commands")}</td></tr>
-            <tr><td>Overhead CPU</td><td>${fmtSeconds(((rightStats.resource_usage_overhead_commands || {}).cpu_seconds_sum))}</td></tr>
-            <tr><td>Reward Mean</td><td>${fmtFixed(rightStats.reward_mean)}</td></tr>
-          </table>
-        </div>
-      `;
+
+      const shortNames = runData.map((d, i) => {
+        const name = d.name || `Run ${i + 1}`;
+        return name.length > 20 ? name.slice(0, 18) + "…" : name;
+      });
+
+      const metricsTable = `
+        <div class="table-wrap">
+        <table class="compare-metrics-table">
+          <thead><tr>
+            <th>Metric</th>
+            ${shortNames.map(n => `<th>${escapeHtml(n)}</th>`).join("")}
+          </tr></thead>
+          <tbody>
+            ${metrics.map(m => {
+              const cells = nWayMetricCells(m.vals, m.fmt, m.higher);
+              return `<tr>
+                <td>${escapeHtml(m.label)}</td>
+                ${cells.map(c => `<td class="${c.cls}">${escapeHtml(c.text)}</td>`).join("")}
+              </tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+        </div>`;
+
+      compareGrid.innerHTML = runStrip + metricsTable;
       renderComparisonTable(selected);
     }
 
     function renderComparisonTable(runs) {
       const target = document.getElementById("comparisonTable");
-      if (runs.length !== 2) {
-        target.innerHTML = `<div class="empty">Task-by-task comparison appears here once you check exactly two runs.</div>`;
+      if (runs.length < 2) {
+        target.innerHTML = ``;
         return;
       }
-      const [left, right] = runs;
+
       const taskMap = new Map();
       for (const run of runs) {
         for (const rollup of run.task_rollups || []) {
@@ -1665,6 +1538,7 @@
         }
       }
       const rows = [...taskMap.values()].sort((a, b) => a.task_name.localeCompare(b.task_name));
+      const runCount = runs.length;
 
       function passBadge(rate) {
         const pct = (100 * (rate || 0)).toFixed(1);
@@ -1672,126 +1546,73 @@
         return `<span class="pass-badge ${cls}">${pct}%</span>`;
       }
 
-      function matchupHeaderCell(item) {
-        if (!item) return `<div class="matchup-cell"><span class="muted">no data</span></div>`;
-        return `<div class="matchup-cell">${passBadge(item.pass_rate)} <span class="time">${fmtSeconds(item.duration_seconds_avg)}</span></div>`;
+      function matchupHeaderCell(item, isBest) {
+        if (!item) return `<div class="matchup-cell"><span class="muted">-</span></div>`;
+        return `<div class="matchup-cell ${isBest ? "cell-best" : ""}">${passBadge(item.pass_rate)} <span class="time">${fmtSeconds(item.duration_seconds_avg)}</span></div>`;
       }
 
-      function matchupDeltaCell(l, r) {
-        if (!l || !r) return `<div class="matchup-delta"><span class="muted">-</span></div>`;
-        const passWinner = metricWinner(l.pass_rate || 0, r.pass_rate || 0, true);
-        const passDelta = (r.pass_rate || 0) - (l.pass_rate || 0);
-        const cls = passWinner === "left" ? "left-wins" : passWinner === "right" ? "right-wins" : "neutral";
-        return `<div class="matchup-delta"><span class="delta-pill ${cls}">${fmtSignedNumber(passDelta * 100, " pts")}</span></div>`;
-      }
+      function expandPanel(row) {
+        const items = runs.map(run => row[run.run_id]);
+        const hasAny = items.some(Boolean);
+        if (!hasAny) return `<div class="matchup-missing">No data for any run.</div>`;
 
-      function expandPanel(l, r) {
-        if (!l && !r) return `<div class="matchup-missing">No data for either run.</div>`;
-        if (!l) return `<div class="matchup-missing">Only the right run has this task.</div>`;
-        if (!r) return `<div class="matchup-missing">Only the left run has this task.</div>`;
-
-        const lTok = l.tokens_total || {};
-        const rTok = r.tokens_total || {};
-        const lAct = l.activity_total || {};
-        const rAct = r.activity_total || {};
-        const lRes = l.resource_usage || {};
-        const rRes = r.resource_usage || {};
-        const lOvh = l.resource_usage_overhead_commands || {};
-        const rOvh = r.resource_usage_overhead_commands || {};
-
-        // Each metric: [label, leftFormatted, rightFormatted, deltaFormatted, winner("left"|"right"|"")]
-        const metrics = [
-          ["Pass Rate", fmtPct(l.pass_rate), fmtPct(r.pass_rate),
-            fmtSignedNumber(((r.pass_rate||0)-(l.pass_rate||0))*100, " pts"),
-            metricWinner(l.pass_rate||0, r.pass_rate||0, true)],
-          ["Duration", fmtSeconds(l.duration_seconds_avg), fmtSeconds(r.duration_seconds_avg),
-            fmtSignedSeconds((r.duration_seconds_avg||0)-(l.duration_seconds_avg||0)),
-            metricWinner(l.duration_seconds_avg||0, r.duration_seconds_avg||0, false)],
-          ["Non-Cache", fmtInt(nonCacheTokens(lTok)), fmtInt(nonCacheTokens(rTok)),
-            fmtSignedNumber(nonCacheTokens(rTok)-nonCacheTokens(lTok)),
-            metricWinner(nonCacheTokens(lTok), nonCacheTokens(rTok), false)],
-          ["Total Tokens", fmtInt(lTok.total), fmtInt(rTok.total),
-            fmtSignedNumber((rTok.total||0)-(lTok.total||0)),
-            metricWinner(lTok.total||0, rTok.total||0, false)],
-          ["Cache %", fmtPct(cacheRatio(lTok)), fmtPct(cacheRatio(rTok)),
-            fmtSignedNumber((cacheRatio(rTok)-cacheRatio(lTok))*100, " pts"),
-            metricWinner(cacheRatio(lTok), cacheRatio(rTok), true)],
-          ["Input", fmtInt(lTok.input), fmtInt(rTok.input),
-            fmtSignedNumber((rTok.input||0)-(lTok.input||0)),
-            metricWinner(lTok.input||0, rTok.input||0, false)],
-          ["Output", fmtInt(lTok.output), fmtInt(rTok.output),
-            fmtSignedNumber((rTok.output||0)-(lTok.output||0)),
-            metricWinner(lTok.output||0, rTok.output||0, false)],
-          ["Reasoning", fmtInt(lTok.reasoning), fmtInt(rTok.reasoning),
-            fmtSignedNumber((rTok.reasoning||0)-(lTok.reasoning||0)),
-            metricWinner(lTok.reasoning||0, rTok.reasoning||0, false)],
-          ["Cache", fmtInt(lTok.cache), fmtInt(rTok.cache),
-            fmtSignedNumber((rTok.cache||0)-(lTok.cache||0)),
-            metricWinner(lTok.cache||0, rTok.cache||0, false)],
-          ["Turns", fmtInt(lAct.llm_turns), fmtInt(rAct.llm_turns),
-            fmtSignedNumber((rAct.llm_turns||0)-(lAct.llm_turns||0)),
-            metricWinner(lAct.llm_turns||0, rAct.llm_turns||0, false)],
-          ["LLM Calls", fmtInt(lAct.llm_calls), fmtInt(rAct.llm_calls),
-            fmtSignedNumber((rAct.llm_calls||0)-(lAct.llm_calls||0)),
-            metricWinner(lAct.llm_calls||0, rAct.llm_calls||0, false)],
-          ["Tool Calls", fmtInt(lAct.tool_calls), fmtInt(rAct.tool_calls),
-            fmtSignedNumber((rAct.tool_calls||0)-(lAct.tool_calls||0)),
-            metricWinner(lAct.tool_calls||0, rAct.tool_calls||0, false)],
-          ["Main CPU", fmtSeconds(lRes.cpu_seconds_sum), fmtSeconds(rRes.cpu_seconds_sum),
-            fmtSignedSeconds((rRes.cpu_seconds_sum||0)-(lRes.cpu_seconds_sum||0)),
-            metricWinner(lRes.cpu_seconds_sum||0, rRes.cpu_seconds_sum||0, false)],
-          ["Main RSS", fmtMemoryKb(lRes.max_rss_kb_max), fmtMemoryKb(rRes.max_rss_kb_max),
-            fmtSignedNumber(Math.round(((rRes.max_rss_kb_max||0)-(lRes.max_rss_kb_max||0))/1024), " MiB"),
-            metricWinner(lRes.max_rss_kb_max||0, rRes.max_rss_kb_max||0, false)],
-          ["Overhead CPU", fmtSeconds(lOvh.cpu_seconds_sum), fmtSeconds(rOvh.cpu_seconds_sum),
-            fmtSignedSeconds((rOvh.cpu_seconds_sum||0)-(lOvh.cpu_seconds_sum||0)),
-            metricWinner(lOvh.cpu_seconds_sum||0, rOvh.cpu_seconds_sum||0, false)],
+        const metricDefs = [
+          { label: "Pass Rate",    extract: d => d ? (d.pass_rate || 0) : null,              format: v => v == null ? "-" : fmtPct(v),            higher: true },
+          { label: "Duration",     extract: d => d ? (d.duration_seconds_avg || 0) : null,   format: v => v == null ? "-" : fmtSeconds(v),         higher: false },
+          { label: "Non-Cache",    extract: d => d ? nonCacheTokens(d.tokens_total) : null,  format: v => v == null ? "-" : fmtInt(v),             higher: false },
+          { label: "Total Tokens", extract: d => d ? ((d.tokens_total||{}).total||0) : null, format: v => v == null ? "-" : fmtInt(v),             higher: false },
+          { label: "Cache %",      extract: d => d ? cacheRatio(d.tokens_total) : null,      format: v => v == null ? "-" : fmtPct(v),             higher: true },
+          { label: "Input",        extract: d => d ? ((d.tokens_total||{}).input||0) : null, format: v => v == null ? "-" : fmtInt(v),             higher: false },
+          { label: "Output",       extract: d => d ? ((d.tokens_total||{}).output||0) : null,format: v => v == null ? "-" : fmtInt(v),             higher: false },
+          { label: "Turns",        extract: d => d ? ((d.activity_total||{}).llm_turns||0) : null, format: v => v == null ? "-" : fmtInt(v),       higher: false },
+          { label: "LLM Calls",    extract: d => d ? ((d.activity_total||{}).llm_calls||0) : null, format: v => v == null ? "-" : fmtInt(v),       higher: false },
+          { label: "Tool Calls",   extract: d => d ? ((d.activity_total||{}).tool_calls||0) : null, format: v => v == null ? "-" : fmtInt(v),      higher: false },
+          { label: "Main CPU",     extract: d => d ? ((d.resource_usage||{}).cpu_seconds_sum||0) : null, format: v => v == null ? "-" : fmtSeconds(v), higher: false },
+          { label: "Main RSS",     extract: d => d ? ((d.resource_usage||{}).max_rss_kb_max||0) : null, format: v => v == null ? "-" : fmtMemoryKb(v), higher: false },
         ];
 
+        const shortNames = runs.map((run, i) => {
+          const name = run.job_name || `Run ${i + 1}`;
+          return name.length > 16 ? name.slice(0, 14) + "…" : name;
+        });
+
         return `
-          <div class="matchup-detail">
-            <div class="matchup-detail-side left-side">
-              <h5>Left</h5>
-              <div class="detail-grid">
-                ${metrics.map(m => `
-                  <div class="detail-row">
-                    <span class="detail-label">${escapeHtml(m[0])}</span>
-                    <span class="detail-value ${m[4] === "left" ? "side-win" : m[4] === "right" ? "side-lose" : ""}">${escapeHtml(m[1])}</span>
-                    <span class="detail-delta flat"></span>
-                  </div>`).join("")}
-              </div>
-            </div>
-            <div class="matchup-detail-side">
-              <h5>Right / Delta</h5>
-              <div class="detail-grid">
-                ${metrics.map(m => `
-                  <div class="detail-row">
-                    <span class="detail-label">${escapeHtml(m[0])}</span>
-                    <span class="detail-value ${m[4] === "right" ? "side-win" : m[4] === "left" ? "side-lose" : ""}">${escapeHtml(m[2])}</span>
-                    <span class="detail-delta flat">${escapeHtml(m[3])}</span>
-                  </div>`).join("")}
-              </div>
-            </div>
-          </div>`;
+          <table class="matchup-detail-table">
+            <thead><tr>
+              <th>Metric</th>
+              ${shortNames.map(n => `<th>${escapeHtml(n)}</th>`).join("")}
+            </tr></thead>
+            <tbody>
+              ${metricDefs.map(m => {
+                const rawVals = items.map(m.extract);
+                const numericVals = rawVals.map(v => v ?? (m.higher ? -Infinity : Infinity));
+                const formatted = rawVals.map(m.format);
+                const cells = nWayMetricCells(numericVals, formatted, m.higher);
+                return `<tr>
+                  <td>${escapeHtml(m.label)}</td>
+                  ${cells.map((c, ci) => `<td class="${rawVals[ci] == null ? "" : c.cls}">${escapeHtml(c.text)}</td>`).join("")}
+                </tr>`;
+              }).join("")}
+            </tbody>
+          </table>`;
       }
 
       target.innerHTML = `
-        <div class="matchup-list">
+        <div class="matchup-list" style="--run-count: ${runCount}">
           ${rows.map((row, i) => {
-            const l = row[left.run_id];
-            const r = row[right.run_id];
+            const items = runs.map(run => row[run.run_id]);
+            const passRates = items.map(d => d ? (d.pass_rate || 0) : -1);
+            const best = bestIndex(passRates.map(v => v < 0 ? -Infinity : v), true);
             return `
               <div class="matchup-row" data-idx="${i}">
-                <div class="matchup-header">
+                <div class="matchup-header" style="--run-count: ${runCount}">
                   <div class="matchup-task">
                     ${escapeHtml(row.task_name)}
                     <div class="expand-hint">click to expand</div>
                   </div>
-                  ${matchupHeaderCell(l)}
-                  ${matchupDeltaCell(l, r)}
-                  ${matchupHeaderCell(r)}
+                  ${items.map((item, idx) => matchupHeaderCell(item, idx === best && best >= 0)).join("")}
                 </div>
-                <div class="matchup-expand">${expandPanel(l, r)}</div>
+                <div class="matchup-expand">${expandPanel(row)}</div>
               </div>`;
           }).join("")}
         </div>`;
@@ -1808,12 +1629,12 @@
       const statsRoot = document.getElementById("runStats");
       const metaRoot = document.getElementById("runMeta");
       if (!run) {
-        statsRoot.innerHTML = `<div class="empty">Choose a run from the sidebar.</div>`;
+        statsRoot.innerHTML = ``;
         metaRoot.textContent = "";
-        document.getElementById("tasksTable").innerHTML = `<div class="empty">No run loaded.</div>`;
-        document.getElementById("trialMeta").innerHTML = `Select a task row to inspect logs and artifacts.`;
+        document.getElementById("tasksTable").innerHTML = ``;
+        document.getElementById("trialMeta").innerHTML = ``;
         document.getElementById("logTabs").innerHTML = "";
-        document.getElementById("logViewer").textContent = "Select a log tab.";
+        document.getElementById("logViewer").textContent = "";
         return;
       }
 
@@ -1873,7 +1694,7 @@
       }
 
       if (!rows.length) {
-        root.innerHTML = `<div class="empty">This run has no task rows yet.</div>`;
+        root.innerHTML = ``;
         return;
       }
 
@@ -1939,10 +1760,10 @@
       const viewer = document.getElementById("logViewer");
       const trial = state.activeTrial;
       if (!trial) {
-        meta.innerHTML = `Select a task row to inspect logs and artifacts.`;
+        meta.innerHTML = ``;
         meta.className = "empty";
         tabs.innerHTML = "";
-        viewer.textContent = "Select a log tab.";
+        viewer.textContent = "";
         return;
       }
 
@@ -2000,7 +1821,7 @@
       const viewer = document.getElementById("logViewer");
       const trial = state.activeTrial;
       if (!trial || !state.activeLogPath) {
-        viewer.textContent = "Select a log tab.";
+        viewer.textContent = "";
         return;
       }
       viewer.textContent = "Loading log...";
@@ -2039,17 +1860,32 @@
       renderWorkspace();
     });
     document.getElementById("compareTab").addEventListener("click", () => {
-      if (state.selectedRunIds.size !== 2) return;
+      if (state.selectedRunIds.size < 2) return;
       state.viewMode = "compare";
       renderWorkspaceTabs();
       renderWorkspace();
     });
-    document.getElementById("runSearch").addEventListener("input", renderRunList);
+    document.getElementById("runSearch").addEventListener("input", () => { renderRunList(); saveFiltersToSession(); });
     for (const config of FILTER_CONFIG) {
-      document.getElementById(config.id).addEventListener("change", renderRunList);
+      document.getElementById(config.id).addEventListener("change", () => { renderRunList(); saveFiltersToSession(); });
     }
     document.getElementById("clearFiltersButton").addEventListener("click", clearFilters);
     document.getElementById("deleteButton").addEventListener("click", deleteSelectedRuns);
+
+    // Filter popover toggle
+    const filterBtn = document.getElementById("filterToggleBtn");
+    const filterPopover = document.getElementById("filterPopover");
+    filterBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const isOpen = filterPopover.classList.toggle("open");
+      filterBtn.classList.toggle("active", isOpen);
+    });
+    document.addEventListener("click", (e) => {
+      if (!filterPopover.contains(e.target) && e.target !== filterBtn) {
+        filterPopover.classList.remove("open");
+        filterBtn.classList.toggle("active", activeFilterEntries().length > 0);
+      }
+    });
 
     setInterval(() => {
       if (document.hidden) return;
@@ -2059,6 +1895,7 @@
       loadRuns().catch(error => console.error("Refresh on focus failed", error));
     });
 
+    restoreFiltersFromSession();
     loadRuns().catch(error => {
       document.getElementById("runList").innerHTML = `<div class="empty">Failed to load runs: ${escapeHtml(error.message)}</div>`;
     });

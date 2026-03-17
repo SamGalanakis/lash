@@ -406,14 +406,12 @@ async fn main() -> anyhow::Result<()> {
     if autonomous {
         prompt_overrides.extend(autonomous_prompt_overrides());
     }
-    let run_session_id = if autonomous {
-        None
-    } else {
-        resume_start
-            .as_ref()
-            .map(|start| start.session_id.clone())
-            .or_else(|| Some(uuid::Uuid::new_v4().to_string()))
-    };
+    // Autonomous runs still need a stable session id so provider-side prompt caching
+    // and benchmark accounting can key repeated requests within the same session.
+    let run_session_id = resume_start
+        .as_ref()
+        .map(|start| start.session_id.clone())
+        .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
     let instruction_source: Arc<dyn InstructionSource> = Arc::new(FsInstructionSource::new());
     let session_policy = SessionPolicy {
         model: model.clone(),

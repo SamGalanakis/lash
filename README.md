@@ -180,6 +180,7 @@ scripts/run-terminalbench.sh --sample --preset trivial --execution-mode repl --m
 scripts/run-terminalbench.sh --sample --preset smoke --execution-mode repl --model gpt-5.4 --variant high
 scripts/run-terminalbench.sh --sample --preset fast-3 --execution-mode standard --model gpt-5.4 --variant high
 scripts/run-terminalbench.sh --sample --preset fast-medium --execution-mode standard --model gpt-5.4 --variant high
+scripts/run-terminalbench.sh --sample --preset representative-10 --execution-mode standard --model gpt-5.4 --variant high
 scripts/run-terminalbench.sh --sample --execution-mode standard --model gpt-5.4 --variant high --build-mode host
 scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,sqlite-with-gcov --model gpt-5.4 --variant high
 scripts/run-terminalbench.sh --full --execution-mode standard --task "git-*" --model gpt-5.4 --variant high
@@ -200,6 +201,7 @@ Notes:
 - `--preset smoke` expands to `log-summary-date-ranges,fix-code-vulnerability`.
 - `--preset fast-3` expands to `log-summary-date-ranges,fix-code-vulnerability,regex-log`.
 - `--preset fast-medium` expands to `regex-log,log-summary-date-ranges,fix-code-vulnerability,sqlite-with-gcov`.
+- `--preset representative-10` expands to `build-cython-ext,configure-git-webserver,db-wal-recovery,fix-code-vulnerability,git-leak-recovery,log-summary-date-ranges,nginx-request-logging,polyglot-c-py,regex-log,sqlite-with-gcov`.
 - `--variant` is required for all benchmark runs so provider-native reasoning settings are explicit and reproducible.
 - `--build-mode docker-bookworm` is the default for lash benchmark builds so the binary matches the benchmark container ABI. Use `host` only when you intentionally want to benchmark against the host libc.
 - OpenCode benchmark runs require an explicit `--model provider/model`.
