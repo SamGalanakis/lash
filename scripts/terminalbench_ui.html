@@ -1644,9 +1644,8 @@
       const codeHeaders = runData.map((d, i) => {
         const letter = CODE_LETTERS[i] || String(i);
         const cls = codeClasses[i % codeClasses.length];
-        const agent = d.params.agent || "";
-        const model = modelShort(d.params);
-        return `<th><span class="run-code ${cls}" style="width:16px;height:16px;font-size:9px;display:inline-flex;vertical-align:middle;margin-right:4px">${letter}</span>${escapeHtml(model)}${agent ? ` · ${escapeHtml(agent)}` : ""}</th>`;
+        const parts = [modelShort(d.params), d.params.agent, d.params.execution_mode, d.params.context_strategy].filter(Boolean);
+        return `<th><span class="run-code ${cls}" style="width:16px;height:16px;font-size:9px;display:inline-flex;vertical-align:middle;margin-right:4px">${letter}</span>${escapeHtml(parts.join(" · "))}</th>`;
       });
 
       const metricsTable = `
