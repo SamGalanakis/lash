@@ -580,6 +580,105 @@ def load_opencode_metadata(opencode_path: Path | None) -> dict[str, Any]:
     }
 
 
+def _load_codex_metadata(codex_path: Path | None) -> dict[str, Any]:
+    """Parse Codex JSONL output to extract token usage and activity metadata."""
+    empty: dict[str, Any] = {
+        "models": [],
+        "llm_turn_count": 0,
+        "llm_call_count": 0,
+        "tool_call_count": 0,
+        "batch_call_count": 0,
+        "tool_call_breakdown": {},
+        "assistant_response": None,
+        "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": 0,
+            "cache_read": 0,
+            "cache_write": 0,
+            "provider_total": 0,
+        },
+    }
+    if not codex_path or not codex_path.exists():
+        return empty
+
+    models: list[str] = []
+    tool_call_breakdown: dict[str, int] = defaultdict(int)
+    assistant_parts: list[str] = []
+    llm_call_count = 0
+    tool_call_count = 0
+    tokens = {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "provider_total": 0,
+    }
+
+    def add_model(value: Any) -> None:
+        if isinstance(value, str) and value and value not in models:
+            models.append(value)
+
+    for raw_line in codex_path.read_text(errors="replace").splitlines():
+        raw_line = raw_line.strip()
+        if not raw_line or not raw_line.startswith("{"):
+            continue
+        try:
+            record = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+
+        event_type = record.get("type", "")
+
+        if event_type in ("response.completed", "message"):
+            llm_call_count += 1
+            add_model(record.get("model"))
+            usage = record.get("usage") or {}
+            tokens["input"] += int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+            tokens["output"] += int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+            tokens["reasoning"] += int(usage.get("reasoning_tokens") or 0)
+            cached = int(
+                usage.get("cached_tokens")
+                or usage.get("cache_read_input_tokens")
+                or usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
+                or 0
+            )
+            tokens["cache"] += cached
+            tokens["cache_read"] += cached
+            total = int(usage.get("total_tokens") or 0)
+            tokens["provider_total"] += total
+
+        if event_type in ("function_call", "tool_use", "exec"):
+            tool_call_count += 1
+            tool_name = record.get("name") or record.get("function", {}).get("name") or "unknown"
+            tool_call_breakdown[tool_name] += 1
+
+        if event_type == "message" and record.get("role") == "assistant":
+            content = record.get("content")
+            if isinstance(content, str) and content.strip():
+                assistant_parts.append(content.strip())
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        text = part.get("text", "").strip()
+                        if text:
+                            assistant_parts.append(text)
+
+    return {
+        "models": models,
+        "llm_turn_count": llm_call_count,
+        "llm_call_count": llm_call_count,
+        "tool_call_count": tool_call_count,
+        "batch_call_count": 0,
+        "tool_call_breakdown": dict(sorted(tool_call_breakdown.items())),
+        "assistant_response": "\n\n".join(assistant_parts).strip() or None,
+        "tokens": tokens,
+    }
+
+
 def token_input_includes_cache(provider_metadata: dict[str, Any], requested_model: str | None) -> bool:
     provider_type = str(provider_metadata.get("active_provider_type") or "").strip().lower()
     requested = str(requested_model or "").strip().lower()
@@ -845,6 +944,8 @@ def infer_command_metadata(
         return {"phase": "bootstrap", "purpose": "config", "family": "opencode", "is_main": False}
     if "skills" in normalized and "cp -r" in normalized:
         return {"phase": "bootstrap", "purpose": "skills", "family": "opencode", "is_main": False}
+    if "codex" in normalized and "exec" in normalized:
+        return {"phase": "main", "purpose": "agent_run", "family": "codex", "is_main": True}
     if normalized.startswith("lash ") or " lash " in f" {normalized} ":
         return {"phase": "main", "purpose": "agent_run", "family": "lash", "is_main": True}
     return {
@@ -1022,6 +1123,7 @@ def build_trial_record(
         "verifier_stdout": trial_dir / "verifier" / "test-stdout.txt",
         "trajectory_json": trajectory_path,
         "opencode_raw": agent_dir / "opencode.txt",
+        "codex_raw": agent_dir / "codex.txt",
         "lash_log": lash_home_dir / "lash.log",
         "lash_config": lash_home_dir / "config.json",
         "models_cache": lash_home_dir / "cache" / "models.json",
@@ -1099,6 +1201,7 @@ def build_trial_record(
     session_db_candidates = sorted(sessions_dir.glob("*.db"))
     trajectory_metadata = load_trajectory_metadata(trajectory_path)
     opencode_metadata = load_opencode_metadata(agent_dir / "opencode.txt")
+    codex_metadata = _load_codex_metadata(agent_dir / "codex.txt")
     activity_metadata = combine_activity_metadata(
         llm_metadata,
         load_session_activity_metadata(session_db_candidates),
@@ -1113,6 +1216,15 @@ def build_trial_record(
             "tool_call_count": opencode_metadata["tool_call_count"],
             "batch_call_count": opencode_metadata["batch_call_count"],
             "tool_call_breakdown": opencode_metadata["tool_call_breakdown"],
+        }
+    elif args.agent == "codex":
+        activity_metadata = {
+            "llm_record_count": codex_metadata["llm_call_count"],
+            "llm_turn_count": codex_metadata["llm_turn_count"],
+            "llm_call_count": codex_metadata["llm_call_count"],
+            "tool_call_count": codex_metadata["tool_call_count"],
+            "batch_call_count": codex_metadata["batch_call_count"],
+            "tool_call_breakdown": codex_metadata["tool_call_breakdown"],
         }
 
     token_source = "agent_result"
@@ -1136,6 +1248,19 @@ def build_trial_record(
             cache_write=int(opencode_tokens.get("cache_write") or 0),
         )
         token_source = "opencode_log"
+    elif args.agent == "codex" and (agent_dir / "codex.txt").exists():
+        codex_tokens = codex_metadata["tokens"]
+        token_details = normalize_token_usage(
+            raw_input=int(codex_tokens.get("input") or 0),
+            output=int(codex_tokens.get("output") or 0),
+            reasoning=int(codex_tokens.get("reasoning") or 0),
+            cache_total=int(codex_tokens.get("cache") or 0),
+            input_includes_cache=False,
+            provider_total=int(codex_tokens.get("provider_total") or 0),
+            cache_read=int(codex_tokens.get("cache_read") or 0),
+            cache_write=int(codex_tokens.get("cache_write") or 0),
+        )
+        token_source = "codex_log"
     elif int(llm_metadata.get("usage_record_count") or 0) > 0:
         llm_tokens = llm_metadata.get("tokens") or {}
         token_details = normalize_token_usage(
