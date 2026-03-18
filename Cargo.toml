@@ -3,7 +3,7 @@ members = ["lash", "lash-cli", "lashlang", "xtask"]
 resolver = "3"
 
 [workspace.package]
-version = "0.2.7"
+version = "0.2.8"
 
 [profile.release]
 lto = "thin"
