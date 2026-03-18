@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use serde_json::json;
@@ -16,12 +17,30 @@ pub(super) struct RunningAgent {
     pub(super) session_id: String,
     pub(super) turn_id: String,
     pub(super) host: Arc<dyn crate::SessionManager>,
+    pub(super) task: String,
+    pub(super) model: String,
+    pub(super) model_variant: Option<String>,
     /// Accumulated prose output from the agent (drainable).
     pub(super) buffer: Arc<StdMutex<String>>,
     /// Final result once the agent completes.
     pub(super) result: Arc<StdMutex<Option<serde_json::Value>>>,
     /// Notified when the agent finishes.
     pub(super) done_notify: Arc<Notify>,
+    /// Ensures the child session is only closed once.
+    pub(super) session_closed: Arc<AtomicBool>,
+}
+
+async fn close_session_once(
+    host: &Arc<dyn crate::SessionManager>,
+    session_id: &str,
+    session_closed: &Arc<AtomicBool>,
+) {
+    if session_closed
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        let _ = host.close_session(session_id).await;
+    }
 }
 
 impl AgentCall {
@@ -116,13 +135,17 @@ impl AgentCall {
         let context_chunks = Arc::new(StdMutex::new(Vec::new()));
         let result: Arc<StdMutex<Option<serde_json::Value>>> = Arc::new(StdMutex::new(None));
         let done_notify = Arc::new(Notify::new());
+        let session_closed = Arc::new(AtomicBool::new(false));
 
         let buf_clone = buffer.clone();
         let ctx_clone = context_chunks.clone();
         let res_clone = result.clone();
         let done_clone = done_notify.clone();
+        let session_closed_clone = session_closed.clone();
         let host = Arc::clone(&context.host);
         let turn_id = turn.turn_id.clone();
+        let session_id = session.session_id.clone();
+        let task = prompt.to_string();
 
         tokio::spawn(async move {
             let mut final_message: Option<String> = None;
@@ -185,11 +208,19 @@ impl AgentCall {
                         "result": result_text,
                         "status": status,
                         "_sub_agent": {
+                            "task": task,
                             "iterations": turn.state.iteration,
                             "tool_calls": all_tool_calls.len(),
                             "tool_call_details": tool_call_summaries,
                             "model": turn.state.policy.model,
                             "model_variant": turn.state.policy.model_variant,
+                            "token_usage": {
+                                "input_tokens": turn.token_usage.input_tokens,
+                                "output_tokens": turn.token_usage.output_tokens,
+                                "cached_input_tokens": turn.token_usage.cached_input_tokens,
+                                "reasoning_tokens": turn.token_usage.reasoning_tokens,
+                                "total_tokens": turn.token_usage.total(),
+                            },
                         },
                     })
                 }
@@ -209,6 +240,7 @@ impl AgentCall {
                 result_json["result"] = json!(current_prose.trim());
             }
 
+            close_session_once(&host, &session_id, &session_closed_clone).await;
             *res_clone.lock().unwrap() = Some(result_json);
             done_clone.notify_waiters();
         });
@@ -219,9 +251,13 @@ impl AgentCall {
                 session_id: session.session_id.clone(),
                 turn_id: turn.turn_id,
                 host: Arc::clone(&context.host),
+                task: prompt.to_string(),
+                model: session.policy.model.clone(),
+                model_variant: session.policy.model_variant.clone(),
                 buffer,
                 result,
                 done_notify,
+                session_closed,
             },
         );
 
@@ -241,7 +277,18 @@ impl AgentCall {
         timeout: Option<f64>,
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
-        let (result_arc, done_notify, buffer, session_id, turn_id, host) = {
+        let (
+            result_arc,
+            done_notify,
+            buffer,
+            session_id,
+            turn_id,
+            host,
+            task,
+            model,
+            model_variant,
+            session_closed,
+        ) = {
             let agents = self.agents.lock().unwrap();
             match agents.get(id) {
                 Some(a) => (
@@ -251,6 +298,10 @@ impl AgentCall {
                     a.session_id.clone(),
                     a.turn_id.clone(),
                     Arc::clone(&a.host),
+                    a.task.clone(),
+                    a.model.clone(),
+                    a.model_variant.clone(),
+                    a.session_closed.clone(),
                 ),
                 None => return ToolResult::err_fmt(format_args!("No agent with id: {id}")),
             }
@@ -260,11 +311,26 @@ impl AgentCall {
             timeout.map(|t| tokio::time::Instant::now() + std::time::Duration::from_secs_f64(t));
 
         let mut sent_len = 0usize;
+        let mut sent_start = false;
 
         loop {
             let done = result_arc.lock().unwrap().is_some();
 
             if let Some(tx) = progress {
+                if !sent_start {
+                    let _ = tx.send(SandboxMessage {
+                        text: json!({
+                            "name": "delegate",
+                            "task": task.clone(),
+                            "model": model.clone(),
+                            "model_variant": model_variant.clone(),
+                            "id": session_id.clone(),
+                        })
+                        .to_string(),
+                        kind: "delegate_start".into(),
+                    });
+                    sent_start = true;
+                }
                 let buf = buffer.lock().unwrap();
                 if buf.len() > sent_len {
                     let new_chunk = &buf[sent_len..];
@@ -287,7 +353,7 @@ impl AgentCall {
                 let _ =
                     tokio::time::timeout(std::time::Duration::from_secs(5), done_notify.notified())
                         .await;
-                let _ = host.close_session(&session_id).await;
+                close_session_once(&host, &session_id, &session_closed).await;
                 return ToolResult::err(json!("Agent timed out"));
             }
 
@@ -303,7 +369,7 @@ impl AgentCall {
 
     /// Cancel a running agent.
     pub(super) async fn agent_kill(&self, id: &str) -> ToolResult {
-        let (turn_id, session_id, done_notify, host) = {
+        let (turn_id, session_id, done_notify, host, session_closed) = {
             let agents = self.agents.lock().unwrap();
             match agents.get(id) {
                 Some(a) => (
@@ -311,6 +377,7 @@ impl AgentCall {
                     a.session_id.clone(),
                     a.done_notify.clone(),
                     Arc::clone(&a.host),
+                    a.session_closed.clone(),
                 ),
                 None => return ToolResult::err_fmt(format_args!("No agent with id: {id}")),
             }
@@ -319,7 +386,7 @@ impl AgentCall {
         let _ = host.cancel_turn(&turn_id).await;
         let _ =
             tokio::time::timeout(std::time::Duration::from_secs(5), done_notify.notified()).await;
-        let _ = host.close_session(&session_id).await;
+        close_session_once(&host, &session_id, &session_closed).await;
         ToolResult::ok(json!(null))
     }
 }

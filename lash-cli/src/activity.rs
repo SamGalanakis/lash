@@ -462,6 +462,10 @@ impl ActivityState {
             "agent_result" => {
                 let handle_id = tool_arg_str(&args, "id").unwrap_or_default().to_string();
                 let meta = result.get("_sub_agent");
+                let child_status = result
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
                 let task = meta
                     .and_then(|value| value.get("task"))
                     .and_then(|value| value.as_str())
@@ -469,6 +473,8 @@ impl ActivityState {
                     .or_else(|| self.agent_handles.remove(&handle_id))
                     .unwrap_or_else(|| handle_id.clone());
 
+                let delegate_status = delegate_activity_status(success, child_status);
+                let delegate_summary = delegate_result_summary(child_status, &task);
                 let mut detail_lines = Vec::new();
                 let mut children = Vec::new();
 
@@ -512,6 +518,9 @@ impl ActivityState {
                     if !parts.is_empty() {
                         detail_lines.push(parts.join(" · "));
                     }
+                    if let Some(token_line) = delegate_token_usage_line(meta) {
+                        detail_lines.push(token_line);
+                    }
 
                     // Build child activity blocks from tool_call_details.
                     if let Some(details) = meta.get("tool_call_details").and_then(|v| v.as_array())
@@ -553,9 +562,9 @@ impl ActivityState {
                     });
                 ActivityBlock {
                     kind: ActivityKind::Delegate,
-                    status,
+                    status: delegate_status,
                     tool_name: name.to_string(),
-                    summary: format!("delegate done · {}", inline_text(&task)),
+                    summary: delegate_summary,
                     detail_lines,
                     duration_ms,
                     args,
@@ -704,6 +713,61 @@ fn semantic_tool_summary(name: &str, args: &Value) -> String {
         "agent_result" => "delegate done".to_string(),
         "agent_kill" => "delegate stopped".to_string(),
         _ => name.replace('_', " "),
+    }
+}
+
+fn delegate_activity_status(success: bool, child_status: &str) -> ActivityStatus {
+    if !success || matches!(child_status, "failed" | "interrupted") {
+        ActivityStatus::Failed
+    } else {
+        ActivityStatus::Completed
+    }
+}
+
+fn delegate_result_summary(child_status: &str, task: &str) -> String {
+    let label = match child_status {
+        "interrupted" => "delegate stopped",
+        "failed" => "delegate failed",
+        _ => "delegate done",
+    };
+    format!("{label} · {}", inline_text(task))
+}
+
+fn delegate_token_usage_line(meta: &Value) -> Option<String> {
+    let usage = meta.get("token_usage")?;
+    let total = usage.get("total_tokens").and_then(|value| value.as_u64());
+    let input = usage.get("input_tokens").and_then(|value| value.as_u64());
+    let output = usage.get("output_tokens").and_then(|value| value.as_u64());
+    let reasoning = usage
+        .get("reasoning_tokens")
+        .and_then(|value| value.as_u64())
+        .filter(|value| *value > 0);
+    let cached = usage
+        .get("cached_input_tokens")
+        .and_then(|value| value.as_u64())
+        .filter(|value| *value > 0);
+
+    let mut parts = Vec::new();
+    if let Some(total) = total {
+        parts.push(format!("{total} total tokens"));
+    }
+    if let Some(input) = input {
+        parts.push(format!("{input} in"));
+    }
+    if let Some(output) = output {
+        parts.push(format!("{output} out"));
+    }
+    if let Some(reasoning) = reasoning {
+        parts.push(format!("{reasoning} reasoning"));
+    }
+    if let Some(cached) = cached {
+        parts.push(format!("{cached} cached"));
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
     }
 }
 
@@ -1520,5 +1584,61 @@ mod tests {
                 "Ratatui queue preview guide · ratatui.rs/guide/queue-preview".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn agent_result_uses_child_status_and_token_usage() {
+        let mut state = ActivityState::default();
+        state.blocks_for_tool_call(
+            "agent_call",
+            json!({"prompt":"inspect queue rendering"}),
+            json!({"id":"child-1","model":"gpt-5.4","model_variant":"high"}),
+            true,
+            3,
+        );
+
+        let blocks = state.blocks_for_tool_call(
+            "agent_result",
+            json!({"id":"child-1"}),
+            json!({
+                "result":"delegate result",
+                "status":"interrupted",
+                "_sub_agent":{
+                    "task":"inspect queue rendering",
+                    "model":"gpt-5.4",
+                    "model_variant":"high",
+                    "iterations":2,
+                    "tool_calls":1,
+                    "tool_call_details":[
+                        {"tool":"read_file","success":true,"duration_ms":12}
+                    ],
+                    "token_usage":{
+                        "input_tokens":101,
+                        "output_tokens":22,
+                        "cached_input_tokens":5,
+                        "reasoning_tokens":7,
+                        "total_tokens":135
+                    }
+                }
+            }),
+            true,
+            12,
+        );
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].status, ActivityStatus::Failed);
+        assert_eq!(
+            blocks[0].summary,
+            "delegate stopped · inspect queue rendering"
+        );
+        assert_eq!(
+            blocks[0].detail_lines,
+            vec![
+                "gpt-5.4 (high) · 2 iterations · 1 tool call".to_string(),
+                "135 total tokens · 101 in · 22 out · 7 reasoning · 5 cached".to_string(),
+            ]
+        );
+        assert_eq!(blocks[0].children.len(), 1);
+        assert_eq!(blocks[0].children[0].summary, "read_file");
     }
 }

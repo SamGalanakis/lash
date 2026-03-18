@@ -790,6 +790,10 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("delegate result")
         );
+        assert_eq!(
+            host.closed.lock().unwrap().as_slice(),
+            ["child-session".to_string()]
+        );
 
         let created = host.created.lock().unwrap();
         assert_eq!(created.len(), 1);
@@ -799,6 +803,56 @@ mod tests {
             .map(|tool| tool.name)
             .collect::<Vec<_>>();
         assert!(!tool_names.iter().any(|name| name == "apply_patch"));
+    }
+
+    #[tokio::test]
+    async fn agent_result_streams_delegate_start_before_tool_output() {
+        let agent_call = test_agent_call(crate::ExecutionMode::Standard);
+        let host = Arc::new(MockSessionManager::default());
+        let context = crate::ToolExecutionContext {
+            session_id: "root".to_string(),
+            host: host.clone(),
+        };
+
+        let handle = agent_call
+            .execute_with_context(
+                "agent_call",
+                &json!({
+                    "prompt": "Summarize the auth flow",
+                    "intelligence": "low"
+                }),
+                &context,
+            )
+            .await;
+        assert!(handle.success);
+
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = agent_call
+            .execute_streaming_with_context(
+                "agent_result",
+                &json!({ "id": "child-session" }),
+                &context,
+                Some(&progress_tx),
+            )
+            .await;
+        assert!(result.success);
+
+        let first = progress_rx.recv().await.expect("delegate_start message");
+        assert_eq!(first.kind, "delegate_start");
+        let first_json: serde_json::Value =
+            serde_json::from_str(&first.text).expect("delegate_start payload");
+        assert_eq!(
+            first_json.get("task").and_then(|value| value.as_str()),
+            Some("Summarize the auth flow")
+        );
+        assert_eq!(
+            first_json.get("model").and_then(|value| value.as_str()),
+            handle.result.get("model").and_then(|value| value.as_str())
+        );
+
+        let second = progress_rx.recv().await.expect("tool_output message");
+        assert_eq!(second.kind, "tool_output");
+        assert!(second.text.contains("delegate"));
     }
 
     #[tokio::test]
@@ -863,9 +917,13 @@ mod tests {
                 session_id: "child-session".to_string(),
                 turn_id: "turn-1".to_string(),
                 host: host.clone(),
+                task: "Summarize the auth flow".to_string(),
+                model: "mock-model".to_string(),
+                model_variant: Some("low".to_string()),
                 buffer: Arc::new(StdMutex::new(String::new())),
                 result: result.clone(),
                 done_notify: done_notify.clone(),
+                session_closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
 

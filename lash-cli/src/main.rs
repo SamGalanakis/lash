@@ -745,7 +745,7 @@ impl AutonomousRenderer {
                 }
             }
             AgentEvent::Message { text, kind } => match kind.as_str() {
-                "tool_output" | "delegate_start" | "final" => {
+                "tool_output" | "final" => {
                     if !text.trim().is_empty() {
                         if kind == "final" {
                             self.streamed_text = true;
@@ -756,6 +756,36 @@ impl AutonomousRenderer {
                         } else {
                             eprintln!("{text}");
                         }
+                    }
+                }
+                "delegate_start" => {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                        let task = value
+                            .get("task")
+                            .and_then(|item| item.as_str())
+                            .unwrap_or("delegate");
+                        let model = value
+                            .get("model")
+                            .and_then(|item| item.as_str())
+                            .unwrap_or_default();
+                        let variant = value
+                            .get("model_variant")
+                            .and_then(|item| item.as_str())
+                            .unwrap_or_default();
+                        let model_label = if model.is_empty() {
+                            String::new()
+                        } else if variant.is_empty() {
+                            model.to_string()
+                        } else {
+                            format!("{model} ({variant})")
+                        };
+                        if model_label.is_empty() {
+                            eprintln!("[delegate] {task}");
+                        } else {
+                            eprintln!("[delegate] {task} · {model_label}");
+                        }
+                    } else if !text.trim().is_empty() {
+                        eprintln!("[delegate] {}", text.trim());
                     }
                 }
                 _ => {}
@@ -1871,7 +1901,7 @@ async fn run_app(
                     continue;
                 }
 
-                app.insert_text(&text);
+                app.insert_pasted_text(&text);
                 app.update_suggestions();
             }
             AppEvent::Terminal(TermEvent::Key(key)) => {
@@ -1907,9 +1937,7 @@ async fn run_app(
 
                 if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Up {
                     if let Some((turn, _was_pending)) = app.take_last_queued_turn() {
-                        app.input = turn.display_text;
-                        app.cursor_pos = app.input.len();
-                        app.pending_images = turn.images;
+                        app.restore_prepared_turn(turn);
                         app.update_suggestions();
                     }
                     continue;
@@ -1937,7 +1965,7 @@ async fn run_app(
                     if let Ok(mut clipboard) = arboard::Clipboard::new()
                         && let Ok(text) = clipboard.get_text()
                     {
-                        app.insert_text(&text);
+                        app.insert_pasted_text(&text);
                         app.update_suggestions();
                     }
                     continue;
@@ -2143,16 +2171,12 @@ async fn run_app(
                         app.update_suggestions();
                     }
                     KeyCode::Tab => {
-                        let input = app.take_input();
-                        let images = app.take_images();
+                        let queued = app.take_prepared_turn();
                         app.update_suggestions();
-                        let queued = PreparedTurn::prepare(input.clone(), images, &app.skills);
-                        let trimmed = input.trim_start();
+                        let trimmed = queued.display_text.trim_start();
                         if queued.is_empty() || trimmed.starts_with('!') || trimmed.starts_with('/')
                         {
-                            app.input = input;
-                            app.cursor_pos = app.input.len();
-                            app.pending_images = queued.images;
+                            app.restore_prepared_turn(queued);
                             continue;
                         }
                         if app.running {
@@ -2165,9 +2189,7 @@ async fn run_app(
                                 &mut app,
                                 "Runtime is still finalizing the previous turn. Please retry in a moment.",
                             );
-                            app.input = queued.display_text.clone();
-                            app.cursor_pos = app.input.len();
-                            app.pending_images = queued.images;
+                            app.restore_prepared_turn(queued);
                             continue;
                         }
 
@@ -2211,10 +2233,8 @@ async fn run_app(
                             continue;
                         }
 
-                        let input = app.take_input();
-                        let images = app.take_images();
+                        let mut queued = app.take_prepared_turn();
                         app.update_suggestions();
-                        let mut queued = PreparedTurn::new(input.clone(), images);
                         if queued.is_empty() {
                             continue;
                         }
@@ -2223,8 +2243,12 @@ async fn run_app(
                             && let Some(skill_prompt) =
                                 command::slash_skill_prompt(&queued.display_text, &app.skills)
                         {
-                            queued =
-                                PreparedTurn::prepare(skill_prompt, queued.images, &app.skills);
+                            queued = PreparedTurn::prepare_with_large_pastes(
+                                skill_prompt,
+                                queued.images,
+                                &app.skills,
+                                queued.large_pastes.clone(),
+                            );
                         }
 
                         if app.running {
@@ -2234,9 +2258,7 @@ async fn run_app(
                                     &mut app,
                                     "Host commands cannot be injected into the active turn. Wait for completion or use `Tab` to queue a normal next turn.",
                                 );
-                                app.input = queued.display_text;
-                                app.cursor_pos = app.input.len();
-                                app.pending_images = queued.images;
+                                app.restore_prepared_turn(queued);
                                 continue;
                             }
                             if !queued.images.is_empty() {
@@ -2244,9 +2266,7 @@ async fn run_app(
                                     &mut app,
                                     "Current-turn injection does not support images yet. Use `Tab` to queue an image-bearing next turn.",
                                 );
-                                app.input = queued.display_text;
-                                app.cursor_pos = app.input.len();
-                                app.pending_images = queued.images;
+                                app.restore_prepared_turn(queued);
                                 continue;
                             }
                             let injection = PluginMessage {
@@ -2263,9 +2283,7 @@ async fn run_app(
                                         &mut app,
                                         format!("Failed to queue current-turn injection: {}", err),
                                     );
-                                    app.input = queued.display_text;
-                                    app.cursor_pos = app.input.len();
-                                    app.pending_images = queued.images;
+                                    app.restore_prepared_turn(queued);
                                 }
                             }
                             continue;
@@ -2275,9 +2293,7 @@ async fn run_app(
                                 &mut app,
                                 "Runtime is still finalizing the previous turn. Please retry in a moment.",
                             );
-                            app.input = queued.display_text;
-                            app.cursor_pos = app.input.len();
-                            app.pending_images = queued.images;
+                            app.restore_prepared_turn(queued);
                             continue;
                         }
 
@@ -3292,7 +3308,7 @@ async fn run_app(
                         }
 
                         // Handle "quit"/"exit" without slash prefix
-                        if input == "quit" || input == "exit" {
+                        if queued.display_text == "quit" || queued.display_text == "exit" {
                             break;
                         }
 

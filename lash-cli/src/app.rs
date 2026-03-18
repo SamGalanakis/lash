@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use lash::{
@@ -77,6 +77,24 @@ impl LiveTurnState {
     }
 }
 
+const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LargePaste {
+    pub placeholder: String,
+    pub content: String,
+}
+
+fn expand_large_paste_placeholders(text: &str, large_pastes: &[LargePaste]) -> String {
+    let mut expanded = text.to_string();
+    for paste in large_pastes {
+        if expanded.contains(&paste.placeholder) {
+            expanded = expanded.replace(&paste.placeholder, &paste.content);
+        }
+    }
+    expanded
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedTurn {
     pub draft_id: String,
@@ -84,10 +102,12 @@ pub struct PreparedTurn {
     pub display_text: String,
     pub effective_text: String,
     pub images: Vec<Vec<u8>>,
+    pub large_pastes: Vec<LargePaste>,
     pub transform_labels: Vec<String>,
 }
 
 impl PreparedTurn {
+    #[cfg(test)]
     pub fn new(text: String, images: Vec<Vec<u8>>) -> Self {
         Self {
             draft_id: uuid::Uuid::new_v4().to_string(),
@@ -95,11 +115,21 @@ impl PreparedTurn {
             display_text: text.clone(),
             effective_text: text,
             images,
+            large_pastes: Vec::new(),
             transform_labels: Vec::new(),
         }
     }
 
     pub fn prepare(text: String, images: Vec<Vec<u8>>, skills: &SkillCatalog) -> Self {
+        Self::prepare_with_large_pastes(text, images, skills, Vec::new())
+    }
+
+    pub fn prepare_with_large_pastes(
+        text: String,
+        images: Vec<Vec<u8>>,
+        skills: &SkillCatalog,
+        large_pastes: Vec<LargePaste>,
+    ) -> Self {
         let mut labels = Vec::new();
         let mut seen = HashSet::new();
         for name in collect_skill_mentions(&text) {
@@ -107,13 +137,19 @@ impl PreparedTurn {
                 labels.push(format!("skill {}", name));
             }
         }
-        let effective_text = append_skill_blocks(&text, skills);
+        let large_pastes = large_pastes
+            .into_iter()
+            .filter(|paste| text.contains(&paste.placeholder))
+            .collect::<Vec<_>>();
+        let expanded_text = expand_large_paste_placeholders(&text, &large_pastes);
+        let effective_text = append_skill_blocks(&expanded_text, skills);
         Self {
             draft_id: uuid::Uuid::new_v4().to_string(),
             raw_text: text.clone(),
             display_text: text,
             effective_text,
             images,
+            large_pastes,
             transform_labels: labels,
         }
     }
@@ -134,6 +170,21 @@ impl PreparedTurn {
             0 => String::new(),
             1 => "[1 image]".to_string(),
             n => format!("[{} images]", n),
+        }
+    }
+
+    pub fn history_text(&self) -> String {
+        let expanded = expand_large_paste_placeholders(&self.raw_text, &self.large_pastes);
+        if expanded.is_empty() {
+            String::new()
+        } else if !self.large_pastes.is_empty() {
+            let collapsed = expanded.split_whitespace().collect::<Vec<_>>().join(" ");
+            format!(
+                "Pasted: {}",
+                smart_truncate_preview_line(&collapsed, PASTED_HISTORY_PREVIEW_CHAR_LIMIT)
+            )
+        } else {
+            preview_text_lines(&expanded).join("\n")
         }
     }
 
@@ -208,6 +259,64 @@ fn wrapped_text_height(text: &str, width: usize, prefix_chars: usize) -> usize {
     h
 }
 
+const TEXT_PREVIEW_MAX_HEAD_LINES: usize = 8;
+const TEXT_PREVIEW_MAX_TAIL_LINES: usize = 3;
+const TEXT_PREVIEW_LINE_CHAR_LIMIT: usize = 240;
+const PASTED_HISTORY_PREVIEW_CHAR_LIMIT: usize = 72;
+const STREAMING_OUTPUT_MAX_LINES: usize = 48;
+const STREAMING_OUTPUT_LINE_CHAR_LIMIT: usize = 240;
+
+pub(crate) fn preview_text_lines(text: &str) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= TEXT_PREVIEW_MAX_HEAD_LINES + TEXT_PREVIEW_MAX_TAIL_LINES + 1 {
+        return lines
+            .into_iter()
+            .map(|line| smart_truncate_preview_line(line, TEXT_PREVIEW_LINE_CHAR_LIMIT))
+            .collect();
+    }
+
+    let hidden = lines
+        .len()
+        .saturating_sub(TEXT_PREVIEW_MAX_HEAD_LINES + TEXT_PREVIEW_MAX_TAIL_LINES);
+    let mut out = Vec::with_capacity(TEXT_PREVIEW_MAX_HEAD_LINES + TEXT_PREVIEW_MAX_TAIL_LINES + 1);
+    out.extend(
+        lines
+            .iter()
+            .take(TEXT_PREVIEW_MAX_HEAD_LINES)
+            .map(|line| smart_truncate_preview_line(line, TEXT_PREVIEW_LINE_CHAR_LIMIT)),
+    );
+    out.push(format!("… {hidden} lines hidden …"));
+    out.extend(
+        lines
+            .iter()
+            .skip(lines.len().saturating_sub(TEXT_PREVIEW_MAX_TAIL_LINES))
+            .map(|line| smart_truncate_preview_line(line, TEXT_PREVIEW_LINE_CHAR_LIMIT)),
+    );
+    out
+}
+
+fn smart_truncate_preview_line(text: &str, max_chars: usize) -> String {
+    let char_count = text.chars().count();
+    if max_chars == 0 || char_count <= max_chars {
+        return text.to_string();
+    }
+
+    let marker = format!(" … {} chars hidden … ", char_count - max_chars);
+    let marker_chars = marker.chars().count();
+    if marker_chars >= max_chars {
+        return text.chars().take(max_chars).collect();
+    }
+
+    let left_chars = (max_chars - marker_chars) / 2;
+    let right_chars = max_chars - marker_chars - left_chars;
+    let prefix: String = text.chars().take(left_chars).collect();
+    let suffix: String = text
+        .chars()
+        .skip(char_count.saturating_sub(right_chars))
+        .collect();
+    format!("{prefix}{marker}{suffix}")
+}
+
 fn activity_artifact_height(
     artifact: &crate::activity::ActivityArtifact,
     indent_width: usize,
@@ -223,9 +332,8 @@ fn activity_artifact_height(
         }
         crate::activity::ActivityArtifact::TextPreview { title, text } => {
             usize::from(title.is_some())
-                + text
-                    .lines()
-                    .take(12)
+                + preview_text_lines(text)
+                    .iter()
                     .map(|line| wrapped_text_height(line, width, indent_width + 2))
                     .sum::<usize>()
         }
@@ -439,8 +547,14 @@ pub struct App {
     height_cache_vh: usize,
     /// PNG-encoded images pasted via Ctrl+V, waiting to be sent with next message.
     pub pending_images: Vec<Vec<u8>>,
+    /// Large pasted text payloads represented by compact placeholders in the visible draft.
+    pub pending_large_pastes: Vec<LargePaste>,
+    /// Per-size counters keep placeholder labels unique for repeated same-length pastes.
+    pub large_paste_counters: HashMap<usize, usize>,
     /// Live streaming output lines from tool execution (e.g. bash).
     pub streaming_output: Vec<String>,
+    pub streaming_output_hidden: usize,
+    pub streaming_output_partial: String,
     /// Whether to render live `tool_output` chunks in history.
     /// Default: on (can be disabled via `LASH_SHOW_TOOL_OUTPUT=0`).
     pub show_live_tool_output: bool,
@@ -498,7 +612,7 @@ impl App {
         self.running = true;
         self.iteration = 0;
         self.pending_text.clear();
-        self.streaming_output.clear();
+        self.clear_streaming_output();
         self.active_delegate = None;
         self.live_output_chars_estimate = 0;
         self.live_output_tokens_estimate = 0;
@@ -508,7 +622,7 @@ impl App {
     pub fn stop_turn(&mut self) {
         self.running = false;
         self.pending_text.clear();
-        self.streaming_output.clear();
+        self.clear_streaming_output();
         self.active_delegate = None;
         self.live_output_chars_estimate = 0;
         self.live_output_tokens_estimate = 0;
@@ -654,7 +768,11 @@ impl App {
             height_cache_width: 0,
             height_cache_vh: 0,
             pending_images: Vec::new(),
+            pending_large_pastes: Vec::new(),
+            large_paste_counters: HashMap::new(),
             streaming_output: Vec::new(),
+            streaming_output_hidden: 0,
+            streaming_output_partial: String::new(),
             show_live_tool_output: !matches!(
                 std::env::var("LASH_SHOW_TOOL_OUTPUT")
                     .unwrap_or_default()
@@ -699,9 +817,21 @@ impl App {
         text
     }
 
+    pub fn take_prepared_turn(&mut self) -> PreparedTurn {
+        let input = self.take_input();
+        let images = self.take_images();
+        let large_pastes = self.take_large_pastes();
+        PreparedTurn::prepare_with_large_pastes(input, images, &self.skills, large_pastes)
+    }
+
     /// Take pending images, clearing them from the app.
     pub fn take_images(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.pending_images)
+    }
+
+    /// Take pending large-paste payloads, clearing them from the draft.
+    pub fn take_large_pastes(&mut self) -> Vec<LargePaste> {
+        std::mem::take(&mut self.pending_large_pastes)
     }
 
     /// Mark the height cache as stale so it will be recomputed on next access.
@@ -838,11 +968,11 @@ impl App {
     }
 
     pub fn push_prepared_user_input(&mut self, turn: &PreparedTurn) {
-        if turn.display_text.is_empty() {
+        let history_text = turn.history_text();
+        if history_text.is_empty() {
             return;
         }
-        self.blocks
-            .push(DisplayBlock::UserInput(turn.display_text.clone()));
+        self.blocks.push(DisplayBlock::UserInput(history_text));
         if let Some(summary) = turn.transform_summary() {
             self.blocks.push(DisplayBlock::SystemMessage(format!(
                 "Model saw transformed input: {summary}"
@@ -887,8 +1017,8 @@ impl App {
                 ..
             } => {
                 self.close_pending_text();
-                self.streaming_output.clear();
-                if name.starts_with("delegate_") {
+                self.clear_streaming_output();
+                if matches!(name.as_str(), "agent_result" | "agent_kill") {
                     self.active_delegate = None;
                 }
                 let plan_content = if success && name == "update_plan" {
@@ -935,6 +1065,14 @@ impl App {
             AgentEvent::Message { text, kind } => {
                 if kind == "delegate_start" {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                        let model = v
+                            .get("model")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default();
+                        let variant = v
+                            .get("model_variant")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default();
                         let name = v
                             .get("name")
                             .and_then(|v| v.as_str())
@@ -946,10 +1084,25 @@ impl App {
                             .unwrap_or("")
                             .to_string();
                         self.active_delegate = Some((name, task, std::time::Instant::now()));
-                        let details = self
-                            .active_delegate
-                            .as_ref()
-                            .map(|(_, task, _)| task.clone());
+                        let model_detail = if model.is_empty() {
+                            None
+                        } else if variant.is_empty() {
+                            Some(model.to_string())
+                        } else {
+                            Some(format!("{model} ({variant})"))
+                        };
+                        let details = match (
+                            self.active_delegate
+                                .as_ref()
+                                .map(|(_, task, _)| task.clone())
+                                .filter(|value| !value.is_empty()),
+                            model_detail,
+                        ) {
+                            (Some(task), Some(model)) => Some(format!("{task} · {model}")),
+                            (Some(task), None) => Some(task),
+                            (None, Some(model)) => Some(model),
+                            (None, None) => Some("delegate".to_string()),
+                        };
                         self.set_status("delegating", details, true);
                     }
                     self.scroll_to_bottom();
@@ -971,7 +1124,7 @@ impl App {
                     let stream_active = self.active_delegate.is_some()
                         || current_status.is_some_and(|status| status.contains("shell"));
                     if self.show_live_tool_output && stream_active {
-                        self.streaming_output.push(text);
+                        self.push_streaming_output_text(&text);
                         self.mark_visible_output();
                         self.scroll_to_bottom();
                     }
@@ -1145,7 +1298,8 @@ impl App {
         self.pending_text.clear();
         self.clear_status();
         self.pending_images.clear();
-        self.streaming_output.clear();
+        self.pending_large_pastes.clear();
+        self.clear_streaming_output();
         self.pending_steers.clear();
         self.queued_turns.clear();
         self.active_delegate = None;
@@ -1158,6 +1312,13 @@ impl App {
         self.model_variant = None;
         self.plugin_mode_indicators.clear();
         self.invalidate_height_cache();
+    }
+
+    pub fn restore_prepared_turn(&mut self, turn: PreparedTurn) {
+        self.input = turn.display_text;
+        self.cursor_pos = self.input.len();
+        self.pending_images = turn.images;
+        self.pending_large_pastes = turn.large_pastes;
     }
 
     /// Toggle expand level 0↔1 (ghost fold ↔ compact plus) with scroll anchoring.
@@ -1385,9 +1546,48 @@ impl App {
     pub fn total_content_height(&mut self, width: usize, viewport_height: usize) -> usize {
         self.ensure_height_cache(width, viewport_height);
         let block_height = self.height_cache.last().copied().unwrap_or(0);
-        // Include live streaming output lines
-        let streaming_height = self.streaming_output.len();
+        let streaming_height = self.streaming_output_height();
         block_height + streaming_height
+    }
+
+    pub fn streaming_output_height(&self) -> usize {
+        usize::from(self.streaming_output_hidden > 0)
+            + self.streaming_output.len()
+            + usize::from(!self.streaming_output_partial.is_empty())
+    }
+
+    fn clear_streaming_output(&mut self) {
+        self.streaming_output.clear();
+        self.streaming_output_hidden = 0;
+        self.streaming_output_partial.clear();
+    }
+
+    fn push_streaming_output_text(&mut self, text: &str) {
+        for segment in text.split_inclusive('\n') {
+            let line = segment.trim_end_matches('\n').trim_end_matches('\r');
+            self.streaming_output_partial.push_str(line);
+            if segment.ends_with('\n') {
+                let completed = std::mem::take(&mut self.streaming_output_partial);
+                self.push_streaming_output_line(completed);
+            }
+        }
+        if self.streaming_output_partial.chars().count() > STREAMING_OUTPUT_LINE_CHAR_LIMIT {
+            self.streaming_output_partial = smart_truncate_preview_line(
+                &self.streaming_output_partial,
+                STREAMING_OUTPUT_LINE_CHAR_LIMIT,
+            );
+        }
+    }
+
+    fn push_streaming_output_line(&mut self, line: String) {
+        if self.streaming_output.len() == STREAMING_OUTPUT_MAX_LINES {
+            self.streaming_output.remove(0);
+            self.streaming_output_hidden += 1;
+        }
+        self.streaming_output.push(smart_truncate_preview_line(
+            &line,
+            STREAMING_OUTPUT_LINE_CHAR_LIMIT,
+        ));
     }
 
     /// Which line (0-indexed) the cursor is on in multi-line input.
@@ -1495,8 +1695,61 @@ impl App {
         self.cursor_pos += text.len();
     }
 
+    fn next_large_paste_placeholder(&mut self, char_count: usize) -> String {
+        let base = format!("[Pasted Content {char_count} chars]");
+        let next_suffix = self.large_paste_counters.entry(char_count).or_insert(0);
+        *next_suffix += 1;
+        if *next_suffix == 1 {
+            base
+        } else {
+            format!("{base} #{}", *next_suffix)
+        }
+    }
+
+    pub fn insert_pasted_text(&mut self, text: &str) {
+        let char_count = text.chars().count();
+        if char_count > LARGE_PASTE_CHAR_THRESHOLD {
+            let placeholder = self.next_large_paste_placeholder(char_count);
+            self.pending_large_pastes.push(LargePaste {
+                placeholder: placeholder.clone(),
+                content: text.to_string(),
+            });
+            self.insert_text(&placeholder);
+        } else {
+            self.insert_text(text);
+        }
+    }
+
+    fn large_paste_range_containing(
+        &self,
+        probe_pos: usize,
+    ) -> Option<(usize, std::ops::Range<usize>)> {
+        for (idx, paste) in self.pending_large_pastes.iter().enumerate() {
+            if let Some((start, _)) = self.input.match_indices(&paste.placeholder).next() {
+                let end = start + paste.placeholder.len();
+                if probe_pos >= start && probe_pos < end {
+                    return Some((idx, start..end));
+                }
+            }
+        }
+        None
+    }
+
+    fn remove_large_paste_at_probe(&mut self, probe_pos: usize) -> bool {
+        let Some((idx, range)) = self.large_paste_range_containing(probe_pos) else {
+            return false;
+        };
+        self.input.drain(range.clone());
+        self.cursor_pos = range.start;
+        self.pending_large_pastes.remove(idx);
+        true
+    }
+
     /// Delete character before cursor.
     pub fn backspace(&mut self) {
+        if self.cursor_pos > 0 && self.remove_large_paste_at_probe(self.cursor_pos - 1) {
+            return;
+        }
         if self.cursor_pos > 0 {
             let prev = self.input[..self.cursor_pos]
                 .char_indices()
@@ -1510,6 +1763,9 @@ impl App {
 
     /// Delete character at cursor.
     pub fn delete(&mut self) {
+        if self.cursor_pos < self.input.len() && self.remove_large_paste_at_probe(self.cursor_pos) {
+            return;
+        }
         if self.cursor_pos < self.input.len() {
             let next = self.input[self.cursor_pos..]
                 .char_indices()
@@ -2435,6 +2691,53 @@ mod tests {
     }
 
     #[test]
+    fn delegate_start_enables_streaming_output_until_agent_result_arrives() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.handle_agent_event(AgentEvent::Message {
+            text: serde_json::json!({
+                "name":"delegate",
+                "task":"inspect queue rendering",
+                "model":"gpt-5.4",
+                "model_variant":"high"
+            })
+            .to_string(),
+            kind: "delegate_start".into(),
+        });
+        assert!(app.active_delegate.is_some());
+        assert_eq!(
+            app.live_turn.as_ref().map(|turn| turn.status_text.as_str()),
+            Some("delegating")
+        );
+        assert_eq!(
+            app.live_turn
+                .as_ref()
+                .and_then(|turn| turn.status_detail.as_deref()),
+            Some("inspect queue rendering · gpt-5.4 (high)")
+        );
+
+        app.handle_agent_event(AgentEvent::Message {
+            text: "delegate stream\n".into(),
+            kind: "tool_output".into(),
+        });
+        assert_eq!(app.streaming_output, vec!["delegate stream".to_string()]);
+
+        app.handle_agent_event(AgentEvent::ToolCall {
+            call_id: Some("tc-delegate".into()),
+            name: "agent_result".into(),
+            args: serde_json::json!({"id":"child-1"}),
+            result: serde_json::json!({
+                "result":"done",
+                "status":"completed",
+                "_sub_agent":{"task":"inspect queue rendering"}
+            }),
+            success: true,
+            duration_ms: 5,
+        });
+        assert!(app.active_delegate.is_none());
+        assert!(app.streaming_output.is_empty());
+    }
+
+    #[test]
     fn plugin_panel_events_upsert_and_clear_blocks() {
         let mut app = App::new("test-model".into(), "test".into());
         app.handle_agent_event(AgentEvent::PluginEvent {
@@ -3145,6 +3448,85 @@ mod tests {
     }
 
     #[test]
+    fn insert_pasted_text_large_uses_placeholder_and_prepare_expands() {
+        let mut app = App::new("test-model".into(), "test".into());
+        let large = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 5);
+
+        app.insert_pasted_text(&large);
+
+        let placeholder = format!("[Pasted Content {} chars]", large.chars().count());
+        assert_eq!(app.input, placeholder);
+        assert_eq!(app.pending_large_pastes.len(), 1);
+
+        let prepared = app.take_prepared_turn();
+        assert_eq!(prepared.display_text, placeholder);
+        assert_eq!(prepared.effective_text, large);
+        assert_eq!(prepared.large_pastes.len(), 1);
+        assert!(app.input.is_empty());
+        assert!(app.pending_large_pastes.is_empty());
+    }
+
+    #[test]
+    fn backspace_deletes_large_paste_placeholder_atomically() {
+        let mut app = App::new("test-model".into(), "test".into());
+        let large = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 2);
+
+        app.insert_pasted_text(&large);
+        let placeholder = app.input.clone();
+        app.cursor_pos = placeholder.len();
+
+        app.backspace();
+
+        assert!(app.input.is_empty());
+        assert!(app.pending_large_pastes.is_empty());
+    }
+
+    #[test]
+    fn repeated_same_size_large_pastes_get_numbered_placeholders() {
+        let mut app = App::new("test-model".into(), "test".into());
+        let large = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 4);
+        let base = format!("[Pasted Content {} chars]", large.chars().count());
+
+        app.insert_pasted_text(&large);
+        app.insert_pasted_text(&large);
+
+        assert_eq!(app.input, format!("{base}{base} #2"));
+        assert_eq!(app.pending_large_pastes.len(), 2);
+        assert_eq!(app.pending_large_pastes[0].placeholder, base);
+        assert_eq!(
+            app.pending_large_pastes[1].placeholder,
+            format!("{base} #2")
+        );
+    }
+
+    #[test]
+    fn prepared_turn_history_text_shows_compact_pasted_summary() {
+        let large = format!(
+            "alpha {}\nomega",
+            "x".repeat(TEXT_PREVIEW_LINE_CHAR_LIMIT * 2)
+        );
+        let char_count = large.chars().count();
+        let placeholder = format!("[Pasted Content {char_count} chars]");
+        let turn = PreparedTurn::prepare_with_large_pastes(
+            placeholder.clone(),
+            Vec::new(),
+            &SkillCatalog::default(),
+            vec![LargePaste {
+                placeholder,
+                content: large,
+            }],
+        );
+
+        let history = turn.history_text();
+        assert!(history.starts_with("Pasted: "));
+        assert!(history.contains("alpha "));
+        assert!(history.contains("omega"));
+        assert!(history.contains("chars hidden"));
+        assert!(!history.contains("[Pasted Content"));
+        assert!(!history.contains('\n'));
+    }
+
+    #[test]
     fn prompt_insert_text_inserts_literal_payload_at_cursor() {
         let mut app = App::new("test-model".into(), "test".into());
         app.prompt = Some(PromptState {
@@ -3162,6 +3544,32 @@ mod tests {
         let prompt = app.prompt.as_ref().expect("prompt");
         assert_eq!(prompt.extra_text, "start\nplain pasted text\nend");
         assert_eq!(prompt.extra_cursor, "start\nplain pasted text\n".len());
+    }
+
+    #[test]
+    fn live_tool_output_keeps_tail_and_counts_hidden_lines() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.running = true;
+        app.live_turn = Some(LiveTurnState::new("shell", None));
+
+        let payload = (0..60)
+            .map(|idx| format!("line-{idx}\n"))
+            .collect::<String>();
+        app.handle_agent_event(AgentEvent::Message {
+            text: payload,
+            kind: "tool_output".into(),
+        });
+
+        assert_eq!(app.streaming_output_hidden, 12);
+        assert_eq!(
+            app.streaming_output.first().map(String::as_str),
+            Some("line-12")
+        );
+        assert_eq!(
+            app.streaming_output.last().map(String::as_str),
+            Some("line-59")
+        );
+        assert_eq!(app.streaming_output_height(), 49);
     }
 
     fn other_variant_name(block: &DisplayBlock) -> &'static str {

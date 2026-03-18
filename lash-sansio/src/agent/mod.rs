@@ -10,9 +10,9 @@ pub use prompt::{
     PromptSectionOverride, default_prompt_renderer,
 };
 
+use crate::ToolDefinition;
 use crate::llm::types::LlmToolSpec;
 use crate::plugin::{CheckpointKind, PluginMessage, PluginSurfaceEvent};
-use crate::ToolDefinition;
 
 /// Token usage statistics from an LLM call.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -432,7 +432,8 @@ pub fn parse_fence_line(
 }
 
 pub fn model_tool_specs(tools: &[ToolDefinition]) -> Vec<LlmToolSpec> {
-    tools.iter()
+    tools
+        .iter()
         .map(|tool| {
             let model_tool = tool.model_tool();
             LlmToolSpec {

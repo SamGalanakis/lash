@@ -155,7 +155,7 @@ impl SessionLogger {
             "type": "user_input",
             "ts": chrono::Local::now().to_rfc3339(),
             "draft_id": turn.draft_id,
-            "content": turn.display_text,
+            "content": turn.history_text(),
             "raw_content": turn.raw_text,
             "effective_content": turn.effective_text,
             "transforms": turn.transform_labels,
@@ -660,6 +660,7 @@ mod tests {
                 display_text: "$localref lash".into(),
                 effective_text: "$localref lash\n\n<skill>...</skill>".into(),
                 images: Vec::new(),
+                large_pastes: Vec::new(),
                 transform_labels: vec!["skill localref".into()],
             });
             logger.flush().unwrap();

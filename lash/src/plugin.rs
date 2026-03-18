@@ -850,7 +850,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{AgentStateEnvelope, ExecutionMode, ToolDefinition, ToolParam, TurnInput};
+    use crate::{
+        AgentStateEnvelope, ExecutionMode, PromptSectionName, ToolDefinition, ToolParam, TurnInput,
+    };
 
     struct MockToolProvider;
 

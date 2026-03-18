@@ -12,7 +12,7 @@ use crate::activity::{
 };
 use crate::app::{
     App, DisplayBlock, PreparedTurn, SPLASH_CONTENT_HEIGHT, SPLASH_SCROLLBACK_HEIGHT,
-    SuggestionKind,
+    SuggestionKind, preview_text_lines,
 };
 use crate::markdown;
 use crate::theme;
@@ -318,9 +318,20 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
 
     // Render live streaming tool output.
     // Delegate output gets its own branch lane so it doesn't blend into normal shell output.
-    if !app.streaming_output.is_empty() && lines.len() < viewport_height + skip_lines {
+    if app.streaming_output_height() > 0 && lines.len() < viewport_height + skip_lines {
         let delegate_stream = app.active_delegate.is_some();
-        for (idx, line) in app.streaming_output.iter().enumerate() {
+        let mut streaming_lines = Vec::with_capacity(app.streaming_output_height());
+        if app.streaming_output_hidden > 0 {
+            streaming_lines.push(format!(
+                "… {} earlier shell lines hidden …",
+                app.streaming_output_hidden
+            ));
+        }
+        streaming_lines.extend(app.streaming_output.iter().cloned());
+        if !app.streaming_output_partial.is_empty() {
+            streaming_lines.push(app.streaming_output_partial.clone());
+        }
+        for (idx, line) in streaming_lines.iter().enumerate() {
             let (prefix, prefix_style, content_style) = if delegate_stream {
                 let prefix = if idx == 0 {
                     "\u{251c}\u{2500} "
@@ -339,7 +350,7 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
             };
             lines.push(Line::from(vec![
                 Span::styled(prefix, prefix_style),
-                Span::styled(line.as_str(), content_style),
+                Span::styled(line.clone(), content_style),
             ]));
             if lines.len() >= viewport_height + skip_lines {
                 break;
@@ -510,12 +521,12 @@ fn render_activity_artifact<'a>(
                 ]));
             }
             let prefix = format!("{}  ", indent);
-            for line in text.lines().take(12) {
+            for line in preview_text_lines(text) {
                 push_wrapped_prefixed(
                     lines,
                     prefix.clone(),
                     prefix.clone(),
-                    line,
+                    &line,
                     theme::system_output(),
                     viewport_width,
                 );
@@ -657,6 +668,77 @@ fn render_patch_artifact<'a>(
     }
 
     render_patch_preview(lines, files, viewport_width, indent, include_diffs);
+}
+
+fn render_pasted_user_input<'a>(lines: &mut Vec<Line<'a>>, preview: &str, viewport_width: usize) {
+    let marker_style = Style::default().fg(theme::SODIUM);
+    let label_style = theme::pasted_label();
+    let preview_style = theme::pasted_preview();
+    let prefix = "\u{25CF} ";
+    let continuation_prefix = "  ";
+    let label = "Pasted: ";
+
+    let prefix_w = UnicodeWidthStr::width(prefix);
+    let continuation_w = UnicodeWidthStr::width(continuation_prefix);
+    let label_w = UnicodeWidthStr::width(label);
+
+    let first_cap = viewport_width.saturating_sub(prefix_w + label_w);
+    let continuation_cap = viewport_width.saturating_sub(continuation_w);
+
+    if first_cap == 0 {
+        lines.push(Line::from(vec![
+            Span::styled(prefix, marker_style),
+            Span::styled(label, label_style),
+            Span::styled(preview.to_string(), preview_style),
+        ]));
+        return;
+    }
+
+    let mut seg_start = 0;
+    let mut col = 0;
+    let mut first_line = true;
+    for (byte_idx, ch) in preview.char_indices() {
+        let cap = if first_line {
+            first_cap
+        } else {
+            continuation_cap.max(1)
+        };
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if col + w > cap && col > 0 {
+            let segment = &preview[seg_start..byte_idx];
+            if first_line {
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, marker_style),
+                    Span::styled(label, label_style),
+                    Span::styled(segment.to_string(), preview_style),
+                ]));
+                first_line = false;
+            } else {
+                lines.push(Line::from(vec![
+                    Span::raw(continuation_prefix),
+                    Span::styled(segment.to_string(), preview_style),
+                ]));
+            }
+            seg_start = byte_idx;
+            col = w;
+        } else {
+            col += w;
+        }
+    }
+
+    let segment = &preview[seg_start..];
+    if first_line {
+        lines.push(Line::from(vec![
+            Span::styled(prefix, marker_style),
+            Span::styled(label, label_style),
+            Span::styled(segment.to_string(), preview_style),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::raw(continuation_prefix),
+            Span::styled(segment.to_string(), preview_style),
+        ]));
+    }
 }
 
 #[derive(Clone)]
@@ -1064,6 +1146,10 @@ fn render_block<'a>(
             // Blank line before user input to separate turns (skip for first block / after Splash)
             if idx > 0 && !matches!(blocks[idx - 1], DisplayBlock::Splash) {
                 lines.push(Line::from(""));
+            }
+            if let Some(preview) = text.strip_prefix("Pasted: ") {
+                render_pasted_user_input(lines, preview, viewport_width);
+                return;
             }
             // Circle marker on first line only, continuation lines get 2-space indent.
             let marker_style = Style::default().fg(theme::SODIUM);
@@ -2730,6 +2816,29 @@ mod tests {
     }
 
     #[test]
+    fn pasted_user_input_renders_as_compact_summary() {
+        let blocks = [DisplayBlock::UserInput(
+            "Pasted: alpha beta gamma delta epsilon zeta eta theta iota kappa".into(),
+        )];
+
+        let mut lines = Vec::new();
+        render_block(&blocks, 0, 1, &mut lines, 36, 10);
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(
+            rendered
+                .first()
+                .is_some_and(|line| line.starts_with("● Pasted: "))
+        );
+        assert!(rendered.iter().skip(1).all(|line| line.starts_with("  ")));
+        let normalized = rendered.join("").replace(['●', ' ', ':'], "");
+        assert_eq!(
+            normalized,
+            "Pastedalphabetagammadeltaepsilonzetaetathetaiotakappa"
+        );
+    }
+
+    #[test]
     fn code_workflow_lane_stays_connected_across_code_and_edit_blocks() {
         let blocks = [
             DisplayBlock::CodeBlock {
@@ -3116,6 +3225,42 @@ mod tests {
         render_activity_block(&activity, 2, &mut lines, 20, false);
 
         assert_eq!(expected_height, lines.len());
+    }
+
+    #[test]
+    fn text_preview_artifact_shows_hidden_line_marker_and_tail() {
+        let text = (0..16)
+            .map(|idx| format!("line-{idx}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let activity = ActivityBlock {
+            kind: ActivityKind::Exploration,
+            status: ActivityStatus::Completed,
+            tool_name: "read_file".into(),
+            summary: "EXPLORE".into(),
+            detail_lines: vec!["read src/app.rs".into()],
+            duration_ms: 3,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: Some(ActivityArtifact::TextPreview {
+                title: Some("preview".into()),
+                text,
+            }),
+            children: Vec::new(),
+            extra: None,
+        };
+
+        let mut lines = Vec::new();
+        render_activity_block(&activity, 2, &mut lines, 80, false);
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("… 5 lines hidden …"))
+        );
+        assert!(rendered.iter().any(|line| line.contains("line-0")));
+        assert!(rendered.iter().any(|line| line.contains("line-15")));
     }
 
     #[test]

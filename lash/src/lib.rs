@@ -131,7 +131,7 @@ pub use tools::{AgentCallPluginFactory, DefaultToolPluginDeps, default_tool_plug
 #[derive(Clone, Debug)]
 pub struct SandboxMessage {
     pub text: String,
-    /// "final" or "tool_output"
+    /// "final", "tool_output", or other host-rendered progress events such as "delegate_start"
     pub kind: String,
 }
 
