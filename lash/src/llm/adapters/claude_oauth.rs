@@ -16,7 +16,8 @@ use crate::provider::Provider;
 
 const CLAUDE_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages?beta=true";
 const CLAUDE_OAUTH_USER_AGENT: &str = "claude-cli/2.1.75";
-const CLAUDE_OAUTH_BETAS: &str = "oauth-2025-04-20,interleaved-thinking-2025-05-14,claude-code-20250219,fine-grained-tool-streaming-2025-05-14";
+const CLAUDE_OAUTH_BETAS: &str =
+    "oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14";
 const CLAUDE_TOOL_PREFIX: &str = "mcp_";
 
 #[derive(Clone, Debug, Default)]
@@ -213,11 +214,16 @@ impl ClaudeOAuthAdapter {
             let Some(content) = message.get_mut("content").and_then(|v| v.as_array_mut()) else {
                 continue;
             };
-            let Some(last) = content.last_mut() else {
+            let Some(block) = content.iter_mut().rev().find(|block| {
+                matches!(
+                    block.get("type").and_then(|v| v.as_str()),
+                    Some("text" | "tool_use" | "tool_result")
+                )
+            }) else {
                 continue;
             };
-            if last.get("cache_control").is_none() {
-                last["cache_control"] = json!({ "type": "ephemeral" });
+            if block.get("cache_control").is_none() {
+                block["cache_control"] = json!({ "type": "ephemeral" });
             }
         }
     }
@@ -535,6 +541,9 @@ impl LlmTransport for ClaudeOAuthAdapter {
         let body = Self::build_request_body(provider, &req);
 
         let request_body = serde_json::to_string(&body).ok();
+        if let Some(ref rb) = request_body {
+            tracing::info!(target: "lash", body = %rb, "Claude request body");
+        }
         let url = CLAUDE_MESSAGES_URL.to_string();
         let request = self
             .client
@@ -904,6 +913,60 @@ mod tests {
         let messages = ClaudeOAuthAdapter::build_messages(&req);
         assert_eq!(
             messages[0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    #[test]
+    fn build_messages_does_not_mark_image_blocks_ephemeral() {
+        let req = LlmRequest {
+            model: "claude-opus-4-6".to_string(),
+            system_prompt: "sys".to_string(),
+            user_prompt: vec![LlmPromptPart::Image(0)],
+            messages: vec![],
+            attachments: vec![crate::llm::types::LlmAttachment {
+                mime: "image/png".to_string(),
+                data: vec![0, 1, 2, 3],
+            }],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::None,
+            model_variant: None,
+            session_id: None,
+            stream_events: None,
+        };
+
+        let messages = ClaudeOAuthAdapter::build_messages(&req);
+        assert_eq!(messages[0]["content"][0]["type"], "image");
+        assert!(messages[0]["content"][0].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn build_messages_marks_last_text_block_when_prompt_contains_image() {
+        let req = LlmRequest {
+            model: "claude-opus-4-6".to_string(),
+            system_prompt: "sys".to_string(),
+            user_prompt: vec![
+                LlmPromptPart::Image(0),
+                LlmPromptPart::Text("describe this".to_string()),
+            ],
+            messages: vec![],
+            attachments: vec![crate::llm::types::LlmAttachment {
+                mime: "image/png".to_string(),
+                data: vec![0, 1, 2, 3],
+            }],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::None,
+            model_variant: None,
+            session_id: None,
+            stream_events: None,
+        };
+
+        let messages = ClaudeOAuthAdapter::build_messages(&req);
+        assert_eq!(messages[0]["content"][0]["type"], "image");
+        assert_eq!(messages[0]["content"][1]["type"], "text");
+        assert!(messages[0]["content"][0].get("cache_control").is_none());
+        assert_eq!(
+            messages[0]["content"][1]["cache_control"]["type"],
             "ephemeral"
         );
     }

@@ -1,7 +1,10 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
-use lash_core::{AgentEvent, MessageRole, PluginMessage, PromptUsage, SkillCatalog, TokenUsage};
+use lash_core::{
+    AgentEvent, MessageRole, PluginMessage, PromptUsage, SkillCatalog, TokenUsage,
+    append_skill_blocks, collect_skill_mentions,
+};
 
 use crate::activity::{
     ActivityBlock, ActivityKind, ActivityState, ActivityStatus, PatchFilePreview,
@@ -75,29 +78,70 @@ impl LiveTurnState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct QueuedTurn {
-    pub text: String,
+pub struct PreparedTurn {
+    pub draft_id: String,
+    pub raw_text: String,
+    pub display_text: String,
+    pub effective_text: String,
     pub images: Vec<Vec<u8>>,
+    pub transform_labels: Vec<String>,
 }
 
-impl QueuedTurn {
+impl PreparedTurn {
     pub fn new(text: String, images: Vec<Vec<u8>>) -> Self {
-        Self { text, images }
+        Self {
+            draft_id: uuid::Uuid::new_v4().to_string(),
+            raw_text: text.clone(),
+            display_text: text.clone(),
+            effective_text: text,
+            images,
+            transform_labels: Vec::new(),
+        }
+    }
+
+    pub fn prepare(text: String, images: Vec<Vec<u8>>, skills: &SkillCatalog) -> Self {
+        let mut labels = Vec::new();
+        let mut seen = HashSet::new();
+        for name in collect_skill_mentions(&text) {
+            if seen.insert(name.clone()) && skills.get(&name).is_some() {
+                labels.push(format!("skill {}", name));
+            }
+        }
+        let effective_text = append_skill_blocks(&text, skills);
+        Self {
+            draft_id: uuid::Uuid::new_v4().to_string(),
+            raw_text: text.clone(),
+            display_text: text,
+            effective_text,
+            images,
+            transform_labels: labels,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.text.is_empty() && self.images.is_empty()
+        self.display_text.is_empty() && self.images.is_empty()
     }
 
     pub fn preview(&self) -> String {
-        let collapsed = self.text.replace('\n', " ").trim().to_string();
+        let collapsed = self.display_text.replace('\n', " ").trim().to_string();
         if !collapsed.is_empty() {
+            if let Some(summary) = self.transform_summary() {
+                return format!("{collapsed} · {summary}");
+            }
             return collapsed;
         }
         match self.images.len() {
             0 => String::new(),
             1 => "[1 image]".to_string(),
             n => format!("[{} images]", n),
+        }
+    }
+
+    pub fn transform_summary(&self) -> Option<String> {
+        if self.transform_labels.is_empty() {
+            None
+        } else {
+            Some(self.transform_labels.join(", "))
         }
     }
 }
@@ -112,10 +156,6 @@ pub enum SuggestionKind {
 /// A renderable block in the scrollable history.
 pub enum DisplayBlock {
     UserInput(String),
-    PendingUserInput {
-        text: String,
-        inject_at_checkpoint: bool,
-    },
     AssistantText(String),
     CodeBlock {
         code: String,
@@ -256,7 +296,6 @@ impl DisplayBlock {
                 // Left-aligned with "\u{25CF} " prefix (2 chars)
                 wrapped_text_height(s, width, 2)
             }
-            DisplayBlock::PendingUserInput { text, .. } => wrapped_text_height(text, width, 2),
             DisplayBlock::AssistantText(s) => {
                 markdown::markdown_height_compact(s, width.saturating_sub(2))
             }
@@ -412,9 +451,9 @@ pub struct App {
     /// Currently selected skill index.
     pub skill_picker_idx: usize,
     /// Priority follow-ups entered with Enter while a turn is running.
-    pub pending_steers: VecDeque<QueuedTurn>,
+    pub pending_steers: VecDeque<PreparedTurn>,
     /// FIFO drafts explicitly queued for later turns.
-    pub queued_turns: VecDeque<QueuedTurn>,
+    pub queued_turns: VecDeque<PreparedTurn>,
     /// Active agent prompt (ask() dialog).
     pub prompt: Option<PromptState>,
     /// Whether the terminal window is currently focused.
@@ -774,14 +813,9 @@ impl App {
             match message.role {
                 MessageRole::User => {
                     committed_user_message = true;
-                    if self
-                        .pending_steers
-                        .front()
-                        .is_some_and(|turn| turn.text == message.content)
-                    {
-                        self.pending_steers.pop_front();
-                    }
-                    if !self.commit_pending_user_preview(&message.content) {
+                    if let Some(turn) = self.pending_steers.pop_front() {
+                        self.push_prepared_user_input(&turn);
+                    } else if !self.commit_pending_user_preview(&message.content) {
                         self.blocks
                             .push(DisplayBlock::UserInput(message.content.clone()));
                     }
@@ -801,6 +835,20 @@ impl App {
                 self.scroll_to_bottom();
             }
         }
+    }
+
+    pub fn push_prepared_user_input(&mut self, turn: &PreparedTurn) {
+        if turn.display_text.is_empty() {
+            return;
+        }
+        self.blocks
+            .push(DisplayBlock::UserInput(turn.display_text.clone()));
+        if let Some(summary) = turn.transform_summary() {
+            self.blocks.push(DisplayBlock::SystemMessage(format!(
+                "Model saw transformed input: {summary}"
+            )));
+        }
+        self.invalidate_height_cache();
     }
 
     /// Process an agent event, updating display blocks.
@@ -1025,21 +1073,21 @@ impl App {
         }
     }
 
-    pub fn queue_pending_steer(&mut self, turn: QueuedTurn) {
+    pub fn queue_pending_steer(&mut self, turn: PreparedTurn) {
         if turn.is_empty() {
             return;
         }
         self.pending_steers.push_back(turn);
     }
 
-    pub fn queue_turn(&mut self, turn: QueuedTurn) {
+    pub fn queue_turn(&mut self, turn: PreparedTurn) {
         if turn.is_empty() {
             return;
         }
         self.queued_turns.push_back(turn);
     }
 
-    pub fn requeue_front(&mut self, turn: QueuedTurn, pending: bool) {
+    pub fn requeue_front(&mut self, turn: PreparedTurn, pending: bool) {
         if turn.is_empty() {
             return;
         }
@@ -1050,11 +1098,11 @@ impl App {
         }
     }
 
-    pub fn take_next_queued_turn(&mut self) -> Option<(QueuedTurn, bool)> {
+    pub fn take_next_queued_turn(&mut self) -> Option<(PreparedTurn, bool)> {
         self.queued_turns.pop_front().map(|turn| (turn, false))
     }
 
-    pub fn take_last_queued_turn(&mut self) -> Option<(QueuedTurn, bool)> {
+    pub fn take_last_queued_turn(&mut self) -> Option<(PreparedTurn, bool)> {
         self.queued_turns.pop_back().map(|turn| (turn, false))
     }
 
@@ -1062,29 +1110,15 @@ impl App {
         !self.pending_steers.is_empty() || !self.queued_turns.is_empty()
     }
 
-    pub fn preview_queued_turn(&mut self, turn: &QueuedTurn, inject_at_checkpoint: bool) {
-        if !inject_at_checkpoint || turn.is_empty() || turn.text.is_empty() {
-            return;
-        }
-        self.blocks.push(DisplayBlock::PendingUserInput {
-            text: turn.text.clone(),
-            inject_at_checkpoint,
-        });
-        self.invalidate_height_cache();
-        self.scroll_to_bottom();
+    pub fn preview_queued_turn(&mut self, turn: &PreparedTurn, inject_at_checkpoint: bool) {
+        let _ = inject_at_checkpoint;
+        let _ = turn;
+        // Queued turns already render in the dedicated queue-preview panel. Duplicating
+        // them into history makes the same text appear twice before it is actually sent.
     }
 
     pub fn commit_pending_user_preview(&mut self, text: &str) -> bool {
-        for block in self.blocks.iter_mut().rev() {
-            if let DisplayBlock::PendingUserInput { text: pending, .. } = block
-                && pending == text
-            {
-                *block = DisplayBlock::UserInput(text.to_string());
-                self.invalidate_height_cache();
-                self.keep_latest_user_block_visible();
-                return true;
-            }
-        }
+        let _ = text;
         false
     }
 
@@ -1254,12 +1288,11 @@ impl App {
             return;
         }
 
-        let Some(last_idx) = self.blocks.iter().rposition(|block| {
-            matches!(
-                block,
-                DisplayBlock::UserInput(_) | DisplayBlock::PendingUserInput { .. }
-            )
-        }) else {
+        let Some(last_idx) = self
+            .blocks
+            .iter()
+            .rposition(|block| matches!(block, DisplayBlock::UserInput(_)))
+        else {
             self.scroll_to_bottom();
             return;
         };
@@ -1326,10 +1359,7 @@ impl App {
         for (i, block) in self.blocks.iter().enumerate() {
             // Blank line before UserInput to separate turns (matches render_block)
             if i > 0
-                && matches!(
-                    block,
-                    DisplayBlock::UserInput(_) | DisplayBlock::PendingUserInput { .. }
-                )
+                && matches!(block, DisplayBlock::UserInput(_))
                 && !matches!(self.blocks[i - 1], DisplayBlock::Splash)
             {
                 cumulative += 1;
@@ -2508,13 +2538,13 @@ mod tests {
     #[test]
     fn queued_turns_are_fifo_and_skip_pending_injections() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.queue_turn(QueuedTurn::new("queued-1".into(), Vec::new()));
-        app.queue_turn(QueuedTurn::new("queued-2".into(), Vec::new()));
-        app.queue_pending_steer(QueuedTurn::new("next-1".into(), Vec::new()));
-        app.queue_pending_steer(QueuedTurn::new("next-2".into(), Vec::new()));
+        app.queue_turn(PreparedTurn::new("queued-1".into(), Vec::new()));
+        app.queue_turn(PreparedTurn::new("queued-2".into(), Vec::new()));
+        app.queue_pending_steer(PreparedTurn::new("next-1".into(), Vec::new()));
+        app.queue_pending_steer(PreparedTurn::new("next-2".into(), Vec::new()));
 
         let order: Vec<(String, bool)> = std::iter::from_fn(|| app.take_next_queued_turn())
-            .map(|(turn, was_pending)| (turn.text, was_pending))
+            .map(|(turn, was_pending)| (turn.display_text, was_pending))
             .collect();
 
         assert_eq!(
@@ -2527,11 +2557,11 @@ mod tests {
     #[test]
     fn take_last_queued_turn_restores_explicit_queue_only() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.queue_pending_steer(QueuedTurn::new("next".into(), Vec::new()));
-        app.queue_turn(QueuedTurn::new("queued".into(), vec![vec![1, 2, 3]]));
+        app.queue_pending_steer(PreparedTurn::new("next".into(), Vec::new()));
+        app.queue_turn(PreparedTurn::new("queued".into(), vec![vec![1, 2, 3]]));
 
         let (turn, was_pending) = app.take_last_queued_turn().expect("queued turn");
-        assert_eq!(turn.text, "queued");
+        assert_eq!(turn.display_text, "queued");
         assert_eq!(turn.images, vec![vec![1, 2, 3]]);
         assert!(!was_pending);
 
@@ -2542,7 +2572,7 @@ mod tests {
     #[test]
     fn injected_messages_commit_render_user_blocks_and_clear_pending_preview() {
         let mut app = App::new("test-model".into(), "test".into());
-        let turn = QueuedTurn::new("follow up".into(), Vec::new());
+        let turn = PreparedTurn::new("follow up".into(), Vec::new());
         app.queue_pending_steer(turn.clone());
         app.preview_queued_turn(&turn, true);
 
@@ -2562,32 +2592,53 @@ mod tests {
     }
 
     #[test]
-    fn previewed_pending_user_turn_is_visible_immediately() {
+    fn injected_messages_clear_pending_queue_even_when_runtime_content_differs() {
         let mut app = App::new("test-model".into(), "test".into());
-        let turn = QueuedTurn::new("follow up now".into(), Vec::new());
+        let mut turn = PreparedTurn::new("$localref lash for context if needed".into(), Vec::new());
+        turn.transform_labels = vec!["skill localref".into()];
+        app.queue_pending_steer(turn.clone());
+        app.preview_queued_turn(&turn, true);
+
+        app.handle_agent_event(AgentEvent::InjectedMessagesCommitted {
+            messages: vec![PluginMessage {
+                role: MessageRole::User,
+                content: "$localref lash for context if needed\n\n<skill>\n<name>localref</name>\nbody\n</skill>".into(),
+            }],
+            checkpoint: lash_core::CheckpointKind::AfterWork,
+        });
+
+        assert!(app.pending_steers.is_empty());
+        assert!(matches!(
+            app.blocks.last(),
+            Some(DisplayBlock::SystemMessage(text)) if text == "Model saw transformed input: skill localref"
+        ));
+    }
+
+    #[test]
+    fn queued_injection_preview_stays_out_of_history() {
+        let mut app = App::new("test-model".into(), "test".into());
+        let turn = PreparedTurn::new("follow up now".into(), Vec::new());
 
         app.queue_pending_steer(turn.clone());
         app.preview_queued_turn(&turn, true);
 
-        assert!(matches!(
+        assert!(!app.commit_pending_user_preview("follow up now"));
+        assert!(!matches!(
             app.blocks.last(),
-            Some(DisplayBlock::PendingUserInput {
-                text,
-                inject_at_checkpoint: true,
-            }) if text == "follow up now"
+            Some(DisplayBlock::UserInput(_))
         ));
     }
 
     #[test]
     fn regular_queued_turn_preview_stays_out_of_history() {
         let mut app = App::new("test-model".into(), "test".into());
-        let turn = QueuedTurn::new("queued text".into(), Vec::new());
+        let turn = PreparedTurn::new("queued text".into(), Vec::new());
         app.preview_queued_turn(&turn, false);
 
         assert!(!app.commit_pending_user_preview("queued text"));
         assert!(!matches!(
             app.blocks.last(),
-            Some(DisplayBlock::PendingUserInput { .. } | DisplayBlock::UserInput(_))
+            Some(DisplayBlock::UserInput(_))
         ));
     }
 
@@ -3116,7 +3167,6 @@ mod tests {
     fn other_variant_name(block: &DisplayBlock) -> &'static str {
         match block {
             DisplayBlock::UserInput(_) => "UserInput",
-            DisplayBlock::PendingUserInput { .. } => "PendingUserInput",
             DisplayBlock::AssistantText(_) => "AssistantText",
             DisplayBlock::CodeBlock { .. } => "CodeBlock",
             DisplayBlock::Activity(_) => "Activity",

@@ -181,6 +181,7 @@ scripts/run-terminalbench.sh --sample --preset smoke --execution-mode repl --mod
 scripts/run-terminalbench.sh --sample --preset fast-3 --execution-mode standard --model gpt-5.4 --variant high
 scripts/run-terminalbench.sh --sample --preset fast-medium --execution-mode standard --model gpt-5.4 --variant high
 scripts/run-terminalbench.sh --full --preset memory-3 --execution-mode standard --model gpt-5.4 --variant high
+scripts/run-terminalbench.sh --full --preset recall-3 --execution-mode standard --model gpt-5.4 --variant high
 scripts/run-terminalbench.sh --full --preset representative-10 --execution-mode standard --model gpt-5.4 --variant high
 scripts/run-terminalbench.sh --sample --execution-mode standard --model gpt-5.4 --variant high --build-mode host
 scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,sqlite-with-gcov --model gpt-5.4 --variant high
@@ -203,6 +204,7 @@ Notes:
 - `--preset fast-3` expands to `log-summary-date-ranges,fix-code-vulnerability,regex-log`.
 - `--preset fast-medium` expands to `regex-log,log-summary-date-ranges,fix-code-vulnerability,sqlite-with-gcov`.
 - `--preset memory-3` expands to `password-recovery,db-wal-recovery,git-leak-recovery` and requires `--full` / `terminal-bench@2.0`.
+- `--preset recall-3` expands to `password-recovery,git-leak-recovery,sanitize-git-repo` and requires `--full` / `terminal-bench@2.0`. It is meant to stress cross-step fact retention and cleanup consistency more than single-artifact forensic decoding.
 - `--preset representative-10` expands to `build-cython-ext,configure-git-webserver,db-wal-recovery,fix-code-vulnerability,git-leak-recovery,log-summary-date-ranges,nginx-request-logging,polyglot-c-py,regex-log,sqlite-with-gcov` and requires `--full` / `terminal-bench@2.0`.
 - `--variant` is required for all benchmark runs so provider-native reasoning settings are explicit and reproducible.
 - `--build-mode docker-bookworm` is the default for lash benchmark builds so the binary matches the benchmark container ABI. Use `host` only when you intentionally want to benchmark against the host libc.
