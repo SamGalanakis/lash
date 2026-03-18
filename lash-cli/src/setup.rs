@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use lash_core::oauth;
-use lash_core::provider::{LashConfig, OPENAI_GENERIC_DEFAULT_BASE_URL, Provider, ProviderKind};
+use lash::oauth;
+use lash::provider::{LashConfig, OPENAI_GENERIC_DEFAULT_BASE_URL, Provider, ProviderKind};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -170,7 +170,7 @@ async fn run_setup_inner(
                                 refresh_token: tokens.refresh_token,
                                 expires_at: tokens.expires_at,
                                 account_id: tokens.account_id,
-                                options: lash_core::provider::ProviderOptions::default(),
+                                options: lash::provider::ProviderOptions::default(),
                             });
                             app.step = if tavily_key.is_some() {
                                 SetupStep::Done
@@ -307,8 +307,7 @@ async fn run_setup_inner(
                                             access_token: tokens.access_token,
                                             refresh_token: tokens.refresh_token,
                                             expires_at: tokens.expires_at,
-                                            options: lash_core::provider::ProviderOptions::default(
-                                            ),
+                                            options: lash::provider::ProviderOptions::default(),
                                         });
                                         app.step = if tavily_key.is_some() {
                                             SetupStep::Done
@@ -348,8 +347,7 @@ async fn run_setup_inner(
                                                 .or_else(|| {
                                                     std::env::var("GOOGLE_CLOUD_PROJECT_ID").ok()
                                                 }),
-                                            options: lash_core::provider::ProviderOptions::default(
-                                            ),
+                                            options: lash::provider::ProviderOptions::default(),
                                         });
                                         app.step = if tavily_key.is_some() {
                                             SetupStep::Done
@@ -444,7 +442,7 @@ async fn run_setup_inner(
                     provider = Some(Provider::OpenAiGeneric {
                         api_key: api_key.clone(),
                         base_url,
-                        options: lash_core::provider::ProviderOptions::default(),
+                        options: lash::provider::ProviderOptions::default(),
                     });
                     app.step = if tavily_key.is_some() {
                         SetupStep::Done

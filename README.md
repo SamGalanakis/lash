@@ -250,11 +250,12 @@ cargo build -p lash-cli --release
 
 ## Integration
 
-`lash-core` is available as a library:
+`lash` is the host/runtime library, and `lash-sansio` is the portable turn-machine core:
 
 ```toml
 [dependencies]
-lash-core = { path = "../lash", default-features = false, features = ["full"] }
+lash = { path = "../lash/lash", default-features = false, features = ["full"] }
+lash-sansio = { path = "../lash/lash-sansio" }
 ```
 
 Embedders provide model metadata explicitly and can choose their own catalog source and storage. The
@@ -267,7 +268,7 @@ as history, planning, and delegation. `PluginHost` can opt sessions into a
 - whether `search_tools()` is exposed because additional tools were omitted from the REPL prompt
 - omitted-tool notes attached to the available tool list
 
-For plugin authors, `lash-core` exposes grouped registrar namespaces on `PluginRegistrar` such as
+For plugin authors, `lash` exposes grouped registrar namespaces on `PluginRegistrar` such as
 `reg.tools()`, `reg.prompt()`, `reg.surface()`, `reg.turn()`, `reg.tool_calls()`, `reg.output()`,
 `reg.messages()`, `reg.tool_results()`, `reg.session()`, and `reg.external()`. Small static
 plugins can use `StaticPluginFactory`, context-sensitive declarative plugins can use

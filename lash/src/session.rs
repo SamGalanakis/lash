@@ -8,8 +8,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::embedded::{LashlangRequest, LashlangResponse, LashlangRuntime};
 use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call};
 use crate::{
-    AgentEvent, PluginMessage, PromptContribution, RuntimeServices, SandboxMessage, SessionManager,
-    ToolCallRecord, ToolImage, ToolProvider,
+    AgentEvent, ExecResponse, PluginMessage, PromptContribution, RuntimeServices, SandboxMessage,
+    SessionManager, ToolCallRecord, ToolImage, ToolProvider,
 };
 
 const REPL_SNAPSHOT_VERSION: u32 = 3;
@@ -593,19 +593,6 @@ impl Session {
 
         Ok(())
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct ExecResponse {
-    /// Captured stdout from the REPL runtime.
-    pub output: String,
-    /// Hidden intermediate observations surfaced back to the model on the next REPL step.
-    pub observations: Vec<String>,
-    pub tool_calls: Vec<ToolCallRecord>,
-    /// Images returned by tools during this execution (e.g. read_file on a PNG).
-    pub images: Vec<ToolImage>,
-    pub error: Option<String>,
-    pub duration_ms: u64,
 }
 
 /// Walk a directory recursively and collect all files as relative_path -> contents.

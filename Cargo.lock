@@ -1323,32 +1323,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lash-cli"
-version = "0.2.2"
-dependencies = [
- "anyhow",
- "arboard",
- "async-trait",
- "chrono",
- "clap",
- "crossterm",
- "image",
- "lash-core",
- "pulldown-cmark",
- "rand",
- "ratatui",
- "serde_json",
- "sha2",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "unicode-width 0.2.0",
- "uuid",
-]
-
-[[package]]
-name = "lash-core"
+name = "lash"
 version = "0.2.2"
 dependencies = [
  "async-trait",
@@ -1358,6 +1333,7 @@ dependencies = [
  "futures-util",
  "globset",
  "ignore",
+ "lash-sansio",
  "lashlang",
  "libc",
  "pdf-extract",
@@ -1375,6 +1351,39 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "lash-cli"
+version = "0.2.2"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "async-trait",
+ "chrono",
+ "clap",
+ "crossterm",
+ "image",
+ "lash",
+ "pulldown-cmark",
+ "rand",
+ "ratatui",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-width 0.2.0",
+ "uuid",
+]
+
+[[package]]
+name = "lash-sansio"
+version = "0.2.2"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

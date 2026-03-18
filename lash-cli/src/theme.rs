@@ -208,6 +208,21 @@ pub fn patch_hunk() -> Style {
     Style::default().fg(PATCH_HUNK)
 }
 
+/// Delegate rail chrome — muted lichen for tree connectors.
+pub fn delegate_chrome() -> Style {
+    Style::default().fg(Color::Rgb(98, 118, 72))
+}
+
+/// Delegate rail marker — bold lichen for the ◆ diamond.
+pub fn delegate_marker() -> Style {
+    Style::default().fg(LICHEN).add_modifier(Modifier::BOLD)
+}
+
+/// Delegate child tool summary — dimmed chalk for nested tool names.
+pub fn delegate_child() -> Style {
+    Style::default().fg(CHALK_DIM)
+}
+
 /// Completed plan-step marker.
 pub fn plan_done_marker() -> Style {
     Style::default().fg(LICHEN).add_modifier(Modifier::BOLD)

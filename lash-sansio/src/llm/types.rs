@@ -1,4 +1,4 @@
-use tokio::sync::mpsc::UnboundedSender;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LlmToolSpec {
@@ -166,7 +166,7 @@ pub struct LlmRequest {
     pub tool_choice: LlmToolChoice,
     pub model_variant: Option<String>,
     pub session_id: Option<String>,
-    pub stream_events: Option<UnboundedSender<LlmStreamEvent>>,
+    pub stream_events: Option<LlmEventSender>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -182,6 +182,28 @@ pub enum LlmStreamEvent {
     Delta(String),
     Part(LlmOutputPart),
     Usage(LlmUsage),
+}
+
+#[derive(Clone)]
+pub struct LlmEventSender(Arc<dyn Fn(LlmStreamEvent) + Send + Sync>);
+
+impl LlmEventSender {
+    pub fn new<F>(send: F) -> Self
+    where
+        F: Fn(LlmStreamEvent) + Send + Sync + 'static,
+    {
+        Self(Arc::new(send))
+    }
+
+    pub fn send(&self, event: LlmStreamEvent) {
+        (self.0)(event);
+    }
+}
+
+impl std::fmt::Debug for LlmEventSender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlmEventSender").finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Debug, Default)]

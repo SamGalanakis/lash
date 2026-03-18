@@ -3,7 +3,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use lash_core::{
+use lash::{
     DynamicStateSnapshot, ExecutionMode, ExternalOpDef, ExternalOpKind, PluginError, PluginFactory,
     PluginRegistrar, PluginSessionContext, SessionCreateRequest, SessionManager, SessionParam,
     SessionPlugin, SessionSnapshot, SessionStartPoint, ToolResult,
@@ -81,9 +81,9 @@ async fn fork_snapshot_via_manager(
             agent_id: None,
             start,
             policy: None,
-            plugin_mode: lash_core::SessionPluginMode::InheritCurrent,
+            plugin_mode: lash::SessionPluginMode::InheritCurrent,
             initial_messages: Vec::new(),
-            context_surface: lash_core::SessionContextSurface::default(),
+            context_surface: lash::SessionContextSurface::default(),
         })
         .await?;
     let snapshot = manager.snapshot_session(&handle.session_id).await?;
@@ -285,9 +285,9 @@ pub fn spawn_in_new_terminal(exe: &Path, args: &[String]) -> Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn fork_current_session(
-    runtime: &mut lash_core::LashRuntime,
+    runtime: &mut lash::LashRuntime,
     logger: &mut SessionLogger,
-    provider: &lash_core::Provider,
+    provider: &lash::Provider,
     configured_model: &str,
     context_window: u64,
     model_variant: Option<&str>,
@@ -345,7 +345,7 @@ pub async fn fork_current_session(
 
     let child_db_path =
         sessions_dir.join(format!("{}.db", child_filename.trim_end_matches(".jsonl")));
-    let child_store = lash_core::Store::open(&child_db_path)?;
+    let child_store = lash::Store::open(&child_db_path)?;
     let execution_mode = state.policy.execution_mode;
     let context_strategy = state.policy.context_strategy;
     let prompt_hash = crate::latest_user_prompt_hash(&state.messages);

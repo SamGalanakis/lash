@@ -167,9 +167,30 @@ impl AgentCall {
                         crate::TurnStatus::Interrupted => "interrupted",
                         crate::TurnStatus::Failed => "failed",
                     };
+
+                    // Build child tool call summaries for the UI.
+                    let all_tool_calls = &turn.state.tool_calls;
+                    let tool_call_summaries: Vec<serde_json::Value> = all_tool_calls
+                        .iter()
+                        .map(|tc| {
+                            json!({
+                                "tool": tc.tool,
+                                "success": tc.success,
+                                "duration_ms": tc.duration_ms,
+                            })
+                        })
+                        .collect();
+
                     json!({
                         "result": result_text,
                         "status": status,
+                        "_sub_agent": {
+                            "iterations": turn.state.iteration,
+                            "tool_calls": all_tool_calls.len(),
+                            "tool_call_details": tool_call_summaries,
+                            "model": turn.state.policy.model,
+                            "model_variant": turn.state.policy.model_variant,
+                        },
                     })
                 }
                 Err(err) => json!({

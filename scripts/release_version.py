@@ -9,7 +9,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CARGO_TOML = ROOT / "Cargo.toml"
 CARGO_LOCK = ROOT / "Cargo.lock"
-WORKSPACE_PACKAGES = ("lash-cli", "lash-core", "lashlang", "xtask")
+WORKSPACE_PACKAGES = ("lash-sansio", "lash", "lash-cli", "lashlang", "xtask")
 VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
 

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use lash_core::agent::{Message, MessageRole, Part, PartKind, PruneState};
-use lash_core::{
+use lash::agent::{Message, MessageRole, Part, PartKind, PruneState};
+use lash::{
     AgentStateEnvelope, CachedModelCatalog, ContextStrategy, DynamicStateSnapshot,
     DynamicToolProvider, ExecutionMode, LashRuntime, PromptUsage, Provider, Store, TokenUsage,
 };
@@ -30,7 +30,7 @@ fn repl_reset_message() -> String {
     "Session resumed. Your REPL environment was reset — re-import modules and recreate any state you need.".to_string()
 }
 
-fn restored_token_usage(state: &lash_core::store::AgentState) -> Option<TokenUsage> {
+fn restored_token_usage(state: &lash::store::AgentState) -> Option<TokenUsage> {
     let usage = TokenUsage {
         input_tokens: state.input_tokens,
         output_tokens: state.output_tokens,
@@ -218,18 +218,18 @@ pub async fn restore_agent_state(
             .and_then(|raw| crate::parse_execution_mode(&raw).ok());
         let restored_execution_mode = requested_execution_mode
             .and_then(|mode| crate::ensure_supported_execution_mode(mode).ok())
-            .unwrap_or_else(lash_core::default_execution_mode);
+            .unwrap_or_else(lash::default_execution_mode);
         let restored_context_strategy = config_value
             .as_ref()
             .and_then(|v| v.get("context_strategy").cloned())
             .and_then(|v| serde_json::from_value::<ContextStrategy>(v).ok())
-            .unwrap_or_else(lash_core::default_context_strategy)
+            .unwrap_or_else(lash::default_context_strategy)
             .validate()
-            .unwrap_or_else(|_| lash_core::default_context_strategy());
+            .unwrap_or_else(|_| lash::default_context_strategy());
         *execution_mode = restored_execution_mode;
         *context_strategy = restored_context_strategy;
         if matches!(requested_execution_mode, Some(ExecutionMode::Repl))
-            && !lash_core::execution_mode_supported(ExecutionMode::Repl)
+            && !lash::execution_mode_supported(ExecutionMode::Repl)
         {
             app.blocks.push(DisplayBlock::SystemMessage(
                 "This build does not support REPL mode; resuming in `standard`.".to_string(),
@@ -294,7 +294,7 @@ pub async fn restore_agent_state(
             app.last_prompt_usage = last_prompt_usage.clone();
             rt.set_state(AgentStateEnvelope {
                 agent_id: "root".to_string(),
-                policy: lash_core::SessionPolicy {
+                policy: lash::SessionPolicy {
                     execution_mode: restored_execution_mode,
                     context_strategy: restored_context_strategy,
                     ..rt.export_state().policy
@@ -321,14 +321,14 @@ mod tests {
     use super::*;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
 
-    use lash_core::{
+    use lash::{
         MemoryModelCatalogStore, PluginHost, PluginSpecFactory, RuntimeHostConfig, RuntimeServices,
         ToolProvider,
     };
 
     #[test]
     fn restored_token_usage_includes_reasoning_tokens() {
-        let state = lash_core::store::AgentState {
+        let state = lash::store::AgentState {
             agent_id: "root".into(),
             messages_json: "[]".into(),
             tool_calls_json: "[]".into(),
@@ -370,7 +370,7 @@ mod tests {
         let _env_guard = env_lock().lock().await;
         let temp = TempDirGuard::new("lash-resume-usage");
         let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
-        let sessions_dir = lash_core::lash_home().join("sessions");
+        let sessions_dir = lash::lash_home().join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
 
         let db_path = sessions_dir.join("resume-usage.db");
@@ -389,7 +389,7 @@ mod tests {
             }
         })
         .to_string();
-        store.save_agent_state(lash_core::store::AgentStateSave {
+        store.save_agent_state(lash::store::AgentStateSave {
             agent_id: "root",
             messages_json: "[]",
             tool_calls_json: "[]",
@@ -405,22 +405,18 @@ mod tests {
         let provider = Provider::OpenAiGeneric {
             api_key: "test-key".into(),
             base_url: "https://example.invalid/v1".into(),
-            options: lash_core::ProviderOptions::default(),
+            options: lash::ProviderOptions::default(),
         };
         struct EmptyTools;
 
         #[async_trait::async_trait]
         impl ToolProvider for EmptyTools {
-            fn definitions(&self) -> Vec<lash_core::ToolDefinition> {
+            fn definitions(&self) -> Vec<lash::ToolDefinition> {
                 Vec::new()
             }
 
-            async fn execute(
-                &self,
-                _name: &str,
-                _args: &serde_json::Value,
-            ) -> lash_core::ToolResult {
-                lash_core::ToolResult::err(serde_json::json!("Unknown tool"))
+            async fn execute(&self, _name: &str, _args: &serde_json::Value) -> lash::ToolResult {
+                lash::ToolResult::err(serde_json::json!("Unknown tool"))
             }
         }
 
@@ -430,9 +426,9 @@ mod tests {
                 .expect("catalog");
         let plugins = PluginHost::new(vec![Arc::new(PluginSpecFactory::new(
             "resume_tools",
-            Arc::new(move |_ctx| {
-                Ok(lash_core::PluginSpec::new().with_tool_provider(Arc::clone(&tools)))
-            }),
+            Arc::new(
+                move |_ctx| Ok(lash::PluginSpec::new().with_tool_provider(Arc::clone(&tools))),
+            ),
         ))])
         .with_dynamic_tools()
         .build_standard_session("root", None)
@@ -441,12 +437,12 @@ mod tests {
         let mut desired_dynamic = dynamic_tools.export_state();
         let runtime_services = RuntimeServices::new(plugins);
         let runtime = LashRuntime::from_state(
-            lash_core::SessionPolicy {
+            lash::SessionPolicy {
                 execution_mode: ExecutionMode::Standard,
                 provider: provider.clone(),
                 model: "gpt-5".into(),
                 max_context_tokens: Some(200_000),
-                ..lash_core::SessionPolicy::default()
+                ..lash::SessionPolicy::default()
             },
             RuntimeHostConfig::default(),
             runtime_services,
@@ -460,7 +456,7 @@ mod tests {
         let mut runtime = Some(runtime);
         let mut turn_counter = 0;
         let mut execution_mode = ExecutionMode::Standard;
-        let mut context_strategy = lash_core::default_context_strategy();
+        let mut context_strategy = lash::default_context_strategy();
         let mut current_model_variant = None;
 
         restore_agent_state(
@@ -482,7 +478,7 @@ mod tests {
 
         assert_eq!(turn_counter, 7);
         assert_eq!(execution_mode, ExecutionMode::Standard);
-        assert_eq!(context_strategy, lash_core::ContextStrategy::RollingContext);
+        assert_eq!(context_strategy, lash::ContextStrategy::RollingContext);
         assert_eq!(app.token_usage.input_tokens, 1200);
         assert_eq!(app.token_usage.output_tokens, 340);
         assert_eq!(app.token_usage.cached_input_tokens, 80);
@@ -499,7 +495,7 @@ mod tests {
         );
         assert_eq!(
             restored_state.policy.context_strategy,
-            lash_core::ContextStrategy::RollingContext
+            lash::ContextStrategy::RollingContext
         );
         assert_eq!(restored_state.token_usage.input_tokens, 1200);
         assert_eq!(restored_state.token_usage.output_tokens, 340);

@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use anyhow::Result;
-use lash_core::AgentEvent;
-use lash_core::TokenUsage;
-use lash_core::agent::{Message, MessageRole, Part, PartKind, PruneState};
+use lash::AgentEvent;
+use lash::TokenUsage;
+use lash::agent::{Message, MessageRole, Part, PartKind, PruneState};
 
 use crate::activity::{ActivityKind, ActivityState, ActivityStatus, merge_exploration_activity};
 use crate::app::{DisplayBlock, PreparedTurn, render_plan_content_from_args};
@@ -44,7 +44,7 @@ pub struct SessionLogger {
 
 impl SessionLogger {
     pub fn new(model: &str, session_id: Option<String>, session_name: String) -> Result<Self> {
-        let dir = lash_core::lash_home().join("sessions");
+        let dir = lash::lash_home().join("sessions");
         std::fs::create_dir_all(&dir)?;
 
         let now = chrono::Local::now();
@@ -227,7 +227,7 @@ impl SessionInfo {
 }
 
 pub fn sessions_dir() -> PathBuf {
-    lash_core::lash_home().join("sessions")
+    lash::lash_home().join("sessions")
 }
 
 pub fn load_session_start(filename: &str) -> Option<SessionStart> {
@@ -513,9 +513,8 @@ pub fn load_session(filename: &str) -> Option<LoadedSession> {
             "injected_messages_committed" => {
                 assistant_replay.flush(&mut blocks);
                 if let Some(messages_val) = val.get("messages")
-                    && let Ok(injected) = serde_json::from_value::<Vec<lash_core::PluginMessage>>(
-                        messages_val.clone(),
-                    )
+                    && let Ok(injected) =
+                        serde_json::from_value::<Vec<lash::PluginMessage>>(messages_val.clone())
                 {
                     for message in injected {
                         match message.role {
@@ -566,8 +565,7 @@ pub fn load_session(filename: &str) -> Option<LoadedSession> {
                 let Some(event_value) = val.get("event").cloned() else {
                     continue;
                 };
-                let Ok(event) =
-                    serde_json::from_value::<lash_core::PluginSurfaceEvent>(event_value)
+                let Ok(event) = serde_json::from_value::<lash::PluginSurfaceEvent>(event_value)
                 else {
                     continue;
                 };
@@ -612,7 +610,7 @@ pub fn load_session(filename: &str) -> Option<LoadedSession> {
 mod tests {
     use super::*;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
-    use lash_core::AgentEvent;
+    use lash::AgentEvent;
     use serde_json::json;
 
     fn with_temp_lash_home(test_name: &str, f: impl FnOnce()) {
@@ -762,7 +760,7 @@ mod tests {
                 attempt: 2,
                 max_attempts: 4,
                 reason: "Claude request failed with 500".to_string(),
-                envelope: Some(lash_core::agent::ErrorEnvelope {
+                envelope: Some(lash::agent::ErrorEnvelope {
                     kind: "llm_provider".to_string(),
                     code: Some("500".to_string()),
                     user_message: "LLM error: Claude request failed with 500".to_string(),

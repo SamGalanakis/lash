@@ -680,10 +680,10 @@ impl LlmTransport for CodexOAuthAdapter {
                     });
                 if let Some(tx) = &stream_events {
                     if usage != LlmUsage::default() {
-                        let _ = tx.send(LlmStreamEvent::Usage(usage.clone()));
+                        tx.send(LlmStreamEvent::Usage(usage.clone()));
                     }
                     for piece in &deltas {
-                        let _ = tx.send(LlmStreamEvent::Delta(piece.clone()));
+                        tx.send(LlmStreamEvent::Delta(piece.clone()));
                     }
                 }
                 return Ok(LlmResponse {
@@ -712,10 +712,10 @@ impl LlmTransport for CodexOAuthAdapter {
             }
             if let Some(tx) = &stream_events {
                 if usage != LlmUsage::default() {
-                    let _ = tx.send(LlmStreamEvent::Usage(usage.clone()));
+                    tx.send(LlmStreamEvent::Usage(usage.clone()));
                 }
                 if !content.is_empty() {
-                    let _ = tx.send(LlmStreamEvent::Delta(content.clone()));
+                    tx.send(LlmStreamEvent::Delta(content.clone()));
                 }
             }
             return Ok(LlmResponse {

@@ -239,7 +239,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(bar, area);
 }
 
-fn context_usage_total(usage: &lash_core::PromptUsage) -> i64 {
+fn context_usage_total(usage: &lash::PromptUsage) -> i64 {
     usage.context_budget_tokens as i64
 }
 
@@ -267,7 +267,7 @@ fn context_usage_pct_from_total(used: i64, context_window: u64) -> Option<f64> {
     Some(used as f64 / context_window as f64 * 100.0)
 }
 
-fn context_usage_pct(usage: &lash_core::PromptUsage, context_window: u64) -> Option<f64> {
+fn context_usage_pct(usage: &lash::PromptUsage, context_window: u64) -> Option<f64> {
     context_usage_pct_from_total(context_usage_total(usage), context_window)
 }
 
@@ -281,7 +281,7 @@ fn format_context_usage_from_total(used: i64, context_window: u64) -> Option<Str
     ))
 }
 
-fn format_context_usage(usage: &lash_core::PromptUsage, context_window: u64) -> Option<String> {
+fn format_context_usage(usage: &lash::PromptUsage, context_window: u64) -> Option<String> {
     format_context_usage_from_total(context_usage_total(usage), context_window)
 }
 
@@ -696,11 +696,10 @@ fn is_code_workflow_block(block: &DisplayBlock) -> bool {
 }
 
 fn is_code_workflow_bridge_block(block: &DisplayBlock) -> bool {
-    match block {
-        DisplayBlock::PlanContent(_) | DisplayBlock::PluginPanel(_) => true,
-        DisplayBlock::Activity(activity) => activity.kind == ActivityKind::PlanUpdate,
-        _ => false,
-    }
+    matches!(
+        block,
+        DisplayBlock::PlanContent(_) | DisplayBlock::PluginPanel(_)
+    )
 }
 
 fn has_code_workflow_neighbor(blocks: &[DisplayBlock], idx: usize, step: isize) -> bool {
@@ -778,6 +777,9 @@ fn activity_uses_connected_lane(activity: &ActivityBlock, expand_level: u8) -> b
     let has_parallel_children = expand_level >= 1
         && activity.kind == ActivityKind::Parallel
         && !activity.children.is_empty();
+    let has_delegate_children = expand_level >= 1
+        && activity.kind == ActivityKind::Delegate
+        && !activity.children.is_empty();
     let has_patch_preview = expand_level == 1
         && matches!(
             activity.artifact,
@@ -785,7 +787,11 @@ fn activity_uses_connected_lane(activity: &ActivityBlock, expand_level: u8) -> b
         );
     let has_expanded_artifact = expand_level >= 2 && activity.artifact.is_some();
 
-    has_detail_rows || has_parallel_children || has_patch_preview || has_expanded_artifact
+    has_detail_rows
+        || has_parallel_children
+        || has_delegate_children
+        || has_patch_preview
+        || has_expanded_artifact
 }
 
 fn default_activity_lane(activity: &ActivityBlock, nested: bool, expand_level: u8) -> ActivityLane {
@@ -806,20 +812,14 @@ fn default_activity_lane(activity: &ActivityBlock, nested: bool, expand_level: u
                 Style::default().fg(theme::SODIUM),
             ),
             ActivityKind::Delegate => (
-                format!("{prefix}◆ "),
-                Style::default()
-                    .fg(theme::LICHEN)
-                    .add_modifier(Modifier::BOLD),
-                format!("{prefix}│ "),
-                Style::default().fg(theme::LICHEN),
-            ),
-            ActivityKind::PlanUpdate => (
-                format!("{prefix}◆ "),
-                Style::default()
-                    .fg(theme::LICHEN)
-                    .add_modifier(Modifier::BOLD),
-                format!("{}  ", prefix),
-                Style::default().fg(theme::LICHEN),
+                if connected {
+                    format!("{prefix}├─ ")
+                } else {
+                    format!("{prefix}◆ ")
+                },
+                theme::delegate_marker(),
+                format!("{prefix}│  "),
+                theme::delegate_chrome(),
             ),
             ActivityKind::Edit => (
                 if connected {
@@ -959,6 +959,32 @@ fn render_activity_block_with_lane<'a>(
                 lines.push(Line::from(vec![
                     Span::styled(lane.parallel_child_prefix.clone(), theme::code_chrome()),
                     Span::styled(child.summary.clone(), activity_style(child.status)),
+                ]));
+            }
+        }
+        if activity.kind == ActivityKind::Delegate && !activity.children.is_empty() {
+            let children = &activity.children;
+            let last_idx = children.len().saturating_sub(1);
+            for (i, child) in children.iter().enumerate() {
+                let connector = if i == last_idx { "╰─ " } else { "├─ " };
+                let connector_prefix = format!("{}{}", lane.artifact_indent, connector);
+                let child_text = truncate_to_display_width(
+                    &format!(
+                        "{} · {}",
+                        child.summary,
+                        crate::util::format_duration_ms(child.duration_ms),
+                    ),
+                    viewport_width
+                        .saturating_sub(UnicodeWidthStr::width(connector_prefix.as_str())),
+                );
+                let child_style = if child.status == ActivityStatus::Failed {
+                    theme::error()
+                } else {
+                    theme::delegate_child()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(connector_prefix, theme::delegate_chrome()),
+                    Span::styled(child_text, child_style),
                 ]));
             }
         }
@@ -2340,22 +2366,6 @@ mod tests {
         })
     }
 
-    fn plan_update_activity(summary: &str) -> DisplayBlock {
-        DisplayBlock::Activity(ActivityBlock {
-            kind: ActivityKind::PlanUpdate,
-            status: ActivityStatus::Completed,
-            tool_name: "update_plan".into(),
-            summary: summary.into(),
-            detail_lines: Vec::new(),
-            duration_ms: 1,
-            args: serde_json::Value::Null,
-            result: serde_json::Value::Null,
-            artifact: None,
-            children: Vec::new(),
-            extra: None,
-        })
-    }
-
     fn line_text(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
@@ -2434,25 +2444,6 @@ mod tests {
             rendered.last().map(String::as_str),
             Some("╰─ second command · 1ms")
         );
-    }
-
-    #[test]
-    fn plan_update_bridges_code_workflow_lane() {
-        let blocks = [
-            workflow_activity("first command"),
-            plan_update_activity("updated plan"),
-            workflow_activity("second command"),
-        ];
-
-        let mut lines = Vec::new();
-        for idx in 0..blocks.len() {
-            render_block(&blocks, idx, 1, &mut lines, 48, 20);
-        }
-
-        let rendered: Vec<String> = lines.iter().map(line_text).collect();
-        assert_eq!(rendered[0], "╭─ first command · 1ms");
-        assert_eq!(rendered[1], "│ ◆ updated plan · 1ms");
-        assert_eq!(rendered[2], "╰─ second command · 1ms");
     }
 
     #[test]
@@ -2678,6 +2669,67 @@ mod tests {
     }
 
     #[test]
+    fn delegate_result_renders_child_tool_tree() {
+        let activity = ActivityBlock {
+            kind: ActivityKind::Delegate,
+            status: ActivityStatus::Completed,
+            tool_name: "agent_result".into(),
+            summary: "delegate done · inspect queue".into(),
+            detail_lines: vec!["claude-sonnet · 3 iterations · 5 tool calls".into()],
+            duration_ms: 4200,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: None,
+            children: vec![
+                ActivityBlock {
+                    kind: ActivityKind::GenericTool,
+                    status: ActivityStatus::Completed,
+                    tool_name: "read_file".into(),
+                    summary: "read_file".into(),
+                    detail_lines: Vec::new(),
+                    duration_ms: 12,
+                    args: serde_json::Value::Null,
+                    result: serde_json::Value::Null,
+                    artifact: None,
+                    children: Vec::new(),
+                    extra: None,
+                },
+                ActivityBlock {
+                    kind: ActivityKind::GenericTool,
+                    status: ActivityStatus::Completed,
+                    tool_name: "exec_command".into(),
+                    summary: "exec_command".into(),
+                    detail_lines: Vec::new(),
+                    duration_ms: 340,
+                    args: serde_json::Value::Null,
+                    result: serde_json::Value::Null,
+                    artifact: None,
+                    children: Vec::new(),
+                    extra: None,
+                },
+            ],
+            extra: None,
+        };
+
+        let mut lines = Vec::new();
+        render_activity_block(&activity, 1, &mut lines, 80, false);
+
+        // Summary with ├─ connector (connected because children exist)
+        assert_eq!(
+            line_text(&lines[0]),
+            "├─ delegate done · inspect queue · 4.2s"
+        );
+        // Detail line
+        assert_eq!(
+            line_text(&lines[1]),
+            "│  claude-sonnet · 3 iterations · 5 tool calls"
+        );
+        // Child tool calls with tree connectors
+        assert_eq!(line_text(&lines[2]), "  ├─ read_file · 12ms");
+        assert_eq!(line_text(&lines[3]), "  ╰─ exec_command · 340ms");
+    }
+
+    #[test]
     fn code_workflow_lane_stays_connected_across_code_and_edit_blocks() {
         let blocks = [
             DisplayBlock::CodeBlock {
@@ -2860,7 +2912,7 @@ mod tests {
 
     #[test]
     fn context_usage_pct_returns_fractional_percent() {
-        let usage = lash_core::PromptUsage {
+        let usage = lash::PromptUsage {
             prompt_context_tokens: 81_182,
             input_tokens: 78_182,
             cached_input_tokens: 3_000,
@@ -2872,7 +2924,7 @@ mod tests {
 
     #[test]
     fn format_context_usage_shows_provider_adjusted_values() {
-        let usage = lash_core::PromptUsage {
+        let usage = lash::PromptUsage {
             prompt_context_tokens: 84_000,
             input_tokens: 82_800,
             cached_input_tokens: 1_200,
@@ -2884,7 +2936,7 @@ mod tests {
         );
         assert_eq!(
             format_context_usage(
-                &lash_core::PromptUsage {
+                &lash::PromptUsage {
                     prompt_context_tokens: 1_000,
                     input_tokens: 1_000,
                     cached_input_tokens: 0,
@@ -2896,7 +2948,7 @@ mod tests {
             Some("1.0k / 1.1M (0.1%)")
         );
         assert_eq!(
-            format_context_usage(&lash_core::PromptUsage::default(), 1_050_000),
+            format_context_usage(&lash::PromptUsage::default(), 1_050_000),
             None
         );
     }
@@ -2906,7 +2958,7 @@ mod tests {
         let mut app = App::new("claude-opus-4-6".into(), "test".into());
         app.running = true;
         app.context_usage_excludes_cached_input = true;
-        app.last_response_usage = lash_core::TokenUsage {
+        app.last_response_usage = lash::TokenUsage {
             input_tokens: 10_000,
             output_tokens: 2_000,
             cached_input_tokens: 1_500,
@@ -2922,7 +2974,7 @@ mod tests {
         let mut app = App::new("claude-opus-4-6".into(), "test".into());
         app.running = true;
         app.context_usage_excludes_cached_input = false;
-        app.last_response_usage = lash_core::TokenUsage {
+        app.last_response_usage = lash::TokenUsage {
             input_tokens: 10_000,
             output_tokens: 2_000,
             cached_input_tokens: 1_500,
@@ -2935,7 +2987,7 @@ mod tests {
 
     #[test]
     fn format_context_usage_uses_normalized_context_budget() {
-        let usage = lash_core::PromptUsage {
+        let usage = lash::PromptUsage {
             prompt_context_tokens: 1_000,
             input_tokens: 1_000,
             cached_input_tokens: 200,
