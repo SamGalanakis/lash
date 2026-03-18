@@ -1251,9 +1251,13 @@
         if (Array.isArray(data.selectedRunIds)) {
           for (const id of data.selectedRunIds) state.selectedRunIds.add(id);
         }
+        // Store pending filter values — dropdowns aren't populated yet, so
+        // setting .value now would silently fail. renderFilterControls()
+        // will apply these after it builds the <option> elements.
+        state._pendingFilters = {};
         for (const config of FILTER_CONFIG) {
           if (data[config.key]) {
-            document.getElementById(config.id).value = data[config.key];
+            state._pendingFilters[config.id] = data[config.key];
           }
         }
       } catch {}
@@ -1374,9 +1378,10 @@
     }
 
     function renderFilterControls() {
+      const pending = state._pendingFilters || {};
       for (const config of FILTER_CONFIG) {
         const select = document.getElementById(config.id);
-        const current = select.value;
+        const current = pending[config.id] || select.value;
         const values = sortedFilterValues(config.key);
         select.innerHTML = [
           `<option value="">${escapeHtml(config.allLabel)}</option>`,
@@ -1384,6 +1389,7 @@
         ].join("");
         select.value = values.includes(current) ? current : "";
       }
+      state._pendingFilters = null;
       renderFilterPanel();
     }
 

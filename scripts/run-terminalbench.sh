@@ -17,7 +17,7 @@ Options:
   --dataset <name@version>      Dataset to run (default: terminal-bench-sample@2.0)
   --sample                      Shortcut for --dataset terminal-bench-sample@2.0
   --full                        Shortcut for --dataset terminal-bench@2.0
-  --preset <name>               Exact task preset: trivial|smoke|fast-3|fast-medium|memory-3|representative-10
+  --preset <name>               Exact task preset: trivial|smoke|fast-3|fast-medium|memory-3|recall-3|representative-10
   --task <glob>                 Task include pattern (repeatable)
   --tasks <a,b,c>               Exact task names as a comma-separated list
   --task-file <path>            Exact task names from a file (one per line, # comments allowed)
@@ -57,6 +57,7 @@ Examples:
   scripts/run-terminalbench.sh --sample --preset fast-3 --execution-mode standard --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --sample --preset fast-medium --execution-mode standard --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --full --preset memory-3 --execution-mode standard --model gpt-5.4 --variant high
+  scripts/run-terminalbench.sh --full --preset recall-3 --execution-mode standard --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --full --preset representative-10 --execution-mode standard --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --full --execution-mode standard --task "git-*" --variant high
   scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,fix-code-vulnerability --variant high
@@ -131,6 +132,12 @@ readonly PRESET_MEMORY_3_TASKS=(
   "git-leak-recovery"
 )
 
+readonly PRESET_RECALL_3_TASKS=(
+  "password-recovery"
+  "git-leak-recovery"
+  "sanitize-git-repo"
+)
+
 readonly PRESET_REPRESENTATIVE_10_TASKS=(
   "build-cython-ext"
   "configure-git-webserver"
@@ -149,6 +156,13 @@ validate_task_preset_scope() {
     memory-3)
       if [[ "${DATASET}" != "terminal-bench@2.0" ]]; then
         echo "error: --preset memory-3 requires --dataset terminal-bench@2.0 (or --full)." >&2
+        echo "requested dataset: ${DATASET}" >&2
+        exit 2
+      fi
+      ;;
+    recall-3)
+      if [[ "${DATASET}" != "terminal-bench@2.0" ]]; then
+        echo "error: --preset recall-3 requires --dataset terminal-bench@2.0 (or --full)." >&2
         echo "requested dataset: ${DATASET}" >&2
         exit 2
       fi
@@ -228,11 +242,14 @@ apply_task_preset() {
     memory-3)
       EXACT_TASKS+=("${PRESET_MEMORY_3_TASKS[@]}")
       ;;
+    recall-3)
+      EXACT_TASKS+=("${PRESET_RECALL_3_TASKS[@]}")
+      ;;
     representative-10)
       EXACT_TASKS+=("${PRESET_REPRESENTATIVE_10_TASKS[@]}")
       ;;
     *)
-      echo "error: unsupported --preset: ${preset} (expected trivial|smoke|fast-3|fast-medium|memory-3|representative-10)" >&2
+      echo "error: unsupported --preset: ${preset} (expected trivial|smoke|fast-3|fast-medium|memory-3|recall-3|representative-10)" >&2
       exit 2
       ;;
   esac

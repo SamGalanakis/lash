@@ -34,6 +34,15 @@ impl CodexOAuthAdapter {
         }
     }
 
+    fn input_image_part(att: &crate::llm::types::LlmAttachment) -> Value {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
+        let data_url = format!("data:{};base64,{}", att.mime, b64);
+        json!({
+            "type": "input_image",
+            "image_url": data_url,
+        })
+    }
+
     fn user_input_item(req: &LlmRequest) -> Value {
         let mut content = Vec::new();
         for part in &req.user_prompt {
@@ -45,12 +54,7 @@ impl CodexOAuthAdapter {
                 }
                 LlmPromptPart::Image(idx) => {
                     if let Some(att) = req.attachments.get(*idx) {
-                        let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
-                        content.push(json!({
-                            "type": "input_image",
-                            "image_base64": b64,
-                            "mime_type": att.mime,
-                        }));
+                        content.push(Self::input_image_part(att));
                     }
                 }
             }
@@ -74,12 +78,7 @@ impl CodexOAuthAdapter {
             "image" if matches!(msg.role, LlmRole::User) => {
                 let idx = msg.image_idx.max(0) as usize;
                 if let Some(att) = req.attachments.get(idx) {
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
-                    json!({
-                        "type": "input_image",
-                        "image_base64": b64,
-                        "mime_type": att.mime,
-                    })
+                    Self::input_image_part(att)
                 } else {
                     json!({"type": "input_text", "text": "[Image attached]"})
                 }
@@ -1010,5 +1009,68 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
         assert_eq!(item["role"], "user");
         assert_eq!(item["content"][0]["type"], "input_text");
         assert_eq!(item["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn user_input_item_encodes_images_as_data_urls() {
+        let req = LlmRequest {
+            model: "gpt-5.4".to_string(),
+            system_prompt: "sys".to_string(),
+            user_prompt: vec![LlmPromptPart::Image(0)],
+            messages: vec![],
+            attachments: vec![crate::llm::types::LlmAttachment {
+                mime: "image/png".to_string(),
+                data: vec![0, 1, 2, 3],
+            }],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::None,
+            model_variant: None,
+            session_id: None,
+            stream_events: None,
+        };
+
+        let item = CodexOAuthAdapter::user_input_item(&req);
+
+        assert_eq!(item["role"], "user");
+        assert_eq!(item["content"][0]["type"], "input_image");
+        assert_eq!(
+            item["content"][0]["image_url"],
+            "data:image/png;base64,AAECAw=="
+        );
+        assert!(item["content"][0].get("image_base64").is_none());
+        assert!(item["content"][0].get("mime_type").is_none());
+    }
+
+    #[test]
+    fn structured_image_messages_use_input_image_data_urls() {
+        let req = LlmRequest {
+            model: "gpt-5.4".to_string(),
+            system_prompt: "sys".to_string(),
+            user_prompt: vec![],
+            messages: vec![LlmMessage {
+                role: LlmRole::User,
+                content: String::new(),
+                kind: "image".to_string(),
+                image_idx: 0,
+                tool_call_id: None,
+                tool_name: None,
+            }],
+            attachments: vec![crate::llm::types::LlmAttachment {
+                mime: "image/png".to_string(),
+                data: vec![0, 1, 2, 3],
+            }],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::None,
+            model_variant: None,
+            session_id: None,
+            stream_events: None,
+        };
+
+        let part = CodexOAuthAdapter::content_part_for_message(&req, &req.messages[0]);
+
+        assert_eq!(part["type"], "input_image");
+        assert_eq!(part["image_url"], "data:image/png;base64,AAECAw==");
+        assert!(part.get("image_base64").is_none());
+        assert!(part.get("mime_type").is_none());
     }
 }

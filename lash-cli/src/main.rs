@@ -34,7 +34,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use app::{App, DisplayBlock, QueuedTurn};
+use app::{App, DisplayBlock, PreparedTurn};
 use event::AppEvent;
 use input_items::{build_items_from_editor_input, insert_inline_marker};
 use prompt_overrides::resolve_prompt_overrides;
@@ -281,6 +281,8 @@ async fn main() -> anyhow::Result<()> {
         println!("{}", info_text_unconfigured(execution_mode, &cwd));
         return Ok(());
     }
+    let interactive_startup = !args.info && args.print_prompt.is_none();
+    let mut startup_system_message: Option<String> = None;
     let mut lash_config = if args.provider || existing_config.is_none() {
         if let Some(ref key) = args.api_key {
             // Shortcut: env var or --api-key activates OpenAI-generic directly.
@@ -318,8 +320,20 @@ async fn main() -> anyhow::Result<()> {
         // SAFETY: else branch means existing_config.is_some() (checked above)
         #[allow(clippy::unnecessary_unwrap)]
         let mut c = existing_config.unwrap();
-        if c.active_provider_mut().ensure_fresh().await? {
-            c.save()?; // persist refreshed tokens
+        match c.active_provider_mut().ensure_fresh().await {
+            Ok(true) => c.save()?, // persist refreshed tokens
+            Ok(false) => {}
+            Err(err) => {
+                if interactive_startup {
+                    let provider_label = c.active_provider().label();
+                    startup_system_message = Some(format!(
+                        "{} refresh failed: {}. Lash opened in recovery mode. Use /provider or relaunch with --provider to reauthenticate or switch providers.",
+                        provider_label, err
+                    ));
+                } else {
+                    return Err(err.into());
+                }
+            }
         }
         c
     };
@@ -590,6 +604,7 @@ async fn main() -> anyhow::Result<()> {
         toolset_hash,
         initial_model_variant,
         execution_mode,
+        startup_system_message,
     )
     .await;
 
@@ -812,8 +827,8 @@ async fn run_autonomous(
     skills: SkillCatalog,
     persistence: AutonomousPersistenceContext,
 ) -> anyhow::Result<()> {
-    let prompt = expand_prompt_skills(&prompt, &skills);
-    let (items, image_blobs) = build_items_from_editor_input(&prompt, Vec::new());
+    let prepared = PreparedTurn::prepare(prompt, Vec::new(), &skills);
+    let (items, image_blobs) = build_items_from_editor_input(&prepared.effective_text, Vec::new());
     let cancel = CancellationToken::new();
     #[cfg(unix)]
     {
@@ -900,7 +915,7 @@ struct RuntimeRunResult {
 
 #[derive(Clone)]
 struct TurnReplayPayload {
-    display_input: String,
+    prepared_turn: PreparedTurn,
     turn_input: TurnInput,
     execution_mode: ExecutionMode,
 }
@@ -1450,6 +1465,7 @@ async fn run_app(
     mut toolset_hash: String,
     initial_model_variant: Option<String>,
     initial_execution_mode: ExecutionMode,
+    startup_system_message: Option<String>,
 ) -> anyhow::Result<()> {
     let mut app = App::new(model, session_name);
     app.context_window = Some(initial_context_window);
@@ -1549,6 +1565,9 @@ async fn run_app(
     let mut pending_clear_after_return = false;
 
     sync_plan_mode(&mut app, &plugin_host, Arc::clone(&session_manager)).await;
+    if let Some(message) = startup_system_message {
+        push_system_message(&mut app, message);
+    }
 
     if let Some(filename) = args.resume.as_deref() {
         if let Err(err) = resume::load_resumed_session(
@@ -1610,11 +1629,12 @@ async fn run_app(
                     &serde_json::to_vec(&dynamic_tools.definitions())
                         .unwrap_or_else(|_| b"[]".to_vec()),
                 );
-                let prompt_text = expand_prompt_skills(prompt, &app.skills);
-                let (items, image_blobs) = build_items_from_editor_input(&prompt_text, Vec::new());
+                let prepared = PreparedTurn::prepare(prompt.to_string(), Vec::new(), &app.skills);
+                let (items, image_blobs) =
+                    build_items_from_editor_input(&prepared.effective_text, Vec::new());
                 let turn_input = make_turn_input(&mut app, items, image_blobs);
                 send_user_message(
-                    prompt.to_string(),
+                    prepared.clone(),
                     turn_input.clone(),
                     &mut app,
                     logger,
@@ -1626,7 +1646,7 @@ async fn run_app(
                     &app_tx,
                 );
                 last_turn = Some(TurnReplayPayload {
-                    display_input: prompt.to_string(),
+                    prepared_turn: prepared,
                     turn_input,
                     execution_mode: current_execution_mode,
                 });
@@ -1779,12 +1799,13 @@ async fn run_app(
                             &serde_json::to_vec(&dynamic_tools.definitions())
                                 .unwrap_or_else(|_| b"[]".to_vec()),
                         );
-                        let prompt_text = expand_prompt_skills(&queued.text, &app.skills);
-                        let (items, image_blobs) =
-                            build_items_from_editor_input(&prompt_text, queued.images.clone());
+                        let (items, image_blobs) = build_items_from_editor_input(
+                            &queued.effective_text,
+                            queued.images.clone(),
+                        );
                         let turn_input = make_turn_input(&mut app, items, image_blobs);
                         send_user_message(
-                            queued.text.clone(),
+                            queued.clone(),
                             turn_input.clone(),
                             &mut app,
                             logger,
@@ -1796,7 +1817,7 @@ async fn run_app(
                             &app_tx,
                         );
                         last_turn = Some(TurnReplayPayload {
-                            display_input: queued.text,
+                            prepared_turn: queued,
                             turn_input,
                             execution_mode: current_execution_mode,
                         });
@@ -1886,7 +1907,7 @@ async fn run_app(
 
                 if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Up {
                     if let Some((turn, _was_pending)) = app.take_last_queued_turn() {
-                        app.input = turn.text;
+                        app.input = turn.display_text;
                         app.cursor_pos = app.input.len();
                         app.pending_images = turn.images;
                         app.update_suggestions();
@@ -2125,7 +2146,7 @@ async fn run_app(
                         let input = app.take_input();
                         let images = app.take_images();
                         app.update_suggestions();
-                        let queued = QueuedTurn::new(input.clone(), images);
+                        let queued = PreparedTurn::prepare(input.clone(), images, &app.skills);
                         let trimmed = input.trim_start();
                         if queued.is_empty() || trimmed.starts_with('!') || trimmed.starts_with('/')
                         {
@@ -2144,18 +2165,19 @@ async fn run_app(
                                 &mut app,
                                 "Runtime is still finalizing the previous turn. Please retry in a moment.",
                             );
-                            app.input = queued.text;
+                            app.input = queued.display_text.clone();
                             app.cursor_pos = app.input.len();
                             app.pending_images = queued.images;
                             continue;
                         }
 
-                        let prompt_text = expand_prompt_skills(&queued.text, &app.skills);
-                        let (items, image_blobs) =
-                            build_items_from_editor_input(&prompt_text, queued.images);
+                        let (items, image_blobs) = build_items_from_editor_input(
+                            &queued.effective_text,
+                            queued.images.clone(),
+                        );
                         let turn_input = make_turn_input(&mut app, items, image_blobs);
                         send_user_message(
-                            queued.text.clone(),
+                            queued.clone(),
                             turn_input.clone(),
                             &mut app,
                             logger,
@@ -2167,7 +2189,7 @@ async fn run_app(
                             &app_tx,
                         );
                         last_turn = Some(TurnReplayPayload {
-                            display_input: queued.text,
+                            prepared_turn: queued,
                             turn_input,
                             execution_mode: current_execution_mode,
                         });
@@ -2192,26 +2214,27 @@ async fn run_app(
                         let input = app.take_input();
                         let images = app.take_images();
                         app.update_suggestions();
-                        let mut queued = QueuedTurn::new(input.clone(), images);
+                        let mut queued = PreparedTurn::new(input.clone(), images);
                         if queued.is_empty() {
                             continue;
                         }
 
-                        if command::parse(&queued.text, &app.skills).is_none()
+                        if command::parse(&queued.display_text, &app.skills).is_none()
                             && let Some(skill_prompt) =
-                                command::slash_skill_prompt(&queued.text, &app.skills)
+                                command::slash_skill_prompt(&queued.display_text, &app.skills)
                         {
-                            queued.text = skill_prompt;
+                            queued =
+                                PreparedTurn::prepare(skill_prompt, queued.images, &app.skills);
                         }
 
                         if app.running {
-                            let trimmed = queued.text.trim_start();
+                            let trimmed = queued.display_text.trim_start();
                             if trimmed.starts_with('/') || trimmed.starts_with('!') {
                                 push_system_message(
                                     &mut app,
                                     "Host commands cannot be injected into the active turn. Wait for completion or use `Tab` to queue a normal next turn.",
                                 );
-                                app.input = queued.text;
+                                app.input = queued.display_text;
                                 app.cursor_pos = app.input.len();
                                 app.pending_images = queued.images;
                                 continue;
@@ -2221,15 +2244,14 @@ async fn run_app(
                                     &mut app,
                                     "Current-turn injection does not support images yet. Use `Tab` to queue an image-bearing next turn.",
                                 );
-                                app.input = queued.text;
+                                app.input = queued.display_text;
                                 app.cursor_pos = app.input.len();
                                 app.pending_images = queued.images;
                                 continue;
                             }
-                            let injection_text = expand_prompt_skills(&queued.text, &app.skills);
                             let injection = PluginMessage {
                                 role: MessageRole::User,
-                                content: injection_text,
+                                content: queued.effective_text.clone(),
                             };
                             match turn_injection_bridge.enqueue(vec![injection]) {
                                 Ok(()) => {
@@ -2241,7 +2263,7 @@ async fn run_app(
                                         &mut app,
                                         format!("Failed to queue current-turn injection: {}", err),
                                     );
-                                    app.input = queued.text;
+                                    app.input = queued.display_text;
                                     app.cursor_pos = app.input.len();
                                     app.pending_images = queued.images;
                                 }
@@ -2253,18 +2275,18 @@ async fn run_app(
                                 &mut app,
                                 "Runtime is still finalizing the previous turn. Please retry in a moment.",
                             );
-                            app.input = queued.text;
+                            app.input = queued.display_text;
                             app.cursor_pos = app.input.len();
                             app.pending_images = queued.images;
                             continue;
                         }
 
                         // Shell escape: !command
-                        if let Some(cmd_str) = queued.text.strip_prefix('!') {
+                        if let Some(cmd_str) = queued.display_text.strip_prefix('!') {
                             let cmd_str = cmd_str.trim();
                             if !cmd_str.is_empty() {
                                 app.blocks
-                                    .push(DisplayBlock::UserInput(queued.text.clone()));
+                                    .push(DisplayBlock::UserInput(queued.display_text.clone()));
                                 app.invalidate_height_cache();
 
                                 use tokio::process::Command as TokioCommand;
@@ -2320,7 +2342,7 @@ async fn run_app(
                         }
 
                         // Try slash command
-                        if let Some(cmd) = command::parse(&queued.text, &app.skills) {
+                        if let Some(cmd) = command::parse(&queued.display_text, &app.skills) {
                             match cmd {
                                 command::Command::Exit => break,
                                 command::Command::Clear => {
@@ -2826,7 +2848,7 @@ async fn run_app(
                                         );
                                         current_execution_mode = previous.execution_mode;
                                         send_user_message(
-                                            previous.display_input.clone(),
+                                            previous.prepared_turn.clone(),
                                             previous.turn_input.clone(),
                                             &mut app,
                                             logger,
@@ -3296,12 +3318,13 @@ async fn run_app(
                             &serde_json::to_vec(&dynamic_tools.definitions())
                                 .unwrap_or_else(|_| b"[]".to_vec()),
                         );
-                        let prompt_text = expand_prompt_skills(&queued.text, &app.skills);
-                        let (items, image_blobs) =
-                            build_items_from_editor_input(&prompt_text, queued.images);
+                        let (items, image_blobs) = build_items_from_editor_input(
+                            &queued.effective_text,
+                            queued.images.clone(),
+                        );
                         let turn_input = make_turn_input(&mut app, items, image_blobs);
                         send_user_message(
-                            queued.text.clone(),
+                            queued.clone(),
                             turn_input.clone(),
                             &mut app,
                             logger,
@@ -3313,7 +3336,7 @@ async fn run_app(
                             &app_tx,
                         );
                         last_turn = Some(TurnReplayPayload {
-                            display_input: queued.text,
+                            prepared_turn: queued,
                             turn_input,
                             execution_mode: current_execution_mode,
                         });
@@ -3433,10 +3456,6 @@ fn make_turn_input(
         image_blobs,
         mode: Some(RunMode::Normal),
     }
-}
-
-fn expand_prompt_skills(text: &str, skills: &SkillCatalog) -> String {
-    lash_core::append_skill_blocks(text, skills)
 }
 
 fn parse_kv_args(raw: &str) -> HashMap<String, String> {
@@ -3570,7 +3589,7 @@ async fn apply_pending_reconfigure(
 /// Send a user message to the runtime: push display block, log, and spawn turn run.
 #[allow(clippy::too_many_arguments)]
 fn send_user_message(
-    display_input: String,
+    prepared_turn: PreparedTurn,
     turn_input: TurnInput,
     app: &mut App,
     logger: &mut SessionLogger,
@@ -3581,22 +3600,20 @@ fn send_user_message(
     active_stream_id: &mut u64,
     app_tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
-    let already_visible = if !display_input.is_empty() {
-        app.commit_pending_user_preview(&display_input)
+    let already_visible = if !prepared_turn.display_text.is_empty() {
+        app.commit_pending_user_preview(&prepared_turn.display_text)
     } else {
         false
     };
-    if !display_input.is_empty() && !already_visible {
-        app.blocks
-            .push(DisplayBlock::UserInput(display_input.clone()));
-        app.invalidate_height_cache();
+    if !prepared_turn.display_text.is_empty() && !already_visible {
+        app.push_prepared_user_input(&prepared_turn);
     }
     app.start_turn();
     app.resume_follow_output();
     app.keep_latest_user_block_visible();
 
-    if !display_input.is_empty() {
-        logger.log_user_input(&display_input);
+    if !prepared_turn.display_text.is_empty() {
+        logger.log_prepared_user_input(&prepared_turn);
     }
 
     let mut rt = runtime

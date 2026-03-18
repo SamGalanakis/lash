@@ -11,7 +11,8 @@ use crate::activity::{
     ActivityArtifact, ActivityBlock, ActivityKind, ActivityStatus, PatchFilePreview,
 };
 use crate::app::{
-    App, DisplayBlock, QueuedTurn, SPLASH_CONTENT_HEIGHT, SPLASH_SCROLLBACK_HEIGHT, SuggestionKind,
+    App, DisplayBlock, PreparedTurn, SPLASH_CONTENT_HEIGHT, SPLASH_SCROLLBACK_HEIGHT,
+    SuggestionKind,
 };
 use crate::markdown;
 use crate::theme;
@@ -1092,91 +1093,6 @@ fn render_block<'a>(
                 }
             }
         }
-        DisplayBlock::PendingUserInput {
-            text,
-            inject_at_checkpoint,
-        } => {
-            if idx > 0 && !matches!(blocks[idx - 1], DisplayBlock::Splash) {
-                lines.push(Line::from(""));
-            }
-            let marker_style = if *inject_at_checkpoint {
-                Style::default().fg(theme::SODIUM)
-            } else {
-                Style::default().fg(theme::LICHEN)
-            };
-            let text_style = theme::user_input().add_modifier(Modifier::DIM);
-            let prefix_w = 2;
-            let cap = viewport_width.saturating_sub(prefix_w);
-            let mut is_first = true;
-
-            for line in text.lines() {
-                if cap == 0 || line.is_empty() {
-                    let prefix = if is_first {
-                        Span::styled(
-                            if *inject_at_checkpoint {
-                                "◆ "
-                            } else {
-                                "◇ "
-                            },
-                            marker_style,
-                        )
-                    } else {
-                        Span::raw("  ")
-                    };
-                    is_first = false;
-                    lines.push(Line::from(vec![
-                        prefix,
-                        Span::styled(line.to_string(), text_style),
-                    ]));
-                } else {
-                    let mut seg_start = 0;
-                    let mut col = 0;
-                    for (byte_idx, ch) in line.char_indices() {
-                        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-                        if col + w > cap && col > 0 {
-                            let prefix = if is_first {
-                                Span::styled(
-                                    if *inject_at_checkpoint {
-                                        "◆ "
-                                    } else {
-                                        "◇ "
-                                    },
-                                    marker_style,
-                                )
-                            } else {
-                                Span::raw("  ")
-                            };
-                            is_first = false;
-                            lines.push(Line::from(vec![
-                                prefix,
-                                Span::styled(line[seg_start..byte_idx].to_string(), text_style),
-                            ]));
-                            seg_start = byte_idx;
-                            col = w;
-                        } else {
-                            col += w;
-                        }
-                    }
-                    let prefix = if is_first {
-                        Span::styled(
-                            if *inject_at_checkpoint {
-                                "◆ "
-                            } else {
-                                "◇ "
-                            },
-                            marker_style,
-                        )
-                    } else {
-                        Span::raw("  ")
-                    };
-                    is_first = false;
-                    lines.push(Line::from(vec![
-                        prefix,
-                        Span::styled(line[seg_start..].to_string(), text_style),
-                    ]));
-                }
-            }
-        }
         DisplayBlock::AssistantText(text) => {
             let prefix_w = 2; // "■ " or "  " is 2 columns
             let rendered =
@@ -1653,9 +1569,12 @@ fn queue_preview_lines(app: &App, width: u16) -> Vec<Line<'static>> {
 
     let mut lines = Vec::new();
     let inner_width = width as usize;
-    let pending_previews: Vec<String> =
-        app.pending_steers.iter().map(QueuedTurn::preview).collect();
-    let queued_previews: Vec<String> = app.queued_turns.iter().map(QueuedTurn::preview).collect();
+    let pending_previews: Vec<String> = app
+        .pending_steers
+        .iter()
+        .map(PreparedTurn::preview)
+        .collect();
+    let queued_previews: Vec<String> = app.queued_turns.iter().map(PreparedTurn::preview).collect();
 
     if !pending_previews.is_empty() {
         push_queue_section(
@@ -2541,7 +2460,7 @@ mod tests {
         let mut app = App::new("model".into(), "session".into());
         app.blocks.clear(); // avoid splash-specific influence on expectations
         app.input = "line1\nline2\nline3".into();
-        app.queue_turn(crate::app::QueuedTurn::new("queued".into(), Vec::new()));
+        app.queue_turn(crate::app::PreparedTurn::new("queued".into(), Vec::new()));
 
         let fw = 100u16;
         let fh = 40u16;
@@ -2656,11 +2575,11 @@ mod tests {
     #[test]
     fn queue_preview_lines_distinguish_checkpoint_and_next_turn() {
         let mut app = App::new("model".into(), "session".into());
-        app.queue_pending_steer(QueuedTurn::new(
+        app.queue_pending_steer(PreparedTurn::new(
             "tighten the current assertion".into(),
             Vec::new(),
         ));
-        app.queue_turn(QueuedTurn::new(
+        app.queue_turn(PreparedTurn::new(
             "run follow-up validation".into(),
             Vec::new(),
         ));
@@ -2697,8 +2616,8 @@ mod tests {
     #[test]
     fn queue_preview_height_grows_for_two_queue_sections() {
         let mut app = App::new("model".into(), "session".into());
-        app.queue_pending_steer(QueuedTurn::new("checkpoint follow-up".into(), Vec::new()));
-        app.queue_turn(QueuedTurn::new("next turn".into(), Vec::new()));
+        app.queue_pending_steer(PreparedTurn::new("checkpoint follow-up".into(), Vec::new()));
+        app.queue_turn(PreparedTurn::new("next turn".into(), Vec::new()));
 
         assert!(queue_preview_height(&app, 64) > 1);
     }

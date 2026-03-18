@@ -10,7 +10,7 @@ use lash_core::TokenUsage;
 use lash_core::agent::{Message, MessageRole, Part, PartKind, PruneState};
 
 use crate::activity::{ActivityKind, ActivityState, ActivityStatus, merge_exploration_activity};
-use crate::app::{DisplayBlock, render_plan_content_from_args};
+use crate::app::{DisplayBlock, PreparedTurn, render_plan_content_from_args};
 use crate::plugin_surface;
 use crate::replay::{AssistantReplay, push_assistant_text_block};
 use crate::util::{is_manual_interrupt_error, manual_interrupt_message};
@@ -143,6 +143,22 @@ impl SessionLogger {
             "type": "user_input",
             "ts": chrono::Local::now().to_rfc3339(),
             "content": input,
+        }));
+        self.flush_pending_turn();
+    }
+
+    pub fn log_prepared_user_input(&mut self, turn: &PreparedTurn) {
+        if !self.pending_turn.is_empty() {
+            self.flush_pending_turn();
+        }
+        self.pending_turn.push(serde_json::json!({
+            "type": "user_input",
+            "ts": chrono::Local::now().to_rfc3339(),
+            "draft_id": turn.draft_id,
+            "content": turn.display_text,
+            "raw_content": turn.raw_text,
+            "effective_content": turn.effective_text,
+            "transforms": turn.transform_labels,
         }));
         self.flush_pending_turn();
     }
@@ -366,6 +382,15 @@ pub fn load_session(filename: &str) -> Option<LoadedSession> {
                     origin: None,
                 });
                 blocks.push(DisplayBlock::UserInput(text));
+                if let Some(transforms) = val.get("transforms").and_then(|v| v.as_array()) {
+                    let labels: Vec<&str> = transforms.iter().filter_map(|v| v.as_str()).collect();
+                    if !labels.is_empty() {
+                        blocks.push(DisplayBlock::SystemMessage(format!(
+                            "Model saw transformed input: {}",
+                            labels.join(", ")
+                        )));
+                    }
+                }
             }
             "text_delta" => {
                 if let Some(text) = val.get("content").and_then(|v| v.as_str()) {
@@ -622,6 +647,35 @@ mod tests {
             assert!(
                 matches!(blocks.get(1), Some(DisplayBlock::AssistantText(text)) if text == "Hello world")
             );
+        });
+    }
+
+    #[test]
+    fn load_session_replays_prepared_user_input_with_transform_note() {
+        with_temp_lash_home("lash-session-log-transforms", || {
+            let mut logger =
+                SessionLogger::new("gpt-test", Some("s1".to_string()), "demo".to_string()).unwrap();
+            let filename = logger.filename().to_string();
+            logger.log_prepared_user_input(&PreparedTurn {
+                draft_id: "draft-1".into(),
+                raw_text: "$localref lash".into(),
+                display_text: "$localref lash".into(),
+                effective_text: "$localref lash\n\n<skill>...</skill>".into(),
+                images: Vec::new(),
+                transform_labels: vec!["skill localref".into()],
+            });
+            logger.flush().unwrap();
+
+            let loaded = load_session(&filename).unwrap();
+            assert!(matches!(
+                loaded.blocks.first(),
+                Some(DisplayBlock::UserInput(text)) if text == "$localref lash"
+            ));
+            assert!(matches!(
+                loaded.blocks.get(1),
+                Some(DisplayBlock::SystemMessage(text))
+                    if text == "Model saw transformed input: skill localref"
+            ));
         });
     }
 
