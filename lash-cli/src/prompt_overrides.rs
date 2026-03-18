@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::anyhow;
-use lash_core::agent::{PromptOverrideMode, PromptSectionName, PromptSectionOverride};
+use lash::agent::{PromptOverrideMode, PromptSectionName, PromptSectionOverride};
 
 use crate::Args;
 

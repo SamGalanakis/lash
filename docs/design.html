@@ -1060,8 +1060,26 @@ flowchart LR
                   <div class="lane-row">
                     <span class="lane-marker delegate">├─</span>
                     <div class="lane-copy">
-                      <strong>delegate · inspect queue rendering</strong>
-                      <span>Delegate work gets its own quiet-success rail so child-session activity does not blend into generic tool chatter.</span>
+                      <strong>delegate done · inspect queue rendering · 4.2s</strong>
+                      <span>Delegate results use tree connectors (├─/╰─) to show the child agent's tool call activity as nested items beneath the summary rail.</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">│</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--ash-text);">claude-sonnet · 3 iterations · 5 tool calls</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">├─</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--chalk-dim);">read_file · 12ms</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">╰─</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--chalk-dim);">exec_command · 340ms</span>
                     </div>
                   </div>
                   <div class="lane-row">
@@ -1069,13 +1087,6 @@ flowchart LR
                     <div class="lane-copy">
                       <strong>web "ratatui queue preview"</strong>
                       <span>Web rows keep the query in the headline and reserve expansion for sources or fetched content.</span>
-                    </div>
-                  </div>
-                  <div class="lane-row">
-                    <span class="lane-marker task">◆</span>
-                    <div class="lane-copy">
-                      <strong>plan updated</strong>
-                      <span>Checklist changes should read like concise progress signals, while the bordered plan block holds the durable state snapshot.</span>
                     </div>
                   </div>
                   <div class="lane-row">
@@ -1114,6 +1125,79 @@ flowchart LR
                     <div class="lane-copy">
                       <strong>╎ @@ queue preview</strong>
                       <span>Patch text lives one level deeper on a scribed inset so scanning the transcript does not collapse into a wall of unified diff noise.</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </article>
+            <article class="mock" style="grid-column: 1 / -1;">
+              <div class="mock-bar">
+                <span>delegate lifecycle</span>
+                <span class="accent">agent tree</span>
+              </div>
+              <div class="mock-body">
+                <div class="lane-stack">
+                  <div class="lane-row">
+                    <span class="lane-marker delegate">◆</span>
+                    <div class="lane-copy">
+                      <strong>delegate · inspect queue rendering · 52ms</strong>
+                      <span>The spawn event uses a filled diamond (◆) when standalone, or a tree connector (├─) when child details follow. Model and tier are shown as detail lines.</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">│</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--ash-text);">claude-sonnet (medium)</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="margin-top: 8px;">
+                    <span class="lane-marker delegate">├─</span>
+                    <div class="lane-copy">
+                      <strong>delegate done · inspect queue rendering · 4.2s</strong>
+                      <span>The result block shows a summary stats line (model · iterations · tool calls), then renders each child tool call as a nested tree branch.</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">│</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--ash-text);">claude-sonnet · 3 iterations · 5 tool calls</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">├─</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--chalk-dim);">read_file · 12ms</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">├─</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--chalk-dim);">exec_command · 340ms</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">├─</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--chalk-dim);">search_files · 89ms</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">├─</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--chalk-dim);">read_file · 8ms</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">╰─</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--chalk-dim);">edit_file · 45ms</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="margin-top: 8px;">
+                    <span class="lane-marker delegate" style="color: var(--error);">◆</span>
+                    <div class="lane-copy">
+                      <strong style="color: var(--error);">delegate stopped · inspect queue rendering · 1.8s</strong>
+                      <span>Kill events use the standalone diamond and the error color to signal forced interruption.</span>
                     </div>
                   </div>
                 </div>

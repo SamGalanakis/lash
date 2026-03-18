@@ -25,10 +25,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use clap::Parser;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
-use lash_core::agent::{Message, MessageRole};
-use lash_core::provider::{LashConfig, OPENAI_GENERIC_DEFAULT_BASE_URL, Provider, ProviderKind};
-use lash_core::tools::{AgentCallConfig, DefaultToolPluginDeps};
-use lash_core::*;
+use lash::agent::{Message, MessageRole};
+use lash::provider::{LashConfig, OPENAI_GENERIC_DEFAULT_BASE_URL, Provider, ProviderKind};
+use lash::tools::{AgentCallConfig, DefaultToolPluginDeps};
+use lash::*;
 use ratatui::DefaultTerminal;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
@@ -45,7 +45,7 @@ const ROOT_SESSION_ID: &str = "root";
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     "\n",
-    "lash-core ",
+    "lash-sansio ",
     env!("CARGO_PKG_VERSION")
 );
 
@@ -192,7 +192,7 @@ fn configure_terminal_ui(no_mouse: bool) -> anyhow::Result<()> {
 async fn main() -> anyhow::Result<()> {
     // Set up file-based structured tracing (JSON logs at $LASH_HOME/lash.log)
     {
-        let log_dir = lash_core::lash_home();
+        let log_dir = lash::lash_home();
         std::fs::create_dir_all(&log_dir).ok();
         let log_file = std::fs::File::create(log_dir.join("lash.log"))?;
 
@@ -225,8 +225,8 @@ async fn main() -> anyhow::Result<()> {
         const BOLD: &str = "\x1b[1m";
         const RESET: &str = "\x1b[0m";
 
-        let lash_dir = lash_core::lash_home();
-        let cache_dir = lash_core::lash_cache_dir();
+        let lash_dir = lash::lash_home();
+        let cache_dir = lash::lash_cache_dir();
 
         eprintln!();
         eprintln!("  {SODIUM}{BOLD}/ reset{RESET}");
@@ -289,7 +289,7 @@ async fn main() -> anyhow::Result<()> {
             let provider = Provider::OpenAiGeneric {
                 api_key: key.clone(),
                 base_url: args.base_url.clone(),
-                options: lash_core::provider::ProviderOptions::default(),
+                options: lash::provider::ProviderOptions::default(),
             };
             let mut cfg = existing_config
                 .clone()
@@ -304,7 +304,7 @@ async fn main() -> anyhow::Result<()> {
                 access_token: key,
                 refresh_token: String::new(),
                 expires_at: u64::MAX,
-                options: lash_core::provider::ProviderOptions::default(),
+                options: lash::provider::ProviderOptions::default(),
             };
             let mut cfg = existing_config
                 .clone()
@@ -360,7 +360,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let model_catalog = models_dev_catalog().map_err(anyhow::Error::msg)?;
     if let Err(err) = model_catalog
-        .refresh_if_stale(lash_core::model_info::DEFAULT_REFRESH_INTERVAL)
+        .refresh_if_stale(lash::model_info::DEFAULT_REFRESH_INTERVAL)
         .await
     {
         eprintln!("warning: failed to refresh models.dev catalog: {err}");
@@ -395,7 +395,7 @@ async fn main() -> anyhow::Result<()> {
     let llm_log_path = std::env::var("LASH_LOG").ok().and_then(|level| {
         let l = level.to_lowercase();
         if l == "debug" || l == "trace" || l.contains("debug") || l.contains("trace") {
-            let dir = lash_core::lash_home().join("sessions");
+            let dir = lash::lash_home().join("sessions");
             Some(dir.join(format!(
                 "{}.llm.jsonl",
                 chrono::Local::now().format("%Y%m%d_%H%M%S")
@@ -405,7 +405,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let sessions_dir = lash_core::lash_home().join("sessions");
+    let sessions_dir = lash::lash_home().join("sessions");
     std::fs::create_dir_all(&sessions_dir)?;
     let resume_start = if let Some(filename) = args.resume.as_deref() {
         Some(
@@ -1010,7 +1010,7 @@ fn parse_execution_mode(input: &str) -> Result<ExecutionMode, String> {
 }
 
 fn execution_mode_usage() -> &'static str {
-    if lash_core::execution_mode_supported(ExecutionMode::Repl) {
+    if lash::execution_mode_supported(ExecutionMode::Repl) {
         "<repl|standard>"
     } else {
         "<standard>"
@@ -1018,7 +1018,7 @@ fn execution_mode_usage() -> &'static str {
 }
 
 fn ensure_supported_execution_mode(mode: ExecutionMode) -> Result<ExecutionMode, String> {
-    if lash_core::execution_mode_supported(mode) {
+    if lash::execution_mode_supported(mode) {
         Ok(mode)
     } else {
         Err(match mode {
@@ -1218,7 +1218,7 @@ fn persist_root_agent_state(
     let messages_json = serde_json::to_string(&state.messages).unwrap_or_else(|_| "[]".to_string());
     let tool_calls_json =
         serde_json::to_string(&state.tool_calls).unwrap_or_else(|_| "[]".to_string());
-    store.save_agent_state(lash_core::store::AgentStateSave {
+    store.save_agent_state(lash::store::AgentStateSave {
         agent_id: "root",
         messages_json: &messages_json,
         tool_calls_json: &tool_calls_json,
@@ -1247,13 +1247,13 @@ fn push_system_message(app: &mut App, msg: impl Into<String>) {
 }
 
 fn version_text() -> String {
-    format!("lash {}\nlash-core {}", APP_VERSION, lash_core::VERSION)
+    format!("lash {}\nlash-sansio {}", APP_VERSION, lash::SANSIO_VERSION)
 }
 
 fn info_text_unconfigured(execution_mode: ExecutionMode, cwd: &str) -> String {
     [
         format!("lash: {}", APP_VERSION),
-        format!("lash-core: {}", lash_core::VERSION),
+        format!("lash-sansio: {}", lash::SANSIO_VERSION),
         "provider: (not configured)".to_string(),
         "configured model: (not configured)".to_string(),
         "resolved model: (not configured)".to_string(),
@@ -1281,7 +1281,7 @@ fn info_text(
     let resolved_model = provider.resolve_model(configured_model);
     let mut lines = vec![
         format!("lash: {}", APP_VERSION),
-        format!("lash-core: {}", lash_core::VERSION),
+        format!("lash-sansio: {}", lash::SANSIO_VERSION),
         format!("provider: {} ({})", provider.label(), provider.id()),
         format!("configured model: {}", configured_model),
         format!("resolved model: {}", resolved_model),
@@ -1322,7 +1322,7 @@ fn help_text(skills: &SkillCatalog) -> String {
         "Commands:".to_string(),
         "  /clear, /new       Reset conversation".to_string(),
         "  /fork [prompt]     Open a forked session in a new terminal".to_string(),
-        "  /version           Show Lash and lash-core versions".to_string(),
+        "  /version           Show Lash and lash-sansio versions".to_string(),
         "  /info              Show current runtime/session info".to_string(),
         "  /model [name]      Show or switch LLM model".to_string(),
         "  /variant [name]    Show or switch provider-native model variant".to_string(),
@@ -1487,7 +1487,7 @@ async fn run_app(
     let mut current_context_strategy = runtime
         .as_ref()
         .map(|rt| rt.export_state().policy.context_strategy)
-        .unwrap_or_else(lash_core::default_context_strategy);
+        .unwrap_or_else(lash::default_context_strategy);
     let mut desired_dynamic = dynamic_tools.export_state();
     let mut pending_reconfigure = false;
 
@@ -2650,7 +2650,7 @@ async fn run_app(
                                             provider = new_cfg.active_provider().clone();
                                             if let Err(err) = model_catalog
                                                 .refresh_if_stale(
-                                                    lash_core::model_info::DEFAULT_REFRESH_INTERVAL,
+                                                    lash::model_info::DEFAULT_REFRESH_INTERVAL,
                                                 )
                                                 .await
                                             {
@@ -3676,7 +3676,7 @@ fn send_user_message(
 /// Send a desktop notification that the agent finished.
 fn notify_done() {
     // Ensure the icon exists in $LASH_HOME
-    let icon_path = lash_core::lash_home().join("icon.svg");
+    let icon_path = lash::lash_home().join("icon.svg");
     if !icon_path.exists() {
         let _ = std::fs::write(&icon_path, include_bytes!("../assets/icon.svg"));
     }

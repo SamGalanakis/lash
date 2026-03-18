@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::app::App;
-use lash_core::InputItem;
+use lash::InputItem;
 
 /// Build structured turn items from editor input:
 /// - `@path` becomes `FileRef` or `DirRef` when resolvable

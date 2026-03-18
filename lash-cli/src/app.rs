@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
-use lash_core::{
+use lash::{
     AgentEvent, MessageRole, PluginMessage, PromptUsage, SkillCatalog, TokenUsage,
     append_skill_blocks, collect_skill_mentions,
 };
@@ -1558,7 +1558,7 @@ impl App {
 
     /// Load input history from $LASH_HOME/history.
     pub fn load_history(&mut self) {
-        let path = lash_core::lash_home().join("history");
+        let path = lash::lash_home().join("history");
         if let Ok(content) = std::fs::read_to_string(&path) {
             self.input_history = content
                 .lines()
@@ -1570,7 +1570,7 @@ impl App {
 
     /// Save input history to $LASH_HOME/history (last 500 entries).
     pub fn save_history(&self) {
-        let dir = lash_core::lash_home();
+        let dir = lash::lash_home();
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("history");
         let start = self.input_history.len().saturating_sub(500);
@@ -2439,7 +2439,7 @@ mod tests {
         let mut app = App::new("test-model".into(), "test".into());
         app.handle_agent_event(AgentEvent::PluginEvent {
             plugin_id: "plan_mode".into(),
-            event: lash_core::PluginSurfaceEvent::PanelUpsert {
+            event: lash::PluginSurfaceEvent::PanelUpsert {
                 key: "proposed_plan:1".into(),
                 title: "PROPOSED PLAN".into(),
                 content: "1. Inspect\n2. Patch".into(),
@@ -2452,7 +2452,7 @@ mod tests {
 
         app.handle_agent_event(AgentEvent::PluginEvent {
             plugin_id: "plan_mode".into(),
-            event: lash_core::PluginSurfaceEvent::PanelClear {
+            event: lash::PluginSurfaceEvent::PanelClear {
                 key: "proposed_plan:1".into(),
             },
         });
@@ -2468,7 +2468,7 @@ mod tests {
         let mut app = App::new("test-model".into(), "test".into());
         app.handle_agent_event(AgentEvent::Error {
             message: "LLM error: cancelled".into(),
-            envelope: Some(lash_core::agent::ErrorEnvelope {
+            envelope: Some(lash::agent::ErrorEnvelope {
                 kind: "llm_provider".into(),
                 code: Some("cancelled".into()),
                 user_message: "LLM error: cancelled".into(),
@@ -2492,7 +2492,7 @@ mod tests {
         });
         app.handle_agent_event(AgentEvent::Error {
             message: "LLM error: Claude request failed with 500".into(),
-            envelope: Some(lash_core::agent::ErrorEnvelope {
+            envelope: Some(lash::agent::ErrorEnvelope {
                 kind: "llm_provider".into(),
                 code: Some("http_500".into()),
                 user_message: "LLM error: Claude request failed with 500".into(),
@@ -2581,7 +2581,7 @@ mod tests {
                 role: MessageRole::User,
                 content: "follow up".into(),
             }],
-            checkpoint: lash_core::CheckpointKind::AfterWork,
+            checkpoint: lash::CheckpointKind::AfterWork,
         });
 
         assert!(app.pending_steers.is_empty());
@@ -2604,7 +2604,7 @@ mod tests {
                 role: MessageRole::User,
                 content: "$localref lash for context if needed\n\n<skill>\n<name>localref</name>\nbody\n</skill>".into(),
             }],
-            checkpoint: lash_core::CheckpointKind::AfterWork,
+            checkpoint: lash::CheckpointKind::AfterWork,
         });
 
         assert!(app.pending_steers.is_empty());

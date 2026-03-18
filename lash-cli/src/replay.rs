@@ -1,4 +1,4 @@
-use lash_core::strip_repl_fragments;
+use lash::strip_repl_fragments;
 
 use crate::app::DisplayBlock;
 

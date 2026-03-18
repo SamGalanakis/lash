@@ -1,5 +1,5 @@
 [package]
-name = "lash-core"
+name = "lash"
 version.workspace = true
 edition = "2024"
 
@@ -11,6 +11,7 @@ sqlite-store = ["dep:rusqlite"]
 full = ["sqlite-store"]
 
 [dependencies]
+lash-sansio = { path = "../lash-sansio" }
 tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

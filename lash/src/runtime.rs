@@ -3006,7 +3006,7 @@ mod tests {
             let call = self.calls.lock().expect("lock calls").remove(0);
             if let Some(tx) = req.stream_events.as_ref() {
                 for event in &call.stream_events {
-                    let _ = tx.send(event.clone());
+                    tx.send(event.clone());
                 }
             }
             call.response

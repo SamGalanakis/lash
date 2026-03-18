@@ -1,11 +1,11 @@
-use lash_core::SkillCatalog;
+use lash::SkillCatalog;
 
 /// Primary commands shown in autocomplete (command, description).
 pub const COMMANDS: &[(&str, &str)] = &[
     ("/clear", "Reset conversation"),
     ("/controls", "Show keyboard shortcuts"),
     ("/fork", "Open a forked session in a new terminal"),
-    ("/version", "Show Lash and lash-core versions"),
+    ("/version", "Show Lash and lash-sansio versions"),
     ("/info", "Show current session/runtime info"),
     ("/model", "Show or switch LLM model"),
     ("/variant", "Show or switch model variant"),
@@ -72,7 +72,7 @@ pub enum Command {
     Controls,
     /// Fork the current session into a new terminal (optional initial prompt)
     Fork(Option<String>),
-    /// Show Lash and lash-core versions
+    /// Show Lash and lash-sansio versions
     Version,
     /// Show session/runtime metadata
     Info,

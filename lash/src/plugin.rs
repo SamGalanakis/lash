@@ -3,7 +3,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::agent::PromptSectionName;
 use crate::llm::types::LlmResponse;
 use crate::runtime::AssembledTurn;
 use crate::{
@@ -12,6 +11,8 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+
+pub use lash_sansio::{CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptContribution};
 
 pub type PluginFuture<T> = Pin<Box<dyn Future<Output = Result<T, PluginError>> + Send>>;
 pub type TurnCommittedHook = Arc<dyn Fn(AssembledTurn) -> PluginFuture<()> + Send + Sync>;
@@ -84,12 +85,6 @@ pub enum SessionStartPoint {
     Snapshot { snapshot: Box<SessionSnapshot> },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PluginMessage {
-    pub role: MessageRole,
-    pub content: String,
-}
-
 #[derive(Clone, Debug)]
 pub struct PluginOwned<T> {
     pub plugin_id: String,
@@ -147,24 +142,6 @@ pub struct SessionCreateRequest {
     pub initial_messages: Vec<PluginMessage>,
     #[serde(skip)]
     pub context_surface: SessionContextSurface,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PromptContribution {
-    pub section: PromptSectionName,
-    #[serde(default)]
-    pub priority: i32,
-    pub content: String,
-}
-
-impl PromptContribution {
-    pub fn guidance(content: impl Into<String>) -> Self {
-        Self {
-            section: PromptSectionName::Guidance,
-            priority: 0,
-            content: content.into(),
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -256,34 +233,6 @@ pub struct CheckpointApplication {
 pub struct TurnFinalization {
     pub turn: AssembledTurn,
     pub events: Vec<crate::AgentEvent>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum PluginSurfaceEvent {
-    ModeIndicatorUpsert {
-        key: String,
-        label: String,
-    },
-    ModeIndicatorClear {
-        key: String,
-    },
-    PanelUpsert {
-        key: String,
-        title: String,
-        content: String,
-    },
-    PanelAppend {
-        key: String,
-        content: String,
-    },
-    PanelClear {
-        key: String,
-    },
-    Custom {
-        name: String,
-        payload: serde_json::Value,
-    },
 }
 
 pub(crate) async fn emit_plugin_surface_events(
@@ -453,13 +402,6 @@ pub struct TurnResultHookContext {
     pub session_id: String,
     pub turn: AssembledTurn,
     pub host: Arc<dyn SessionManager>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CheckpointKind {
-    AfterWork,
-    BeforeCompletion,
 }
 
 #[derive(Clone)]

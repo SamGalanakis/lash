@@ -11,7 +11,6 @@ pub enum ActivityKind {
     WebFetch,
     Edit,
     Delegate,
-    PlanUpdate,
     Parallel,
     GenericTool,
 }
@@ -112,6 +111,10 @@ impl ActivityState {
             if !blocks.is_empty() {
                 return blocks;
             }
+        }
+        // Plan content block already renders the full checklist, so no activity line needed.
+        if name == "update_plan" {
+            return Vec::new();
         }
         vec![self.block_for_single_tool_call(name, args, result, success, duration_ms)]
     }
@@ -423,12 +426,31 @@ impl ActivityState {
                 if success && let Some(id) = tool_result_handle_id(&result) {
                     self.agent_handles.insert(id.to_string(), task.clone());
                 }
+                let mut detail_lines = Vec::new();
+                if success {
+                    let model = result
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let variant = result
+                        .get("model_variant")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    if !model.is_empty() {
+                        let label = if variant.is_empty() {
+                            model.to_string()
+                        } else {
+                            format!("{model} ({variant})")
+                        };
+                        detail_lines.push(label);
+                    }
+                }
                 ActivityBlock {
                     kind: ActivityKind::Delegate,
                     status,
                     tool_name: name.to_string(),
                     summary: format!("delegate · {}", inline_text(&task)),
-                    detail_lines: Vec::new(),
+                    detail_lines,
                     duration_ms,
                     args,
                     result,
@@ -446,18 +468,81 @@ impl ActivityState {
                     .map(str::to_string)
                     .or_else(|| self.agent_handles.remove(&handle_id))
                     .unwrap_or_else(|| handle_id.clone());
+
                 let mut detail_lines = Vec::new();
+                let mut children = Vec::new();
+
                 if let Some(meta) = meta {
-                    let tool_calls = meta.get("tool_calls").and_then(|value| value.as_u64());
-                    let iterations = meta.get("iterations").and_then(|value| value.as_u64());
-                    if tool_calls.is_some() || iterations.is_some() {
-                        detail_lines.push(format!(
-                            "Iterations: {} · tool calls: {}",
-                            iterations.unwrap_or(0),
-                            tool_calls.unwrap_or(0)
+                    // Model info line.
+                    let model = meta
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let variant = meta
+                        .get("model_variant")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let tool_calls = meta.get("tool_calls").and_then(|v| v.as_u64());
+                    let iterations = meta.get("iterations").and_then(|v| v.as_u64());
+
+                    // Summary stats line.
+                    let mut parts = Vec::new();
+                    if !model.is_empty() {
+                        let label = if variant.is_empty() {
+                            model.to_string()
+                        } else {
+                            format!("{model} ({variant})")
+                        };
+                        parts.push(label);
+                    }
+                    if let Some(iters) = iterations {
+                        parts.push(format!(
+                            "{} iteration{}",
+                            iters,
+                            if iters == 1 { "" } else { "s" }
                         ));
                     }
+                    if let Some(tc) = tool_calls {
+                        parts.push(format!(
+                            "{} tool call{}",
+                            tc,
+                            if tc == 1 { "" } else { "s" }
+                        ));
+                    }
+                    if !parts.is_empty() {
+                        detail_lines.push(parts.join(" · "));
+                    }
+
+                    // Build child activity blocks from tool_call_details.
+                    if let Some(details) = meta.get("tool_call_details").and_then(|v| v.as_array())
+                    {
+                        for tc in details {
+                            let tool = tc.get("tool").and_then(|v| v.as_str()).unwrap_or("unknown");
+                            let tc_success =
+                                tc.get("success").and_then(|v| v.as_bool()).unwrap_or(true);
+                            let tc_duration =
+                                tc.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                            children.push(ActivityBlock {
+                                kind: ActivityKind::GenericTool,
+                                status: if tc_success {
+                                    ActivityStatus::Completed
+                                } else {
+                                    ActivityStatus::Failed
+                                },
+                                tool_name: tool.to_string(),
+                                summary: tool.to_string(),
+                                detail_lines: Vec::new(),
+                                duration_ms: tc_duration,
+                                args: Value::Null,
+                                result: Value::Null,
+                                artifact: None,
+                                children: Vec::new(),
+                                extra: None,
+                            });
+                        }
+                    }
                 }
+
                 let artifact = result
                     .get("result")
                     .and_then(|value| value.as_str())
@@ -476,7 +561,7 @@ impl ActivityState {
                     args,
                     result,
                     artifact,
-                    children: Vec::new(),
+                    children,
                     extra: None,
                 }
             }
@@ -510,16 +595,14 @@ impl ActivityState {
                 extra: None,
                 result,
             },
+            // update_plan is filtered out in blocks_for_tool_call; this branch
+            // is unreachable but kept as a guard.
             "update_plan" => ActivityBlock {
-                kind: ActivityKind::PlanUpdate,
+                kind: ActivityKind::GenericTool,
                 status,
                 tool_name: name.to_string(),
-                summary: plan_update_summary(&args),
-                detail_lines: args
-                    .get("explanation")
-                    .and_then(|value| value.as_str())
-                    .map(|value| vec![value.to_string()])
-                    .unwrap_or_default(),
+                summary: "updated plan".to_string(),
+                detail_lines: Vec::new(),
                 duration_ms,
                 args,
                 result,
@@ -554,38 +637,6 @@ impl ActivityState {
                 result,
             },
         }
-    }
-}
-
-fn plan_update_summary(args: &serde_json::Value) -> String {
-    let Some(items) = args
-        .get("steps")
-        .or_else(|| args.get("plan"))
-        .and_then(|value| value.as_array())
-    else {
-        return "updated plan".to_string();
-    };
-    let completed = items
-        .iter()
-        .filter(|item| item.get("status").and_then(|value| value.as_str()) == Some("completed"))
-        .count();
-    let in_progress = items
-        .iter()
-        .filter(|item| item.get("status").and_then(|value| value.as_str()) == Some("in_progress"))
-        .count();
-    if in_progress > 0 {
-        format!(
-            "updated plan · {} steps, {} completed, {} in progress",
-            items.len(),
-            completed,
-            in_progress
-        )
-    } else {
-        format!(
-            "updated plan · {} steps, {} completed",
-            items.len(),
-            completed
-        )
     }
 }
 

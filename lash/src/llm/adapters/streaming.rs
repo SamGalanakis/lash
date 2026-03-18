@@ -1,7 +1,5 @@
-use tokio::sync::mpsc::UnboundedSender;
-
 use crate::llm::transport::LlmTransportError;
-use crate::llm::types::{LlmStreamEvent, LlmUsage};
+use crate::llm::types::{LlmEventSender, LlmStreamEvent, LlmUsage};
 
 use std::time::Duration;
 
@@ -108,7 +106,7 @@ where
 }
 
 pub fn emit_progress(
-    tx: Option<&UnboundedSender<LlmStreamEvent>>,
+    tx: Option<&LlmEventSender>,
     deltas: &[String],
     prev_len: usize,
     usage: &LlmUsage,
@@ -118,9 +116,9 @@ pub fn emit_progress(
         return;
     };
     if usage != prev_usage && usage != &LlmUsage::default() {
-        let _ = tx.send(LlmStreamEvent::Usage(usage.clone()));
+        tx.send(LlmStreamEvent::Usage(usage.clone()));
     }
     for piece in deltas.iter().skip(prev_len) {
-        let _ = tx.send(LlmStreamEvent::Delta(piece.clone()));
+        tx.send(LlmStreamEvent::Delta(piece.clone()));
     }
 }

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use lash_core::PluginSurfaceEvent;
+use lash::PluginSurfaceEvent;
 
 use crate::app::{DisplayBlock, PluginPanelBlock};
 
