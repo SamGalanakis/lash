@@ -66,7 +66,7 @@ impl ToolProvider for UpdatePlanTool {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "update_plan".into(),
-            description: "Update the task plan for substantial multi-step work. Provide an optional explanation and a list of short plan items, each with a step and status. Valid statuses: pending, in_progress, completed. At most one step can be in_progress at a time.".into(),
+            description: "Update the task plan. Provide an optional explanation and a list of short plan items, each with a step and status. Valid statuses: pending, in_progress, completed. At most one step can be in_progress at a time.".into(),
             params: vec![
                 ToolParam::optional("explanation", "str"),
                 ToolParam::typed("plan", "list"),

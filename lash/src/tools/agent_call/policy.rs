@@ -184,7 +184,7 @@ impl AgentCall {
 pub(super) fn agent_call_prompt_contributions() -> Vec<PromptContribution> {
     vec![
         PromptContribution::guidance(
-            "### Delegation\nUse `agent_call` for scoped sub-tasks. Each delegate runs in its own session. Prefer low-intelligence delegates for read-only lookup or summarization work, and avoid overlapping file edits across concurrent delegates.",
+            "### Delegation\nUse `agent_call` proactively for scoped, self-contained sub-tasks whenever it will reduce context pressure, isolate noisy work, support review or verification, or let truly independent work proceed in parallel. Do not wait for the user to explicitly ask for delegation. Avoid overlapping file edits across concurrent delegates, and if your very next step is blocked on a result and you have no other useful parallel work, do it yourself instead.\n\nChoose intelligence by task shape:\n\n- `low`: fast, read-only exploration and synthesis. Use for codebase discovery, tracing behavior, finding examples, summarizing logs or failures, scanning docs, searching history, comparing implementations, or web research that informs your next step.\n  Examples:\n  - \"Find where auth tokens are refreshed\"\n  - \"Summarize the config loader\"\n  - \"Scan the repo for queue-related paths\"\n  - \"Check the docs for the current API shape\"\n\n- `medium`: bounded implementation or analysis with a contained scope. Use for small features, targeted bug fixes, focused tests, contained refactors, single-module edits, or validating one concrete hypothesis.\n  Examples:\n  - \"Add tests for the retry helper\"\n  - \"Refactor this parser module without changing behavior\"\n  - \"Fix the null handling bug in this endpoint\"\n  - \"Implement this small CLI flag\"\n\n- `high`: peer-level independent work. This is the same intelligence tier as you, so use it when another strong agent can make real parallel progress on a separate line of work. Use it for substantial tasks that can be owned in parallel, larger isolated implementations, strong validation passes, or serious design investigation.\n  Examples:\n  - \"Implement the backend half while I handle the UI\"\n  - \"Own the persistence changes while I update the command flow\"\n  - \"Review this design for race conditions and regressions\"\n  - \"Validate whether this architectural direction is sound\"",
         ),
         PromptContribution::guidance(
             "### Agent Lifecycle\n`agent_result(id)` blocks until the child session finishes and returns an object in `result.value` with the child result and terminal status. The agent ID remains valid afterwards, including after `agent_kill(id)`, so you can query the terminal result again even after the child session has been stopped.",
@@ -203,7 +203,7 @@ pub(super) fn agent_call_definitions(
     let (agent_call_description, agent_call_examples) = match execution_mode {
         crate::ExecutionMode::Repl => (
             format!(
-                "Spawn a child session for scoped work and return a handle. In REPL mode, use `call agent_result {{ id: handle.value.id }}` or `call agent_kill {{ id: handle.value.id }}` with the returned id. Use `intelligence=\"low\"` for fast read-only work; {}. Medium/high inherit the parent execution mode.",
+                "Spawn a child session for a scoped sub-task and return a handle. Choose `intelligence` based on the delegation guidance above. In REPL mode, use `call agent_result {{ id: handle.value.id }}` or `call agent_kill {{ id: handle.value.id }}` with the returned id; {}. Medium/high inherit the parent execution mode.",
                 low_tier_summary
             ),
             vec![
@@ -213,7 +213,7 @@ pub(super) fn agent_call_definitions(
         ),
         crate::ExecutionMode::Standard => (
             format!(
-                "Spawn a child session for scoped work and return a handle. Use `agent_result(id)` or `agent_kill(id)` with the returned id. Use `intelligence=\"low\"` for fast read-only work; {}. Medium/high inherit the parent execution mode.",
+                "Spawn a child session for a scoped sub-task and return a handle. Choose `intelligence` based on the delegation guidance above. Use `agent_result(id)` or `agent_kill(id)` with the returned id; {}. Medium/high inherit the parent execution mode.",
                 low_tier_summary
             ),
             vec![
