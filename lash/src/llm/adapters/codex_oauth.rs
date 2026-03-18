@@ -26,6 +26,9 @@ impl Default for CodexOAuthAdapter {
 }
 
 impl CodexOAuthAdapter {
+    const CODEX_ORIGINATOR: &'static str = "codex_cli_rs";
+    const CODEX_RESPONSES_URL: &'static str = "https://chatgpt.com/backend-api/codex/responses";
+
     pub fn new(timeouts: LlmTimeouts) -> Self {
         Self {
             client: build_http_client(),
@@ -94,20 +97,7 @@ impl CodexOAuthAdapter {
     }
 
     fn build_input(req: &LlmRequest) -> Vec<Value> {
-        if req.messages.is_empty() {
-            return vec![
-                json!({
-                    "role": "system",
-                    "content": [{"type": "input_text", "text": req.system_prompt}],
-                }),
-                Self::user_input_item(req),
-            ];
-        }
-
-        let mut input = vec![json!({
-            "role": "system",
-            "content": [{"type": "input_text", "text": req.system_prompt}],
-        })];
+        let mut input = Vec::new();
         for chunk in coalesce_replay_messages(&req.messages) {
             match chunk {
                 LlmReplayChunk::Message(msg) => {
@@ -151,41 +141,68 @@ impl CodexOAuthAdapter {
                 }
             }
         }
+        let user_item = Self::user_input_item(req);
+        if user_item
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|content| !content.is_empty())
+        {
+            input.push(user_item);
+        }
         input
     }
 
+    fn build_tools(req: &LlmRequest) -> Vec<Value> {
+        req.tools
+            .iter()
+            .map(|tool| {
+                json!({
+                    "type": "function",
+                    "name": tool.name.clone(),
+                    "description": tool.description.clone(),
+                    "strict": false,
+                    "parameters": tool.input_schema.clone(),
+                })
+            })
+            .collect()
+    }
+
+    fn tool_choice_value(choice: &crate::llm::types::LlmToolChoice) -> &'static str {
+        match choice {
+            crate::llm::types::LlmToolChoice::Auto => "auto",
+            crate::llm::types::LlmToolChoice::None => "none",
+            crate::llm::types::LlmToolChoice::Required => "required",
+        }
+    }
+
+    fn codex_user_agent() -> String {
+        format!(
+            "{}/{} ({}; {}) lash",
+            Self::CODEX_ORIGINATOR,
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    }
+
     fn build_request_body(req: &LlmRequest, stream: bool) -> Value {
+        let tools = Self::build_tools(req);
         let mut body = json!({
             "model": req.model,
+            "instructions": req.system_prompt,
             "input": Self::build_input(req),
+            "tools": tools,
+            "tool_choice": Self::tool_choice_value(&req.tool_choice),
+            "parallel_tool_calls": !req.tools.is_empty(),
             "stream": stream,
             "store": false,
-            "instructions": "",
+            "include": [],
         });
         if let Some(effort) = req.model_variant.as_deref() {
             body["reasoning"] = json!({"effort": effort});
         }
         if let Some(session_id) = req.session_id.as_deref() {
             body["prompt_cache_key"] = json!(session_id);
-        }
-        if !req.tools.is_empty() {
-            body["tools"] = json!(
-                req.tools
-                    .iter()
-                    .map(|tool| json!({
-                        "type": "function",
-                        "name": tool.name.clone(),
-                        "description": tool.description.clone(),
-                        "parameters": tool.input_schema.clone(),
-                    }))
-                    .collect::<Vec<_>>()
-            );
-            body["tool_choice"] = match req.tool_choice {
-                crate::llm::types::LlmToolChoice::Auto => json!("auto"),
-                crate::llm::types::LlmToolChoice::None => json!("none"),
-                crate::llm::types::LlmToolChoice::Required => json!("required"),
-            };
-            body["parallel_tool_calls"] = json!(true);
         }
         body
     }
@@ -539,29 +556,22 @@ impl LlmTransport for CodexOAuthAdapter {
         let body = Self::build_request_body(&req, stream_events.is_some());
 
         let request_body = serde_json::to_string(&body).ok();
-        let url = "https://chatgpt.com/backend-api/codex/responses".to_string();
         let mut http = self
             .client
-            .post(&url)
+            .post(Self::CODEX_RESPONSES_URL)
             .header("Authorization", format!("Bearer {}", access_token))
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
-            .header("originator", "lash")
-            .header(
-                "User-Agent",
-                format!(
-                    "lash/{} ({}; {})",
-                    env!("CARGO_PKG_VERSION"),
-                    std::env::consts::OS,
-                    std::env::consts::ARCH
-                ),
-            )
+            .header("originator", Self::CODEX_ORIGINATOR)
+            .header("User-Agent", Self::codex_user_agent())
             .json(&body);
         if let Some(session_id) = req.session_id.as_deref() {
-            http = http.header("session_id", session_id);
+            http = http
+                .header("session_id", session_id)
+                .header("x-client-request-id", session_id);
         }
         if let Some(id) = account_id {
-            http = http.header("ChatGPT-Account-Id", id);
+            http = http.header("ChatGPT-Account-ID", id);
         }
 
         let resp = send_request(
@@ -682,7 +692,10 @@ impl LlmTransport for CodexOAuthAdapter {
                     parts,
                     usage,
                     request_body,
-                    http_summary: Some(format!("HTTP POST {} (stream/fallback)", url)),
+                    http_summary: Some(format!(
+                        "HTTP POST {} (stream/fallback)",
+                        Self::CODEX_RESPONSES_URL
+                    )),
                 });
             }
             let value: Value = serde_json::from_str(&text).map_err(|e| {
@@ -711,7 +724,7 @@ impl LlmTransport for CodexOAuthAdapter {
                 parts,
                 usage,
                 request_body,
-                http_summary: Some(format!("HTTP POST {}", url)),
+                http_summary: Some(format!("HTTP POST {}", Self::CODEX_RESPONSES_URL)),
             });
         }
 
@@ -763,7 +776,7 @@ impl LlmTransport for CodexOAuthAdapter {
             parts,
             usage,
             request_body,
-            http_summary: Some(format!("HTTP POST {} (stream)", url)),
+            http_summary: Some(format!("HTTP POST {} (stream)", Self::CODEX_RESPONSES_URL)),
         })
     }
 }
@@ -871,7 +884,7 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
         let req = LlmRequest {
             model: "gpt-5.4".to_string(),
             system_prompt: "sys".to_string(),
-            user_prompt: vec![],
+            user_prompt: vec![LlmPromptPart::Text("new turn".to_string())],
             messages: vec![
                 LlmMessage {
                     role: LlmRole::User,
@@ -906,61 +919,14 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
             stream_events: None,
         };
 
-        let input = {
-            let mut input = vec![json!({
-                "role": "system",
-                "content": [{"type": "input_text", "text": req.system_prompt}],
-            })];
-            for chunk in coalesce_replay_messages(&req.messages) {
-                match chunk {
-                    LlmReplayChunk::Message(msg) => {
-                        if msg.kind == "tool_result" {
-                            input.push(json!({
-                                "type": "function_call_output",
-                                "call_id": msg.tool_call_id.unwrap_or_default(),
-                                "output": msg.content,
-                            }));
-                        } else {
-                            input.push(json!({
-                                "role": CodexOAuthAdapter::role_name(&msg.role),
-                                "content": [CodexOAuthAdapter::content_part_for_message(&req, &msg)],
-                            }));
-                        }
-                    }
-                    LlmReplayChunk::AssistantToolCalls { text, tool_calls } => {
-                        if let Some(text) = text.filter(|text| !text.is_empty()) {
-                            input.push(json!({
-                                "role": "assistant",
-                                "content": [{"type": "output_text", "text": text}],
-                            }));
-                        }
-                        input.extend(tool_calls.into_iter().map(|call| {
-                            json!({
-                                "type": "function_call",
-                                "call_id": call.call_id,
-                                "name": call.tool_name,
-                                "arguments": call.input_json,
-                            })
-                        }));
-                    }
-                    LlmReplayChunk::ToolResults { results } => {
-                        input.extend(results.into_iter().map(|msg| {
-                            json!({
-                                "type": "function_call_output",
-                                "call_id": msg.tool_call_id.unwrap_or_default(),
-                                "output": msg.content,
-                            })
-                        }));
-                    }
-                }
-            }
-            input
-        };
+        let input = CodexOAuthAdapter::build_input(&req);
 
         assert_eq!(input.len(), 4);
-        assert_eq!(input[1]["role"], "user");
-        assert_eq!(input[2]["type"], "function_call");
-        assert_eq!(input[3]["type"], "function_call_output");
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[2]["type"], "function_call_output");
+        assert_eq!(input[3]["role"], "user");
+        assert_eq!(input[3]["content"][0]["text"], "new turn");
     }
 
     #[test]
@@ -981,6 +947,67 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
         let body = CodexOAuthAdapter::build_request_body(&req, false);
         assert_eq!(body["prompt_cache_key"], "sess-123");
         assert_eq!(body["store"], false);
+        assert_eq!(body["instructions"], "sys");
+        assert_eq!(body["include"], json!([]));
+    }
+
+    #[test]
+    fn build_request_body_uses_top_level_instructions_instead_of_system_input() {
+        let req = LlmRequest {
+            model: "gpt-5.4".to_string(),
+            system_prompt: "system guidance".to_string(),
+            user_prompt: vec![LlmPromptPart::Text("hello".to_string())],
+            messages: vec![],
+            attachments: vec![],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::None,
+            model_variant: None,
+            session_id: None,
+            stream_events: None,
+        };
+
+        let body = CodexOAuthAdapter::build_request_body(&req, false);
+
+        assert_eq!(body["instructions"], "system guidance");
+        assert_eq!(body["input"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["input"][0]["role"], "user");
+        assert!(body["input"][0].get("type").is_none());
+    }
+
+    #[test]
+    fn build_request_body_emits_codex_style_function_tools() {
+        let req = LlmRequest {
+            model: "gpt-5.4".to_string(),
+            system_prompt: "sys".to_string(),
+            user_prompt: vec![LlmPromptPart::Text("hello".to_string())],
+            messages: vec![],
+            attachments: vec![],
+            tools: vec![crate::llm::types::LlmToolSpec {
+                name: "find".to_string(),
+                description: "Locate code".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"}
+                    },
+                    "required": ["query"]
+                }),
+                output_schema: serde_json::Value::Null,
+            }],
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: None,
+            stream_events: None,
+        };
+
+        let body = CodexOAuthAdapter::build_request_body(&req, true);
+
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["parallel_tool_calls"], true);
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["name"], "find");
+        assert_eq!(body["tools"][0]["strict"], false);
+        assert!(body["tools"][0].get("output_schema").is_none());
     }
 
     #[test]
