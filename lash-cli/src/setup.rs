@@ -49,7 +49,6 @@ enum SetupStep {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CredentialMode {
-    ClaudeOAuth,
     GoogleOAuth,
     OpenAiGenericKey,
 }
@@ -135,7 +134,7 @@ async fn run_setup_inner(
                         anyhow::bail!("Setup cancelled");
                     }
                     if key.code == KeyCode::Esc {
-                        app.step = SetupStep::SelectProvider { selected: 1 };
+                        app.step = SetupStep::SelectProvider { selected: 0 };
                         continue;
                     }
                     if key.code == KeyCode::Char('c') && !user_code.is_empty() {
@@ -294,41 +293,6 @@ async fn run_setup_inner(
                                     input: default_url,
                                     cursor: cursor_pos,
                                 };
-                            }
-                            CredentialMode::ClaudeOAuth => {
-                                let Some(v) = verifier.take() else {
-                                    *error =
-                                        Some("Missing auth state; press Esc and retry.".into());
-                                    continue;
-                                };
-                                match oauth::exchange_code(&val, &v).await {
-                                    Ok(tokens) => {
-                                        provider = Some(Provider::Claude {
-                                            access_token: tokens.access_token,
-                                            refresh_token: tokens.refresh_token,
-                                            expires_at: tokens.expires_at,
-                                            options: lash::provider::ProviderOptions::default(),
-                                        });
-                                        app.step = if tavily_key.is_some() {
-                                            SetupStep::Done
-                                        } else {
-                                            SetupStep::InputTavily {
-                                                input: String::new(),
-                                                cursor: 0,
-                                            }
-                                        };
-                                    }
-                                    Err(e) => {
-                                        *error = Some(format!("{}", e));
-                                        let (new_v, challenge) = oauth::generate_pkce();
-                                        let url = oauth::authorize_url(&challenge, &new_v);
-                                        persist_oauth_url(&url);
-                                        *browser_error =
-                                            open_browser(&url).err().map(|err| err.to_string());
-                                        *auth_url = Some(url);
-                                        *verifier = Some(new_v);
-                                    }
-                                }
                             }
                             CredentialMode::GoogleOAuth => {
                                 let Some(v) = verifier.take() else {
@@ -527,21 +491,6 @@ async fn run_setup_inner(
 
 async fn start_provider_flow(app: &mut SetupApp, kind: ProviderKind) {
     match kind {
-        ProviderKind::Claude => {
-            let (verifier, challenge) = oauth::generate_pkce();
-            let url = oauth::authorize_url(&challenge, &verifier);
-            persist_oauth_url(&url);
-            let browser_error = open_browser(&url).err().map(|e| e.to_string());
-            app.step = SetupStep::InputCredential {
-                input: String::new(),
-                cursor: 0,
-                error: None,
-                verifier: Some(verifier),
-                auth_url: Some(url),
-                browser_error,
-                mode: CredentialMode::ClaudeOAuth,
-            };
-        }
         ProviderKind::Codex => match oauth::codex_request_device_code().await {
             Ok(dc) => {
                 let _ = open_browser(oauth::CODEX_DEVICE_VERIFY_URL);
@@ -617,34 +566,35 @@ fn draw_setup(frame: &mut Frame, app: &SetupApp) {
 
     let logo_height = 8; // 5 logo + 1 trailing slash + 1 scribe + 1 tagline
 
-    let step_height: u16 =
-        match &app.step {
-            SetupStep::SelectProvider { .. } => 10, // blank + label + blank + 4 options + blank + help + pad
-            SetupStep::InputCredential { error, mode, .. } => {
-                match mode {
-                    CredentialMode::OpenAiGenericKey => {
-                        if error.is_some() {
-                            10
-                        } else {
-                            8
-                        }
-                    }
-                    CredentialMode::ClaudeOAuth | CredentialMode::GoogleOAuth => {
-                        if error.is_some() { 12 } else { 11 }
-                    }
+    let step_height: u16 = match &app.step {
+        SetupStep::SelectProvider { .. } => 10, // blank + label + blank + 4 options + blank + help + pad
+        SetupStep::InputCredential { error, mode, .. } => match mode {
+            CredentialMode::OpenAiGenericKey => {
+                if error.is_some() {
+                    10
+                } else {
+                    8
                 }
             }
-            SetupStep::CodexDeviceAuth {
-                error, copy_status, ..
-            } => match (error.is_some(), copy_status.is_some()) {
-                (true, true) => 11,
-                (true, false) | (false, true) => 10,
-                (false, false) => 9,
-            },
-            SetupStep::InputBaseUrl { .. } => 8,
-            SetupStep::InputTavily { .. } => 7,
-            SetupStep::Done => 4,
-        };
+            CredentialMode::GoogleOAuth => {
+                if error.is_some() {
+                    12
+                } else {
+                    11
+                }
+            }
+        },
+        SetupStep::CodexDeviceAuth {
+            error, copy_status, ..
+        } => match (error.is_some(), copy_status.is_some()) {
+            (true, true) => 11,
+            (true, false) | (false, true) => 10,
+            (false, false) => 9,
+        },
+        SetupStep::InputBaseUrl { .. } => 8,
+        SetupStep::InputTavily { .. } => 7,
+        SetupStep::Done => 4,
+    };
 
     let chunks = Layout::vertical([
         Constraint::Min(0),              // top spacer
@@ -841,35 +791,6 @@ fn draw_credential_input(
     let oauth_url_hint = oauth_url_display();
 
     match mode {
-        CredentialMode::ClaudeOAuth => {
-            lines.push(Line::from(Span::styled(
-                format!("{}Claude sign-in", pad),
-                Style::default().fg(theme::ASH_TEXT),
-            )));
-            if let Some(url) = auth_url {
-                if browser_error.is_some() {
-                    lines.push(Line::from(Span::styled(
-                        format!("{}Browser didn't open. Use manual URL.", pad),
-                        Style::default().fg(theme::ERROR),
-                    )));
-                } else {
-                    lines.push(Line::from(Span::styled(
-                        format!("{}Tried opening browser automatically.", pad),
-                        Style::default().fg(theme::ASH_TEXT),
-                    )));
-                }
-                lines.push(Line::from(Span::styled(
-                    format!("{}Paste code or callback URL.", pad),
-                    Style::default().fg(theme::ASH_TEXT),
-                )));
-                let _ = url;
-                lines.push(Line::from(Span::styled(
-                    format!("{}Manual URL: {}", pad, oauth_url_hint),
-                    Style::default().fg(theme::ASH_TEXT),
-                )));
-                lines.push(Line::from(""));
-            }
-        }
         CredentialMode::GoogleOAuth => {
             lines.push(Line::from(Span::styled(
                 format!("{}Google sign-in", pad),
@@ -914,7 +835,7 @@ fn draw_credential_input(
     // Label
     let label = match mode {
         CredentialMode::OpenAiGenericKey => "API key",
-        CredentialMode::ClaudeOAuth | CredentialMode::GoogleOAuth => "Authorization code",
+        CredentialMode::GoogleOAuth => "Authorization code",
     };
 
     // Input box

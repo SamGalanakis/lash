@@ -75,7 +75,7 @@ struct Args {
     #[arg(long, env = "TAVILY_API_KEY")]
     tavily_api_key: Option<String>,
 
-    /// Model name (defaults per provider: Claude/Codex/OpenAI-generic/Google OAuth)
+    /// Model name (defaults per provider: Codex/OpenAI-generic/Google OAuth)
     #[arg(long)]
     model: Option<String>,
 
@@ -264,11 +264,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Resolve config before TUI init (may need interactive terminal)
     let existing_config = LashConfig::load();
-    if args.info
-        && existing_config.is_none()
-        && args.api_key.is_none()
-        && std::env::var("ANTHROPIC_API_KEY").is_err()
-    {
+    if args.info && existing_config.is_none() && args.api_key.is_none() {
         let execution_mode =
             ensure_supported_execution_mode(match args.execution_mode.as_deref() {
                 Some(raw) => parse_execution_mode(raw).map_err(anyhow::Error::msg)?,
@@ -289,21 +285,6 @@ async fn main() -> anyhow::Result<()> {
             let provider = Provider::OpenAiGeneric {
                 api_key: key.clone(),
                 base_url: args.base_url.clone(),
-                options: lash::provider::ProviderOptions::default(),
-            };
-            let mut cfg = existing_config
-                .clone()
-                .unwrap_or_else(|| LashConfig::new(provider.clone()));
-            cfg.upsert_provider(provider.clone());
-            let _ = cfg.set_active_provider_kind(provider.kind());
-            cfg.set_tavily_api_key(args.tavily_api_key.clone());
-            cfg
-        } else if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-            // ANTHROPIC_API_KEY env var → activate direct Claude bearer token.
-            let provider = Provider::Claude {
-                access_token: key,
-                refresh_token: String::new(),
-                expires_at: u64::MAX,
                 options: lash::provider::ProviderOptions::default(),
             };
             let mut cfg = existing_config

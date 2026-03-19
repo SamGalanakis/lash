@@ -3413,13 +3413,14 @@ mod tests {
 
         runtime
             .update_session_config(
-                Some(crate::Provider::Claude {
+                Some(crate::Provider::Codex {
                     access_token: "tok".into(),
                     refresh_token: "ref".into(),
                     expires_at: u64::MAX,
+                    account_id: None,
                     options: crate::provider::ProviderOptions::default(),
                 }),
-                Some("claude-opus-4-6".to_string()),
+                Some("gpt-5.4".to_string()),
                 Some(None),
                 Some(123_456),
                 None,
@@ -3435,9 +3436,9 @@ mod tests {
         );
         assert_eq!(
             current.provider.kind(),
-            crate::provider::ProviderKind::Claude
+            crate::provider::ProviderKind::Codex
         );
-        assert_eq!(current.model, "claude-opus-4-6");
+        assert_eq!(current.model, "gpt-5.4");
         assert_ne!(previous.max_context_tokens, current.max_context_tokens);
     }
 
@@ -4435,28 +4436,6 @@ mod tests {
         assert_eq!(turn.token_usage.input_tokens, 12);
         assert_eq!(turn.token_usage.output_tokens, 4);
         assert_eq!(turn.token_usage.cached_input_tokens, 1);
-    }
-
-    #[test]
-    fn normalize_prompt_usage_counts_cached_tokens_for_claude() {
-        let usage = TokenUsage {
-            input_tokens: 80,
-            output_tokens: 0,
-            cached_input_tokens: 20,
-            reasoning_tokens: 0,
-        };
-        let prompt_usage = normalize_prompt_usage(
-            &Provider::Claude {
-                access_token: "token".into(),
-                refresh_token: "refresh".into(),
-                expires_at: 0,
-                options: crate::provider::ProviderOptions::default(),
-            },
-            &usage,
-        )
-        .expect("prompt usage");
-        assert_eq!(prompt_usage.prompt_context_tokens, 100);
-        assert_eq!(prompt_usage.context_budget_tokens, 100);
     }
 
     #[test]

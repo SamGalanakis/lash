@@ -18,8 +18,6 @@ fn default_base_url() -> String {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ProviderKind {
-    #[serde(rename = "claude")]
-    Claude,
     #[serde(rename = "codex")]
     Codex,
     #[serde(rename = "google_oauth")]
@@ -29,8 +27,7 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
-    pub const ALL: [ProviderKind; 4] = [
-        ProviderKind::Claude,
+    pub const ALL: [ProviderKind; 3] = [
         ProviderKind::Codex,
         ProviderKind::GoogleOAuth,
         ProviderKind::OpenAiGeneric,
@@ -38,7 +35,6 @@ impl ProviderKind {
 
     pub fn id(self) -> &'static str {
         match self {
-            ProviderKind::Claude => "claude",
             ProviderKind::Codex => "codex",
             ProviderKind::GoogleOAuth => "google_oauth",
             ProviderKind::OpenAiGeneric => "openai-generic",
@@ -47,7 +43,6 @@ impl ProviderKind {
 
     pub fn cli_label(self) -> &'static str {
         match self {
-            ProviderKind::Claude => "Claude OAuth",
             ProviderKind::Codex => "OpenAI Codex OAuth",
             ProviderKind::GoogleOAuth => "Google OAuth (Gemini)",
             ProviderKind::OpenAiGeneric => "OpenAI-generic (API key)",
@@ -56,7 +51,6 @@ impl ProviderKind {
 
     pub fn setup_name(self) -> &'static str {
         match self {
-            ProviderKind::Claude => "Claude",
             ProviderKind::Codex => "Codex",
             ProviderKind::GoogleOAuth => "Google OAuth",
             ProviderKind::OpenAiGeneric => "OpenAI-generic",
@@ -65,7 +59,6 @@ impl ProviderKind {
 
     pub fn setup_description(self) -> &'static str {
         match self {
-            ProviderKind::Claude => "Max/Pro subscription",
             ProviderKind::Codex => "ChatGPT Plus/Pro/Team",
             ProviderKind::GoogleOAuth => "Gemini via Google account",
             ProviderKind::OpenAiGeneric => "API key, defaults to OpenRouter base URL",
@@ -231,13 +224,6 @@ pub enum Provider {
         #[serde(default, skip_serializing_if = "ProviderOptions::is_default")]
         options: ProviderOptions,
     },
-    Claude {
-        access_token: String,
-        refresh_token: String,
-        expires_at: u64,
-        #[serde(default, skip_serializing_if = "ProviderOptions::is_default")]
-        options: ProviderOptions,
-    },
     Codex {
         access_token: String,
         refresh_token: String,
@@ -261,7 +247,6 @@ impl Provider {
     pub fn kind(&self) -> ProviderKind {
         match self {
             Provider::OpenAiGeneric { .. } => ProviderKind::OpenAiGeneric,
-            Provider::Claude { .. } => ProviderKind::Claude,
             Provider::Codex { .. } => ProviderKind::Codex,
             Provider::GoogleOAuth { .. } => ProviderKind::GoogleOAuth,
         }
@@ -302,7 +287,7 @@ impl Provider {
             .map(|m| (m.model, m.variant))
     }
 
-    /// Resolve model name: strip "anthropic/" prefix for direct Claude API.
+    /// Resolve a configured model name against provider-specific expectations.
     pub fn resolve_model(&self, model: &str) -> String {
         adapter_for(self).normalize_model(model)
     }
@@ -313,13 +298,12 @@ impl Provider {
     }
 
     pub fn input_usage_excludes_cached_tokens(&self) -> bool {
-        matches!(self, Provider::Claude { .. })
+        false
     }
 
     pub fn options(&self) -> &ProviderOptions {
         match self {
             Provider::OpenAiGeneric { options, .. }
-            | Provider::Claude { options, .. }
             | Provider::Codex { options, .. }
             | Provider::GoogleOAuth { options, .. } => options,
         }
@@ -328,7 +312,6 @@ impl Provider {
     pub fn options_mut(&mut self) -> &mut ProviderOptions {
         match self {
             Provider::OpenAiGeneric { options, .. }
-            | Provider::Claude { options, .. }
             | Provider::Codex { options, .. }
             | Provider::GoogleOAuth { options, .. } => options,
         }
@@ -396,20 +379,6 @@ impl Provider {
             .as_secs();
 
         match self {
-            Provider::Claude {
-                access_token,
-                refresh_token,
-                expires_at,
-                ..
-            } => {
-                if now + 300 >= *expires_at {
-                    let tokens = oauth::refresh_tokens(refresh_token).await?;
-                    *access_token = tokens.access_token;
-                    *refresh_token = tokens.refresh_token;
-                    *expires_at = tokens.expires_at;
-                    return Ok(true);
-                }
-            }
             Provider::Codex {
                 access_token,
                 refresh_token,
@@ -610,15 +579,6 @@ mod tests {
         }
     }
 
-    fn claude() -> Provider {
-        Provider::Claude {
-            access_token: "tok".into(),
-            refresh_token: "ref".into(),
-            expires_at: u64::MAX,
-            options: ProviderOptions::default(),
-        }
-    }
-
     fn codex() -> Provider {
         Provider::Codex {
             access_token: "tok".into(),
@@ -645,7 +605,6 @@ mod tests {
             openai_generic().default_model(),
             "anthropic/claude-sonnet-4.6"
         );
-        assert_eq!(claude().default_model(), "claude-opus-4-6");
         assert_eq!(codex().default_model(), "gpt-5.4");
         assert_eq!(google_oauth().default_model(), "gemini-3.1-pro-preview");
     }
@@ -662,37 +621,12 @@ mod tests {
         );
         assert_eq!(codex().default_model_variant("gpt-5.4"), Some("high"));
         assert_eq!(
-            claude().supported_variants("claude-sonnet-4-6"),
-            &["low", "medium", "high", "max"]
-        );
-        assert_eq!(
-            claude().default_model_variant("claude-sonnet-4-6"),
-            Some("high")
-        );
-        assert_eq!(
             google_oauth().supported_variants("gemini-3.1-pro-preview"),
             &["low", "medium", "high"]
         );
         assert_eq!(
             openai_generic().supported_variants("anthropic/claude-sonnet-4.6"),
             &["none", "minimal", "low", "medium", "high", "xhigh"]
-        );
-    }
-
-    #[test]
-    fn default_agent_model_claude() {
-        let p = claude();
-        assert_eq!(
-            p.default_agent_model("low"),
-            Some(("claude-haiku-4-5", Some("low")))
-        );
-        assert_eq!(
-            p.default_agent_model("medium"),
-            Some(("claude-sonnet-4-6", Some("medium")))
-        );
-        assert_eq!(
-            p.default_agent_model("high"),
-            Some(("claude-sonnet-4-6", Some("high")))
         );
     }
 
@@ -737,20 +671,9 @@ mod tests {
 
     #[test]
     fn default_agent_model_unknown_tier() {
-        assert!(claude().default_agent_model("unknown").is_none());
         assert!(openai_generic().default_agent_model("").is_none());
         assert!(codex().default_agent_model("extreme").is_none());
         assert!(google_oauth().default_agent_model("extreme").is_none());
-    }
-
-    #[test]
-    fn resolve_model_claude_strips_prefix() {
-        let p = claude();
-        assert_eq!(
-            p.resolve_model("anthropic/claude-sonnet-4-6"),
-            "claude-sonnet-4-6"
-        );
-        assert_eq!(p.resolve_model("claude-sonnet-4-6"), "claude-sonnet-4-6");
     }
 
     #[test]
@@ -774,19 +697,6 @@ mod tests {
         assert_eq!(
             p.resolve_model("gemini-3-pro-preview"),
             "gemini-3-pro-preview"
-        );
-    }
-
-    #[test]
-    fn context_lookup_model_claude_adds_prefix() {
-        let p = claude();
-        assert_eq!(
-            p.context_lookup_model("claude-opus-4-6"),
-            "anthropic/claude-opus-4-6"
-        );
-        assert_eq!(
-            p.context_lookup_model("anthropic/claude-opus-4-6"),
-            "anthropic/claude-opus-4-6"
         );
     }
 
@@ -975,22 +885,22 @@ mod tests {
     #[test]
     fn switches_and_updates_saved_providers() {
         let mut cfg = LashConfig::new(codex());
-        cfg.upsert_provider(claude());
-        cfg.set_active_provider_kind(ProviderKind::Claude)
+        cfg.upsert_provider(google_oauth());
+        cfg.set_active_provider_kind(ProviderKind::GoogleOAuth)
             .expect("switch provider");
 
-        assert_eq!(cfg.active_provider().kind(), ProviderKind::Claude);
+        assert_eq!(cfg.active_provider().kind(), ProviderKind::GoogleOAuth);
         assert!(cfg.has_provider(ProviderKind::Codex));
-        assert!(cfg.has_provider(ProviderKind::Claude));
+        assert!(cfg.has_provider(ProviderKind::GoogleOAuth));
         assert_eq!(cfg.provider_count(), 2);
     }
 
     #[test]
     fn removing_active_provider_promotes_another_saved_provider() {
         let mut cfg = LashConfig::new(codex());
-        cfg.upsert_provider(claude());
+        cfg.upsert_provider(google_oauth());
         let removed = cfg.remove_provider(ProviderKind::Codex).expect("removed");
         assert_eq!(removed.kind(), ProviderKind::Codex);
-        assert_eq!(cfg.active_provider().kind(), ProviderKind::Claude);
+        assert_eq!(cfg.active_provider().kind(), ProviderKind::GoogleOAuth);
     }
 }

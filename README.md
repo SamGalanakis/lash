@@ -31,6 +31,12 @@ First run opens provider setup if needed:
 lash
 ```
 
+Interactive setup currently supports:
+
+- `codex`: OpenAI Codex OAuth
+- `google_oauth`: Google OAuth for Gemini
+- `openai-generic`: API key auth, defaulting to the OpenRouter base URL
+
 Autonomous single-shot usage:
 
 ```bash
@@ -210,7 +216,7 @@ Notes:
 - `--build-mode docker-bookworm` is the default for lash benchmark builds so the binary matches the benchmark container ABI. Use `host` only when you intentionally want to benchmark against the host libc.
 - OpenCode benchmark runs require an explicit `--model provider/model`.
 - OpenCode benchmark runs automatically copy local `opencode auth login` credentials from `~/.local/share/opencode/auth.json` into the Harbor container when present.
-- OpenCode can still fall back to provider env vars such as `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`.
+- OpenCode can still fall back to provider env vars such as `OPENROUTER_API_KEY` or `OPENAI_API_KEY`.
 
 Each run exports a structured snapshot to `.benchmarks/terminalbench/` by default, including:
 
@@ -294,6 +300,12 @@ Relevant runtime settings include:
 - `runtime.context_strategy`
 - `runtime.low_tier_subagent_execution_mode`
   `standard` by default for `agent_call` low-tier child sessions; set to `repl` only if you want low-tier delegates to execute via `lashlang`
+
+Supported provider ids:
+
+- `codex`
+- `google_oauth`
+- `openai-generic`
 
 Supported context strategies:
 

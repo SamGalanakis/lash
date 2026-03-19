@@ -3,7 +3,6 @@ use crate::provider::{OPENAI_GENERIC_DEFAULT_BASE_URL, Provider};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VariantRequestConfig {
     ReasoningEffort(String),
-    AnthropicThinkingBudget { budget_tokens: u32 },
     GoogleThinkingLevel { level: String },
     GoogleThinkingBudget { budget_tokens: i32 },
 }
@@ -12,7 +11,6 @@ const OPENAI_GPT5_VARIANTS: &[&str] = &["minimal", "low", "medium", "high"];
 const OPENAI_GPT5_XHIGH_VARIANTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
 const CODEX_VARIANTS: &[&str] = &["low", "medium", "high"];
 const CODEX_XHIGH_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
-const CLAUDE_VARIANTS: &[&str] = &["low", "medium", "high", "max"];
 const GEMINI_31_VARIANTS: &[&str] = &["low", "medium", "high"];
 const GEMINI_3_VARIANTS: &[&str] = &["low", "high"];
 const GEMINI_25_VARIANTS: &[&str] = &["high", "max"];
@@ -52,13 +50,6 @@ pub fn supported_variants(provider: &Provider, model: &str) -> &'static [&'stati
                 &[]
             }
         }
-        Provider::Claude { .. } => {
-            if lower.contains("claude") {
-                CLAUDE_VARIANTS
-            } else {
-                &[]
-            }
-        }
         Provider::GoogleOAuth { .. } => {
             if lower.contains("gemini-2.5") {
                 GEMINI_25_VARIANTS
@@ -91,7 +82,6 @@ pub fn default_variant(provider: &Provider, model: &str) -> Option<&'static str>
     let lower = model.to_ascii_lowercase();
     match provider {
         Provider::Codex { .. } => Some("high"),
-        Provider::Claude { .. } => Some("high"),
         Provider::GoogleOAuth { .. } => Some("high"),
         Provider::OpenAiGeneric { .. } => {
             if lower.contains("gpt") {
@@ -135,16 +125,6 @@ pub fn request_config(
 
     match provider {
         Provider::Codex { .. } => Some(VariantRequestConfig::ReasoningEffort(variant.to_string())),
-        Provider::Claude { .. } => {
-            let budget_tokens = match variant {
-                "low" => 4_000,
-                "medium" => 8_000,
-                "high" => 16_000,
-                "max" => 31_999,
-                _ => return None,
-            };
-            Some(VariantRequestConfig::AnthropicThinkingBudget { budget_tokens })
-        }
         Provider::GoogleOAuth { .. } => {
             let lower = model.to_ascii_lowercase();
             if lower.contains("gemini-2.5") {
@@ -184,15 +164,6 @@ mod tests {
         }
     }
 
-    fn claude() -> Provider {
-        Provider::Claude {
-            access_token: "tok".into(),
-            refresh_token: "ref".into(),
-            expires_at: u64::MAX,
-            options: crate::provider::ProviderOptions::default(),
-        }
-    }
-
     fn google() -> Provider {
         Provider::GoogleOAuth {
             access_token: "tok".into(),
@@ -222,20 +193,6 @@ mod tests {
             CODEX_XHIGH_VARIANTS
         );
         assert_eq!(default_variant(&codex(), "gpt-5.4"), Some("high"));
-    }
-
-    #[test]
-    fn claude_uses_named_budget_presets() {
-        assert_eq!(
-            supported_variants(&claude(), "claude-sonnet-4-6"),
-            CLAUDE_VARIANTS
-        );
-        assert_eq!(
-            request_config(&claude(), "claude-sonnet-4-6", "high"),
-            Some(VariantRequestConfig::AnthropicThinkingBudget {
-                budget_tokens: 16_000
-            })
-        );
     }
 
     #[test]

@@ -1,12 +1,6 @@
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
-const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
-const AUTH_URL: &str = "https://claude.ai/oauth/authorize";
-const REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
-const SCOPES: &str = "org:create_api_key user:profile user:inference";
-
 // ── Google OAuth (Gemini API via OAuth bearer) ────────────────────
 
 const GOOGLE_CLIENT_ID_ENV: &str = "LASH_GOOGLE_CLIENT_ID";
@@ -53,20 +47,6 @@ pub fn generate_pkce() -> (String, String) {
     (verifier, challenge)
 }
 
-/// Build the authorization URL for the browser.
-/// The `verifier` is embedded in the `state` param to keep the callback self-contained.
-pub fn authorize_url(challenge: &str, verifier: &str) -> String {
-    format!(
-        "{}?code=true&client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}",
-        AUTH_URL,
-        CLIENT_ID,
-        urlencoded(REDIRECT_URI),
-        urlencoded(SCOPES),
-        challenge,
-        verifier,
-    )
-}
-
 /// Build the Google OAuth authorization URL for manual code entry.
 pub fn google_authorize_url(challenge: &str) -> Result<String, OAuthError> {
     let state = uuid::Uuid::new_v4().to_string();
@@ -81,82 +61,6 @@ pub fn google_authorize_url(challenge: &str) -> Result<String, OAuthError> {
         challenge,
         state,
     ))
-}
-
-/// Exchange an authorization code for tokens.
-/// The pasted code may contain `code#state` — we split on `#`.
-pub async fn exchange_code(code: &str, verifier: &str) -> Result<OAuthTokens, OAuthError> {
-    let parts: Vec<&str> = code.splitn(2, '#').collect();
-    let auth_code = parts[0];
-    let state = parts.get(1).copied().unwrap_or("");
-
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(TOKEN_URL)
-        .json(&serde_json::json!({
-            "grant_type": "authorization_code",
-            "client_id": CLIENT_ID,
-            "code": auth_code,
-            "state": state,
-            "redirect_uri": REDIRECT_URI,
-            "code_verifier": verifier,
-        }))
-        .send()
-        .await?;
-
-    let status = resp.status();
-    let body: serde_json::Value = resp.json().await?;
-
-    if !status.is_success() {
-        let err = body["error_description"]
-            .as_str()
-            .or(body["error"].as_str())
-            .unwrap_or("unknown error");
-        return Err(OAuthError::TokenExchange(err.to_string()));
-    }
-
-    parse_token_response(&body)
-}
-
-/// Refresh an expired access token.
-pub async fn refresh_tokens(refresh: &str) -> Result<OAuthTokens, OAuthError> {
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(TOKEN_URL)
-        .json(&serde_json::json!({
-            "grant_type": "refresh_token",
-            "client_id": CLIENT_ID,
-            "refresh_token": refresh,
-        }))
-        .send()
-        .await?;
-
-    let status = resp.status();
-    let body: serde_json::Value = resp.json().await?;
-
-    if !status.is_success() {
-        let err = body["error_description"]
-            .as_str()
-            .or(body["error"].as_str())
-            .unwrap_or("unknown error");
-        return Err(OAuthError::TokenExchange(err.to_string()));
-    }
-
-    // Refresh response may not include a new refresh_token; keep the old one.
-    let now = now_secs();
-    let expires_in = body["expires_in"].as_u64().unwrap_or(3600);
-
-    Ok(OAuthTokens {
-        access_token: body["access_token"]
-            .as_str()
-            .ok_or_else(|| OAuthError::TokenExchange("missing access_token".into()))?
-            .to_string(),
-        refresh_token: body["refresh_token"]
-            .as_str()
-            .unwrap_or(refresh)
-            .to_string(),
-        expires_at: now + expires_in,
-    })
 }
 
 /// Exchange a Google OAuth authorization code for tokens.
