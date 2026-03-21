@@ -19,6 +19,7 @@ use crate::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, 
 use crate::plugin::{
     CheckpointHookContext, PluginMessage, PrepareTurnRequest, SessionConfigChangedContext,
     ToolResultProjectionContext, ToolResultProjectionHook, emit_plugin_surface_events,
+    plugin_surface_event_renders_visible_output,
 };
 use crate::provider::Provider;
 use crate::sansio::{Effect, LlmCallError, Response, TurnMachine, TurnMachineConfig};
@@ -202,6 +203,8 @@ pub struct AssembledTurn {
     pub state: AgentStateEnvelope,
     pub status: TurnStatus,
     pub assistant_output: AssistantOutput,
+    #[serde(default)]
+    pub has_plugin_visible_output: bool,
     pub done_reason: DoneReason,
     pub execution: ExecutionSummary,
     #[serde(default)]
@@ -341,6 +344,7 @@ struct TurnAssembler {
     issues: Vec<TurnIssue>,
     saw_done: bool,
     saw_tool_failure: bool,
+    has_plugin_visible_output: bool,
 }
 
 impl TurnAssembler {
@@ -401,6 +405,11 @@ impl TurnAssembler {
             }
             AgentEvent::Done => {
                 self.saw_done = true;
+            }
+            AgentEvent::PluginEvent { event, .. } => {
+                if plugin_surface_event_renders_visible_output(event) {
+                    self.has_plugin_visible_output = true;
+                }
             }
             _ => {}
         }
@@ -463,6 +472,7 @@ impl TurnAssembler {
                 raw_text: raw_output,
                 state: output_state,
             },
+            has_plugin_visible_output: self.has_plugin_visible_output,
             done_reason,
             token_usage: self.token_usage,
             tool_calls: self.tool_calls,
@@ -3947,6 +3957,7 @@ mod tests {
         assert_eq!(out.assistant_output.safe_text, "final");
         assert_eq!(out.assistant_output.raw_text, "final");
         assert_eq!(out.assistant_output.state, OutputState::Usable);
+        assert!(!out.has_plugin_visible_output);
     }
 
     #[test]
@@ -4021,6 +4032,29 @@ mod tests {
         );
         assert_eq!(out.status, TurnStatus::Completed);
         assert_eq!(out.done_reason, DoneReason::MaxTurns);
+    }
+
+    #[test]
+    fn assembler_tracks_plugin_panel_output() {
+        let mut assembler = TurnAssembler::default();
+        assembler.push(&AgentEvent::PluginEvent {
+            plugin_id: "plan_mode".to_string(),
+            event: crate::PluginSurfaceEvent::PanelUpsert {
+                key: "proposed_plan:1".to_string(),
+                title: "PROPOSED PLAN".to_string(),
+                content: "1. Inspect\n2. Patch".to_string(),
+            },
+        });
+        assembler.push(&AgentEvent::Done);
+        let out = assembler.finish(
+            default_state(),
+            false,
+            None,
+            &SanitizerPolicy::default(),
+            &TerminationPolicy::default(),
+        );
+        assert_eq!(out.status, TurnStatus::Completed);
+        assert!(out.has_plugin_visible_output);
     }
 
     #[test]

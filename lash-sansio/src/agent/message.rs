@@ -313,9 +313,6 @@ fn render_structured_prompt(msgs: &[Message]) -> RenderedPrompt {
                 }
                 PartKind::ToolResult => {
                     let rendered = part.render();
-                    if rendered.trim().is_empty() {
-                        continue;
-                    }
                     messages.push(LlmMessage {
                         role: llm_role_for_message(msg.role),
                         content: rendered,
@@ -530,6 +527,45 @@ mod tests {
         assert_eq!(rendered.messages[2].image_idx, 3);
         assert_eq!(rendered.messages[3].kind, "tool_call");
         assert_eq!(rendered.messages[4].kind, "tool_result");
+    }
+
+    #[test]
+    fn render_structured_prompt_preserves_empty_tool_results() {
+        let msgs = vec![
+            Message {
+                id: "m0".to_string(),
+                role: MessageRole::Assistant,
+                parts: vec![Part {
+                    id: "m0.p0".to_string(),
+                    kind: PartKind::ToolCall,
+                    content: r#"{"question":"Pick one"}"#.to_string(),
+                    tool_call_id: Some("ask_1".to_string()),
+                    tool_name: Some("ask".to_string()),
+                    prune_state: PruneState::Intact,
+                }],
+                origin: None,
+            },
+            Message {
+                id: "m1".to_string(),
+                role: MessageRole::User,
+                parts: vec![Part {
+                    id: "m1.p0".to_string(),
+                    kind: PartKind::ToolResult,
+                    content: String::new(),
+                    tool_call_id: Some("ask_1".to_string()),
+                    tool_name: Some("ask".to_string()),
+                    prune_state: PruneState::Intact,
+                }],
+                origin: None,
+            },
+        ];
+
+        let rendered = render_structured_prompt(&msgs);
+        assert_eq!(rendered.messages.len(), 2);
+        assert_eq!(rendered.messages[0].kind, "tool_call");
+        assert_eq!(rendered.messages[1].kind, "tool_result");
+        assert_eq!(rendered.messages[1].tool_call_id.as_deref(), Some("ask_1"));
+        assert!(rendered.messages[1].content.is_empty());
     }
 
     #[test]

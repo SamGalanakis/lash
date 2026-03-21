@@ -125,6 +125,7 @@ fn empty_turn(session_id: &str) -> AssembledTurn {
             raw_text: String::new(),
             state: OutputState::Usable,
         },
+        has_plugin_visible_output: false,
         done_reason: DoneReason::ModelStop,
         execution: crate::ExecutionSummary {
             mode: ExecutionMode::Standard,
@@ -734,4 +735,60 @@ async fn plan_mode_plugin_suppresses_proposed_plan_tags_and_emits_panel_events()
         .expect("response");
     assert_eq!(response.len(), 1);
     assert_eq!(response[0].value.response.full_text, "Start\n\nDone.");
+}
+
+#[tokio::test]
+async fn plan_mode_plugin_preserves_plan_only_output_as_panel_event() {
+    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::new(
+        PlanModePluginConfig::default(),
+    ))]);
+    let session = host.build_standard_session("root", None).expect("session");
+    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
+
+    session
+        .invoke_external(
+            "plan_mode.enable",
+            json!({}),
+            None,
+            true,
+            Arc::clone(&manager),
+        )
+        .await
+        .expect("enable");
+    session
+        .before_turn(TurnHookContext {
+            session_id: "root".to_string(),
+            state: AgentStateEnvelope::default(),
+            host: Arc::clone(&manager),
+        })
+        .await
+        .expect("before_turn");
+
+    let response = session
+        .transform_assistant_response(
+            "root",
+            crate::llm::types::LlmResponse {
+                full_text: "<proposed_plan>\n- Step one\n- Step two\n</proposed_plan>".into(),
+                deltas: Vec::new(),
+                parts: vec![crate::llm::types::LlmOutputPart::Text {
+                    text: "<proposed_plan>\n- Step one\n- Step two\n</proposed_plan>".into(),
+                }],
+                usage: crate::llm::types::LlmUsage::default(),
+                request_body: None,
+                http_summary: None,
+            },
+            manager,
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.len(), 1);
+    assert_eq!(response[0].value.response.full_text, "");
+    assert!(response[0].value.events.iter().any(|event| matches!(
+        event,
+        crate::plugin::PluginSurfaceEvent::PanelUpsert { title, content, .. }
+            if title == "PROPOSED PLAN"
+                && content.contains("Step one")
+                && content.contains("Step two")
+    )));
 }

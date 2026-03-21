@@ -106,6 +106,7 @@ pub use plugin::{
     SnapshotReader, SnapshotWriter, ToolResultProjectionContext, ToolResultProjectionHook,
     ToolResultProjectionMode, ToolResultProjectionPluginConfig, ToolResultProjector,
     ToolSurfaceContribution, TurnHookContext, TurnResultHookContext,
+    plugin_surface_event_renders_visible_output,
 };
 #[cfg(feature = "sqlite-store")]
 pub use plugin::{

@@ -17,7 +17,7 @@ mod theme;
 mod ui;
 mod util;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,6 +48,13 @@ const LONG_VERSION: &str = concat!(
     "lash-sansio ",
     env!("CARGO_PKG_VERSION")
 );
+
+fn turn_has_visible_output(turn: &AssembledTurn) -> bool {
+    !turn.assistant_output.safe_text.trim().is_empty()
+        || !turn.code_outputs.is_empty()
+        || !turn.errors.is_empty()
+        || turn.has_plugin_visible_output
+}
 
 fn autonomous_prompt_overrides() -> Vec<PromptSectionOverride> {
     vec![
@@ -676,6 +683,7 @@ struct AutonomousRenderer {
     streamed_text: bool,
     wrote_stdout: bool,
     stdout_text: String,
+    plugin_panels: BTreeMap<String, (String, String)>,
 }
 
 impl AutonomousRenderer {
@@ -684,6 +692,7 @@ impl AutonomousRenderer {
             streamed_text: false,
             wrote_stdout: false,
             stdout_text: String::new(),
+            plugin_panels: BTreeMap::new(),
         }
     }
 
@@ -792,11 +801,58 @@ impl AutonomousRenderer {
             AgentEvent::Prompt { response_tx, .. } => {
                 let _ = response_tx.send(String::new());
             }
+            AgentEvent::PluginEvent { plugin_id, event } => match event {
+                PluginSurfaceEvent::PanelUpsert {
+                    key,
+                    title,
+                    content,
+                } => {
+                    self.plugin_panels.insert(
+                        plugin_surface::surface_key(&plugin_id, &key),
+                        (title, content),
+                    );
+                }
+                PluginSurfaceEvent::PanelAppend { key, content } => {
+                    if !content.is_empty()
+                        && let Some((_, existing)) = self
+                            .plugin_panels
+                            .get_mut(&plugin_surface::surface_key(&plugin_id, &key))
+                    {
+                        existing.push_str(&content);
+                    }
+                }
+                PluginSurfaceEvent::PanelClear { key } => {
+                    self.plugin_panels
+                        .remove(&plugin_surface::surface_key(&plugin_id, &key));
+                }
+                PluginSurfaceEvent::ModeIndicatorUpsert { .. }
+                | PluginSurfaceEvent::ModeIndicatorClear { .. }
+                | PluginSurfaceEvent::Custom { .. } => {}
+            },
             AgentEvent::Done
             | AgentEvent::TokenUsage { .. }
-            | AgentEvent::PluginEvent { .. }
             | AgentEvent::InjectedMessagesCommitted { .. }
             | AgentEvent::LlmResponse { .. } => {}
+        }
+    }
+
+    fn rendered_plugin_output(&self) -> Option<String> {
+        let sections = self
+            .plugin_panels
+            .values()
+            .map(|(title, content)| {
+                let body = content.trim();
+                if body.is_empty() {
+                    title.clone()
+                } else {
+                    format!("{title}\n{body}")
+                }
+            })
+            .collect::<Vec<_>>();
+        if sections.is_empty() {
+            None
+        } else {
+            Some(sections.join("\n\n"))
         }
     }
 
@@ -887,6 +943,10 @@ async fn run_autonomous(
             persist_autonomous_runtime_state(&mut runtime, &persistence, turn.state.clone()).await;
             if !turn.assistant_output.safe_text.is_empty() {
                 renderer.finish_output(&turn.assistant_output.safe_text);
+            } else if turn.has_plugin_visible_output {
+                if let Some(rendered) = renderer.rendered_plugin_output() {
+                    renderer.finish_output(&rendered);
+                }
             } else {
                 let raw = turn.assistant_output.raw_text.trim();
                 if raw.is_empty() {
@@ -1688,18 +1748,17 @@ async fn run_app(
                         app.dirty = true;
                         continue;
                     }
+                    let no_visible_output = matches!(done.result.status, TurnStatus::Completed)
+                        && !turn_has_visible_output(&done.result);
                     let mut state = done.result.state;
                     tracing::info!(
                         iteration = state.iteration,
                         status = ?done.result.status,
                         reason = ?done.result.done_reason,
                         assistant_chars = done.result.assistant_output.safe_text.len(),
+                        plugin_visible_output = done.result.has_plugin_visible_output,
                         "runtime turn completed"
                     );
-                    let no_visible_output = matches!(done.result.status, TurnStatus::Completed)
-                        && done.result.assistant_output.safe_text.trim().is_empty()
-                        && done.result.code_outputs.is_empty()
-                        && done.result.errors.is_empty();
                     if no_visible_output {
                         let raw = done.result.assistant_output.raw_text.trim();
                         if raw.is_empty() {
@@ -2102,23 +2161,22 @@ async fn run_app(
 
                 // ── Prompt (ask dialog) key handling ──
                 if app.has_prompt() {
+                    let editing_text = app.is_prompt_editing_extra() || app.is_prompt_freeform();
                     match key.code {
-                        KeyCode::Up => app.prompt_up(),
-                        KeyCode::Down => app.prompt_down(),
+                        KeyCode::Up if !editing_text => app.prompt_up(),
+                        KeyCode::Down if !editing_text => app.prompt_down(),
+                        KeyCode::Tab => app.prompt_toggle_extra(),
+                        KeyCode::BackTab if editing_text => app.prompt_insert_char('\n'),
                         KeyCode::BackTab => app.prompt_toggle_extra(),
                         KeyCode::Enter => {
                             if let Some(response) = app.take_prompt_response() {
                                 logger.log_user_input(&response);
                             }
                         }
-                        KeyCode::Char(c)
-                            if app.is_prompt_editing_extra() || app.is_prompt_freeform() =>
-                        {
+                        KeyCode::Char(c) if editing_text => {
                             app.prompt_insert_char(c);
                         }
-                        KeyCode::Backspace
-                            if app.is_prompt_editing_extra() || app.is_prompt_freeform() =>
-                        {
+                        KeyCode::Backspace if editing_text => {
                             app.prompt_backspace();
                         }
                         _ => {}
@@ -2995,7 +3053,10 @@ async fn run_app(
                                         }
                                     } else {
                                         // No arg — open session picker
-                                        let mut sessions = session_log::list_sessions();
+                                        const SESSION_PICKER_LIMIT: usize = 50;
+                                        let mut sessions = session_log::list_recent_sessions(
+                                            SESSION_PICKER_LIMIT + 1,
+                                        );
                                         sessions.retain(|s| s.session_id != logger.session_id);
                                         if sessions.is_empty() {
                                             app.blocks.push(DisplayBlock::SystemMessage(
@@ -3004,7 +3065,7 @@ async fn run_app(
                                             app.invalidate_height_cache();
                                             app.scroll_to_bottom();
                                         } else {
-                                            sessions.truncate(50);
+                                            sessions.truncate(SESSION_PICKER_LIMIT);
                                             app.session_picker = sessions;
                                             app.session_picker_idx = 0;
                                         }
@@ -3646,6 +3707,7 @@ fn send_user_message(
                     raw_text: String::new(),
                     state: OutputState::EmptyOutput,
                 },
+                has_plugin_visible_output: false,
                 done_reason: DoneReason::RuntimeError,
                 execution: ExecutionSummary {
                     mode: rt.export_state().policy.execution_mode,
@@ -3886,5 +3948,49 @@ mod tests {
             renderer.stdout_text,
             "Inspected files.\nCompleted successfully."
         );
+    }
+
+    #[test]
+    fn autonomous_renderer_collects_plugin_panel_output() {
+        let mut renderer = AutonomousRenderer::new();
+        renderer.handle(AgentEvent::PluginEvent {
+            plugin_id: "plan_mode".to_string(),
+            event: PluginSurfaceEvent::PanelUpsert {
+                key: "proposed_plan:1".to_string(),
+                title: "PROPOSED PLAN".to_string(),
+                content: "1. Inspect\n2. Patch".to_string(),
+            },
+        });
+
+        assert_eq!(
+            renderer.rendered_plugin_output().as_deref(),
+            Some("PROPOSED PLAN\n1. Inspect\n2. Patch")
+        );
+    }
+
+    #[test]
+    fn turn_has_visible_output_accepts_plugin_rendered_turns() {
+        let turn = AssembledTurn {
+            state: AgentStateEnvelope::default(),
+            status: TurnStatus::Completed,
+            assistant_output: AssistantOutput {
+                safe_text: String::new(),
+                raw_text: "<proposed_plan>\n1. Inspect\n</proposed_plan>".to_string(),
+                state: OutputState::Sanitized,
+            },
+            has_plugin_visible_output: true,
+            done_reason: DoneReason::ModelStop,
+            execution: ExecutionSummary {
+                mode: ExecutionMode::Standard,
+                had_tool_calls: false,
+                had_code_execution: false,
+            },
+            token_usage: TokenUsage::default(),
+            tool_calls: Vec::new(),
+            code_outputs: Vec::new(),
+            errors: Vec::new(),
+        };
+
+        assert!(turn_has_visible_output(&turn));
     }
 }

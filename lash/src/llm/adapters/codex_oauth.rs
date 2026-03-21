@@ -499,7 +499,7 @@ impl LlmTransport for CodexOAuthAdapter {
     fn default_agent_model(&self, tier: &str) -> Option<ModelSelection> {
         match tier {
             "low" => Some(ModelSelection {
-                model: "gpt-5.3-codex-spark",
+                model: "gpt-5.4-mini",
                 variant: Some("low"),
             }),
             "medium" => Some(ModelSelection {
@@ -927,6 +927,48 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
         assert_eq!(input[2]["type"], "function_call_output");
         assert_eq!(input[3]["role"], "user");
         assert_eq!(input[3]["content"][0]["text"], "new turn");
+    }
+
+    #[test]
+    fn structured_messages_preserve_empty_function_call_output() {
+        let req = LlmRequest {
+            model: "gpt-5.4".to_string(),
+            system_prompt: "sys".to_string(),
+            user_prompt: vec![LlmPromptPart::Text("continue".to_string())],
+            messages: vec![
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: "{\"question\":\"Pick one\"}".to_string(),
+                    kind: "tool_call".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_ask".to_string()),
+                    tool_name: Some("ask".to_string()),
+                },
+                LlmMessage {
+                    role: LlmRole::User,
+                    content: String::new(),
+                    kind: "tool_result".to_string(),
+                    image_idx: -1,
+                    tool_call_id: Some("call_ask".to_string()),
+                    tool_name: Some("ask".to_string()),
+                },
+            ],
+            attachments: vec![],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: None,
+            stream_events: None,
+        };
+
+        let input = CodexOAuthAdapter::build_input(&req);
+
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(input[1]["type"], "function_call_output");
+        assert_eq!(input[1]["call_id"], "call_ask");
+        assert_eq!(input[1]["output"], "");
+        assert_eq!(input[2]["role"], "user");
     }
 
     #[test]

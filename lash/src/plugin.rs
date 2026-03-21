@@ -252,6 +252,17 @@ pub(crate) async fn emit_plugin_surface_events(
     }
 }
 
+pub fn plugin_surface_event_renders_visible_output(event: &PluginSurfaceEvent) -> bool {
+    match event {
+        PluginSurfaceEvent::PanelUpsert { .. } => true,
+        PluginSurfaceEvent::PanelAppend { content, .. } => !content.is_empty(),
+        PluginSurfaceEvent::ModeIndicatorUpsert { .. }
+        | PluginSurfaceEvent::ModeIndicatorClear { .. }
+        | PluginSurfaceEvent::PanelClear { .. }
+        | PluginSurfaceEvent::Custom { .. } => false,
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PluginDirective {
@@ -985,6 +996,7 @@ mod tests {
                     raw_text: String::new(),
                     state: crate::OutputState::Usable,
                 },
+                has_plugin_visible_output: false,
                 done_reason: crate::DoneReason::ModelStop,
                 execution: crate::ExecutionSummary {
                     mode: ExecutionMode::Standard,
