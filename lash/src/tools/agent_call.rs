@@ -409,7 +409,7 @@ mod tests {
                         account_id: None,
                         options: crate::ProviderOptions::default(),
                     },
-                    model: "gpt-5.3-codex-spark".to_string(),
+                    model: "gpt-5.4-mini".to_string(),
                     model_variant: Some("low".to_string()),
                     recall_agent_model: None,
                     session_id: None,
@@ -455,6 +455,7 @@ mod tests {
                     raw_text: "delegate result".to_string(),
                     state: crate::OutputState::Usable,
                 },
+                has_plugin_visible_output: false,
                 done_reason: crate::DoneReason::ModelStop,
                 execution: crate::ExecutionSummary {
                     mode: crate::ExecutionMode::Standard,
@@ -505,7 +506,7 @@ mod tests {
         };
 
         let (m_low, r_low) = pick_model_and_variant(&config, &None, &Tier::Low);
-        assert_eq!(m_low, "gpt-5.3-codex-spark");
+        assert_eq!(m_low, "gpt-5.4-mini");
         assert_eq!(r_low.as_deref(), Some("low"));
 
         let (m_mid, r_mid) = pick_model_and_variant(&config, &None, &Tier::Medium);

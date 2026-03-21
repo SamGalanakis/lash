@@ -476,7 +476,11 @@ impl ActivityState {
                 let delegate_status = delegate_activity_status(success, child_status);
                 let delegate_summary = delegate_result_summary(child_status, &task);
                 let mut detail_lines = Vec::new();
-                let mut children = Vec::new();
+                if let Some(error) = result.get("error").and_then(|value| value.as_str())
+                    && !error.trim().is_empty()
+                {
+                    detail_lines.push(format!("Error {}", inline_text(error)));
+                }
 
                 if let Some(meta) = meta {
                     // Model info line.
@@ -521,35 +525,6 @@ impl ActivityState {
                     if let Some(token_line) = delegate_token_usage_line(meta) {
                         detail_lines.push(token_line);
                     }
-
-                    // Build child activity blocks from tool_call_details.
-                    if let Some(details) = meta.get("tool_call_details").and_then(|v| v.as_array())
-                    {
-                        for tc in details {
-                            let tool = tc.get("tool").and_then(|v| v.as_str()).unwrap_or("unknown");
-                            let tc_success =
-                                tc.get("success").and_then(|v| v.as_bool()).unwrap_or(true);
-                            let tc_duration =
-                                tc.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-                            children.push(ActivityBlock {
-                                kind: ActivityKind::GenericTool,
-                                status: if tc_success {
-                                    ActivityStatus::Completed
-                                } else {
-                                    ActivityStatus::Failed
-                                },
-                                tool_name: tool.to_string(),
-                                summary: tool.to_string(),
-                                detail_lines: Vec::new(),
-                                duration_ms: tc_duration,
-                                args: Value::Null,
-                                result: Value::Null,
-                                artifact: None,
-                                children: Vec::new(),
-                                extra: None,
-                            });
-                        }
-                    }
                 }
 
                 let artifact = result
@@ -570,7 +545,7 @@ impl ActivityState {
                     args,
                     result,
                     artifact,
-                    children,
+                    children: Vec::new(),
                     extra: None,
                 }
             }
@@ -1638,7 +1613,52 @@ mod tests {
                 "135 total tokens · 101 in · 22 out · 7 reasoning · 5 cached".to_string(),
             ]
         );
-        assert_eq!(blocks[0].children.len(), 1);
-        assert_eq!(blocks[0].children[0].summary, "read_file");
+        assert!(blocks[0].children.is_empty());
+    }
+
+    #[test]
+    fn agent_result_surfaces_child_error_details() {
+        let mut state = ActivityState::default();
+        state.blocks_for_tool_call(
+            "agent_call",
+            json!({"prompt":"inspect queue rendering"}),
+            json!({"id":"child-1","model":"gpt-5.4-mini","model_variant":"low"}),
+            true,
+            3,
+        );
+
+        let blocks = state.blocks_for_tool_call(
+            "agent_result",
+            json!({"id":"child-1"}),
+            json!({
+                "result":"",
+                "status":"failed",
+                "error":"LLM error: Codex request failed with 400",
+                "_sub_agent":{
+                    "task":"inspect queue rendering",
+                    "model":"gpt-5.4-mini",
+                    "model_variant":"low",
+                    "iterations":24,
+                    "tool_calls":49,
+                    "tool_call_details":[]
+                }
+            }),
+            true,
+            12,
+        );
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].status, ActivityStatus::Failed);
+        assert_eq!(
+            blocks[0].summary,
+            "delegate failed · inspect queue rendering"
+        );
+        assert_eq!(
+            blocks[0].detail_lines,
+            vec![
+                "Error LLM error: Codex request failed with 400".to_string(),
+                "gpt-5.4-mini (low) · 24 iterations · 49 tool calls".to_string(),
+            ]
+        );
     }
 }

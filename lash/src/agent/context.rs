@@ -779,6 +779,7 @@ mod tests {
                 raw_text: summary.to_string(),
                 state: OutputState::Usable,
             },
+            has_plugin_visible_output: false,
             done_reason: DoneReason::ModelStop,
             execution: ExecutionSummary {
                 mode: ExecutionMode::Standard,

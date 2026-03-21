@@ -230,6 +230,106 @@ pub fn sessions_dir() -> PathBuf {
     lash::lash_home().join("sessions")
 }
 
+fn is_resumable_session_log(path: &std::path::Path) -> bool {
+    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+        return false;
+    }
+
+    let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    !filename.ends_with(".llm.jsonl")
+}
+
+fn parse_session_info(
+    path: &std::path::Path,
+    filename: String,
+    modified: SystemTime,
+) -> Option<SessionInfo> {
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut lines = reader.lines();
+
+    // Parse first line for session metadata
+    let first_line = match lines.next() {
+        Some(Ok(line)) => line,
+        _ => return None,
+    };
+    let val: serde_json::Value = serde_json::from_str(&first_line).ok()?;
+
+    // Skip child sessions (spawned by delegate_task)
+    if val.get("parent_session_id").is_some_and(|v| !v.is_null()) {
+        return None;
+    }
+
+    let session_id = val
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Scan for first user_input and count messages
+    let mut message_count = 0;
+    let mut first_message = String::new();
+    for line in lines {
+        let Ok(line) = line else {
+            continue;
+        };
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let is_user = v
+            .get("type")
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| t == "user_input");
+        if is_user {
+            message_count += 1;
+            if first_message.is_empty() {
+                first_message = v
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+            }
+        }
+    }
+
+    Some(SessionInfo {
+        filename,
+        session_id,
+        message_count,
+        first_message,
+        modified,
+    })
+}
+
+fn collect_session_candidates() -> Vec<(PathBuf, String, SystemTime)> {
+    let dir = sessions_dir();
+    let mut candidates = Vec::new();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return candidates,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !is_resumable_session_log(&path) {
+            continue;
+        }
+
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        let modified = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        candidates.push((path, filename, modified));
+    }
+
+    candidates.sort_by(|a, b| b.2.cmp(&a.2));
+    candidates
+}
+
 pub fn load_session_start(filename: &str) -> Option<SessionStart> {
     let path = sessions_dir().join(filename);
     let file = File::open(&path).ok()?;
@@ -250,87 +350,20 @@ pub fn load_session_start(filename: &str) -> Option<SessionStart> {
     })
 }
 
-/// List available session files, most recently modified first.
-pub fn list_sessions() -> Vec<SessionInfo> {
-    let dir = sessions_dir();
-    let mut sessions = Vec::new();
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return sessions,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+pub fn list_recent_sessions(limit: usize) -> Vec<SessionInfo> {
+    if limit == 0 {
+        return Vec::new();
+    }
 
-        let modified = std::fs::metadata(&path)
-            .and_then(|m| m.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-
-        let file = match File::open(&path) {
-            Ok(file) => file,
-            Err(_) => continue,
-        };
-        let reader = BufReader::new(file);
-        let mut lines = reader.lines();
-
-        // Parse first line for session metadata
-        let first_line = match lines.next() {
-            Some(Ok(line)) => line,
-            _ => continue,
-        };
-        let val: serde_json::Value = match serde_json::from_str(&first_line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        // Skip child sessions (spawned by delegate_task)
-        if val.get("parent_session_id").is_some_and(|v| !v.is_null()) {
-            continue;
-        }
-        let session_id = val
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        // Scan for first user_input and count messages
-        let mut message_count = 0;
-        let mut first_message = String::new();
-        for line in lines {
-            let Ok(line) = line else {
-                continue;
-            };
-            let v: serde_json::Value = match serde_json::from_str(&line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let is_user = v
-                .get("type")
-                .and_then(|t| t.as_str())
-                .is_some_and(|t| t == "user_input");
-            if is_user {
-                message_count += 1;
-                if first_message.is_empty() {
-                    first_message = v
-                        .get("content")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                }
+    let mut sessions = Vec::with_capacity(limit);
+    for (path, filename, modified) in collect_session_candidates() {
+        if let Some(session) = parse_session_info(&path, filename, modified) {
+            sessions.push(session);
+            if sessions.len() >= limit {
+                break;
             }
         }
-
-        sessions.push(SessionInfo {
-            filename,
-            session_id,
-            message_count,
-            first_message,
-            modified,
-        });
     }
-    // Sort by modification time, most recent first
-    sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
     sessions
 }
 
@@ -383,12 +416,13 @@ pub fn load_session(filename: &str) -> Option<LoadedSession> {
                 });
                 blocks.push(DisplayBlock::UserInput(text));
                 if let Some(transforms) = val.get("transforms").and_then(|v| v.as_array()) {
-                    let labels: Vec<&str> = transforms.iter().filter_map(|v| v.as_str()).collect();
-                    if !labels.is_empty() {
-                        blocks.push(DisplayBlock::SystemMessage(format!(
-                            "Model saw transformed input: {}",
-                            labels.join(", ")
-                        )));
+                    let names: Vec<String> = transforms
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|s| s.strip_prefix("skill ").unwrap_or(s).to_string())
+                        .collect();
+                    if !names.is_empty() {
+                        blocks.push(DisplayBlock::SkillLoaded(names));
                     }
                 }
             }
@@ -672,8 +706,7 @@ mod tests {
             ));
             assert!(matches!(
                 loaded.blocks.get(1),
-                Some(DisplayBlock::SystemMessage(text))
-                    if text == "Model saw transformed input: skill localref"
+                Some(DisplayBlock::SkillLoaded(names)) if names == &["localref"]
             ));
         });
     }
@@ -860,6 +893,72 @@ mod tests {
                         if panel.title == "PROPOSED PLAN" && panel.content.contains("Inspect")
                 )
             }));
+        });
+    }
+
+    #[test]
+    fn list_recent_sessions_skips_llm_sidecars() {
+        with_temp_lash_home("lash-session-log-list-sidecars", || {
+            let session_path = sessions_dir().join("real-session.jsonl");
+            std::fs::write(
+                &session_path,
+                concat!(
+                    "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
+                    "{\"type\":\"user_input\",\"content\":\"Hi\"}\n",
+                    "{\"type\":\"done\"}\n"
+                ),
+            )
+            .unwrap();
+
+            let llm_path = sessions_dir().join("real-session.llm.jsonl");
+            std::fs::write(
+                &llm_path,
+                concat!(
+                    "{\"type\":\"llm_request\",\"payload\":\"huge\"}\n",
+                    "{\"type\":\"llm_response\",\"payload\":\"still not resumable\"}\n"
+                ),
+            )
+            .unwrap();
+
+            let sessions = list_recent_sessions(10);
+            assert_eq!(sessions.len(), 1);
+            assert_eq!(sessions[0].filename, "real-session.jsonl");
+        });
+    }
+
+    #[test]
+    fn list_recent_sessions_respects_limit_after_skipping_child_sessions() {
+        with_temp_lash_home("lash-session-log-list-limit", || {
+            for idx in 0..3 {
+                let path = sessions_dir().join(format!("session-{}.jsonl", idx));
+                std::fs::write(
+                    &path,
+                    format!(
+                        concat!(
+                            "{{\"type\":\"session_start\",\"session_id\":\"s{}\",\"session_name\":\"demo\"}}\n",
+                            "{{\"type\":\"user_input\",\"content\":\"message {}\"}}\n",
+                            "{{\"type\":\"done\"}}\n"
+                        ),
+                        idx, idx
+                    ),
+                )
+                .unwrap();
+            }
+
+            let child_path = sessions_dir().join("child-session.jsonl");
+            std::fs::write(
+                &child_path,
+                concat!(
+                    "{\"type\":\"session_start\",\"session_id\":\"child\",\"session_name\":\"demo\",\"parent_session_id\":\"root\"}\n",
+                    "{\"type\":\"user_input\",\"content\":\"skip me\"}\n",
+                    "{\"type\":\"done\"}\n"
+                ),
+            )
+            .unwrap();
+
+            let sessions = list_recent_sessions(2);
+            assert_eq!(sessions.len(), 2);
+            assert!(sessions.iter().all(|session| session.session_id != "child"));
         });
     }
 }

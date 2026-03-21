@@ -642,7 +642,7 @@ mod tests {
     fn default_agent_model_codex() {
         let p = codex();
         let (m, re) = p.default_agent_model("low").unwrap();
-        assert_eq!(m, "gpt-5.3-codex-spark");
+        assert_eq!(m, "gpt-5.4-mini");
         assert_eq!(re, Some("low"));
         let (m, re) = p.default_agent_model("medium").unwrap();
         assert_eq!(m, "gpt-5.4");

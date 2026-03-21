@@ -365,6 +365,7 @@ mod tests {
                     raw_text: String::new(),
                     state: crate::OutputState::Usable,
                 },
+                has_plugin_visible_output: false,
                 done_reason: crate::DoneReason::ModelStop,
                 execution: crate::ExecutionSummary {
                     mode: ExecutionMode::Standard,

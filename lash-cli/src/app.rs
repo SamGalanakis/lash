@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use lash::{
     AgentEvent, MessageRole, PluginMessage, PromptUsage, SkillCatalog, TokenUsage,
-    append_skill_blocks, collect_skill_mentions,
+    append_skill_blocks, collect_skill_mentions, plugin_surface_event_renders_visible_output,
 };
 
 use crate::activity::{
@@ -44,10 +44,10 @@ pub struct PromptState {
     pub options: Vec<String>,
     /// 0..options.len() = option, options.len() = "Other"
     pub selected_idx: usize,
-    /// Freeform context text (Shift+Tab to activate).
+    /// Freeform answer/context text.
     pub extra_text: String,
     pub extra_cursor: usize,
-    /// True when Shift+Tab has been pressed to edit extra text.
+    /// True when extra text editing is active.
     pub editing_extra: bool,
     pub response_tx: std::sync::mpsc::Sender<String>,
 }
@@ -134,7 +134,7 @@ impl PreparedTurn {
         let mut seen = HashSet::new();
         for name in collect_skill_mentions(&text) {
             if seen.insert(name.clone()) && skills.get(&name).is_some() {
-                labels.push(format!("skill {}", name));
+                labels.push(name);
             }
         }
         let large_pastes = large_pastes
@@ -162,7 +162,7 @@ impl PreparedTurn {
         let collapsed = self.display_text.replace('\n', " ").trim().to_string();
         if !collapsed.is_empty() {
             if let Some(summary) = self.transform_summary() {
-                return format!("{collapsed} · {summary}");
+                return format!("{collapsed} · \u{25C6} {summary}");
             }
             return collapsed;
         }
@@ -226,6 +226,8 @@ pub enum DisplayBlock {
     Error(String),
     /// Informational message from the system (e.g. /help output).
     SystemMessage(String),
+    /// Compact skill-invocation indicator (skill names without "skill " prefix).
+    SkillLoaded(Vec<String>),
     /// Rendered plan content from update_plan (bordered markdown).
     PlanContent(String),
     PluginPanel(PluginPanelBlock),
@@ -485,6 +487,7 @@ impl DisplayBlock {
             }
             DisplayBlock::Error(msg) => wrapped_line_height(&format!("Error: {}", msg), width),
             DisplayBlock::SystemMessage(s) => wrapped_text_height(s, width, 0),
+            DisplayBlock::SkillLoaded(_) => 1,
             DisplayBlock::PlanContent(s) => {
                 // borders (2) + plain-text content lines (not markdown)
                 let inner_w = width.saturating_sub(4).max(1);
@@ -973,10 +976,9 @@ impl App {
             return;
         }
         self.blocks.push(DisplayBlock::UserInput(history_text));
-        if let Some(summary) = turn.transform_summary() {
-            self.blocks.push(DisplayBlock::SystemMessage(format!(
-                "Model saw transformed input: {summary}"
-            )));
+        if !turn.transform_labels.is_empty() {
+            self.blocks
+                .push(DisplayBlock::SkillLoaded(turn.transform_labels.clone()));
         }
         self.invalidate_height_cache();
     }
@@ -1202,6 +1204,7 @@ impl App {
                 }
             }
             AgentEvent::PluginEvent { plugin_id, event } => {
+                let renders_visible_output = plugin_surface_event_renders_visible_output(&event);
                 let mutation = plugin_surface::apply_surface_event(
                     &mut self.blocks,
                     &mut self.plugin_mode_indicators,
@@ -1210,6 +1213,9 @@ impl App {
                 );
                 if mutation.blocks_changed {
                     self.invalidate_height_cache();
+                    if renders_visible_output {
+                        self.mark_visible_output();
+                    }
                     self.scroll_to_bottom();
                 }
                 if mutation.indicators_changed {
@@ -2080,9 +2086,11 @@ impl App {
         }
     }
 
-    /// Toggle extra text editing (Shift+Tab).
+    /// Toggle extra text editing for prompts that also have discrete options.
     pub fn prompt_toggle_extra(&mut self) {
-        if let Some(p) = &mut self.prompt {
+        if let Some(p) = &mut self.prompt
+            && !p.options.is_empty()
+        {
             p.editing_extra = !p.editing_extra;
         }
     }
@@ -2740,6 +2748,7 @@ mod tests {
     #[test]
     fn plugin_panel_events_upsert_and_clear_blocks() {
         let mut app = App::new("test-model".into(), "test".into());
+        app.start_turn();
         app.handle_agent_event(AgentEvent::PluginEvent {
             plugin_id: "plan_mode".into(),
             event: lash::PluginSurfaceEvent::PanelUpsert {
@@ -2752,6 +2761,11 @@ mod tests {
             app.blocks.last(),
             Some(DisplayBlock::PluginPanel(panel)) if panel.title == "PROPOSED PLAN"
         ));
+        assert!(
+            app.live_turn
+                .as_ref()
+                .is_some_and(|turn| turn.has_visible_output)
+        );
 
         app.handle_agent_event(AgentEvent::PluginEvent {
             plugin_id: "plan_mode".into(),
@@ -2898,7 +2912,7 @@ mod tests {
     fn injected_messages_clear_pending_queue_even_when_runtime_content_differs() {
         let mut app = App::new("test-model".into(), "test".into());
         let mut turn = PreparedTurn::new("$localref lash for context if needed".into(), Vec::new());
-        turn.transform_labels = vec!["skill localref".into()];
+        turn.transform_labels = vec!["localref".into()];
         app.queue_pending_steer(turn.clone());
         app.preview_queued_turn(&turn, true);
 
@@ -2913,7 +2927,7 @@ mod tests {
         assert!(app.pending_steers.is_empty());
         assert!(matches!(
             app.blocks.last(),
-            Some(DisplayBlock::SystemMessage(text)) if text == "Model saw transformed input: skill localref"
+            Some(DisplayBlock::SkillLoaded(names)) if names == &["localref"]
         ));
     }
 
@@ -3547,6 +3561,27 @@ mod tests {
     }
 
     #[test]
+    fn prompt_toggle_extra_ignores_freeform_prompts() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.prompt = Some(PromptState {
+            question: "Question?".into(),
+            options: Vec::new(),
+            selected_idx: 0,
+            extra_text: String::new(),
+            extra_cursor: 0,
+            editing_extra: true,
+            response_tx: std::sync::mpsc::channel().0,
+        });
+
+        app.prompt_toggle_extra();
+
+        assert!(
+            app.prompt.as_ref().expect("prompt").editing_extra,
+            "freeform prompts should stay in text-entry mode"
+        );
+    }
+
+    #[test]
     fn live_tool_output_keeps_tail_and_counts_hidden_lines() {
         let mut app = App::new("test-model".into(), "test".into());
         app.running = true;
@@ -3582,6 +3617,7 @@ mod tests {
             DisplayBlock::ShellOutput { .. } => "ShellOutput",
             DisplayBlock::Error(_) => "Error",
             DisplayBlock::SystemMessage(_) => "SystemMessage",
+            DisplayBlock::SkillLoaded(_) => "SkillLoaded",
             DisplayBlock::PlanContent(_) => "PlanContent",
             DisplayBlock::PluginPanel(_) => "PluginPanel",
             DisplayBlock::Splash => "Splash",

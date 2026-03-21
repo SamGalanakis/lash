@@ -11,7 +11,7 @@ use crate::activity::{
     ActivityArtifact, ActivityBlock, ActivityKind, ActivityStatus, PatchFilePreview,
 };
 use crate::app::{
-    App, DisplayBlock, PreparedTurn, SPLASH_CONTENT_HEIGHT, SPLASH_SCROLLBACK_HEIGHT,
+    App, DisplayBlock, PreparedTurn, PromptState, SPLASH_CONTENT_HEIGHT, SPLASH_SCROLLBACK_HEIGHT,
     SuggestionKind, preview_text_lines,
 };
 use crate::markdown;
@@ -1377,6 +1377,13 @@ fn render_block<'a>(
                 lines.push(Line::from(Span::styled(line, theme::system_message())));
             }
         }
+        DisplayBlock::SkillLoaded(names) => {
+            let joined = names.join(" · ");
+            lines.push(Line::from(vec![
+                Span::styled("  \u{25C6} ", theme::skill_marker()),
+                Span::styled(joined, theme::skill_name()),
+            ]));
+        }
         DisplayBlock::PlanContent(content) => {
             render_plan_block(
                 content,
@@ -1941,11 +1948,22 @@ fn draw_suggestions(frame: &mut Frame, app: &App, input_area: Rect) {
 
     let is_path = app.suggestion_kind == SuggestionKind::Path;
     let count = app.suggestions.len() as u16;
-    let height = count + 2; // +2 for top/bottom border
+    let desired_height = count + 2; // +2 for top/bottom border
     let base_width: u16 = if is_path { 50 } else { 40 };
     let width = base_width.min(input_area.width);
-    let y = input_area.y.saturating_sub(height);
-    let height = height.min(frame.area().bottom().saturating_sub(y));
+
+    // Suggestions should live in the gap directly above the input, never in the
+    // top status-bar row or outside the frame.
+    let top_bound = input_area
+        .y
+        .min(frame.area().bottom())
+        .max(frame.area().y + 1);
+    let available_height = top_bound.saturating_sub(frame.area().y + 1);
+    let height = desired_height.min(available_height);
+    if height == 0 || width == 0 {
+        return;
+    }
+    let y = top_bound.saturating_sub(height);
 
     let popup_area = Rect::new(input_area.x, y, width, height);
 
@@ -2004,13 +2022,19 @@ fn draw_session_picker(frame: &mut Frame, app: &App, history_area: Rect) {
     let max_visible = 15u16;
     let count = app.session_picker.len() as u16;
     let visible = count.min(max_visible);
-    let height = visible + 2; // +2 for borders
+    let desired_height = visible + 2; // +2 for borders
     let width = 80u16.min(history_area.width.saturating_sub(4));
+    if width == 0 || history_area.height == 0 {
+        return;
+    }
 
-    // Center in history area, clamped to frame
+    // Center in the history pane and keep the popup inside that pane.
     let x = history_area.x + (history_area.width.saturating_sub(width)) / 2;
-    let y = history_area.y + (history_area.height.saturating_sub(height)) / 2;
-    let height = height.min(frame.area().bottom().saturating_sub(y));
+    let y = history_area.y + (history_area.height.saturating_sub(desired_height)) / 2;
+    let height = desired_height.min(history_area.bottom().saturating_sub(y));
+    if height == 0 {
+        return;
+    }
     let popup_area = Rect::new(x, y, width, height);
 
     frame.render_widget(Clear, popup_area);
@@ -2103,13 +2127,19 @@ fn draw_skill_picker(frame: &mut Frame, app: &App, history_area: Rect) {
     let max_visible = 15u16;
     let count = app.skill_picker.len() as u16;
     let visible = count.min(max_visible);
-    let height = visible + 2; // +2 for borders
+    let desired_height = visible + 2; // +2 for borders
     let width = 60u16.min(history_area.width.saturating_sub(4));
+    if width == 0 || history_area.height == 0 {
+        return;
+    }
 
-    // Center in history area, clamped to frame
+    // Center in the history pane and keep the popup inside that pane.
     let x = history_area.x + (history_area.width.saturating_sub(width)) / 2;
-    let y = history_area.y + (history_area.height.saturating_sub(height)) / 2;
-    let height = height.min(frame.area().bottom().saturating_sub(y));
+    let y = history_area.y + (history_area.height.saturating_sub(desired_height)) / 2;
+    let height = desired_height.min(history_area.bottom().saturating_sub(y));
+    if height == 0 {
+        return;
+    }
     let popup_area = Rect::new(x, y, width, height);
 
     frame.render_widget(Clear, popup_area);
@@ -2183,35 +2213,163 @@ fn prompt_height(app: &App, frame_width: u16) -> u16 {
         None => return 3, // fallback
     };
 
-    let has_options = !prompt.options.is_empty();
     let inner_w = frame_width.saturating_sub(2) as usize; // border padding
-
-    // Question lines via markdown rendering
-    let q_lines = if prompt.question.is_empty() {
-        1
-    } else {
-        markdown::markdown_height(&prompt.question, inner_w)
-    };
-
-    let option_count = if has_options {
-        prompt.options.len() + 1 // +1 for "Other"
-    } else {
-        0
-    };
-
-    let extra_h: u16 = if prompt.editing_extra || !has_options {
-        1 // single input line
-    } else {
-        0
-    };
-
-    let content_h = q_lines as u16
-        + if option_count > 0 || extra_h > 0 { 1 } else { 0 } // blank after question (only if more content follows)
-        + option_count as u16
-        + extra_h
-        + 1; // help bar
+    let content_h = prompt_content_lines(prompt, inner_w).len() as u16;
     let max_h = 20u16; // cap height
     (content_h + 2).min(max_h) // +2 for borders
+}
+
+fn push_wrapped_prefixed_lines(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    total_width: usize,
+    first_prefix: Span<'static>,
+    cont_prefix: Span<'static>,
+    text_style: Style,
+) {
+    let first_prefix_width = first_prefix.width();
+    let cont_prefix_width = cont_prefix.width();
+    let mut first_visual_line = true;
+
+    for logical_line in text.split('\n') {
+        let prefix_width = if first_visual_line {
+            first_prefix_width
+        } else {
+            cont_prefix_width
+        };
+        let segments = wrap_line(logical_line, prefix_width, total_width);
+
+        for (segment_idx, (start, end)) in segments.into_iter().enumerate() {
+            let prefix = if first_visual_line && segment_idx == 0 {
+                first_prefix.clone()
+            } else {
+                cont_prefix.clone()
+            };
+            lines.push(Line::from(vec![
+                prefix,
+                Span::styled(logical_line[start..end].to_string(), text_style),
+            ]));
+            first_visual_line = false;
+        }
+    }
+}
+
+fn prompt_input_text(prompt: &PromptState) -> String {
+    let mut display = prompt.extra_text.clone();
+    let cursor = prompt.extra_cursor.min(display.len());
+    display.insert(cursor, '\u{2588}');
+    display
+}
+
+fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'static>> {
+    let has_options = !prompt.options.is_empty();
+    let show_text_input = prompt.editing_extra || !has_options;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    if !prompt.question.is_empty() {
+        let md_lines = markdown::render_markdown(&prompt.question, inner_w);
+        for md_line in md_lines {
+            let mut prefixed = vec![Span::styled(" ", Style::default())];
+            prefixed.extend(md_line.spans);
+            lines.push(Line::from(prefixed));
+        }
+    }
+
+    if !lines.is_empty() && (has_options || show_text_input) {
+        lines.push(Line::from(""));
+    }
+
+    if has_options {
+        for (idx, opt) in prompt.options.iter().enumerate() {
+            let selected = idx == prompt.selected_idx;
+            let text_style = if selected {
+                Style::default()
+                    .fg(theme::SODIUM)
+                    .bg(theme::FORM_RAISED)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::CHALK_DIM)
+            };
+            let prefix_style = if selected {
+                Style::default().fg(theme::SODIUM).bg(theme::FORM_RAISED)
+            } else {
+                text_style
+            };
+            push_wrapped_prefixed_lines(
+                &mut lines,
+                &format!("{}. {}", idx + 1, opt),
+                inner_w,
+                Span::styled(if selected { " \u{203a} " } else { "   " }, prefix_style),
+                Span::styled("   ", prefix_style),
+                text_style,
+            );
+        }
+
+        let other_selected = prompt.selected_idx == prompt.options.len();
+        let other_style = if other_selected {
+            Style::default()
+                .fg(theme::SODIUM)
+                .bg(theme::FORM_RAISED)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::CHALK_DIM)
+        };
+        let other_prefix_style = if other_selected {
+            Style::default().fg(theme::SODIUM).bg(theme::FORM_RAISED)
+        } else {
+            other_style
+        };
+        push_wrapped_prefixed_lines(
+            &mut lines,
+            "Other",
+            inner_w,
+            Span::styled(
+                if other_selected { " \u{203a} " } else { "   " },
+                other_prefix_style,
+            ),
+            Span::styled("   ", other_prefix_style),
+            other_style,
+        );
+    }
+
+    if has_options && show_text_input {
+        lines.push(Line::from(""));
+    }
+
+    if show_text_input {
+        push_wrapped_prefixed_lines(
+            &mut lines,
+            &prompt_input_text(prompt),
+            inner_w,
+            Span::styled(format!(" {} ", theme::PROMPT_CHAR), theme::prompt()),
+            Span::styled("   ", Style::default().fg(theme::ASH)),
+            Style::default().fg(theme::CHALK),
+        );
+    }
+
+    if !lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+
+    let help_text = if has_options {
+        if show_text_input {
+            "Enter submit  Shift+Tab newline  Tab choices  Esc cancel"
+        } else {
+            "\u{2191}\u{2193} select  Enter submit  Tab context  Esc cancel"
+        }
+    } else {
+        "Enter submit  Shift+Tab newline  Esc cancel"
+    };
+    push_wrapped_prefixed_lines(
+        &mut lines,
+        help_text,
+        inner_w,
+        Span::styled(" ", Style::default().fg(theme::ASH)),
+        Span::styled(" ", Style::default().fg(theme::ASH)),
+        Style::default().fg(theme::ASH),
+    );
+
+    lines
 }
 
 /// Draw the agent prompt inline in the input area (replaces normal input).
@@ -2221,115 +2379,8 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
         None => return,
     };
 
-    let has_options = !prompt.options.is_empty();
     let inner_w = area.width.saturating_sub(2) as usize;
-
-    let mut lines: Vec<Line> = Vec::new();
-
-    // Question text via markdown rendering
-    if !prompt.question.is_empty() {
-        let md_lines = markdown::render_markdown(&prompt.question, inner_w);
-        // Prefix each line with a left margin
-        for md_line in md_lines {
-            let mut prefixed = vec![Span::styled(" ", Style::default())];
-            prefixed.extend(md_line.spans);
-            lines.push(Line::from(prefixed));
-        }
-    }
-
-    // Blank separator before options/input
-    lines.push(Line::from(""));
-
-    // Option list
-    if has_options {
-        for (i, opt) in prompt.options.iter().enumerate() {
-            let selected = i == prompt.selected_idx;
-            let marker = if selected { "\u{203a}" } else { " " };
-            let max_opt_w = inner_w.saturating_sub(6); // " › 1. " prefix
-            let label = format!("{}. {}", i + 1, opt);
-            let truncated: String = label.chars().take(max_opt_w).collect();
-
-            if selected {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!(" {} ", marker),
-                        Style::default().fg(theme::SODIUM).bg(theme::FORM_RAISED),
-                    ),
-                    Span::styled(
-                        truncated,
-                        Style::default()
-                            .fg(theme::SODIUM)
-                            .bg(theme::FORM_RAISED)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]));
-            } else {
-                lines.push(Line::from(Span::styled(
-                    format!(" {} {}", marker, truncated),
-                    Style::default().fg(theme::CHALK_DIM),
-                )));
-            }
-        }
-
-        // "Other" option — always last
-        let other_selected = prompt.selected_idx == prompt.options.len();
-        let marker = if other_selected { "\u{203a}" } else { " " };
-        if other_selected {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" {} ", marker),
-                    Style::default().fg(theme::SODIUM).bg(theme::FORM_RAISED),
-                ),
-                Span::styled(
-                    "Other",
-                    Style::default()
-                        .fg(theme::SODIUM)
-                        .bg(theme::FORM_RAISED)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]));
-        } else {
-            lines.push(Line::from(Span::styled(
-                format!(" {} Other", marker),
-                Style::default().fg(theme::CHALK_DIM),
-            )));
-        }
-    }
-
-    // Text input line (shown when editing extra or freeform)
-    if prompt.editing_extra || !has_options {
-        let label = if has_options { "context" } else { "answer" };
-        let text_w = inner_w.saturating_sub(4); // " ❯ " prefix
-        let text_display: String = prompt.extra_text.chars().take(text_w).collect();
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {} ", theme::PROMPT_CHAR), theme::prompt()),
-            Span::styled(text_display, Style::default().fg(theme::CHALK)),
-            Span::styled("\u{2588}", Style::default().fg(theme::SODIUM)),
-            Span::styled(format!("  {}", label), Style::default().fg(theme::ASH)),
-        ]));
-    }
-
-    // Help bar
-    let help = if has_options {
-        Line::from(vec![
-            Span::styled(" \u{2191}\u{2193}", theme::help_key()),
-            Span::styled(" select  ", theme::help_desc()),
-            Span::styled("\u{23ce}", theme::help_key()),
-            Span::styled(" submit  ", theme::help_desc()),
-            Span::styled("\u{21e7}\u{21e5}", theme::help_key()),
-            Span::styled(" context  ", theme::help_desc()),
-            Span::styled("Esc", theme::help_key()),
-            Span::styled(" cancel", theme::help_desc()),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled(" \u{23ce}", theme::help_key()),
-            Span::styled(" submit  ", theme::help_desc()),
-            Span::styled("Esc", theme::help_key()),
-            Span::styled(" cancel", theme::help_desc()),
-        ])
-    };
-    lines.push(help);
+    let lines = prompt_content_lines(prompt, inner_w);
 
     let content_h = area.height.saturating_sub(2) as usize;
     let scroll_offset = if lines.len() > content_h {
@@ -2351,6 +2402,7 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
     let paragraph = Paragraph::new(lines)
         .block(block)
         .style(Style::default().bg(theme::FORM_DEEP))
+        .wrap(Wrap { trim: false })
         .scroll((scroll_offset as u16, 0));
     frame.render_widget(paragraph, area);
 }
@@ -2433,7 +2485,7 @@ fn input_cursor_position(input: &str, cursor_pos: usize, full_width: usize) -> (
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::App;
+    use crate::app::{App, PromptState};
     use ratatui::{Terminal, backend::TestBackend};
 
     fn workflow_activity(summary: &str) -> DisplayBlock {
@@ -2460,6 +2512,23 @@ mod tests {
         (0..width)
             .map(|x| backend.buffer().cell((x, y)).expect("buffer cell").symbol())
             .collect::<String>()
+    }
+
+    fn prompt_state(
+        question: &str,
+        options: Vec<&str>,
+        extra_text: &str,
+        editing_extra: bool,
+    ) -> PromptState {
+        PromptState {
+            question: question.into(),
+            options: options.into_iter().map(str::to_string).collect(),
+            selected_idx: 0,
+            extra_text: extra_text.into(),
+            extra_cursor: extra_text.len(),
+            editing_extra,
+            response_tx: std::sync::mpsc::channel().0,
+        }
     }
 
     #[test]
@@ -2551,6 +2620,43 @@ mod tests {
     }
 
     #[test]
+    fn prompt_content_lines_wrap_long_freeform_input() {
+        let prompt = prompt_state(
+            "Answer the question.",
+            Vec::new(),
+            "alpha beta gamma delta epsilon zeta eta theta iota omega",
+            true,
+        );
+
+        let rendered = prompt_content_lines(&prompt, 20)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let normalized = rendered.replace('\n', " ");
+
+        assert!(normalized.contains("alpha"));
+        assert!(normalized.contains("theta"));
+        assert!(normalized.contains("omega"));
+    }
+
+    #[test]
+    fn prompt_height_accounts_for_wrapped_prompt_input() {
+        let mut app = App::new("model".into(), "session".into());
+        app.prompt = Some(prompt_state(
+            "Answer the question.",
+            Vec::new(),
+            "this answer keeps going until it wraps across multiple visible rows",
+            true,
+        ));
+
+        assert!(
+            prompt_height(&app, 20) > 7,
+            "wrapped prompt input should grow the prompt area"
+        );
+    }
+
+    #[test]
     fn turn_status_footer_only_renders_working_line() {
         let backend = TestBackend::new(48, 3);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -2604,6 +2710,90 @@ mod tests {
         assert!(middle.contains("Error"));
         assert!(!middle.contains("Working"));
         assert!(!middle.contains("provider timeout"));
+    }
+
+    #[test]
+    fn suggestions_do_not_render_over_status_bar() {
+        let backend = TestBackend::new(40, 6);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut app = App::new("model".into(), "session".into());
+        app.input = "hello".into();
+        app.cursor_pos = app.input.len();
+        app.suggestion_kind = SuggestionKind::Command;
+        app.suggestions = vec![
+            ("/one".into(), "first suggestion".into()),
+            ("/two".into(), "second suggestion".into()),
+            ("/three".into(), "third suggestion".into()),
+            ("/four".into(), "fourth suggestion".into()),
+            ("/five".into(), "fifth suggestion".into()),
+        ];
+
+        terminal.draw(|frame| draw(frame, &app)).expect("draw app");
+
+        let top = buffer_row_text(terminal.backend(), 0, 40);
+        assert!(top.contains("lash"), "status bar disappeared: {top:?}");
+        assert!(
+            !top.contains("/one")
+                && !top.contains("/two")
+                && !top.contains("/three")
+                && !top.contains("/four")
+                && !top.contains("/five"),
+            "suggestions overlapped the status bar: {top:?}"
+        );
+    }
+
+    #[test]
+    fn session_picker_stays_inside_history_pane() {
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut app = App::new("model".into(), "session".into());
+        app.input = "hello".into();
+        app.cursor_pos = app.input.len();
+        app.session_picker = (0..5)
+            .map(|idx| crate::session_log::SessionInfo {
+                filename: format!("session-{idx}.jsonl"),
+                session_id: format!("session-{idx}"),
+                message_count: idx + 1,
+                first_message: format!("first message {idx}"),
+                modified: std::time::SystemTime::now(),
+            })
+            .collect();
+
+        terminal.draw(|frame| draw(frame, &app)).expect("draw app");
+
+        let input_row = buffer_row_text(terminal.backend(), 6, 40);
+        assert!(
+            input_row.contains(theme::PROMPT_CHAR),
+            "session picker overflow erased input row: {input_row:?}"
+        );
+        assert!(
+            !input_row.contains("Sessions") && !input_row.contains("first message"),
+            "session picker overflowed into input area: {input_row:?}"
+        );
+    }
+
+    #[test]
+    fn skill_picker_stays_inside_history_pane() {
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut app = App::new("model".into(), "session".into());
+        app.input = "hello".into();
+        app.cursor_pos = app.input.len();
+        app.skill_picker = (0..5)
+            .map(|idx| (format!("skill-{idx}"), format!("skill description {idx}")))
+            .collect();
+
+        terminal.draw(|frame| draw(frame, &app)).expect("draw app");
+
+        let input_row = buffer_row_text(terminal.backend(), 6, 40);
+        assert!(
+            input_row.contains(theme::PROMPT_CHAR),
+            "skill picker overflow erased input row: {input_row:?}"
+        );
+        assert!(
+            !input_row.contains("Skills") && !input_row.contains("skill-"),
+            "skill picker overflowed into input area: {input_row:?}"
+        );
     }
 
     #[test]
@@ -2755,7 +2945,7 @@ mod tests {
     }
 
     #[test]
-    fn delegate_result_renders_child_tool_tree() {
+    fn delegate_result_renders_summary_without_child_tool_tree() {
         let activity = ActivityBlock {
             kind: ActivityKind::Delegate,
             status: ActivityStatus::Completed,
@@ -2766,53 +2956,23 @@ mod tests {
             args: serde_json::Value::Null,
             result: serde_json::Value::Null,
             artifact: None,
-            children: vec![
-                ActivityBlock {
-                    kind: ActivityKind::GenericTool,
-                    status: ActivityStatus::Completed,
-                    tool_name: "read_file".into(),
-                    summary: "read_file".into(),
-                    detail_lines: Vec::new(),
-                    duration_ms: 12,
-                    args: serde_json::Value::Null,
-                    result: serde_json::Value::Null,
-                    artifact: None,
-                    children: Vec::new(),
-                    extra: None,
-                },
-                ActivityBlock {
-                    kind: ActivityKind::GenericTool,
-                    status: ActivityStatus::Completed,
-                    tool_name: "exec_command".into(),
-                    summary: "exec_command".into(),
-                    detail_lines: Vec::new(),
-                    duration_ms: 340,
-                    args: serde_json::Value::Null,
-                    result: serde_json::Value::Null,
-                    artifact: None,
-                    children: Vec::new(),
-                    extra: None,
-                },
-            ],
+            children: Vec::new(),
             extra: None,
         };
 
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 80, false);
 
-        // Summary with ├─ connector (connected because children exist)
+        // Detail rows keep the connected delegate lane.
         assert_eq!(
             line_text(&lines[0]),
             "├─ delegate done · inspect queue · 4.2s"
         );
-        // Detail line
         assert_eq!(
             line_text(&lines[1]),
             "│  claude-sonnet · 3 iterations · 5 tool calls"
         );
-        // Child tool calls with tree connectors
-        assert_eq!(line_text(&lines[2]), "  ├─ read_file · 12ms");
-        assert_eq!(line_text(&lines[3]), "  ╰─ exec_command · 340ms");
+        assert_eq!(lines.len(), 2);
     }
 
     #[test]

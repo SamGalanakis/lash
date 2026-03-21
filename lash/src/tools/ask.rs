@@ -64,7 +64,7 @@ impl ToolProvider for AskTool {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "ask".into(),
-            description: "Pause and ask the user a targeted question, then wait for the answer before continuing. Use this only when you are genuinely blocked, need the user's decision, or must request a value that cannot be inferred safely. Prefer doing the work without asking when a reasonable default can be discovered from local context. Omit `options` for free-form input, or provide a short list of choices.".into(),
+            description: "Pause and ask the user a targeted question, then wait for the answer before continuing. Use this only when you are genuinely blocked, need the user's decision, or must request a value that cannot be inferred safely. Prefer doing the work without asking when a reasonable default can be discovered from local context. When a short list of concrete answers would be sufficient, always provide `options`; omit `options` only for genuinely free-form responses.".into(),
             params: vec![
                 ToolParam {
                     name: "question".into(),
@@ -77,7 +77,7 @@ impl ToolProvider for AskTool {
                     name: "options".into(),
                     r#type: "list".into(),
                     description:
-                        "Optional list of short choices. Omit or pass null for free-form input."
+                        "Optional list of short choices. Prefer passing `options` whenever the answer can be expressed as a short choice list; omit or pass null only for genuinely free-form input."
                             .into(),
                     default_value: None,
                     required: false,
@@ -132,5 +132,25 @@ mod tests {
         response_task.await.expect("response task");
         assert!(result.success);
         assert_eq!(result.result, serde_json::json!("b"));
+    }
+
+    #[test]
+    fn ask_tool_definition_prefers_structured_options() {
+        let tool = AskTool::new(PromptBridge::new());
+        let definition = tool.definitions().into_iter().next().expect("definition");
+        let options = definition
+            .params
+            .iter()
+            .find(|param| param.name == "options")
+            .expect("options param");
+
+        assert!(
+            definition.description.contains("always provide `options`"),
+            "description should bias the model toward structured choices"
+        );
+        assert!(
+            options.description.contains("Prefer passing `options`"),
+            "options param should explain when to use structured choices"
+        );
     }
 }

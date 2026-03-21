@@ -183,6 +183,16 @@ pub fn system_message() -> Style {
     Style::default().fg(ASH_TEXT)
 }
 
+/// Skill-loaded marker (◆) — sodium, dimmed.
+pub fn skill_marker() -> Style {
+    Style::default().fg(SODIUM).add_modifier(Modifier::DIM)
+}
+
+/// Skill name text — chalk dim.
+pub fn skill_name() -> Style {
+    Style::default().fg(CHALK_DIM)
+}
+
 /// Markdown heading (bold + sodium)
 pub fn heading() -> Style {
     Style::default().fg(SODIUM).add_modifier(Modifier::BOLD)

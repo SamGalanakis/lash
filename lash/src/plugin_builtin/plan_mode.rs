@@ -85,6 +85,7 @@ Once intent is stable, keep asking until the spec is decision complete:
 Asking questions
 
 Strongly prefer using `ask(...)` for questions that materially change the plan, confirm important assumptions, or request information that cannot be discovered via non-mutating exploration.
+When the answer can be captured as a short list of concrete choices, pass structured `options` instead of embedding pseudo-multiple-choice text in the question body. Reserve free-form asks for cases where the user genuinely needs to type an unconstrained answer.
 Ask questions early for preferences and tradeoffs that are not discoverable from the environment.
 If the user does not answer a preference question, proceed with a recommended default and record it as an assumption in the final plan.
 
