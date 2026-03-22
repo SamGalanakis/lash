@@ -1,4 +1,5 @@
 use serde_json::json;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -11,7 +12,7 @@ use crate::{
     MessageRole, PluginMessage, ToolDefinition, ToolImage, ToolParam, ToolProvider, ToolResult,
 };
 
-use super::{parse_optional_usize_arg, read_to_string, require_str, run_blocking};
+use super::{parse_optional_usize_arg, require_str, run_blocking};
 
 /// Read files with line-number-prefixed output. Supports images natively.
 #[derive(Default)]
@@ -99,9 +100,8 @@ impl SessionPlugin for ReadFilePlugin {
 
 const DEFAULT_LIMIT: usize = 2000;
 const MAX_LINE_LEN: usize = 2000;
-/// Max text file size we'll read (1 MB). Larger files must use offset/limit.
-const MAX_TEXT_BYTES: u64 = 1_000_000;
-const TRUNCATION_HINT: &str = "Pass `limit=null` for all lines.";
+const MAX_OUTPUT_BYTES: usize = 50 * 1024;
+const MAX_OUTPUT_BYTES_LABEL: &str = "50 KB";
 
 #[async_trait::async_trait]
 impl ToolProvider for ReadFile {
@@ -124,10 +124,7 @@ impl ToolProvider for ReadFile {
                 ToolParam {
                     name: "limit".into(),
                     r#type: "int".into(),
-                    description: format!(
-                        "Maximum lines to read (default: {}). Use null or \"none\" for no cap.",
-                        DEFAULT_LIMIT
-                    ),
+                    description: format!("Maximum lines to read (default: {}).", DEFAULT_LIMIT),
                     default_value: Some(serde_json::json!(DEFAULT_LIMIT)),
                     required: false,
                 },
@@ -153,7 +150,7 @@ impl ToolProvider for ReadFile {
             .max(1);
 
         let limit = match parse_limit(args) {
-            Ok(l) => l,
+            Ok(limit) => limit,
             Err(e) => return e,
         };
 
@@ -161,11 +158,14 @@ impl ToolProvider for ReadFile {
     }
 }
 
-fn parse_limit(args: &serde_json::Value) -> Result<Option<usize>, ToolResult> {
-    parse_optional_usize_arg(args, "limit", Some(DEFAULT_LIMIT), true, 1)
+fn parse_limit(args: &serde_json::Value) -> Result<usize, ToolResult> {
+    Ok(
+        parse_optional_usize_arg(args, "limit", Some(DEFAULT_LIMIT), false, 1)?
+            .unwrap_or(DEFAULT_LIMIT),
+    )
 }
 
-fn execute_read_file_sync(path_str: &str, offset: usize, limit: Option<usize>) -> ToolResult {
+fn execute_read_file_sync(path_str: &str, offset: usize, limit: usize) -> ToolResult {
     let path = Path::new(path_str);
     if !path.exists() {
         return ToolResult::err_fmt(format_args!(
@@ -175,7 +175,7 @@ fn execute_read_file_sync(path_str: &str, offset: usize, limit: Option<usize>) -
 
     // Directory — still works but nudges toward ls
     if path.is_dir() {
-        let mut result = list_directory(path);
+        let mut result = list_directory(path, offset, limit);
         if result.success
             && let serde_json::Value::String(ref mut s) = result.result
         {
@@ -206,73 +206,26 @@ fn execute_read_file_sync(path_str: &str, offset: usize, limit: Option<usize>) -
         ));
     }
 
-    // Check file size before reading
-    let file_size = match std::fs::metadata(path) {
-        Ok(m) => m.len(),
-        Err(e) => return ToolResult::err_fmt(format_args!("Failed to stat file: {e}")),
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) => return ToolResult::err_fmt(format_args!("Failed to open file: {e}")),
     };
-    if file_size > MAX_TEXT_BYTES {
-        return ToolResult::err_fmt(format_args!(
-            "File too large ({file_size} bytes, max {MAX_TEXT_BYTES}). Use offset and limit parameters to read in chunks."
-        ));
-    }
-
-    let content = match read_to_string(path) {
-        Ok(c) => c,
-        Err(e) => return e,
+    let reader = BufReader::new(file);
+    let slice = match collect_window(
+        reader.lines(),
+        offset,
+        limit,
+        |line_no, line| format!("{line_no}: {line}"),
+        "file",
+    ) {
+        Ok(slice) => slice,
+        Err(err) => return err,
     };
 
-    let all_lines: Vec<&str> = content.lines().collect();
-    let total_lines = all_lines.len();
-
-    // offset is 1-based
-    let start_idx = (offset - 1).min(total_lines);
-    let end_idx = match limit {
-        Some(limit) => (start_idx + limit).min(total_lines),
-        None => total_lines,
-    };
-    let selected: Vec<&str> = all_lines[start_idx..end_idx].to_vec();
-
-    // Truncate long lines and format with line numbers.
-    let truncated_content: String = selected
-        .iter()
-        .map(|line| {
-            if line.len() > MAX_LINE_LEN {
-                format!("{}...", &line[..MAX_LINE_LEN])
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let mut formatted = format_numbered_lines(&truncated_content, offset);
-
-    append_truncation_notice(&mut formatted, start_idx, end_idx, total_lines);
-
-    ToolResult::ok(json!(formatted))
+    ToolResult::ok(json!(render_window(&slice, WindowKind::Lines)))
 }
 
-fn append_truncation_notice(
-    formatted: &mut String,
-    start_idx: usize,
-    end_idx: usize,
-    total_lines: usize,
-) {
-    if end_idx >= total_lines {
-        return;
-    }
-    let shown_start = start_idx + 1;
-    let shown_end = end_idx;
-    let omitted = total_lines - end_idx;
-    let next_offset = end_idx + 1;
-    formatted.push_str(&format!(
-        "\n[results truncated: showing lines {}-{} of {} ({} more lines). Use offset={} to continue. {}]",
-        shown_start, shown_end, total_lines, omitted, next_offset, TRUNCATION_HINT
-    ));
-}
-
-fn list_directory(path: &Path) -> ToolResult {
+fn list_directory(path: &Path, offset: usize, limit: usize) -> ToolResult {
     match std::fs::read_dir(path) {
         Ok(entries) => {
             let mut items: Vec<String> = Vec::new();
@@ -286,7 +239,17 @@ fn list_directory(path: &Path) -> ToolResult {
                 }
             }
             items.sort();
-            ToolResult::ok(json!(items.join("\n")))
+            let slice = match collect_window(
+                items.into_iter().map(Ok::<String, std::io::Error>),
+                offset,
+                limit,
+                |_index, entry| entry.to_string(),
+                "directory",
+            ) {
+                Ok(slice) => slice,
+                Err(err) => return err,
+            };
+            ToolResult::ok(json!(render_window(&slice, WindowKind::Entries)))
         }
         Err(e) => ToolResult::err_fmt(format_args!("Failed to read directory: {e}")),
     }
@@ -344,7 +307,7 @@ fn read_image(path: &Path, path_str: &str, mime: &str) -> ToolResult {
 }
 
 /// Extract text from a PDF file using the pdf-extract crate (pure Rust).
-fn read_pdf(path: &Path, path_str: &str, offset: usize, limit: Option<usize>) -> ToolResult {
+fn read_pdf(path: &Path, path_str: &str, offset: usize, limit: usize) -> ToolResult {
     let pdf_bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => return ToolResult::err_fmt(format_args!("Failed to read PDF: {e}")),
@@ -361,36 +324,25 @@ fn read_pdf(path: &Path, path_str: &str, offset: usize, limit: Option<usize>) ->
         }
     };
 
-    let all_lines: Vec<&str> = text.lines().collect();
-    let total_lines = all_lines.len();
-    let start_idx = (offset - 1).min(total_lines);
-    let end_idx = match limit {
-        Some(limit) => (start_idx + limit).min(total_lines),
-        None => total_lines,
+    let slice = match collect_window(
+        text.lines()
+            .map(|line| Ok::<String, std::io::Error>(line.to_string())),
+        offset,
+        limit,
+        |line_no, line| format!("{line_no}: {line}"),
+        "PDF",
+    ) {
+        Ok(slice) => slice,
+        Err(err) => return err,
     };
-    let selected = &all_lines[start_idx..end_idx];
 
-    let truncated: String = selected
-        .iter()
-        .map(|line| {
-            if line.len() > MAX_LINE_LEN {
-                format!("{}...", &line[..MAX_LINE_LEN])
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let mut formatted = format_numbered_lines(&truncated, offset);
+    let mut formatted = render_window(&slice, WindowKind::Lines);
 
     let header = format!(
         "[PDF: {} ({}KB, {} lines extracted)]\n",
-        path_str, file_size_kb, total_lines
+        path_str, file_size_kb, slice.total_items
     );
     formatted.insert_str(0, &header);
-
-    append_truncation_notice(&mut formatted, start_idx, end_idx, total_lines);
 
     ToolResult::ok(json!(formatted))
 }
@@ -464,15 +416,129 @@ fn gif_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     Some((w, h))
 }
 
-fn format_numbered_lines(content: &str, start_line: usize) -> String {
-    let mut out = String::new();
-    for (i, line) in content.lines().enumerate() {
-        if i > 0 {
-            out.push('\n');
+struct WindowSlice {
+    rendered: Vec<String>,
+    total_items: usize,
+    shown_start: Option<usize>,
+    shown_end: Option<usize>,
+    has_more_items: bool,
+    truncated_by_bytes: bool,
+}
+
+enum WindowKind {
+    Lines,
+    Entries,
+}
+
+fn collect_window<I, E, F>(
+    items: I,
+    offset: usize,
+    limit: usize,
+    mut format_item: F,
+    item_label: &str,
+) -> Result<WindowSlice, ToolResult>
+where
+    I: IntoIterator<Item = Result<String, E>>,
+    E: std::fmt::Display,
+    F: FnMut(usize, &str) -> String,
+{
+    let mut total_items = 0usize;
+    let mut bytes = 0usize;
+    let mut rendered = Vec::new();
+    let mut has_more_items = false;
+    let mut truncated_by_bytes = false;
+
+    for item in items {
+        let item = item.map_err(|err| {
+            ToolResult::err_fmt(format_args!("Failed to read {item_label}: {err}"))
+        })?;
+        total_items += 1;
+        if total_items < offset {
+            continue;
         }
-        out.push_str(&format!("{}: {}", start_line + i, line));
+        if rendered.len() >= limit {
+            has_more_items = true;
+            continue;
+        }
+
+        let item = truncate_line(&item);
+        let rendered_item = format_item(total_items, &item);
+        let size = rendered_item.len() + usize::from(!rendered.is_empty());
+        if bytes + size > MAX_OUTPUT_BYTES {
+            truncated_by_bytes = true;
+            has_more_items = true;
+            break;
+        }
+        bytes += size;
+        rendered.push(rendered_item);
     }
-    out
+
+    if total_items < offset && !(total_items == 0 && offset == 1) {
+        return Err(ToolResult::err_fmt(format_args!(
+            "Offset {offset} is out of range for this {item_label} ({total_items} items)"
+        )));
+    }
+
+    let shown_start = (!rendered.is_empty()).then_some(offset);
+    let shown_end = shown_start.map(|start| start + rendered.len().saturating_sub(1));
+
+    Ok(WindowSlice {
+        rendered,
+        total_items,
+        shown_start,
+        shown_end,
+        has_more_items,
+        truncated_by_bytes,
+    })
+}
+
+fn render_window(slice: &WindowSlice, kind: WindowKind) -> String {
+    let mut output = slice.rendered.join("\n");
+    let Some(shown_start) = slice.shown_start else {
+        return output;
+    };
+    let Some(shown_end) = slice.shown_end else {
+        return output;
+    };
+
+    let next_offset = shown_end + 1;
+    match kind {
+        WindowKind::Lines => {
+            if slice.truncated_by_bytes {
+                output.push_str(&format!(
+                    "\n[output capped at {}. Showing lines {}-{}. Use offset={} to continue.]",
+                    MAX_OUTPUT_BYTES_LABEL, shown_start, shown_end, next_offset
+                ));
+            } else if slice.has_more_items {
+                output.push_str(&format!(
+                    "\n[results truncated: showing lines {}-{} of {}. Use offset={} to continue.]",
+                    shown_start, shown_end, slice.total_items, next_offset
+                ));
+            }
+        }
+        WindowKind::Entries => {
+            if slice.truncated_by_bytes {
+                output.push_str(&format!(
+                    "\n[output capped at {}. Showing entries {}-{}. Use offset={} to continue.]",
+                    MAX_OUTPUT_BYTES_LABEL, shown_start, shown_end, next_offset
+                ));
+            } else if slice.has_more_items {
+                output.push_str(&format!(
+                    "\n[results truncated: showing entries {}-{} of {}. Use offset={} to continue.]",
+                    shown_start, shown_end, slice.total_items, next_offset
+                ));
+            }
+        }
+    }
+    output
+}
+
+fn truncate_line(line: &str) -> String {
+    if line.len() > MAX_LINE_LEN {
+        format!("{}...", &line[..MAX_LINE_LEN])
+    } else {
+        line.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -518,28 +584,29 @@ mod tests {
         assert!(!text.contains("1: line1"));
         assert!(!text.contains("4: line4"));
         assert!(text.contains("results truncated"));
-        assert!(text.contains("2 more lines"));
         assert!(text.contains("offset=4"));
     }
 
     #[tokio::test]
-    async fn test_read_limit_none() {
+    async fn test_read_caps_large_output_by_bytes() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.txt");
-        std::fs::write(&path, "line1\nline2\nline3").unwrap();
+        let content = (0..200)
+            .map(|idx| format!("{idx}: {}", "x".repeat(400)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, content).unwrap();
         let tool = ReadFile;
         let result = tool
             .execute(
                 "read_file",
-                &json!({"path": path.to_str().unwrap(), "limit": null}),
+                &json!({"path": path.to_str().unwrap(), "limit": 200}),
             )
             .await;
         assert!(result.success);
         let text = result.result.as_str().unwrap();
-        assert!(text.contains("1: line1"));
-        assert!(text.contains("2: line2"));
-        assert!(text.contains("3: line3"));
-        assert!(!text.contains("results truncated"));
+        assert!(text.contains("output capped at 50 KB"));
+        assert!(text.contains("Use offset="));
     }
 
     #[tokio::test]

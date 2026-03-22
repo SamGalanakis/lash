@@ -198,12 +198,6 @@ pub(crate) fn project_tool_catalog(
         .collect()
 }
 
-/// Read a file to string, or return ToolResult::err.
-pub(crate) fn read_to_string(path: &std::path::Path) -> Result<String, ToolResult> {
-    std::fs::read_to_string(path)
-        .map_err(|e| ToolResult::err_fmt(format_args!("Failed to read {}: {e}", path.display())))
-}
-
 /// Run blocking filesystem work off the async runtime.
 pub(crate) async fn run_blocking<F>(f: F) -> ToolResult
 where

@@ -1,19 +1,19 @@
 use serde_json::json;
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::{Component, Path};
 
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
-use super::{parse_optional_usize_arg, require_str};
+use super::require_str;
 
 /// Search file contents using regex patterns.
 #[derive(Default)]
 pub struct Grep;
 
 const MAX_RESULTS: usize = 100;
-const DEFAULT_CONTEXT: usize = 3;
-const MAX_LINE_LEN: usize = 500;
-const TRUNCATION_HINT: &str = "Pass `limit=null` for all.";
+const MAX_LINE_LEN: usize = 2_000;
+const TRUNCATION_HINT: &str = "Consider using a more specific path or pattern.";
 
 #[async_trait::async_trait]
 impl ToolProvider for Grep {
@@ -21,8 +21,8 @@ impl ToolProvider for Grep {
         vec![ToolDefinition {
             name: "grep".into(),
             description: format!(
-                "Search file contents with a ripgrep-style regex. Returns `file:line:text` matches plus `file-line-text` context lines. Defaults: context={}, limit={}.",
-                DEFAULT_CONTEXT, MAX_RESULTS
+                "Search file contents with a ripgrep-style regex. Returns up to {} `file:line:text` matches.",
+                MAX_RESULTS
             ),
             params: vec![
                 ToolParam::typed("pattern", "str"),
@@ -39,26 +39,6 @@ impl ToolProvider for Grep {
                     r#type: "str".into(),
                     description: "Glob pattern to filter files (e.g. \"*.rs\", \"*.py\")".into(),
                     default_value: None,
-                    required: false,
-                },
-                ToolParam {
-                    name: "context".into(),
-                    r#type: "int".into(),
-                    description: format!(
-                        "Number of context lines before/after each match (ripgrep `-C`, default: {}). Use 0 for match-only output.",
-                        DEFAULT_CONTEXT
-                    ),
-                    default_value: Some(serde_json::json!(DEFAULT_CONTEXT)),
-                    required: false,
-                },
-                ToolParam {
-                    name: "limit".into(),
-                    r#type: "int".into(),
-                    description: format!(
-                        "Maximum matches to return (default: {}). Use null or \"none\" for no cap.",
-                        MAX_RESULTS
-                    ),
-                    default_value: Some(serde_json::json!(MAX_RESULTS)),
                     required: false,
                 },
             ],
@@ -78,14 +58,6 @@ impl ToolProvider for Grep {
         let base_dir = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         let include = args.get("include").and_then(|v| v.as_str());
-        let context = match parse_context(args) {
-            Ok(c) => c,
-            Err(e) => return e,
-        };
-        let limit = match parse_limit(args) {
-            Ok(l) => l,
-            Err(e) => return e,
-        };
 
         let re = match regex::Regex::new(pattern) {
             Ok(r) => r,
@@ -107,9 +79,9 @@ impl ToolProvider for Grep {
 
         // If it's a single file, search just that file
         if base.is_file() {
-            let searched = search_file(base, &re, context, limit);
+            let searched = search_file(base, &re, MAX_RESULTS);
             let mut output = format_matches(&searched.entries);
-            maybe_append_truncation_line(&mut output, limit, searched.match_count);
+            maybe_append_truncation_line(&mut output, searched.match_count);
             return ToolResult::ok(json!(output));
         }
 
@@ -124,7 +96,7 @@ impl ToolProvider for Grep {
 
         let mut all_entries: Vec<GrepHit> = Vec::new();
         let mut total_matches: usize = 0;
-        let mut rendered_matches: usize = 0;
+        let mut shown_matches: usize = 0;
 
         for entry in walker {
             let entry = match entry {
@@ -134,7 +106,7 @@ impl ToolProvider for Grep {
 
             let path = entry.path();
 
-            if !path.is_file() {
+            if !path.is_file() || is_git_internal_path(base, path) {
                 continue;
             }
 
@@ -146,28 +118,21 @@ impl ToolProvider for Grep {
                 }
             }
 
-            let remaining = limit.map(|l| l.saturating_sub(rendered_matches));
-            let searched = search_file(path, &re, context, remaining);
+            if shown_matches >= MAX_RESULTS {
+                break;
+            }
+
+            let remaining = MAX_RESULTS.saturating_sub(shown_matches);
+            let searched = search_file(path, &re, remaining);
             total_matches += searched.match_count;
-            rendered_matches += searched.rendered_matches;
+            shown_matches += searched.entries.len();
             all_entries.extend(searched.entries);
         }
 
         let mut output = format_matches(&all_entries);
-        maybe_append_truncation_line(&mut output, limit, total_matches);
+        maybe_append_truncation_line(&mut output, total_matches);
         ToolResult::ok(json!(output))
     }
-}
-
-fn parse_context(args: &serde_json::Value) -> Result<usize, ToolResult> {
-    Ok(
-        parse_optional_usize_arg(args, "context", Some(DEFAULT_CONTEXT), false, 0)?
-            .unwrap_or(DEFAULT_CONTEXT),
-    )
-}
-
-fn parse_limit(args: &serde_json::Value) -> Result<Option<usize>, ToolResult> {
-    parse_optional_usize_arg(args, "limit", Some(MAX_RESULTS), true, 1)
 }
 
 #[derive(Clone)]
@@ -181,21 +146,14 @@ struct GrepHit {
 struct SearchResult {
     entries: Vec<GrepHit>,
     match_count: usize,
-    rendered_matches: usize,
 }
 
-fn maybe_append_truncation_line(
-    output: &mut Vec<String>,
-    limit: Option<usize>,
-    total_matches: usize,
-) {
-    if let Some(limit) = limit
-        && total_matches > limit
-    {
-        let omitted = total_matches - limit;
+fn maybe_append_truncation_line(output: &mut Vec<String>, total_matches: usize) {
+    if total_matches > MAX_RESULTS {
+        let omitted = total_matches - MAX_RESULTS;
         output.push(format!(
             "[results truncated: showing {} of {} matches ({} omitted). {}]",
-            limit, total_matches, omitted, TRUNCATION_HINT
+            MAX_RESULTS, total_matches, omitted, TRUNCATION_HINT
         ));
     }
 }
@@ -213,88 +171,57 @@ fn format_matches(matches: &[GrepHit]) -> Vec<String> {
         .collect()
 }
 
-fn search_file(
-    path: &Path,
-    re: &regex::Regex,
-    context: usize,
-    max_matches: Option<usize>,
-) -> SearchResult {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
+fn search_file(path: &Path, re: &regex::Regex, max_matches: usize) -> SearchResult {
+    let file = match File::open(path) {
+        Ok(file) => file,
         Err(_) => {
             return SearchResult {
                 entries: vec![],
                 match_count: 0,
-                rendered_matches: 0,
             };
         }
     };
 
-    let lines: Vec<&str> = content.lines().collect();
-    let mut matched_lines: Vec<usize> = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        if re.is_match(line) {
-            matched_lines.push(i);
-        }
-    }
-    let match_count = matched_lines.len();
-
-    if match_count == 0 {
-        return SearchResult {
-            entries: vec![],
-            match_count: 0,
-            rendered_matches: 0,
-        };
-    }
-
-    let rendered_matches = max_matches
-        .map(|m| m.min(match_count))
-        .unwrap_or(match_count);
-    if rendered_matches == 0 {
-        return SearchResult {
-            entries: vec![],
-            match_count,
-            rendered_matches: 0,
-        };
-    }
-
-    let mut included: BTreeMap<usize, bool> = BTreeMap::new();
-    for &match_idx in matched_lines.iter().take(rendered_matches) {
-        let start = match_idx.saturating_sub(context);
-        let end = (match_idx + context).min(lines.len().saturating_sub(1));
-        for i in start..=end {
-            let is_match = i == match_idx;
-            included
-                .entry(i)
-                .and_modify(|existing| *existing = *existing || is_match)
-                .or_insert(is_match);
-        }
-    }
-
+    let reader = BufReader::new(file);
     let file = path.to_string_lossy().to_string();
-    let entries = included
-        .into_iter()
-        .map(|(idx, is_match)| {
-            let line = lines[idx];
-            let content = if line.len() > MAX_LINE_LEN {
-                format!("{}...", &line[..MAX_LINE_LEN])
-            } else {
-                line.to_string()
-            };
-            GrepHit {
-                file: file.clone(),
-                line: idx + 1,
-                content,
-                is_match,
-            }
-        })
-        .collect();
+    let mut entries = Vec::new();
+    let mut match_count = 0usize;
+
+    for (idx, line_result) in reader.lines().enumerate() {
+        let Ok(line) = line_result else {
+            continue;
+        };
+        if !re.is_match(&line) {
+            continue;
+        }
+        match_count += 1;
+        if entries.len() >= max_matches {
+            continue;
+        }
+        let content = if line.len() > MAX_LINE_LEN {
+            format!("{}...", &line[..MAX_LINE_LEN])
+        } else {
+            line
+        };
+        entries.push(GrepHit {
+            file: file.clone(),
+            line: idx + 1,
+            content,
+            is_match: true,
+        });
+    }
 
     SearchResult {
         entries,
         match_count,
-        rendered_matches,
     }
+}
+
+fn is_git_internal_path(base: &Path, path: &Path) -> bool {
+    path.strip_prefix(base)
+        .unwrap_or(path)
+        .components()
+        .any(|component| matches!(component, Component::Normal(name) if name == ".git"))
 }
 
 #[cfg(test)]
@@ -315,7 +242,7 @@ mod tests {
         let result = tool
             .execute(
                 "grep",
-                &json!({"pattern": "hello", "path": dir.path().to_str().unwrap(), "context": 0}),
+                &json!({"pattern": "hello", "path": dir.path().to_str().unwrap()}),
             )
             .await;
         assert!(result.success);
@@ -370,43 +297,54 @@ mod tests {
         let result = tool
             .execute(
                 "grep",
-                &json!({"pattern": "hello", "path": dir.path().to_str().unwrap(), "context": 0, "limit": 2}),
+                &json!({"pattern": "hello", "path": dir.path().to_str().unwrap()}),
             )
             .await;
         assert!(result.success);
         let arr = result.result.as_array().unwrap();
         let text: Vec<&str> = arr.iter().map(|v| v.as_str().unwrap_or("")).collect();
         assert_eq!(text.len(), 3);
-        assert!(text[2].contains("showing 2 of 3"));
-        assert!(text[2].contains("1 omitted"));
+        assert!(!text[2].contains("results truncated"));
     }
 
     #[tokio::test]
-    async fn test_grep_limit_none() {
+    async fn test_grep_hard_caps_at_100_results() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(
-            dir.path().join("test.txt"),
-            "hello one\nhello two\nhello three\n",
-        )
-        .unwrap();
+        let lines = (0..150)
+            .map(|idx| format!("hello {idx}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.path().join("test.txt"), lines).unwrap();
         let tool = Grep;
         let result = tool
             .execute(
                 "grep",
-                &json!({"pattern": "hello", "path": dir.path().to_str().unwrap(), "context": 0, "limit": null}),
+                &json!({"pattern": "hello", "path": dir.path().to_str().unwrap()}),
             )
             .await;
         assert!(result.success);
         let arr = result.result.as_array().unwrap();
-        assert_eq!(arr.len(), 3);
+        assert_eq!(arr.len(), 101);
+        assert!(
+            arr[100]
+                .as_str()
+                .unwrap_or("")
+                .contains("showing 100 of 150")
+        );
     }
 
     #[tokio::test]
-    async fn test_grep_default_context_includes_neighbor_lines() {
+    async fn test_grep_ignores_git_internal_paths() {
         let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git/rr-cache")).unwrap();
         std::fs::write(
             dir.path().join("test.txt"),
             "hello world\nfoo bar\nhello again",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".git/rr-cache/ignored.txt"),
+            "hello from git internals",
         )
         .unwrap();
         let tool = Grep;
@@ -420,7 +358,7 @@ mod tests {
         let arr = result.result.as_array().unwrap();
         let text: Vec<&str> = arr.iter().map(|v| v.as_str().unwrap_or("")).collect();
         assert!(text.iter().any(|l| l.contains(":1:hello world")));
-        assert!(text.iter().any(|l| l.contains("-2-foo bar")));
         assert!(text.iter().any(|l| l.contains(":3:hello again")));
+        assert!(!text.iter().any(|l| l.contains("git internals")));
     }
 }

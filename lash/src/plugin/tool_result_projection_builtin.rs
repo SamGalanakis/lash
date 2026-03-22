@@ -1,12 +1,18 @@
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
+
 use crate::ToolResult;
+use crate::lash_cache_dir;
 use crate::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
     ToolResultProjectionContext, ToolResultProjectionHook,
 };
 
 const APPROX_BYTES_PER_TOKEN: usize = 4;
+const DEFAULT_MAX_LINES: usize = 2_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -16,18 +22,27 @@ pub enum ToolResultProjectionMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ToolResultProjectionPluginConfig {
     pub mode: ToolResultProjectionMode,
     pub limit: usize,
+    pub max_lines: usize,
 }
 
 impl Default for ToolResultProjectionPluginConfig {
     fn default() -> Self {
         Self {
             mode: ToolResultProjectionMode::Bytes,
-            limit: 10_000,
+            limit: 50 * 1024,
+            max_lines: DEFAULT_MAX_LINES,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectionDirection {
+    Head,
+    Tail,
 }
 
 pub struct BuiltinToolResultProjectionPluginFactory {
@@ -93,12 +108,9 @@ fn project_tool_result(
     config: &ToolResultProjectionPluginConfig,
     ctx: ToolResultProjectionContext,
 ) -> ToolResult {
-    let projected_value = project_json_value(&ctx.result.result, config, false);
     let result = match ctx.hook {
-        ToolResultProjectionHook::BeforeModel => {
-            project_model_value(projected_value, ctx.result.success, config)
-        }
-        ToolResultProjectionHook::BeforeHistory => projected_value,
+        ToolResultProjectionHook::BeforeModel => project_model_value(config, &ctx),
+        ToolResultProjectionHook::BeforeHistory => project_history_value(config, &ctx),
     };
     ToolResult {
         success: ctx.result.success,
@@ -108,15 +120,32 @@ fn project_tool_result(
 }
 
 fn project_model_value(
-    value: serde_json::Value,
-    success: bool,
     config: &ToolResultProjectionPluginConfig,
+    ctx: &ToolResultProjectionContext,
 ) -> serde_json::Value {
-    let rendered = render_tool_result_payload(success, &value);
-    if !needs_truncation(&rendered, config) {
-        return value;
+    if ctx.tool_name == "batch" {
+        return serde_json::Value::String(render_batch_model_summary(&ctx.result.result));
     }
-    serde_json::Value::String(formatted_truncate_text(&rendered, config))
+    let rendered = render_tool_result_payload(ctx.result.success, &ctx.result.result);
+    if !needs_truncation(&rendered, config) {
+        return project_json_value(&ctx.result.result, config, ctx);
+    }
+    serde_json::Value::String(formatted_truncate_text(
+        &rendered,
+        config,
+        tool_projection_direction(&ctx.tool_name),
+        Some(ctx),
+    ))
+}
+
+fn project_history_value(
+    config: &ToolResultProjectionPluginConfig,
+    ctx: &ToolResultProjectionContext,
+) -> serde_json::Value {
+    if ctx.tool_name == "batch" {
+        return project_batch_history_value(&ctx.result.result, config, ctx);
+    }
+    project_json_value(&ctx.result.result, config, ctx)
 }
 
 fn render_tool_result_payload(success: bool, value: &serde_json::Value) -> String {
@@ -137,57 +166,71 @@ fn render_tool_result_payload(success: bool, value: &serde_json::Value) -> Strin
 fn project_json_value(
     value: &serde_json::Value,
     config: &ToolResultProjectionPluginConfig,
-    formatted: bool,
+    ctx: &ToolResultProjectionContext,
 ) -> serde_json::Value {
     match value {
         serde_json::Value::String(text) => {
-            serde_json::Value::String(project_text(text, config, formatted))
+            serde_json::Value::String(project_text(text, config, ctx))
         }
         serde_json::Value::Array(items) => serde_json::Value::Array(
             items
                 .iter()
-                .map(|item| project_json_value(item, config, formatted))
+                .map(|item| project_json_value(item, config, ctx))
                 .collect(),
         ),
         serde_json::Value::Object(map) => serde_json::Value::Object(
             map.iter()
-                .map(|(key, value)| (key.clone(), project_json_value(value, config, formatted)))
+                .map(|(key, value)| (key.clone(), project_json_value(value, config, ctx)))
                 .collect(),
         ),
         other => other.clone(),
     }
 }
 
-fn project_text(text: &str, config: &ToolResultProjectionPluginConfig, formatted: bool) -> String {
+fn project_text(
+    text: &str,
+    config: &ToolResultProjectionPluginConfig,
+    ctx: &ToolResultProjectionContext,
+) -> String {
     if !needs_truncation(text, config) {
         return text.to_string();
     }
-    if formatted {
-        formatted_truncate_text(text, config)
-    } else {
-        truncate_text(text, config)
-    }
+    truncate_text(
+        text,
+        config,
+        tool_projection_direction(&ctx.tool_name),
+        Some(ctx),
+    )
 }
 
 fn needs_truncation(text: &str, config: &ToolResultProjectionPluginConfig) -> bool {
+    if text.lines().count() > config.max_lines {
+        return true;
+    }
     match config.mode {
         ToolResultProjectionMode::Bytes => text.len() > config.limit,
         ToolResultProjectionMode::Tokens => approx_token_count(text) > config.limit,
     }
 }
 
-fn formatted_truncate_text(text: &str, config: &ToolResultProjectionPluginConfig) -> String {
+fn formatted_truncate_text(
+    text: &str,
+    config: &ToolResultProjectionPluginConfig,
+    direction: ProjectionDirection,
+    ctx: Option<&ToolResultProjectionContext>,
+) -> String {
     if !needs_truncation(text, config) {
         return text.to_string();
     }
-    let total_lines = text.lines().count();
-    format!(
-        "Total output lines: {total_lines}\n\n{}",
-        truncate_text(text, config)
-    )
+    truncate_text(text, config, direction, ctx)
 }
 
-fn truncate_text(text: &str, config: &ToolResultProjectionPluginConfig) -> String {
+fn truncate_text(
+    text: &str,
+    config: &ToolResultProjectionPluginConfig,
+    direction: ProjectionDirection,
+    ctx: Option<&ToolResultProjectionContext>,
+) -> String {
     if text.is_empty() {
         return String::new();
     }
@@ -201,60 +244,67 @@ fn truncate_text(text: &str, config: &ToolResultProjectionPluginConfig) -> Strin
             removed_units(config.mode, text.len(), text.chars().count()),
         );
     }
-    if text.len() <= max_bytes {
+    if !needs_truncation(text, config) {
         return text.to_string();
     }
-    let (left_budget, right_budget) = split_budget(max_bytes);
-    let (removed_chars, prefix, suffix) = split_string(text, left_budget, right_budget);
-    let removed_bytes = text.len().saturating_sub(prefix.len() + suffix.len());
-    let marker = format_truncation_marker(
-        config.mode,
-        removed_units(config.mode, removed_bytes, removed_chars),
-    );
-    let mut out = String::with_capacity(prefix.len() + marker.len() + suffix.len());
-    out.push_str(prefix);
-    out.push_str(&marker);
-    out.push_str(suffix);
-    out
-}
+    let lines: Vec<&str> = text.lines().collect();
+    let mut preview_lines = Vec::new();
+    let mut bytes = 0usize;
+    let mut hit_budget = false;
 
-fn split_budget(budget: usize) -> (usize, usize) {
-    let left = budget / 2;
-    (left, budget - left)
-}
-
-fn split_string(s: &str, prefix_bytes: usize, suffix_bytes: usize) -> (usize, &str, &str) {
-    if s.is_empty() {
-        return (0, "", "");
-    }
-    let len = s.len();
-    let tail_start_target = len.saturating_sub(suffix_bytes);
-    let mut prefix_end = 0usize;
-    let mut suffix_start = len;
-    let mut removed_chars = 0usize;
-    let mut suffix_started = false;
-
-    for (idx, ch) in s.char_indices() {
-        let char_end = idx + ch.len_utf8();
-        if char_end <= prefix_bytes {
-            prefix_end = char_end;
-            continue;
-        }
-        if idx >= tail_start_target {
-            if !suffix_started {
-                suffix_start = idx;
-                suffix_started = true;
+    match direction {
+        ProjectionDirection::Head => {
+            for (idx, line) in lines.iter().enumerate().take(config.max_lines) {
+                let size = line.len() + usize::from(idx > 0);
+                if bytes + size > max_bytes {
+                    hit_budget = true;
+                    break;
+                }
+                preview_lines.push(*line);
+                bytes += size;
             }
-            continue;
         }
-        removed_chars = removed_chars.saturating_add(1);
+        ProjectionDirection::Tail => {
+            for (idx, line) in lines.iter().rev().take(config.max_lines).enumerate() {
+                let size = line.len() + usize::from(idx > 0);
+                if bytes + size > max_bytes {
+                    hit_budget = true;
+                    break;
+                }
+                preview_lines.push(*line);
+                bytes += size;
+            }
+            preview_lines.reverse();
+        }
     }
 
-    if suffix_start < prefix_end {
-        suffix_start = prefix_end;
+    let preview = preview_lines.join("\n");
+    let removed = if hit_budget {
+        removed_units(
+            config.mode,
+            text.len().saturating_sub(bytes),
+            text.chars().count().saturating_sub(preview.chars().count()),
+        )
+    } else {
+        u64::try_from(lines.len().saturating_sub(preview_lines.len())).unwrap_or(u64::MAX)
+    };
+    let unit = if hit_budget {
+        match config.mode {
+            ToolResultProjectionMode::Bytes => "bytes",
+            ToolResultProjectionMode::Tokens => "tokens",
+        }
+    } else {
+        "lines"
+    };
+    let hint = truncation_hint(ctx, text);
+    match direction {
+        ProjectionDirection::Head => {
+            format!("{preview}\n\n...{removed} {unit} truncated...\n\n{hint}")
+        }
+        ProjectionDirection::Tail => {
+            format!("...{removed} {unit} truncated...\n\n{hint}\n\n{preview}")
+        }
     }
-
-    (removed_chars, &s[..prefix_end], &s[suffix_start..])
 }
 
 fn format_truncation_marker(mode: ToolResultProjectionMode, removed: u64) -> String {
@@ -291,6 +341,152 @@ fn approx_tokens_from_byte_count(bytes: usize) -> u64 {
         / (APPROX_BYTES_PER_TOKEN as u64)
 }
 
+fn tool_projection_direction(tool_name: &str) -> ProjectionDirection {
+    match tool_name {
+        "exec_command" | "write_stdin" => ProjectionDirection::Tail,
+        _ => ProjectionDirection::Head,
+    }
+}
+
+fn truncation_hint(ctx: Option<&ToolResultProjectionContext>, text: &str) -> String {
+    let output_path =
+        ctx.and_then(|ctx| spill_tool_output(&ctx.session_id, &ctx.tool_name, &ctx.args, text));
+    match output_path {
+        Some(path) => format!(
+            "The tool output was truncated. Full output saved to: {}\nUse `read_file` with `offset`/`limit` or `grep` to inspect specific sections instead of reading the whole file at once.",
+            path.display()
+        ),
+        None => "The tool output was truncated. Use `read_file` with `offset`/`limit` or `grep` to inspect specific sections instead of reading the whole file at once.".to_string(),
+    }
+}
+
+fn spill_tool_output(
+    session_id: &str,
+    tool_name: &str,
+    args: &serde_json::Value,
+    full_output: &str,
+) -> Option<PathBuf> {
+    let dir = lash_cache_dir().join("tool-output").join(session_id);
+    if fs::create_dir_all(&dir).is_err() {
+        return None;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(tool_name.as_bytes());
+    hasher.update(args.to_string().as_bytes());
+    hasher.update(full_output.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    let stem = tool_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let path = dir.join(format!("{stem}-{}.txt", &digest[..12]));
+    if write_if_changed(&path, full_output).is_err() {
+        return None;
+    }
+    Some(path)
+}
+
+fn write_if_changed(path: &Path, content: &str) -> std::io::Result<()> {
+    let should_write = match fs::read_to_string(path) {
+        Ok(existing) => existing != content,
+        Err(_) => true,
+    };
+    if should_write {
+        fs::write(path, content)?;
+    }
+    Ok(())
+}
+
+fn render_batch_model_summary(value: &serde_json::Value) -> String {
+    let summary = value
+        .get("summary")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            let successful = value
+                .get("successful")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let total = value
+                .get("total")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(successful);
+            format!("Executed {successful}/{total} tools successfully.")
+        });
+
+    let mut lines = vec![summary];
+    if let Some(results) = value.get("results").and_then(|value| value.as_array()) {
+        let details = results
+            .iter()
+            .filter_map(|item| {
+                let tool = item.get("tool").and_then(|value| value.as_str())?;
+                let status = if item.get("success").and_then(|value| value.as_bool()) == Some(true)
+                {
+                    "ok"
+                } else {
+                    "failed"
+                };
+                Some(format!("- {tool}: {status}"))
+            })
+            .collect::<Vec<_>>();
+        if !details.is_empty() {
+            lines.push(String::new());
+            lines.extend(details);
+        }
+    }
+    lines.join("\n")
+}
+
+fn project_batch_history_value(
+    value: &serde_json::Value,
+    config: &ToolResultProjectionPluginConfig,
+    ctx: &ToolResultProjectionContext,
+) -> serde_json::Value {
+    let Some(map) = value.as_object() else {
+        return project_json_value(value, config, ctx);
+    };
+    let mut projected = serde_json::Map::new();
+    for key in ["summary", "total", "successful", "failed"] {
+        if let Some(value) = map.get(key) {
+            projected.insert(key.to_string(), value.clone());
+        }
+    }
+    let details = map
+        .get("results")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    let mut detail = serde_json::Map::new();
+                    if let Some(tool) = item.get("tool") {
+                        detail.insert("tool".to_string(), tool.clone());
+                    }
+                    if let Some(success) = item.get("success") {
+                        detail.insert("success".to_string(), success.clone());
+                    }
+                    if let Some(duration_ms) = item.get("duration_ms") {
+                        detail.insert("duration_ms".to_string(), duration_ms.clone());
+                    }
+                    if let Some(error) = item.get("error") {
+                        detail.insert("error".to_string(), project_json_value(error, config, ctx));
+                    }
+                    serde_json::Value::Object(detail)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    projected.insert("details".to_string(), serde_json::Value::Array(details));
+    serde_json::Value::Object(projected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,19 +498,31 @@ mod tests {
         let config = ToolResultProjectionPluginConfig {
             mode: ToolResultProjectionMode::Tokens,
             limit: 5,
+            max_lines: DEFAULT_MAX_LINES,
         };
         let got = project_text(
             "this is an example of a long output that should be truncated",
             &config,
-            true,
+            &ToolResultProjectionContext {
+                hook: ToolResultProjectionHook::BeforeHistory,
+                session_id: "root".to_string(),
+                tool_name: "grep".to_string(),
+                args: json!({}),
+                result: ToolResult::ok(json!("unused")),
+                duration_ms: 1,
+                host: Arc::new(NoopSessionManager),
+            },
         );
-        assert!(got.contains("Total output lines: 1"));
         assert!(got.contains("tokens truncated"));
+        assert!(got.contains("Full output saved to:"));
     }
 
     #[test]
     fn history_projection_preserves_shape() {
-        let config = ToolResultProjectionPluginConfig::default();
+        let config = ToolResultProjectionPluginConfig {
+            limit: 512,
+            ..ToolResultProjectionPluginConfig::default()
+        };
         let projected = project_tool_result(
             &config,
             ToolResultProjectionContext {
@@ -336,8 +544,8 @@ mod tests {
             .get("output")
             .and_then(|value| value.as_str())
             .unwrap_or_default();
-        assert!(output.contains("chars truncated"));
-        assert!(!output.contains("Total output lines"));
+        assert!(output.contains("bytes truncated"));
+        assert!(output.contains("Full output saved to:"));
     }
 
     #[test]
@@ -345,6 +553,7 @@ mod tests {
         let config = ToolResultProjectionPluginConfig {
             mode: ToolResultProjectionMode::Bytes,
             limit: 40,
+            max_lines: DEFAULT_MAX_LINES,
         };
         let projected = project_tool_result(
             &config,
@@ -366,7 +575,69 @@ mod tests {
                 .result
                 .as_str()
                 .unwrap_or_default()
-                .contains("chars truncated")
+                .contains("bytes truncated")
         );
+    }
+
+    #[test]
+    fn batch_model_projection_drops_nested_child_payloads() {
+        let projected = project_tool_result(
+            &ToolResultProjectionPluginConfig::default(),
+            ToolResultProjectionContext {
+                hook: ToolResultProjectionHook::BeforeModel,
+                session_id: "root".to_string(),
+                tool_name: "batch".to_string(),
+                args: json!({}),
+                result: ToolResult::ok(json!({
+                    "summary": "Executed 1/2 tools successfully. 1 failed.",
+                    "total": 2,
+                    "successful": 1,
+                    "failed": 1,
+                    "results": [
+                        {"tool": "read_file", "success": true, "duration_ms": 1, "result": "very long child payload"},
+                        {"tool": "grep", "success": false, "duration_ms": 1, "error": "boom"}
+                    ]
+                })),
+                duration_ms: 1,
+                host: Arc::new(NoopSessionManager),
+            },
+        );
+        let text = projected.result.as_str().unwrap_or_default();
+        assert!(text.contains("Executed 1/2 tools successfully. 1 failed."));
+        assert!(text.contains("- read_file: ok"));
+        assert!(!text.contains("very long child payload"));
+    }
+
+    #[test]
+    fn batch_history_projection_keeps_only_metadata() {
+        let projected = project_tool_result(
+            &ToolResultProjectionPluginConfig::default(),
+            ToolResultProjectionContext {
+                hook: ToolResultProjectionHook::BeforeHistory,
+                session_id: "root".to_string(),
+                tool_name: "batch".to_string(),
+                args: json!({}),
+                result: ToolResult::ok(json!({
+                    "summary": "Executed 1/2 tools successfully. 1 failed.",
+                    "total": 2,
+                    "successful": 1,
+                    "failed": 1,
+                    "results": [
+                        {"tool": "read_file", "success": true, "duration_ms": 1, "result": "child payload"},
+                        {"tool": "grep", "success": false, "duration_ms": 1, "error": "boom"}
+                    ]
+                })),
+                duration_ms: 1,
+                host: Arc::new(NoopSessionManager),
+            },
+        );
+        let details = projected
+            .result
+            .get("details")
+            .and_then(|value| value.as_array())
+            .expect("details");
+        assert_eq!(details.len(), 2);
+        assert!(details[0].get("result").is_none());
+        assert_eq!(details[1].get("error"), Some(&json!("boom")));
     }
 }

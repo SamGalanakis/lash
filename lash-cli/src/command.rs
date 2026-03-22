@@ -65,6 +65,7 @@ pub fn completion_inserts_space(cmd: &str, skills: &SkillCatalog) -> bool {
 }
 
 /// Slash commands recognized by the TUI.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     /// Reset conversation to splash screen
     Clear,
