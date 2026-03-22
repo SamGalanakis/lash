@@ -2,6 +2,7 @@
 name = "lash-sansio"
 version.workspace = true
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -4,6 +4,7 @@ resolver = "3"
 
 [workspace.package]
 version = "0.2.10"
+license = "MIT"
 
 [profile.release]
 lto = "thin"

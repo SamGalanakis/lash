@@ -2,6 +2,7 @@
 name = "lash-cli"
 version.workspace = true
 edition = "2024"
+license.workspace = true
 
 [[bin]]
 name = "lash"
