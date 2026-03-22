@@ -22,7 +22,7 @@ thiserror = "2"
 tempfile = "3"
 tracing = "0.1"
 regex = "1"
-reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream", "native-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream", "rustls"] }
 globset = "0.4"
 ignore = "0.4"
 tokio-util = { version = "0.7", features = ["rt"] }

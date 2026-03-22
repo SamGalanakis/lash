@@ -135,6 +135,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: write
+      actions: write
 
     steps:
       - name: Check out repository
@@ -177,3 +178,17 @@ jobs:
           git reset --hard origin/main
           git tag "${tag}"
           git push origin "${tag}"
+
+      - name: Trigger release workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v${{ steps.version.outputs.version }}"
+          for _ in 1 2 3 4 5; do
+            if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1
+          gh workflow run release.yml --ref main -f release_tag="${tag}"
