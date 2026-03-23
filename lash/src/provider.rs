@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::llm::factory::adapter_for;
 use crate::llm::timeouts::{DEFAULT_CHUNK_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS, LlmTimeouts};
+use crate::mcp::McpServerConfig;
 use crate::model_info::{ModelCatalog, ResolvedModelSpec};
 use crate::oauth::{self, OAuthError};
 
@@ -207,6 +208,8 @@ pub struct LashConfig {
     pub providers: BTreeMap<ProviderKind, Provider>,
     #[serde(default, skip_serializing_if = "AuxiliarySecrets::is_empty")]
     pub auxiliary_secrets: AuxiliarySecrets,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp_servers: BTreeMap<String, McpServerConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_models: Option<AgentModels>,
     #[serde(default, skip_serializing_if = "RuntimeSettings::is_default")]
@@ -426,6 +429,7 @@ impl LashConfig {
             active_provider: kind,
             providers,
             auxiliary_secrets: AuxiliarySecrets::default(),
+            mcp_servers: BTreeMap::new(),
             agent_models: None,
             runtime: RuntimeSettings::default(),
         }
@@ -538,6 +542,14 @@ impl LashConfig {
         self.runtime.context_strategy
     }
 
+    pub fn mcp_servers(&self) -> &BTreeMap<String, McpServerConfig> {
+        &self.mcp_servers
+    }
+
+    pub fn set_mcp_servers(&mut self, servers: BTreeMap<String, McpServerConfig>) {
+        self.mcp_servers = servers;
+    }
+
     pub fn set_context_strategy(&mut self, strategy: crate::ContextStrategy) {
         self.runtime.context_strategy = strategy;
     }
@@ -559,6 +571,7 @@ pub fn save_provider(provider: &Provider) -> Result<(), std::io::Error> {
         active_provider: provider.kind(),
         providers: BTreeMap::from([(provider.kind(), provider.clone())]),
         auxiliary_secrets: AuxiliarySecrets::default(),
+        mcp_servers: BTreeMap::new(),
         agent_models: None,
         runtime: RuntimeSettings::default(),
     });
@@ -807,6 +820,43 @@ mod tests {
 
         let cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
         assert_eq!(cfg.tavily_api_key(), Some("new-key"));
+    }
+
+    #[test]
+    fn mcp_servers_preserved() {
+        let raw = serde_json::json!({
+            "active_provider": "openai-generic",
+            "providers": {
+                "openai-generic": {
+                    "type": "openai-generic",
+                    "api_key": "k",
+                    "base_url": "https://openrouter.ai/api/v1"
+                }
+            },
+            "mcp_servers": {
+                "docs": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+                }
+            }
+        });
+
+        let cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
+        match cfg.mcp_servers().get("docs") {
+            Some(McpServerConfig::Stdio { command, args, .. }) => {
+                assert_eq!(command, "npx");
+                assert_eq!(
+                    args,
+                    &vec![
+                        "-y".to_string(),
+                        "@modelcontextprotocol/server-filesystem".to_string(),
+                        ".".to_string()
+                    ]
+                );
+            }
+            other => panic!("unexpected MCP config: {other:?}"),
+        }
     }
 
     #[test]

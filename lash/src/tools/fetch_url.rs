@@ -39,6 +39,8 @@ impl ToolProvider for FetchUrl {
             examples: vec!["fetch_url(url=\"https://www.rust-lang.org/\")".into()],
             enabled: true,
             injected: true,
+            input_schema_override: None,
+            output_schema_override: None,
         }]
     }
 

@@ -250,6 +250,8 @@ impl ToolProvider for StateStore {
             ],
             enabled: true,
             injected: false,
+            input_schema_override: None,
+            output_schema_override: None,
         }]
     }
 
@@ -444,6 +446,8 @@ mod tests {
                         examples: vec![],
                         enabled: true,
                         injected: false,
+                        input_schema_override: None,
+                        output_schema_override: None,
                     },
                     ToolDefinition {
                         name: "read_file".to_string(),
@@ -453,6 +457,8 @@ mod tests {
                         examples: vec![],
                         enabled: true,
                         injected: true,
+                        input_schema_override: None,
+                        output_schema_override: None,
                     },
                 ],
             })

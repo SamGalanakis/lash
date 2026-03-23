@@ -878,6 +878,8 @@ mod tests {
                 examples: vec![],
                 enabled: true,
                 injected: false,
+                input_schema_override: None,
+                output_schema_override: None,
             }]
         }
 

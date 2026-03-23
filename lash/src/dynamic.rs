@@ -314,6 +314,70 @@ impl DynamicToolProvider {
         Ok(state.generation)
     }
 
+    pub fn upsert_adapter(
+        &self,
+        adapter: Arc<dyn ToolExecutionAdapter>,
+    ) -> Result<u64, ReconfigureError> {
+        let adapter_id = adapter.id().to_string();
+        let advertised_tools = adapter.advertised_tools();
+        let advertised_names: BTreeSet<String> = advertised_tools
+            .iter()
+            .map(|def| def.name.clone())
+            .collect();
+
+        {
+            let mut adapters = self.adapters.write().expect("adapters lock poisoned");
+            adapters.insert(adapter_id.clone(), adapter);
+        }
+
+        let mut state = self.state.write().expect("dynamic state lock poisoned");
+        let previously_enabled = state.enabled_tools.clone();
+        state.tools.retain(|_, spec| spec.adapter_id != adapter_id);
+        let remaining_tool_names: BTreeSet<String> = state.tools.keys().cloned().collect();
+        state
+            .enabled_tools
+            .retain(|name| remaining_tool_names.contains(name));
+
+        for def in advertised_tools {
+            let name = def.name.clone();
+            state.tools.insert(
+                name.clone(),
+                DynamicToolSpec {
+                    definition: def,
+                    adapter_id: adapter_id.clone(),
+                },
+            );
+            if previously_enabled.contains(&name) || !state.enabled_tools.contains(&name) {
+                state.enabled_tools.insert(name);
+            }
+        }
+
+        for name in advertised_names {
+            state.enabled_tools.insert(name);
+        }
+
+        state.generation += 1;
+        Ok(state.generation)
+    }
+
+    pub fn remove_adapter(&self, adapter_id: &str) -> Result<u64, ReconfigureError> {
+        {
+            let mut adapters = self.adapters.write().expect("adapters lock poisoned");
+            if adapters.remove(adapter_id).is_none() {
+                return Err(ReconfigureError::UnknownAdapter(adapter_id.to_string()));
+            }
+        }
+
+        let mut state = self.state.write().expect("dynamic state lock poisoned");
+        state.tools.retain(|_, spec| spec.adapter_id != adapter_id);
+        let remaining_tool_names: BTreeSet<String> = state.tools.keys().cloned().collect();
+        state
+            .enabled_tools
+            .retain(|name| remaining_tool_names.contains(name));
+        state.generation += 1;
+        Ok(state.generation)
+    }
+
     pub fn upsert_inprocess_handler(&self, def: ToolDefinition, handler: InProcessToolHandler) {
         self.inprocess.register_tool(def, handler);
     }
@@ -489,7 +553,12 @@ impl ToolProvider for DynamicToolProvider {
 mod tests {
     use super::*;
 
+    use serde_json::json;
+
+    use crate::ToolParam;
+
     struct MockTool;
+    struct ExternalMockAdapter;
 
     #[async_trait::async_trait]
     impl ToolProvider for MockTool {
@@ -502,11 +571,54 @@ mod tests {
                 examples: vec![],
                 enabled: true,
                 injected: false,
+                input_schema_override: None,
+                output_schema_override: None,
             }]
         }
 
         async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
             ToolResult::ok(serde_json::json!("ok"))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutionAdapter for ExternalMockAdapter {
+        fn id(&self) -> &str {
+            "external"
+        }
+
+        fn advertised_tools(&self) -> Vec<ToolDefinition> {
+            vec![ToolDefinition {
+                name: "mcp__demo__search".to_string(),
+                description: "search".to_string(),
+                params: vec![ToolParam::typed("query", "str")],
+                returns: "dict".to_string(),
+                examples: vec![],
+                enabled: true,
+                injected: true,
+                input_schema_override: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string" }
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                })),
+                output_schema_override: None,
+            }]
+        }
+
+        async fn execute(
+            &self,
+            tool: &str,
+            args: &serde_json::Value,
+            _context: Option<ToolExecutionContext>,
+            _progress: Option<&ProgressSender>,
+        ) -> ToolResult {
+            ToolResult::ok(json!({
+                "tool": tool,
+                "args": args
+            }))
         }
     }
 
@@ -529,5 +641,39 @@ mod tests {
             registry.apply_state(snapshot),
             Err(ReconfigureError::Validation(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn upsert_adapter_registers_and_executes_external_tools() {
+        let registry =
+            DynamicToolProvider::from_tool_provider(Arc::new(MockTool)).expect("dynamic registry");
+        registry
+            .upsert_adapter(Arc::new(ExternalMockAdapter))
+            .expect("adapter registered");
+
+        let defs = registry.definitions();
+        assert!(defs.iter().any(|def| def.name == "mcp__demo__search"));
+
+        let result = registry
+            .execute("mcp__demo__search", &json!({ "query": "hello" }))
+            .await;
+        assert!(result.success);
+        assert_eq!(result.result["tool"], json!("mcp__demo__search"));
+        assert_eq!(result.result["args"]["query"], json!("hello"));
+    }
+
+    #[test]
+    fn remove_adapter_removes_all_adapter_tools() {
+        let registry =
+            DynamicToolProvider::from_tool_provider(Arc::new(MockTool)).expect("dynamic registry");
+        registry
+            .upsert_adapter(Arc::new(ExternalMockAdapter))
+            .expect("adapter registered");
+        registry
+            .remove_adapter("external")
+            .expect("adapter removed");
+
+        let defs = registry.definitions();
+        assert!(!defs.iter().any(|def| def.name == "mcp__demo__search"));
     }
 }

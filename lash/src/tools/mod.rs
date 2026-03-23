@@ -329,6 +329,8 @@ mod tests {
             examples: Vec::new(),
             enabled: true,
             injected: true,
+            input_schema_override: None,
+            output_schema_override: None,
         }
     }
 

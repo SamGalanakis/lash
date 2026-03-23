@@ -585,6 +585,8 @@ mod tests {
                     examples: vec![],
                     enabled: true,
                     injected: true,
+                    input_schema_override: None,
+                    output_schema_override: None,
                 },
                 ToolDefinition {
                     name: "read_file".into(),
@@ -594,6 +596,8 @@ mod tests {
                     examples: vec![],
                     enabled: true,
                     injected: true,
+                    input_schema_override: None,
+                    output_schema_override: None,
                 },
                 ToolDefinition {
                     name: "apply_patch".into(),
@@ -603,6 +607,8 @@ mod tests {
                     examples: vec![],
                     enabled: true,
                     injected: true,
+                    input_schema_override: None,
+                    output_schema_override: None,
                 },
             ]
         }

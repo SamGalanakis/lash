@@ -3,6 +3,7 @@ pub mod dynamic;
 pub mod embedded;
 pub mod instructions;
 pub mod llm;
+pub mod mcp;
 pub mod model_info;
 pub mod model_variant;
 pub mod oauth;
@@ -89,6 +90,7 @@ pub use lash_sansio::{
     TurnMachine, TurnMachineConfig, default_context_strategy, default_execution_mode,
     default_prompt_renderer, execution_mode_supported,
 };
+pub use mcp::{McpError, McpServerConfig, McpToolExecutionAdapter, attach_mcp_servers};
 pub use model_info::{
     CachedModelCatalog, FileModelCatalogStore, MemoryModelCatalogStore, ModelCatalog,
     ModelCatalogSource, ModelCatalogStore, ModelInfo, ModelsDevHttpSource, ResolvedModelSpec,

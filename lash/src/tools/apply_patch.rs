@@ -83,6 +83,8 @@ impl ToolProvider for ApplyPatchTool {
             ],
             enabled: true,
             injected: true,
+            input_schema_override: None,
+            output_schema_override: None,
         }]
     }
     async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {

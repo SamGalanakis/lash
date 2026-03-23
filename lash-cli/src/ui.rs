@@ -408,6 +408,28 @@ fn truncate_to_display_width(text: &str, max_width: usize) -> String {
     out
 }
 
+fn truncate_with_suffix(text: &str, suffix: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let suffix_width = UnicodeWidthStr::width(suffix);
+    if suffix_width >= max_width {
+        return truncate_to_display_width(suffix, max_width);
+    }
+
+    let text_width = UnicodeWidthStr::width(text);
+    if text_width + suffix_width <= max_width {
+        return format!("{text}{suffix}");
+    }
+
+    let prefix_width = max_width.saturating_sub(suffix_width);
+    format!(
+        "{}{}",
+        truncate_to_display_width(text, prefix_width),
+        suffix
+    )
+}
+
 /// Build a ghost fold summary for a group of code blocks starting at `idx`.
 /// `idx` should point to the first (non-continuation) CodeBlock in a group.
 /// Scans forward through contiguous CodeBlock/Activity/CodeOutput blocks.
@@ -2065,17 +2087,17 @@ fn draw_session_picker(frame: &mut Frame, app: &App, history_area: Rect) {
             let time_str = session.relative_time();
             let msg_count = format!("{} msgs", session.message_count);
 
-            // Truncate the first message to fit, collapsing newlines
-            let preview: String = session
+            // Truncate the first message to fit, collapsing newlines.
+            // Keep the session directory label visible at the end when present.
+            let preview_base: String = session
                 .first_message
                 .chars()
                 .map(|c| if c == '\n' { ' ' } else { c })
-                .take(inner_w)
                 .collect();
-            let preview = if session.first_message.chars().count() > inner_w {
-                format!("{}\u{2026}", &preview[..preview.len().min(preview.len())])
+            let preview = if let Some(cwd_label) = session.cwd_label() {
+                truncate_with_suffix(&preview_base, &format!(" {cwd_label}"), inner_w)
             } else {
-                preview
+                truncate_to_display_width(&preview_base, inner_w)
             };
 
             let (time_style, msg_style, count_style, prefix_style) = if selected {
@@ -2756,6 +2778,7 @@ mod tests {
                 message_count: idx + 1,
                 first_message: format!("first message {idx}"),
                 modified: std::time::SystemTime::now(),
+                cwd: None,
             })
             .collect();
 
@@ -2769,6 +2792,33 @@ mod tests {
         assert!(
             !input_row.contains("Sessions") && !input_row.contains("first message"),
             "session picker overflowed into input area: {input_row:?}"
+        );
+    }
+
+    #[test]
+    fn session_picker_preview_keeps_cwd_suffix_visible() {
+        let backend = TestBackend::new(80, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut app = App::new("model".into(), "session".into());
+        app.session_picker = vec![crate::session_log::SessionInfo {
+            filename: "session-0.jsonl".into(),
+            session_id: "session-0".into(),
+            message_count: 1,
+            first_message:
+                "a very long first message that should get truncated before the directory suffix"
+                    .into(),
+            modified: std::time::SystemTime::now(),
+            cwd: Some(std::path::PathBuf::from("/home/sam/code/frontend-design")),
+        }];
+
+        terminal.draw(|frame| draw(frame, &app)).expect("draw app");
+
+        let rows: Vec<String> = (0..8)
+            .map(|y| buffer_row_text(terminal.backend(), y, 80))
+            .collect();
+        assert!(
+            rows.iter().any(|row| row.contains("/frontend-design")),
+            "session picker row missing cwd suffix: {rows:?}"
         );
     }
 

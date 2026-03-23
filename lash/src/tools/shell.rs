@@ -685,6 +685,8 @@ impl ToolProvider for StandardShell {
                 examples: vec![],
                 enabled: true,
                 injected: true,
+                input_schema_override: None,
+                output_schema_override: None,
             },
             ToolDefinition {
                 name: "write_stdin".into(),
@@ -730,6 +732,8 @@ impl ToolProvider for StandardShell {
                 examples: vec![],
                 enabled: true,
                 injected: true,
+                input_schema_override: None,
+                output_schema_override: None,
             },
         ]
     }

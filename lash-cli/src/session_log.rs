@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::Result;
@@ -21,6 +21,7 @@ pub struct SessionInfo {
     pub message_count: usize,
     pub first_message: String,
     pub modified: SystemTime,
+    pub cwd: Option<PathBuf>,
 }
 
 pub struct SessionStart {
@@ -224,6 +225,39 @@ impl SessionInfo {
             format!("{}w ago", secs / 604800)
         }
     }
+
+    pub fn cwd_label(&self) -> Option<String> {
+        let cwd = self.cwd.as_deref()?;
+        let name = cwd
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .map(|name| format!("/{name}"));
+        if name.is_some() {
+            name
+        } else if cwd == Path::new("/") {
+            Some("/".to_string())
+        } else {
+            None
+        }
+    }
+
+    fn project_match_rank(&self, current_cwd: Option<&Path>) -> u8 {
+        let Some(current_cwd) = current_cwd else {
+            return 0;
+        };
+        let Some(session_cwd) = self.cwd.as_deref() else {
+            return 0;
+        };
+
+        if session_cwd == current_cwd {
+            3
+        } else if current_cwd.starts_with(session_cwd) || session_cwd.starts_with(current_cwd) {
+            2
+        } else {
+            0
+        }
+    }
 }
 
 pub fn sessions_dir() -> PathBuf {
@@ -268,6 +302,11 @@ fn parse_session_info(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let cwd = val
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|cwd| !cwd.is_empty())
+        .map(PathBuf::from);
 
     // Scan for first user_input and count messages
     let mut message_count = 0;
@@ -302,6 +341,7 @@ fn parse_session_info(
         message_count,
         first_message,
         modified,
+        cwd,
     })
 }
 
@@ -355,15 +395,18 @@ pub fn list_recent_sessions(limit: usize) -> Vec<SessionInfo> {
         return Vec::new();
     }
 
-    let mut sessions = Vec::with_capacity(limit);
-    for (path, filename, modified) in collect_session_candidates() {
-        if let Some(session) = parse_session_info(&path, filename, modified) {
-            sessions.push(session);
-            if sessions.len() >= limit {
-                break;
-            }
-        }
-    }
+    let current_cwd = std::env::current_dir().ok();
+    let mut sessions: Vec<_> = collect_session_candidates()
+        .into_iter()
+        .filter_map(|(path, filename, modified)| parse_session_info(&path, filename, modified))
+        .collect();
+    sessions.sort_by(|a, b| {
+        b.project_match_rank(current_cwd.as_deref())
+            .cmp(&a.project_match_rank(current_cwd.as_deref()))
+            .then_with(|| b.modified.cmp(&a.modified))
+            .then_with(|| a.filename.cmp(&b.filename))
+    });
+    sessions.truncate(limit);
     sessions
 }
 
@@ -960,5 +1003,70 @@ mod tests {
             assert_eq!(sessions.len(), 2);
             assert!(sessions.iter().all(|session| session.session_id != "child"));
         });
+    }
+
+    #[test]
+    fn list_recent_sessions_prioritizes_current_project_sessions() {
+        with_temp_lash_home("lash-session-log-project-priority", || {
+            let workspace = TempDirGuard::new("lash-session-log-project-workspace");
+            let current_project = workspace.path().join("current-project");
+            let current_nested = current_project.join("nested");
+            let other_project = workspace.path().join("other-project");
+            std::fs::create_dir_all(&current_nested).expect("current project dir");
+            std::fs::create_dir_all(&other_project).expect("other project dir");
+
+            let local_path = sessions_dir().join("local-session.jsonl");
+            std::fs::write(
+                &local_path,
+                format!(
+                    concat!(
+                        "{{\"type\":\"session_start\",\"session_id\":\"local\",\"session_name\":\"demo\",\"cwd\":{:?}}}\n",
+                        "{{\"type\":\"user_input\",\"content\":\"local\"}}\n",
+                        "{{\"type\":\"done\"}}\n"
+                    ),
+                    current_project.to_string_lossy()
+                ),
+            )
+            .expect("write local session");
+
+            std::thread::sleep(std::time::Duration::from_millis(20));
+
+            let other_path = sessions_dir().join("other-session.jsonl");
+            std::fs::write(
+                &other_path,
+                format!(
+                    concat!(
+                        "{{\"type\":\"session_start\",\"session_id\":\"other\",\"session_name\":\"demo\",\"cwd\":{:?}}}\n",
+                        "{{\"type\":\"user_input\",\"content\":\"other\"}}\n",
+                        "{{\"type\":\"done\"}}\n"
+                    ),
+                    other_project.to_string_lossy()
+                ),
+            )
+            .expect("write other session");
+
+            let original_cwd = std::env::current_dir().expect("cwd");
+            std::env::set_current_dir(&current_nested).expect("chdir current project");
+            let sessions = list_recent_sessions(10);
+            std::env::set_current_dir(original_cwd).expect("restore cwd");
+
+            assert_eq!(sessions.len(), 2);
+            assert_eq!(sessions[0].session_id, "local");
+            assert_eq!(sessions[1].session_id, "other");
+        });
+    }
+
+    #[test]
+    fn session_info_cwd_label_uses_last_directory_name() {
+        let info = SessionInfo {
+            filename: "session.jsonl".into(),
+            session_id: "s1".into(),
+            message_count: 1,
+            first_message: "hello".into(),
+            modified: SystemTime::now(),
+            cwd: Some(PathBuf::from("/home/sam/code/frontend-design")),
+        };
+
+        assert_eq!(info.cwd_label().as_deref(), Some("/frontend-design"));
     }
 }

@@ -17,5 +17,7 @@ pub(crate) fn batch_tool_definition() -> ToolDefinition {
         ],
         enabled: true,
         injected: true,
+        input_schema_override: None,
+        output_schema_override: None,
     }
 }

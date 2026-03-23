@@ -148,6 +148,10 @@ pub struct ToolDefinition {
     pub enabled: bool,
     #[serde(default)]
     pub injected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema_override: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema_override: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -212,6 +216,10 @@ impl ToolDefinition {
     }
 
     pub fn input_schema(&self) -> serde_json::Value {
+        if let Some(schema) = &self.input_schema_override {
+            return schema.clone();
+        }
+
         let mut properties = serde_json::Map::new();
         let mut required = Vec::new();
 
@@ -253,6 +261,10 @@ impl ToolDefinition {
     }
 
     pub fn output_schema(&self) -> serde_json::Value {
+        if let Some(schema) = &self.output_schema_override {
+            return schema.clone();
+        }
+
         let ty = self.returns.trim();
         match ty {
             "" | "any" => serde_json::json!({}),
@@ -267,6 +279,51 @@ impl ToolDefinition {
             _ if ty.starts_with("list") => serde_json::json!({ "type": "array", "items": {} }),
             _ => serde_json::json!({}),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_definition_uses_schema_overrides_for_model_tools() {
+        let tool = ToolDefinition {
+            name: "mcp__demo__search".to_string(),
+            description: "Search demo server".to_string(),
+            params: vec![ToolParam::typed("query", "str")],
+            returns: "str".to_string(),
+            examples: vec![],
+            enabled: true,
+            injected: true,
+            input_schema_override: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "limit": { "type": "integer" }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            })),
+            output_schema_override: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "hits": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["hits"],
+                "additionalProperties": false
+            })),
+        };
+
+        let model_tool = tool.model_tool();
+        assert_eq!(
+            model_tool.input_schema["properties"]["limit"]["type"],
+            serde_json::json!("integer")
+        );
+        assert_eq!(
+            model_tool.output_schema["properties"]["hits"]["type"],
+            serde_json::json!("array")
+        );
     }
 }
 

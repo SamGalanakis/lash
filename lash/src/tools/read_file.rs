@@ -133,6 +133,8 @@ impl ToolProvider for ReadFile {
             examples: vec![],
             enabled: true,
             injected: true,
+            input_schema_override: None,
+            output_schema_override: None,
         }]
     }
 

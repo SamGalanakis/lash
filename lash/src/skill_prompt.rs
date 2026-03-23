@@ -8,12 +8,15 @@ pub fn collect_skill_mentions(text: &str) -> Vec<String> {
     let mut idx = 0usize;
 
     while idx < bytes.len() {
-        if bytes[idx] != b'$' {
-            idx += 1;
-            continue;
-        }
+        let sigil = match bytes[idx] {
+            b'$' | b'/' => bytes[idx],
+            _ => {
+                idx += 1;
+                continue;
+            }
+        };
 
-        if idx > 0 && is_skill_name_byte(bytes[idx - 1]) {
+        if !is_valid_skill_mention_start(bytes, idx, sigil) {
             idx += 1;
             continue;
         }
@@ -23,7 +26,7 @@ pub fn collect_skill_mentions(text: &str) -> Vec<String> {
         while end < bytes.len() && is_skill_name_byte(bytes[end]) {
             end += 1;
         }
-        if end > start {
+        if end > start && is_valid_skill_mention_end(bytes, end, sigil) {
             mentions.push(text[start..end].to_string());
             idx = end;
         } else {
@@ -70,6 +73,25 @@ fn is_skill_name_byte(byte: u8) -> bool {
     byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
 }
 
+fn is_valid_skill_mention_start(bytes: &[u8], idx: usize, sigil: u8) -> bool {
+    if idx == 0 {
+        return true;
+    }
+    let prev = bytes[idx - 1];
+    match sigil {
+        b'$' => !is_skill_name_byte(prev),
+        b'/' => {
+            prev.is_ascii_whitespace()
+                || matches!(prev, b'(' | b'[' | b'{' | b'<' | b'"' | b'\'' | b'`')
+        }
+        _ => false,
+    }
+}
+
+fn is_valid_skill_mention_end(bytes: &[u8], end: usize, sigil: u8) -> bool {
+    !matches!((sigil, bytes.get(end).copied()), (b'/', Some(b'/')))
+}
+
 fn render_skill_block(skill: &LoadedSkill) -> String {
     format!(
         "<skill>\n<name>{}</name>\n<path>{}</path>\n{}\n</skill>",
@@ -109,18 +131,36 @@ mod tests {
     }
 
     #[test]
+    fn collects_inline_slash_skill_mentions() {
+        assert_eq!(
+            collect_skill_mentions("See /localref opencode, then (/wholehog) again."),
+            vec!["localref".to_string(), "wholehog".to_string()]
+        );
+    }
+
+    #[test]
+    fn ignores_path_like_slash_segments() {
+        assert!(collect_skill_mentions("/localref/opencode and https://example.com").is_empty());
+    }
+
+    #[test]
     fn appends_selected_skills_as_blocks() {
-        let catalog = skill_catalog_with(&[("frontend-design", "demo")]);
-        let expanded = append_skill_blocks("Use $frontend-design for this page.", &catalog);
+        let catalog = skill_catalog_with(&[("frontend-design", "demo"), ("wholehog", "demo")]);
+        let expanded = append_skill_blocks(
+            "Use $frontend-design for this page and /wholehog for the cutover.",
+            &catalog,
+        );
 
         assert!(expanded.contains("<skill>\n<name>frontend-design</name>"));
+        assert!(expanded.contains("<skill>\n<name>wholehog</name>"));
         assert!(expanded.contains("body for frontend-design"));
     }
 
     #[test]
     fn ignores_unknown_mentions_and_deduplicates_known_ones() {
         let catalog = skill_catalog_with(&[("demo", "demo")]);
-        let expanded = append_skill_blocks("$demo then $unknown then $demo again", &catalog);
+        let expanded =
+            append_skill_blocks("$demo then /demo then $unknown then /demo again", &catalog);
 
         assert_eq!(expanded.matches("<skill>").count(), 1);
         assert!(expanded.contains("<name>demo</name>"));

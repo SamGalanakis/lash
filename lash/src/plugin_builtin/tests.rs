@@ -245,6 +245,8 @@ fn repl_tool_surface_plugin_shapes_search_surface_and_omitted_tool_note() {
                     examples: vec![],
                     enabled: true,
                     injected: false,
+                    input_schema_override: None,
+                    output_schema_override: None,
                 },
                 ToolDefinition {
                     name: "read_file".to_string(),
@@ -254,6 +256,8 @@ fn repl_tool_surface_plugin_shapes_search_surface_and_omitted_tool_note() {
                     examples: vec![],
                     enabled: true,
                     injected: true,
+                    input_schema_override: None,
+                    output_schema_override: None,
                 },
                 ToolDefinition {
                     name: "apply_patch".to_string(),
@@ -263,6 +267,8 @@ fn repl_tool_surface_plugin_shapes_search_surface_and_omitted_tool_note() {
                     examples: vec![],
                     enabled: true,
                     injected: false,
+                    input_schema_override: None,
+                    output_schema_override: None,
                 },
             ],
         })
@@ -297,6 +303,8 @@ fn repl_tool_surface_plugin_hides_search_tools_when_nothing_is_omitted() {
                     examples: vec![],
                     enabled: true,
                     injected: false,
+                    input_schema_override: None,
+                    output_schema_override: None,
                 },
                 ToolDefinition {
                     name: "read_file".to_string(),
@@ -306,6 +314,8 @@ fn repl_tool_surface_plugin_hides_search_tools_when_nothing_is_omitted() {
                     examples: vec![],
                     enabled: true,
                     injected: true,
+                    input_schema_override: None,
+                    output_schema_override: None,
                 },
             ],
         })
@@ -515,6 +525,8 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     examples: vec![],
                     enabled: true,
                     injected: false,
+                    input_schema_override: None,
+                    output_schema_override: None,
                 },
                 ToolDefinition {
                     name: "update_plan".to_string(),
@@ -524,6 +536,8 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     examples: vec![],
                     enabled: true,
                     injected: true,
+                    input_schema_override: None,
+                    output_schema_override: None,
                 },
                 ToolDefinition {
                     name: "read_file".to_string(),
@@ -533,6 +547,8 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     examples: vec![],
                     enabled: true,
                     injected: true,
+                    input_schema_override: None,
+                    output_schema_override: None,
                 },
             ],
         })

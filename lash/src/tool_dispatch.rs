@@ -415,6 +415,8 @@ mod tests {
                     examples: vec![],
                     enabled: true,
                     injected: true,
+                    input_schema_override: None,
+                    output_schema_override: None,
                 },
                 crate::ToolDefinition {
                     name: "beta".into(),
@@ -424,6 +426,8 @@ mod tests {
                     examples: vec![],
                     enabled: true,
                     injected: true,
+                    input_schema_override: None,
+                    output_schema_override: None,
                 },
             ]
         }
@@ -460,6 +464,8 @@ mod tests {
                     examples: vec![],
                     enabled: true,
                     injected: true,
+                    input_schema_override: None,
+                    output_schema_override: None,
                 },
                 crate::ToolDefinition {
                     name: "probe_b".into(),
@@ -469,6 +475,8 @@ mod tests {
                     examples: vec![],
                     enabled: true,
                     injected: true,
+                    input_schema_override: None,
+                    output_schema_override: None,
                 },
             ]
         }

@@ -37,6 +37,8 @@ impl ToolProvider for WebSearch {
             examples: vec!["search_web(query=\"latest Rust release notes\", max_results=5)".into()],
             enabled: true,
             injected: true,
+            input_schema_override: None,
+            output_schema_override: None,
         }]
     }
 

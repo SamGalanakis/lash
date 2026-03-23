@@ -241,6 +241,8 @@ pub(super) fn agent_call_definitions(
             examples: agent_call_examples,
             enabled: true,
             injected: true,
+            input_schema_override: None,
+            output_schema_override: None,
         },
         ToolDefinition {
             name: "agent_result".into(),
@@ -253,6 +255,8 @@ pub(super) fn agent_call_definitions(
             examples: vec![],
             enabled: true,
             injected: true,
+            input_schema_override: None,
+            output_schema_override: None,
         },
         ToolDefinition {
             name: "agent_kill".into(),
@@ -263,6 +267,8 @@ pub(super) fn agent_call_definitions(
             examples: vec![],
             enabled: true,
             injected: true,
+            input_schema_override: None,
+            output_schema_override: None,
         },
     ]
 }

@@ -490,6 +490,9 @@ async fn main() -> anyhow::Result<()> {
     let dynamic_tools = root_plugins
         .dynamic_tools()
         .ok_or_else(|| anyhow::anyhow!("root dynamic tool provider was not initialized"))?;
+    attach_mcp_servers(&dynamic_tools, lash_config.mcp_servers())
+        .await
+        .map_err(|err| anyhow::anyhow!("failed to attach MCP servers: {err}"))?;
     let dynamic_tools_provider: Arc<dyn ToolProvider> = dynamic_tools.clone();
     let toolset_hash = hash12(
         &serde_json::to_vec(&dynamic_tools_provider.definitions())
@@ -3524,6 +3527,8 @@ fn register_builtin_tool(
                 examples: vec![format!("{tool_name}(text=\"hello\")")],
                 enabled: true,
                 injected: false,
+                input_schema_override: None,
+                output_schema_override: None,
             };
             adapter.register_tool(def.clone(), handler);
             def
@@ -3543,6 +3548,8 @@ fn register_builtin_tool(
                 examples: vec![format!("{tool_name}()")],
                 enabled: true,
                 injected: false,
+                input_schema_override: None,
+                output_schema_override: None,
             };
             adapter.register_tool(def.clone(), handler);
             def
@@ -3562,6 +3569,8 @@ fn register_builtin_tool(
                 examples: vec![format!("{tool_name}()")],
                 enabled: true,
                 injected: false,
+                input_schema_override: None,
+                output_schema_override: None,
             };
             adapter.register_tool(def.clone(), handler);
             def
@@ -4007,5 +4016,23 @@ mod tests {
                 .iter()
                 .any(|name| name == "yolopush")
         );
+    }
+
+    #[test]
+    fn prepared_turn_collects_inline_slash_skills_once() {
+        let skills = skill_catalog_with(&[("localref", "fetch local references")]);
+        let turn = PreparedTurn::prepare(
+            "Compare with /localref opencode and mention /localref again".into(),
+            Vec::new(),
+            &skills,
+        );
+
+        assert_eq!(
+            turn.display_text,
+            "Compare with /localref opencode and mention /localref again"
+        );
+        assert_eq!(turn.transform_labels, vec!["localref".to_string()]);
+        assert_eq!(turn.effective_text.matches("<skill>").count(), 1);
+        assert!(turn.effective_text.contains("<name>localref</name>"));
     }
 }

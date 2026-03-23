@@ -297,6 +297,8 @@ impl ToolProvider for HistoryTools {
             examples: vec![],
             enabled: true,
             injected: true,
+            input_schema_override: None,
+            output_schema_override: None,
         }]
     }
 

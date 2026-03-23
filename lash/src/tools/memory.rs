@@ -513,6 +513,8 @@ impl ToolProvider for RecallSubmitTool {
             examples: vec![],
             enabled: true,
             injected: true,
+            input_schema_override: None,
+            output_schema_override: None,
         }]
     }
 
@@ -557,6 +559,8 @@ impl ToolProvider for SessionHistoryTools {
                 examples: vec![],
                 enabled: true,
                 injected: true,
+                input_schema_override: None,
+                output_schema_override: None,
             },
             ToolDefinition {
                 name: "read_memory".into(),
@@ -566,6 +570,8 @@ impl ToolProvider for SessionHistoryTools {
                 examples: vec![],
                 enabled: true,
                 injected: true,
+                input_schema_override: None,
+                output_schema_override: None,
             },
         ]
     }
@@ -612,6 +618,8 @@ impl ToolProvider for RecallAgentTools {
                 examples: vec![],
                 enabled: true,
                 injected: true,
+                input_schema_override: None,
+                output_schema_override: None,
             },
             ToolDefinition {
                 name: "see_full_memory".into(),
@@ -621,6 +629,8 @@ impl ToolProvider for RecallAgentTools {
                 examples: vec![],
                 enabled: true,
                 injected: true,
+                input_schema_override: None,
+                output_schema_override: None,
             },
         ]
     }

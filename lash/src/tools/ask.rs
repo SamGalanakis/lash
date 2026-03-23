@@ -90,6 +90,8 @@ impl ToolProvider for AskTool {
             ],
             enabled: true,
             injected: true,
+            input_schema_override: None,
+            output_schema_override: None,
         }]
     }
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
