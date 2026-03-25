@@ -3,7 +3,7 @@ members = ["lash-sansio", "lash", "lash-cli", "lashlang", "xtask"]
 resolver = "3"
 
 [workspace.package]
-version = "0.2.14"
+version = "0.2.15"
 license = "MIT"
 
 [profile.release]
