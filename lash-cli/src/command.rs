@@ -64,6 +64,10 @@ pub fn completion_inserts_space(cmd: &str, skills: &SkillCatalog) -> bool {
     slash_skill_prompt(cmd, skills).is_some()
 }
 
+pub fn runs_out_of_band_while_running(cmd: &Command) -> bool {
+    matches!(cmd, Command::Fork(_))
+}
+
 /// Slash commands recognized by the TUI.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -260,6 +264,13 @@ mod tests {
         for cmd in ["/clear", "/skills", "/help", "/exit"] {
             assert!(!completion_inserts_space(cmd, &skills));
         }
+    }
+
+    #[test]
+    fn fork_runs_out_of_band_while_running() {
+        assert!(runs_out_of_band_while_running(&Command::Fork(None)));
+        assert!(!runs_out_of_band_while_running(&Command::Help));
+        assert!(!runs_out_of_band_while_running(&Command::Model(None)));
     }
 
     #[test]
