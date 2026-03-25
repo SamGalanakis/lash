@@ -160,17 +160,29 @@ fn wrapped_line_height(text: &str, width: usize) -> usize {
 
 fn parse_inline_diff_rows(diff: &str) -> Vec<InlineDiffRow> {
     let mut rows = Vec::new();
-    let mut old_line = 0usize;
-    let mut new_line = 0usize;
+    let mut old_line: Option<usize> = None;
+    let mut new_line: Option<usize> = None;
     let mut in_hunk = false;
 
     for line in diff.lines() {
         if line.starts_with("--- ") || line.starts_with("+++ ") {
             continue;
         }
+        if line == "@@" {
+            old_line = None;
+            new_line = None;
+            in_hunk = true;
+            rows.push(InlineDiffRow {
+                line_number: None,
+                sign: None,
+                text: line.to_string(),
+                kind: InlineDiffKind::Hunk,
+            });
+            continue;
+        }
         if let Some((old_start, new_start)) = parse_hunk_header(line) {
-            old_line = old_start;
-            new_line = new_start;
+            old_line = Some(old_start);
+            new_line = Some(new_start);
             in_hunk = true;
             rows.push(InlineDiffRow {
                 line_number: None,
@@ -184,33 +196,41 @@ fn parse_inline_diff_rows(diff: &str) -> Vec<InlineDiffRow> {
         if in_hunk {
             if let Some(text) = line.strip_prefix('+') {
                 rows.push(InlineDiffRow {
-                    line_number: Some(new_line),
+                    line_number: new_line,
                     sign: Some('+'),
                     text: text.to_string(),
                     kind: InlineDiffKind::Add,
                 });
-                new_line += 1;
+                if let Some(line_number) = new_line.as_mut() {
+                    *line_number += 1;
+                }
                 continue;
             }
             if let Some(text) = line.strip_prefix('-') {
                 rows.push(InlineDiffRow {
-                    line_number: Some(old_line),
+                    line_number: old_line,
                     sign: Some('-'),
                     text: text.to_string(),
                     kind: InlineDiffKind::Remove,
                 });
-                old_line += 1;
+                if let Some(line_number) = old_line.as_mut() {
+                    *line_number += 1;
+                }
                 continue;
             }
             if let Some(text) = line.strip_prefix(' ') {
                 rows.push(InlineDiffRow {
-                    line_number: Some(new_line),
+                    line_number: new_line.or(old_line),
                     sign: Some(' '),
                     text: text.to_string(),
                     kind: InlineDiffKind::Context,
                 });
-                old_line += 1;
-                new_line += 1;
+                if let Some(line_number) = old_line.as_mut() {
+                    *line_number += 1;
+                }
+                if let Some(line_number) = new_line.as_mut() {
+                    *line_number += 1;
+                }
                 continue;
             }
         }
