@@ -401,7 +401,7 @@ pub(crate) fn push_system_message(app: &mut App, msg: impl Into<String>) {
 
 pub(crate) fn version_text() -> String {
     format!(
-        "lash {}
+        "lash-cli {}
 lash-sansio {}",
         crate::APP_VERSION,
         lash::SANSIO_VERSION
@@ -410,7 +410,7 @@ lash-sansio {}",
 
 pub(crate) fn info_text_unconfigured(execution_mode: ExecutionMode, cwd: &str) -> String {
     [
-        format!("lash: {}", crate::APP_VERSION),
+        format!("lash-cli: {}", crate::APP_VERSION),
         format!("lash-sansio: {}", lash::SANSIO_VERSION),
         "provider: (not configured)".to_string(),
         "configured model: (not configured)".to_string(),
@@ -441,7 +441,7 @@ pub(crate) fn info_text(
 ) -> String {
     let resolved_model = provider.resolve_model(configured_model);
     let mut lines = vec![
-        format!("lash: {}", crate::APP_VERSION),
+        format!("lash-cli: {}", crate::APP_VERSION),
         format!("lash-sansio: {}", lash::SANSIO_VERSION),
         format!("provider: {} ({})", provider.label(), provider.id()),
         format!("configured model: {}", configured_model),
@@ -485,7 +485,7 @@ pub(crate) fn help_text(skills: &SkillCatalog) -> String {
         "Commands:".to_string(),
         "  /clear, /new       Reset conversation".to_string(),
         "  /fork [prompt]     Open a forked session in a new terminal".to_string(),
-        "  /version           Show Lash and lash-sansio versions".to_string(),
+        "  /version           Show lash-cli and lash-sansio versions".to_string(),
         "  /info              Show current runtime/session info".to_string(),
         "  /model [name]      Show or switch LLM model".to_string(),
         "  /variant [name]    Show or switch provider-native model variant".to_string(),

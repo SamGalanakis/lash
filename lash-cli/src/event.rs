@@ -8,6 +8,9 @@ pub enum AppEvent {
         id: usize,
         png: anyhow::Result<Vec<u8>>,
     },
+    UpdateCheckFinished {
+        message: String,
+    },
     Agent {
         stream_id: u64,
         event: AgentEvent,

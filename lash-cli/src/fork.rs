@@ -180,6 +180,7 @@ fn run_command(mut cmd: std::process::Command) -> std::result::Result<(), String
     }
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
 fn spawn_with_launchers(exe: &Path, args: &[String], launchers: Vec<(&str, Vec<&str>)>) -> bool {
     for (launcher, prefix) in launchers {
         let Some(program) = find_program_on_path(launcher) else {

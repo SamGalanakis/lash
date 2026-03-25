@@ -69,6 +69,16 @@ pub(crate) async fn run(
         return Ok(());
     }
 
+    if args.check_update {
+        println!("{}", crate::update::check_update_text().await?);
+        return Ok(());
+    }
+
+    if args.update {
+        crate::update::install_latest_release().await?;
+        return Ok(());
+    }
+
     // Resolve config before TUI init (may need interactive terminal)
     let existing_config = LashConfig::load();
     if args.info && existing_config.is_none() && args.api_key.is_none() {

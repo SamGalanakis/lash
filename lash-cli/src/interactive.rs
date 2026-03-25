@@ -18,6 +18,7 @@ use crate::fork;
 use crate::input_items::{build_items_from_editor_input, insert_inline_marker};
 use crate::resume;
 use crate::session_log::{self, SessionLogger};
+use crate::update;
 use crate::{Args, setup, ui};
 use crate::{
     cleanup_terminal, configure_terminal_ui, controls_text, ensure_supported_execution_mode,
@@ -1091,6 +1092,13 @@ pub(crate) async fn run_app(
         }
     }
 
+    let update_tx = app_tx.clone();
+    tokio::spawn(async move {
+        if let Some(message) = update::background_notification_message().await {
+            let _ = update_tx.send(AppEvent::UpdateCheckFinished { message });
+        }
+    });
+
     loop {
         // Check if runtime turn completed — reclaim runtime + updated history
         if let Some(ref mut rx) = runtime_return_rx {
@@ -1369,6 +1377,10 @@ pub(crate) async fn run_app(
                     }
                 }
                 app.update_suggestions();
+            }
+            AppEvent::UpdateCheckFinished { message } => {
+                app.dirty = true;
+                push_system_message(&mut app, message);
             }
             AppEvent::Terminal(TermEvent::Key(key)) => {
                 // With kitty keyboard protocol, ignore Release/Repeat events
