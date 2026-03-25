@@ -1478,6 +1478,8 @@ dependencies = [
  "pulldown-cmark",
  "rand",
  "ratatui",
+ "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

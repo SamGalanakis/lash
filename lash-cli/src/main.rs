@@ -20,6 +20,7 @@ mod setup;
 mod test_support;
 mod theme;
 mod ui;
+mod update;
 mod util;
 
 use clap::Parser;
@@ -74,7 +75,7 @@ fn autonomous_prompt_overrides() -> Vec<PromptSectionOverride> {
 }
 
 #[derive(Parser)]
-#[command(name = "lash", version = APP_VERSION, long_version = LONG_VERSION)]
+#[command(name = "lash-cli", bin_name = "lash", version = APP_VERSION, long_version = LONG_VERSION)]
 struct Args {
     /// OpenAI-generic API key (optional — use --provider to configure interactively)
     #[arg(long, env = "OPENAI_GENERIC_API_KEY")]
@@ -127,6 +128,14 @@ struct Args {
     /// Print current runtime/config info and exit
     #[arg(long)]
     info: bool,
+
+    /// Check GitHub releases for a newer lash version and exit
+    #[arg(long, conflicts_with = "update")]
+    check_update: bool,
+
+    /// Install the latest lash release and exit
+    #[arg(long, conflicts_with = "check_update")]
+    update: bool,
 
     /// Run autonomously: execute prompt, print response to stdout, exit
     #[arg(short = 'p', long = "print")]

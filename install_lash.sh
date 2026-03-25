@@ -48,6 +48,10 @@ require_cmd tar
 require_cmd mktemp
 require_cmd install
 
+json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
 download() {
   local url="$1"
   local output_path="$2"
@@ -134,10 +138,31 @@ fi
 )
 
 mkdir -p "${install_dir}"
+install_dir="$(cd "${install_dir}" && pwd)"
+binary_path="${install_dir}/lash"
 tar -xzf "${archive_path}" -C "${tmp_dir}" lash
-install -m 0755 "${tmp_dir}/lash" "${install_dir}/lash"
+install -m 0755 "${tmp_dir}/lash" "${binary_path}"
 
-echo "Installed lash to ${install_dir}/lash"
+lash_home="${LASH_HOME:-$HOME/.lash}"
+manifest_path="${lash_home}/install.json"
+mkdir -p "${lash_home}"
+installed_version="$("${binary_path}" --version 2>/dev/null | awk 'NR == 1 { print $2 }')"
+if [[ -z "${installed_version}" ]]; then
+  installed_version="${version:-latest}"
+fi
+installed_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"
+cat > "${manifest_path}" <<EOF
+{
+  "repo": "$(json_escape "${repo}")",
+  "version": "$(json_escape "${installed_version}")",
+  "install_dir": "$(json_escape "${install_dir}")",
+  "binary_path": "$(json_escape "${binary_path}")",
+  "installed_at": "$(json_escape "${installed_at}")"
+}
+EOF
+chmod 0600 "${manifest_path}"
+
+echo "Installed lash to ${binary_path}"
 
 case ":${PATH}:" in
   *":${install_dir}:"*) ;;

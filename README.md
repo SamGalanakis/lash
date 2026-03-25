@@ -52,6 +52,8 @@ Common flags:
 ```bash
 lash --model gpt-5.4
 lash --execution-mode standard
+lash --check-update
+lash --update
 lash --provider
 lash --no-mouse
 lash --reset
