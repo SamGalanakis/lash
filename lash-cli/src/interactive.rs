@@ -528,6 +528,7 @@ async fn handle_slash_command(
                         .unwrap_or_else(|_| b"[]".to_vec()),
                 );
                 *current_execution_mode = previous.execution_mode;
+                let current_dynamic_state = dynamic_tools.export_state();
                 send_user_message(
                     previous.prepared_turn.clone(),
                     previous.turn_input.clone(),
@@ -539,6 +540,9 @@ async fn handle_slash_command(
                     cancel_token,
                     active_stream_id,
                     app_tx,
+                    provider,
+                    &current_dynamic_state,
+                    toolset_hash,
                 );
             } else {
                 push_system_message(app, "No previous turn payload to retry yet.");
@@ -548,13 +552,9 @@ async fn handle_slash_command(
             push_system_message(app, controls_text());
         }
         command::Command::Fork(prompt) => {
-            let Some(rt) = runtime.as_mut() else {
-                push_system_message(app, "Runtime is not available to fork right now.");
-                return Ok(false);
-            };
             let current_dynamic_state = dynamic_tools.export_state();
             match fork::fork_current_session(
-                rt,
+                runtime.as_mut(),
                 logger,
                 &app.persisted_ui_state(),
                 provider,
@@ -1071,6 +1071,7 @@ pub(crate) async fn run_app(
                 let (items, image_blobs) =
                     build_items_from_editor_input(&prepared.effective_text, Vec::new());
                 let turn_input = make_turn_input(&mut app, items, image_blobs);
+                let current_dynamic_state = dynamic_tools.export_state();
                 send_user_message(
                     prepared.clone(),
                     turn_input.clone(),
@@ -1082,6 +1083,9 @@ pub(crate) async fn run_app(
                     &mut cancel_token,
                     &mut active_stream_id,
                     &app_tx,
+                    &provider,
+                    &current_dynamic_state,
+                    &toolset_hash,
                 );
                 last_turn = Some(TurnReplayPayload {
                     prepared_turn: prepared,
@@ -1286,6 +1290,7 @@ pub(crate) async fn run_app(
                             queued.images.clone(),
                         );
                         let turn_input = make_turn_input(&mut app, items, image_blobs);
+                        let current_dynamic_state = dynamic_tools.export_state();
                         send_user_message(
                             queued.clone(),
                             turn_input.clone(),
@@ -1297,6 +1302,9 @@ pub(crate) async fn run_app(
                             &mut cancel_token,
                             &mut active_stream_id,
                             &app_tx,
+                            &provider,
+                            &current_dynamic_state,
+                            &toolset_hash,
                         );
                         last_turn = Some(TurnReplayPayload {
                             prepared_turn: queued,
@@ -1675,8 +1683,8 @@ pub(crate) async fn run_app(
                             );
                             continue;
                         }
-                        let is_host_slash_command =
-                            command::parse(&queued.display_text, &app.skills).is_some();
+                        let parsed_command = command::parse(&queued.display_text, &app.skills);
+                        let is_host_slash_command = parsed_command.is_some();
                         if queued.is_empty()
                             || shell_escape_command(&queued.display_text).is_some()
                             || (is_host_slash_command && !app.running)
@@ -1685,6 +1693,43 @@ pub(crate) async fn run_app(
                             continue;
                         }
                         if app.running {
+                            if let Some(cmd) = parsed_command
+                                && command::runs_out_of_band_while_running(&cmd)
+                            {
+                                if handle_slash_command(
+                                    cmd,
+                                    &mut terminal,
+                                    &mut app,
+                                    logger,
+                                    args,
+                                    &paused,
+                                    &plugin_host,
+                                    &dynamic_tools,
+                                    &mut runtime,
+                                    &mut history,
+                                    &mut turn_counter,
+                                    &mut last_turn,
+                                    &mut runtime_return_rx,
+                                    &mut cancel_token,
+                                    &mut active_stream_id,
+                                    &mut provider,
+                                    &mut current_model_variant,
+                                    &mut current_execution_mode,
+                                    &mut current_context_strategy,
+                                    &mut session_manager,
+                                    &mut desired_dynamic,
+                                    &mut pending_reconfigure,
+                                    model_catalog.as_ref(),
+                                    &mut toolset_hash,
+                                    &app_tx,
+                                    &mut pending_clear_after_return,
+                                )
+                                .await?
+                                {
+                                    break;
+                                }
+                                continue;
+                            }
                             app.queue_turn(queued.clone());
                             app.preview_queued_turn(&queued, false);
                             continue;
@@ -1703,6 +1748,7 @@ pub(crate) async fn run_app(
                             queued.images.clone(),
                         );
                         let turn_input = make_turn_input(&mut app, items, image_blobs);
+                        let current_dynamic_state = dynamic_tools.export_state();
                         send_user_message(
                             queued.clone(),
                             turn_input.clone(),
@@ -1714,6 +1760,9 @@ pub(crate) async fn run_app(
                             &mut cancel_token,
                             &mut active_stream_id,
                             &app_tx,
+                            &provider,
+                            &current_dynamic_state,
+                            &toolset_hash,
                         );
                         last_turn = Some(TurnReplayPayload {
                             prepared_turn: queued,
@@ -1755,10 +1804,47 @@ pub(crate) async fn run_app(
                             continue;
                         }
 
-                        let is_host_slash_command =
-                            command::parse(&queued.display_text, &app.skills).is_some();
+                        let parsed_command = command::parse(&queued.display_text, &app.skills);
+                        let is_host_slash_command = parsed_command.is_some();
 
                         if app.running {
+                            if let Some(cmd) = parsed_command
+                                && command::runs_out_of_band_while_running(&cmd)
+                            {
+                                if handle_slash_command(
+                                    cmd,
+                                    &mut terminal,
+                                    &mut app,
+                                    logger,
+                                    args,
+                                    &paused,
+                                    &plugin_host,
+                                    &dynamic_tools,
+                                    &mut runtime,
+                                    &mut history,
+                                    &mut turn_counter,
+                                    &mut last_turn,
+                                    &mut runtime_return_rx,
+                                    &mut cancel_token,
+                                    &mut active_stream_id,
+                                    &mut provider,
+                                    &mut current_model_variant,
+                                    &mut current_execution_mode,
+                                    &mut current_context_strategy,
+                                    &mut session_manager,
+                                    &mut desired_dynamic,
+                                    &mut pending_reconfigure,
+                                    model_catalog.as_ref(),
+                                    &mut toolset_hash,
+                                    &app_tx,
+                                    &mut pending_clear_after_return,
+                                )
+                                .await?
+                                {
+                                    break;
+                                }
+                                continue;
+                            }
                             if is_host_slash_command {
                                 app.queue_turn(queued.clone());
                                 app.preview_queued_turn(&queued, false);
@@ -1925,6 +2011,7 @@ pub(crate) async fn run_app(
                             queued.images.clone(),
                         );
                         let turn_input = make_turn_input(&mut app, items, image_blobs);
+                        let current_dynamic_state = dynamic_tools.export_state();
                         send_user_message(
                             queued.clone(),
                             turn_input.clone(),
@@ -1936,6 +2023,9 @@ pub(crate) async fn run_app(
                             &mut cancel_token,
                             &mut active_stream_id,
                             &app_tx,
+                            &provider,
+                            &current_dynamic_state,
+                            &toolset_hash,
                         );
                         last_turn = Some(TurnReplayPayload {
                             prepared_turn: queued,
@@ -2078,6 +2168,101 @@ fn make_turn_input(
         items,
         image_blobs,
         mode: Some(RunMode::Normal),
+    }
+}
+
+fn append_turn_input_message(messages: &mut Vec<Message>, turn_input: &TurnInput) {
+    let user_id = format!("m{}", messages.len());
+    let mut image_ids = Vec::new();
+    let mut user_parts = Vec::new();
+
+    for item in &turn_input.items {
+        match item {
+            InputItem::Text { text } => {
+                if text.is_empty() {
+                    continue;
+                }
+                user_parts.push(Part {
+                    id: format!("{}.p{}", user_id, user_parts.len()),
+                    kind: PartKind::Text,
+                    content: text.clone(),
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: PruneState::Intact,
+                });
+            }
+            InputItem::FileRef { path } => {
+                user_parts.push(Part {
+                    id: format!("{}.p{}", user_id, user_parts.len()),
+                    kind: PartKind::Text,
+                    content: format!("[file: {path}]"),
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: PruneState::Intact,
+                });
+            }
+            InputItem::DirRef { path } => {
+                user_parts.push(Part {
+                    id: format!("{}.p{}", user_id, user_parts.len()),
+                    kind: PartKind::Text,
+                    content: format!("[directory: {}]", path.trim_end_matches('/')),
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: PruneState::Intact,
+                });
+            }
+            InputItem::ImageRef { id } => {
+                let Some(_) = turn_input.image_blobs.get(id) else {
+                    continue;
+                };
+                let image_idx =
+                    if let Some(idx) = image_ids.iter().position(|candidate| candidate == id) {
+                        idx
+                    } else {
+                        image_ids.push(id.clone());
+                        image_ids.len() - 1
+                    };
+                user_parts.push(Part {
+                    id: format!("{}.p{}", user_id, user_parts.len()),
+                    kind: PartKind::Text,
+                    content: format!("{}{}", lash::agent::message::IMAGE_REF_PREFIX, image_idx),
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: PruneState::Intact,
+                });
+            }
+        }
+    }
+
+    if user_parts.is_empty() {
+        user_parts.push(Part {
+            id: format!("{user_id}.p0"),
+            kind: PartKind::Text,
+            content: String::new(),
+            tool_call_id: None,
+            tool_name: None,
+            prune_state: PruneState::Intact,
+        });
+    }
+
+    messages.push(Message {
+        id: user_id,
+        role: MessageRole::User,
+        parts: user_parts,
+        origin: None,
+    });
+}
+
+fn pending_turn_snapshot(
+    state: &AgentStateEnvelope,
+    turn_input: &TurnInput,
+) -> DurableTurnSnapshot {
+    let mut messages = state.messages.clone();
+    append_turn_input_message(&mut messages, turn_input);
+    DurableTurnSnapshot {
+        messages,
+        tool_calls: state.tool_calls.clone(),
+        iteration: state.iteration,
     }
 }
 
@@ -2305,13 +2490,16 @@ fn send_user_message(
     prepared_turn: PreparedTurn,
     turn_input: TurnInput,
     app: &mut App,
-    _logger: &mut SessionLogger,
+    logger: &mut SessionLogger,
     runtime: &mut Option<LashRuntime>,
     _history: &mut Vec<Message>,
     runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
     cancel_token: &mut Option<CancellationToken>,
     active_stream_id: &mut u64,
     app_tx: &mpsc::UnboundedSender<AppEvent>,
+    provider: &Provider,
+    dynamic_state: &DynamicStateSnapshot,
+    toolset_hash: &str,
 ) {
     let already_visible = if !prepared_turn.display_text.is_empty() {
         app.commit_pending_user_preview(&prepared_turn.display_text)
@@ -2328,6 +2516,23 @@ fn send_user_message(
     let mut rt = runtime
         .take()
         .expect("runtime should be available when not running");
+    let persisted_state = rt.export_state();
+    persist_live_runtime_snapshot(
+        logger.store().as_ref(),
+        pending_turn_snapshot(&persisted_state, &turn_input),
+        &app.persisted_ui_state(),
+        dynamic_state,
+        provider,
+        &app.model,
+        app.context_window
+            .expect("app context_window must be set before dispatching a turn"),
+        persisted_state.policy.execution_mode,
+        persisted_state.policy.context_strategy,
+        app.model_variant.as_deref(),
+        toolset_hash,
+        persisted_state.token_usage.clone(),
+        persisted_state.last_prompt_usage.clone(),
+    );
     tracing::info!(
         mode = ?turn_input.mode,
         items = turn_input.items.len(),

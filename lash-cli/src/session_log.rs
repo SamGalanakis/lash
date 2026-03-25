@@ -88,6 +88,10 @@ impl SessionLogger {
         &self.filename
     }
 
+    pub fn store(&self) -> &Arc<Store> {
+        &self.store
+    }
+
     pub fn clone_history_from(&mut self, source_filename: &str) -> Result<()> {
         let source = Store::open(&sessions_dir().join(source_filename))?;
         self.store

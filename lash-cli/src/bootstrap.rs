@@ -7,7 +7,7 @@ use lash::*;
 use crate::autonomous::{AutonomousPersistenceContext, run_autonomous};
 use crate::interactive::{generate_session_name, run_app};
 use crate::session_log::{self, SessionLogger};
-use crate::{Args, fork, setup};
+use crate::{Args, setup};
 use crate::{
     autonomous_prompt_overrides, cleanup_terminal, configure_terminal_ui,
     ensure_supported_execution_mode, hash12, info_text, info_text_unconfigured, models_dev_catalog,
@@ -282,7 +282,6 @@ pub(crate) async fn run(
         )) as Arc<dyn PluginFactory>,
         Arc::new(BuiltinPlanTrackerPluginFactory),
         Arc::new(BuiltinPlanModePluginFactory::default()),
-        Arc::new(fork::ForkPluginFactory),
         Arc::new(AgentCallPluginFactory::new(
             session_policy.clone(),
             agent_call_config,

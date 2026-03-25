@@ -3,93 +3,55 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use lash::{
-    DynamicStateSnapshot, ExecutionMode, ExternalOpDef, ExternalOpKind, PluginError, PluginFactory,
-    PluginRegistrar, PluginSessionContext, SessionCreateRequest, SessionManager, SessionParam,
-    SessionPlugin, SessionSnapshot, SessionStartPoint, ToolResult,
-};
-use serde_json::json;
+use lash::{DynamicStateSnapshot, ExecutionMode};
 
 use crate::app::PersistedUiState;
 use crate::session_log::{self, SessionLogger};
 
-pub struct ForkPluginFactory;
-
-struct ForkPlugin;
-
-impl PluginFactory for ForkPluginFactory {
-    fn id(&self) -> &'static str {
-        "cli_fork"
-    }
-
-    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        Ok(Arc::new(ForkPlugin))
-    }
-}
-
-impl SessionPlugin for ForkPlugin {
-    fn id(&self) -> &'static str {
-        "cli_fork"
-    }
-
-    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        reg.external().op(
-            ExternalOpDef {
-                name: "session.fork".to_string(),
-                description: "Create a detached fork snapshot of the current session.".to_string(),
-                kind: ExternalOpKind::Command,
-                session_param: SessionParam::Optional,
-                input_schema: json!({
-                    "type": "object",
-                    "additionalProperties": false
-                }),
-                output_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "session_id": { "type": "string" },
-                        "snapshot": { "type": "object" }
-                    },
-                    "required": ["session_id", "snapshot"],
-                    "additionalProperties": false
-                }),
-            },
-            Arc::new(|ctx, _args| {
-                Box::pin(async move {
-                    let start = if let Some(session_id) = ctx.session_id.clone() {
-                        SessionStartPoint::ExistingSession { session_id }
-                    } else {
-                        SessionStartPoint::CurrentSession
-                    };
-                    match fork_snapshot_via_manager(ctx.host.as_ref(), start).await {
-                        Ok((session_id, snapshot)) => ToolResult::ok(json!({
-                            "session_id": session_id,
-                            "snapshot": snapshot,
-                        })),
-                        Err(err) => ToolResult::err(json!(err.to_string())),
-                    }
-                })
-            }),
-        )
-    }
-}
-
-async fn fork_snapshot_via_manager(
-    manager: &dyn SessionManager,
-    start: SessionStartPoint,
-) -> Result<(String, SessionSnapshot), PluginError> {
-    let handle = manager
-        .create_session(SessionCreateRequest {
-            agent_id: None,
-            start,
-            policy: None,
-            plugin_mode: lash::SessionPluginMode::InheritCurrent,
-            initial_messages: Vec::new(),
-            context_surface: lash::SessionContextSurface::default(),
-        })
-        .await?;
-    let snapshot = manager.snapshot_session(&handle.session_id).await?;
-    manager.close_session(&handle.session_id).await?;
-    Ok((handle.session_id, snapshot))
+#[allow(clippy::too_many_arguments)]
+async fn persist_parent_root_snapshot(
+    runtime: &mut lash::LashRuntime,
+    store: &lash::Store,
+    ui_state: &PersistedUiState,
+    dynamic_state: &DynamicStateSnapshot,
+    provider: &lash::Provider,
+    configured_model: &str,
+    context_window: u64,
+    model_variant: Option<&str>,
+    toolset_hash: &str,
+) -> Result<()> {
+    let mut state = runtime.export_state();
+    let execution_mode = state.policy.execution_mode;
+    let context_strategy = state.policy.context_strategy;
+    let snapshot_hash = if matches!(execution_mode, ExecutionMode::Repl) {
+        let blob = runtime
+            .snapshot_repl()
+            .await
+            .context("Failed to snapshot REPL state for fork")?;
+        let hash = crate::hash12(&blob);
+        state.repl_snapshot = Some(blob);
+        Some(hash)
+    } else {
+        None
+    };
+    state.task_state = None;
+    let prompt_hash = crate::latest_user_prompt_hash(&state.messages);
+    crate::persist_root_agent_state(
+        store,
+        &mut state,
+        ui_state,
+        dynamic_state,
+        provider,
+        configured_model,
+        context_window,
+        execution_mode,
+        context_strategy,
+        model_variant,
+        toolset_hash,
+        prompt_hash,
+        snapshot_hash,
+    );
+    Ok(())
 }
 
 fn find_program_on_path(name: &str) -> Option<PathBuf> {
@@ -583,7 +545,7 @@ pub fn spawn_in_new_terminal(exe: &Path, args: &[String]) -> Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn fork_current_session(
-    runtime: &mut lash::LashRuntime,
+    runtime: Option<&mut lash::LashRuntime>,
     logger: &mut SessionLogger,
     ui_state: &PersistedUiState,
     provider: &lash::Provider,
@@ -594,44 +556,27 @@ pub async fn fork_current_session(
     dynamic_state: &DynamicStateSnapshot,
 ) -> Result<(String, String)> {
     logger.flush()?;
-
-    let fork_result = runtime
-        .invoke_external("session.fork", json!({}), None)
-        .await
-        .map_err(|err| anyhow!(err.to_string()))?;
-    if !fork_result.success {
-        let message = fork_result
-            .result
-            .as_str()
-            .unwrap_or("session.fork failed")
-            .to_string();
-        return Err(anyhow!(message));
+    if let Some(runtime) = runtime {
+        persist_parent_root_snapshot(
+            runtime,
+            logger.store().as_ref(),
+            ui_state,
+            dynamic_state,
+            provider,
+            configured_model,
+            context_window,
+            model_variant,
+            toolset_hash,
+        )
+        .await?;
     }
+    let parent_state = logger
+        .store()
+        .load_agent_state(crate::ROOT_SESSION_ID)
+        .ok_or_else(|| {
+            anyhow!("No persisted snapshot available to fork yet. Try again in a moment.")
+        })?;
 
-    let child_session_id = fork_result
-        .result
-        .get("session_id")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("session.fork did not return a session_id"))?
-        .to_string();
-    let snapshot_value = fork_result
-        .result
-        .get("snapshot")
-        .cloned()
-        .ok_or_else(|| anyhow!("session.fork did not return a snapshot"))?;
-    let mut state: SessionSnapshot = serde_json::from_value(snapshot_value)
-        .context("session.fork returned an invalid snapshot")?;
-
-    if matches!(
-        runtime.export_state().policy.execution_mode,
-        ExecutionMode::Repl
-    ) {
-        let snapshot = runtime.snapshot_repl().await?;
-        state.repl_snapshot = Some(snapshot);
-    }
-
-    let snapshot_hash = state.repl_snapshot.as_deref().map(crate::hash12);
     let sessions_dir = session_log::sessions_dir();
     let child_session_name = crate::generate_session_name(&sessions_dir);
     let child_filename = session_log::new_session_filename();
@@ -641,29 +586,136 @@ pub async fn fork_current_session(
         Arc::clone(&child_store),
         child_filename.clone(),
         configured_model,
-        Some(child_session_id),
+        Some(uuid::Uuid::new_v4().to_string()),
         child_session_name.clone(),
     )?;
     child_logger.mark_as_child_of(&logger.session_id)?;
     child_logger.clone_history_from(logger.filename())?;
-    let execution_mode = state.policy.execution_mode;
-    let context_strategy = state.policy.context_strategy;
-    let prompt_hash = crate::latest_user_prompt_hash(&state.messages);
-    crate::persist_root_agent_state(
-        child_store.as_ref(),
-        &mut state,
-        ui_state,
-        dynamic_state,
-        provider,
-        configured_model,
-        context_window,
-        execution_mode,
-        context_strategy,
-        model_variant,
-        toolset_hash,
-        prompt_hash,
-        snapshot_hash,
-    );
+    child_store.save_agent_state(lash::store::AgentStateSave {
+        agent_id: crate::ROOT_SESSION_ID,
+        messages_json: &parent_state.messages_json,
+        tool_calls_json: &parent_state.tool_calls_json,
+        ui_json: &parent_state.ui_json,
+        iteration: parent_state.iteration,
+        config_json: &parent_state.config_json,
+        repl_snapshot: parent_state.repl_snapshot.as_deref(),
+        input_tokens: parent_state.input_tokens,
+        output_tokens: parent_state.output_tokens,
+        cached_input_tokens: parent_state.cached_input_tokens,
+        reasoning_tokens: parent_state.reasoning_tokens,
+    });
 
     Ok((child_filename, child_session_name))
+}
+
+#[cfg(test)]
+mod fork_tests {
+    use super::*;
+    use crate::app::DisplayBlock;
+    use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
+    use lash::provider::{OPENAI_GENERIC_DEFAULT_BASE_URL, Provider, ProviderOptions};
+    use lash::store::HistoryTurnRecord;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn dummy_provider() -> Provider {
+        Provider::OpenAiGeneric {
+            api_key: "test".to_string(),
+            base_url: OPENAI_GENERIC_DEFAULT_BASE_URL.to_string(),
+            options: ProviderOptions::default(),
+        }
+    }
+
+    fn empty_dynamic_state() -> DynamicStateSnapshot {
+        DynamicStateSnapshot {
+            base_generation: 0,
+            tools: BTreeMap::new(),
+            enabled_tools: BTreeSet::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn fork_clones_persisted_root_snapshot_without_runtime() {
+        let _env_guard = env_lock().lock().await;
+        let temp = TempDirGuard::new("lash-fork-persisted-snapshot");
+        let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
+        std::fs::create_dir_all(session_log::sessions_dir()).expect("sessions dir");
+
+        let parent_filename = "parent.db".to_string();
+        let parent_path = session_log::sessions_dir().join(&parent_filename);
+        let parent_store = Arc::new(lash::Store::open(&parent_path).expect("parent store"));
+        let mut parent_logger = SessionLogger::new(
+            Arc::clone(&parent_store),
+            parent_filename.clone(),
+            "gpt-test",
+            Some("parent-session".into()),
+            "parent".into(),
+        )
+        .expect("parent logger");
+        parent_store.save_agent_state(lash::store::AgentStateSave {
+            agent_id: crate::ROOT_SESSION_ID,
+            messages_json: r#"[{"id":"u1","role":"user","parts":[{"id":"u1.p0","kind":"text","content":"hello","tool_call_id":null,"tool_name":null,"prune_state":"intact"}],"origin":null}]"#,
+            tool_calls_json: "[]",
+            ui_json: &serde_json::to_string(&PersistedUiState {
+                blocks: vec![DisplayBlock::UserInput("hello".into())],
+                ..PersistedUiState::default()
+            })
+            .expect("ui json"),
+            iteration: 1,
+            config_json: r#"{"task_state":{"kind":"live_resume","status":"running"}}"#,
+            repl_snapshot: None,
+            input_tokens: 10,
+            output_tokens: 3,
+            cached_input_tokens: 1,
+            reasoning_tokens: 2,
+        });
+        parent_store.history_upsert_turn(
+            crate::ROOT_SESSION_ID,
+            &HistoryTurnRecord {
+                index: 0,
+                user_message: "hello".into(),
+                prose: "world".into(),
+                code: String::new(),
+                output: String::new(),
+                error: None,
+                tool_calls: Vec::new(),
+                files_read: Vec::new(),
+                files_written: Vec::new(),
+            },
+        );
+
+        let (child_filename, _child_session_name) = fork_current_session(
+            None,
+            &mut parent_logger,
+            &PersistedUiState::default(),
+            &dummy_provider(),
+            "gpt-test",
+            1024,
+            None,
+            "toolhash",
+            &empty_dynamic_state(),
+        )
+        .await
+        .expect("fork should succeed");
+
+        let child_store = lash::Store::open(&session_log::sessions_dir().join(&child_filename))
+            .expect("child store");
+        let child_meta = child_store.load_session_meta().expect("child meta");
+        assert_eq!(
+            child_meta.parent_session_id.as_deref(),
+            Some("parent-session")
+        );
+
+        let child_state = child_store
+            .load_agent_state(crate::ROOT_SESSION_ID)
+            .expect("child root state");
+        assert!(child_state.messages_json.contains("\"hello\""));
+        assert_eq!(
+            child_state.config_json,
+            r#"{"task_state":{"kind":"live_resume","status":"running"}}"#
+        );
+
+        let child_turns = child_store.history_export(crate::ROOT_SESSION_ID);
+        assert_eq!(child_turns.len(), 1);
+        assert_eq!(child_turns[0].user_message, "hello");
+    }
 }
