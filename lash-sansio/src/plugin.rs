@@ -1,10 +1,25 @@
-use crate::MessageRole;
+use crate::{MessageRole, Part};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PluginMessage {
     pub role: MessageRole,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<Part>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<Vec<u8>>,
+}
+
+impl PluginMessage {
+    pub fn text(role: MessageRole, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            parts: Vec::new(),
+            images: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

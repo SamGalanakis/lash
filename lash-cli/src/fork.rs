@@ -10,6 +10,7 @@ use lash::{
 };
 use serde_json::json;
 
+use crate::app::PersistedUiState;
 use crate::session_log::{self, SessionLogger};
 
 pub struct ForkPluginFactory;
@@ -287,6 +288,7 @@ pub fn spawn_in_new_terminal(exe: &Path, args: &[String]) -> Result<()> {
 pub async fn fork_current_session(
     runtime: &mut lash::LashRuntime,
     logger: &mut SessionLogger,
+    ui_state: &PersistedUiState,
     provider: &lash::Provider,
     configured_model: &str,
     context_window: u64,
@@ -335,23 +337,25 @@ pub async fn fork_current_session(
     let snapshot_hash = state.repl_snapshot.as_deref().map(crate::hash12);
     let sessions_dir = session_log::sessions_dir();
     let child_session_name = crate::generate_session_name(&sessions_dir);
+    let child_filename = session_log::new_session_filename();
+    let child_db_path = sessions_dir.join(&child_filename);
+    let child_store = Arc::new(lash::Store::open(&child_db_path)?);
     let mut child_logger = SessionLogger::new(
+        Arc::clone(&child_store),
+        child_filename.clone(),
         configured_model,
         Some(child_session_id),
         child_session_name.clone(),
     )?;
+    child_logger.mark_as_child_of(&logger.session_id)?;
     child_logger.clone_history_from(logger.filename())?;
-    let child_filename = child_logger.filename().to_string();
-
-    let child_db_path =
-        sessions_dir.join(format!("{}.db", child_filename.trim_end_matches(".jsonl")));
-    let child_store = lash::Store::open(&child_db_path)?;
     let execution_mode = state.policy.execution_mode;
     let context_strategy = state.policy.context_strategy;
     let prompt_hash = crate::latest_user_prompt_hash(&state.messages);
     crate::persist_root_agent_state(
-        &child_store,
+        child_store.as_ref(),
         &mut state,
+        ui_state,
         dynamic_state,
         provider,
         configured_model,

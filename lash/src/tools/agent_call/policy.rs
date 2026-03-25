@@ -184,7 +184,7 @@ impl AgentCall {
 pub(super) fn agent_call_prompt_contributions() -> Vec<PromptContribution> {
     vec![
         PromptContribution::guidance(
-            "### Delegation\nUse `agent_call` proactively for scoped, self-contained sub-tasks whenever it will reduce context pressure, isolate noisy work, support review or verification, or let truly independent work proceed in parallel. Do not wait for the user to explicitly ask for delegation. Avoid overlapping file edits across concurrent delegates, and if your very next step is blocked on a result and you have no other useful parallel work, do it yourself instead.\n\nChoose intelligence by task shape:\n\n- `low`: fast, read-only exploration and synthesis. Use for codebase discovery, tracing behavior, finding examples, summarizing logs or failures, scanning docs, searching history, comparing implementations, or web research that informs your next step.\n  Examples:\n  - \"Find where auth tokens are refreshed\"\n  - \"Summarize the config loader\"\n  - \"Scan the repo for queue-related paths\"\n  - \"Check the docs for the current API shape\"\n\n- `medium`: bounded implementation or analysis with a contained scope. Use for small features, targeted bug fixes, focused tests, contained refactors, single-module edits, or validating one concrete hypothesis.\n  Examples:\n  - \"Add tests for the retry helper\"\n  - \"Refactor this parser module without changing behavior\"\n  - \"Fix the null handling bug in this endpoint\"\n  - \"Implement this small CLI flag\"\n\n- `high`: peer-level independent work. This is the same intelligence tier as you, so use it when another strong agent can make real parallel progress on a separate line of work. Use it for substantial tasks that can be owned in parallel, larger isolated implementations, strong validation passes, or serious design investigation.\n  Examples:\n  - \"Implement the backend half while I handle the UI\"\n  - \"Own the persistence changes while I update the command flow\"\n  - \"Review this design for race conditions and regressions\"\n  - \"Validate whether this architectural direction is sound\"",
+            "### Delegation\nUse `agent_call` proactively for scoped, self-contained sub-tasks when it will make concrete progress without blocking your next local step. Treat delegation as sidecar work, not a handoff of the immediate critical path. Before delegating, identify what you can do locally right now and what can run in parallel.\n\nDelegation rules:\n- Do not duplicate work between the main agent and delegates. Once a delegate owns a trace, question, or validation pass, trust it and use your local effort on non-overlapping work until the result is needed.\n- Do not delegate the next blocking step in a single-threaded workflow. If your very next step depends on the result and you have no meaningful parallel work, do it yourself instead.\n- Keep delegated asks concrete, well-bounded, and self-contained.\n- Avoid overlapping file edits across concurrent delegates.\n- Call `agent_result` sparingly; wait only when the child result is needed to continue.\n\nChoose intelligence by task shape:\n\n- `low`: fast, read-only exploration and synthesis. Use for codebase discovery, tracing behavior, finding examples, summarizing logs or failures, scanning docs, searching history, comparing implementations, or other informational sidecar work.\n  Examples:\n  - \"Find where auth tokens are refreshed\"\n  - \"Summarize the config loader\"\n  - \"Scan the repo for queue-related paths\"\n  - \"Check the docs for the current API shape\"\n\n- `medium`: bounded implementation or analysis with a contained scope. Use for small features, targeted bug fixes, focused tests, contained refactors, single-module edits, or validating one concrete hypothesis.\n  Examples:\n  - \"Add tests for the retry helper\"\n  - \"Refactor this parser module without changing behavior\"\n  - \"Fix the null handling bug in this endpoint\"\n  - \"Implement this small CLI flag\"\n\n- `high`: peer-level independent work with a clearly separate line of ownership. Use it for substantial parallel tasks, larger isolated implementations, strong validation passes, or serious design investigation when the write scope or responsibility boundary is distinct.\n  Examples:\n  - \"Implement the backend half while I handle the UI\"\n  - \"Own the persistence changes while I update the command flow\"\n  - \"Review this design for race conditions and regressions\"\n  - \"Validate whether this architectural direction is sound\"",
         ),
         PromptContribution::guidance(
             "### Agent Lifecycle\n`agent_result(id)` blocks until the child session finishes and returns an object in `result.value` with the child result and terminal status. The agent ID remains valid afterwards, including after `agent_kill(id)`, so you can query the terminal result again even after the child session has been stopped.",
@@ -271,4 +271,22 @@ pub(super) fn agent_call_definitions(
             output_schema_override: None,
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delegation_guidance_preserves_parallelism_without_duplicate_work() {
+        let text = agent_call_prompt_contributions()
+            .into_iter()
+            .map(|c| c.content)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert!(text.contains("Do not duplicate work between the main agent and delegates"));
+        assert!(text.contains("Do not delegate the next blocking step"));
+        assert!(text.contains("Call `agent_result` sparingly"));
+        assert!(!text.contains("Do not wait for the user to explicitly ask for delegation"));
+    }
 }

@@ -2,15 +2,18 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use lash::{
-    AgentEvent, MessageRole, PluginMessage, PromptUsage, SkillCatalog, TokenUsage,
-    append_skill_blocks, collect_skill_mentions, plugin_surface_event_renders_visible_output,
+    AgentEvent, Message, MessageRole, PartKind, PluginMessage, PromptUsage, SkillCatalog,
+    TokenUsage, append_skill_blocks, collect_skill_mentions,
+    plugin_surface_event_renders_visible_output,
 };
 
 use crate::activity::{
     ActivityBlock, ActivityKind, ActivityState, ActivityStatus, PatchFilePreview,
-    merge_exploration_activity,
+    merge_edit_activity, merge_exploration_activity,
 };
 use crate::command;
+use crate::diff::inline_diff_height;
+use crate::input_items::image_marker_ranges;
 use crate::markdown;
 use crate::plugin_surface;
 use crate::replay::{normalize_stream_text, push_assistant_text_block};
@@ -29,7 +32,7 @@ fn byte_pos_at_display_col(line: &str, target_col: usize) -> usize {
     line.len()
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PluginPanelBlock {
     pub plugin_id: String,
     pub key: String,
@@ -85,6 +88,12 @@ pub struct LargePaste {
     pub content: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingImage {
+    pub id: usize,
+    pub png_bytes: Vec<u8>,
+}
+
 fn expand_large_paste_placeholders(text: &str, large_pastes: &[LargePaste]) -> String {
     let mut expanded = text.to_string();
     for paste in large_pastes {
@@ -101,7 +110,7 @@ pub struct PreparedTurn {
     pub raw_text: String,
     pub display_text: String,
     pub effective_text: String,
-    pub images: Vec<Vec<u8>>,
+    pub images: Vec<PendingImage>,
     pub large_pastes: Vec<LargePaste>,
     pub transform_labels: Vec<String>,
 }
@@ -114,19 +123,26 @@ impl PreparedTurn {
             raw_text: text.clone(),
             display_text: text.clone(),
             effective_text: text,
-            images,
+            images: images
+                .into_iter()
+                .enumerate()
+                .map(|(idx, png_bytes)| PendingImage {
+                    id: idx + 1,
+                    png_bytes,
+                })
+                .collect(),
             large_pastes: Vec::new(),
             transform_labels: Vec::new(),
         }
     }
 
-    pub fn prepare(text: String, images: Vec<Vec<u8>>, skills: &SkillCatalog) -> Self {
+    pub fn prepare(text: String, images: Vec<PendingImage>, skills: &SkillCatalog) -> Self {
         Self::prepare_with_large_pastes(text, images, skills, Vec::new())
     }
 
     pub fn prepare_with_large_pastes(
         text: String,
-        images: Vec<Vec<u8>>,
+        images: Vec<PendingImage>,
         skills: &SkillCatalog,
         large_pastes: Vec<LargePaste>,
     ) -> Self {
@@ -161,9 +177,6 @@ impl PreparedTurn {
     pub fn preview(&self) -> String {
         let collapsed = self.display_text.replace('\n', " ").trim().to_string();
         if !collapsed.is_empty() {
-            if let Some(summary) = self.transform_summary() {
-                return format!("{collapsed} · \u{25C6} {summary}");
-            }
             return collapsed;
         }
         match self.images.len() {
@@ -187,14 +200,6 @@ impl PreparedTurn {
             preview_text_lines(&expanded).join("\n")
         }
     }
-
-    pub fn transform_summary(&self) -> Option<String> {
-        if self.transform_labels.is_empty() {
-            None
-        } else {
-            Some(self.transform_labels.join(", "))
-        }
-    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -205,6 +210,7 @@ pub enum SuggestionKind {
 }
 
 /// A renderable block in the scrollable history.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DisplayBlock {
     UserInput(String),
     AssistantText(String),
@@ -226,12 +232,124 @@ pub enum DisplayBlock {
     Error(String),
     /// Informational message from the system (e.g. /help output).
     SystemMessage(String),
-    /// Compact skill-invocation indicator (skill names without "skill " prefix).
-    SkillLoaded(Vec<String>),
     /// Rendered plan content from update_plan (bordered markdown).
     PlanContent(String),
     PluginPanel(PluginPanelBlock),
     Splash,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct PersistedUiState {
+    #[serde(default)]
+    pub blocks: Vec<DisplayBlock>,
+    #[serde(default)]
+    pub last_response_usage: TokenUsage,
+    #[serde(default)]
+    pub plugin_mode_indicators: BTreeMap<String, String>,
+}
+
+impl PersistedUiState {
+    pub fn from_messages(messages: &[Message]) -> Self {
+        Self {
+            blocks: blocks_from_messages(messages),
+            last_response_usage: TokenUsage::default(),
+            plugin_mode_indicators: BTreeMap::new(),
+        }
+    }
+}
+
+fn blocks_from_messages(messages: &[Message]) -> Vec<DisplayBlock> {
+    let mut blocks = Vec::new();
+    for message in messages {
+        append_message_blocks(&mut blocks, message);
+    }
+    blocks
+}
+
+fn append_message_blocks(blocks: &mut Vec<DisplayBlock>, message: &Message) {
+    match message.role {
+        MessageRole::User => {
+            let text = rendered_message_text(message);
+            if !text.is_empty() {
+                blocks.push(DisplayBlock::UserInput(text));
+            }
+        }
+        MessageRole::Assistant => {
+            let mut prose = Vec::new();
+            for part in &message.parts {
+                let Some(text) = rendered_part_text(&part.kind, &part.content) else {
+                    continue;
+                };
+                match part.kind {
+                    PartKind::Text | PartKind::Prose => prose.push(text),
+                    PartKind::Code => {
+                        flush_assistant_prose(blocks, &mut prose);
+                        blocks.push(DisplayBlock::CodeBlock {
+                            code: text,
+                            continuation: false,
+                        });
+                    }
+                    PartKind::Output => {
+                        flush_assistant_prose(blocks, &mut prose);
+                        blocks.push(DisplayBlock::CodeOutput {
+                            output: text,
+                            error: None,
+                        });
+                    }
+                    PartKind::Error => {
+                        flush_assistant_prose(blocks, &mut prose);
+                        blocks.push(DisplayBlock::Error(text));
+                    }
+                    PartKind::ToolCall | PartKind::ToolResult => {}
+                }
+            }
+            flush_assistant_prose(blocks, &mut prose);
+        }
+        MessageRole::System => {
+            let text = rendered_message_text(message);
+            if !text.is_empty() {
+                blocks.push(DisplayBlock::SystemMessage(text));
+            }
+        }
+    }
+}
+
+fn flush_assistant_prose(blocks: &mut Vec<DisplayBlock>, prose: &mut Vec<String>) {
+    if prose.is_empty() {
+        return;
+    }
+    let text = prose.join("\n\n");
+    let _ = push_assistant_text_block(blocks, &text);
+    prose.clear();
+}
+
+fn rendered_message_text(message: &Message) -> String {
+    message
+        .parts
+        .iter()
+        .filter_map(|part| rendered_part_text(&part.kind, &part.content))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        .trim()
+        .to_string()
+}
+
+fn rendered_part_text(kind: &PartKind, content: &str) -> Option<String> {
+    let rendered = if let Some(index) = content.strip_prefix(lash::agent::message::IMAGE_REF_PREFIX)
+    {
+        format!("[Image #{}]", index)
+    } else {
+        content.to_string()
+    };
+
+    if rendered.trim().is_empty() {
+        return None;
+    }
+
+    match kind {
+        PartKind::ToolCall | PartKind::ToolResult => None,
+        _ => Some(rendered),
+    }
 }
 
 pub(crate) const SPLASH_CONTENT_HEIGHT: usize = 8;
@@ -353,18 +471,16 @@ fn patch_file_heading(file: &PatchFilePreview) -> String {
         Some(from_path) => format!("{from_path} → {}", file.path),
         None => file.path.clone(),
     };
-    format!(
-        "{} {} (+{} -{})",
-        match file.status.as_str() {
-            "added" => "added",
-            "deleted" => "deleted",
-            "moved" => "moved",
-            _ => "edited",
-        },
-        subject,
-        file.added,
-        file.removed
-    )
+    let prefix = match file.status.as_str() {
+        "added" => Some("added"),
+        "deleted" => Some("deleted"),
+        "moved" => Some("moved"),
+        _ => None,
+    };
+    match prefix {
+        Some(prefix) => format!("{prefix} {subject} (+{} -{})", file.added, file.removed),
+        None => format!("{subject} (+{} -{})", file.added, file.removed),
+    }
 }
 
 fn patch_preview_height(
@@ -379,11 +495,7 @@ fn patch_preview_height(
             let mut height =
                 wrapped_text_height(&patch_file_heading(file), width, indent_width + 2);
             if include_diffs && !file.diff.trim().is_empty() {
-                height += file
-                    .diff
-                    .lines()
-                    .map(|line| wrapped_text_height(line, width, indent_width + 4))
-                    .sum::<usize>();
+                height += inline_diff_height(&file.diff, width, indent_width + 2);
             }
             height
         })
@@ -457,7 +569,7 @@ impl DisplayBlock {
                     && let Some(crate::activity::ActivityArtifact::PatchPreview { files, .. }) =
                         &activity.artifact
                 {
-                    h += patch_preview_height(files, 2, width, false);
+                    h += patch_preview_height(files, 2, width, true);
                 }
                 h
             }
@@ -487,7 +599,6 @@ impl DisplayBlock {
             }
             DisplayBlock::Error(msg) => wrapped_line_height(&format!("Error: {}", msg), width),
             DisplayBlock::SystemMessage(s) => wrapped_text_height(s, width, 0),
-            DisplayBlock::SkillLoaded(_) => 1,
             DisplayBlock::PlanContent(s) => {
                 // borders (2) + plain-text content lines (not markdown)
                 let inner_w = width.saturating_sub(4).max(1);
@@ -549,7 +660,9 @@ pub struct App {
     /// Viewport height the height cache was computed for (needed for Splash centering).
     height_cache_vh: usize,
     /// PNG-encoded images pasted via Ctrl+V, waiting to be sent with next message.
-    pub pending_images: Vec<Vec<u8>>,
+    pub pending_images: Vec<PendingImage>,
+    /// Image markers already inserted into the draft whose clipboard payload is still encoding.
+    pub inflight_image_ids: HashSet<usize>,
     /// Large pasted text payloads represented by compact placeholders in the visible draft.
     pub pending_large_pastes: Vec<LargePaste>,
     /// Per-size counters keep placeholder labels unique for repeated same-length pastes.
@@ -606,6 +719,19 @@ pub struct App {
 }
 
 impl App {
+    pub fn persisted_ui_state(&self) -> PersistedUiState {
+        PersistedUiState {
+            blocks: self
+                .blocks
+                .iter()
+                .filter(|block| !matches!(block, DisplayBlock::Splash))
+                .cloned()
+                .collect(),
+            last_response_usage: self.last_response_usage.clone(),
+            plugin_mode_indicators: self.plugin_mode_indicators.clone(),
+        }
+    }
+
     fn ensure_live_turn(&mut self) -> &mut LiveTurnState {
         self.live_turn
             .get_or_insert_with(|| LiveTurnState::new("starting", None))
@@ -725,6 +851,16 @@ impl App {
             self.invalidate_height_cache();
             return;
         }
+        if let Some(DisplayBlock::Activity(existing)) = self.blocks.last_mut()
+            && existing.kind == ActivityKind::Edit
+            && activity.kind == ActivityKind::Edit
+            && existing.status == ActivityStatus::Completed
+            && activity.status == ActivityStatus::Completed
+            && merge_edit_activity(existing, activity.clone())
+        {
+            self.invalidate_height_cache();
+            return;
+        }
         self.blocks.push(DisplayBlock::Activity(activity));
         self.invalidate_height_cache();
     }
@@ -771,6 +907,7 @@ impl App {
             height_cache_width: 0,
             height_cache_vh: 0,
             pending_images: Vec::new(),
+            inflight_image_ids: HashSet::new(),
             pending_large_pastes: Vec::new(),
             large_paste_counters: HashMap::new(),
             streaming_output: Vec::new(),
@@ -822,13 +959,14 @@ impl App {
 
     pub fn take_prepared_turn(&mut self) -> PreparedTurn {
         let input = self.take_input();
-        let images = self.take_images();
+        let images = self.take_pending_images();
         let large_pastes = self.take_large_pastes();
         PreparedTurn::prepare_with_large_pastes(input, images, &self.skills, large_pastes)
     }
 
-    /// Take pending images, clearing them from the app.
-    pub fn take_images(&mut self) -> Vec<Vec<u8>> {
+    /// Take pending images, preserving their stable inline ids for marker parsing.
+    pub fn take_pending_images(&mut self) -> Vec<PendingImage> {
+        self.inflight_image_ids.clear();
         std::mem::take(&mut self.pending_images)
     }
 
@@ -976,10 +1114,6 @@ impl App {
             return;
         }
         self.blocks.push(DisplayBlock::UserInput(history_text));
-        if !turn.transform_labels.is_empty() {
-            self.blocks
-                .push(DisplayBlock::SkillLoaded(turn.transform_labels.clone()));
-        }
         self.invalidate_height_cache();
     }
 
@@ -1225,6 +1359,7 @@ impl App {
             AgentEvent::InjectedMessagesCommitted { messages, .. } => {
                 self.commit_injected_messages(&messages);
             }
+            AgentEvent::DurableSnapshot { .. } => {}
             AgentEvent::LlmResponse { .. } => {}
             AgentEvent::Prompt { .. } => {
                 // Handled by the main event loop, not here
@@ -1323,8 +1458,61 @@ impl App {
     pub fn restore_prepared_turn(&mut self, turn: PreparedTurn) {
         self.input = turn.display_text;
         self.cursor_pos = self.input.len();
+        self.input_history_idx = None;
         self.pending_images = turn.images;
+        self.inflight_image_ids.clear();
         self.pending_large_pastes = turn.large_pastes;
+    }
+
+    pub fn next_image_marker_id(&self) -> usize {
+        let max_pending = self
+            .pending_images
+            .iter()
+            .map(|image| image.id)
+            .max()
+            .unwrap_or(0);
+        let max_inline = image_marker_ranges(&self.input)
+            .into_iter()
+            .map(|(_, idx)| idx)
+            .max()
+            .unwrap_or(0);
+        max_pending.max(max_inline) + 1
+    }
+
+    #[allow(dead_code)]
+    pub fn add_pending_image(&mut self, png_bytes: Vec<u8>) -> usize {
+        let id = self.next_image_marker_id();
+        self.pending_images.push(PendingImage { id, png_bytes });
+        id
+    }
+
+    pub fn begin_pending_image(&mut self, id: usize) {
+        self.inflight_image_ids.insert(id);
+    }
+
+    pub fn has_pending_image_jobs(&self) -> bool {
+        image_marker_ranges(&self.input)
+            .into_iter()
+            .any(|(_, idx)| self.inflight_image_ids.contains(&idx))
+    }
+
+    pub fn complete_pending_image(&mut self, id: usize, png_bytes: Vec<u8>) -> bool {
+        self.inflight_image_ids.remove(&id);
+        if !image_marker_ranges(&self.input)
+            .into_iter()
+            .any(|(_, idx)| idx == id)
+        {
+            return false;
+        }
+        if self.pending_images.iter().all(|image| image.id != id) {
+            self.pending_images.push(PendingImage { id, png_bytes });
+        }
+        true
+    }
+
+    pub fn fail_pending_image(&mut self, id: usize) -> bool {
+        self.inflight_image_ids.remove(&id);
+        self.remove_image_marker_by_id(id)
     }
 
     /// Toggle expand level 0↔1 (ghost fold ↔ compact plus) with scroll anchoring.
@@ -1614,6 +1802,13 @@ impl App {
             self.move_cursor_up_line();
             return;
         }
+        if self.input.is_empty()
+            && self.input_history_idx.is_none()
+            && let Some((turn, _was_pending)) = self.take_last_queued_turn()
+        {
+            self.restore_prepared_turn(turn);
+            return;
+        }
         if self.input_history.is_empty() {
             return;
         }
@@ -1751,8 +1946,58 @@ impl App {
         true
     }
 
+    fn image_marker_range_containing(
+        &self,
+        probe_pos: usize,
+    ) -> Option<(usize, std::ops::Range<usize>)> {
+        image_marker_ranges(&self.input)
+            .into_iter()
+            .find(|(range, _)| probe_pos >= range.start && probe_pos < range.end)
+            .map(|(range, idx)| (idx, range))
+    }
+
+    fn image_marker_range_for_id(&self, id: usize) -> Option<std::ops::Range<usize>> {
+        image_marker_ranges(&self.input)
+            .into_iter()
+            .find_map(|(range, idx)| (idx == id).then_some(range))
+    }
+
+    fn remove_image_marker_range(
+        &mut self,
+        image_id: usize,
+        range: std::ops::Range<usize>,
+    ) -> bool {
+        let removed_len = range.end.saturating_sub(range.start);
+        self.input.drain(range.clone());
+        if self.cursor_pos > range.end {
+            self.cursor_pos = self.cursor_pos.saturating_sub(removed_len);
+        } else if self.cursor_pos > range.start {
+            self.cursor_pos = range.start;
+        }
+        self.pending_images.retain(|image| image.id != image_id);
+        self.inflight_image_ids.remove(&image_id);
+        true
+    }
+
+    fn remove_image_marker_by_id(&mut self, image_id: usize) -> bool {
+        let Some(range) = self.image_marker_range_for_id(image_id) else {
+            return false;
+        };
+        self.remove_image_marker_range(image_id, range)
+    }
+
+    fn remove_image_marker_at_probe(&mut self, probe_pos: usize) -> bool {
+        let Some((image_id, range)) = self.image_marker_range_containing(probe_pos) else {
+            return false;
+        };
+        self.remove_image_marker_range(image_id, range)
+    }
+
     /// Delete character before cursor.
     pub fn backspace(&mut self) {
+        if self.cursor_pos > 0 && self.remove_image_marker_at_probe(self.cursor_pos - 1) {
+            return;
+        }
         if self.cursor_pos > 0 && self.remove_large_paste_at_probe(self.cursor_pos - 1) {
             return;
         }
@@ -1769,6 +2014,10 @@ impl App {
 
     /// Delete character at cursor.
     pub fn delete(&mut self) {
+        if self.cursor_pos < self.input.len() && self.remove_image_marker_at_probe(self.cursor_pos)
+        {
+            return;
+        }
         if self.cursor_pos < self.input.len() && self.remove_large_paste_at_probe(self.cursor_pos) {
             return;
         }
@@ -2879,7 +3128,9 @@ mod tests {
 
         let (turn, was_pending) = app.take_last_queued_turn().expect("queued turn");
         assert_eq!(turn.display_text, "queued");
-        assert_eq!(turn.images, vec![vec![1, 2, 3]]);
+        assert_eq!(turn.images.len(), 1);
+        assert_eq!(turn.images[0].id, 1);
+        assert_eq!(turn.images[0].png_bytes, vec![1, 2, 3]);
         assert!(!was_pending);
 
         assert!(app.take_last_queued_turn().is_none());
@@ -2894,10 +3145,7 @@ mod tests {
         app.preview_queued_turn(&turn, true);
 
         app.handle_agent_event(AgentEvent::InjectedMessagesCommitted {
-            messages: vec![PluginMessage {
-                role: MessageRole::User,
-                content: "follow up".into(),
-            }],
+            messages: vec![PluginMessage::text(MessageRole::User, "follow up")],
             checkpoint: lash::CheckpointKind::AfterWork,
         });
 
@@ -2911,24 +3159,23 @@ mod tests {
     #[test]
     fn injected_messages_clear_pending_queue_even_when_runtime_content_differs() {
         let mut app = App::new("test-model".into(), "test".into());
-        let mut turn = PreparedTurn::new("$localref lash for context if needed".into(), Vec::new());
+        let mut turn = PreparedTurn::new("/localref lash for context if needed".into(), Vec::new());
         turn.transform_labels = vec!["localref".into()];
         app.queue_pending_steer(turn.clone());
         app.preview_queued_turn(&turn, true);
 
         app.handle_agent_event(AgentEvent::InjectedMessagesCommitted {
-            messages: vec![PluginMessage {
-                role: MessageRole::User,
-                content: "$localref lash for context if needed\n\n<skill>\n<name>localref</name>\nbody\n</skill>".into(),
-            }],
+            messages: vec![PluginMessage::text(
+                MessageRole::User,
+                "/localref lash for context if needed\n\n<skill>\n<name>localref</name>\nbody\n</skill>",
+            )],
             checkpoint: lash::CheckpointKind::AfterWork,
         });
 
         assert!(app.pending_steers.is_empty());
-        assert!(matches!(
-            app.blocks.last(),
-            Some(DisplayBlock::SkillLoaded(names)) if names == &["localref"]
-        ));
+        assert!(
+            matches!(app.blocks.last(), Some(DisplayBlock::UserInput(text)) if text == "/localref lash for context if needed")
+        );
     }
 
     #[test]
@@ -2957,6 +3204,118 @@ mod tests {
             app.blocks.last(),
             Some(DisplayBlock::UserInput(_))
         ));
+    }
+
+    #[test]
+    fn history_up_restores_last_queued_turn_before_history() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.input_history = vec!["older turn".into()];
+        app.queue_turn(PreparedTurn::new("queued text".into(), vec![vec![1, 2, 3]]));
+
+        app.history_up();
+
+        assert_eq!(app.input, "queued text");
+        assert_eq!(app.pending_images.len(), 1);
+        assert_eq!(app.pending_images[0].id, 1);
+        assert_eq!(app.pending_images[0].png_bytes, vec![1, 2, 3]);
+        assert!(app.queued_turns.is_empty());
+        assert_eq!(app.input_history_idx, None);
+    }
+
+    #[test]
+    fn restore_prepared_turn_clears_history_selection() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.input_history = vec!["older turn".into()];
+        app.input_history_idx = Some(0);
+
+        app.restore_prepared_turn(PreparedTurn::new("queued text".into(), Vec::new()));
+
+        assert_eq!(app.input_history_idx, None);
+    }
+
+    #[test]
+    fn backspace_deletes_image_marker_atomically() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.input = "hello [Image #2] world".into();
+        app.cursor_pos = "hello [Image #2]".len();
+        app.pending_images = vec![PendingImage {
+            id: 2,
+            png_bytes: vec![1, 2, 3],
+        }];
+
+        app.backspace();
+
+        assert_eq!(app.input, "hello  world");
+        assert!(app.pending_images.is_empty());
+        assert_eq!(app.cursor_pos, "hello ".len());
+    }
+
+    #[test]
+    fn next_image_marker_id_tracks_highest_visible_marker() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.input = "[Image #2] [Image #5]".into();
+        app.pending_images = vec![PendingImage {
+            id: 2,
+            png_bytes: vec![1, 2, 3],
+        }];
+
+        assert_eq!(app.next_image_marker_id(), 6);
+    }
+
+    #[test]
+    fn add_pending_image_uses_highest_marker_plus_one() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.input = "before [Image #4] after".into();
+        app.pending_images = vec![PendingImage {
+            id: 2,
+            png_bytes: vec![9],
+        }];
+
+        let id = app.add_pending_image(vec![1, 2, 3]);
+
+        assert_eq!(id, 5);
+        assert_eq!(app.pending_images.last().map(|img| img.id), Some(5));
+    }
+
+    #[test]
+    fn complete_pending_image_only_attaches_when_marker_still_exists() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.input = "before [Image #3] after".into();
+        app.begin_pending_image(3);
+
+        assert!(app.complete_pending_image(3, vec![1, 2, 3]));
+        assert_eq!(app.pending_images.len(), 1);
+        assert_eq!(app.pending_images[0].id, 3);
+
+        app.input.clear();
+        app.begin_pending_image(4);
+        assert!(!app.complete_pending_image(4, vec![9]));
+        assert!(app.pending_images.iter().all(|image| image.id != 4));
+    }
+
+    #[test]
+    fn fail_pending_image_removes_marker_and_inflight_state() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.input = "before [Image #7] after".into();
+        app.cursor_pos = app.input.len();
+        app.begin_pending_image(7);
+
+        assert!(app.fail_pending_image(7));
+        assert_eq!(app.input, "before  after");
+        assert!(!app.inflight_image_ids.contains(&7));
+    }
+
+    #[test]
+    fn pending_image_jobs_only_count_visible_markers() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.begin_pending_image(2);
+        assert!(!app.has_pending_image_jobs());
+
+        app.input = "[Image #2]".into();
+        assert!(app.has_pending_image_jobs());
+
+        app.backspace();
+        assert!(!app.has_pending_image_jobs());
     }
 
     #[test]
@@ -3450,6 +3809,65 @@ mod tests {
     }
 
     #[test]
+    fn handle_tool_call_merges_contiguous_edit_activity() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.blocks.clear();
+
+        app.handle_agent_event(AgentEvent::ToolCall {
+            call_id: Some("tc5".into()),
+            name: "apply_patch".into(),
+            args: serde_json::json!({}),
+            result: serde_json::json!({
+                "summary": "Applied patch to 1 file",
+                "added": 1,
+                "removed": 1,
+                "files": [{
+                    "path": "a.rs",
+                    "status": "modified",
+                    "added": 1,
+                    "removed": 1,
+                    "diff": "--- a/a.rs\n+++ b/a.rs\n@@ -1,1 +1,1 @@\n-old\n+new"
+                }]
+            }),
+            success: true,
+            duration_ms: 7,
+        });
+        app.handle_agent_event(AgentEvent::ToolCall {
+            call_id: Some("tc6".into()),
+            name: "apply_patch".into(),
+            args: serde_json::json!({}),
+            result: serde_json::json!({
+                "summary": "Applied patch to 1 file",
+                "added": 2,
+                "removed": 0,
+                "files": [{
+                    "path": "b.rs",
+                    "status": "added",
+                    "added": 2,
+                    "removed": 0,
+                    "diff": "--- a/b.rs\n+++ b/b.rs\n@@ -0,0 +1,2 @@\n+fn one() {}\n+fn two() {}"
+                }]
+            }),
+            success: true,
+            duration_ms: 5,
+        });
+
+        assert_eq!(app.blocks.len(), 1);
+        match &app.blocks[0] {
+            DisplayBlock::Activity(activity) => {
+                assert_eq!(activity.kind, ActivityKind::Edit);
+                assert_eq!(activity.summary, "Edited 2 files (+3 -1)");
+                assert_eq!(activity.duration_ms, 12);
+                assert_eq!(activity.children.len(), 1);
+            }
+            other => panic!(
+                "expected activity block, got {:?}",
+                other_variant_name(other)
+            ),
+        }
+    }
+
+    #[test]
     fn insert_text_inserts_literal_payload_at_cursor() {
         let mut app = App::new("test-model".into(), "test".into());
         app.input = "startend".into();
@@ -3617,7 +4035,6 @@ mod tests {
             DisplayBlock::ShellOutput { .. } => "ShellOutput",
             DisplayBlock::Error(_) => "Error",
             DisplayBlock::SystemMessage(_) => "SystemMessage",
-            DisplayBlock::SkillLoaded(_) => "SkillLoaded",
             DisplayBlock::PlanContent(_) => "PlanContent",
             DisplayBlock::PluginPanel(_) => "PluginPanel",
             DisplayBlock::Splash => "Splash",

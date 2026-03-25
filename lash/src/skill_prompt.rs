@@ -3,13 +3,20 @@ use std::collections::HashSet;
 use crate::{LoadedSkill, SkillCatalog};
 
 pub fn collect_skill_mentions(text: &str) -> Vec<String> {
+    collect_skill_mentions_with_ranges(text)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect()
+}
+
+pub fn collect_skill_mentions_with_ranges(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
     let bytes = text.as_bytes();
     let mut mentions = Vec::new();
     let mut idx = 0usize;
 
     while idx < bytes.len() {
         let sigil = match bytes[idx] {
-            b'$' | b'/' => bytes[idx],
+            b'/' => bytes[idx],
             _ => {
                 idx += 1;
                 continue;
@@ -27,7 +34,7 @@ pub fn collect_skill_mentions(text: &str) -> Vec<String> {
             end += 1;
         }
         if end > start && is_valid_skill_mention_end(bytes, end, sigil) {
-            mentions.push(text[start..end].to_string());
+            mentions.push((idx..end, text[start..end].to_string()));
             idx = end;
         } else {
             idx += 1;
@@ -79,7 +86,6 @@ fn is_valid_skill_mention_start(bytes: &[u8], idx: usize, sigil: u8) -> bool {
     }
     let prev = bytes[idx - 1];
     match sigil {
-        b'$' => !is_skill_name_byte(prev),
         b'/' => {
             prev.is_ascii_whitespace()
                 || matches!(prev, b'(' | b'[' | b'{' | b'<' | b'"' | b'\'' | b'`')
@@ -123,11 +129,20 @@ mod tests {
     }
 
     #[test]
-    fn collects_skill_mentions_from_plain_text() {
-        assert_eq!(
-            collect_skill_mentions("Use $frontend-design and then $wholehog."),
-            vec!["frontend-design".to_string(), "wholehog".to_string()]
-        );
+    fn ignores_dollar_prefixed_text() {
+        assert!(collect_skill_mentions("Use $frontend-design and then $wholehog.").is_empty());
+    }
+
+    #[test]
+    fn collects_skill_mentions_with_ranges_including_sigil() {
+        let mentions =
+            collect_skill_mentions_with_ranges("Use /frontend-design and then /wholehog.");
+
+        assert_eq!(mentions.len(), 2);
+        assert_eq!(mentions[0].0, 4..20);
+        assert_eq!(mentions[0].1, "frontend-design");
+        assert_eq!(mentions[1].0, 30..39);
+        assert_eq!(mentions[1].1, "wholehog");
     }
 
     #[test]
@@ -147,7 +162,7 @@ mod tests {
     fn appends_selected_skills_as_blocks() {
         let catalog = skill_catalog_with(&[("frontend-design", "demo"), ("wholehog", "demo")]);
         let expanded = append_skill_blocks(
-            "Use $frontend-design for this page and /wholehog for the cutover.",
+            "Use /frontend-design for this page and /wholehog for the cutover.",
             &catalog,
         );
 
@@ -159,8 +174,7 @@ mod tests {
     #[test]
     fn ignores_unknown_mentions_and_deduplicates_known_ones() {
         let catalog = skill_catalog_with(&[("demo", "demo")]);
-        let expanded =
-            append_skill_blocks("$demo then /demo then $unknown then /demo again", &catalog);
+        let expanded = append_skill_blocks("/demo then $unknown then /demo again", &catalog);
 
         assert_eq!(expanded.matches("<skill>").count(), 1);
         assert!(expanded.contains("<name>demo</name>"));

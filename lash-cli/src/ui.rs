@@ -14,8 +14,11 @@ use crate::app::{
     App, DisplayBlock, PreparedTurn, PromptState, SPLASH_CONTENT_HEIGHT, SPLASH_SCROLLBACK_HEIGHT,
     SuggestionKind, preview_text_lines,
 };
+use crate::diff::render_inline_diff;
+use crate::input_items::image_marker_ranges;
 use crate::markdown;
 use crate::theme;
+use lash::collect_skill_mentions_with_ranges;
 fn input_height(app: &App, frame_width: u16) -> u16 {
     if app.has_prompt() {
         prompt_height(app, frame_width)
@@ -525,12 +528,7 @@ fn render_activity_artifact<'a>(
                 Span::styled(indent.to_string(), theme::code_chrome()),
                 Span::styled(format!("{}:", title), theme::code_header()),
             ]));
-            for line in diff.lines() {
-                lines.push(Line::from(vec![
-                    Span::styled(format!("{}  ", indent), theme::code_chrome()),
-                    Span::styled(line.to_string(), theme::code_content()),
-                ]));
-            }
+            render_inline_diff(lines, diff, viewport_width, &format!("{}  ", indent));
         }
         ActivityArtifact::PatchPreview { files, .. } => {
             render_patch_preview(lines, files, viewport_width, indent, true);
@@ -574,12 +572,12 @@ fn render_activity_artifact<'a>(
     }
 }
 
-fn patch_status_label(status: &str) -> &'static str {
+fn patch_status_label(status: &str) -> Option<&'static str> {
     match status {
-        "added" => "added",
-        "deleted" => "deleted",
-        "moved" => "moved",
-        _ => "edited",
+        "added" => Some("added"),
+        "deleted" => Some("deleted"),
+        "moved" => Some("moved"),
+        _ => None,
     }
 }
 
@@ -589,23 +587,25 @@ fn render_patch_summary_line<'a>(
     file: &PatchFilePreview,
     viewport_width: usize,
 ) {
-    let mut spans = vec![
-        Span::styled(prefix.to_string(), theme::patch_frame()),
-        Span::styled(
-            patch_status_label(&file.status).to_string(),
-            theme::patch_label(),
-        ),
-        Span::raw(" "),
-    ];
     let subject = match &file.from_path {
         Some(from_path) => format!("{from_path} → {}", file.path),
         None => file.path.clone(),
     };
     let counts = format!(" (+{} -{})", file.added, file.removed);
+    let status_label = patch_status_label(&file.status);
+    let label_width = status_label
+        .map(UnicodeWidthStr::width)
+        .unwrap_or(0)
+        .saturating_add(usize::from(status_label.is_some()));
     let available = viewport_width
         .saturating_sub(UnicodeWidthStr::width(prefix))
-        .saturating_sub(UnicodeWidthStr::width(patch_status_label(&file.status)))
-        .saturating_sub(1 + UnicodeWidthStr::width(counts.as_str()));
+        .saturating_sub(label_width)
+        .saturating_sub(UnicodeWidthStr::width(counts.as_str()));
+    let mut spans = vec![Span::styled(prefix.to_string(), theme::patch_frame())];
+    if let Some(label) = status_label {
+        spans.push(Span::styled(label.to_string(), theme::patch_label()));
+        spans.push(Span::raw(" "));
+    }
     spans.push(Span::styled(
         truncate_to_display_width(&subject, available),
         theme::assistant_text(),
@@ -627,27 +627,7 @@ fn render_patch_diff_lines<'a>(
     diff: &str,
     viewport_width: usize,
 ) {
-    for diff_line in diff.lines() {
-        let style = if diff_line.starts_with("@@") {
-            theme::patch_hunk()
-        } else if diff_line.starts_with('+') && !diff_line.starts_with("+++ ") {
-            theme::patch_add()
-        } else if diff_line.starts_with('-') && !diff_line.starts_with("--- ") {
-            theme::patch_remove()
-        } else if diff_line.starts_with("+++ ") || diff_line.starts_with("--- ") {
-            theme::code_header()
-        } else {
-            theme::code_content()
-        };
-        push_wrapped_prefixed(
-            lines,
-            format!("{prefix}╎ "),
-            format!("{prefix}  "),
-            diff_line,
-            style,
-            viewport_width,
-        );
-    }
+    render_inline_diff(lines, diff, viewport_width, prefix);
 }
 
 fn render_patch_preview<'a>(
@@ -987,6 +967,12 @@ fn render_activity_block_with_lane<'a>(
         } else {
             theme::explore_label()
         }
+    } else if activity.kind == ActivityKind::Edit {
+        if activity.status == ActivityStatus::Failed {
+            theme::error().add_modifier(Modifier::BOLD)
+        } else {
+            theme::assistant_text().add_modifier(Modifier::BOLD)
+        }
     } else if activity.kind == ActivityKind::Delegate {
         Style::default().fg(theme::CHALK_MID)
     } else {
@@ -1015,12 +1001,15 @@ fn render_activity_block_with_lane<'a>(
     } else {
         lane.detail_prefix_style
     };
+    let summary = if let Some(duration_text) =
+        crate::util::format_duration_ms_if_visible(activity.duration_ms)
+    {
+        format!("{} · {}", activity.summary, duration_text)
+    } else {
+        activity.summary.clone()
+    };
     let summary_text = truncate_to_display_width(
-        &format!(
-            "{} · {}",
-            activity.summary,
-            crate::util::format_duration_ms(activity.duration_ms)
-        ),
+        &summary,
         viewport_width.saturating_sub(UnicodeWidthStr::width(lane.summary_prefix.as_str())),
     );
     lines.push(Line::from(vec![
@@ -1055,7 +1044,7 @@ fn render_activity_block_with_lane<'a>(
                 files,
                 viewport_width,
                 lane.artifact_indent.as_str(),
-                false,
+                true,
             );
         }
         if activity.kind == ActivityKind::Parallel {
@@ -1072,12 +1061,15 @@ fn render_activity_block_with_lane<'a>(
             for (i, child) in children.iter().enumerate() {
                 let connector = if i == last_idx { "╰─ " } else { "├─ " };
                 let connector_prefix = format!("{}{}", lane.artifact_indent, connector);
+                let child_summary = if let Some(duration_text) =
+                    crate::util::format_duration_ms_if_visible(child.duration_ms)
+                {
+                    format!("{} · {}", child.summary, duration_text)
+                } else {
+                    child.summary.clone()
+                };
                 let child_text = truncate_to_display_width(
-                    &format!(
-                        "{} · {}",
-                        child.summary,
-                        crate::util::format_duration_ms(child.duration_ms),
-                    ),
+                    &child_summary,
                     viewport_width
                         .saturating_sub(UnicodeWidthStr::width(connector_prefix.as_str())),
                 );
@@ -1154,6 +1146,58 @@ fn prefix_rendered_lines(lines: &mut [Line<'_>], prefix: &str, style: Style) {
     }
 }
 
+fn styled_user_input_segment<'a>(text: &'a str, seg_start: usize, seg_end: usize) -> Vec<Span<'a>> {
+    let mut spans = Vec::new();
+    let mut cursor = seg_start;
+
+    for (range, _) in collect_skill_mentions_with_ranges(text) {
+        if range.end <= seg_start || range.start >= seg_end {
+            continue;
+        }
+        let start = range.start.max(seg_start);
+        let end = range.end.min(seg_end);
+
+        if cursor < start {
+            spans.push(Span::styled(
+                text[cursor..start].to_string(),
+                theme::user_input(),
+            ));
+        }
+
+        let mention = &text[start..end];
+        if start == range.start {
+            let mut chars = mention.chars();
+            if let Some(sigil) = chars.next() {
+                spans.push(Span::styled(
+                    sigil.to_string(),
+                    theme::resolved_token_sigil(),
+                ));
+                let rest = chars.as_str();
+                if !rest.is_empty() {
+                    spans.push(Span::styled(rest.to_string(), theme::resolved_token()));
+                }
+            }
+        } else if !mention.is_empty() {
+            spans.push(Span::styled(mention.to_string(), theme::resolved_token()));
+        }
+
+        cursor = end;
+    }
+
+    if cursor < seg_end {
+        spans.push(Span::styled(
+            text[cursor..seg_end].to_string(),
+            theme::user_input(),
+        ));
+    }
+
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), theme::user_input()));
+    }
+
+    spans
+}
+
 fn render_block<'a>(
     blocks: &'a [DisplayBlock],
     idx: usize,
@@ -1175,7 +1219,6 @@ fn render_block<'a>(
             }
             // Circle marker on first line only, continuation lines get 2-space indent.
             let marker_style = Style::default().fg(theme::SODIUM);
-            let text_style = theme::user_input();
             let prefix_w = 2; // "● " or "  " is 2 columns
             let cap = viewport_width.saturating_sub(prefix_w);
             let mut is_first = true;
@@ -1190,7 +1233,7 @@ fn render_block<'a>(
                     is_first = false;
                     lines.push(Line::from(vec![
                         prefix,
-                        Span::styled(line.to_string(), text_style),
+                        Span::styled(line.to_string(), theme::user_input()),
                     ]));
                 } else {
                     let mut seg_start = 0;
@@ -1204,10 +1247,9 @@ fn render_block<'a>(
                                 Span::raw("  ")
                             };
                             is_first = false;
-                            lines.push(Line::from(vec![
-                                prefix,
-                                Span::styled(line[seg_start..byte_idx].to_string(), text_style),
-                            ]));
+                            let mut spans = vec![prefix];
+                            spans.extend(styled_user_input_segment(line, seg_start, byte_idx));
+                            lines.push(Line::from(spans));
                             seg_start = byte_idx;
                             col = w;
                         } else {
@@ -1220,10 +1262,9 @@ fn render_block<'a>(
                         Span::raw("  ")
                     };
                     is_first = false;
-                    lines.push(Line::from(vec![
-                        prefix,
-                        Span::styled(line[seg_start..].to_string(), text_style),
-                    ]));
+                    let mut spans = vec![prefix];
+                    spans.extend(styled_user_input_segment(line, seg_start, line.len()));
+                    lines.push(Line::from(spans));
                 }
             }
         }
@@ -1398,13 +1439,6 @@ fn render_block<'a>(
             for line in text.lines() {
                 lines.push(Line::from(Span::styled(line, theme::system_message())));
             }
-        }
-        DisplayBlock::SkillLoaded(names) => {
-            let joined = names.join(" · ");
-            lines.push(Line::from(vec![
-                Span::styled("  \u{25C6} ", theme::skill_marker()),
-                Span::styled(joined, theme::skill_name()),
-            ]));
         }
         DisplayBlock::PlanContent(content) => {
             render_plan_block(
@@ -1650,8 +1684,6 @@ fn draw_turn_status(frame: &mut Frame, app: &App, area: Rect) {
     };
     frame.render_widget(Block::default().style(theme::turn_status_bar()), area);
 
-    let elapsed_text =
-        crate::util::format_duration_ms(turn.turn_started_at.elapsed().as_millis() as u64);
     let brand = animated_lash_word(turn.turn_started_at.elapsed());
     let (label, label_style) = if turn.status_text == "error" {
         ("Error", theme::error().add_modifier(Modifier::BOLD))
@@ -1662,8 +1694,12 @@ fn draw_turn_status(frame: &mut Frame, app: &App, area: Rect) {
     spans.extend(brand);
     spans.push(Span::raw("  "));
     spans.push(Span::styled(label, label_style));
-    spans.push(Span::raw("    "));
-    spans.push(Span::styled(elapsed_text, theme::turn_status_elapsed()));
+    if let Some(elapsed_text) = crate::util::format_duration_ms_if_visible(
+        turn.turn_started_at.elapsed().as_millis() as u64,
+    ) {
+        spans.push(Span::raw("    "));
+        spans.push(Span::styled(elapsed_text, theme::turn_status_elapsed()));
+    }
 
     let line_y = area.y + area.height.saturating_sub(1) / 2;
     let line_area = Rect {
@@ -1721,7 +1757,7 @@ fn queue_preview_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         push_queue_section(
             &mut lines,
             inner_width,
-            "◆ after next tool/result · Esc sends now",
+            "◆ after next tool/result",
             &pending_previews,
             Style::default().fg(theme::SODIUM),
             Style::default().fg(theme::CHALK_MID),
@@ -1740,13 +1776,6 @@ fn queue_preview_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             Style::default().fg(theme::LICHEN),
             Style::default().fg(theme::CHALK_DIM),
         );
-        lines.push(Line::from(vec![
-            Span::styled("  \u{2325}\u{2191} ", Style::default().fg(theme::ASH)),
-            Span::styled(
-                "edit last queued turn",
-                Style::default().fg(theme::ASH_TEXT),
-            ),
-        ]));
     }
 
     lines
@@ -1848,6 +1877,7 @@ fn draw_queue_preview(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines = Vec::new();
+    let image_markers = image_marker_ranges(&app.input);
 
     // Multi-line input rendering with manual character-level wrapping.
     // We pre-wrap each logical line using wrap_line() so that rendering and
@@ -1858,23 +1888,24 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     for (i, logical_line) in input_lines.iter().enumerate() {
         let segments = wrap_line(logical_line, prefix_w, total_width);
         for (j, &(seg_start, seg_end)) in segments.iter().enumerate() {
-            let seg_text = &logical_line[seg_start..seg_end];
+            let seg_spans = styled_input_segment(logical_line, seg_start, seg_end, &image_markers);
             if j == 0 {
                 // First visual line of this logical line — gets prefix
                 if i == 0 {
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("{} ", theme::PROMPT_CHAR), theme::prompt()),
-                        Span::styled(seg_text, theme::user_input()),
-                    ]));
+                    let mut spans = vec![Span::styled(
+                        format!("{} ", theme::PROMPT_CHAR),
+                        theme::prompt(),
+                    )];
+                    spans.extend(seg_spans);
+                    lines.push(Line::from(spans));
                 } else {
-                    lines.push(Line::from(vec![
-                        Span::styled("  ", Style::default().fg(theme::ASH)),
-                        Span::styled(seg_text, theme::user_input()),
-                    ]));
+                    let mut spans = vec![Span::styled("  ", Style::default().fg(theme::ASH))];
+                    spans.extend(seg_spans);
+                    lines.push(Line::from(spans));
                 }
             } else {
                 // Wrapped continuation line — no prefix
-                lines.push(Line::from(Span::styled(seg_text, theme::user_input())));
+                lines.push(Line::from(seg_spans));
             }
         }
     }
@@ -1960,6 +1991,44 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     let cursor_x = area.x + vis_col as u16;
     let cursor_y = area.y + 1 + (cursor_abs_row - scroll_offset) as u16;
     frame.set_cursor_position((cursor_x, cursor_y));
+}
+
+fn styled_input_segment<'a>(
+    logical_line: &'a str,
+    seg_start: usize,
+    seg_end: usize,
+    image_markers: &[(std::ops::Range<usize>, usize)],
+) -> Vec<Span<'a>> {
+    let mut spans = Vec::new();
+    let mut cursor = seg_start;
+    for (range, _) in image_markers {
+        if range.end <= seg_start || range.start >= seg_end {
+            continue;
+        }
+        let clamped_start = range.start.max(seg_start);
+        let clamped_end = range.end.min(seg_end);
+        if cursor < clamped_start {
+            spans.push(Span::styled(
+                logical_line[cursor..clamped_start].to_string(),
+                theme::user_input(),
+            ));
+        }
+        spans.push(Span::styled(
+            logical_line[clamped_start..clamped_end].to_string(),
+            theme::image_marker(),
+        ));
+        cursor = clamped_end;
+    }
+    if cursor < seg_end {
+        spans.push(Span::styled(
+            logical_line[cursor..seg_end].to_string(),
+            theme::user_input(),
+        ));
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), theme::user_input()));
+    }
+    spans
 }
 
 /// Draw the autocomplete popup above the input area (slash commands or @path).
@@ -2615,11 +2684,11 @@ mod tests {
         }
 
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
-        assert_eq!(rendered[0], "╭─ first command · 1ms");
+        assert_eq!(rendered[0], "╭─ first command");
         assert!(rendered.iter().any(|line| line.starts_with("│ ┌─ PLAN ")));
         assert_eq!(
             rendered.last().map(String::as_str),
-            Some("╰─ second command · 1ms")
+            Some("╰─ second command")
         );
     }
 
@@ -2735,6 +2804,41 @@ mod tests {
     }
 
     #[test]
+    fn turn_status_footer_shows_elapsed_after_threshold() {
+        let backend = TestBackend::new(48, 3);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut app = App::new("model".into(), "session".into());
+        app.live_turn = Some(crate::app::LiveTurnState {
+            status_text: "thinking".into(),
+            status_detail: None,
+            phase_started_at: std::time::Instant::now() - std::time::Duration::from_secs(2),
+            turn_started_at: std::time::Instant::now() - std::time::Duration::from_secs(2),
+            assistant_block_idx: None,
+            has_visible_output: false,
+            transient_until: None,
+        });
+
+        terminal
+            .draw(|frame| draw_turn_status(frame, &app, frame.area()))
+            .expect("draw footer");
+
+        let middle = buffer_row_text(terminal.backend(), 1, 48);
+        assert!(middle.contains("Working"));
+        assert!(middle.contains("2.0s"));
+    }
+
+    #[test]
+    fn styled_user_input_segment_highlights_skill_mentions_inline() {
+        let spans = styled_user_input_segment("ok. /wholehog that.", 0, 19);
+
+        assert_eq!(spans.len(), 4);
+        assert_eq!(spans[0].content.as_ref(), "ok. ");
+        assert_eq!(spans[1].content.as_ref(), "/");
+        assert_eq!(spans[2].content.as_ref(), "wholehog");
+        assert_eq!(spans[3].content.as_ref(), " that.");
+    }
+
+    #[test]
     fn suggestions_do_not_render_over_status_bar() {
         let backend = TestBackend::new(40, 6);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -2773,7 +2877,7 @@ mod tests {
         app.cursor_pos = app.input.len();
         app.session_picker = (0..5)
             .map(|idx| crate::session_log::SessionInfo {
-                filename: format!("session-{idx}.jsonl"),
+                filename: format!("session-{idx}.db"),
                 session_id: format!("session-{idx}"),
                 message_count: idx + 1,
                 first_message: format!("first message {idx}"),
@@ -2801,7 +2905,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut app = App::new("model".into(), "session".into());
         app.session_picker = vec![crate::session_log::SessionInfo {
-            filename: "session-0.jsonl".into(),
+            filename: "session-0.db".into(),
             session_id: "session-0".into(),
             message_count: 1,
             first_message:
@@ -2911,13 +3015,7 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("after next tool/result"))
         );
-        assert!(rendered.iter().any(|line| line.contains("Esc sends now")));
         assert!(rendered.iter().any(|line| line.contains("next full turn")));
-        assert!(
-            rendered
-                .iter()
-                .any(|line| line.contains("edit last queued turn"))
-        );
         assert!(
             rendered
                 .iter()
@@ -2928,6 +3026,34 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("run follow-up validation"))
         );
+    }
+
+    #[test]
+    fn image_marker_uses_distinct_style_in_input() {
+        let backend = TestBackend::new(40, 4);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut app = App::new("model".into(), "session".into());
+        app.input = "[Image #1] rest".into();
+        app.cursor_pos = app.input.len();
+
+        terminal
+            .draw(|frame| draw_input(frame, &app, Rect::new(0, 0, 40, 4)))
+            .expect("draw");
+
+        let image_cell = terminal
+            .backend()
+            .buffer()
+            .cell((2, 1))
+            .expect("image cell");
+        let text_cell = terminal
+            .backend()
+            .buffer()
+            .cell((13, 1))
+            .expect("text cell");
+        assert_eq!(image_cell.symbol(), "[");
+        assert_eq!(image_cell.fg, theme::SODIUM);
+        assert_eq!(text_cell.symbol(), "r");
+        assert_eq!(text_cell.fg, theme::CHALK_MID);
     }
 
     #[test]
@@ -2962,10 +3088,7 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 80, false);
 
-        assert_eq!(
-            line_text(&lines[0]),
-            "+ date '+%Y-%m-%d %H:%M:%S %Z' · 13ms"
-        );
+        assert_eq!(line_text(&lines[0]), "+ date '+%Y-%m-%d %H:%M:%S %Z'");
         assert_eq!(lines.len(), 1);
     }
 
@@ -2988,10 +3111,7 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 80, false);
 
-        assert_eq!(
-            line_text(&lines[0]),
-            "◆ delegate · inspect queue rendering · 7ms"
-        );
+        assert_eq!(line_text(&lines[0]), "◆ delegate · inspect queue rendering");
     }
 
     #[test]
@@ -3059,7 +3179,7 @@ mod tests {
                 kind: ActivityKind::Edit,
                 status: ActivityStatus::Completed,
                 tool_name: "apply_patch".into(),
-                summary: "edited hello.txt (+2 -1)".into(),
+                summary: "Edited hello.txt (+2 -1)".into(),
                 detail_lines: Vec::new(),
                 duration_ms: 5,
                 args: serde_json::Value::Null,
@@ -3090,7 +3210,7 @@ mod tests {
             render_block(&blocks, idx, 1, &mut lines, 80, 20);
         }
 
-        assert_eq!(line_text(&lines[0]), "├─ edited hello.txt (+2 -1) · 5ms");
+        assert_eq!(line_text(&lines[0]), "├─ Edited hello.txt (+2 -1)");
         assert_eq!(lines.len(), 1);
     }
 
@@ -3112,12 +3232,12 @@ mod tests {
     }
 
     #[test]
-    fn patch_activity_renders_revision_lane_and_file_slate() {
+    fn patch_activity_normal_view_renders_inline_diff_lines() {
         let activity = ActivityBlock {
             kind: ActivityKind::Edit,
             status: ActivityStatus::Completed,
             tool_name: "apply_patch".into(),
-            summary: "edited lash-cli/src/ui.rs (+3 -1)".into(),
+            summary: "Edited lash-cli/src/ui.rs (+3 -1)".into(),
             detail_lines: Vec::new(),
             duration_ms: 15,
             args: serde_json::Value::Null,
@@ -3142,11 +3262,10 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 80, false);
 
-        assert_eq!(
-            line_text(&lines[0]),
-            "╭─ edited lash-cli/src/ui.rs (+3 -1) · 15ms"
-        );
-        assert_eq!(lines.len(), 1);
+        assert_eq!(line_text(&lines[0]), "╭─ Edited lash-cli/src/ui.rs (+3 -1)");
+        assert!(line_text(&lines[1]).contains("@@"));
+        assert!(line_text(&lines[2]).contains("- old"));
+        assert!(line_text(&lines[3]).contains("+ new"));
     }
 
     #[test]
@@ -3155,7 +3274,7 @@ mod tests {
             kind: ActivityKind::Edit,
             status: ActivityStatus::Completed,
             tool_name: "apply_patch".into(),
-            summary: "edited 2 files (+4 -1)".into(),
+            summary: "Edited 2 files (+4 -1)".into(),
             detail_lines: Vec::new(),
             duration_ms: 15,
             args: serde_json::Value::Null,
@@ -3189,18 +3308,18 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 80, false);
 
-        assert_eq!(line_text(&lines[0]), "╭─ edited 2 files (+4 -1) · 15ms");
-        assert_eq!(line_text(&lines[1]), "  ├ edited a.rs (+3 -1)");
+        assert_eq!(line_text(&lines[0]), "╭─ Edited 2 files (+4 -1)");
+        assert_eq!(line_text(&lines[1]), "  ├ a.rs (+3 -1)");
         assert_eq!(line_text(&lines[2]), "  ╰ added b.rs (+1 -0)");
     }
 
     #[test]
-    fn patch_activity_full_view_renders_colored_diff_lines() {
+    fn patch_activity_full_view_renders_numbered_inline_diff_lines() {
         let activity = ActivityBlock {
             kind: ActivityKind::Edit,
             status: ActivityStatus::Completed,
             tool_name: "apply_patch".into(),
-            summary: "edited lash-cli/src/ui.rs (+1 -1)".into(),
+            summary: "Edited lash-cli/src/ui.rs (+1 -1)".into(),
             detail_lines: Vec::new(),
             duration_ms: 8,
             args: serde_json::Value::Null,
@@ -3212,7 +3331,7 @@ mod tests {
                     status: "moved".into(),
                     added: 1,
                     removed: 1,
-                    diff: "--- a/lash-cli/src/app.rs\n+++ b/lash-cli/src/ui.rs\n@@\n-old\n+new"
+                    diff: "--- a/lash-cli/src/app.rs\n+++ b/lash-cli/src/ui.rs\n@@ -1,1 +1,1 @@\n-old\n+new"
                         .into(),
                 }],
                 total_added: 1,
@@ -3225,8 +3344,13 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 2, &mut lines, 80, false);
 
-        assert_eq!(line_text(&lines[1]), "  │ ╎ --- a/lash-cli/src/app.rs");
-        assert_eq!(line_text(&lines[5]), "  │ ╎ +new");
+        assert!(line_text(&lines[1]).contains("@@"));
+        assert!(line_text(&lines[2]).contains("1 - old"));
+        assert!(line_text(&lines[3]).contains("1 + new"));
+        assert_eq!(
+            lines[2].spans.last().expect("diff body").style,
+            theme::patch_diff_remove_line()
+        );
     }
 
     #[test]
@@ -3337,7 +3461,7 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 80, false);
 
-        assert_eq!(line_text(&lines[0]), "╭─ EXPLORE · 3ms");
+        assert_eq!(line_text(&lines[0]), "╭─ EXPLORE");
         assert_eq!(line_text(&lines[1]), "│   list .");
         assert_eq!(line_text(&lines[2]), "│   read src/main.rs");
     }
@@ -3361,7 +3485,7 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 20, false);
 
-        assert_eq!(line_text(&lines[0]), "╭─ EXPLORE · 3ms");
+        assert_eq!(line_text(&lines[0]), "╭─ EXPLORE");
         assert_eq!(line_text(&lines[1]), "│   read src/compon…");
     }
 
@@ -3384,7 +3508,7 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 80, false);
 
-        assert_eq!(line_text(&lines[0]), "─ EXPLORE · 3ms");
+        assert_eq!(line_text(&lines[0]), "─ EXPLORE");
         assert_eq!(lines.len(), 1);
     }
 

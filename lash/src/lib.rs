@@ -82,13 +82,13 @@ pub use dynamic::{
 pub use instructions::InstructionLoaderConfig;
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
 pub use lash_sansio::{
-    AgentEvent, CheckpointKind, ContextStrategy, DefaultPromptRenderer, Effect, EffectId,
-    ErrorEnvelope, ExecResponse, ExecutionMode, LlmCallError, Message, MessageOrigin, MessageRole,
-    Part, PartKind, PluginMessage, PluginSurfaceEvent, PromptContext, PromptContribution,
-    PromptOverrideMode, PromptRenderer, PromptSectionName, PromptSectionOverride, PruneState,
-    Response, TokenUsage, ToolCallRecord, ToolDefinition, ToolImage, ToolParam, ToolResult,
-    TurnMachine, TurnMachineConfig, default_context_strategy, default_execution_mode,
-    default_prompt_renderer, execution_mode_supported,
+    AgentEvent, CheckpointKind, ContextStrategy, DefaultPromptRenderer, DurableTurnSnapshot,
+    Effect, EffectId, ErrorEnvelope, ExecResponse, ExecutionMode, LlmCallError, Message,
+    MessageOrigin, MessageRole, Part, PartKind, PluginMessage, PluginSurfaceEvent, PromptContext,
+    PromptContribution, PromptOverrideMode, PromptRenderer, PromptSectionName,
+    PromptSectionOverride, PruneState, Response, TokenUsage, ToolCallRecord, ToolDefinition,
+    ToolImage, ToolParam, ToolResult, TurnMachine, TurnMachineConfig, default_context_strategy,
+    default_execution_mode, default_prompt_renderer, execution_mode_supported,
 };
 pub use mcp::{McpError, McpServerConfig, McpToolExecutionAdapter, attach_mcp_servers};
 pub use model_info::{
@@ -124,7 +124,9 @@ pub use runtime::{
 };
 pub use session::{PromptBridge, Session, SessionError, TurnInjectionBridge, UserPrompt};
 pub use skill_catalog::{LoadedSkill, SkillCatalog};
-pub use skill_prompt::{append_skill_blocks, collect_skill_mentions};
+pub use skill_prompt::{
+    append_skill_blocks, collect_skill_mentions, collect_skill_mentions_with_ranges,
+};
 #[cfg(feature = "sqlite-store")]
 pub use store::{AgentState, Store};
 pub use text::strip_repl_fragments;

@@ -24,6 +24,14 @@ pub const ERROR: Color = Color::Rgb(204, 68, 68);
 pub const PATCH_FRAME: Color = Color::Rgb(128, 94, 38);
 pub const PATCH_ADD: Color = Color::Rgb(126, 164, 92);
 pub const PATCH_HUNK: Color = Color::Rgb(154, 142, 106);
+pub const PATCH_ADD_GUTTER_BG: Color = Color::Rgb(39, 55, 31);
+pub const PATCH_ADD_LINE_BG: Color = Color::Rgb(25, 37, 23);
+pub const PATCH_REMOVE_GUTTER_BG: Color = Color::Rgb(78, 36, 32);
+pub const PATCH_REMOVE_LINE_BG: Color = Color::Rgb(46, 24, 21);
+pub const PATCH_CONTEXT_GUTTER_BG: Color = Color::Rgb(26, 25, 22);
+pub const PATCH_CONTEXT_LINE_BG: Color = Color::Rgb(19, 18, 16);
+pub const PATCH_HUNK_GUTTER_BG: Color = Color::Rgb(41, 34, 22);
+pub const PATCH_HUNK_LINE_BG: Color = Color::Rgb(28, 24, 18);
 
 // ── Character constants ────────────────────────────────────────────
 pub const PROMPT_CHAR: &str = "❯";
@@ -39,6 +47,24 @@ pub fn prompt() -> Style {
 /// User-typed text after the prompt
 pub fn user_input() -> Style {
     Style::default().fg(CHALK_MID)
+}
+
+/// Sigil for an inline resolved skill/command token inside user text.
+pub fn resolved_token_sigil() -> Style {
+    Style::default()
+        .fg(SODIUM)
+        .bg(FORM_RAISED)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Body for an inline resolved skill/command token inside user text.
+pub fn resolved_token() -> Style {
+    Style::default().fg(CHALK).bg(FORM_RAISED)
+}
+
+/// Inline image markers inside the draft editor.
+pub fn image_marker() -> Style {
+    Style::default().fg(SODIUM).add_modifier(Modifier::BOLD)
 }
 
 /// Label for compact pasted-content summaries in user history.
@@ -183,16 +209,6 @@ pub fn system_message() -> Style {
     Style::default().fg(ASH_TEXT)
 }
 
-/// Skill-loaded marker (◆) — sodium, dimmed.
-pub fn skill_marker() -> Style {
-    Style::default().fg(SODIUM).add_modifier(Modifier::DIM)
-}
-
-/// Skill name text — chalk dim.
-pub fn skill_name() -> Style {
-    Style::default().fg(CHALK_DIM)
-}
-
 /// Markdown heading (bold + sodium)
 pub fn heading() -> Style {
     Style::default().fg(SODIUM).add_modifier(Modifier::BOLD)
@@ -223,9 +239,58 @@ pub fn patch_remove() -> Style {
     Style::default().fg(ERROR)
 }
 
-/// Patch hunk header styling
-pub fn patch_hunk() -> Style {
-    Style::default().fg(PATCH_HUNK)
+/// Diff gutter for inserted lines.
+pub fn patch_diff_add_gutter() -> Style {
+    Style::default()
+        .fg(LICHEN)
+        .bg(PATCH_ADD_GUTTER_BG)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Diff body for inserted lines.
+pub fn patch_diff_add_line() -> Style {
+    Style::default().fg(CHALK).bg(PATCH_ADD_LINE_BG)
+}
+
+/// Diff gutter for removed lines.
+pub fn patch_diff_remove_gutter() -> Style {
+    Style::default()
+        .fg(ERROR)
+        .bg(PATCH_REMOVE_GUTTER_BG)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Diff body for removed lines.
+pub fn patch_diff_remove_line() -> Style {
+    Style::default().fg(CHALK).bg(PATCH_REMOVE_LINE_BG)
+}
+
+/// Diff gutter for context rows.
+pub fn patch_diff_context_gutter() -> Style {
+    Style::default().fg(ASH_TEXT).bg(PATCH_CONTEXT_GUTTER_BG)
+}
+
+/// Diff body for context rows.
+pub fn patch_diff_context_line() -> Style {
+    Style::default().fg(CHALK_DIM).bg(PATCH_CONTEXT_LINE_BG)
+}
+
+/// Diff gutter for hunk headers.
+pub fn patch_diff_hunk_gutter() -> Style {
+    Style::default().fg(PATCH_HUNK).bg(PATCH_HUNK_GUTTER_BG)
+}
+
+/// Diff body for hunk headers.
+pub fn patch_diff_hunk_line() -> Style {
+    Style::default()
+        .fg(PATCH_HUNK)
+        .bg(PATCH_HUNK_LINE_BG)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Diff body for non-standard meta lines such as truncation notices.
+pub fn patch_diff_meta_line() -> Style {
+    Style::default().fg(ASH_TEXT).add_modifier(Modifier::DIM)
 }
 
 /// Delegate rail chrome — muted lichen for tree connectors.

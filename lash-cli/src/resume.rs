@@ -65,9 +65,8 @@ pub async fn load_resumed_session(
     desired_dynamic: &mut DynamicStateSnapshot,
     model_catalog: &CachedModelCatalog,
 ) -> Result<(), String> {
-    let Some(loaded) = session_log::load_session(filename) else {
-        return Err(format!("Could not load: {}", filename));
-    };
+    let loaded =
+        session_log::load_session(filename).map_err(|err| format!("Could not load: {err}"))?;
     *history = loaded.messages;
     app.blocks = loaded.blocks;
     app.last_response_usage = loaded.last_token_usage;
@@ -99,7 +98,7 @@ pub async fn load_resumed_session(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn restore_agent_state(
-    jsonl_filename: &str,
+    session_filename: &str,
     history: &mut Vec<Message>,
     runtime: &mut Option<LashRuntime>,
     app: &mut App,
@@ -112,9 +111,7 @@ pub async fn restore_agent_state(
     desired_dynamic: &mut DynamicStateSnapshot,
     model_catalog: &CachedModelCatalog,
 ) -> Result<(), String> {
-    let stem = jsonl_filename.trim_end_matches(".jsonl");
-    let db_filename = format!("{}.db", stem);
-    let db_path = session_log::sessions_dir().join(&db_filename);
+    let db_path = session_log::sessions_dir().join(session_filename);
 
     if !db_path.exists() {
         push_history_system_message(history, repl_reset_message());
@@ -123,16 +120,27 @@ pub async fn restore_agent_state(
 
     let resume_store = match Store::open(&db_path) {
         Ok(s) => s,
-        Err(_) => {
-            app.blocks.push(DisplayBlock::SystemMessage(
-                "Could not open session database.".to_string(),
-            ));
+        Err(err) => {
+            app.blocks.push(DisplayBlock::SystemMessage(format!(
+                "Could not open session database: {err}"
+            )));
             return Ok(());
         }
     };
 
     if let Some(state) = resume_store.load_agent_state("root") {
         let config_value = serde_json::from_str::<serde_json::Value>(&state.config_json).ok();
+        let resumed_live_snapshot = config_value
+            .as_ref()
+            .and_then(|value| value.get("task_state"))
+            .and_then(|value| value.get("kind"))
+            .and_then(|value| value.as_str())
+            == Some("live_resume");
+        if resumed_live_snapshot {
+            app.blocks.push(DisplayBlock::SystemMessage(
+                "Interrupted runtime state restored from a live snapshot.".to_string(),
+            ));
+        }
         if let Some(dynamic_state) = config_value
             .as_ref()
             .and_then(|v| v.get("dynamic_state").cloned())
@@ -332,6 +340,7 @@ mod tests {
             agent_id: "root".into(),
             messages_json: "[]".into(),
             tool_calls_json: "[]".into(),
+            ui_json: "{}".into(),
             iteration: 3,
             config_json: "{}".into(),
             repl_snapshot: None,
@@ -393,6 +402,7 @@ mod tests {
             agent_id: "root",
             messages_json: "[]",
             tool_calls_json: "[]",
+            ui_json: "{}",
             iteration: 7,
             config_json: &config_json,
             repl_snapshot: None,
@@ -460,7 +470,7 @@ mod tests {
         let mut current_model_variant = None;
 
         restore_agent_state(
-            "resume-usage.jsonl",
+            "resume-usage.db",
             &mut history,
             &mut runtime,
             &mut app,
@@ -506,5 +516,148 @@ mod tests {
         assert_eq!(prompt_usage.input_tokens, 3900);
         assert_eq!(prompt_usage.cached_input_tokens, 196);
         assert_eq!(prompt_usage.context_budget_tokens, 4096);
+    }
+
+    #[tokio::test]
+    async fn restore_agent_state_keeps_loaded_history_for_interrupted_turns() {
+        let _env_guard = env_lock().lock().await;
+        let temp = TempDirGuard::new("lash-resume-live-snapshot");
+        let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
+        let sessions_dir = lash::lash_home().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+
+        let db_path = sessions_dir.join("resume-live.db");
+        let store = Store::open(&db_path).expect("store");
+        let config_json = serde_json::json!({
+            "manifest": {
+                "execution_mode": "standard"
+            },
+            "context_strategy": {
+                "type": "rolling_context"
+            },
+            "task_state": {
+                "kind": "live_resume",
+                "status": "running"
+            }
+        })
+        .to_string();
+        store.save_agent_state(lash::store::AgentStateSave {
+            agent_id: "root",
+            messages_json: "[]",
+            tool_calls_json: "[]",
+            ui_json: "{}",
+            iteration: 2,
+            config_json: &config_json,
+            repl_snapshot: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+            reasoning_tokens: 0,
+        });
+
+        let provider = Provider::OpenAiGeneric {
+            api_key: "test-key".into(),
+            base_url: "https://example.invalid/v1".into(),
+            options: lash::ProviderOptions::default(),
+        };
+        struct EmptyTools;
+
+        #[async_trait::async_trait]
+        impl ToolProvider for EmptyTools {
+            fn definitions(&self) -> Vec<lash::ToolDefinition> {
+                Vec::new()
+            }
+
+            async fn execute(&self, _name: &str, _args: &serde_json::Value) -> lash::ToolResult {
+                lash::ToolResult::err(serde_json::json!("Unknown tool"))
+            }
+        }
+
+        let tools: Arc<dyn ToolProvider> = Arc::new(EmptyTools);
+        let model_catalog =
+            CachedModelCatalog::models_dev(Arc::new(MemoryModelCatalogStore::new(None)), None)
+                .expect("catalog");
+        let plugins = PluginHost::new(vec![Arc::new(PluginSpecFactory::new(
+            "resume_live_tools",
+            Arc::new(
+                move |_ctx| Ok(lash::PluginSpec::new().with_tool_provider(Arc::clone(&tools))),
+            ),
+        ))])
+        .with_dynamic_tools()
+        .build_standard_session("root", None)
+        .expect("plugins");
+        let dynamic_tools = plugins.dynamic_tools().expect("dynamic tools");
+        let mut desired_dynamic = dynamic_tools.export_state();
+        let runtime_services = RuntimeServices::new(plugins);
+        let runtime = LashRuntime::from_state(
+            lash::SessionPolicy {
+                execution_mode: ExecutionMode::Standard,
+                provider: provider.clone(),
+                model: "gpt-5".into(),
+                max_context_tokens: Some(200_000),
+                ..lash::SessionPolicy::default()
+            },
+            RuntimeHostConfig::default(),
+            runtime_services,
+            AgentStateEnvelope::default(),
+        )
+        .await
+        .expect("runtime");
+
+        let mut app = App::new("gpt-5".into(), "resume-live".into());
+        let mut history = vec![Message {
+            id: "m0".into(),
+            role: MessageRole::User,
+            parts: vec![Part {
+                id: "m0.p0".into(),
+                kind: PartKind::Text,
+                content: "jsonl replay message".into(),
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: PruneState::Intact,
+            }],
+            origin: None,
+        }];
+        let mut runtime = Some(runtime);
+        let mut turn_counter = 0;
+        let mut execution_mode = ExecutionMode::Standard;
+        let mut context_strategy = lash::default_context_strategy();
+        let mut current_model_variant = None;
+
+        restore_agent_state(
+            "resume-live.db",
+            &mut history,
+            &mut runtime,
+            &mut app,
+            &mut turn_counter,
+            &mut execution_mode,
+            &mut context_strategy,
+            &provider,
+            &mut current_model_variant,
+            &dynamic_tools,
+            &mut desired_dynamic,
+            &model_catalog,
+        )
+        .await
+        .expect("restore");
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].role, MessageRole::User);
+        assert_eq!(history[0].parts.len(), 1);
+        assert_eq!(history[0].parts[0].content, "jsonl replay message");
+        let restored_runtime = runtime.expect("runtime");
+        let restored_messages = restored_runtime.export_state().messages;
+        assert_eq!(restored_messages.len(), 1);
+        assert_eq!(restored_messages[0].role, MessageRole::User);
+        assert_eq!(restored_messages[0].parts.len(), 1);
+        assert_eq!(
+            restored_messages[0].parts[0].content,
+            "jsonl replay message"
+        );
+        assert!(app.blocks.iter().any(|block| matches!(
+            block,
+            DisplayBlock::SystemMessage(msg)
+                if msg == "Interrupted runtime state restored from a live snapshot."
+        )));
     }
 }

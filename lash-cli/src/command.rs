@@ -103,7 +103,6 @@ pub enum Command {
     Reconfigure(Option<String>),
 }
 
-/// Convert `/skill ...` into the ordinary `$skill ...` prompt form.
 pub fn slash_skill_prompt(input: &str, skills: &SkillCatalog) -> Option<String> {
     let trimmed = input.trim();
     if !trimmed.starts_with('/') {
@@ -116,8 +115,8 @@ pub fn slash_skill_prompt(input: &str, skills: &SkillCatalog) -> Option<String> 
     };
     skills.get(cmd)?;
     Some(match arg.filter(|a| !a.is_empty()) {
-        Some(arg) => format!("${cmd} {arg}"),
-        None => format!("${cmd}"),
+        Some(arg) => format!("/{cmd} {arg}"),
+        None => format!("/{cmd}"),
     })
 }
 
@@ -274,15 +273,15 @@ mod tests {
     }
 
     #[test]
-    fn slash_skill_prompts_convert_to_dollar_mentions() {
+    fn slash_skill_prompts_preserve_slash_mentions() {
         let skills = skill_catalog_with(&[("yolopush", "ship changes")]);
         assert_eq!(
             slash_skill_prompt("/yolopush", &skills).as_deref(),
-            Some("$yolopush")
+            Some("/yolopush")
         );
         assert_eq!(
             slash_skill_prompt("/yolopush merge staging", &skills).as_deref(),
-            Some("$yolopush merge staging")
+            Some("/yolopush merge staging")
         );
         assert!(slash_skill_prompt("/skills", &skills).is_none());
     }

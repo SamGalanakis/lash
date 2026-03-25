@@ -1,3 +1,5 @@
+pub const MIN_VISIBLE_DURATION_MS: u64 = 1_000;
+
 /// Format a duration in milliseconds as a human-readable string.
 ///
 /// - `< 1s` → "42ms"
@@ -20,6 +22,10 @@ pub fn format_duration_ms(ms: u64) -> String {
     }
 }
 
+pub fn format_duration_ms_if_visible(ms: u64) -> Option<String> {
+    (ms >= MIN_VISIBLE_DURATION_MS).then(|| format_duration_ms(ms))
+}
+
 pub fn manual_interrupt_message() -> &'static str {
     "Manually interrupted."
 }
@@ -38,4 +44,27 @@ pub fn is_manual_interrupt_error(message: &str, code: Option<&str>) -> bool {
         normalized.as_str(),
         "cancelled" | "canceled" | "llm error: cancelled" | "llm error: canceled"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_duration_ms, format_duration_ms_if_visible};
+
+    #[test]
+    fn duration_under_visibility_threshold_is_hidden() {
+        assert_eq!(format_duration_ms_if_visible(999), None);
+    }
+
+    #[test]
+    fn duration_at_visibility_threshold_is_shown() {
+        assert_eq!(
+            format_duration_ms_if_visible(1_000),
+            Some("1.0s".to_string())
+        );
+    }
+
+    #[test]
+    fn duration_formatter_still_formats_subsecond_values() {
+        assert_eq!(format_duration_ms(42), "42ms");
+    }
 }

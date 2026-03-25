@@ -51,6 +51,13 @@ pub struct ErrorEnvelope {
     pub raw: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DurableTurnSnapshot {
+    pub messages: Vec<Message>,
+    pub tool_calls: Vec<crate::ToolCallRecord>,
+    pub iteration: usize,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type")]
 pub enum AgentEvent {
@@ -111,6 +118,11 @@ pub enum AgentEvent {
     PluginEvent {
         plugin_id: String,
         event: PluginSurfaceEvent,
+    },
+    #[serde(rename = "durable_snapshot")]
+    DurableSnapshot {
+        #[serde(skip)]
+        snapshot: DurableTurnSnapshot,
     },
     #[serde(rename = "done")]
     Done,

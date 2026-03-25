@@ -9,9 +9,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::message::IMAGE_REF_PREFIX;
 use crate::agent::{
-    AgentEvent, Message, MessageRole, Part, PartKind, PruneState, SessionPolicy, TokenUsage,
-    build_execution_preamble, context::build_context, finalize_prompt_context, make_error_event,
-    transport_stream_events,
+    AgentEvent, DurableTurnSnapshot, Message, MessageRole, Part, PartKind, PruneState,
+    SessionPolicy, TokenUsage, build_execution_preamble, context::build_context,
+    finalize_prompt_context, make_error_event, transport_stream_events,
 };
 use crate::llm::factory::adapter_for;
 use crate::llm::transport::LlmTransport;
@@ -836,17 +836,25 @@ fn plugin_message_to_message(
     plugin_message: &PluginMessage,
 ) -> Message {
     let msg_idx = existing.len() + idx;
-    Message {
-        id: format!("m{msg_idx}"),
-        role: plugin_message.role,
-        parts: vec![Part {
+    let mut parts = if plugin_message.parts.is_empty() {
+        vec![Part {
             id: format!("m{msg_idx}.p0"),
             kind: PartKind::Text,
             content: plugin_message.content.clone(),
             tool_call_id: None,
             tool_name: None,
             prune_state: PruneState::Intact,
-        }],
+        }]
+    } else {
+        plugin_message.parts.clone()
+    };
+    for (part_idx, part) in parts.iter_mut().enumerate() {
+        part.id = format!("m{msg_idx}.p{part_idx}");
+    }
+    Message {
+        id: format!("m{msg_idx}"),
+        role: plugin_message.role,
+        parts,
         origin: Some(crate::MessageOrigin::Plugin {
             plugin_id: "plugin".to_string(),
         }),
@@ -1515,6 +1523,14 @@ struct RuntimeTurnDriver {
 }
 
 impl RuntimeTurnDriver {
+    fn durable_snapshot(&self, messages: &[Message], iteration: usize) -> DurableTurnSnapshot {
+        DurableTurnSnapshot {
+            messages: messages.to_vec(),
+            tool_calls: self.tool_calls.clone(),
+            iteration,
+        }
+    }
+
     fn llm(&self, provider: &Provider) -> Box<dyn LlmTransport> {
         (self.llm_factory)(provider)
     }
@@ -1575,6 +1591,8 @@ impl RuntimeTurnDriver {
             Ok(machine) => machine,
             Err(result) => return result,
         };
+        let snapshot = self.durable_snapshot(machine.messages(), machine.iteration());
+        crate::agent::send_event(&event_tx, AgentEvent::DurableSnapshot { snapshot }).await;
 
         loop {
             let Some(effect) = machine.poll_effect() else {
@@ -1599,6 +1617,9 @@ impl RuntimeTurnDriver {
                         result,
                         text_streamed,
                     });
+                    let snapshot = self.durable_snapshot(machine.messages(), machine.iteration());
+                    crate::agent::send_event(&event_tx, AgentEvent::DurableSnapshot { snapshot })
+                        .await;
                 }
                 Effect::Checkpoint { id, checkpoint } => {
                     match self
@@ -1606,7 +1627,14 @@ impl RuntimeTurnDriver {
                         .await
                     {
                         Ok(messages) => {
-                            machine.handle_response(Response::Checkpoint { id, messages })
+                            machine.handle_response(Response::Checkpoint { id, messages });
+                            let snapshot =
+                                self.durable_snapshot(machine.messages(), machine.iteration());
+                            crate::agent::send_event(
+                                &event_tx,
+                                AgentEvent::DurableSnapshot { snapshot },
+                            )
+                            .await;
                         }
                         Err(err) => {
                             machine.fail_turn(make_error_event(
@@ -1628,7 +1656,19 @@ impl RuntimeTurnDriver {
                 }
                 Effect::ToolCalls { id, calls } => {
                     let results = self.run_tool_calls(calls, &event_tx).await;
+                    self.tool_calls
+                        .extend(results.iter().map(|outcome| ToolCallRecord {
+                            call_id: Some(outcome.call_id.clone()),
+                            tool: outcome.tool_name.clone(),
+                            args: outcome.args.clone(),
+                            result: outcome.raw_result.result.clone(),
+                            success: outcome.raw_result.success,
+                            duration_ms: outcome.duration_ms,
+                        }));
                     machine.handle_response(Response::ToolResults { id, results });
+                    let snapshot = self.durable_snapshot(machine.messages(), machine.iteration());
+                    crate::agent::send_event(&event_tx, AgentEvent::DurableSnapshot { snapshot })
+                        .await;
                 }
                 Effect::Sleep { id, duration } => {
                     tokio::time::sleep(duration).await;
@@ -1649,6 +1689,9 @@ impl RuntimeTurnDriver {
                         },
                     };
                     machine.handle_response(response);
+                    let snapshot = self.durable_snapshot(machine.messages(), machine.iteration());
+                    crate::agent::send_event(&event_tx, AgentEvent::DurableSnapshot { snapshot })
+                        .await;
                 }
             }
         }
@@ -3463,10 +3506,10 @@ mod tests {
                         Box::pin(async {
                             Ok(vec![
                                 crate::PluginDirective::EnqueueMessages {
-                                    messages: vec![crate::PluginMessage {
-                                        role: crate::MessageRole::System,
-                                        content: "plugin preface".to_string(),
-                                    }],
+                                    messages: vec![crate::PluginMessage::text(
+                                        crate::MessageRole::System,
+                                        "plugin preface",
+                                    )],
                                 },
                                 crate::PluginDirective::AbortTurn {
                                     code: "blocked".to_string(),
@@ -3577,10 +3620,10 @@ mod tests {
     async fn bridge_checkpoint_injection_continues_standard_turn() {
         let bridge = crate::TurnInjectionBridge::new();
         bridge
-            .enqueue(vec![crate::PluginMessage {
-                role: crate::MessageRole::User,
-                content: "one more thing".to_string(),
-            }])
+            .enqueue(vec![crate::PluginMessage::text(
+                crate::MessageRole::User,
+                "one more thing",
+            )])
             .expect("enqueue");
         let transport = MockTransport::new(vec![
             MockCall {
@@ -3637,6 +3680,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bridge_checkpoint_injection_preserves_images() {
+        let bridge = crate::TurnInjectionBridge::new();
+        bridge
+            .enqueue(vec![crate::PluginMessage {
+                role: crate::MessageRole::User,
+                content: "see image".to_string(),
+                parts: vec![
+                    crate::Part {
+                        id: String::new(),
+                        kind: crate::PartKind::Text,
+                        content: format!("{}0", crate::agent::message::IMAGE_REF_PREFIX),
+                        tool_call_id: None,
+                        tool_name: None,
+                        prune_state: crate::PruneState::Intact,
+                    },
+                    crate::Part {
+                        id: String::new(),
+                        kind: crate::PartKind::Text,
+                        content: "see image".to_string(),
+                        tool_call_id: None,
+                        tool_name: None,
+                        prune_state: crate::PruneState::Intact,
+                    },
+                ],
+                images: vec![vec![9, 8, 7]],
+            }])
+            .expect("enqueue");
+        let transport = MockTransport::new(vec![
+            MockCall {
+                stream_events: Vec::new(),
+                response: Ok(LlmResponse {
+                    full_text: "First answer.".to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: "First answer.".to_string(),
+                    }],
+                    ..LlmResponse::default()
+                }),
+            },
+            MockCall {
+                stream_events: Vec::new(),
+                response: Ok(LlmResponse {
+                    full_text: "Second answer.".to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: "Second answer.".to_string(),
+                    }],
+                    ..LlmResponse::default()
+                }),
+            },
+        ]);
+        let mut runtime = standard_runtime_with_bridge(transport, bridge).await;
+
+        let turn = runtime
+            .run_turn_assembled(
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "hello".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    mode: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("turn");
+
+        assert!(turn.state.messages.iter().any(|message| {
+            message.role == MessageRole::User
+                && message.parts.iter().any(|part| {
+                    part.content == format!("{}0", crate::agent::message::IMAGE_REF_PREFIX)
+                })
+        }));
+    }
+
+    #[tokio::test]
     async fn checkpoint_hook_can_inject_messages() {
         let plugin = Arc::new(RuntimeTestPluginFactory {
             build: Arc::new(|_| {
@@ -3646,10 +3763,10 @@ mod tests {
                         Box::pin(async move {
                             if ctx.checkpoint == crate::CheckpointKind::BeforeCompletion {
                                 Ok(vec![crate::PluginDirective::EnqueueMessages {
-                                    messages: vec![crate::PluginMessage {
-                                        role: crate::MessageRole::System,
-                                        content: "checkpoint injected".to_string(),
-                                    }],
+                                    messages: vec![crate::PluginMessage::text(
+                                        crate::MessageRole::System,
+                                        "checkpoint injected",
+                                    )],
                                 }])
                             } else {
                                 Ok(Vec::new())
@@ -3739,10 +3856,10 @@ mod tests {
                                             start: crate::SessionStartPoint::CurrentSession,
                                             policy: None,
                                             plugin_mode: crate::SessionPluginMode::InheritCurrent,
-                                            initial_messages: vec![crate::PluginMessage {
-                                                role: crate::MessageRole::User,
-                                                content: "branch seed".to_string(),
-                                            }],
+                                            initial_messages: vec![crate::PluginMessage::text(
+                                                crate::MessageRole::User,
+                                                "branch seed",
+                                            )],
                                             context_surface: crate::SessionContextSurface::default(
                                             ),
                                         })
@@ -4704,6 +4821,89 @@ mod tests {
                 "payload": "raw:sample"
             })
         );
+    }
+
+    #[tokio::test]
+    async fn stream_turn_emits_durable_snapshots_at_turn_boundaries() {
+        let transport = MockTransport::new(vec![
+            MockCall {
+                stream_events: Vec::new(),
+                response: Ok(LlmResponse {
+                    parts: vec![
+                        LlmOutputPart::Text {
+                            text: "checking tool".to_string(),
+                        },
+                        LlmOutputPart::ToolCall {
+                            call_id: "tool-1".to_string(),
+                            tool_name: "echo_tool".to_string(),
+                            input_json: r#"{"value":"sample"}"#.to_string(),
+                        },
+                    ],
+                    ..LlmResponse::default()
+                }),
+            },
+            MockCall {
+                stream_events: Vec::new(),
+                response: Ok(LlmResponse {
+                    full_text: "done".to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: "done".to_string(),
+                    }],
+                    ..LlmResponse::default()
+                }),
+            },
+        ]);
+        let tools: Arc<dyn crate::ToolProvider> = Arc::new(EchoTool);
+        let mut runtime = runtime_with_plugins_and_tools(Vec::new(), tools, transport).await;
+        let sink = RecordingSink::default();
+
+        let _ = runtime
+            .stream_turn(
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "run the tool".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    mode: None,
+                },
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("turn");
+
+        let snapshots: Vec<DurableTurnSnapshot> = sink
+            .snapshot()
+            .into_iter()
+            .filter_map(|event| match event {
+                AgentEvent::DurableSnapshot { snapshot } => Some(snapshot),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            snapshots.len() >= 3,
+            "expected live snapshots across the turn lifecycle"
+        );
+        assert!(snapshots.iter().any(|snapshot| {
+            snapshot.messages.iter().any(|message| {
+                message.role == MessageRole::User
+                    && message
+                        .parts
+                        .iter()
+                        .any(|part| part.content == "run the tool")
+            })
+        }));
+        assert!(snapshots.iter().any(|snapshot| {
+            snapshot.tool_calls.iter().any(|call| {
+                call.call_id.as_deref() == Some("tool-1")
+                    && call.tool == "echo_tool"
+                    && call.result
+                        == serde_json::json!({
+                            "payload": "raw:sample"
+                        })
+            })
+        }));
     }
 
     #[cfg(feature = "sqlite-store")]

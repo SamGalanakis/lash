@@ -1478,6 +1478,7 @@ dependencies = [
  "pulldown-cmark",
  "rand",
  "ratatui",
+ "serde",
  "serde_json",
  "sha2",
  "tokio",

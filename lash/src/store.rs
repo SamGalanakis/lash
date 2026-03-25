@@ -20,18 +20,17 @@ CREATE TABLE IF NOT EXISTS archive (
 );
 
 CREATE TABLE IF NOT EXISTS agents (
-    agent_id            TEXT PRIMARY KEY,
-    parent_id           TEXT,
-    status              TEXT NOT NULL DEFAULT 'active',
-    messages            TEXT NOT NULL DEFAULT '[]',
-    tool_calls_json     TEXT NOT NULL DEFAULT '[]',
-    iteration           INTEGER NOT NULL DEFAULT 0,
-    config_json         TEXT NOT NULL DEFAULT '{}',
-    repl_snapshot       BLOB,
-    input_tokens        INTEGER NOT NULL DEFAULT 0,
-    output_tokens       INTEGER NOT NULL DEFAULT 0,
-    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
-    reasoning_tokens    INTEGER NOT NULL DEFAULT 0
+    agent_id              TEXT PRIMARY KEY,
+    messages              TEXT NOT NULL DEFAULT '[]',
+    tool_calls_json       TEXT NOT NULL DEFAULT '[]',
+    ui_json               TEXT NOT NULL DEFAULT '{}',
+    iteration             INTEGER NOT NULL DEFAULT 0,
+    config_json           TEXT NOT NULL DEFAULT '{}',
+    repl_snapshot         BLOB,
+    input_tokens          INTEGER NOT NULL DEFAULT 0,
+    output_tokens         INTEGER NOT NULL DEFAULT 0,
+    cached_input_tokens   INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS history_turns (
@@ -50,7 +49,18 @@ CREATE TABLE IF NOT EXISTS history_turns (
 CREATE INDEX IF NOT EXISTS idx_history_turns_agent_turn
 ON history_turns(agent_id, turn_index);
 
+CREATE TABLE IF NOT EXISTS session_meta (
+    singleton        INTEGER PRIMARY KEY CHECK (singleton = 1),
+    session_id       TEXT NOT NULL,
+    session_name     TEXT NOT NULL,
+    created_at       TEXT NOT NULL,
+    model            TEXT NOT NULL,
+    cwd              TEXT,
+    parent_session_id TEXT
+);
 ";
+
+const SCHEMA_VERSION: i32 = 1;
 
 fn apply_pragmas(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
@@ -68,6 +78,7 @@ pub struct AgentState {
     pub agent_id: String,
     pub messages_json: String,
     pub tool_calls_json: String,
+    pub ui_json: String,
     pub iteration: i64,
     pub config_json: String,
     pub repl_snapshot: Option<Vec<u8>>,
@@ -82,6 +93,7 @@ pub struct AgentStateSave<'a> {
     pub agent_id: &'a str,
     pub messages_json: &'a str,
     pub tool_calls_json: &'a str,
+    pub ui_json: &'a str,
     pub iteration: i64,
     pub config_json: &'a str,
     pub repl_snapshot: Option<&'a [u8]>,
@@ -104,13 +116,32 @@ pub struct HistoryTurnRecord {
     pub files_written: Vec<String>,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SessionMeta {
+    pub session_id: String,
+    pub session_name: String,
+    pub created_at: String,
+    pub model: String,
+    pub cwd: Option<String>,
+    pub parent_session_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SessionMetaSave<'a> {
+    pub session_id: &'a str,
+    pub session_name: &'a str,
+    pub created_at: &'a str,
+    pub model: &'a str,
+    pub cwd: Option<&'a str>,
+    pub parent_session_id: Option<&'a str>,
+}
+
 impl Store {
     /// Open (or create) a SQLite database at `path`.
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
         apply_pragmas(&conn)?;
-        conn.execute_batch(SCHEMA)?;
-        apply_migrations(&conn)?;
+        ensure_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -120,8 +151,7 @@ impl Store {
     pub fn memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
         apply_pragmas(&conn)?;
-        conn.execute_batch(SCHEMA)?;
-        apply_migrations(&conn)?;
+        ensure_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -159,13 +189,15 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO agents (
-                agent_id, messages, tool_calls_json, iteration, config_json, repl_snapshot,
-                input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                agent_id, messages, tool_calls_json, ui_json, iteration, config_json,
+                repl_snapshot, input_tokens, output_tokens, cached_input_tokens,
+                reasoning_tokens
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 state.agent_id,
                 state.messages_json,
                 state.tool_calls_json,
+                state.ui_json,
                 state.iteration,
                 state.config_json,
                 state.repl_snapshot,
@@ -182,7 +214,7 @@ impl Store {
     pub fn load_agent_state(&self, agent_id: &str) -> Option<AgentState> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT agent_id, messages, tool_calls_json, iteration, config_json, repl_snapshot, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
+            "SELECT agent_id, messages, tool_calls_json, ui_json, iteration, config_json, repl_snapshot, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
              FROM agents WHERE agent_id = ?1",
             params![agent_id],
             |row| {
@@ -190,13 +222,14 @@ impl Store {
                     agent_id: row.get(0)?,
                     messages_json: row.get(1)?,
                     tool_calls_json: row.get(2)?,
-                    iteration: row.get(3)?,
-                    config_json: row.get(4)?,
-                    repl_snapshot: row.get(5)?,
-                    input_tokens: row.get(6)?,
-                    output_tokens: row.get(7)?,
-                    cached_input_tokens: row.get(8)?,
-                    reasoning_tokens: row.get(9)?,
+                    ui_json: row.get(3)?,
+                    iteration: row.get(4)?,
+                    config_json: row.get(5)?,
+                    repl_snapshot: row.get(6)?,
+                    input_tokens: row.get(7)?,
+                    output_tokens: row.get(8)?,
+                    cached_input_tokens: row.get(9)?,
+                    reasoning_tokens: row.get(10)?,
                 })
             },
         )
@@ -294,10 +327,19 @@ impl Store {
     }
 
     pub fn history_copy(&self, source_agent_id: &str, target_agent_id: &str) {
-        if source_agent_id == target_agent_id {
+        self.history_copy_from_store(self, source_agent_id, target_agent_id);
+    }
+
+    pub fn history_copy_from_store(
+        &self,
+        source: &Store,
+        source_agent_id: &str,
+        target_agent_id: &str,
+    ) {
+        if std::ptr::eq(source, self) && source_agent_id == target_agent_id {
             return;
         }
-        let turns = self.history_export(source_agent_id);
+        let turns = source.history_export(source_agent_id);
         let values = turns
             .into_iter()
             .map(|turn| {
@@ -315,6 +357,45 @@ impl Store {
             })
             .collect::<Vec<_>>();
         self.history_load(target_agent_id, &values);
+    }
+
+    // ─── Session metadata ───
+
+    pub fn save_session_meta(&self, meta: SessionMetaSave<'_>) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO session_meta
+             (singleton, session_id, session_name, created_at, model, cwd, parent_session_id)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                meta.session_id,
+                meta.session_name,
+                meta.created_at,
+                meta.model,
+                meta.cwd,
+                meta.parent_session_id
+            ],
+        );
+    }
+
+    pub fn load_session_meta(&self) -> Option<SessionMeta> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT session_id, session_name, created_at, model, cwd, parent_session_id
+             FROM session_meta WHERE singleton = 1",
+            [],
+            |row| {
+                Ok(SessionMeta {
+                    session_id: row.get(0)?,
+                    session_name: row.get(1)?,
+                    created_at: row.get(2)?,
+                    model: row.get(3)?,
+                    cwd: row.get(4)?,
+                    parent_session_id: row.get(5)?,
+                })
+            },
+        )
+        .ok()
     }
 
     // ─── Internal helpers (require caller to already hold the lock) ───
@@ -419,26 +500,40 @@ fn history_record_from_value(turn: &serde_json::Value) -> HistoryTurnRecord {
     }
 }
 
-fn apply_migrations(conn: &Connection) -> rusqlite::Result<()> {
-    match conn.execute(
-        "ALTER TABLE agents ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0",
-        [],
-    ) {
-        Ok(_) => {}
-        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
-            if message.contains("duplicate column name") => {}
-        Err(err) => return Err(err),
+fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
+    let user_version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if user_version == SCHEMA_VERSION {
+        conn.execute_batch(SCHEMA)?;
+        return Ok(());
     }
-    match conn.execute(
-        "ALTER TABLE agents ADD COLUMN tool_calls_json TEXT NOT NULL DEFAULT '[]'",
-        [],
-    ) {
-        Ok(_) => {}
-        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
-            if message.contains("duplicate column name") => {}
-        Err(err) => return Err(err),
+
+    if user_version == 0 && !has_user_schema_objects(conn)? {
+        conn.execute_batch(SCHEMA)?;
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        return Ok(());
     }
-    Ok(())
+
+    Err(rusqlite::Error::InvalidParameterName(
+        unsupported_schema_message(),
+    ))
+}
+
+fn has_user_schema_objects(conn: &Connection) -> rusqlite::Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE name NOT LIKE 'sqlite_%'
+           AND type IN ('table', 'index', 'trigger', 'view')",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn unsupported_schema_message() -> String {
+    format!(
+        "Unsupported lash session schema. Delete {} and try again.",
+        crate::lash_home().join("sessions").display()
+    )
 }
 
 #[cfg(test)]
@@ -483,6 +578,7 @@ mod tests {
             agent_id: "ag1",
             messages_json: "[]",
             tool_calls_json: "[]",
+            ui_json: "{}",
             iteration: 5,
             config_json: "{}",
             repl_snapshot: None,
@@ -496,42 +592,31 @@ mod tests {
         assert_eq!(a.iteration, 5);
         assert_eq!(a.input_tokens, 100);
         assert_eq!(a.reasoning_tokens, 7);
+        assert_eq!(a.ui_json, "{}");
     }
 
     #[test]
-    fn open_migrates_old_agents_schema_with_missing_reasoning_tokens() {
+    fn open_rejects_legacy_session_schema() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("legacy.db");
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "
             CREATE TABLE agents (
-                agent_id            TEXT PRIMARY KEY,
-                parent_id           TEXT,
-                status              TEXT NOT NULL DEFAULT 'active',
-                messages            TEXT NOT NULL DEFAULT '[]',
-                iteration           INTEGER NOT NULL DEFAULT 0,
-                config_json         TEXT NOT NULL DEFAULT '{}',
-                repl_snapshot       BLOB,
-                input_tokens        INTEGER NOT NULL DEFAULT 0,
-                output_tokens       INTEGER NOT NULL DEFAULT 0,
-                cached_input_tokens INTEGER NOT NULL DEFAULT 0
+                agent_id TEXT PRIMARY KEY,
+                messages TEXT NOT NULL DEFAULT '[]'
             );
-            INSERT INTO agents (
-                agent_id, parent_id, status, messages, iteration, config_json, repl_snapshot,
-                input_tokens, output_tokens, cached_input_tokens
-            ) VALUES ('root', NULL, 'active', '[]', 4, '{}', NULL, 100, 25, 5);
+            INSERT INTO agents (agent_id, messages) VALUES ('root', '[]');
             ",
         )
         .unwrap();
         drop(conn);
 
-        let store = Store::open(&path).unwrap();
-        let state = store.load_agent_state("root").expect("agent");
-        assert_eq!(state.input_tokens, 100);
-        assert_eq!(state.output_tokens, 25);
-        assert_eq!(state.cached_input_tokens, 5);
-        assert_eq!(state.reasoning_tokens, 0);
+        let err = match Store::open(&path) {
+            Ok(_) => panic!("legacy schema should be rejected"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("Unsupported lash session schema"));
     }
 
     #[test]
@@ -544,5 +629,50 @@ mod tests {
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .unwrap();
         assert_eq!(journal_mode.to_ascii_lowercase(), "delete");
+    }
+
+    #[test]
+    fn session_meta_round_trip() {
+        let s = mem();
+        s.save_session_meta(SessionMetaSave {
+            session_id: "s1",
+            session_name: "demo",
+            created_at: "2026-03-25T10:00:00Z",
+            model: "gpt-5",
+            cwd: Some("/tmp/demo"),
+            parent_session_id: None,
+        });
+        let meta = s.load_session_meta().expect("meta");
+        assert_eq!(meta.session_id, "s1");
+        assert_eq!(meta.session_name, "demo");
+        assert_eq!(meta.model, "gpt-5");
+        assert_eq!(meta.cwd.as_deref(), Some("/tmp/demo"));
+    }
+
+    #[test]
+    fn history_copy_from_store_round_trip() {
+        let source = mem();
+        source.history_upsert_turn(
+            "root",
+            &HistoryTurnRecord {
+                index: 0,
+                user_message: "hello".into(),
+                prose: "world".into(),
+                code: String::new(),
+                output: String::new(),
+                error: None,
+                tool_calls: Vec::new(),
+                files_read: Vec::new(),
+                files_written: Vec::new(),
+            },
+        );
+
+        let target = mem();
+        target.history_copy_from_store(&source, "root", "root-copy");
+
+        let turns = target.history_export("root-copy");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].user_message, "hello");
+        assert_eq!(turns[0].prose, "world");
     }
 }

@@ -11,9 +11,9 @@ use crate::plugin::{
 use crate::{PluginMessage, ToolResult};
 
 fn plan_mode_guidance_message() -> PluginMessage {
-    PluginMessage {
-        role: crate::MessageRole::System,
-        content: r#"
+    PluginMessage::text(
+        crate::MessageRole::System,
+        r#"
 Plan Mode (Conversational)
 
 You work in 3 phases, and you should chat your way to a great plan before finalizing it.
@@ -113,7 +113,7 @@ Only produce at most one `<proposed_plan>` block per turn, and only when you are
 "#
         .trim()
         .to_string(),
-    }
+    )
 }
 
 #[derive(Clone, Debug)]

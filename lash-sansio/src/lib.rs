@@ -8,9 +8,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use agent::message::MessageOrigin;
 pub use agent::{
-    AgentEvent, DefaultPromptRenderer, ErrorEnvelope, Message, MessageRole, Part, PartKind,
-    PromptOverrideMode, PromptRenderer, PromptSectionName, PromptSectionOverride, PruneState,
-    TokenUsage, default_prompt_renderer,
+    AgentEvent, DefaultPromptRenderer, DurableTurnSnapshot, ErrorEnvelope, Message, MessageRole,
+    Part, PartKind, PromptOverrideMode, PromptRenderer, PromptSectionName, PromptSectionOverride,
+    PruneState, TokenUsage, default_prompt_renderer,
 };
 pub use plugin::{CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptContribution};
 pub use sansio::{Effect, EffectId, LlmCallError, Response, TurnMachine, TurnMachineConfig};

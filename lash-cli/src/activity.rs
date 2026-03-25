@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivityKind {
     Exploration,
     ShellCommand,
@@ -15,13 +15,13 @@ pub enum ActivityKind {
     GenericTool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivityStatus {
     Completed,
     Failed,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ExplorationOpKind {
     Read,
     Search,
@@ -29,18 +29,18 @@ pub enum ExplorationOpKind {
     List,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExplorationOp {
     pub kind: ExplorationOpKind,
     pub subject: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivityExtra {
     Exploration(Vec<ExplorationOp>),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivityArtifact {
     DiffPreview {
         title: String,
@@ -61,7 +61,7 @@ pub enum ActivityArtifact {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PatchFilePreview {
     pub path: String,
     pub from_path: Option<String>,
@@ -71,7 +71,7 @@ pub struct PatchFilePreview {
     pub diff: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ActivityBlock {
     pub kind: ActivityKind,
     pub status: ActivityStatus,
@@ -638,6 +638,33 @@ pub fn merge_exploration_activity(target: &mut ActivityBlock, mut incoming: Acti
     true
 }
 
+pub fn merge_edit_activity(target: &mut ActivityBlock, incoming: ActivityBlock) -> bool {
+    let Some(ActivityArtifact::PatchPreview {
+        files,
+        total_added,
+        total_removed,
+    }) = target.artifact.as_mut()
+    else {
+        return false;
+    };
+    let Some(ActivityArtifact::PatchPreview {
+        files: incoming_files,
+        total_added: incoming_added,
+        total_removed: incoming_removed,
+    }) = incoming.artifact.clone()
+    else {
+        return false;
+    };
+
+    files.extend(incoming_files);
+    *total_added += incoming_added;
+    *total_removed += incoming_removed;
+    target.duration_ms += incoming.duration_ms;
+    target.children.push(incoming);
+    target.summary = patch_summary_from_preview(files, *total_added, *total_removed);
+    true
+}
+
 fn rebuild_exploration_summary(block: &mut ActivityBlock) {
     let Some(ActivityExtra::Exploration(ops)) = block.extra.as_ref() else {
         return;
@@ -1201,45 +1228,71 @@ fn patch_summary(result: &Value) -> Option<String> {
         return None;
     };
 
-    Some(if files.len() == 1 {
-        let file = &files[0];
-        let path = match &file.from_path {
-            Some(from_path) => format!("{from_path} → {}", file.path),
-            None => file.path.clone(),
-        };
-        format!(
-            "{} {} {}",
-            patch_status_verb(&file.status),
-            path,
-            patch_count_suffix(file.added, file.removed)
-        )
-    } else {
-        format!(
-            "{} {} files {}",
-            patch_group_verb(files.as_slice()),
-            files.len(),
-            patch_count_suffix(total_added, total_removed)
-        )
-    })
+    Some(patch_summary_from_preview(
+        &files,
+        total_added,
+        total_removed,
+    ))
 }
 
-fn patch_group_verb(files: &[PatchFilePreview]) -> &'static str {
+fn patch_summary_from_preview(
+    files: &[PatchFilePreview],
+    total_added: usize,
+    total_removed: usize,
+) -> String {
+    if files.len() == 1 {
+        let file = &files[0];
+        return format!(
+            "{} {} {}",
+            patch_status_title(&file.status),
+            patch_file_subject(file),
+            patch_count_suffix(file.added, file.removed)
+        );
+    }
+
+    let file_count = patch_unique_file_count(files);
+    let noun = if file_count == 1 { "file" } else { "files" };
+    format!(
+        "{} {} {} {}",
+        patch_group_title(files),
+        file_count,
+        noun,
+        patch_count_suffix(total_added, total_removed)
+    )
+}
+
+fn patch_group_title(files: &[PatchFilePreview]) -> &'static str {
     let Some(first) = files.first() else {
-        return "edited";
+        return "Edited";
     };
     if files.iter().all(|file| file.status == first.status) {
-        patch_status_verb(&first.status)
+        patch_status_title(&first.status)
     } else {
-        "edited"
+        "Edited"
     }
 }
 
-fn patch_status_verb(status: &str) -> &'static str {
+fn patch_status_title(status: &str) -> &'static str {
     match status {
-        "added" => "added",
-        "deleted" => "deleted",
-        "moved" => "moved",
-        _ => "edited",
+        "added" => "Added",
+        "deleted" => "Deleted",
+        "moved" => "Moved",
+        _ => "Edited",
+    }
+}
+
+fn patch_unique_file_count(files: &[PatchFilePreview]) -> usize {
+    let mut unique = HashSet::new();
+    for file in files {
+        unique.insert(patch_file_subject(file));
+    }
+    unique.len()
+}
+
+fn patch_file_subject(file: &PatchFilePreview) -> String {
+    match &file.from_path {
+        Some(from_path) => format!("{from_path} → {}", file.path),
+        None => file.path.clone(),
     }
 }
 
@@ -1326,7 +1379,7 @@ mod tests {
             18,
         );
 
-        assert_eq!(blocks[0].summary, "edited lash-cli/src/ui.rs (+3 -1)");
+        assert_eq!(blocks[0].summary, "Edited lash-cli/src/ui.rs (+3 -1)");
         assert!(matches!(
             blocks[0].artifact,
             Some(ActivityArtifact::PatchPreview {
@@ -1360,7 +1413,7 @@ mod tests {
             11,
         );
 
-        assert_eq!(blocks[0].summary, "moved old.rs → new.rs (+2 -2)");
+        assert_eq!(blocks[0].summary, "Moved old.rs → new.rs (+2 -2)");
     }
 
     #[test]

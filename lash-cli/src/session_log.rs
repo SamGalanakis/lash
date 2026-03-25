@@ -1,19 +1,14 @@
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
-use anyhow::Result;
-use lash::AgentEvent;
-use lash::TokenUsage;
-use lash::agent::{Message, MessageRole, Part, PartKind, PruneState};
+use anyhow::{Context, Result};
+use lash::agent::{Message, MessageRole, PartKind};
+use lash::store::SessionMetaSave;
+use lash::{Store, TokenUsage};
 
-use crate::activity::{ActivityKind, ActivityState, ActivityStatus, merge_exploration_activity};
-use crate::app::{DisplayBlock, PreparedTurn, render_plan_content_from_args};
-use crate::plugin_surface;
-use crate::replay::{AssistantReplay, push_assistant_text_block};
-use crate::util::{is_manual_interrupt_error, manual_interrupt_message};
+use crate::app::{DisplayBlock, PersistedUiState};
 
 pub struct SessionInfo {
     pub filename: String,
@@ -37,76 +32,56 @@ pub struct LoadedSession {
 }
 
 pub struct SessionLogger {
-    file: std::io::BufWriter<std::fs::File>,
+    store: Arc<Store>,
     pub session_id: String,
     filename: String,
-    pending_turn: Vec<serde_json::Value>,
 }
 
 impl SessionLogger {
-    pub fn new(model: &str, session_id: Option<String>, session_name: String) -> Result<Self> {
-        let dir = lash::lash_home().join("sessions");
-        std::fs::create_dir_all(&dir)?;
-
-        let now = chrono::Local::now();
-        let filename = format!("{}.jsonl", now.format("%Y%m%d_%H%M%S"));
-        let path = dir.join(&filename);
-        let file = std::io::BufWriter::new(std::fs::File::create(&path)?);
+    pub fn new(
+        store: Arc<Store>,
+        filename: String,
+        model: &str,
+        session_id: Option<String>,
+        session_name: String,
+    ) -> Result<Self> {
+        std::fs::create_dir_all(sessions_dir())?;
         let session_id = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-        let mut logger = Self {
-            file,
-            session_id: session_id.clone(),
-            filename,
-            pending_turn: Vec::new(),
-        };
-        logger.write_json(&serde_json::json!({
-            "type": "session_start",
-            "session_id": session_id,
-            "session_name": session_name,
-            "ts": now.to_rfc3339(),
-            "model": model,
-            "cwd": std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()),
-        }))?;
-        logger.flush_file()?;
-
-        Ok(logger)
-    }
-
-    pub fn resume(filename: &str) -> Result<Self> {
-        let start = load_session_start(filename)
-            .ok_or_else(|| anyhow::anyhow!("Could not load session metadata for {}", filename))?;
-        let path = sessions_dir().join(filename);
-        let file = std::io::BufWriter::new(
-            std::fs::OpenOptions::new()
-                .append(true)
-                .create(true)
-                .open(&path)?,
-        );
+        store.save_session_meta(SessionMetaSave {
+            session_id: &session_id,
+            session_name: &session_name,
+            created_at: &chrono::Local::now().to_rfc3339(),
+            model,
+            cwd: std::env::current_dir()
+                .ok()
+                .as_ref()
+                .and_then(|path| path.to_str()),
+            parent_session_id: None,
+        });
         Ok(Self {
-            file,
-            session_id: start.session_id,
-            filename: filename.to_string(),
-            pending_turn: Vec::new(),
+            store,
+            session_id,
+            filename,
         })
     }
 
-    fn write_json(&mut self, value: &serde_json::Value) -> Result<()> {
-        use std::io::Write;
-        serde_json::to_writer(&mut self.file, value)?;
-        self.file.write_all(b"\n")?;
-        Ok(())
-    }
-
-    fn flush_file(&mut self) -> Result<()> {
-        use std::io::Write;
-        self.file.flush()?;
-        Ok(())
+    pub fn resume(store: Arc<Store>, filename: &str) -> Result<Self> {
+        let start = store
+            .load_session_meta()
+            .map(|meta| SessionStart {
+                session_id: meta.session_id,
+                session_name: meta.session_name,
+            })
+            .ok_or_else(|| anyhow::anyhow!("Could not load session metadata for {}", filename))?;
+        Ok(Self {
+            store,
+            session_id: start.session_id,
+            filename: filename.to_string(),
+        })
     }
 
     pub fn flush(&mut self) -> Result<()> {
-        self.flush_pending_turn();
-        self.flush_file()
+        Ok(())
     }
 
     pub fn filename(&self) -> &str {
@@ -114,102 +89,30 @@ impl SessionLogger {
     }
 
     pub fn clone_history_from(&mut self, source_filename: &str) -> Result<()> {
-        let path = sessions_dir().join(source_filename);
-        use std::io::Write;
-        let reader = BufReader::new(File::open(&path)?);
-        for line in reader.lines().skip(1) {
-            let line = line?;
-            self.file.write_all(line.as_bytes())?;
-            self.file.write_all(b"\n")?;
-        }
-        self.flush_file()
+        let source = Store::open(&sessions_dir().join(source_filename))?;
+        self.store
+            .history_copy_from_store(&source, crate::ROOT_SESSION_ID, crate::ROOT_SESSION_ID);
+        Ok(())
     }
 
-    fn flush_pending_turn(&mut self) {
-        if self.pending_turn.is_empty() {
-            return;
-        }
-        let pending = std::mem::take(&mut self.pending_turn);
-        for value in pending {
-            let _ = self.write_json(&value);
-        }
-        let _ = self.flush_file();
+    pub fn mark_as_child_of(&self, parent_session_id: &str) -> Result<()> {
+        let meta = self
+            .store
+            .load_session_meta()
+            .ok_or_else(|| anyhow::anyhow!("Missing session metadata for {}", self.filename))?;
+        self.store.save_session_meta(SessionMetaSave {
+            session_id: &meta.session_id,
+            session_name: &meta.session_name,
+            created_at: &meta.created_at,
+            model: &meta.model,
+            cwd: meta.cwd.as_deref(),
+            parent_session_id: Some(parent_session_id),
+        });
+        Ok(())
     }
-
-    pub fn log_user_input(&mut self, input: &str) {
-        if !self.pending_turn.is_empty() {
-            self.flush_pending_turn();
-        }
-        self.pending_turn.push(serde_json::json!({
-            "type": "user_input",
-            "ts": chrono::Local::now().to_rfc3339(),
-            "content": input,
-        }));
-        self.flush_pending_turn();
-    }
-
-    pub fn log_prepared_user_input(&mut self, turn: &PreparedTurn) {
-        if !self.pending_turn.is_empty() {
-            self.flush_pending_turn();
-        }
-        self.pending_turn.push(serde_json::json!({
-            "type": "user_input",
-            "ts": chrono::Local::now().to_rfc3339(),
-            "draft_id": turn.draft_id,
-            "content": turn.history_text(),
-            "raw_content": turn.raw_text,
-            "effective_content": turn.effective_text,
-            "transforms": turn.transform_labels,
-        }));
-        self.flush_pending_turn();
-    }
-
-    pub fn log_event(&mut self, event: &AgentEvent) {
-        let mut value = serde_json::to_value(event).unwrap_or_default();
-        let mut event_type = String::new();
-        if let serde_json::Value::Object(ref mut map) = value {
-            map.insert(
-                "ts".into(),
-                serde_json::Value::String(chrono::Local::now().to_rfc3339()),
-            );
-            event_type = map
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-        }
-        self.pending_turn.push(value);
-        if should_flush_event(&event_type) {
-            self.flush_pending_turn();
-        }
-    }
-}
-
-impl Drop for SessionLogger {
-    fn drop(&mut self) {
-        self.flush_pending_turn();
-    }
-}
-
-fn should_flush_event(event_type: &str) -> bool {
-    matches!(
-        event_type,
-        "tool_call"
-            | "code_output"
-            | "message"
-            | "injected_messages_committed"
-            | "llm_request"
-            | "llm_response"
-            | "retry_status"
-            | "plugin_event"
-            | "done"
-            | "error"
-            | "prompt"
-    )
 }
 
 impl SessionInfo {
-    /// Format the file modification time as a human-readable relative string.
     pub fn relative_time(&self) -> String {
         let elapsed = self.modified.elapsed().unwrap_or_default();
         let secs = elapsed.as_secs();
@@ -264,129 +167,78 @@ pub fn sessions_dir() -> PathBuf {
     lash::lash_home().join("sessions")
 }
 
-fn is_resumable_session_log(path: &std::path::Path) -> bool {
-    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-        return false;
-    }
-
-    let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-
-    !filename.ends_with(".llm.jsonl")
+pub fn new_session_filename() -> String {
+    format!("{}.db", chrono::Local::now().format("%Y%m%d_%H%M%S"))
 }
 
-fn parse_session_info(
-    path: &std::path::Path,
-    filename: String,
-    modified: SystemTime,
-) -> Option<SessionInfo> {
-    let file = File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    let mut lines = reader.lines();
+fn is_resumable_session_store(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()) == Some("db")
+}
 
-    // Parse first line for session metadata
-    let first_line = match lines.next() {
-        Some(Ok(line)) => line,
-        _ => return None,
-    };
-    let val: serde_json::Value = serde_json::from_str(&first_line).ok()?;
-
-    // Skip child sessions (spawned by delegate_task)
-    if val.get("parent_session_id").is_some_and(|v| !v.is_null()) {
+fn parse_session_info(path: &Path, filename: String, modified: SystemTime) -> Option<SessionInfo> {
+    let store = Store::open(path).ok()?;
+    let meta = store.load_session_meta()?;
+    if meta.parent_session_id.is_some() {
         return None;
     }
 
-    let session_id = val
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let cwd = val
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .filter(|cwd| !cwd.is_empty())
-        .map(PathBuf::from);
-
-    // Scan for first user_input and count messages
-    let mut message_count = 0;
+    let messages = load_messages(&store).ok()?;
+    let mut message_count = 0usize;
     let mut first_message = String::new();
-    for line in lines {
-        let Ok(line) = line else {
+    for message in messages {
+        if message.role != MessageRole::User {
             continue;
-        };
-        let v: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let is_user = v
-            .get("type")
-            .and_then(|t| t.as_str())
-            .is_some_and(|t| t == "user_input");
-        if is_user {
-            message_count += 1;
-            if first_message.is_empty() {
-                first_message = v
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("")
-                    .to_string();
-            }
+        }
+        message_count += 1;
+        if first_message.is_empty() {
+            first_message = preview_message_text(&message);
         }
     }
 
     Some(SessionInfo {
         filename,
-        session_id,
+        session_id: meta.session_id,
         message_count,
         first_message,
         modified,
-        cwd,
+        cwd: meta.cwd.map(PathBuf::from),
     })
 }
 
 fn collect_session_candidates() -> Vec<(PathBuf, String, SystemTime)> {
-    let dir = sessions_dir();
     let mut candidates = Vec::new();
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
+    let entries = match std::fs::read_dir(sessions_dir()) {
+        Ok(entries) => entries,
         Err(_) => return candidates,
     };
-
     for entry in entries.flatten() {
         let path = entry.path();
-        if !is_resumable_session_log(&path) {
+        if !is_resumable_session_store(&path) {
             continue;
         }
-
-        let filename = path.file_name().unwrap().to_string_lossy().to_string();
         let modified = std::fs::metadata(&path)
-            .and_then(|m| m.modified())
+            .and_then(|meta| meta.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
+        let Some(filename) = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+        else {
+            continue;
+        };
         candidates.push((path, filename, modified));
     }
-
     candidates.sort_by(|a, b| b.2.cmp(&a.2));
     candidates
 }
 
-pub fn load_session_start(filename: &str) -> Option<SessionStart> {
-    let path = sessions_dir().join(filename);
-    let file = File::open(&path).ok()?;
-    let mut reader = BufReader::new(file);
-    let mut first_line = String::new();
-    reader.read_line(&mut first_line).ok()?;
-    if first_line.is_empty() {
-        return None;
-    }
-    let val: serde_json::Value = serde_json::from_str(&first_line).ok()?;
-    Some(SessionStart {
-        session_id: val.get("session_id")?.as_str()?.to_string(),
-        session_name: val
-            .get("session_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or(filename.trim_end_matches(".jsonl"))
-            .to_string(),
+pub fn load_session_start(filename: &str) -> Result<SessionStart> {
+    let store = Store::open(&sessions_dir().join(filename))?;
+    let meta = store
+        .load_session_meta()
+        .ok_or_else(|| anyhow::anyhow!("Could not load session metadata for {}", filename))?;
+    Ok(SessionStart {
+        session_id: meta.session_id,
+        session_name: meta.session_name,
     })
 }
 
@@ -410,285 +262,62 @@ pub fn list_recent_sessions(limit: usize) -> Vec<SessionInfo> {
     sessions
 }
 
-/// Load a session JSONL file, reconstructing display blocks and structured messages.
-pub fn load_session(filename: &str) -> Option<LoadedSession> {
-    let path = sessions_dir().join(filename);
-    let file = File::open(&path).ok()?;
-    let reader = BufReader::new(file);
+pub fn load_session(filename: &str) -> Result<LoadedSession> {
+    let store = Store::open(&sessions_dir().join(filename))?;
+    let messages = load_messages(&store)?;
+    let ui_state = load_ui_state(&store)?;
 
-    let mut messages = Vec::new();
-    let mut blocks = Vec::new();
-    let mut assistant_replay = AssistantReplay::default();
-    let mut last_token_usage = TokenUsage::default();
-    let mut activity_state = ActivityState::default();
-    let mut plugin_mode_indicators = BTreeMap::new();
-
-    for line in reader.lines() {
-        let Ok(line) = line else {
-            continue;
-        };
-        let val: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let ty = match val.get("type").and_then(|v| v.as_str()) {
-            Some(t) => t,
-            None => continue,
-        };
-        match ty {
-            "user_input" => {
-                assistant_replay.flush(&mut blocks);
-                let text = val
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let msg_id = format!("m{}", messages.len());
-                messages.push(Message {
-                    id: msg_id.clone(),
-                    role: MessageRole::User,
-                    parts: vec![Part {
-                        id: format!("{msg_id}.p0"),
-                        kind: PartKind::Text,
-                        content: text.clone(),
-                        tool_call_id: None,
-                        tool_name: None,
-                        prune_state: PruneState::Intact,
-                    }],
-                    origin: None,
-                });
-                blocks.push(DisplayBlock::UserInput(text));
-                if let Some(transforms) = val.get("transforms").and_then(|v| v.as_array()) {
-                    let names: Vec<String> = transforms
-                        .iter()
-                        .filter_map(|v| v.as_str())
-                        .map(|s| s.strip_prefix("skill ").unwrap_or(s).to_string())
-                        .collect();
-                    if !names.is_empty() {
-                        blocks.push(DisplayBlock::SkillLoaded(names));
-                    }
-                }
-            }
-            "text_delta" => {
-                if let Some(text) = val.get("content").and_then(|v| v.as_str()) {
-                    assistant_replay.push_text_delta(text);
-                }
-            }
-            "llm_request" => {
-                assistant_replay.flush(&mut blocks);
-            }
-            "done" => {
-                assistant_replay.flush(&mut blocks);
-            }
-            "code_block" => {
-                assistant_replay.flush(&mut blocks);
-                if let Some(code) = val.get("code").and_then(|v| v.as_str()) {
-                    blocks.push(DisplayBlock::CodeBlock {
-                        code: code.to_string(),
-                        continuation: false,
-                    });
-                }
-            }
-            "tool_call" => {
-                assistant_replay.flush(&mut blocks);
-                if let (Some(name), Some(success), Some(duration_ms)) = (
-                    val.get("name").and_then(|v| v.as_str()),
-                    val.get("success").and_then(|v| v.as_bool()),
-                    val.get("duration_ms").and_then(|v| v.as_u64()),
-                ) {
-                    let args = val
-                        .get("args")
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!({}));
-                    let result = val
-                        .get("result")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null);
-                    for activity in activity_state.blocks_for_tool_call(
-                        name,
-                        args,
-                        result,
-                        success,
-                        duration_ms,
-                    ) {
-                        if let Some(DisplayBlock::Activity(existing)) = blocks.last_mut()
-                            && existing.kind == ActivityKind::Exploration
-                            && activity.kind == ActivityKind::Exploration
-                            && existing.status == ActivityStatus::Completed
-                            && activity.status == ActivityStatus::Completed
-                            && merge_exploration_activity(existing, activity.clone())
-                        {
-                            continue;
-                        }
-                        blocks.push(DisplayBlock::Activity(activity));
-                    }
-                    if success
-                        && name == "update_plan"
-                        && let Some(content) = render_plan_content_from_args(
-                            val.get("args").unwrap_or(&serde_json::Value::Null),
-                        )
-                    {
-                        blocks.push(DisplayBlock::PlanContent(content));
-                    }
-                }
-            }
-            "code_output" => {
-                assistant_replay.flush(&mut blocks);
-                let output = val
-                    .get("output")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let error = val
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .filter(|s| !s.trim().is_empty());
-                if !output.is_empty() || error.is_some() {
-                    blocks.push(DisplayBlock::CodeOutput { output, error });
-                }
-            }
-            "llm_response" => {
-                if let Some(c) = val.get("content").and_then(|v| v.as_str()) {
-                    assistant_replay.remember_llm_response(c);
-                    let msg_id = format!("m{}", messages.len());
-                    messages.push(Message {
-                        id: msg_id.clone(),
-                        role: MessageRole::Assistant,
-                        parts: vec![Part {
-                            id: format!("{msg_id}.p0"),
-                            kind: PartKind::Prose,
-                            content: c.to_string(),
-                            tool_call_id: None,
-                            tool_name: None,
-                            prune_state: PruneState::Intact,
-                        }],
-                        origin: None,
-                    });
-                }
-            }
-            "token_usage" => {
-                if let Some(usage) = val
-                    .get("usage")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                {
-                    last_token_usage = usage;
-                }
-            }
-            "message" => {
-                assistant_replay.flush(&mut blocks);
-                let text = val
-                    .get("text")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let kind = val.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-                if kind == "final" && !text.is_empty() {
-                    push_assistant_text_block(&mut blocks, &text);
-                }
-            }
-            "injected_messages_committed" => {
-                assistant_replay.flush(&mut blocks);
-                if let Some(messages_val) = val.get("messages")
-                    && let Ok(injected) =
-                        serde_json::from_value::<Vec<lash::PluginMessage>>(messages_val.clone())
-                {
-                    for message in injected {
-                        match message.role {
-                            MessageRole::User => {
-                                let msg_id = format!("m{}", messages.len());
-                                messages.push(Message {
-                                    id: msg_id.clone(),
-                                    role: MessageRole::User,
-                                    parts: vec![Part {
-                                        id: format!("{msg_id}.p0"),
-                                        kind: PartKind::Text,
-                                        content: message.content.clone(),
-                                        tool_call_id: None,
-                                        tool_name: None,
-                                        prune_state: PruneState::Intact,
-                                    }],
-                                    origin: None,
-                                });
-                                blocks.push(DisplayBlock::UserInput(message.content));
-                            }
-                            MessageRole::System => {
-                                let msg_id = format!("m{}", messages.len());
-                                messages.push(Message {
-                                    id: msg_id.clone(),
-                                    role: MessageRole::System,
-                                    parts: vec![Part {
-                                        id: format!("{msg_id}.p0"),
-                                        kind: PartKind::Text,
-                                        content: message.content.clone(),
-                                        tool_call_id: None,
-                                        tool_name: None,
-                                        prune_state: PruneState::Intact,
-                                    }],
-                                    origin: None,
-                                });
-                                blocks.push(DisplayBlock::SystemMessage(message.content));
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            "plugin_event" => {
-                assistant_replay.flush(&mut blocks);
-                let Some(plugin_id) = val.get("plugin_id").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                let Some(event_value) = val.get("event").cloned() else {
-                    continue;
-                };
-                let Ok(event) = serde_json::from_value::<lash::PluginSurfaceEvent>(event_value)
-                else {
-                    continue;
-                };
-                let _ = plugin_surface::apply_surface_event(
-                    &mut blocks,
-                    &mut plugin_mode_indicators,
-                    plugin_id,
-                    event,
-                );
-            }
-            "error" => {
-                assistant_replay.flush(&mut blocks);
-                if let Some(msg) = val.get("message").and_then(|v| v.as_str()) {
-                    let code = val
-                        .get("envelope")
-                        .and_then(|v| v.get("code"))
-                        .and_then(|v| v.as_str());
-                    if is_manual_interrupt_error(msg, code) {
-                        blocks.push(DisplayBlock::SystemMessage(
-                            manual_interrupt_message().to_string(),
-                        ));
-                    } else {
-                        blocks.push(DisplayBlock::Error(msg.to_string()));
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    assistant_replay.flush(&mut blocks);
-
-    Some(LoadedSession {
+    Ok(LoadedSession {
         messages,
-        blocks,
-        last_token_usage,
-        plugin_mode_indicators,
+        blocks: ui_state.blocks,
+        last_token_usage: ui_state.last_response_usage,
+        plugin_mode_indicators: ui_state.plugin_mode_indicators,
     })
+}
+
+fn load_messages(store: &Store) -> Result<Vec<Message>> {
+    let state = store
+        .load_agent_state(crate::ROOT_SESSION_ID)
+        .ok_or_else(|| anyhow::anyhow!("Missing root session snapshot"))?;
+    serde_json::from_str(&state.messages_json).context("Invalid persisted message snapshot")
+}
+
+fn load_ui_state(store: &Store) -> Result<PersistedUiState> {
+    let state = store
+        .load_agent_state(crate::ROOT_SESSION_ID)
+        .ok_or_else(|| anyhow::anyhow!("Missing root session snapshot"))?;
+    serde_json::from_str(&state.ui_json).context("Invalid persisted UI snapshot")
+}
+
+fn preview_message_text(message: &Message) -> String {
+    message
+        .parts
+        .iter()
+        .filter_map(|part| preview_part_text(&part.kind, &part.content))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn preview_part_text(kind: &PartKind, content: &str) -> Option<String> {
+    if matches!(kind, PartKind::ToolCall | PartKind::ToolResult) {
+        return None;
+    }
+    let rendered = if let Some(index) = content.strip_prefix(lash::agent::message::IMAGE_REF_PREFIX)
+    {
+        format!("[Image #{index}]")
+    } else {
+        content.to_string()
+    };
+    (!rendered.trim().is_empty()).then_some(rendered)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
-    use lash::AgentEvent;
-    use serde_json::json;
 
     fn with_temp_lash_home(test_name: &str, f: impl FnOnce()) {
         let _env_guard = env_lock().blocking_lock();
@@ -698,375 +327,195 @@ mod tests {
         f();
     }
 
-    #[test]
-    fn load_session_reconstructs_streamed_assistant_blocks() {
-        with_temp_lash_home("lash-session-log-streamed", || {
-            let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
-            let path = sessions_dir().join(&filename);
-            std::fs::write(
-                &path,
-                concat!(
-                    "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
-                    "{\"type\":\"user_input\",\"content\":\"Hi\"}\n",
-                    "{\"type\":\"text_delta\",\"content\":\"Hello\"}\n",
-                    "{\"type\":\"text_delta\",\"content\":\" world\"}\n",
-                    "{\"type\":\"llm_response\",\"content\":\"Hello world\"}\n",
-                    "{\"type\":\"done\"}\n"
-                ),
-            )
-            .unwrap();
-
-            let loaded = load_session(&filename).unwrap();
-            let blocks = loaded.blocks;
-            assert!(matches!(blocks.first(), Some(DisplayBlock::UserInput(text)) if text == "Hi"));
-            assert!(
-                matches!(blocks.get(1), Some(DisplayBlock::AssistantText(text)) if text == "Hello world")
-            );
+    fn persist_root_snapshot(store: &Store, messages: Vec<Message>, ui_state: PersistedUiState) {
+        let messages_json = serde_json::to_string(&messages).expect("messages");
+        let ui_json = serde_json::to_string(&ui_state).expect("ui state");
+        store.save_agent_state(lash::store::AgentStateSave {
+            agent_id: crate::ROOT_SESSION_ID,
+            messages_json: &messages_json,
+            tool_calls_json: "[]",
+            ui_json: &ui_json,
+            iteration: 1,
+            config_json: "{}",
+            repl_snapshot: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+            reasoning_tokens: 0,
         });
     }
 
+    fn text_message(role: MessageRole, id: &str, content: &str) -> Message {
+        Message {
+            id: id.to_string(),
+            role,
+            parts: vec![lash::Part {
+                id: format!("{id}.p0"),
+                kind: PartKind::Text,
+                content: content.to_string(),
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: lash::PruneState::Intact,
+            }],
+            origin: None,
+        }
+    }
+
     #[test]
-    fn load_session_replays_prepared_user_input_with_transform_note() {
-        with_temp_lash_home("lash-session-log-transforms", || {
-            let mut logger =
-                SessionLogger::new("gpt-test", Some("s1".to_string()), "demo".to_string()).unwrap();
-            let filename = logger.filename().to_string();
-            logger.log_prepared_user_input(&PreparedTurn {
-                draft_id: "draft-1".into(),
-                raw_text: "$localref lash".into(),
-                display_text: "$localref lash".into(),
-                effective_text: "$localref lash\n\n<skill>...</skill>".into(),
-                images: Vec::new(),
-                large_pastes: Vec::new(),
-                transform_labels: vec!["skill localref".into()],
-            });
-            logger.flush().unwrap();
+    fn load_session_reads_persisted_root_snapshot() {
+        with_temp_lash_home("lash-session-load-root-snapshot", || {
+            let filename = new_session_filename();
+            let path = sessions_dir().join(&filename);
+            let store = Arc::new(Store::open(&path).unwrap());
+            SessionLogger::new(
+                Arc::clone(&store),
+                filename.clone(),
+                "gpt-test",
+                Some("s1".into()),
+                "demo".into(),
+            )
+            .unwrap();
+            let messages = vec![
+                text_message(MessageRole::User, "m0", "Hi"),
+                text_message(MessageRole::Assistant, "m1", "Hello world"),
+            ];
+            persist_root_snapshot(
+                &store,
+                messages.clone(),
+                PersistedUiState {
+                    blocks: vec![
+                        DisplayBlock::UserInput("Hi".into()),
+                        DisplayBlock::AssistantText("Hello world".into()),
+                    ],
+                    last_response_usage: TokenUsage {
+                        input_tokens: 12,
+                        output_tokens: 7,
+                        cached_input_tokens: 2,
+                        reasoning_tokens: 1,
+                    },
+                    plugin_mode_indicators: BTreeMap::from([(
+                        "plan_mode".to_string(),
+                        "plan".to_string(),
+                    )]),
+                },
+            );
 
             let loaded = load_session(&filename).unwrap();
+            assert_eq!(loaded.messages.len(), 2);
             assert!(matches!(
                 loaded.blocks.first(),
-                Some(DisplayBlock::UserInput(text)) if text == "$localref lash"
+                Some(DisplayBlock::UserInput(text)) if text == "Hi"
             ));
             assert!(matches!(
                 loaded.blocks.get(1),
-                Some(DisplayBlock::SkillLoaded(names)) if names == &["localref"]
+                Some(DisplayBlock::AssistantText(text)) if text == "Hello world"
             ));
-        });
-    }
-
-    #[test]
-    fn load_session_ignores_empty_code_output_errors() {
-        with_temp_lash_home("lash-session-log-empty-code-output", || {
-            let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
-            let path = sessions_dir().join(&filename);
-            std::fs::write(
-                &path,
-                concat!(
-                    "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
-                    "{\"type\":\"user_input\",\"content\":\"Hi\"}\n",
-                    "{\"type\":\"code_output\",\"output\":\"\",\"error\":\"\"}\n",
-                    "{\"type\":\"done\"}\n"
-                ),
-            )
-            .unwrap();
-
-            let loaded = load_session(&filename).unwrap();
-            let blocks = loaded.blocks;
-            assert!(matches!(blocks.first(), Some(DisplayBlock::UserInput(text)) if text == "Hi"));
-            assert_eq!(blocks.len(), 1);
-        });
-    }
-
-    #[test]
-    fn load_session_maps_cancelled_error_to_system_message() {
-        with_temp_lash_home("lash-session-log-cancelled", || {
-            let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
-            let path = sessions_dir().join(&filename);
-            std::fs::write(
-                &path,
-                concat!(
-                    "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
-                    "{\"type\":\"user_input\",\"content\":\"Hi\"}\n",
-                    "{\"type\":\"error\",\"message\":\"LLM error: cancelled\",\"envelope\":{\"kind\":\"llm_provider\",\"code\":\"cancelled\",\"user_message\":\"LLM error: cancelled\"}}\n",
-                    "{\"type\":\"done\"}\n"
-                ),
-            )
-            .unwrap();
-
-            let loaded = load_session(&filename).unwrap();
-            assert!(matches!(
-                loaded.blocks.get(1),
-                Some(DisplayBlock::SystemMessage(msg)) if msg == "Manually interrupted."
-            ));
-        });
-    }
-
-    #[test]
-    fn logger_flushes_tool_calls_before_done() {
-        with_temp_lash_home("lash-session-log-logger", || {
-            let mut logger =
-                SessionLogger::new("gpt-test", Some("s1".to_string()), "demo".to_string()).unwrap();
-            let path = sessions_dir().join(logger.filename());
-
-            logger.log_user_input("What time is it?");
-            logger.log_event(&AgentEvent::ToolCall {
-                call_id: Some("tc1".to_string()),
-                name: "exec_command".to_string(),
-                args: json!({"cmd": "date"}),
-                result: json!({"wall_time_seconds": 0.01, "exit_code": 0, "output": "Thu\n"}),
-                success: true,
-                duration_ms: 0,
-            });
-
-            let contents = std::fs::read_to_string(&path).unwrap();
-            assert!(contents.contains("\"type\":\"user_input\""));
-            assert!(contents.contains("\"type\":\"tool_call\""));
-            assert!(contents.contains("\"exec_command\""));
-        });
-    }
-
-    #[test]
-    fn logger_persists_retry_status_envelope() {
-        with_temp_lash_home("lash-session-log-retry-envelope", || {
-            let mut logger =
-                SessionLogger::new("gpt-test", Some("s1".to_string()), "demo".to_string()).unwrap();
-            let path = sessions_dir().join(logger.filename());
-
-            logger.log_event(&AgentEvent::RetryStatus {
-                wait_seconds: 2,
-                attempt: 2,
-                max_attempts: 4,
-                reason: "Claude request failed with 500".to_string(),
-                envelope: Some(lash::agent::ErrorEnvelope {
-                    kind: "llm_provider".to_string(),
-                    code: Some("500".to_string()),
-                    user_message: "LLM error: Claude request failed with 500".to_string(),
-                    raw: Some("{\"type\":\"error\",\"request_id\":\"req_123\"}".to_string()),
-                }),
-            });
-
-            let contents = std::fs::read_to_string(&path).unwrap();
-            assert!(contents.contains("\"type\":\"retry_status\""));
-            assert!(contents.contains("\"code\":\"500\""));
-            assert!(contents.contains("req_123"));
-        });
-    }
-
-    #[test]
-    fn load_session_replays_injected_messages_committed() {
-        with_temp_lash_home("lash-session-log-injected", || {
-            let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
-            let path = sessions_dir().join(&filename);
-            std::fs::write(
-                &path,
-                concat!(
-                    "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
-                    "{\"type\":\"user_input\",\"content\":\"Hi\"}\n",
-                    "{\"type\":\"injected_messages_committed\",\"messages\":[{\"role\":\"User\",\"content\":\"follow up\"},{\"role\":\"System\",\"content\":\"note\"}],\"checkpoint\":\"after_work\"}\n",
-                    "{\"type\":\"done\"}\n"
-                ),
-            )
-            .unwrap();
-
-            let loaded = load_session(&filename).unwrap();
-            assert!(loaded.blocks.iter().any(
-                |block| matches!(block, DisplayBlock::UserInput(text) if text == "follow up")
-            ));
-            assert!(
-                loaded.blocks.iter().any(
-                    |block| matches!(block, DisplayBlock::SystemMessage(text) if text == "note")
-                )
-            );
-        });
-    }
-
-    #[test]
-    fn load_session_reconstructs_plan_block_from_update_plan_args() {
-        with_temp_lash_home("lash-session-log-plan", || {
-            let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
-            let path = sessions_dir().join(&filename);
-            std::fs::write(
-                &path,
-                concat!(
-                    "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
-                    "{\"type\":\"tool_call\",\"name\":\"update_plan\",\"args\":{\"explanation\":\"Split tracker and mode.\",\"plan\":[{\"step\":\"Inspect runtime\",\"status\":\"completed\"},{\"step\":\"Refactor plugins\",\"status\":\"in_progress\"}]},\"result\":\"Plan updated\",\"success\":true,\"duration_ms\":0}\n",
-                    "{\"type\":\"done\"}\n"
-                ),
-            )
-            .unwrap();
-
-            let loaded = load_session(&filename).unwrap();
-            assert!(loaded.blocks.iter().any(|block| {
-                matches!(
-                    block,
-                    DisplayBlock::PlanContent(content)
-                        if content.contains("Split tracker and mode.")
-                            && content.contains("✓ Inspect runtime")
-                            && content.contains("▸ Refactor plugins")
-                )
-            }));
-        });
-    }
-
-    #[test]
-    fn load_session_replays_plugin_panel_events() {
-        with_temp_lash_home("lash-session-log-plugin-panel", || {
-            let filename = format!("test-{}.jsonl", uuid::Uuid::new_v4());
-            let path = sessions_dir().join(&filename);
-            std::fs::write(
-                &path,
-                concat!(
-                    "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
-                    "{\"type\":\"plugin_event\",\"plugin_id\":\"plan_mode\",\"event\":{\"kind\":\"mode_indicator_upsert\",\"key\":\"mode\",\"label\":\"plan\"}}\n",
-                    "{\"type\":\"plugin_event\",\"plugin_id\":\"plan_mode\",\"event\":{\"kind\":\"panel_upsert\",\"key\":\"proposed_plan:1\",\"title\":\"PROPOSED PLAN\",\"content\":\"1. Inspect\\n2. Patch\"}}\n",
-                    "{\"type\":\"done\"}\n"
-                ),
-            )
-            .unwrap();
-
-            let loaded = load_session(&filename).unwrap();
+            assert_eq!(loaded.last_token_usage.input_tokens, 12);
             assert_eq!(
-                loaded.plugin_mode_indicators.get("plan_mode:mode"),
+                loaded.plugin_mode_indicators.get("plan_mode"),
                 Some(&"plan".to_string())
             );
-            assert!(loaded.blocks.iter().any(|block| {
-                matches!(
-                    block,
-                    DisplayBlock::PluginPanel(panel)
-                        if panel.title == "PROPOSED PLAN" && panel.content.contains("Inspect")
-                )
-            }));
         });
     }
 
     #[test]
-    fn list_recent_sessions_skips_llm_sidecars() {
-        with_temp_lash_home("lash-session-log-list-sidecars", || {
-            let session_path = sessions_dir().join("real-session.jsonl");
-            std::fs::write(
-                &session_path,
-                concat!(
-                    "{\"type\":\"session_start\",\"session_id\":\"s1\",\"session_name\":\"demo\"}\n",
-                    "{\"type\":\"user_input\",\"content\":\"Hi\"}\n",
-                    "{\"type\":\"done\"}\n"
-                ),
+    fn list_recent_sessions_ignores_child_sessions() {
+        with_temp_lash_home("lash-session-log-list", || {
+            let parent = sessions_dir().join("parent.db");
+            let child = sessions_dir().join("child.db");
+            let parent_store = Arc::new(Store::open(&parent).unwrap());
+            let child_store = Store::open(&child).unwrap();
+            SessionLogger::new(
+                Arc::clone(&parent_store),
+                "parent.db".into(),
+                "gpt-test",
+                Some("parent".into()),
+                "demo".into(),
             )
             .unwrap();
-
-            let llm_path = sessions_dir().join("real-session.llm.jsonl");
-            std::fs::write(
-                &llm_path,
-                concat!(
-                    "{\"type\":\"llm_request\",\"payload\":\"huge\"}\n",
-                    "{\"type\":\"llm_response\",\"payload\":\"still not resumable\"}\n"
-                ),
-            )
-            .unwrap();
+            persist_root_snapshot(
+                &parent_store,
+                vec![text_message(MessageRole::User, "m0", "hello there")],
+                PersistedUiState {
+                    blocks: vec![DisplayBlock::UserInput("hello there".into())],
+                    ..PersistedUiState::default()
+                },
+            );
+            child_store.save_session_meta(SessionMetaSave {
+                session_id: "child",
+                session_name: "demo",
+                created_at: "2026-03-25T10:00:00Z",
+                model: "gpt-test",
+                cwd: std::env::current_dir()
+                    .ok()
+                    .as_ref()
+                    .and_then(|path| path.to_str()),
+                parent_session_id: Some("parent"),
+            });
+            persist_root_snapshot(
+                &child_store,
+                vec![text_message(MessageRole::User, "m0", "child prompt")],
+                PersistedUiState {
+                    blocks: vec![DisplayBlock::UserInput("child prompt".into())],
+                    ..PersistedUiState::default()
+                },
+            );
 
             let sessions = list_recent_sessions(10);
             assert_eq!(sessions.len(), 1);
-            assert_eq!(sessions[0].filename, "real-session.jsonl");
+            assert_eq!(sessions[0].filename, "parent.db");
+            assert_eq!(sessions[0].message_count, 1);
+            assert_eq!(sessions[0].first_message, "hello there");
         });
     }
 
     #[test]
-    fn list_recent_sessions_respects_limit_after_skipping_child_sessions() {
-        with_temp_lash_home("lash-session-log-list-limit", || {
-            for idx in 0..3 {
-                let path = sessions_dir().join(format!("session-{}.jsonl", idx));
-                std::fs::write(
-                    &path,
-                    format!(
-                        concat!(
-                            "{{\"type\":\"session_start\",\"session_id\":\"s{}\",\"session_name\":\"demo\"}}\n",
-                            "{{\"type\":\"user_input\",\"content\":\"message {}\"}}\n",
-                            "{{\"type\":\"done\"}}\n"
-                        ),
-                        idx, idx
-                    ),
-                )
-                .unwrap();
-            }
-
-            let child_path = sessions_dir().join("child-session.jsonl");
-            std::fs::write(
-                &child_path,
-                concat!(
-                    "{\"type\":\"session_start\",\"session_id\":\"child\",\"session_name\":\"demo\",\"parent_session_id\":\"root\"}\n",
-                    "{\"type\":\"user_input\",\"content\":\"skip me\"}\n",
-                    "{\"type\":\"done\"}\n"
-                ),
+    fn clone_history_from_copies_history_turns() {
+        with_temp_lash_home("lash-session-log-clone", || {
+            let source_filename = "source.db".to_string();
+            let target_filename = "target.db".to_string();
+            let source_store =
+                Arc::new(Store::open(&sessions_dir().join(&source_filename)).unwrap());
+            let target_store =
+                Arc::new(Store::open(&sessions_dir().join(&target_filename)).unwrap());
+            let mut source = SessionLogger::new(
+                Arc::clone(&source_store),
+                source_filename.clone(),
+                "gpt-test",
+                Some("source".into()),
+                "source".into(),
             )
             .unwrap();
+            source_store.history_upsert_turn(
+                crate::ROOT_SESSION_ID,
+                &lash::store::HistoryTurnRecord {
+                    index: 0,
+                    user_message: "hello".into(),
+                    prose: "world".into(),
+                    code: String::new(),
+                    output: String::new(),
+                    error: None,
+                    tool_calls: Vec::new(),
+                    files_read: Vec::new(),
+                    files_written: Vec::new(),
+                },
+            );
 
-            let sessions = list_recent_sessions(2);
-            assert_eq!(sessions.len(), 2);
-            assert!(sessions.iter().all(|session| session.session_id != "child"));
-        });
-    }
-
-    #[test]
-    fn list_recent_sessions_prioritizes_current_project_sessions() {
-        with_temp_lash_home("lash-session-log-project-priority", || {
-            let workspace = TempDirGuard::new("lash-session-log-project-workspace");
-            let current_project = workspace.path().join("current-project");
-            let current_nested = current_project.join("nested");
-            let other_project = workspace.path().join("other-project");
-            std::fs::create_dir_all(&current_nested).expect("current project dir");
-            std::fs::create_dir_all(&other_project).expect("other project dir");
-
-            let local_path = sessions_dir().join("local-session.jsonl");
-            std::fs::write(
-                &local_path,
-                format!(
-                    concat!(
-                        "{{\"type\":\"session_start\",\"session_id\":\"local\",\"session_name\":\"demo\",\"cwd\":{:?}}}\n",
-                        "{{\"type\":\"user_input\",\"content\":\"local\"}}\n",
-                        "{{\"type\":\"done\"}}\n"
-                    ),
-                    current_project.to_string_lossy()
-                ),
+            let mut target = SessionLogger::new(
+                Arc::clone(&target_store),
+                target_filename.clone(),
+                "gpt-test",
+                Some("target".into()),
+                "target".into(),
             )
-            .expect("write local session");
+            .unwrap();
+            target.clone_history_from(&source_filename).unwrap();
 
-            std::thread::sleep(std::time::Duration::from_millis(20));
-
-            let other_path = sessions_dir().join("other-session.jsonl");
-            std::fs::write(
-                &other_path,
-                format!(
-                    concat!(
-                        "{{\"type\":\"session_start\",\"session_id\":\"other\",\"session_name\":\"demo\",\"cwd\":{:?}}}\n",
-                        "{{\"type\":\"user_input\",\"content\":\"other\"}}\n",
-                        "{{\"type\":\"done\"}}\n"
-                    ),
-                    other_project.to_string_lossy()
-                ),
-            )
-            .expect("write other session");
-
-            let original_cwd = std::env::current_dir().expect("cwd");
-            std::env::set_current_dir(&current_nested).expect("chdir current project");
-            let sessions = list_recent_sessions(10);
-            std::env::set_current_dir(original_cwd).expect("restore cwd");
-
-            assert_eq!(sessions.len(), 2);
-            assert_eq!(sessions[0].session_id, "local");
-            assert_eq!(sessions[1].session_id, "other");
+            let turns = target_store.history_export(crate::ROOT_SESSION_ID);
+            assert_eq!(turns.len(), 1);
+            assert_eq!(turns[0].user_message, "hello");
+            assert_eq!(turns[0].prose, "world");
+            let _ = (&mut source, &mut target);
         });
-    }
-
-    #[test]
-    fn session_info_cwd_label_uses_last_directory_name() {
-        let info = SessionInfo {
-            filename: "session.jsonl".into(),
-            session_id: "s1".into(),
-            message_count: 1,
-            first_message: "hello".into(),
-            modified: SystemTime::now(),
-            cwd: Some(PathBuf::from("/home/sam/code/frontend-design")),
-        };
-
-        assert_eq!(info.cwd_label().as_deref(), Some("/frontend-design"));
     }
 }

@@ -15,12 +15,13 @@ use crate::provider::{OPENAI_GENERIC_DEFAULT_BASE_URL, Provider};
 use crate::session::Session;
 
 pub use lash_sansio::agent::{
-    AgentEvent, DefaultPromptRenderer, ErrorEnvelope, LLM_MAX_RETRIES, LLM_RETRY_DELAYS, Message,
-    MessageRole, Part, PartKind, PromptOverrideMode, PromptRenderer, PromptSectionName,
-    PromptSectionOverride, PruneState, TokenUsage, TurnTerminationPolicyState, append_line_segment,
-    build_assistant_parts, default_prompt_renderer, format_tool_result_content,
-    is_malformed_assistant_output, make_error_envelope, make_error_event, parse_fence_line,
-    render_prompt, render_transcript_prompt, truncate_raw_error,
+    AgentEvent, DefaultPromptRenderer, DurableTurnSnapshot, ErrorEnvelope, LLM_MAX_RETRIES,
+    LLM_RETRY_DELAYS, Message, MessageRole, Part, PartKind, PromptOverrideMode, PromptRenderer,
+    PromptSectionName, PromptSectionOverride, PruneState, TokenUsage, TurnTerminationPolicyState,
+    append_line_segment, build_assistant_parts, default_prompt_renderer,
+    format_tool_result_content, is_malformed_assistant_output, make_error_envelope,
+    make_error_event, parse_fence_line, render_prompt, render_transcript_prompt,
+    truncate_raw_error,
 };
 
 /// Send an event to the channel if it's still open.

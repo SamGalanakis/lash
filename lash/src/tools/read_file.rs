@@ -86,10 +86,7 @@ impl SessionPlugin for ReadFilePlugin {
                 }
 
                 Ok(vec![PluginDirective::EnqueueMessages {
-                    messages: vec![PluginMessage {
-                        role: MessageRole::System,
-                        content: instructions,
-                    }],
+                    messages: vec![PluginMessage::text(MessageRole::System, instructions)],
                 }])
             })
         }));

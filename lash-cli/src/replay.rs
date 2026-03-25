@@ -47,29 +47,3 @@ pub fn push_assistant_text_block(blocks: &mut Vec<DisplayBlock>, text: &str) -> 
     blocks.push(DisplayBlock::AssistantText(cleaned));
     true
 }
-
-#[derive(Default)]
-pub struct AssistantReplay {
-    pending_text: String,
-    fallback_assistant_text: Option<String>,
-}
-
-impl AssistantReplay {
-    pub fn push_text_delta(&mut self, text: &str) {
-        self.pending_text.push_str(text);
-    }
-
-    pub fn remember_llm_response(&mut self, text: &str) {
-        self.fallback_assistant_text = Some(text.to_string());
-    }
-
-    pub fn flush(&mut self, blocks: &mut Vec<DisplayBlock>) -> bool {
-        let text = if self.pending_text.is_empty() {
-            self.fallback_assistant_text.take().unwrap_or_default()
-        } else {
-            std::mem::take(&mut self.pending_text)
-        };
-        self.fallback_assistant_text = None;
-        push_assistant_text_block(blocks, &text)
-    }
-}

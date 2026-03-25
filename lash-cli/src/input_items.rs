@@ -1,7 +1,8 @@
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::PathBuf;
 
-use crate::app::App;
+use crate::app::{App, PendingImage};
 use lash::InputItem;
 
 /// Build structured turn items from editor input:
@@ -10,17 +11,16 @@ use lash::InputItem;
 /// - plain text remains `Text`
 pub fn build_items_from_editor_input(
     input: &str,
-    images: Vec<Vec<u8>>,
+    images: Vec<PendingImage>,
 ) -> (Vec<InputItem>, HashMap<String, Vec<u8>>) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut items: Vec<InputItem> = Vec::new();
     let mut image_blobs: HashMap<String, Vec<u8>> = HashMap::new();
-    let mut image_slots: Vec<Option<(String, Vec<u8>)>> = images
+    let image_slots: HashMap<usize, Vec<u8>> = images
         .into_iter()
-        .enumerate()
-        .map(|(i, bytes)| (format!("img-{}", i + 1), bytes))
-        .map(Some)
+        .map(|image| (image.id, image.png_bytes))
         .collect();
+    let mut emitted_image_ids: HashMap<usize, String> = HashMap::new();
 
     let mut text_buf = String::with_capacity(input.len());
     let mut i = 0;
@@ -28,13 +28,16 @@ pub fn build_items_from_editor_input(
 
     while i < bytes.len() {
         if let Some((next_i, img_idx)) = parse_image_marker_at(input, i)
-            && let Some(slot) = image_slots
-                .get_mut(img_idx.saturating_sub(1))
-                .and_then(Option::take)
+            && let Some(bytes) = image_slots.get(&img_idx)
         {
             push_text_item(&mut items, &mut text_buf);
-            let (id, data) = slot;
-            image_blobs.insert(id.clone(), data);
+            let id = emitted_image_ids
+                .entry(img_idx)
+                .or_insert_with(|| format!("img-{img_idx}"))
+                .clone();
+            image_blobs
+                .entry(id.clone())
+                .or_insert_with(|| bytes.clone());
             items.push(InputItem::ImageRef { id });
             i = next_i;
             continue;
@@ -82,13 +85,6 @@ pub fn build_items_from_editor_input(
 
     push_text_item(&mut items, &mut text_buf);
 
-    // Preserve any pasted images even if their inline markers were removed.
-    for slot in image_slots.into_iter().flatten() {
-        let (id, data) = slot;
-        image_blobs.insert(id.clone(), data);
-        items.push(InputItem::ImageRef { id });
-    }
-
     (items, image_blobs)
 }
 
@@ -133,6 +129,20 @@ pub(crate) fn parse_image_marker_at(input: &str, start: usize) -> Option<(usize,
     Some((start + prefix.len() + digits_len + 1, idx))
 }
 
+pub(crate) fn image_marker_ranges(input: &str) -> Vec<(Range<usize>, usize)> {
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i < input.len() {
+        if let Some((next, idx)) = parse_image_marker_at(input, i) {
+            ranges.push((i..next, idx));
+            i = next;
+            continue;
+        }
+        i += input[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+    }
+    ranges
+}
+
 /// Insert an inline attachment marker like `[Image #1]` at the current cursor,
 /// adding surrounding spaces when needed so it reads naturally in the input.
 pub fn insert_inline_marker(app: &mut App, marker: &str) {
@@ -151,9 +161,7 @@ pub fn insert_inline_marker(app: &mut App, marker: &str) {
     if needs_leading_space {
         app.insert_char(' ');
     }
-    for ch in marker.chars() {
-        app.insert_char(ch);
-    }
+    app.insert_text(marker);
     if needs_trailing_space {
         app.insert_char(' ');
     }

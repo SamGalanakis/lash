@@ -679,29 +679,48 @@ impl TurnMachine {
 
     fn append_checkpoint_messages(&mut self, plugin_messages: &[PluginMessage]) {
         let base_len = self.messages.len();
+        let mut appended_images = Vec::new();
         let appended = plugin_messages
             .iter()
             .filter(|message| matches!(message.role, MessageRole::User | MessageRole::System))
             .enumerate()
             .map(|(offset, message)| {
                 let message_id = format!("m{}", base_len + offset);
-                Message {
-                    id: message_id.clone(),
-                    role: message.role,
-                    parts: vec![Part {
+                let mut parts = if message.parts.is_empty() {
+                    vec![Part {
                         id: format!("{message_id}.p0"),
                         kind: PartKind::Text,
                         content: message.content.clone(),
                         tool_call_id: None,
                         tool_name: None,
                         prune_state: PruneState::Intact,
-                    }],
+                    }]
+                } else {
+                    message.parts.clone()
+                };
+                for (part_idx, part) in parts.iter_mut().enumerate() {
+                    part.id = format!("{message_id}.p{part_idx}");
+                }
+                if matches!(message.role, MessageRole::User) {
+                    appended_images.extend(
+                        message
+                            .images
+                            .iter()
+                            .cloned()
+                            .map(|bytes| ("image/png".to_string(), bytes)),
+                    );
+                }
+                Message {
+                    id: message_id.clone(),
+                    role: message.role,
+                    parts,
                     origin: Some(MessageOrigin::Plugin {
                         plugin_id: "plugin".to_string(),
                     }),
                 }
             })
             .collect::<Vec<_>>();
+        self.user_images.extend(appended_images);
         self.messages.extend(appended);
     }
 
@@ -2292,10 +2311,7 @@ mod tests {
 
         machine.handle_response(Response::Checkpoint {
             id: checkpoint_id,
-            messages: vec![PluginMessage {
-                role: MessageRole::User,
-                content: "one more thing".to_string(),
-            }],
+            messages: vec![PluginMessage::text(MessageRole::User, "one more thing")],
         });
 
         let effects = drain_effects(&mut machine);
@@ -2353,10 +2369,7 @@ mod tests {
         assert_eq!(checkpoint, CheckpointKind::AfterWork);
         machine.handle_response(Response::Checkpoint {
             id: checkpoint_id,
-            messages: vec![PluginMessage {
-                role: MessageRole::User,
-                content: "keep going".to_string(),
-            }],
+            messages: vec![PluginMessage::text(MessageRole::User, "keep going")],
         });
 
         let effects = drain_effects(&mut machine);
