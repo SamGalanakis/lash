@@ -3312,6 +3312,7 @@ mod tests {
         assert!(!app.has_pending_image_jobs());
 
         app.input = "[Image #2]".into();
+        app.cursor_pos = app.input.len();
         assert!(app.has_pending_image_jobs());
 
         app.backspace();

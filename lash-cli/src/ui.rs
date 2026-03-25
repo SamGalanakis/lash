@@ -638,13 +638,14 @@ fn render_patch_preview<'a>(
     include_diffs: bool,
 ) {
     for (idx, file) in files.iter().enumerate() {
-        let row_prefix = if idx + 1 == files.len() && !include_diffs {
+        let shows_diff = include_diffs && !file.diff.trim().is_empty();
+        let row_prefix = if idx + 1 == files.len() && !shows_diff {
             format!("{indent}╰ ")
         } else {
             format!("{indent}├ ")
         };
         render_patch_summary_line(lines, &row_prefix, file, viewport_width);
-        if include_diffs && !file.diff.trim().is_empty() {
+        if shows_diff {
             render_patch_diff_lines(lines, &format!("{indent}│ "), &file.diff, viewport_width);
         }
     }
