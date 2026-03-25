@@ -1153,8 +1153,9 @@ pub(crate) async fn run_app(
                         if matches!(state.policy.execution_mode, ExecutionMode::Repl) {
                             match rt.snapshot_repl().await {
                                 Ok(blob) => {
-                                    state = rt.export_state();
-                                    Some(hash12(&blob))
+                                    let snapshot_hash = hash12(&blob);
+                                    state.repl_snapshot = Some(blob);
+                                    Some(snapshot_hash)
                                 }
                                 Err(e) => {
                                     push_system_message(
@@ -1168,12 +1169,12 @@ pub(crate) async fn run_app(
                                 }
                             }
                         } else {
-                            state = rt.export_state();
                             None
                         }
                     } else {
                         None
                     };
+                    state.task_state = None;
 
                     history = state.messages.clone();
                     turn_counter = state.iteration;
@@ -1996,7 +1997,9 @@ pub(crate) async fn run_app(
                 }
                 app.dirty = true;
                 if let AgentEvent::DurableSnapshot { snapshot } = event {
-                    if let Some(context_window) = app.context_window {
+                    if runtime_return_rx.is_some()
+                        && let Some(context_window) = app.context_window
+                    {
                         persist_live_runtime_snapshot(
                             &store,
                             snapshot,
