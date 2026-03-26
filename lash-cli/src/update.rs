@@ -608,6 +608,96 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn workspace_repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .to_path_buf()
+    }
+
+    fn prepare_build_checkout() -> TempDir {
+        let temp = TempDir::new().expect("tempdir");
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(temp.path())
+            .status()
+            .expect("init git repo");
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .arg("remote")
+            .arg("add")
+            .arg("origin")
+            .arg(workspace_repo_root())
+            .current_dir(temp.path())
+            .status()
+            .expect("add origin");
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .args(["fetch", "-q", "origin", crate::BUILD_GIT_HEAD])
+            .current_dir(temp.path())
+            .status()
+            .expect("fetch build head");
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .args(["checkout", "-q", "FETCH_HEAD"])
+            .current_dir(temp.path())
+            .status()
+            .expect("checkout build head");
+        assert!(status.success());
+        temp
+    }
+
+    fn create_metadata_only_release_commit(repo: &Path) -> String {
+        for path in ["Cargo.toml", "Cargo.lock"] {
+            let file = repo.join(path);
+            let contents = std::fs::read_to_string(&file).expect("read metadata file");
+            std::fs::write(&file, format!("{contents}\n")).expect("modify metadata file");
+        }
+
+        let status = std::process::Command::new("git")
+            .args(["add", "Cargo.toml", "Cargo.lock"])
+            .current_dir(repo)
+            .status()
+            .expect("stage metadata files");
+        assert!(status.success());
+
+        let status = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=lash-tests",
+                "-c",
+                "user.email=lash-tests@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "metadata-only release commit",
+            ])
+            .current_dir(repo)
+            .status()
+            .expect("commit metadata files");
+        assert!(status.success());
+
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .expect("resolve release commit");
+        assert!(output.status.success());
+        let release_commit = String::from_utf8(output.stdout)
+            .expect("release commit utf8")
+            .trim()
+            .to_string();
+
+        let status = std::process::Command::new("git")
+            .args(["checkout", "-q", crate::BUILD_GIT_HEAD])
+            .current_dir(repo)
+            .status()
+            .expect("restore build head");
+        assert!(status.success());
+
+        release_commit
+    }
+
     #[test]
     fn parses_release_tags_as_semver() {
         assert_eq!(
@@ -631,48 +721,14 @@ mod tests {
 
     #[test]
     fn source_equivalent_release_does_not_offer_update() {
-        let temp = TempDir::new().expect("tempdir");
-        let status = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(temp.path())
-            .status()
-            .expect("init git repo");
-        assert!(status.success());
-        let status = std::process::Command::new("git")
-            .args(["remote", "add", "origin", "/home/sam/code/lash"])
-            .current_dir(temp.path())
-            .status()
-            .expect("add origin");
-        assert!(status.success());
-        let status = std::process::Command::new("git")
-            .args(["fetch", "-q", "origin", crate::BUILD_GIT_HEAD])
-            .current_dir(temp.path())
-            .status()
-            .expect("fetch build head");
-        assert!(status.success());
-        let status = std::process::Command::new("git")
-            .args([
-                "fetch",
-                "-q",
-                "origin",
-                "fd3a7421626c3d5023f2624d02e4f1cc11027bc1",
-            ])
-            .current_dir(temp.path())
-            .status()
-            .expect("fetch release head");
-        assert!(status.success());
-        let status = std::process::Command::new("git")
-            .args(["checkout", "-q", "FETCH_HEAD"])
-            .current_dir(temp.path())
-            .status()
-            .expect("checkout build head");
-        assert!(status.success());
+        let temp = prepare_build_checkout();
+        let release_commit = create_metadata_only_release_commit(temp.path());
         let current = Version::parse("0.2.12").expect("current version");
         let release = LatestRelease {
             repo: DEFAULT_REPO.to_string(),
             tag: "v0.2.18".to_string(),
             version: Version::parse("0.2.18").expect("release version"),
-            commit: Some("fd3a7421626c3d5023f2624d02e4f1cc11027bc1".to_string()),
+            commit: Some(release_commit),
         };
         assert!(!should_offer_update_for_build(
             &release,
@@ -684,42 +740,8 @@ mod tests {
 
     #[test]
     fn dirty_source_checkout_still_offers_update() {
-        let temp = TempDir::new().expect("tempdir");
-        let status = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(temp.path())
-            .status()
-            .expect("init git repo");
-        assert!(status.success());
-        let status = std::process::Command::new("git")
-            .args(["remote", "add", "origin", "/home/sam/code/lash"])
-            .current_dir(temp.path())
-            .status()
-            .expect("add origin");
-        assert!(status.success());
-        let status = std::process::Command::new("git")
-            .args(["fetch", "-q", "origin", crate::BUILD_GIT_HEAD])
-            .current_dir(temp.path())
-            .status()
-            .expect("fetch build head");
-        assert!(status.success());
-        let status = std::process::Command::new("git")
-            .args([
-                "fetch",
-                "-q",
-                "origin",
-                "fd3a7421626c3d5023f2624d02e4f1cc11027bc1",
-            ])
-            .current_dir(temp.path())
-            .status()
-            .expect("fetch release head");
-        assert!(status.success());
-        let status = std::process::Command::new("git")
-            .args(["checkout", "-q", "FETCH_HEAD"])
-            .current_dir(temp.path())
-            .status()
-            .expect("checkout build head");
-        assert!(status.success());
+        let temp = prepare_build_checkout();
+        let release_commit = create_metadata_only_release_commit(temp.path());
         std::fs::write(
             temp.path().join("Cargo.toml"),
             std::fs::read_to_string(temp.path().join("Cargo.toml")).expect("read Cargo.toml")
@@ -731,7 +753,7 @@ mod tests {
             repo: DEFAULT_REPO.to_string(),
             tag: "v0.2.18".to_string(),
             version: Version::parse("0.2.18").expect("release version"),
-            commit: Some("fd3a7421626c3d5023f2624d02e4f1cc11027bc1".to_string()),
+            commit: Some(release_commit),
         };
         assert!(build_git_head_is_dirty_at(Some(temp.path())));
         assert!(should_offer_update_for_build(
