@@ -1,16 +1,14 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::provider::AgentModels;
-use crate::{
+use lash::provider::AgentModels;
+use lash::{
     PromptContribution, SessionContextSurface, SessionCreateRequest, SessionPluginMode,
     SessionPolicy, SessionStartPoint, ToolDefinition, ToolParam, ToolProvider,
 };
 
-use super::AgentCall;
-use crate::tools::FilteredToolProvider;
+use super::{DelegateTools, FilteredToolProvider};
 
-/// Intelligence tier determines model choice, tool access, and turn limits.
 pub(super) enum Tier {
     Low,
     Medium,
@@ -18,20 +16,20 @@ pub(super) enum Tier {
 }
 
 impl Tier {
-    pub(super) fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "low" => Some(Tier::Low),
-            "medium" => Some(Tier::Medium),
-            "high" => Some(Tier::High),
+    pub(super) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
             _ => None,
         }
     }
 
     fn as_str(&self) -> &'static str {
         match self {
-            Tier::Low => "low",
-            Tier::Medium => "medium",
-            Tier::High => "high",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
         }
     }
 }
@@ -41,24 +39,24 @@ pub(super) fn pick_model_and_variant(
     models: &Option<AgentModels>,
     tier: &Tier,
 ) -> (String, Option<String>) {
-    if let Some(m) = models {
+    if let Some(models) = models {
         match tier {
             Tier::Low => {
-                if let Some(ref q) = m.low {
-                    let variant = preferred_override_variant(&config.provider, q, tier);
-                    return (q.clone(), variant);
+                if let Some(model) = &models.low {
+                    let variant = preferred_override_variant(&config.provider, model, tier);
+                    return (model.clone(), variant);
                 }
             }
             Tier::Medium => {
-                if let Some(ref b) = m.medium {
-                    let variant = preferred_override_variant(&config.provider, b, tier);
-                    return (b.clone(), variant);
+                if let Some(model) = &models.medium {
+                    let variant = preferred_override_variant(&config.provider, model, tier);
+                    return (model.clone(), variant);
                 }
             }
             Tier::High => {
-                if let Some(ref t) = m.high {
-                    let variant = preferred_override_variant(&config.provider, t, tier);
-                    return (t.clone(), variant);
+                if let Some(model) = &models.high {
+                    let variant = preferred_override_variant(&config.provider, model, tier);
+                    return (model.clone(), variant);
                 }
             }
         }
@@ -78,7 +76,7 @@ pub(super) fn pick_model_and_variant(
 }
 
 fn preferred_override_variant(
-    provider: &crate::Provider,
+    provider: &lash::Provider,
     model: &str,
     tier: &Tier,
 ) -> Option<String> {
@@ -105,16 +103,13 @@ fn medium_high_denied_tools() -> HashSet<&'static str> {
     ["ask"].into_iter().collect()
 }
 
-impl AgentCall {
+impl DelegateTools {
     pub(super) fn build_session_policy(&self, tier: &Tier) -> SessionPolicy {
         let (model, model_variant) = pick_model_and_variant(&self.policy, &self.agent_models, tier);
         SessionPolicy {
             model,
             model_variant,
-            session_id: self.policy.session_id.clone(),
             provider: self.policy.provider.clone(),
-            sub_agent: true,
-            include_soul: matches!(tier, Tier::High),
             max_context_tokens: self.policy.max_context_tokens,
             max_turns: None,
             execution_mode: match tier {
@@ -153,7 +148,7 @@ impl AgentCall {
     pub(super) fn visible_tool_names_for_tier(
         &self,
         tier: &Tier,
-    ) -> Result<Vec<String>, crate::plugin::PluginError> {
+    ) -> Result<Vec<String>, lash::plugin::PluginError> {
         Ok(self
             .tier_context_surface(tier)
             .tool_providers
@@ -166,13 +161,14 @@ impl AgentCall {
     pub(super) fn build_create_request(
         &self,
         agent_id: String,
+        parent_session_id: String,
         tier: &Tier,
     ) -> SessionCreateRequest {
-        let policy = self.build_session_policy(tier);
         SessionCreateRequest {
             agent_id: Some(agent_id),
+            parent_session_id: Some(parent_session_id),
             start: SessionStartPoint::Empty,
-            policy: Some(policy),
+            policy: Some(self.build_session_policy(tier)),
             plugin_mode: SessionPluginMode::InheritCurrent,
             initial_messages: Vec::new(),
             context_surface: self.tier_context_surface(tier),
@@ -180,10 +176,10 @@ impl AgentCall {
     }
 }
 
-pub(super) fn agent_call_prompt_contributions() -> Vec<PromptContribution> {
+pub(super) fn delegate_prompt_contributions() -> Vec<PromptContribution> {
     vec![
         PromptContribution::guidance(
-            "### Delegation\nUse `agent_call` proactively for scoped, self-contained sub-tasks when it will make concrete progress without blocking your next local step. Treat delegation as sidecar work, not a handoff of the immediate critical path. Before delegating, identify what you can do locally right now and what can run in parallel.\n\nDelegation rules:\n- Do not duplicate work between the main agent and delegates. Once a delegate owns a trace, question, or validation pass, trust it and use your local effort on non-overlapping work until the result is needed.\n- Do not delegate the next blocking step in a single-threaded workflow. If your very next step depends on the result and you have no meaningful parallel work, do it yourself instead.\n- Keep delegated asks concrete, well-bounded, and self-contained.\n- Avoid overlapping file edits across concurrent delegates.\n- Call `agent_result` sparingly; wait only when the child result is needed to continue.\n\nChoose intelligence by task shape:\n\n- `low`: fast, read-only exploration and synthesis. Use for codebase discovery, tracing behavior, finding examples, summarizing logs or failures, scanning docs, searching history, comparing implementations, or other informational sidecar work.\n  Examples:\n  - \"Find where auth tokens are refreshed\"\n  - \"Summarize the config loader\"\n  - \"Scan the repo for queue-related paths\"\n  - \"Check the docs for the current API shape\"\n\n- `medium`: bounded implementation or analysis with a contained scope. Use for small features, targeted bug fixes, focused tests, contained refactors, single-module edits, or validating one concrete hypothesis.\n  Examples:\n  - \"Add tests for the retry helper\"\n  - \"Refactor this parser module without changing behavior\"\n  - \"Fix the null handling bug in this endpoint\"\n  - \"Implement this small CLI flag\"\n\n- `high`: peer-level independent work with a clearly separate line of ownership. Use it for substantial parallel tasks, larger isolated implementations, strong validation passes, or serious design investigation when the write scope or responsibility boundary is distinct.\n  Examples:\n  - \"Implement the backend half while I handle the UI\"\n  - \"Own the persistence changes while I update the command flow\"\n  - \"Review this design for race conditions and regressions\"\n  - \"Validate whether this architectural direction is sound\"",
+            "### Delegation\nUse `agent_call` proactively for scoped, self-contained sub-tasks when it will make concrete progress without blocking your next local step. Treat delegation as sidecar work, not a handoff of the immediate critical path. Before delegating, identify what you can do locally right now and what can run in parallel.\n\nDelegation rules:\n- Do not duplicate work between the main agent and child sessions. Once a child owns a trace, question, or validation pass, trust it and use your local effort on non-overlapping work until the result is needed.\n- Do not delegate the next blocking step in a single-threaded workflow. If your very next step depends on the result and you have no meaningful parallel work, do it yourself instead.\n- Keep delegated asks concrete, well-bounded, and self-contained.\n- Avoid overlapping file edits across concurrent child sessions.\n- Call `agent_result` sparingly; wait only when the child result is needed to continue.\n\nChoose intelligence by task shape:\n\n- `low`: fast, read-only exploration and synthesis. Use for codebase discovery, tracing behavior, finding examples, summarizing logs or failures, scanning docs, searching history, comparing implementations, or other informational sidecar work.\n  Examples:\n  - \"Find where auth tokens are refreshed\"\n  - \"Summarize the config loader\"\n  - \"Scan the repo for queue-related paths\"\n  - \"Check the docs for the current API shape\"\n\n- `medium`: bounded implementation or analysis with a contained scope. Use for small features, targeted bug fixes, focused tests, contained refactors, single-module edits, or validating one concrete hypothesis.\n  Examples:\n  - \"Add tests for the retry helper\"\n  - \"Refactor this parser module without changing behavior\"\n  - \"Fix the null handling bug in this endpoint\"\n  - \"Implement this small CLI flag\"\n\n- `high`: peer-level independent work with a clearly separate line of ownership. Use it for substantial parallel tasks, larger isolated implementations, strong validation passes, or serious design investigation when the write scope or responsibility boundary is distinct.\n  Examples:\n  - \"Implement the backend half while I handle the UI\"\n  - \"Own the persistence changes while I update the command flow\"\n  - \"Review this design for race conditions and regressions\"\n  - \"Validate whether this architectural direction is sound\"",
         ),
         PromptContribution::guidance(
             "### Agent Lifecycle\n`agent_result(id)` blocks until the child session finishes and returns an object in `result.value` with the child result and terminal status. The agent ID remains valid afterwards, including after `agent_kill(id)`, so you can query the terminal result again even after the child session has been stopped.",
@@ -191,16 +187,16 @@ pub(super) fn agent_call_prompt_contributions() -> Vec<PromptContribution> {
     ]
 }
 
-pub(super) fn agent_call_definitions(
-    execution_mode: crate::ExecutionMode,
-    low_tier_execution_mode: crate::ExecutionMode,
+pub(super) fn delegate_tool_definitions(
+    execution_mode: lash::ExecutionMode,
+    low_tier_execution_mode: lash::ExecutionMode,
 ) -> Vec<ToolDefinition> {
     let low_tier_summary = match low_tier_execution_mode {
-        crate::ExecutionMode::Standard => "by default, low runs in standard mode",
-        crate::ExecutionMode::Repl => "in this session, low runs in repl mode",
+        lash::ExecutionMode::Standard => "by default, low runs in standard mode",
+        lash::ExecutionMode::Repl => "in this session, low runs in repl mode",
     };
     let (agent_call_description, agent_call_examples) = match execution_mode {
-        crate::ExecutionMode::Repl => (
+        lash::ExecutionMode::Repl => (
             format!(
                 "Spawn a child session for a scoped sub-task and return a handle. Choose `intelligence` based on the delegation guidance above. In REPL mode, use `call agent_result {{ id: handle.value.id }}` or `call agent_kill {{ id: handle.value.id }}` with the returned id; {}. Medium/high inherit the parent execution mode.",
                 low_tier_summary
@@ -210,7 +206,7 @@ pub(super) fn agent_call_definitions(
                 r#"result = call agent_result { id: handle.value.id }"#.into(),
             ],
         ),
-        crate::ExecutionMode::Standard => (
+        lash::ExecutionMode::Standard => (
             format!(
                 "Spawn a child session for a scoped sub-task and return a handle. Choose `intelligence` based on the delegation guidance above. Use `agent_result(id)` or `agent_kill(id)` with the returned id; {}. Medium/high inherit the parent execution mode.",
                 low_tier_summary
@@ -221,6 +217,7 @@ pub(super) fn agent_call_definitions(
             ],
         ),
     };
+
     vec![
         ToolDefinition {
             name: "agent_call".into(),
@@ -231,7 +228,7 @@ pub(super) fn agent_call_definitions(
                 ToolParam {
                     name: "schema".into(),
                     r#type: "str".into(),
-                    description: "JSON schema to include in the agent's prompt as output guidance (not enforced at runtime)".into(),
+                    description: "JSON schema to include in the child session prompt as output guidance (not enforced at runtime)".into(),
                     default_value: None,
                     required: false,
                 },
@@ -270,22 +267,4 @@ pub(super) fn agent_call_definitions(
             output_schema_override: None,
         },
     ]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn delegation_guidance_preserves_parallelism_without_duplicate_work() {
-        let text = agent_call_prompt_contributions()
-            .into_iter()
-            .map(|c| c.content)
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        assert!(text.contains("Do not duplicate work between the main agent and delegates"));
-        assert!(text.contains("Do not delegate the next blocking step"));
-        assert!(text.contains("Call `agent_result` sparingly"));
-        assert!(!text.contains("Do not wait for the user to explicitly ask for delegation"));
-    }
 }

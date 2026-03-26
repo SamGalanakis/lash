@@ -28,7 +28,7 @@ Options:
                                 (required for all benchmark runs)
   --execution-mode <mode>       Lash execution mode: repl|standard
                                 (required for --agent lash; ignored for opencode)
-  --context-strategy <name>     Lash context strategy: rolling_context|recall_agent
+  --context-strategy <name>     Lash context strategy: rolling_context
                                 (optional for --agent lash; ignored for opencode)
   --jobs-dir <path>             Harbor jobs output dir (default: jobs)
   --results-dir <path>          Persistent structured results dir (default: .benchmarks/terminalbench)
@@ -62,7 +62,6 @@ Examples:
   scripts/run-terminalbench.sh --full --execution-mode standard --task "git-*" --variant high
   scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,fix-code-vulnerability --variant high
   scripts/run-terminalbench.sh --sample --execution-mode standard --context-strategy rolling_context --model gpt-5.4 --variant high
-  scripts/run-terminalbench.sh --sample --execution-mode repl --context-strategy recall_agent --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --sample --execution-mode repl --task chess-best-move --model gpt-5.3-codex --variant high
   scripts/run-terminalbench.sh --agent opencode --sample --model openai/gpt-5.4 --variant high
   scripts/run-terminalbench.sh --agent codex --sample --model o3 --variant high
@@ -490,8 +489,8 @@ if [[ "${AGENT}" == "lash" ]]; then
     exit 2
   fi
 
-  if [[ -n "${CONTEXT_STRATEGY}" && "${CONTEXT_STRATEGY}" != "rolling_context" && "${CONTEXT_STRATEGY}" != "recall_agent" ]]; then
-    echo "error: unsupported --context-strategy: ${CONTEXT_STRATEGY} (expected rolling_context|recall_agent)" >&2
+  if [[ -n "${CONTEXT_STRATEGY}" && "${CONTEXT_STRATEGY}" != "rolling_context" ]]; then
+    echo "error: unsupported --context-strategy: ${CONTEXT_STRATEGY} (expected rolling_context)" >&2
     exit 2
   fi
 

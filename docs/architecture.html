@@ -749,7 +749,7 @@
           </div>
           <div class="cell">
             <h4>Context Control</h4>
-            <p>Plugin-owned history compaction with soft/hard watermarks plus <code>search_history</code> for long-running sessions and delegated child workers. The watermark metric is a normalized context-budget count: adjusted input + output + cached prompt tokens.</p>
+            <p>Plugin-owned history compaction with soft/hard watermarks keeps long-running sessions inside their model context window. The watermark metric is a normalized context-budget count: adjusted input + output + cached prompt tokens.</p>
           </div>
           <div class="cell">
             <h4>Execution Surface</h4>
@@ -1384,11 +1384,12 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="arch-card-tag tag-tools"><span class="dot"></span>Delegation</div>
         <div class="arch-card-title">Delegated Child Sessions</div>
         <div class="arch-card-desc">
-          <code>agent_call</code> asks the host session manager to create and run a child session. Delegates share the same
-          filesystem/worktree but get isolated session state, resolved session config, and their own streamed turn lifecycle.
-          Low tier delegates apply a tool-surface overlay that removes write/delegation tools and default to <code>standard</code>
-          via the host-owned <code>runtime.low_tier_subagent_execution_mode</code> setting; medium/high inherit the parent
-          session's execution mode and keep the broader parent surface except for interactive prompting.
+          <code>agent_call</code> is a host-owned tool that uses the session manager's generic child-session primitives to
+          create and run a child session. Delegates share the same filesystem/worktree but get isolated session state,
+          resolved session config, and their own streamed turn lifecycle. Low tier delegates apply a tool-surface overlay
+          that removes write/delegation tools and default to <code>standard</code> via the host-owned
+          <code>runtime.low_tier_delegate_execution_mode</code> setting; medium/high inherit the parent session's execution
+          mode and keep the broader parent surface except for interactive prompting.
         </div>
         <div class="cell-grid cols-3">
           <div class="cell">
@@ -1397,7 +1398,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
           </div>
           <div class="cell">
             <h4>Recall Pattern</h4>
-            <p>Use a low-tier read-only delegate to summarize prior context when needed. Both modes can use <code>search_history</code> for prior-turn recall.</p>
+            <p>Use a low-tier read-only delegate to summarize prior context when needed. Prior turns remain available to the host through persisted session history.</p>
           </div>
           <div class="cell">
             <h4>Constraint</h4>
@@ -1490,7 +1491,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
           </div>
           <div class="cell">
             <h4>Stateful Plugins</h4>
-            <p><code>search_history</code>, plan mode, plan tracking, prompt-context injection, and <code>agent_call</code> all layer their own state and policy on top of the same surface model.</p>
+            <p>Plan mode, plan tracking, prompt-context injection, history persistence, and host-owned delegation tools all layer their own state and policy on top of the same surface model.</p>
           </div>
         </div>
       </div>
@@ -1512,31 +1513,31 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="arch-card-tag tag-history"><span class="dot"></span>History</div>
         <div class="arch-card-title">Persistent Turn History</div>
         <div class="arch-card-desc">
-          History search covers prior completed turns persisted by the runtime, including turns no longer visible in the
-          active prompt window. Sub-agents can inherit parent-agent context at spawn time.
+          Persisted turn history survives context pruning and remains available to the host, even after older messages
+          fall out of the active prompt window. Child sessions can inherit parent context at spawn time.
         </div>
         <div class="cell-grid cols-2">
           <div class="cell">
             <h4>API</h4>
             <p>
-              <code>search_history(query=None, mode="hybrid", regex=None, limit=None, fields=None, since_turn=None)</code> &mdash; search prior completed turns; with no query, list all turns in stable turn order
+              <code>history.summary(limit=5)</code> &mdash; summarize a session's persisted history for host-facing inspection
             </p>
           </div>
           <div class="cell">
             <h4>Sub-Agent Inheritance</h4>
             <p>
-              Sub-agents can inherit parent-agent context at spawn time.
-              A low-tier delegate can call <code>search_history</code> to summarize relevant context without full write access.
+              Child sessions can inherit parent context at spawn time.
+              Hosts can inspect persisted history directly and decide how to roll that context into later work.
             </p>
           </div>
         </div>
 
         <div class="example-block">
-          <div class="example-label">Example &mdash; Recalling prior context (REPL)</div>
+          <div class="example-label">Example &mdash; Inspecting session history (host)</div>
           <pre><span class="tag">&lt;repl&gt;</span>
-<span class="cm"># Find what the user asked about earlier</span>
-hits = <span class="kw">call</span> search_history { query: <span class="str">"database migration"</span>, limit: 5 }
-<span class="kw">observe</span> hits
+<span class="cm"># Ask the runtime for a compact session summary</span>
+summary = <span class="kw">call</span> external <span class="str">"history.summary"</span> { limit: 5 }
+<span class="kw">observe</span> summary
 <span class="tag">&lt;/repl&gt;</span></pre>
         </div>
 
@@ -1551,8 +1552,8 @@ worker = <span class="kw">call</span> agent_call { prompt: <span class="str">"Se
     </div>
 
     <div class="arch-note">
-      Use <code>search_history</code> only when prior-turn recall is actually needed.
-      Skip history-mining detours unless the task explicitly depends on prior turns.
+      Persisted history is a host-side affordance, not a general-purpose model tool.
+      Keep recall logic explicit instead of sending the model on history-mining detours by default.
     </div>
   </div>
 
@@ -1691,7 +1692,7 @@ worker = <span class="kw">call</span> agent_call { prompt: <span class="str">"Se
         <div class="step">
           <span class="step-num">05</span>
           <strong>Context + Output</strong>
-          <p><code>rolling_context</code> prunes older tool output and compacts oversized prefixes; <code>recall_agent</code> trims older context and exposes retrieval helpers. Streamed usage updates keep the TUI token counters live, and the final answer + updated envelope return as one canonical <code>AssembledTurn</code>.</p>
+          <p><code>rolling_context</code> prunes older tool output and compacts oversized prefixes. Streamed usage updates keep the TUI token counters live, and the final answer + updated envelope return as one canonical <code>AssembledTurn</code>.</p>
         </div>
       </div>
     </div>

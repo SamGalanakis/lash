@@ -2959,7 +2959,7 @@ mod tests {
             result: serde_json::json!({
                 "result":"done",
                 "status":"completed",
-                "_sub_agent":{"task":"inspect queue rendering"}
+                "session":{"task":"inspect queue rendering"}
             }),
             success: true,
             duration_ms: 5,

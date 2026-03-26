@@ -37,13 +37,9 @@ pub struct SessionPolicy {
     pub model: String,
     pub provider: Provider,
     pub max_context_tokens: Option<usize>,
-    pub sub_agent: bool,
     pub model_variant: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recall_agent_model: Option<String>,
     pub session_id: Option<String>,
     pub max_turns: Option<usize>,
-    pub include_soul: bool,
     pub execution_mode: ExecutionMode,
     pub context_strategy: ContextStrategy,
 }
@@ -58,12 +54,9 @@ impl Default for SessionPolicy {
                 options: crate::provider::ProviderOptions::default(),
             },
             max_context_tokens: None,
-            sub_agent: false,
             model_variant: None,
-            recall_agent_model: None,
             session_id: None,
             max_turns: None,
-            include_soul: false,
             execution_mode: crate::default_execution_mode(),
             context_strategy: crate::default_context_strategy(),
         }
@@ -135,13 +128,8 @@ pub(crate) fn build_execution_preamble(
         tool_list,
         tool_names,
         omitted_tool_count,
-        is_subagent: policy.sub_agent,
         can_write,
-        include_soul: if policy.sub_agent {
-            policy.include_soul
-        } else {
-            true
-        },
+        include_soul: true,
         contributions: Vec::new(),
     };
 

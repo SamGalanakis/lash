@@ -1,50 +1,30 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use serde_json::json;
 use tokio::sync::Notify;
 
-use crate::{
+use lash::{
     AgentEvent, InputItem, ProgressSender, SandboxMessage, ToolExecutionContext, ToolResult,
     TurnInput,
 };
 
-use super::{AgentCall, Tier};
+use super::{DelegateTools, policy::Tier};
 
-/// A running delegated child session managed by AgentCall.
-pub(super) struct RunningAgent {
+pub(super) struct RunningDelegate {
     pub(super) session_id: String,
+    pub(super) parent_session_id: Option<String>,
     pub(super) turn_id: String,
-    pub(super) host: Arc<dyn crate::SessionManager>,
+    pub(super) host: Arc<dyn lash::SessionManager>,
     pub(super) task: String,
     pub(super) model: String,
     pub(super) model_variant: Option<String>,
-    /// Accumulated prose output from the agent (drainable).
     pub(super) buffer: Arc<StdMutex<String>>,
-    /// Final result once the agent completes.
     pub(super) result: Arc<StdMutex<Option<serde_json::Value>>>,
-    /// Notified when the agent finishes.
     pub(super) done_notify: Arc<Notify>,
-    /// Ensures the child session is only closed once.
-    pub(super) session_closed: Arc<AtomicBool>,
 }
 
-async fn close_session_once(
-    host: &Arc<dyn crate::SessionManager>,
-    session_id: &str,
-    session_closed: &Arc<AtomicBool>,
-) {
-    if session_closed
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
-        let _ = host.close_session(session_id).await;
-    }
-}
-
-impl AgentCall {
-    /// Spawn a child session in the background and return its handle ID.
+impl DelegateTools {
     pub(super) async fn spawn_agent(
         &self,
         args: &serde_json::Value,
@@ -52,20 +32,18 @@ impl AgentCall {
     ) -> ToolResult {
         let prompt = args
             .get("prompt")
-            .and_then(|v| v.as_str())
+            .and_then(|value| value.as_str())
             .unwrap_or_default();
-
         if prompt.is_empty() {
             return ToolResult::err(json!("Missing required parameter: prompt"));
         }
 
         let intelligence = args
             .get("intelligence")
-            .and_then(|v| v.as_str())
+            .and_then(|value| value.as_str())
             .unwrap_or_default();
-
         let tier = match Tier::from_str(intelligence) {
-            Some(t) => t,
+            Some(tier) => tier,
             None => {
                 return ToolResult::err(json!(
                     "Missing or invalid 'intelligence' parameter: must be \"low\", \"medium\", or \"high\""
@@ -75,34 +53,37 @@ impl AgentCall {
 
         let schema = args
             .get("schema")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
 
         let agent_id = uuid::Uuid::new_v4().to_string();
         let session = match context
             .host
-            .create_session(self.build_create_request(agent_id, &tier))
+            .create_session(self.build_create_request(agent_id, context.session_id.clone(), &tier))
             .await
         {
             Ok(session) => session,
             Err(err) => {
-                return ToolResult::err_fmt(format_args!(
-                    "Failed to create delegate session: {err}"
-                ));
+                return ToolResult::err_fmt(format_args!("Failed to create child session: {err}"));
             }
         };
         let agent_execution_mode = session.policy.execution_mode;
 
-        let user_content = if let Some(ref schema_str) = schema {
-            let model_name = serde_json::from_str::<serde_json::Value>(schema_str)
+        let user_content = if let Some(schema_str) = schema {
+            let model_name = serde_json::from_str::<serde_json::Value>(&schema_str)
                 .ok()
-                .and_then(|v| v.get("title").and_then(|t| t.as_str()).map(String::from))
+                .and_then(|value| {
+                    value
+                        .get("title")
+                        .and_then(|title| title.as_str())
+                        .map(str::to_string)
+                })
                 .unwrap_or_else(|| "Result".to_string());
             match agent_execution_mode {
-                crate::ExecutionMode::Repl => format!(
+                lash::ExecutionMode::Repl => format!(
                     "{prompt}\n\nWhen you are done, reply in plain text with a single JSON object matching this schema exactly:\n{schema_str}\n\nDo not wrap the final JSON in `<repl>`, markdown fences, or extra commentary. The object should represent a `{model_name}`."
                 ),
-                crate::ExecutionMode::Standard => format!(
+                lash::ExecutionMode::Standard => format!(
                     "{prompt}\n\nReturn your final answer as a single JSON object matching this schema exactly:\n{schema_str}\n\nDo not wrap it in markdown fences or extra commentary."
                 ),
             }
@@ -125,26 +106,23 @@ impl AgentCall {
             Ok(turn) => turn,
             Err(err) => {
                 let _ = context.host.close_session(&session.session_id).await;
-                return ToolResult::err_fmt(format_args!(
-                    "Failed to start delegate session: {err}"
-                ));
+                return ToolResult::err_fmt(format_args!("Failed to start child session: {err}"));
             }
         };
 
         let buffer = Arc::new(StdMutex::new(String::new()));
         let context_chunks = Arc::new(StdMutex::new(Vec::new()));
-        let result: Arc<StdMutex<Option<serde_json::Value>>> = Arc::new(StdMutex::new(None));
+        let result = Arc::new(StdMutex::new(None));
         let done_notify = Arc::new(Notify::new());
-        let session_closed = Arc::new(AtomicBool::new(false));
 
-        let buf_clone = buffer.clone();
-        let ctx_clone = context_chunks.clone();
-        let res_clone = result.clone();
-        let done_clone = done_notify.clone();
-        let session_closed_clone = session_closed.clone();
+        let buffer_clone = Arc::clone(&buffer);
+        let context_chunks_clone = Arc::clone(&context_chunks);
+        let result_clone = Arc::clone(&result);
+        let done_notify_clone = Arc::clone(&done_notify);
         let host = Arc::clone(&context.host);
         let turn_id = turn.turn_id.clone();
         let session_id = session.session_id.clone();
+        let parent_session_id = session.parent_session_id.clone();
         let task = prompt.to_string();
 
         tokio::spawn(async move {
@@ -155,7 +133,7 @@ impl AgentCall {
                 match event {
                     AgentEvent::TextDelta { content } => {
                         current_prose.push_str(&content);
-                        buf_clone.lock().unwrap().push_str(&content);
+                        buffer_clone.lock().unwrap().push_str(&content);
                     }
                     AgentEvent::Message { text, kind } => {
                         if kind == "final" {
@@ -165,7 +143,7 @@ impl AgentCall {
                     AgentEvent::CodeBlock { .. } => {
                         let trimmed = current_prose.trim().to_string();
                         if !trimmed.is_empty() {
-                            ctx_clone.lock().unwrap().push(trimmed);
+                            context_chunks_clone.lock().unwrap().push(trimmed);
                         }
                         current_prose.clear();
                     }
@@ -176,41 +154,42 @@ impl AgentCall {
             let assembled = host.await_turn(&turn_id).await;
             let mut result_json = match assembled {
                 Ok(turn) => {
-                    let result_text = if let Some(msg) = final_message {
-                        msg
+                    let result_text = if let Some(message) = final_message {
+                        message
                     } else if !current_prose.trim().is_empty() {
                         current_prose.trim().to_string()
                     } else if !turn.assistant_output.raw_text.trim().is_empty() {
                         turn.assistant_output.raw_text.trim().to_string()
                     } else {
-                        ctx_clone.lock().unwrap().join("\n\n")
+                        context_chunks_clone.lock().unwrap().join("\n\n")
                     };
                     let status = match turn.status {
-                        crate::TurnStatus::Completed => "completed",
-                        crate::TurnStatus::Interrupted => "interrupted",
-                        crate::TurnStatus::Failed => "failed",
+                        lash::TurnStatus::Completed => "completed",
+                        lash::TurnStatus::Interrupted => "interrupted",
+                        lash::TurnStatus::Failed => "failed",
                     };
-
-                    // Build child tool call summaries for the UI.
-                    let all_tool_calls = &turn.state.tool_calls;
-                    let tool_call_summaries: Vec<serde_json::Value> = all_tool_calls
+                    let tool_call_summaries = turn
+                        .state
+                        .tool_calls
                         .iter()
-                        .map(|tc| {
+                        .map(|tool_call| {
                             json!({
-                                "tool": tc.tool,
-                                "success": tc.success,
-                                "duration_ms": tc.duration_ms,
+                                "tool": tool_call.tool,
+                                "success": tool_call.success,
+                                "duration_ms": tool_call.duration_ms,
                             })
                         })
-                        .collect();
+                        .collect::<Vec<_>>();
 
                     json!({
                         "result": result_text,
                         "status": status,
-                        "_sub_agent": {
+                        "session": {
+                            "id": session_id,
+                            "parent_session_id": parent_session_id,
                             "task": task,
                             "iterations": turn.state.iteration,
-                            "tool_calls": all_tool_calls.len(),
+                            "tool_calls": turn.state.tool_calls.len(),
                             "tool_call_details": tool_call_summaries,
                             "model": turn.state.policy.model,
                             "model_variant": turn.state.policy.model_variant,
@@ -240,15 +219,15 @@ impl AgentCall {
                 result_json["result"] = json!(current_prose.trim());
             }
 
-            close_session_once(&host, &session_id, &session_closed_clone).await;
-            *res_clone.lock().unwrap() = Some(result_json);
-            done_clone.notify_waiters();
+            *result_clone.lock().unwrap() = Some(result_json);
+            done_notify_clone.notify_waiters();
         });
 
-        self.agents.lock().unwrap().insert(
+        self.delegates.lock().unwrap().insert(
             session.session_id.clone(),
-            RunningAgent {
+            RunningDelegate {
                 session_id: session.session_id.clone(),
+                parent_session_id: session.parent_session_id.clone(),
                 turn_id: turn.turn_id,
                 host: Arc::clone(&context.host),
                 task: prompt.to_string(),
@@ -257,20 +236,19 @@ impl AgentCall {
                 buffer,
                 result,
                 done_notify,
-                session_closed,
             },
         );
 
         ToolResult::ok(json!({
             "__handle__": "agent",
             "id": session.session_id,
+            "parent_session_id": session.parent_session_id,
             "model": session.policy.model,
             "model_variant": session.policy.model_variant,
             "execution_mode": session.policy.execution_mode,
         }))
     }
 
-    /// Wait for agent completion and return the result.
     pub(super) async fn agent_result(
         &self,
         id: &str,
@@ -278,67 +256,68 @@ impl AgentCall {
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
         let (
-            result_arc,
+            result,
             done_notify,
             buffer,
             session_id,
+            parent_session_id,
             turn_id,
             host,
             task,
             model,
             model_variant,
-            session_closed,
         ) = {
-            let agents = self.agents.lock().unwrap();
-            match agents.get(id) {
-                Some(a) => (
-                    a.result.clone(),
-                    a.done_notify.clone(),
-                    a.buffer.clone(),
-                    a.session_id.clone(),
-                    a.turn_id.clone(),
-                    Arc::clone(&a.host),
-                    a.task.clone(),
-                    a.model.clone(),
-                    a.model_variant.clone(),
-                    a.session_closed.clone(),
+            let delegates = self.delegates.lock().unwrap();
+            match delegates.get(id) {
+                Some(delegate) => (
+                    Arc::clone(&delegate.result),
+                    Arc::clone(&delegate.done_notify),
+                    Arc::clone(&delegate.buffer),
+                    delegate.session_id.clone(),
+                    delegate.parent_session_id.clone(),
+                    delegate.turn_id.clone(),
+                    Arc::clone(&delegate.host),
+                    delegate.task.clone(),
+                    delegate.model.clone(),
+                    delegate.model_variant.clone(),
                 ),
                 None => return ToolResult::err_fmt(format_args!("No agent with id: {id}")),
             }
         };
 
-        let deadline =
-            timeout.map(|t| tokio::time::Instant::now() + std::time::Duration::from_secs_f64(t));
-
+        let deadline = timeout
+            .map(|value| tokio::time::Instant::now() + std::time::Duration::from_secs_f64(value));
         let mut sent_len = 0usize;
         let mut sent_start = false;
 
         loop {
-            let done = result_arc.lock().unwrap().is_some();
+            let done = result.lock().unwrap().is_some();
 
-            if let Some(tx) = progress {
+            if let Some(progress) = progress {
                 if !sent_start {
-                    let _ = tx.send(SandboxMessage {
+                    let _ = progress.send(SandboxMessage {
                         text: json!({
                             "name": "delegate",
                             "task": task.clone(),
                             "model": model.clone(),
                             "model_variant": model_variant.clone(),
                             "id": session_id.clone(),
+                            "parent_session_id": parent_session_id.clone(),
                         })
                         .to_string(),
                         kind: "delegate_start".into(),
                     });
                     sent_start = true;
                 }
-                let buf = buffer.lock().unwrap();
-                if buf.len() > sent_len {
-                    let new_chunk = &buf[sent_len..];
-                    let _ = tx.send(SandboxMessage {
+
+                let buffer = buffer.lock().unwrap();
+                if buffer.len() > sent_len {
+                    let new_chunk = &buffer[sent_len..];
+                    let _ = progress.send(SandboxMessage {
                         text: new_chunk.to_string(),
                         kind: "tool_output".into(),
                     });
-                    sent_len = buf.len();
+                    sent_len = buffer.len();
                 }
             }
 
@@ -346,14 +325,13 @@ impl AgentCall {
                 break;
             }
 
-            if let Some(dl) = deadline
-                && tokio::time::Instant::now() >= dl
+            if let Some(deadline) = deadline
+                && tokio::time::Instant::now() >= deadline
             {
                 let _ = host.cancel_turn(&turn_id).await;
                 let _ =
                     tokio::time::timeout(std::time::Duration::from_secs(5), done_notify.notified())
                         .await;
-                close_session_once(&host, &session_id, &session_closed).await;
                 return ToolResult::err(json!("Agent timed out"));
             }
 
@@ -363,21 +341,18 @@ impl AgentCall {
             }
         }
 
-        let result = result_arc.lock().unwrap().clone().unwrap_or(json!(null));
-        ToolResult::ok(result)
+        let result = result.lock().unwrap();
+        ToolResult::ok(result.clone().unwrap_or(serde_json::Value::Null))
     }
 
-    /// Cancel a running agent.
     pub(super) async fn agent_kill(&self, id: &str) -> ToolResult {
-        let (turn_id, session_id, done_notify, host, session_closed) = {
-            let agents = self.agents.lock().unwrap();
-            match agents.get(id) {
-                Some(a) => (
-                    a.turn_id.clone(),
-                    a.session_id.clone(),
-                    a.done_notify.clone(),
-                    Arc::clone(&a.host),
-                    a.session_closed.clone(),
+        let (turn_id, done_notify, host) = {
+            let delegates = self.delegates.lock().unwrap();
+            match delegates.get(id) {
+                Some(delegate) => (
+                    delegate.turn_id.clone(),
+                    Arc::clone(&delegate.done_notify),
+                    Arc::clone(&delegate.host),
                 ),
                 None => return ToolResult::err_fmt(format_args!("No agent with id: {id}")),
             }
@@ -386,7 +361,6 @@ impl AgentCall {
         let _ = host.cancel_turn(&turn_id).await;
         let _ =
             tokio::time::timeout(std::time::Duration::from_secs(5), done_notify.notified()).await;
-        close_session_once(&host, &session_id, &session_closed).await;
         ToolResult::ok(json!(null))
     }
 }

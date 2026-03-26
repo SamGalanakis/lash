@@ -528,6 +528,7 @@ mod tests {
         ) -> Result<SessionHandle, PluginError> {
             Ok(SessionHandle {
                 session_id: "s".to_string(),
+                parent_session_id: None,
                 policy: SessionPolicy {
                     provider: crate::Provider::OpenAiGeneric {
                         api_key: String::new(),

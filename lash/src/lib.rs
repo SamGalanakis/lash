@@ -11,6 +11,7 @@ pub mod oauth;
 pub mod plugin;
 pub mod provider;
 pub mod runtime;
+#[cfg(feature = "sqlite-store")]
 mod search;
 pub mod session;
 pub mod skill_catalog;
@@ -135,7 +136,7 @@ pub use skill_prompt::{
 #[cfg(feature = "sqlite-store")]
 pub use store::{AgentState, Store};
 pub use text::strip_repl_fragments;
-pub use tools::{AgentCallPluginFactory, DefaultToolPluginDeps, default_tool_plugin_factories};
+pub use tools::{DefaultToolPluginDeps, default_tool_plugin_factories};
 
 /// A message sent from the sandbox to the host during execution.
 #[derive(Clone, Debug)]

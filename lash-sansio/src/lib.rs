@@ -41,42 +41,11 @@ pub fn default_execution_mode() -> ExecutionMode {
 pub enum ContextStrategy {
     #[default]
     RollingContext,
-    RecallAgent {
-        #[serde(default = "ContextStrategy::default_recall_agent_keep_recent_pct")]
-        keep_recent_pct: u8,
-    },
 }
 
 impl ContextStrategy {
-    pub const fn default_recall_agent_keep_recent_pct() -> u8 {
-        10
-    }
-
-    pub fn recall_agent(keep_recent_pct: u8) -> Result<Self, String> {
-        let strategy = Self::RecallAgent { keep_recent_pct };
-        strategy.validate()?;
-        Ok(strategy)
-    }
-
-    pub fn recall_agent_default() -> Self {
-        Self::RecallAgent {
-            keep_recent_pct: Self::default_recall_agent_keep_recent_pct(),
-        }
-    }
-
     pub fn validate(self) -> Result<Self, String> {
-        match self {
-            Self::RollingContext => Ok(self),
-            Self::RecallAgent { keep_recent_pct } => {
-                if keep_recent_pct == 0 || keep_recent_pct >= 100 {
-                    return Err(
-                        "recall_agent keep_recent_pct must be greater than 0 and less than 100"
-                            .to_string(),
-                    );
-                }
-                Ok(self)
-            }
-        }
+        Ok(self)
     }
 }
 
@@ -417,7 +386,6 @@ pub struct PromptContext {
     pub tool_list: String,
     pub tool_names: Vec<String>,
     pub omitted_tool_count: usize,
-    pub is_subagent: bool,
     pub can_write: bool,
     pub include_soul: bool,
     pub contributions: Vec<PromptContribution>,

@@ -656,13 +656,16 @@ impl SessionManager for RuntimeSessionManager {
             }
             SessionStartPoint::Snapshot { snapshot } => (**snapshot).clone(),
         };
-        let policy = request
+        let mut policy = request
             .policy
             .clone()
             .unwrap_or_else(|| match &request.start {
                 SessionStartPoint::Empty => self.current_policy.clone(),
                 _ => snapshot.policy.clone(),
             });
+        if request.parent_session_id.is_some() {
+            policy.session_id = Some(agent_id.clone());
+        }
         let state = self.build_runtime_state(agent_id.clone(), &request, snapshot, &policy);
         let plugins = match request.plugin_mode {
             crate::SessionPluginMode::Fresh => self
@@ -714,6 +717,7 @@ impl SessionManager for RuntimeSessionManager {
             .insert(agent_id.clone(), Arc::new(Mutex::new(runtime)));
         Ok(SessionHandle {
             session_id: agent_id,
+            parent_session_id: request.parent_session_id,
             policy,
         })
     }
@@ -1327,11 +1331,6 @@ impl LashRuntime {
             prompt_usage: previous_prompt_usage.clone(),
             max_context_tokens: Some(LashRuntime::max_context_tokens(self)),
             host: Arc::clone(&manager),
-            #[cfg(feature = "sqlite-store")]
-            store: self
-                .session
-                .as_ref()
-                .and_then(|session| session.history_store()),
         })
         .await
         .map_err(|err| RuntimeError {
@@ -2984,8 +2983,6 @@ mod tests {
     use crate::llm::transport::LlmTransportError;
     use crate::llm::types::{LlmRequest, LlmUsage};
     use crate::plugin::StaticPluginFactory;
-    #[cfg(feature = "sqlite-store")]
-    use crate::plugin::history::HistoryTools;
     use crate::provider::Provider;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
@@ -3883,6 +3880,7 @@ mod tests {
                                         .host
                                         .create_session(crate::SessionCreateRequest {
                                             agent_id: Some("branched".to_string()),
+                                            parent_session_id: None,
                                             start: crate::SessionStartPoint::CurrentSession,
                                             policy: None,
                                             plugin_mode: crate::SessionPluginMode::InheritCurrent,
@@ -3988,6 +3986,7 @@ mod tests {
         let handle = manager
             .create_session(crate::SessionCreateRequest {
                 agent_id: Some("child".to_string()),
+                parent_session_id: None,
                 start: crate::SessionStartPoint::Empty,
                 policy: None,
                 plugin_mode: crate::SessionPluginMode::InheritCurrent,
@@ -4062,6 +4061,7 @@ mod tests {
         let handle = manager
             .create_session(crate::SessionCreateRequest {
                 agent_id: Some("memory-child".to_string()),
+                parent_session_id: None,
                 start: crate::SessionStartPoint::Empty,
                 policy: None,
                 plugin_mode: crate::SessionPluginMode::Fresh,
@@ -4940,7 +4940,7 @@ mod tests {
 
     #[cfg(feature = "sqlite-store")]
     #[tokio::test]
-    async fn completed_turns_are_persisted_for_search_history() {
+    async fn completed_turns_are_persisted_for_history_export() {
         let transport = MockTransport::new(vec![MockCall {
             stream_events: vec![LlmStreamEvent::Delta("Stored answer".to_string())],
             response: Ok(LlmResponse {
@@ -4986,23 +4986,11 @@ mod tests {
             .await
             .expect("turn");
 
-        let result = HistoryTools::new(Arc::clone(&store)).search_history(&serde_json::json!({
-            "__agent_id__":"root",
-            "query":"where did this go",
-            "mode":"hybrid",
-            "limit":10
-        }));
-        assert!(result.success);
-        let items = result.result.as_array().cloned().unwrap_or_default();
+        let items = store.history_export("root");
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].get("turn").and_then(|v| v.as_i64()), Some(1));
-        assert!(
-            items[0]
-                .get("preview")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .contains("where did this go")
-        );
+        assert_eq!(items[0].index, 1);
+        assert_eq!(items[0].user_message, "where did this go?");
+        assert_eq!(items[0].prose, "Stored answer");
     }
 
     #[cfg(feature = "sqlite-store")]

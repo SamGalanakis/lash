@@ -560,7 +560,7 @@ mod tests {
             ToolResultProjectionContext {
                 hook: ToolResultProjectionHook::BeforeModel,
                 session_id: "root".to_string(),
-                tool_name: "search_history".to_string(),
+                tool_name: "search_tools".to_string(),
                 args: json!({}),
                 result: ToolResult::ok(json!({
                     "results": [{"output": "x".repeat(200)}]

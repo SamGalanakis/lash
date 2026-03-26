@@ -4,6 +4,7 @@ mod autonomous;
 mod bootstrap;
 mod cli_support;
 mod command;
+mod delegate_tools;
 mod diff;
 mod event;
 mod fork;
@@ -98,7 +99,7 @@ struct Args {
     #[arg(long = "execution-mode")]
     execution_mode: Option<String>,
 
-    /// Context strategy (`rolling_context` or `recall_agent`)
+    /// Context strategy (`rolling_context`)
     #[arg(long = "context-strategy")]
     context_strategy: Option<String>,
 

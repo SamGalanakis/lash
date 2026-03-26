@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use super::history::HistoryTools;
 use super::plan_mode::{PlanModePluginConfig, PlanModePluginFactory};
 use super::plan_tracker::PlanTrackerPluginFactory;
 use super::*;
@@ -11,13 +10,12 @@ use crate::instructions::InstructionSource;
 use crate::plugin::{
     PluginDirective, PluginError, PromptHookContext, ToolCallHookContext, ToolSurfaceContext,
 };
-use crate::store::Store;
 use crate::tools::StateToolsPluginFactory;
 use crate::{
     AgentStateEnvelope, AssembledTurn, AssistantOutput, DoneReason, ExecutionMode, MessageRole,
     OutputState, PluginHost, SessionCreateRequest, SessionHandle, SessionManager, SessionPolicy,
-    SessionSnapshot, TokenUsage, ToolDefinition, ToolProvider, TurnHookContext, TurnInput,
-    TurnResultHookContext, TurnStatus,
+    SessionSnapshot, TokenUsage, ToolDefinition, TurnHookContext, TurnInput, TurnResultHookContext,
+    TurnStatus,
 };
 
 struct MockSessionManager;
@@ -70,6 +68,7 @@ impl SessionManager for MockSessionManager {
     ) -> Result<SessionHandle, PluginError> {
         Ok(SessionHandle {
             session_id: request.agent_id.unwrap_or_else(|| "child".to_string()),
+            parent_session_id: request.parent_session_id,
             policy: crate::SessionPolicy {
                 provider: crate::Provider::OpenAiGeneric {
                     api_key: String::new(),
@@ -151,64 +150,6 @@ fn empty_turn(session_id: &str) -> AssembledTurn {
         code_outputs: Vec::new(),
         errors: Vec::new(),
     }
-}
-
-#[cfg(feature = "sqlite-store")]
-#[test]
-fn history_tools_expose_search_history_tool() {
-    let store = Arc::new(Store::memory().expect("store"));
-    let defs = HistoryTools::new(store).definitions();
-    let defs = defs
-        .into_iter()
-        .filter(|def| def.name == "search_history")
-        .collect::<Vec<_>>();
-
-    assert_eq!(defs.len(), 1);
-    assert!(defs[0].enabled);
-    assert!(defs[0].injected);
-}
-
-#[cfg(feature = "sqlite-store")]
-#[test]
-fn search_history_lists_all_without_query_in_stable_turn_order() {
-    let store = Arc::new(Store::memory().expect("store"));
-    store.history_add_turn(
-        "root",
-        &json!({
-            "index": 2,
-            "user_message": "second",
-            "prose": "",
-            "code": "",
-            "output": "",
-            "tool_calls": [],
-            "files_read": [],
-            "files_written": [],
-        }),
-    );
-    store.history_add_turn(
-        "root",
-        &json!({
-            "index": 1,
-            "user_message": "first",
-            "prose": "",
-            "code": "",
-            "output": "",
-            "tool_calls": [],
-            "files_read": [],
-            "files_written": [],
-        }),
-    );
-    let tools = HistoryTools::new(store);
-
-    let result = tools.search_history(&json!({ "__agent_id__": "root" }));
-
-    assert!(result.success);
-    let items = result.result.as_array().cloned().unwrap_or_default();
-    assert_eq!(items.len(), 2);
-    assert_eq!(items[0]["turn"], 1);
-    assert_eq!(items[1]["turn"], 2);
-    assert!(items[0].get("score").is_none());
-    assert!(items[0].get("field_hits").is_none());
 }
 
 #[tokio::test]
