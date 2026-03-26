@@ -150,22 +150,28 @@ pub struct LlmAttachment {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LlmPromptPart {
-    Text(String),
-    Image(usize),
+pub struct LlmJsonSchema {
+    pub name: String,
+    pub schema: serde_json::Value,
+    pub strict: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LlmOutputSpec {
+    JsonObject,
+    JsonSchema(LlmJsonSchema),
 }
 
 #[derive(Clone, Debug)]
 pub struct LlmRequest {
     pub model: String,
-    pub system_prompt: String,
-    pub user_prompt: Vec<LlmPromptPart>,
     pub messages: Vec<LlmMessage>,
     pub attachments: Vec<LlmAttachment>,
     pub tools: Vec<LlmToolSpec>,
     pub tool_choice: LlmToolChoice,
     pub model_variant: Option<String>,
     pub session_id: Option<String>,
+    pub output_spec: Option<LlmOutputSpec>,
     pub stream_events: Option<LlmEventSender>,
 }
 

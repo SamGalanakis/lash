@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod direct;
 pub mod dynamic;
 pub mod embedded;
 pub mod instructions;
@@ -75,6 +76,10 @@ pub fn default_skill_dirs() -> Vec<PathBuf> {
 
 // Re-exports
 pub use agent::SessionPolicy;
+pub use direct::{
+    DirectJsonSchema, DirectLlmClient, DirectLlmError, DirectMessage, DirectOutputSpec, DirectPart,
+    DirectRequest, DirectRole,
+};
 pub use dynamic::{
     DynamicStateSnapshot, DynamicToolProvider, DynamicToolSpec, InProcessToolExecutionAdapter,
     InProcessToolFuture, InProcessToolHandler, ReconfigureError, ToolExecutionAdapter,

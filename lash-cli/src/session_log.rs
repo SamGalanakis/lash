@@ -8,7 +8,7 @@ use lash::agent::{Message, MessageRole, PartKind};
 use lash::store::SessionMetaSave;
 use lash::{Store, TokenUsage};
 
-use crate::app::{DisplayBlock, PersistedUiState};
+use crate::app::{DisplayBlock, PersistedLiveTurnState, PersistedUiState};
 
 pub struct SessionInfo {
     pub filename: String,
@@ -29,6 +29,7 @@ pub struct LoadedSession {
     pub blocks: Vec<DisplayBlock>,
     pub last_token_usage: TokenUsage,
     pub plugin_mode_indicators: BTreeMap<String, String>,
+    pub live_turn: Option<PersistedLiveTurnState>,
 }
 
 pub struct SessionLogger {
@@ -276,6 +277,7 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
         blocks: ui_state.blocks,
         last_token_usage: ui_state.last_response_usage,
         plugin_mode_indicators: ui_state.plugin_mode_indicators,
+        live_turn: ui_state.live_turn,
     })
 }
 
@@ -399,6 +401,11 @@ mod tests {
                         "plan_mode".to_string(),
                         "plan".to_string(),
                     )]),
+                    live_turn: Some(PersistedLiveTurnState {
+                        status_text: "retrying".to_string(),
+                        status_detail: Some("in 5s".to_string()),
+                        has_visible_output: false,
+                    }),
                 },
             );
 
@@ -416,6 +423,13 @@ mod tests {
             assert_eq!(
                 loaded.plugin_mode_indicators.get("plan_mode"),
                 Some(&"plan".to_string())
+            );
+            assert_eq!(
+                loaded
+                    .live_turn
+                    .as_ref()
+                    .map(|turn| turn.status_text.as_str()),
+                Some("retrying")
             );
         });
     }

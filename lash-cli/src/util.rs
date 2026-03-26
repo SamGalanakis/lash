@@ -30,7 +30,7 @@ pub fn manual_interrupt_message() -> &'static str {
     "Manually interrupted."
 }
 
-pub fn is_manual_interrupt_error(message: &str, code: Option<&str>) -> bool {
+pub fn is_cancelled_error(message: &str, code: Option<&str>) -> bool {
     if code.is_some_and(|code| matches!(code, "cancelled" | "canceled")) {
         return true;
     }

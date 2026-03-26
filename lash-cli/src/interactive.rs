@@ -24,10 +24,10 @@ use crate::{
     cleanup_terminal, configure_terminal_ui, controls_text, ensure_supported_execution_mode,
     execution_mode_label, execution_mode_usage, hash12, help_text, info_text,
     latest_user_prompt_hash, normalize_prepared_turn_for_dispatch, parse_execution_mode,
-    parse_model_selection, persist_live_runtime_snapshot, persist_root_agent_state,
-    plan_mode_toggle, push_system_message, resolve_model_selection, resolve_model_variant,
-    shell_escape_command, sync_plan_mode, turn_has_visible_output, validate_model_selection,
-    variant_lines, version_text,
+    parse_model_selection, persist_live_runtime_snapshot, persist_live_ui_state,
+    persist_root_agent_state, plan_mode_toggle, push_system_message, resolve_model_selection,
+    resolve_model_variant, shell_escape_command, sync_plan_mode, turn_has_visible_output,
+    validate_model_selection, variant_lines, version_text,
 };
 
 /// Returned by the spawned runtime task so we can reclaim ownership.
@@ -1505,6 +1505,7 @@ pub(crate) async fn run_app(
                         app.dismiss_session_picker();
                     } else if app.running {
                         // Interrupt running agent
+                        app.note_manual_interrupt_requested();
                         if let Some(token) = cancel_token.take() {
                             token.cancel();
                         }
@@ -2146,8 +2147,19 @@ pub(crate) async fn run_app(
                         response_tx,
                     });
                 } else {
-                    let is_done = matches!(event, AgentEvent::Done);
+                    let is_done = matches!(&event, AgentEvent::Done);
+                    let should_persist_live_ui = runtime_return_rx.is_some()
+                        && matches!(
+                            &event,
+                            AgentEvent::LlmRequest { .. }
+                                | AgentEvent::RetryStatus { .. }
+                                | AgentEvent::Error { .. }
+                                | AgentEvent::Done
+                        );
                     app.handle_agent_event(event);
+                    if should_persist_live_ui {
+                        persist_live_ui_state(&store, &app.persisted_ui_state());
+                    }
                     if is_done && !app.focused {
                         notify_done();
                     }

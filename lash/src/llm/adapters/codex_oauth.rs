@@ -8,7 +8,7 @@ use crate::llm::timeouts::{
 };
 use crate::llm::transport::{LlmTransport, LlmTransportError};
 use crate::llm::types::{
-    LlmMessage, LlmOutputPart, LlmPromptPart, LlmReplayChunk, LlmRequest, LlmResponse, LlmRole,
+    LlmMessage, LlmOutputPart, LlmOutputSpec, LlmReplayChunk, LlmRequest, LlmResponse, LlmRole,
     LlmStreamEvent, LlmUsage, ModelSelection, coalesce_replay_messages,
 };
 use crate::provider::Provider;
@@ -46,28 +46,6 @@ impl CodexOAuthAdapter {
         })
     }
 
-    fn user_input_item(req: &LlmRequest) -> Value {
-        let mut content = Vec::new();
-        for part in &req.user_prompt {
-            match part {
-                LlmPromptPart::Text(text) => {
-                    if !text.is_empty() {
-                        content.push(json!({"type": "input_text", "text": text}));
-                    }
-                }
-                LlmPromptPart::Image(idx) => {
-                    if let Some(att) = req.attachments.get(*idx) {
-                        content.push(Self::input_image_part(att));
-                    }
-                }
-            }
-        }
-        json!({
-            "role": "user",
-            "content": content,
-        })
-    }
-
     fn role_name(role: &LlmRole) -> &'static str {
         match role {
             LlmRole::User => "user",
@@ -96,12 +74,17 @@ impl CodexOAuthAdapter {
         }
     }
 
-    fn build_input(req: &LlmRequest) -> Vec<Value> {
+    fn build_input(req: &LlmRequest) -> (String, Vec<Value>) {
         let mut input = Vec::new();
+        let mut instructions = Vec::new();
         for chunk in coalesce_replay_messages(&req.messages) {
             match chunk {
                 LlmReplayChunk::Message(msg) => {
-                    if msg.kind == "tool_result" {
+                    if matches!(msg.role, LlmRole::System) && msg.kind != "tool_result" {
+                        if !msg.content.is_empty() {
+                            instructions.push(msg.content);
+                        }
+                    } else if msg.kind == "tool_result" {
                         input.push(json!({
                             "type": "function_call_output",
                             "call_id": msg.tool_call_id.unwrap_or_default(),
@@ -141,15 +124,7 @@ impl CodexOAuthAdapter {
                 }
             }
         }
-        let user_item = Self::user_input_item(req);
-        if user_item
-            .get("content")
-            .and_then(Value::as_array)
-            .is_some_and(|content| !content.is_empty())
-        {
-            input.push(user_item);
-        }
-        input
+        (instructions.join("\n\n"), input)
     }
 
     fn build_tools(req: &LlmRequest) -> Vec<Value> {
@@ -187,10 +162,11 @@ impl CodexOAuthAdapter {
 
     fn build_request_body(req: &LlmRequest, stream: bool) -> Value {
         let tools = Self::build_tools(req);
+        let (instructions, input) = Self::build_input(req);
         let mut body = json!({
             "model": req.model,
-            "instructions": req.system_prompt,
-            "input": Self::build_input(req),
+            "instructions": instructions,
+            "input": input,
             "tools": tools,
             "tool_choice": Self::tool_choice_value(&req.tool_choice),
             "parallel_tool_calls": !req.tools.is_empty(),
@@ -203,6 +179,19 @@ impl CodexOAuthAdapter {
         }
         if let Some(session_id) = req.session_id.as_deref() {
             body["prompt_cache_key"] = json!(session_id);
+        }
+        if let Some(output_spec) = &req.output_spec {
+            body["text"] = json!({
+                "format": match output_spec {
+                    LlmOutputSpec::JsonObject => json!({ "type": "json_object" }),
+                    LlmOutputSpec::JsonSchema(schema) => json!({
+                        "type": "json_schema",
+                        "name": schema.name,
+                        "schema": schema.schema,
+                        "strict": schema.strict,
+                    }),
+                }
+            });
         }
         body
     }
@@ -916,6 +905,7 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
             tool_choice: crate::llm::types::LlmToolChoice::Auto,
             model_variant: None,
             session_id: None,
+            output_spec: None,
             stream_events: None,
         };
 
@@ -958,6 +948,7 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
             tool_choice: crate::llm::types::LlmToolChoice::Auto,
             model_variant: None,
             session_id: None,
+            output_spec: None,
             stream_events: None,
         };
 
@@ -983,6 +974,7 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
             tool_choice: crate::llm::types::LlmToolChoice::None,
             model_variant: None,
             session_id: Some("sess-123".to_string()),
+            output_spec: None,
             stream_events: None,
         };
 
@@ -1005,6 +997,7 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
             tool_choice: crate::llm::types::LlmToolChoice::None,
             model_variant: None,
             session_id: None,
+            output_spec: None,
             stream_events: None,
         };
 
@@ -1039,6 +1032,7 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
             tool_choice: crate::llm::types::LlmToolChoice::Auto,
             model_variant: None,
             session_id: None,
+            output_spec: None,
             stream_events: None,
         };
 
@@ -1050,6 +1044,35 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
         assert_eq!(body["tools"][0]["name"], "find");
         assert_eq!(body["tools"][0]["strict"], false);
         assert!(body["tools"][0].get("output_schema").is_none());
+    }
+
+    #[test]
+    fn build_request_body_adds_text_format_for_structured_output() {
+        let req = LlmRequest {
+            model: "gpt-5.4".to_string(),
+            system_prompt: "sys".to_string(),
+            user_prompt: vec![LlmPromptPart::Text("hello".to_string())],
+            messages: vec![],
+            attachments: vec![],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::None,
+            model_variant: None,
+            session_id: None,
+            output_spec: Some(crate::llm::types::LlmOutputSpec::JsonSchema(
+                crate::llm::types::LlmJsonSchema {
+                    name: "shape".to_string(),
+                    schema: json!({"type": "object", "properties": {"name": {"type": "string"}}}),
+                    strict: true,
+                },
+            )),
+            stream_events: None,
+        };
+
+        let body = CodexOAuthAdapter::build_request_body(&req, false);
+
+        assert_eq!(body["text"]["format"]["type"], "json_schema");
+        assert_eq!(body["text"]["format"]["name"], "shape");
+        assert_eq!(body["text"]["format"]["strict"], true);
     }
 
     #[test]
@@ -1070,6 +1093,7 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
             tool_choice: crate::llm::types::LlmToolChoice::None,
             model_variant: None,
             session_id: None,
+            output_spec: None,
             stream_events: None,
         };
 
@@ -1095,6 +1119,7 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
             tool_choice: crate::llm::types::LlmToolChoice::None,
             model_variant: None,
             session_id: None,
+            output_spec: None,
             stream_events: None,
         };
 
@@ -1132,6 +1157,7 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
             tool_choice: crate::llm::types::LlmToolChoice::None,
             model_variant: None,
             session_id: None,
+            output_spec: None,
             stream_events: None,
         };
 

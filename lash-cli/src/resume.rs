@@ -73,6 +73,7 @@ pub async fn load_resumed_session(
     app.last_response_usage = loaded.last_token_usage;
     app.last_prompt_usage = None;
     app.plugin_mode_indicators = loaded.plugin_mode_indicators;
+    app.live_turn = loaded.live_turn.map(Into::into);
     app.blocks.push(DisplayBlock::SystemMessage(format!(
         "Resumed: {}",
         filename

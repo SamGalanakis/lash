@@ -18,8 +18,7 @@ use crate::agent::{
     make_error_envelope, make_error_event, parse_fence_line, render_prompt, truncate_raw_error,
 };
 use crate::llm::types::{
-    LlmAttachment, LlmOutputPart, LlmPromptPart, LlmRequest, LlmResponse, LlmToolChoice,
-    LlmToolSpec, LlmUsage,
+    LlmAttachment, LlmOutputPart, LlmRequest, LlmResponse, LlmToolChoice, LlmToolSpec, LlmUsage,
 };
 use crate::{CheckpointKind, ExecutionMode, PluginMessage, ToolCallRecord, ToolResult};
 
@@ -54,6 +53,7 @@ pub enum LogEvent {
         usage: TokenUsage,
         request_body: Option<String>,
         response_text: String,
+        response_parts: Option<Value>,
     },
 }
 
@@ -372,19 +372,25 @@ impl TurnMachine {
         let rendered_prompt = render_prompt(&self.messages, self.config.execution_mode);
 
         let is_standard = matches!(self.config.execution_mode, ExecutionMode::Standard);
-        let has_structured_messages = !rendered_prompt.messages.is_empty();
-
         let attachments: Vec<LlmAttachment> = rendered_prompt.attachments;
-        let mut user_prompt = rendered_prompt.user_prompt;
-        if !has_structured_messages {
-            user_prompt.extend((0..attachments.len()).map(LlmPromptPart::Image));
+        let mut messages = rendered_prompt.messages;
+        if !system_prompt.trim().is_empty() {
+            messages.insert(
+                0,
+                crate::llm::types::LlmMessage {
+                    role: crate::llm::types::LlmRole::System,
+                    content: system_prompt,
+                    kind: "text".to_string(),
+                    image_idx: -1,
+                    tool_call_id: None,
+                    tool_name: None,
+                },
+            );
         }
 
         let llm_request = LlmRequest {
             model: self.config.model.clone(),
-            system_prompt,
-            user_prompt,
-            messages: rendered_prompt.messages,
+            messages,
             attachments,
             tools: if is_standard {
                 self.config.tool_specs.clone()
@@ -398,6 +404,7 @@ impl TurnMachine {
             },
             model_variant: self.config.model_variant.clone(),
             session_id: self.config.session_id.clone(),
+            output_spec: None,
             stream_events: None,
         };
         self.queue_llm_request(llm_request, 0, None);
@@ -860,6 +867,31 @@ impl TurnMachine {
         }
     }
 
+    fn llm_response_debug_parts(&self, llm_response: &LlmResponse) -> Option<Value> {
+        let parts = llm_response
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                LlmOutputPart::Text { text } if !text.is_empty() => Some(serde_json::json!({
+                    "type": "text",
+                    "text": text,
+                })),
+                LlmOutputPart::Text { .. } => None,
+                LlmOutputPart::ToolCall {
+                    call_id,
+                    tool_name,
+                    input_json,
+                } => Some(serde_json::json!({
+                    "type": "tool_call",
+                    "call_id": call_id,
+                    "tool_name": tool_name,
+                    "input_json": input_json,
+                })),
+            })
+            .collect::<Vec<_>>();
+        (!parts.is_empty()).then_some(Value::Array(parts))
+    }
+
     fn record_llm_usage(
         &mut self,
         llm_response: &LlmResponse,
@@ -880,6 +912,7 @@ impl TurnMachine {
             cumulative: self.cumulative_usage.clone(),
         });
         if self.config.emit_llm_debug_log {
+            let response_parts = self.llm_response_debug_parts(llm_response);
             self.pending_effects.push_back(Effect::Log {
                 event: LogEvent::LlmDebug {
                     agent_id: self.config.agent_id.clone(),
@@ -887,6 +920,7 @@ impl TurnMachine {
                     usage,
                     request_body: llm_response.request_body.clone(),
                     response_text: response_text.to_string(),
+                    response_parts,
                 },
             });
         }
@@ -1751,16 +1785,17 @@ mod tests {
         })
     }
 
-    fn find_llm_debug(effects: &[Effect]) -> Option<(TokenUsage, String)> {
+    fn find_llm_debug(effects: &[Effect]) -> Option<(TokenUsage, String, Option<Value>)> {
         effects.iter().find_map(|e| match e {
             Effect::Log {
                 event:
                     LogEvent::LlmDebug {
                         usage,
                         response_text,
+                        response_parts,
                         ..
                     },
-            } => Some((usage.clone(), response_text.clone())),
+            } => Some((usage.clone(), response_text.clone(), response_parts.clone())),
             _ => None,
         })
     }
@@ -1846,7 +1881,7 @@ mod tests {
             .expect("llm call");
 
         assert_eq!(request.attachments.len(), 1);
-        // In structured mode, images and text go to messages, not user_prompt.
+        // Images and text now always flow through ordered request messages.
         assert!(
             request
                 .messages
@@ -2486,7 +2521,8 @@ mod tests {
         assert_eq!(usage.cached_input_tokens, 45);
         assert_eq!(usage.reasoning_tokens, 67);
 
-        let (debug_usage, response_text) = find_llm_debug(&effects).expect("llm debug");
+        let (debug_usage, response_text, response_parts) =
+            find_llm_debug(&effects).expect("llm debug");
         assert_eq!(debug_usage.input_tokens, 321);
         assert_eq!(debug_usage.output_tokens, 123);
         assert_eq!(debug_usage.cached_input_tokens, 45);
@@ -2494,6 +2530,45 @@ mod tests {
         assert_eq!(
             response_text,
             "Here's the code:\n<repl>\nprint('hi')\n</repl>\n"
+        );
+        assert!(response_parts.is_none());
+    }
+
+    #[test]
+    fn llm_debug_log_preserves_tool_call_only_responses() {
+        let mut config = test_config(ExecutionMode::Standard);
+        config.emit_llm_debug_log = true;
+        let msgs = vec![user_message("call a tool")];
+        let mut machine = TurnMachine::new(config, msgs, 0);
+
+        let effects = drain_effects(&mut machine);
+        let llm_id = *find_llm_call(&effects).expect("llm call");
+
+        machine.handle_response(Response::LlmComplete {
+            id: llm_id,
+            text_streamed: false,
+            result: Ok(LlmResponse {
+                parts: vec![LlmOutputPart::ToolCall {
+                    call_id: "tc1".to_string(),
+                    tool_name: "read_file".to_string(),
+                    input_json: r#"{"path":"foo.txt"}"#.to_string(),
+                }],
+                ..LlmResponse::default()
+            }),
+        });
+
+        let effects = drain_effects(&mut machine);
+        let (usage, response_text, response_parts) = find_llm_debug(&effects).expect("llm debug");
+        assert_eq!(usage.total(), 0);
+        assert!(response_text.is_empty());
+        assert_eq!(
+            response_parts,
+            Some(Value::Array(vec![serde_json::json!({
+                "type": "tool_call",
+                "call_id": "tc1",
+                "tool_name": "read_file",
+                "input_json": r#"{"path":"foo.txt"}"#,
+            })]))
         );
     }
 
@@ -2625,15 +2700,6 @@ mod tests {
 
         let effects = drain_effects(&mut machine);
         let request = find_llm_request(&effects).expect("next llm request");
-        let prompt_text = request
-            .user_prompt
-            .iter()
-            .filter_map(|part| match part {
-                LlmPromptPart::Text(text) => Some(text.as_str()),
-                LlmPromptPart::Image(_) => None,
-            })
-            .collect::<Vec<_>>()
-            .join("");
         let replay_text = request
             .messages
             .iter()
@@ -2641,18 +2707,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let code_block = "<repl>\nprint('hi')\n</repl>";
-        assert_eq!(
-            format!("{prompt_text}\n{replay_text}")
-                .matches(code_block)
-                .count(),
-            1
-        );
-        assert_eq!(
-            format!("{prompt_text}\n{replay_text}")
-                .matches("<output>\nhi\n\n</output>")
-                .count(),
-            1
-        );
+        assert_eq!(replay_text.matches(code_block).count(), 1);
+        assert_eq!(replay_text.matches("<output>\nhi\n\n</output>").count(), 1);
     }
 
     #[test]

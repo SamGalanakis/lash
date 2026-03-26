@@ -16,7 +16,7 @@ use crate::input_items::image_marker_ranges;
 use crate::plugin_surface;
 use crate::replay::{normalize_stream_text, push_assistant_text_block};
 use crate::ui;
-use crate::util::{is_manual_interrupt_error, manual_interrupt_message};
+use crate::util::{is_cancelled_error, manual_interrupt_message};
 
 /// Find the byte offset within `line` that corresponds to a given display column.
 /// If the target column exceeds the line's display width, returns line.len().
@@ -200,6 +200,33 @@ impl LiveTurnState {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PersistedLiveTurnState {
+    pub status_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_detail: Option<String>,
+    #[serde(default)]
+    pub has_visible_output: bool,
+}
+
+impl LiveTurnState {
+    fn persisted(&self) -> PersistedLiveTurnState {
+        PersistedLiveTurnState {
+            status_text: self.status_text.clone(),
+            status_detail: self.status_detail.clone(),
+            has_visible_output: self.has_visible_output,
+        }
+    }
+}
+
+impl From<PersistedLiveTurnState> for LiveTurnState {
+    fn from(value: PersistedLiveTurnState) -> Self {
+        let mut turn = LiveTurnState::new(value.status_text, value.status_detail);
+        turn.has_visible_output = value.has_visible_output;
+        turn
+    }
+}
+
 const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -372,6 +399,8 @@ pub struct PersistedUiState {
     pub last_response_usage: TokenUsage,
     #[serde(default)]
     pub plugin_mode_indicators: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_turn: Option<PersistedLiveTurnState>,
 }
 
 impl PersistedUiState {
@@ -380,6 +409,7 @@ impl PersistedUiState {
             blocks: blocks_from_messages(messages),
             last_response_usage: TokenUsage::default(),
             plugin_mode_indicators: BTreeMap::new(),
+            live_turn: None,
         }
     }
 }
@@ -661,6 +691,8 @@ pub struct App {
     pub activity_state: ActivityState,
     /// Whether mouse capture is currently active (temporarily released during shift+mouse for native selection).
     pub mouse_captured: bool,
+    /// Set only when this local UI requested cancellation via Esc.
+    manual_interrupt_requested: bool,
 }
 
 impl App {
@@ -674,6 +706,7 @@ impl App {
                 .collect(),
             last_response_usage: self.last_response_usage.clone(),
             plugin_mode_indicators: self.plugin_mode_indicators.clone(),
+            live_turn: self.live_turn.as_ref().map(LiveTurnState::persisted),
         }
     }
 
@@ -684,6 +717,7 @@ impl App {
 
     pub fn start_turn(&mut self) {
         self.running = true;
+        self.manual_interrupt_requested = false;
         self.iteration = 0;
         self.pending_text.clear();
         self.clear_streaming_output();
@@ -695,6 +729,7 @@ impl App {
 
     pub fn stop_turn(&mut self) {
         self.running = false;
+        self.manual_interrupt_requested = false;
         self.pending_text.clear();
         self.clear_streaming_output();
         self.active_delegate = None;
@@ -743,7 +778,12 @@ impl App {
     }
 
     fn clear_status(&mut self) {
+        self.manual_interrupt_requested = false;
         self.live_turn = None;
+    }
+
+    pub fn note_manual_interrupt_requested(&mut self) {
+        self.manual_interrupt_requested = true;
     }
 
     pub fn on_tick(&mut self) {
@@ -886,6 +926,7 @@ impl App {
             active_delegate: None,
             activity_state: ActivityState::default(),
             mouse_captured: true,
+            manual_interrupt_requested: false,
         }
     }
 
@@ -1274,11 +1315,13 @@ impl App {
             AgentEvent::Error { message, envelope } => {
                 self.close_pending_text();
                 let code = envelope.as_ref().and_then(|err| err.code.as_deref());
-                if is_manual_interrupt_error(&message, code) {
+                if self.manual_interrupt_requested && is_cancelled_error(&message, code) {
+                    self.manual_interrupt_requested = false;
                     self.blocks.push(DisplayBlock::SystemMessage(
                         manual_interrupt_message().to_string(),
                     ));
                 } else {
+                    self.manual_interrupt_requested = false;
                     self.set_transient_status(
                         "error",
                         Some(message.chars().take(96).collect()),
@@ -2987,6 +3030,7 @@ mod tests {
     #[test]
     fn cancelled_error_renders_as_system_message() {
         let mut app = App::new("test-model".into(), "test".into());
+        app.note_manual_interrupt_requested();
         app.handle_agent_event(AgentEvent::Error {
             message: "LLM error: cancelled".into(),
             envelope: Some(lash::agent::ErrorEnvelope {
@@ -3000,6 +3044,25 @@ mod tests {
         assert!(matches!(
             app.blocks.last(),
             Some(DisplayBlock::SystemMessage(msg)) if msg == "Manually interrupted."
+        ));
+    }
+
+    #[test]
+    fn cancelled_error_without_manual_request_renders_as_error() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.handle_agent_event(AgentEvent::Error {
+            message: "LLM error: cancelled".into(),
+            envelope: Some(lash::agent::ErrorEnvelope {
+                kind: "llm_provider".into(),
+                code: Some("cancelled".into()),
+                user_message: "LLM error: cancelled".into(),
+                raw: None,
+            }),
+        });
+
+        assert!(matches!(
+            app.blocks.last(),
+            Some(DisplayBlock::Error(msg)) if msg == "LLM error: cancelled"
         ));
     }
 
@@ -3054,6 +3117,22 @@ mod tests {
         }
         app.on_tick();
         assert!(app.live_turn.is_none());
+    }
+
+    #[test]
+    fn persisted_ui_state_includes_live_turn_snapshot() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.start_turn();
+        app.set_status("retrying", Some("in 5s".into()), true);
+        if let Some(turn) = app.live_turn.as_mut() {
+            turn.has_visible_output = true;
+        }
+
+        let persisted = app.persisted_ui_state();
+        let live_turn = persisted.live_turn.expect("live turn");
+        assert_eq!(live_turn.status_text, "retrying");
+        assert_eq!(live_turn.status_detail.as_deref(), Some("in 5s"));
+        assert!(live_turn.has_visible_output);
     }
 
     #[test]

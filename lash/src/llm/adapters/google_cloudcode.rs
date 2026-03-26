@@ -12,7 +12,7 @@ use crate::llm::timeouts::{
 };
 use crate::llm::transport::{LlmTransport, LlmTransportError};
 use crate::llm::types::{
-    LlmMessage, LlmOutputPart, LlmPromptPart, LlmReplayChunk, LlmRequest, LlmResponse, LlmRole,
+    LlmMessage, LlmOutputPart, LlmOutputSpec, LlmReplayChunk, LlmRequest, LlmResponse, LlmRole,
     LlmUsage, ModelSelection, coalesce_replay_messages,
 };
 use crate::model_variant::VariantRequestConfig;
@@ -97,84 +97,68 @@ impl GoogleCloudCodeAdapter {
         req: &LlmRequest,
         attachment_parts: &[Value],
     ) -> Vec<Value> {
-        if !req.messages.is_empty() {
-            let mut out = Vec::new();
-            for chunk in coalesce_replay_messages(&req.messages) {
-                match chunk {
-                    LlmReplayChunk::Message(msg) => {
-                        let role = match msg.role {
-                            LlmRole::Assistant => "model",
-                            LlmRole::User | LlmRole::System => "user",
-                        };
-                        let part = Self::content_part_for_message_with_attachment_parts(
-                            attachment_parts,
-                            &msg,
-                        );
-                        out.push(json!({
-                            "role": role,
-                            "parts": [part],
-                        }));
+        let mut out = Vec::new();
+        for chunk in coalesce_replay_messages(&req.messages) {
+            match chunk {
+                LlmReplayChunk::Message(msg) => {
+                    if matches!(msg.role, LlmRole::System) {
+                        continue;
                     }
-                    LlmReplayChunk::AssistantToolCalls { text, tool_calls } => {
-                        let mut parts = Vec::new();
-                        if let Some(text) = text.filter(|text| !text.is_empty()) {
-                            parts.push(json!({ "text": text }));
-                        }
-                        parts.extend(tool_calls.into_iter().map(|call| {
-                            json!({
-                                "functionCall": {
-                                    "id": call.call_id,
-                                    "name": call.tool_name,
-                                    "args": serde_json::from_str::<Value>(&call.input_json)
-                                        .unwrap_or_else(|_| json!({"_raw": call.input_json})),
-                                }
-                            })
-                        }));
-                        out.push(json!({
-                            "role": "model",
-                            "parts": parts,
-                        }));
-                    }
-                    LlmReplayChunk::ToolResults { results } => {
-                        let parts = results
-                            .into_iter()
-                            .map(|msg| {
-                                json!({
-                                    "functionResponse": {
-                                        "id": msg.tool_call_id.clone().unwrap_or_default(),
-                                        "name": msg.tool_name.clone().unwrap_or_else(|| "tool".to_string()),
-                                        "response": { "content": msg.content }
-                                    }
-                                })
-                            })
-                            .collect::<Vec<_>>();
-                        out.push(json!({
-                            "role": "user",
-                            "parts": parts,
-                        }));
-                    }
+                    let role = match msg.role {
+                        LlmRole::Assistant => "model",
+                        LlmRole::User => "user",
+                        LlmRole::System => "user",
+                    };
+                    let part = Self::content_part_for_message_with_attachment_parts(
+                        attachment_parts,
+                        &msg,
+                    );
+                    out.push(json!({
+                        "role": role,
+                        "parts": [part],
+                    }));
                 }
-            }
-            return out;
-        }
-
-        let mut parts = Vec::new();
-        for part in &req.user_prompt {
-            match part {
-                LlmPromptPart::Text(text) => {
-                    if !text.is_empty() {
+                LlmReplayChunk::AssistantToolCalls { text, tool_calls } => {
+                    let mut parts = Vec::new();
+                    if let Some(text) = text.filter(|text| !text.is_empty()) {
                         parts.push(json!({ "text": text }));
                     }
+                    parts.extend(tool_calls.into_iter().map(|call| {
+                        json!({
+                            "functionCall": {
+                                "id": call.call_id,
+                                "name": call.tool_name,
+                                "args": serde_json::from_str::<Value>(&call.input_json)
+                                    .unwrap_or_else(|_| json!({"_raw": call.input_json})),
+                            }
+                        })
+                    }));
+                    out.push(json!({
+                        "role": "model",
+                        "parts": parts,
+                    }));
                 }
-                LlmPromptPart::Image(idx) => {
-                    parts.push(Self::attachment_part_for_index(attachment_parts, *idx));
+                LlmReplayChunk::ToolResults { results } => {
+                    let parts = results
+                        .into_iter()
+                        .map(|msg| {
+                            json!({
+                                "functionResponse": {
+                                    "id": msg.tool_call_id.clone().unwrap_or_default(),
+                                    "name": msg.tool_name.clone().unwrap_or_else(|| "tool".to_string()),
+                                    "response": { "content": msg.content }
+                                }
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    out.push(json!({
+                        "role": "user",
+                        "parts": parts,
+                    }));
                 }
             }
         }
-        vec![json!({
-            "role": "user",
-            "parts": parts,
-        })]
+        out
     }
 
     #[cfg(test)]
@@ -196,14 +180,25 @@ impl GoogleCloudCodeAdapter {
                 let idx = msg.image_idx.max(0) as usize;
                 Self::attachment_part_for_index(attachment_parts, idx)
             }
-            _ => {
-                let text = if matches!(msg.role, LlmRole::System) {
-                    format!("Runtime note:\n{}", msg.content)
-                } else {
-                    msg.content.clone()
-                };
-                json!({ "text": text })
-            }
+            _ => json!({ "text": msg.content.clone() }),
+        }
+    }
+
+    fn system_instruction(req: &LlmRequest) -> Option<Value> {
+        let text = req
+            .messages
+            .iter()
+            .filter(|msg| matches!(msg.role, LlmRole::System) && msg.kind != "tool_result")
+            .map(|msg| msg.content.as_str())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if text.is_empty() {
+            None
+        } else {
+            Some(json!({
+                "parts": [{ "text": text }],
+            }))
         }
     }
 
@@ -649,15 +644,15 @@ impl GoogleCloudCodeAdapter {
             "user_prompt_id": uuid::Uuid::new_v4().to_string(),
             "request": {
                 "contents": contents,
-                "systemInstruction": {
-                    "parts": [{ "text": req.system_prompt }],
-                },
                 "generationConfig": {
                     "temperature": 0,
                     "maxOutputTokens": 32768,
                 }
             }
         });
+        if let Some(system_instruction) = Self::system_instruction(req) {
+            request["request"]["systemInstruction"] = system_instruction;
+        }
         if let Some(variant) = req.model_variant.as_deref()
             && let Some(config) =
                 crate::model_variant::request_config(provider, &req.model, variant)
@@ -690,6 +685,12 @@ impl GoogleCloudCodeAdapter {
                     }))
                     .collect::<Vec<_>>()
             }]);
+        }
+        if let Some(output_spec) = &req.output_spec {
+            request["request"]["generationConfig"]["responseMimeType"] = json!("application/json");
+            if let LlmOutputSpec::JsonSchema(schema) = output_spec {
+                request["request"]["generationConfig"]["responseSchema"] = schema.schema.clone();
+            }
         }
         if let Some(project) = project_id.filter(|p| !p.trim().is_empty()) {
             request["project"] = json!(project);
@@ -1040,6 +1041,7 @@ mod tests {
             tool_choice: crate::llm::types::LlmToolChoice::Auto,
             model_variant: None,
             session_id: None,
+            output_spec: None,
             stream_events: None,
         };
 
@@ -1128,6 +1130,7 @@ mod tests {
             tool_choice: crate::llm::types::LlmToolChoice::Auto,
             model_variant: None,
             session_id: None,
+            output_spec: None,
             stream_events: None,
         };
 
@@ -1156,6 +1159,7 @@ mod tests {
             tool_choice: crate::llm::types::LlmToolChoice::Auto,
             model_variant: None,
             session_id: None,
+            output_spec: None,
             stream_events: None,
         };
 
@@ -1197,6 +1201,7 @@ mod tests {
             tool_choice: crate::llm::types::LlmToolChoice::Auto,
             model_variant: None,
             session_id: None,
+            output_spec: None,
             stream_events: None,
         };
 
@@ -1213,6 +1218,52 @@ mod tests {
         assert_eq!(
             contents[0]["parts"][0]["fileData"]["fileUri"],
             "https://generativelanguage.googleapis.com/v1beta/files/replay"
+        );
+    }
+
+    #[test]
+    fn build_request_adds_response_schema_for_structured_output() {
+        let provider = Provider::GoogleOAuth {
+            access_token: "tok".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: u64::MAX,
+            project_id: Some("proj".to_string()),
+            options: crate::provider::ProviderOptions::default(),
+        };
+        let req = LlmRequest {
+            model: "gemini".to_string(),
+            system_prompt: "sys".to_string(),
+            user_prompt: vec![LlmPromptPart::Text("hi".to_string())],
+            messages: vec![],
+            attachments: vec![],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::None,
+            model_variant: None,
+            session_id: None,
+            output_spec: Some(crate::llm::types::LlmOutputSpec::JsonSchema(
+                crate::llm::types::LlmJsonSchema {
+                    name: "ignored_by_google".to_string(),
+                    schema: json!({"type": "OBJECT", "properties": {"ok": {"type": "BOOLEAN"}}}),
+                    strict: true,
+                },
+            )),
+            stream_events: None,
+        };
+
+        let request = GoogleCloudCodeAdapter::build_request(
+            &provider,
+            &req,
+            GoogleCloudCodeAdapter::build_contents(&req),
+            Some("proj"),
+        );
+
+        assert_eq!(
+            request["request"]["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
+        assert_eq!(
+            request["request"]["generationConfig"]["responseSchema"]["type"],
+            "OBJECT"
         );
     }
 }
