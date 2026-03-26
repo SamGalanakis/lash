@@ -224,6 +224,18 @@ fn expand_large_paste_placeholders(text: &str, large_pastes: &[LargePaste]) -> S
     expanded
 }
 
+fn annotate_large_paste_placeholders(text: &str, large_pastes: &[LargePaste]) -> String {
+    let mut annotated = text.to_string();
+    for paste in large_pastes {
+        if annotated.contains(&paste.placeholder) {
+            let char_count = paste.content.chars().count();
+            annotated =
+                annotated.replace(&paste.placeholder, &format!("[pasted {char_count} chars]"));
+        }
+    }
+    annotated
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedTurn {
     pub draft_id: String,
@@ -307,17 +319,11 @@ impl PreparedTurn {
     }
 
     pub fn history_text(&self) -> String {
-        let expanded = expand_large_paste_placeholders(&self.raw_text, &self.large_pastes);
-        if expanded.is_empty() {
+        let annotated = annotate_large_paste_placeholders(&self.raw_text, &self.large_pastes);
+        if annotated.is_empty() {
             String::new()
-        } else if !self.large_pastes.is_empty() {
-            let collapsed = expanded.split_whitespace().collect::<Vec<_>>().join(" ");
-            format!(
-                "Pasted: {}",
-                smart_truncate_preview_line(&collapsed, PASTED_HISTORY_PREVIEW_CHAR_LIMIT)
-            )
         } else {
-            preview_text_lines(&expanded).join("\n")
+            preview_text_lines(&annotated).join("\n")
         }
     }
 }
@@ -494,7 +500,6 @@ fn wrapped_text_height(text: &str, width: usize, prefix_chars: usize) -> usize {
 const TEXT_PREVIEW_MAX_HEAD_LINES: usize = 8;
 const TEXT_PREVIEW_MAX_TAIL_LINES: usize = 3;
 const TEXT_PREVIEW_LINE_CHAR_LIMIT: usize = 240;
-const PASTED_HISTORY_PREVIEW_CHAR_LIMIT: usize = 72;
 const STREAMING_OUTPUT_MAX_LINES: usize = 48;
 const STREAMING_OUTPUT_LINE_CHAR_LIMIT: usize = 240;
 
@@ -1546,6 +1551,16 @@ impl App {
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
+        if self.follow_output {
+            self.follow_output = false;
+            if self.height_cache_width > 0 && self.height_cache_vh > 0 {
+                let total =
+                    self.total_content_height(self.height_cache_width, self.height_cache_vh);
+                self.scroll_offset = total.saturating_sub(self.height_cache_vh);
+            } else {
+                self.scroll_offset = 0;
+            }
+        }
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
         self.follow_output = false;
     }
@@ -3635,6 +3650,47 @@ mod tests {
     }
 
     #[test]
+    fn scroll_up_from_follow_output_detaches_from_bottom_anchor() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.blocks.clear();
+        app.blocks.push(DisplayBlock::UserInput("hello".into()));
+        app.blocks.push(DisplayBlock::AssistantText(
+            (0..20)
+                .map(|idx| format!("line {idx}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ));
+        let width = 24;
+        let viewport_height = 5;
+        app.follow_output = true;
+        app.ensure_height_cache_pub(width, viewport_height);
+        app.refresh_follow_output_anchor(width, viewport_height);
+
+        let bottom = app.scroll_offset;
+        app.scroll_up(2);
+
+        assert!(!app.follow_output);
+        assert_eq!(app.scroll_offset, bottom.saturating_sub(2));
+    }
+
+    #[test]
+    fn text_delta_does_not_force_scroll_when_follow_output_is_paused() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.blocks.clear();
+        app.blocks.push(DisplayBlock::UserInput("prompt".into()));
+        app.start_turn();
+        app.follow_output = false;
+        app.scroll_offset = 3;
+
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: "streamed output".into(),
+        });
+
+        assert_eq!(app.scroll_offset, 3);
+        assert!(!app.follow_output);
+    }
+
+    #[test]
     fn refresh_follow_output_anchor_repositions_waiting_prompt_on_resize() {
         let mut app = App::new("test-model".into(), "test".into());
         app.blocks.push(DisplayBlock::UserInput(
@@ -3873,7 +3929,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_turn_history_text_shows_compact_pasted_summary() {
+    fn prepared_turn_history_text_annotates_only_pasted_content_inline() {
         let large = format!(
             "alpha {}\nomega",
             "x".repeat(TEXT_PREVIEW_LINE_CHAR_LIMIT * 2)
@@ -3881,7 +3937,7 @@ mod tests {
         let char_count = large.chars().count();
         let placeholder = format!("[Pasted Content {char_count} chars]");
         let turn = PreparedTurn::prepare_with_large_pastes(
-            placeholder.clone(),
+            format!("before {placeholder} after"),
             Vec::new(),
             &SkillCatalog::default(),
             vec![LargePaste {
@@ -3891,10 +3947,9 @@ mod tests {
         );
 
         let history = turn.history_text();
-        assert!(history.starts_with("Pasted: "));
-        assert!(history.contains("alpha "));
-        assert!(history.contains("omega"));
-        assert!(history.contains("chars hidden"));
+        assert!(history.starts_with("before "));
+        assert!(history.ends_with(" after"));
+        assert!(history.contains(&format!("[pasted {char_count} chars]")));
         assert!(!history.contains("[Pasted Content"));
         assert!(!history.contains('\n'));
     }

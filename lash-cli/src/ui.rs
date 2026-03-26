@@ -704,77 +704,6 @@ fn render_patch_artifact<'a>(
     render_patch_preview(lines, files, viewport_width, indent, include_diffs);
 }
 
-fn render_pasted_user_input<'a>(lines: &mut Vec<Line<'a>>, preview: &str, viewport_width: usize) {
-    let marker_style = Style::default().fg(theme::SODIUM);
-    let label_style = theme::pasted_label();
-    let preview_style = theme::pasted_preview();
-    let prefix = "\u{25CF} ";
-    let continuation_prefix = "  ";
-    let label = "Pasted: ";
-
-    let prefix_w = UnicodeWidthStr::width(prefix);
-    let continuation_w = UnicodeWidthStr::width(continuation_prefix);
-    let label_w = UnicodeWidthStr::width(label);
-
-    let first_cap = viewport_width.saturating_sub(prefix_w + label_w);
-    let continuation_cap = viewport_width.saturating_sub(continuation_w);
-
-    if first_cap == 0 {
-        lines.push(Line::from(vec![
-            Span::styled(prefix, marker_style),
-            Span::styled(label, label_style),
-            Span::styled(preview.to_string(), preview_style),
-        ]));
-        return;
-    }
-
-    let mut seg_start = 0;
-    let mut col = 0;
-    let mut first_line = true;
-    for (byte_idx, ch) in preview.char_indices() {
-        let cap = if first_line {
-            first_cap
-        } else {
-            continuation_cap.max(1)
-        };
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if col + w > cap && col > 0 {
-            let segment = &preview[seg_start..byte_idx];
-            if first_line {
-                lines.push(Line::from(vec![
-                    Span::styled(prefix, marker_style),
-                    Span::styled(label, label_style),
-                    Span::styled(segment.to_string(), preview_style),
-                ]));
-                first_line = false;
-            } else {
-                lines.push(Line::from(vec![
-                    Span::raw(continuation_prefix),
-                    Span::styled(segment.to_string(), preview_style),
-                ]));
-            }
-            seg_start = byte_idx;
-            col = w;
-        } else {
-            col += w;
-        }
-    }
-
-    let segment = &preview[seg_start..];
-    if first_line {
-        lines.push(Line::from(vec![
-            Span::styled(prefix, marker_style),
-            Span::styled(label, label_style),
-            Span::styled(segment.to_string(), preview_style),
-        ]));
-    } else {
-        lines.push(Line::from(vec![
-            Span::raw(continuation_prefix),
-            Span::styled(segment.to_string(), preview_style),
-        ]));
-    }
-}
-
 #[derive(Clone)]
 struct ActivityLane {
     summary_prefix: String,
@@ -1471,10 +1400,6 @@ fn render_block_into<'a>(
             // Blank line before user input to separate turns (skip for first block / after Splash)
             if idx > 0 && !matches!(blocks[idx - 1], DisplayBlock::Splash) {
                 lines.push(Line::from(""));
-            }
-            if let Some(preview) = text.strip_prefix("Pasted: ") {
-                render_pasted_user_input(lines, preview, viewport_width);
-                return;
             }
             // Circle marker on first line only, continuation lines get 2-space indent.
             let marker_style = Style::default().fg(theme::SODIUM);
@@ -3640,26 +3565,23 @@ mod tests {
     }
 
     #[test]
-    fn pasted_user_input_renders_as_compact_summary() {
+    fn user_input_with_inline_paste_annotation_renders_normally() {
         let blocks = [DisplayBlock::UserInput(
-            "Pasted: alpha beta gamma delta epsilon zeta eta theta iota kappa".into(),
+            "before [pasted 1234 chars] after".into(),
         )];
 
         let mut lines = Vec::new();
-        render_block(&blocks, 0, 1, &mut lines, 36, 10);
+        render_block(&blocks, 0, 1, &mut lines, 18, 10);
 
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
         assert!(
             rendered
                 .first()
-                .is_some_and(|line| line.starts_with("● Pasted: "))
+                .is_some_and(|line| line.starts_with("● before [pasted"))
         );
         assert!(rendered.iter().skip(1).all(|line| line.starts_with("  ")));
-        let normalized = rendered.join("").replace(['●', ' ', ':'], "");
-        assert_eq!(
-            normalized,
-            "Pastedalphabetagammadeltaepsilonzetaetathetaiotakappa"
-        );
+        let normalized = rendered.join("").replace(['●', ' '], "");
+        assert_eq!(normalized, "before[pasted1234chars]after");
     }
 
     #[test]

@@ -44,6 +44,7 @@ pub(crate) use interactive::generate_session_name;
 pub(crate) use interactive::{injected_image_part_indices, make_injected_plugin_message};
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const BUILD_GIT_HEAD: &str = env!("LASH_BUILD_GIT_HEAD");
 const ROOT_SESSION_ID: &str = "root";
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
