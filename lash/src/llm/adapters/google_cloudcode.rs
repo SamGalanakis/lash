@@ -1004,21 +1004,24 @@ impl LlmTransport for GoogleCloudCodeAdapter {
 mod tests {
     use super::*;
 
+    fn message(role: LlmRole, kind: &str, content: &str) -> LlmMessage {
+        LlmMessage {
+            role,
+            content: content.to_string(),
+            kind: kind.to_string(),
+            image_idx: -1,
+            tool_call_id: None,
+            tool_name: None,
+        }
+    }
+
     #[test]
     fn build_contents_uses_structured_replay_for_standard_mode() {
         let req = LlmRequest {
             model: "gemini-3.1-pro-preview".to_string(),
-            system_prompt: "sys".to_string(),
-            user_prompt: vec![],
             messages: vec![
-                LlmMessage {
-                    role: LlmRole::User,
-                    content: "question".to_string(),
-                    kind: "text".to_string(),
-                    image_idx: -1,
-                    tool_call_id: None,
-                    tool_name: None,
-                },
+                message(LlmRole::System, "text", "sys"),
+                message(LlmRole::User, "text", "question"),
                 LlmMessage {
                     role: LlmRole::Assistant,
                     content: "{\"path\":\"README.md\"}".to_string(),
@@ -1119,12 +1122,13 @@ mod tests {
     }
 
     #[test]
-    fn build_contents_uses_single_user_prompt() {
+    fn build_contents_uses_single_user_message() {
         let req = LlmRequest {
             model: "gemini".to_string(),
-            system_prompt: "sys".to_string(),
-            user_prompt: vec![LlmPromptPart::Text("history".to_string())],
-            messages: vec![],
+            messages: vec![
+                message(LlmRole::System, "text", "sys"),
+                message(LlmRole::User, "text", "history"),
+            ],
             attachments: vec![],
             tools: vec![],
             tool_choice: crate::llm::types::LlmToolChoice::Auto,
@@ -1145,12 +1149,18 @@ mod tests {
     fn build_contents_can_use_uploaded_file_data_for_prompt_images() {
         let req = LlmRequest {
             model: "gemini".to_string(),
-            system_prompt: "sys".to_string(),
-            user_prompt: vec![
-                LlmPromptPart::Text("look".to_string()),
-                LlmPromptPart::Image(0),
+            messages: vec![
+                message(LlmRole::System, "text", "sys"),
+                message(LlmRole::User, "text", "look"),
+                LlmMessage {
+                    role: LlmRole::User,
+                    content: String::new(),
+                    kind: "image".to_string(),
+                    image_idx: 0,
+                    tool_call_id: None,
+                    tool_name: None,
+                },
             ],
-            messages: vec![],
             attachments: vec![crate::llm::types::LlmAttachment {
                 mime: "image/png".to_string(),
                 data: vec![1, 2, 3],
@@ -1173,8 +1183,10 @@ mod tests {
             })],
         );
 
+        assert_eq!(contents.len(), 2);
+        assert_eq!(contents[0]["parts"][0]["text"], "look");
         assert_eq!(
-            contents[0]["parts"][1]["fileData"]["fileUri"],
+            contents[1]["parts"][0]["fileData"]["fileUri"],
             "https://generativelanguage.googleapis.com/v1beta/files/abc"
         );
     }
@@ -1183,8 +1195,6 @@ mod tests {
     fn build_contents_can_use_uploaded_file_data_for_replay_images() {
         let req = LlmRequest {
             model: "gemini".to_string(),
-            system_prompt: "sys".to_string(),
-            user_prompt: vec![],
             messages: vec![LlmMessage {
                 role: LlmRole::User,
                 content: String::new(),
@@ -1232,9 +1242,10 @@ mod tests {
         };
         let req = LlmRequest {
             model: "gemini".to_string(),
-            system_prompt: "sys".to_string(),
-            user_prompt: vec![LlmPromptPart::Text("hi".to_string())],
-            messages: vec![],
+            messages: vec![
+                message(LlmRole::System, "text", "sys"),
+                message(LlmRole::User, "text", "hi"),
+            ],
             attachments: vec![],
             tools: vec![],
             tool_choice: crate::llm::types::LlmToolChoice::None,

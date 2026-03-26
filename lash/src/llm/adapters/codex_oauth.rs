@@ -774,6 +774,17 @@ impl LlmTransport for CodexOAuthAdapter {
 mod tests {
     use super::*;
 
+    fn message(role: LlmRole, kind: &str, content: &str) -> LlmMessage {
+        LlmMessage {
+            role,
+            content: content.to_string(),
+            kind: kind.to_string(),
+            image_idx: -1,
+            tool_call_id: None,
+            tool_name: None,
+        }
+    }
+
     #[test]
     fn parses_codex_sse_delta_and_completed_usage() {
         let mut full = String::new();
@@ -872,17 +883,9 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
     fn structured_messages_build_responses_input_items() {
         let req = LlmRequest {
             model: "gpt-5.4".to_string(),
-            system_prompt: "sys".to_string(),
-            user_prompt: vec![LlmPromptPart::Text("new turn".to_string())],
             messages: vec![
-                LlmMessage {
-                    role: LlmRole::User,
-                    content: "question".to_string(),
-                    kind: "text".to_string(),
-                    image_idx: -1,
-                    tool_call_id: None,
-                    tool_name: None,
-                },
+                message(LlmRole::System, "text", "sys"),
+                message(LlmRole::User, "text", "question"),
                 LlmMessage {
                     role: LlmRole::Assistant,
                     content: "{\"path\":\"README.md\"}".to_string(),
@@ -899,6 +902,7 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
                     tool_call_id: Some("call_1".to_string()),
                     tool_name: Some("read_file".to_string()),
                 },
+                message(LlmRole::User, "text", "new turn"),
             ],
             attachments: vec![],
             tools: vec![],
@@ -909,8 +913,9 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
             stream_events: None,
         };
 
-        let input = CodexOAuthAdapter::build_input(&req);
+        let (instructions, input) = CodexOAuthAdapter::build_input(&req);
 
+        assert_eq!(instructions, "sys");
         assert_eq!(input.len(), 4);
         assert_eq!(input[0]["role"], "user");
         assert_eq!(input[1]["type"], "function_call");
@@ -923,8 +928,6 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
     fn structured_messages_preserve_empty_function_call_output() {
         let req = LlmRequest {
             model: "gpt-5.4".to_string(),
-            system_prompt: "sys".to_string(),
-            user_prompt: vec![LlmPromptPart::Text("continue".to_string())],
             messages: vec![
                 LlmMessage {
                     role: LlmRole::Assistant,
@@ -942,6 +945,7 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
                     tool_call_id: Some("call_ask".to_string()),
                     tool_name: Some("ask".to_string()),
                 },
+                message(LlmRole::User, "text", "continue"),
             ],
             attachments: vec![],
             tools: vec![],
@@ -952,7 +956,7 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
             stream_events: None,
         };
 
-        let input = CodexOAuthAdapter::build_input(&req);
+        let (_, input) = CodexOAuthAdapter::build_input(&req);
 
         assert_eq!(input.len(), 3);
         assert_eq!(input[0]["type"], "function_call");
@@ -966,9 +970,10 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
     fn build_request_body_sets_prompt_cache_key_from_session_id() {
         let req = LlmRequest {
             model: "gpt-5.4".to_string(),
-            system_prompt: "sys".to_string(),
-            user_prompt: vec![LlmPromptPart::Text("hello".to_string())],
-            messages: vec![],
+            messages: vec![
+                message(LlmRole::System, "text", "sys"),
+                message(LlmRole::User, "text", "hello"),
+            ],
             attachments: vec![],
             tools: vec![],
             tool_choice: crate::llm::types::LlmToolChoice::None,
@@ -989,9 +994,10 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
     fn build_request_body_uses_top_level_instructions_instead_of_system_input() {
         let req = LlmRequest {
             model: "gpt-5.4".to_string(),
-            system_prompt: "system guidance".to_string(),
-            user_prompt: vec![LlmPromptPart::Text("hello".to_string())],
-            messages: vec![],
+            messages: vec![
+                message(LlmRole::System, "text", "system guidance"),
+                message(LlmRole::User, "text", "hello"),
+            ],
             attachments: vec![],
             tools: vec![],
             tool_choice: crate::llm::types::LlmToolChoice::None,
@@ -1013,9 +1019,10 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
     fn build_request_body_emits_codex_style_function_tools() {
         let req = LlmRequest {
             model: "gpt-5.4".to_string(),
-            system_prompt: "sys".to_string(),
-            user_prompt: vec![LlmPromptPart::Text("hello".to_string())],
-            messages: vec![],
+            messages: vec![
+                message(LlmRole::System, "text", "sys"),
+                message(LlmRole::User, "text", "hello"),
+            ],
             attachments: vec![],
             tools: vec![crate::llm::types::LlmToolSpec {
                 name: "find".to_string(),
@@ -1050,9 +1057,10 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
     fn build_request_body_adds_text_format_for_structured_output() {
         let req = LlmRequest {
             model: "gpt-5.4".to_string(),
-            system_prompt: "sys".to_string(),
-            user_prompt: vec![LlmPromptPart::Text("hello".to_string())],
-            messages: vec![],
+            messages: vec![
+                message(LlmRole::System, "text", "sys"),
+                message(LlmRole::User, "text", "hello"),
+            ],
             attachments: vec![],
             tools: vec![],
             tool_choice: crate::llm::types::LlmToolChoice::None,
@@ -1082,12 +1090,10 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
     }
 
     #[test]
-    fn user_input_item_uses_input_text_content_type() {
+    fn user_text_messages_use_input_text_content_type() {
         let req = LlmRequest {
             model: "gpt-5.4".to_string(),
-            system_prompt: "sys".to_string(),
-            user_prompt: vec![LlmPromptPart::Text("hello".to_string())],
-            messages: vec![],
+            messages: vec![message(LlmRole::User, "text", "hello")],
             attachments: vec![],
             tools: vec![],
             tool_choice: crate::llm::types::LlmToolChoice::None,
@@ -1097,7 +1103,8 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
             stream_events: None,
         };
 
-        let item = CodexOAuthAdapter::user_input_item(&req);
+        let (_, input) = CodexOAuthAdapter::build_input(&req);
+        let item = &input[0];
 
         assert_eq!(item["role"], "user");
         assert_eq!(item["content"][0]["type"], "input_text");
@@ -1105,12 +1112,17 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
     }
 
     #[test]
-    fn user_input_item_encodes_images_as_data_urls() {
+    fn user_image_messages_encode_images_as_data_urls() {
         let req = LlmRequest {
             model: "gpt-5.4".to_string(),
-            system_prompt: "sys".to_string(),
-            user_prompt: vec![LlmPromptPart::Image(0)],
-            messages: vec![],
+            messages: vec![LlmMessage {
+                role: LlmRole::User,
+                content: String::new(),
+                kind: "image".to_string(),
+                image_idx: 0,
+                tool_call_id: None,
+                tool_name: None,
+            }],
             attachments: vec![crate::llm::types::LlmAttachment {
                 mime: "image/png".to_string(),
                 data: vec![0, 1, 2, 3],
@@ -1123,7 +1135,8 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
             stream_events: None,
         };
 
-        let item = CodexOAuthAdapter::user_input_item(&req);
+        let (_, input) = CodexOAuthAdapter::build_input(&req);
+        let item = &input[0];
 
         assert_eq!(item["role"], "user");
         assert_eq!(item["content"][0]["type"], "input_image");
@@ -1139,8 +1152,6 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
     fn structured_image_messages_use_input_image_data_urls() {
         let req = LlmRequest {
             model: "gpt-5.4".to_string(),
-            system_prompt: "sys".to_string(),
-            user_prompt: vec![],
             messages: vec![LlmMessage {
                 role: LlmRole::User,
                 content: String::new(),
