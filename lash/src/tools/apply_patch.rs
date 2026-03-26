@@ -1,5 +1,5 @@
 use serde_json::json;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
@@ -50,6 +50,22 @@ It is important to remember:
 
 #[derive(Default)]
 pub struct ApplyPatchTool;
+
+#[cfg(feature = "sqlite-store")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PatchAction {
+    Add,
+    Delete,
+    Update,
+}
+
+#[cfg(feature = "sqlite-store")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PatchFileOp {
+    pub action: PatchAction,
+    pub path: PathBuf,
+    pub move_path: Option<PathBuf>,
+}
 
 #[async_trait::async_trait]
 impl ToolProvider for ApplyPatchTool {
@@ -112,12 +128,9 @@ fn execute_apply_patch_sync(input: &str, workdir: Option<&str>) -> ToolResult {
         return ToolResult::err_fmt("No files were modified.");
     }
 
-    let cwd = match workdir {
-        Some(path) => PathBuf::from(path),
-        None => match std::env::current_dir() {
-            Ok(path) => path,
-            Err(err) => return ToolResult::err_fmt(format!("Failed to determine cwd: {err}")),
-        },
+    let cwd = match resolve_patch_workdir(workdir) {
+        Ok(path) => path,
+        Err(err) => return ToolResult::err_fmt(err),
     };
 
     let mut applied = Vec::new();
@@ -158,6 +171,38 @@ fn execute_apply_patch_sync(input: &str, workdir: Option<&str>) -> ToolResult {
         "files": files,
         "diff": combined_diff,
     }))
+}
+
+#[cfg(feature = "sqlite-store")]
+pub(crate) fn inspect_patch_ops(
+    input: &str,
+    workdir: Option<&str>,
+) -> Result<Vec<PatchFileOp>, String> {
+    let patch = parse_patch(input)?;
+    let cwd = resolve_patch_workdir(workdir)?;
+    Ok(patch
+        .hunks
+        .into_iter()
+        .map(|hunk| match hunk {
+            Hunk::Add { path, .. } => PatchFileOp {
+                action: PatchAction::Add,
+                path: resolve_path(&cwd, &path),
+                move_path: None,
+            },
+            Hunk::Delete { path } => PatchFileOp {
+                action: PatchAction::Delete,
+                path: resolve_path(&cwd, &path),
+                move_path: None,
+            },
+            Hunk::Update {
+                path, move_path, ..
+            } => PatchFileOp {
+                action: PatchAction::Update,
+                path: resolve_path(&cwd, &path),
+                move_path: move_path.as_ref().map(|target| resolve_path(&cwd, target)),
+            },
+        })
+        .collect())
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -256,6 +301,21 @@ fn strip_heredoc_wrapper(input: &str) -> Option<String> {
 
     let inner = lines[1..lines.len() - 1].join("\n");
     has_patch_boundaries(inner.lines()).then(|| inner.trim().to_string())
+}
+
+fn resolve_patch_workdir(workdir: Option<&str>) -> Result<PathBuf, String> {
+    let base = match workdir {
+        Some(path) => PathBuf::from(path),
+        None => std::env::current_dir().map_err(|err| format!("Failed to determine cwd: {err}"))?,
+    };
+    let cwd = if base.is_absolute() {
+        base
+    } else {
+        std::env::current_dir()
+            .map_err(|err| format!("Failed to determine cwd: {err}"))?
+            .join(base)
+    };
+    Ok(normalize_path(&cwd))
 }
 
 fn parse_heredoc_start(line: &str) -> Option<&str> {
@@ -571,6 +631,25 @@ fn normalize_display_path(cwd: &Path, path: &Path) -> String {
     display.replace('\\', "/")
 }
 
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let popped = normalized.pop();
+                if !popped {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
+}
+
 fn apply_hunk(hunk: &Hunk, cwd: &Path) -> Result<PreparedChange, String> {
     match hunk {
         Hunk::Add { path, contents } => {
@@ -651,11 +730,12 @@ fn apply_hunk(hunk: &Hunk, cwd: &Path) -> Result<PreparedChange, String> {
 }
 
 fn resolve_path(cwd: &Path, path: &Path) -> PathBuf {
-    if path.is_absolute() {
+    let resolved = if path.is_absolute() {
         path.to_path_buf()
     } else {
         cwd.join(path)
-    }
+    };
+    normalize_path(&resolved)
 }
 
 struct AppliedPatch {

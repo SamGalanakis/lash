@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -19,26 +19,52 @@ use crate::input_items::image_marker_ranges;
 use crate::markdown;
 use crate::theme;
 use lash::collect_skill_mentions_with_ranges;
-fn input_height(app: &App, frame_width: u16) -> u16 {
+
+const INPUT_HORIZONTAL_PADDING: u16 = 1;
+const PROMPT_HORIZONTAL_PADDING: u16 = 1;
+const MIN_HISTORY_HEIGHT: u16 = 3;
+const MAX_INPUT_HEIGHT: u16 = 20;
+
+fn padded_content_width(frame_width: u16, horizontal_padding: u16) -> usize {
+    frame_width.saturating_sub(horizontal_padding.saturating_mul(2)) as usize
+}
+
+fn desired_input_height(app: &App, frame_width: u16) -> u16 {
     if app.has_prompt() {
         prompt_height(app, frame_width)
     } else {
-        // Inner width = frame width; prefix handled by wrap_line
-        let inner_w = frame_width as usize;
+        let inner_w = padded_content_width(frame_width, INPUT_HORIZONTAL_PADDING);
         let visual_lines = input_visual_lines(&app.input, inner_w);
-        (visual_lines as u16 + 2).min(12)
+        (visual_lines as u16 + 2).min(MAX_INPUT_HEIGHT)
     }
+}
+
+fn input_height(app: &App, frame_width: u16, frame_height: u16, reserved_height: u16) -> u16 {
+    let desired = desired_input_height(app, frame_width);
+    let max_allowed = frame_height
+        .saturating_sub(reserved_height)
+        .saturating_sub(MIN_HISTORY_HEIGHT);
+    desired.min(max_allowed)
+}
+
+fn prompt_inner_width(frame_width: u16) -> usize {
+    frame_width.saturating_sub(4 + PROMPT_HORIZONTAL_PADDING.saturating_mul(2)) as usize
 }
 
 fn queue_preview_height(app: &App, frame_width: u16) -> u16 {
     queue_preview_lines(app, frame_width).len() as u16
 }
 
+fn turn_status_height(app: &App) -> u16 {
+    if app.live_turn.is_some() { 1 } else { 0 }
+}
+
 /// Exact history viewport height based on the same layout math used in draw().
 pub fn history_viewport_height(app: &App, frame_width: u16, frame_height: u16) -> usize {
-    let status_h = if app.live_turn.is_some() { 3 } else { 0 };
+    let status_h = turn_status_height(app);
     let queued_h = queue_preview_height(app, frame_width);
-    let input_h = input_height(app, frame_width);
+    let reserved_height = 1 + status_h + queued_h;
+    let input_h = input_height(app, frame_width, frame_height, reserved_height);
     let overhead = 1 + status_h + queued_h + input_h;
     frame_height.saturating_sub(overhead) as usize
 }
@@ -47,9 +73,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // Paint entire frame with FORM bg so no terminal background bleeds through
     frame.render_widget(Block::default().style(theme::history_bg()), frame.area());
 
-    let status_h = if app.live_turn.is_some() { 3 } else { 0 };
+    let status_h = turn_status_height(app);
     let queued_h = queue_preview_height(app, frame.area().width);
-    let input_h = input_height(app, frame.area().width);
+    let reserved_height = 1 + status_h + queued_h;
+    let input_h = input_height(
+        app,
+        frame.area().width,
+        frame.area().height,
+        reserved_height,
+    );
 
     let chunks = Layout::vertical([
         Constraint::Length(1),        // [0] status bar
@@ -364,8 +396,7 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
     // Use Paragraph's built-in scroll to skip visual rows correctly.
     // Manual .skip()/.take() on logical Lines is wrong because skip_lines
     // is in visual-row space (from the height cache) but Lines can wrap.
-    let paragraph = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
+    let paragraph = Paragraph::new(wrap_rendered_lines(&lines, viewport_width))
         .style(theme::history_bg())
         .block(Block::default().borders(Borders::NONE))
         .scroll((skip_lines as u16, 0));
@@ -772,6 +803,130 @@ fn is_code_workflow_activity(kind: ActivityKind) -> bool {
     )
 }
 
+fn prompt_section_label(text: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(" ", Style::default()),
+        Span::styled(
+            text.to_string(),
+            Style::default()
+                .fg(theme::SODIUM)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+fn styled_question_chunk(chunk: &str) -> Vec<Span<'static>> {
+    if let Some(rest) = chunk.strip_prefix("Question · ") {
+        return vec![
+            Span::styled(
+                "Question",
+                Style::default()
+                    .fg(theme::SODIUM)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" · ", Style::default().fg(theme::ASH_MID)),
+            Span::styled(rest.to_string(), theme::assistant_text()),
+        ];
+    }
+
+    if let Some(rest) = chunk.strip_prefix("Answer · ") {
+        return vec![
+            Span::styled(
+                "Answer",
+                Style::default()
+                    .fg(theme::LICHEN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" · ", Style::default().fg(theme::ASH_MID)),
+            Span::styled(rest.to_string(), theme::assistant_text()),
+        ];
+    }
+
+    if let Some((num, rest)) = chunk.split_once(". ")
+        && num.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return vec![
+            Span::styled(
+                format!("{num}."),
+                Style::default()
+                    .fg(theme::SODIUM)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(rest.to_string(), theme::assistant_text()),
+        ];
+    }
+
+    vec![Span::styled(chunk.to_string(), theme::assistant_text())]
+}
+
+fn render_question_panel<'a>(
+    detail_lines: &[String],
+    lines: &mut Vec<Line<'a>>,
+    viewport_width: usize,
+) {
+    let title = " QUESTION ".to_string();
+    let title_w = UnicodeWidthStr::width(title.as_str());
+    let fill_w = viewport_width.saturating_sub(3 + title_w);
+
+    lines.push(Line::from(vec![
+        Span::styled("┌─", Style::default().fg(theme::ASH)),
+        Span::styled(
+            title,
+            Style::default()
+                .fg(theme::SODIUM)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("─".repeat(fill_w), Style::default().fg(theme::ASH)),
+        Span::styled("┐", Style::default().fg(theme::ASH)),
+    ]));
+
+    let inner_w = viewport_width.saturating_sub(4).max(1);
+    for raw_line in detail_lines {
+        let segments = if raw_line.is_empty() {
+            vec![(0usize, 0usize)]
+        } else {
+            wrap_line(raw_line, 0, 0, inner_w)
+        };
+
+        for (start, end) in segments {
+            let chunk = if raw_line.is_empty() {
+                String::new()
+            } else {
+                truncate_to_display_width(&raw_line[start..end], inner_w)
+            };
+            let styled = styled_question_chunk(&chunk);
+            let visible_width: usize = styled
+                .iter()
+                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                .sum();
+            let pad = inner_w.saturating_sub(visible_width);
+            let mut row = Vec::with_capacity(styled.len() + 3);
+            row.push(Span::styled("│ ", Style::default().fg(theme::ASH)));
+            row.extend(styled);
+            row.push(Span::raw(" ".repeat(pad)));
+            row.push(Span::styled(" │", Style::default().fg(theme::ASH)));
+            lines.push(Line::from(row));
+        }
+    }
+
+    let bottom_fill = viewport_width.saturating_sub(2);
+    lines.push(Line::from(Span::styled(
+        format!("└{}┘", "─".repeat(bottom_fill)),
+        Style::default().fg(theme::ASH),
+    )));
+}
+
+fn prompt_title(prompt: &PromptState) -> &'static str {
+    if prompt.options.is_empty() {
+        " Question "
+    } else if prompt.is_editing_reply() {
+        " Question · Write Reply "
+    } else {
+        " Question · Choose Reply "
+    }
+}
+
 fn is_code_workflow_block(block: &DisplayBlock) -> bool {
     match block {
         DisplayBlock::CodeBlock { .. } | DisplayBlock::CodeOutput { .. } => true,
@@ -962,6 +1117,11 @@ fn render_activity_block_with_lane<'a>(
     viewport_width: usize,
     lane: ActivityLane,
 ) {
+    if activity.kind == ActivityKind::Ask && expand_level >= 1 {
+        render_question_panel(&activity.detail_lines, lines, viewport_width);
+        return;
+    }
+
     let summary_style = if activity.kind == ActivityKind::Exploration {
         if activity.status == ActivityStatus::Failed {
             theme::error().add_modifier(Modifier::BOLD)
@@ -974,6 +1134,10 @@ fn render_activity_block_with_lane<'a>(
         } else {
             theme::assistant_text().add_modifier(Modifier::BOLD)
         }
+    } else if activity.kind == ActivityKind::Ask {
+        Style::default()
+            .fg(theme::SODIUM)
+            .add_modifier(Modifier::BOLD)
     } else if activity.kind == ActivityKind::Delegate {
         Style::default().fg(theme::CHALK_MID)
     } else {
@@ -1140,6 +1304,100 @@ fn render_activity_block<'a>(
     );
 }
 
+pub fn rendered_block_height(
+    blocks: &[DisplayBlock],
+    idx: usize,
+    expand_level: u8,
+    viewport_width: usize,
+    viewport_height: usize,
+) -> usize {
+    let mut lines = Vec::new();
+    render_block_into(
+        blocks,
+        idx,
+        expand_level,
+        &mut lines,
+        viewport_width,
+        viewport_height,
+    );
+    wrap_rendered_lines(&lines, viewport_width).len()
+}
+
+fn clone_line_owned(line: &Line<'_>) -> Line<'static> {
+    if line.spans.is_empty() {
+        return Line::from("");
+    }
+    Line::from(
+        line.spans
+            .iter()
+            .map(|span| Span::styled(span.content.to_string(), span.style))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn push_wrapped_line(
+    wrapped: &mut Vec<Line<'static>>,
+    spans: &mut Vec<Span<'static>>,
+    segment: &mut String,
+    style: &mut Option<Style>,
+) {
+    if !segment.is_empty() {
+        spans.push(Span::styled(
+            std::mem::take(segment),
+            style.take().unwrap_or_default(),
+        ));
+    }
+
+    if spans.is_empty() {
+        wrapped.push(Line::from(""));
+    } else {
+        wrapped.push(Line::from(std::mem::take(spans)));
+    }
+}
+
+fn wrap_rendered_lines(lines: &[Line<'_>], width: usize) -> Vec<Line<'static>> {
+    if width == 0 {
+        return lines.iter().map(clone_line_owned).collect();
+    }
+
+    let mut wrapped = Vec::with_capacity(lines.len());
+    for line in lines {
+        if line.width() <= width {
+            wrapped.push(clone_line_owned(line));
+            continue;
+        }
+
+        let mut row = Vec::new();
+        let mut segment = String::new();
+        let mut segment_style: Option<Style> = None;
+        let mut row_width = 0usize;
+
+        for span in &line.spans {
+            for ch in span.content.chars() {
+                let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if row_width + ch_width > width && row_width > 0 {
+                    push_wrapped_line(&mut wrapped, &mut row, &mut segment, &mut segment_style);
+                    row_width = 0;
+                }
+
+                if segment_style != Some(span.style) && !segment.is_empty() {
+                    row.push(Span::styled(
+                        std::mem::take(&mut segment),
+                        segment_style.take().unwrap_or_default(),
+                    ));
+                }
+                segment_style = Some(span.style);
+                segment.push(ch);
+                row_width += ch_width;
+            }
+        }
+
+        push_wrapped_line(&mut wrapped, &mut row, &mut segment, &mut segment_style);
+    }
+
+    wrapped
+}
+
 fn prefix_rendered_lines(lines: &mut [Line<'_>], prefix: &str, style: Style) {
     for line in lines.iter_mut() {
         line.spans
@@ -1199,7 +1457,7 @@ fn styled_user_input_segment<'a>(text: &'a str, seg_start: usize, seg_end: usize
     spans
 }
 
-fn render_block<'a>(
+fn render_block_into<'a>(
     blocks: &'a [DisplayBlock],
     idx: usize,
     expand_level: u8,
@@ -1515,6 +1773,24 @@ fn render_block<'a>(
     }
 }
 
+fn render_block<'a>(
+    blocks: &'a [DisplayBlock],
+    idx: usize,
+    expand_level: u8,
+    lines: &mut Vec<Line<'a>>,
+    viewport_width: usize,
+    viewport_height: usize,
+) {
+    render_block_into(
+        blocks,
+        idx,
+        expand_level,
+        lines,
+        viewport_width,
+        viewport_height,
+    );
+}
+
 /// Render plan content as a bordered block with markdown inside.
 fn render_plan_block<'a>(
     content: &'a str,
@@ -1546,7 +1822,7 @@ fn render_plan_block<'a>(
         let segments = if raw_line.is_empty() {
             vec![(0usize, 0usize)]
         } else {
-            wrap_line(raw_line, 0, inner_w)
+            wrap_line(raw_line, 0, 0, inner_w)
         };
 
         for (start, end) in segments {
@@ -1648,7 +1924,7 @@ fn render_panel_block<'a>(
         let segments = if raw.is_empty() {
             vec![(0usize, 0usize)]
         } else {
-            wrap_line(&raw, 0, inner_w.max(1))
+            wrap_line(&raw, 0, 0, inner_w.max(1))
         };
 
         for (start, end) in segments {
@@ -1683,6 +1959,9 @@ fn draw_turn_status(frame: &mut Frame, app: &App, area: Rect) {
     let Some(turn) = app.live_turn.as_ref() else {
         return;
     };
+    if area.height == 0 {
+        return;
+    };
     frame.render_widget(Block::default().style(theme::turn_status_bar()), area);
 
     let brand = animated_lash_word(turn.turn_started_at.elapsed());
@@ -1702,17 +1981,10 @@ fn draw_turn_status(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(elapsed_text, theme::turn_status_elapsed()));
     }
 
-    let line_y = area.y + area.height.saturating_sub(1) / 2;
-    let line_area = Rect {
-        x: area.x,
-        y: line_y,
-        width: area.width,
-        height: 1,
-    };
     let status_line = Paragraph::new(Line::from(spans))
         .style(theme::turn_status_bar())
         .alignment(ratatui::layout::Alignment::Center);
-    frame.render_widget(status_line, line_area);
+    frame.render_widget(status_line, area);
 }
 
 fn animated_lash_word(elapsed: std::time::Duration) -> Vec<Span<'static>> {
@@ -1799,7 +2071,7 @@ fn push_queue_section(
             String::new()
         }
     );
-    for (start, end) in wrap_line(&header, 0, width.max(1)) {
+    for (start, end) in wrap_line(&header, 0, 0, width.max(1)) {
         lines.push(Line::from(Span::styled(
             header[start..end].to_string(),
             header_style,
@@ -1840,7 +2112,12 @@ fn push_wrapped_queue_item(
     max_lines: usize,
 ) {
     let collapsed = text.replace('\n', " ");
-    let segments = wrap_line(&collapsed, first_prefix.width(), width.max(1));
+    let segments = wrap_line(
+        &collapsed,
+        first_prefix.width(),
+        continuation_prefix.width(),
+        width.max(1),
+    );
     for (idx, (start, end)) in segments.into_iter().take(max_lines).enumerate() {
         let prefix = if idx == 0 {
             first_prefix
@@ -1852,7 +2129,15 @@ fn push_wrapped_queue_item(
             Span::styled(collapsed[start..end].to_string(), style),
         ]));
     }
-    if wrap_line(&collapsed, first_prefix.width(), width.max(1)).len() > max_lines {
+    if wrap_line(
+        &collapsed,
+        first_prefix.width(),
+        continuation_prefix.width(),
+        width.max(1),
+    )
+    .len()
+        > max_lines
+    {
         lines.push(Line::from(vec![Span::styled(
             format!("{continuation_prefix}\u{2026}"),
             Style::default().fg(theme::ASH_TEXT),
@@ -1877,17 +2162,21 @@ fn draw_queue_preview(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
     let mut lines = Vec::new();
     let image_markers = image_marker_ranges(&app.input);
 
     // Multi-line input rendering with manual character-level wrapping.
     // We pre-wrap each logical line using wrap_line() so that rendering and
     // cursor positioning use identical wrapping logic (no Paragraph::wrap).
-    let total_width = area.width as usize;
+    let total_width = padded_content_width(area.width, INPUT_HORIZONTAL_PADDING);
     let prefix_w = 2; // "❯ " or "  "
     let input_lines: Vec<&str> = app.input.split('\n').collect();
     for (i, logical_line) in input_lines.iter().enumerate() {
-        let segments = wrap_line(logical_line, prefix_w, total_width);
+        let segments = wrap_line(logical_line, prefix_w, prefix_w, total_width);
         for (j, &(seg_start, seg_end)) in segments.iter().enumerate() {
             let seg_spans = styled_input_segment(logical_line, seg_start, seg_end, &image_markers);
             if j == 0 {
@@ -1905,15 +2194,17 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
                     lines.push(Line::from(spans));
                 }
             } else {
-                // Wrapped continuation line — no prefix
-                lines.push(Line::from(seg_spans));
+                // Wrapped continuation line — align with the text column.
+                let mut spans = vec![Span::styled("  ", Style::default().fg(theme::ASH))];
+                spans.extend(seg_spans);
+                lines.push(Line::from(spans));
             }
         }
     }
 
     // Position cursor accounting for visual wrapping
     let clamped_cursor = app.cursor_pos.min(app.input.len());
-    let (vis_row, vis_col) = input_cursor_position(&app.input, clamped_cursor, area.width as usize);
+    let (vis_row, vis_col) = input_cursor_position(&app.input, clamped_cursor, total_width);
     let cursor_abs_row = vis_row;
     let content_h = area.height.saturating_sub(2) as usize; // inside borders
 
@@ -1928,7 +2219,8 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::TOP | Borders::BOTTOM)
-                .border_style(theme::input_border()),
+                .border_style(theme::input_border())
+                .padding(Padding::horizontal(INPUT_HORIZONTAL_PADDING)),
         )
         .scroll((scroll_offset as u16, 0));
     frame.render_widget(input, area);
@@ -1989,7 +2281,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         );
     }
 
-    let cursor_x = area.x + vis_col as u16;
+    let cursor_x = area.x + INPUT_HORIZONTAL_PADDING + vis_col as u16;
     let cursor_y = area.y + 1 + (cursor_abs_row - scroll_offset) as u16;
     frame.set_cursor_position((cursor_x, cursor_y));
 }
@@ -2305,10 +2597,9 @@ fn prompt_height(app: &App, frame_width: u16) -> u16 {
         None => return 3, // fallback
     };
 
-    let inner_w = frame_width.saturating_sub(2) as usize; // border padding
+    let inner_w = prompt_inner_width(frame_width);
     let content_h = prompt_content_lines(prompt, inner_w).len() as u16;
-    let max_h = 20u16; // cap height
-    (content_h + 2).min(max_h) // +2 for borders
+    (content_h + 2).min(MAX_INPUT_HEIGHT) // +2 for borders
 }
 
 fn push_wrapped_prefixed_lines(
@@ -2329,7 +2620,7 @@ fn push_wrapped_prefixed_lines(
         } else {
             cont_prefix_width
         };
-        let segments = wrap_line(logical_line, prefix_width, total_width);
+        let segments = wrap_line(logical_line, prefix_width, cont_prefix_width, total_width);
 
         for (segment_idx, (start, end)) in segments.into_iter().enumerate() {
             let prefix = if first_visual_line && segment_idx == 0 {
@@ -2347,23 +2638,21 @@ fn push_wrapped_prefixed_lines(
 }
 
 fn prompt_input_text(prompt: &PromptState) -> String {
-    let mut display = prompt.extra_text.clone();
-    let cursor = prompt.extra_cursor.min(display.len());
+    let mut display = prompt.reply_text.clone();
+    let cursor = prompt.reply_cursor.min(display.len());
     display.insert(cursor, '\u{2588}');
     display
 }
 
 fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'static>> {
-    let has_options = !prompt.options.is_empty();
-    let show_text_input = prompt.editing_extra || !has_options;
+    let has_options = prompt.has_options();
+    let show_text_input = prompt.is_editing_reply();
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     if !prompt.question.is_empty() {
         let md_lines = markdown::render_markdown(&prompt.question, inner_w);
         for md_line in md_lines {
-            let mut prefixed = vec![Span::styled(" ", Style::default())];
-            prefixed.extend(md_line.spans);
-            lines.push(Line::from(prefixed));
+            lines.push(md_line);
         }
     }
 
@@ -2372,8 +2661,9 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
     }
 
     if has_options {
+        lines.push(prompt_section_label("Choices"));
         for (idx, opt) in prompt.options.iter().enumerate() {
-            let selected = idx == prompt.selected_idx;
+            let selected = prompt.selected_option_idx() == Some(idx);
             let text_style = if selected {
                 Style::default()
                     .fg(theme::SODIUM)
@@ -2397,7 +2687,7 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
             );
         }
 
-        let other_selected = prompt.selected_idx == prompt.options.len();
+        let other_selected = prompt.selects_custom_reply();
         let other_style = if other_selected {
             Style::default()
                 .fg(theme::SODIUM)
@@ -2413,7 +2703,7 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
         };
         push_wrapped_prefixed_lines(
             &mut lines,
-            "Other",
+            "Write my own answer",
             inner_w,
             Span::styled(
                 if other_selected { " \u{203a} " } else { "   " },
@@ -2429,6 +2719,9 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
     }
 
     if show_text_input {
+        if has_options {
+            lines.push(prompt_section_label("Reply"));
+        }
         push_wrapped_prefixed_lines(
             &mut lines,
             &prompt_input_text(prompt),
@@ -2447,7 +2740,7 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
         if show_text_input {
             "Enter submit  Shift+Tab newline  Tab choices  Esc cancel"
         } else {
-            "\u{2191}\u{2193} select  Enter submit  Tab context  Esc cancel"
+            "↑↓ choose  Enter submit  Tab write reply  Esc cancel"
         }
     } else {
         "Enter submit  Shift+Tab newline  Esc cancel"
@@ -2471,7 +2764,7 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
         None => return,
     };
 
-    let inner_w = area.width.saturating_sub(2) as usize;
+    let inner_w = prompt_inner_width(area.width);
     let lines = prompt_content_lines(prompt, inner_w);
 
     let content_h = area.height.saturating_sub(2) as usize;
@@ -2481,7 +2774,7 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
         0
     };
 
-    let title = " Agent Question ";
+    let title = prompt_title(prompt);
     let block = Block::default()
         .title(Span::styled(
             title,
@@ -2489,8 +2782,9 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
                 .fg(theme::SODIUM)
                 .add_modifier(Modifier::BOLD),
         ))
-        .borders(Borders::TOP | Borders::BOTTOM)
-        .border_style(Style::default().fg(theme::ASH_LIGHT));
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::ASH_LIGHT))
+        .padding(Padding::horizontal(PROMPT_HORIZONTAL_PADDING));
     let paragraph = Paragraph::new(lines)
         .block(block)
         .style(Style::default().bg(theme::FORM_DEEP))
@@ -2503,11 +2797,17 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
 /// `prefix_width` columns are reserved on the first visual line (for the prompt prefix).
 /// Continuation (wrapped) visual lines use the full `total_width`.
 /// Uses character-level wrapping with proper Unicode width calculation.
-fn wrap_line(text: &str, prefix_width: usize, total_width: usize) -> Vec<(usize, usize)> {
+fn wrap_line(
+    text: &str,
+    first_prefix_width: usize,
+    continuation_prefix_width: usize,
+    total_width: usize,
+) -> Vec<(usize, usize)> {
     if total_width == 0 {
         return vec![(0, text.len())];
     }
-    let first_cap = total_width.saturating_sub(prefix_width);
+    let first_cap = total_width.saturating_sub(first_prefix_width).max(1);
+    let continuation_cap = total_width.saturating_sub(continuation_prefix_width).max(1);
     let mut result = Vec::new();
     let mut line_start = 0;
     let mut col = 0;
@@ -2519,7 +2819,7 @@ fn wrap_line(text: &str, prefix_width: usize, total_width: usize) -> Vec<(usize,
             result.push((line_start, byte_idx));
             line_start = byte_idx;
             col = w;
-            capacity = total_width;
+            capacity = continuation_cap;
         } else {
             col += w;
         }
@@ -2537,7 +2837,7 @@ fn input_visual_lines(input: &str, width: usize) -> usize {
     let prefix_w = 2; // "❯ " or "  "
     let mut total = 0;
     for line in input.split('\n') {
-        total += wrap_line(line, prefix_w, width).len();
+        total += wrap_line(line, prefix_w, prefix_w, width).len();
     }
     total.max(1)
 }
@@ -2551,7 +2851,7 @@ fn input_cursor_position(input: &str, cursor_pos: usize, full_width: usize) -> (
 
     for logical_line in input.split('\n') {
         let line_end = byte_offset + logical_line.len();
-        let segments = wrap_line(logical_line, prefix_w, full_width);
+        let segments = wrap_line(logical_line, prefix_w, prefix_w, full_width);
 
         if cursor_pos <= line_end {
             let cursor_in_line = cursor_pos - byte_offset;
@@ -2560,7 +2860,7 @@ fn input_cursor_position(input: &str, cursor_pos: usize, full_width: usize) -> (
                 if cursor_in_line >= seg_start && (cursor_in_line < seg_end || is_last) {
                     let text_before = &logical_line[seg_start..cursor_in_line];
                     let col = UnicodeWidthStr::width(text_before);
-                    return (vis_row, if i == 0 { col + prefix_w } else { col });
+                    return (vis_row, col + prefix_w);
                 }
                 vis_row += 1;
             }
@@ -2609,16 +2909,21 @@ mod tests {
     fn prompt_state(
         question: &str,
         options: Vec<&str>,
-        extra_text: &str,
-        editing_extra: bool,
+        reply_text: &str,
+        editing_reply: bool,
     ) -> PromptState {
+        let has_options = !options.is_empty();
         PromptState {
             question: question.into(),
             options: options.into_iter().map(str::to_string).collect(),
-            selected_idx: 0,
-            extra_text: extra_text.into(),
-            extra_cursor: extra_text.len(),
-            editing_extra,
+            selection: crate::app::PromptSelection::Option(0),
+            focus: if has_options && !editing_reply {
+                crate::app::PromptFocus::Selection
+            } else {
+                crate::app::PromptFocus::ReplyEditor
+            },
+            reply_text: reply_text.into(),
+            reply_cursor: reply_text.len(),
             response_tx: std::sync::mpsc::channel().0,
         }
     }
@@ -2699,16 +3004,107 @@ mod tests {
         app.blocks.clear(); // avoid splash-specific influence on expectations
         app.input = "line1\nline2\nline3".into();
         app.queue_turn(crate::app::PreparedTurn::new("queued".into(), Vec::new()));
+        app.live_turn = Some(crate::app::LiveTurnState {
+            status_text: "thinking".into(),
+            status_detail: None,
+            phase_started_at: std::time::Instant::now(),
+            turn_started_at: std::time::Instant::now(),
+            assistant_block_idx: None,
+            has_visible_output: false,
+            transient_until: None,
+        });
 
         let fw = 100u16;
         let fh = 40u16;
+        let reserved_height = 1u16 + turn_status_height(&app) + queue_preview_height(&app, fw);
         let expected_overhead = 1u16 // status bar
-            + if app.running { 1 } else { 0 }
+            + turn_status_height(&app)
             + queue_preview_height(&app, fw)
-            + input_height(&app, fw);
+            + input_height(&app, fw, fh, reserved_height);
 
         let got = history_viewport_height(&app, fw, fh);
         assert_eq!(got, fh.saturating_sub(expected_overhead) as usize);
+    }
+
+    #[test]
+    fn pending_prompt_does_not_lose_last_visible_line_to_separator_row() {
+        let backend = TestBackend::new(20, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut app = App::new("model".into(), "session".into());
+        app.blocks.clear();
+        app.blocks
+            .push(DisplayBlock::AssistantText("history".into()));
+        app.blocks.push(DisplayBlock::UserInput(
+            ["line1", "line2", "line3"].join("\n"),
+        ));
+        app.start_turn();
+        app.follow_output = true;
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let vh = history_viewport_height(&app, area.width, area.height);
+                app.ensure_height_cache_pub(area.width as usize, vh);
+                app.refresh_follow_output_anchor(area.width as usize, vh);
+                let total = app.total_content_height(area.width as usize, vh);
+                app.scroll_offset = app.scroll_offset.min(total.saturating_sub(vh));
+                draw(frame, &app);
+            })
+            .expect("draw app");
+
+        let rows: Vec<String> = (0..8)
+            .map(|y| buffer_row_text(terminal.backend(), y, 20))
+            .collect();
+
+        assert!(
+            rows.iter().take(4).any(|row| row.contains("line3")),
+            "last visible prompt line should not be lost above footer: {rows:?}"
+        );
+        assert!(
+            rows[4].contains("Working"),
+            "footer should still occupy the turn-status row: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn wrapped_assistant_tail_stays_visible_above_footer() {
+        let backend = TestBackend::new(20, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut app = App::new("model".into(), "session".into());
+        app.blocks.clear();
+        app.blocks.push(DisplayBlock::AssistantText(
+            "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda omega".into(),
+        ));
+        app.start_turn();
+        app.follow_output = true;
+        if let Some(turn) = app.live_turn.as_mut() {
+            turn.has_visible_output = true;
+        }
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let vh = history_viewport_height(&app, area.width, area.height);
+                app.ensure_height_cache_pub(area.width as usize, vh);
+                app.refresh_follow_output_anchor(area.width as usize, vh);
+                let total = app.total_content_height(area.width as usize, vh);
+                app.scroll_offset = app.scroll_offset.min(total.saturating_sub(vh));
+                draw(frame, &app);
+            })
+            .expect("draw app");
+
+        let rows: Vec<String> = (0..8)
+            .map(|y| buffer_row_text(terminal.backend(), y, 20))
+            .collect();
+
+        assert!(
+            rows.iter().take(4).any(|row| row.contains("omega")),
+            "assistant tail should stay visible above footer: {rows:?}"
+        );
+        assert!(
+            rows[4].contains("Working"),
+            "footer should still occupy the turn-status row: {rows:?}"
+        );
     }
 
     #[test]
@@ -2749,8 +3145,109 @@ mod tests {
     }
 
     #[test]
+    fn wrap_line_reserves_continuation_prefix_width() {
+        let text = "12345678901234567890";
+        let segments = wrap_line(text, 2, 4, 10);
+        let chunks = segments
+            .iter()
+            .map(|(start, end)| &text[*start..*end])
+            .collect::<Vec<_>>();
+
+        assert_eq!(chunks, vec!["12345678", "901234", "567890"]);
+    }
+
+    #[test]
+    fn ask_activity_renders_as_question_panel() {
+        let activity = ActivityBlock {
+            kind: ActivityKind::Ask,
+            status: ActivityStatus::Completed,
+            tool_name: "ask".into(),
+            summary: "Question".into(),
+            detail_lines: vec![
+                "Question · Which environment should I use?".into(),
+                "1. staging".into(),
+                "2. prod".into(),
+                "Answer · staging".into(),
+            ],
+            duration_ms: 0,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: None,
+            children: Vec::new(),
+            extra: None,
+        };
+
+        let mut lines = Vec::new();
+        render_activity_block(&activity, 1, &mut lines, 48, false);
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert_eq!(
+            rendered[0],
+            "┌─ QUESTION ───────────────────────────────────┐"
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("Which environment should I use?"))
+        );
+        assert!(rendered.iter().any(|line| line.contains("1. staging")));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("Answer · staging"))
+        );
+        assert_eq!(
+            rendered.last().map(String::as_str),
+            Some("└──────────────────────────────────────────────┘")
+        );
+    }
+
+    #[test]
+    fn input_height_grows_until_cap_and_preserves_history() {
+        let mut app = App::new("model".into(), "session".into());
+        app.input = (0..40)
+            .map(|idx| format!("line {idx} with enough text to wrap around the viewport"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let height = input_height(&app, 40, 18, 1);
+        assert_eq!(height, 14);
+    }
+
+    #[test]
+    fn draw_input_keeps_cursor_visible_at_bottom_of_tall_message() {
+        let backend = TestBackend::new(28, 5);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut app = App::new("model".into(), "session".into());
+        app.input = (0..8)
+            .map(|idx| format!("line {idx} wraps heavily"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.cursor_pos = app.input.len();
+
+        terminal
+            .draw(|frame| draw_input(frame, &app, Rect::new(0, 0, 28, 5)))
+            .expect("draw");
+
+        let cursor = terminal
+            .backend()
+            .buffer()
+            .cell((3, 3))
+            .expect("cursor row cell");
+        assert_eq!(cursor.symbol(), "l");
+
+        let visible_rows: Vec<String> = (1..4)
+            .map(|y| buffer_row_text(terminal.backend(), y, 28))
+            .collect();
+        assert!(
+            visible_rows.iter().any(|row| row.contains("line 7")),
+            "latest line should remain visible: {visible_rows:?}"
+        );
+    }
+
+    #[test]
     fn turn_status_footer_only_renders_working_line() {
-        let backend = TestBackend::new(48, 3);
+        let backend = TestBackend::new(48, 1);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut app = App::new("model".into(), "session".into());
         app.live_turn = Some(crate::app::LiveTurnState {
@@ -2768,20 +3265,16 @@ mod tests {
             .expect("draw footer");
 
         let backend = terminal.backend();
-        let top = buffer_row_text(backend, 0, 48);
-        let middle = buffer_row_text(backend, 1, 48);
-        let bottom = buffer_row_text(backend, 2, 48);
+        let row = buffer_row_text(backend, 0, 48);
 
-        assert!(top.trim().is_empty());
-        assert!(middle.contains("Working"));
-        assert!(!middle.contains("thinking"));
-        assert!(!middle.contains("waiting"));
-        assert!(bottom.trim().is_empty());
+        assert!(row.contains("Working"));
+        assert!(!row.contains("thinking"));
+        assert!(!row.contains("waiting"));
     }
 
     #[test]
     fn turn_status_footer_replaces_working_with_error() {
-        let backend = TestBackend::new(48, 3);
+        let backend = TestBackend::new(48, 1);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut app = App::new("model".into(), "session".into());
         app.live_turn = Some(crate::app::LiveTurnState {
@@ -2798,15 +3291,15 @@ mod tests {
             .draw(|frame| draw_turn_status(frame, &app, frame.area()))
             .expect("draw footer");
 
-        let middle = buffer_row_text(terminal.backend(), 1, 48);
-        assert!(middle.contains("Error"));
-        assert!(!middle.contains("Working"));
-        assert!(!middle.contains("provider timeout"));
+        let row = buffer_row_text(terminal.backend(), 0, 48);
+        assert!(row.contains("Error"));
+        assert!(!row.contains("Working"));
+        assert!(!row.contains("provider timeout"));
     }
 
     #[test]
     fn turn_status_footer_shows_elapsed_after_threshold() {
-        let backend = TestBackend::new(48, 3);
+        let backend = TestBackend::new(48, 1);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut app = App::new("model".into(), "session".into());
         app.live_turn = Some(crate::app::LiveTurnState {
@@ -2823,9 +3316,9 @@ mod tests {
             .draw(|frame| draw_turn_status(frame, &app, frame.area()))
             .expect("draw footer");
 
-        let middle = buffer_row_text(terminal.backend(), 1, 48);
-        assert!(middle.contains("Working"));
-        assert!(middle.contains("2.0s"));
+        let row = buffer_row_text(terminal.backend(), 0, 48);
+        assert!(row.contains("Working"));
+        assert!(row.contains("2.0s"));
     }
 
     #[test]
@@ -3044,12 +3537,12 @@ mod tests {
         let image_cell = terminal
             .backend()
             .buffer()
-            .cell((2, 1))
+            .cell((3, 1))
             .expect("image cell");
         let text_cell = terminal
             .backend()
             .buffer()
-            .cell((13, 1))
+            .cell((14, 1))
             .expect("text cell");
         assert_eq!(image_cell.symbol(), "[");
         assert_eq!(image_cell.fg, theme::SODIUM);

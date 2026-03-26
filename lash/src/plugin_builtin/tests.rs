@@ -22,6 +22,19 @@ use crate::{
 
 struct MockSessionManager;
 
+fn mock_snapshot(run_session_id: &str) -> SessionSnapshot {
+    AgentStateEnvelope {
+        agent_id: "root".to_string(),
+        policy: SessionPolicy {
+            execution_mode: ExecutionMode::Standard,
+            context_strategy: crate::ContextStrategy::RollingContext,
+            session_id: Some(run_session_id.to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
 struct StaticInstructionSource {
     text: String,
     read_text: String,
@@ -40,11 +53,11 @@ impl InstructionSource for StaticInstructionSource {
 #[async_trait::async_trait]
 impl SessionManager for MockSessionManager {
     async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
-        Ok(AgentStateEnvelope::default())
+        Ok(mock_snapshot("run-session"))
     }
 
     async fn snapshot_session(&self, _session_id: &str) -> Result<SessionSnapshot, PluginError> {
-        Ok(AgentStateEnvelope::default())
+        Ok(mock_snapshot("run-session"))
     }
 
     async fn tool_catalog(&self, _session_id: &str) -> Result<Vec<serde_json::Value>, PluginError> {
@@ -93,6 +106,7 @@ impl SessionManager for MockSessionManager {
                 model: "mock-model".to_string(),
                 execution_mode: ExecutionMode::Standard,
                 context_strategy: crate::ContextStrategy::RollingContext,
+                session_id: Some("run-session".to_string()),
                 ..Default::default()
             },
             events: rx,
@@ -464,7 +478,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     let before_turn = session
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
-            state: AgentStateEnvelope::default(),
+            state: mock_snapshot("run-session"),
             host: Arc::clone(&manager),
         })
         .await
@@ -474,8 +488,9 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         PluginDirective::EnqueueMessages { messages }
             if messages.iter().any(|message|
                 message.role == MessageRole::System
-                    && message.content.contains("Plan Mode (Conversational)")
-                    && message.content.contains("PHASE 1 - Ground in the environment"))
+                    && message.content.contains("Plan Mode")
+                    && message.content.contains(".lash/plans/run-session.md")
+                    && message.content.contains("plan_exit()"))
     )));
     assert!(before_turn.iter().any(|emitted| {
         emitted.plugin_id == "plan_mode"
@@ -550,6 +565,28 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     input_schema_override: None,
                     output_schema_override: None,
                 },
+                ToolDefinition {
+                    name: "apply_patch".to_string(),
+                    description: "Apply patches".to_string(),
+                    params: vec![],
+                    returns: "dict".to_string(),
+                    examples: vec![],
+                    enabled: true,
+                    injected: true,
+                    input_schema_override: None,
+                    output_schema_override: None,
+                },
+                ToolDefinition {
+                    name: "plan_exit".to_string(),
+                    description: "Exit plan mode".to_string(),
+                    params: vec![],
+                    returns: "dict".to_string(),
+                    examples: vec![],
+                    enabled: false,
+                    injected: false,
+                    input_schema_override: None,
+                    output_schema_override: None,
+                },
             ],
         })
         .expect("tool surface");
@@ -559,6 +596,19 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             .iter()
             .find(|tool| tool.name == "update_plan")
             .is_some_and(|tool| !tool.enabled && !tool.injected)
+    );
+    assert!(
+        surface
+            .tools
+            .iter()
+            .find(|tool| tool.name == "plan_exit")
+            .is_some_and(|tool| tool.enabled && tool.injected)
+    );
+    assert!(
+        surface
+            .tool_list_notes
+            .iter()
+            .any(|note| note.contains(".lash/plans/run-session.md"))
     );
 
     let checklist_blocked = session
@@ -590,6 +640,37 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         .expect("before_tool_call");
     assert!(read_allowed.is_empty());
 
+    let plan_patch_allowed = session
+        .before_tool_call(ToolCallHookContext {
+            session_id: "root".to_string(),
+            tool_name: "apply_patch".to_string(),
+            args: json!({
+                "input": "*** Begin Patch\n*** Add File: .lash/plans/run-session.md\n+# Plan\n*** End Patch"
+            }),
+            host: Arc::clone(&manager),
+        })
+        .await
+        .expect("before_tool_call");
+    assert!(plan_patch_allowed.is_empty());
+
+    let repo_patch_blocked = session
+        .before_tool_call(ToolCallHookContext {
+            session_id: "root".to_string(),
+            tool_name: "apply_patch".to_string(),
+            args: json!({
+                "input": "*** Begin Patch\n*** Add File: src/main.rs\n+fn main() {}\n*** End Patch"
+            }),
+            host: Arc::clone(&manager),
+        })
+        .await
+        .expect("before_tool_call");
+    assert!(repo_patch_blocked.iter().any(|emitted| matches!(
+        &emitted.value,
+        PluginDirective::AbortTurn { code, message }
+            if code == "plan_mode_tool_blocked"
+                && message.contains(".lash/plans/run-session.md")
+    )));
+
     session
         .invoke_external(
             "plan_mode.disable",
@@ -615,7 +696,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         .at_checkpoint(crate::CheckpointHookContext {
             session_id: "root".to_string(),
             checkpoint: crate::CheckpointKind::AfterWork,
-            state: AgentStateEnvelope::default(),
+            state: mock_snapshot("run-session"),
             host: Arc::clone(&manager),
         })
         .await
@@ -624,13 +705,8 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         &emitted.value,
         PluginDirective::EnqueueMessages { messages }
             if messages.iter().any(|message|
-                message.content.contains("Plan Mode (Conversational)")
-                    && message.content.contains("Finalization rule"))
-    )));
-    assert!(checkpoint.iter().any(|emitted| matches!(
-        &emitted.value,
-        PluginDirective::EnqueueMessages { messages }
-            if messages.iter().any(|message| message.content.contains("<proposed_plan>"))
+                message.content.contains(".lash/plans/run-session.md")
+                    && message.content.contains("plan_exit()"))
     )));
 
     session
@@ -646,7 +722,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
 #[tokio::test]
 async fn plan_mode_plugin_uses_configured_blocked_tool_set() {
     let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::new(
-        PlanModePluginConfig::default().with_blocked_tools(["read_file"]),
+        PlanModePluginConfig::default().with_blocked_tools(["apply_patch", "read_file"]),
     ))]);
     let session = host.build_standard_session("root", None).expect("session");
     let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
@@ -688,10 +764,106 @@ async fn plan_mode_plugin_uses_configured_blocked_tool_set() {
         .await
         .expect("before_tool_call");
     assert!(allowed.is_empty());
+    let apply_patch_blocked = session
+        .before_tool_call(ToolCallHookContext {
+            session_id: "root".to_string(),
+            tool_name: "apply_patch".to_string(),
+            args: json!({
+                "input": "*** Begin Patch\n*** Add File: .lash/plans/run-session.md\n+# Plan\n*** End Patch"
+            }),
+            host: Arc::clone(&manager),
+        })
+        .await
+        .expect("before_tool_call");
+    assert!(apply_patch_blocked.iter().any(|emitted| matches!(
+        &emitted.value,
+        PluginDirective::AbortTurn { code, .. } if code == "plan_mode_tool_blocked"
+    )));
 }
 
 #[tokio::test]
-async fn plan_mode_plugin_suppresses_proposed_plan_tags_and_emits_panel_events() {
+async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
+    let prompt_bridge = crate::PromptBridge::new();
+    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::with_prompt_bridge(
+        PlanModePluginConfig::default(),
+        prompt_bridge.clone(),
+    ))]);
+    let session = host.build_standard_session("root", None).expect("session");
+    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
+
+    let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::unbounded_channel();
+    prompt_bridge.set_sender(prompt_tx);
+    let prompt_task = tokio::spawn(async move {
+        let prompt = prompt_rx.recv().await.expect("prompt");
+        assert!(prompt.question.contains(".lash/plans/run-session.md"));
+        prompt
+            .response_tx
+            .send("Implement it".to_string())
+            .expect("response");
+    });
+
+    session
+        .invoke_external(
+            "plan_mode.enable",
+            json!({}),
+            None,
+            true,
+            Arc::clone(&manager),
+        )
+        .await
+        .expect("enable");
+    session
+        .before_turn(TurnHookContext {
+            session_id: "root".to_string(),
+            state: mock_snapshot("run-session"),
+            host: Arc::clone(&manager),
+        })
+        .await
+        .expect("before_turn");
+
+    let result = session
+        .tools()
+        .execute_with_context(
+            "plan_exit",
+            &json!({}),
+            &crate::ToolExecutionContext {
+                session_id: "root".to_string(),
+                host: Arc::clone(&manager),
+            },
+        )
+        .await;
+    prompt_task.await.expect("prompt task");
+    assert!(result.success);
+    assert_eq!(
+        result
+            .result
+            .get("approved")
+            .and_then(|value| value.as_bool()),
+        Some(true)
+    );
+    assert!(
+        result
+            .result
+            .get("next_turn_input")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value.contains("Execute that plan"))
+    );
+
+    let status = session
+        .invoke_external("plan_mode.status", json!({}), None, true, manager)
+        .await
+        .expect("status");
+    assert_eq!(
+        status
+            .result
+            .get("enabled")
+            .and_then(|value| value.as_bool()),
+        Some(false)
+    );
+}
+
+#[tokio::test]
+async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
     let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
     let session = host.build_standard_session("root", None).expect("session");
     let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
@@ -706,40 +878,25 @@ async fn plan_mode_plugin_suppresses_proposed_plan_tags_and_emits_panel_events()
         )
         .await
         .expect("enable");
-    session
-        .before_turn(TurnHookContext {
-            session_id: "root".to_string(),
-            state: AgentStateEnvelope::default(),
-            host: Arc::clone(&manager),
-        })
-        .await
-        .expect("before_turn");
 
     let stream = session
         .transform_assistant_stream(
             "root",
-            "Start\n<proposed_plan>\n- Step one\n".to_string(),
+            "Keep this text exactly.".to_string(),
             Arc::clone(&manager),
         )
         .await
         .expect("stream");
-    assert_eq!(stream.len(), 1);
-    assert_eq!(stream[0].plugin_id, "plan_mode");
-    assert_eq!(stream[0].value.chunk, "Start\n");
-    assert!(stream[0].value.events.iter().any(|event| matches!(
-        event,
-        crate::plugin::PluginSurfaceEvent::PanelUpsert { title, content, .. }
-            if title == "PROPOSED PLAN" && content.contains("Step one")
-    )));
+    assert!(stream.is_empty());
 
     let response = session
         .transform_assistant_response(
             "root",
             crate::llm::types::LlmResponse {
-                full_text: "Start\n<proposed_plan>\n- Step one\n</proposed_plan>\nDone.".into(),
+                full_text: "Keep this text exactly.".into(),
                 deltas: Vec::new(),
                 parts: vec![crate::llm::types::LlmOutputPart::Text {
-                    text: "Start\n<proposed_plan>\n- Step one\n</proposed_plan>\nDone.".into(),
+                    text: "Keep this text exactly.".into(),
                 }],
                 usage: crate::llm::types::LlmUsage::default(),
                 request_body: None,
@@ -749,62 +906,5 @@ async fn plan_mode_plugin_suppresses_proposed_plan_tags_and_emits_panel_events()
         )
         .await
         .expect("response");
-    assert_eq!(response.len(), 1);
-    assert_eq!(response[0].value.response.full_text, "Start\n\nDone.");
-}
-
-#[tokio::test]
-async fn plan_mode_plugin_preserves_plan_only_output_as_panel_event() {
-    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::new(
-        PlanModePluginConfig::default(),
-    ))]);
-    let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
-
-    session
-        .invoke_external(
-            "plan_mode.enable",
-            json!({}),
-            None,
-            true,
-            Arc::clone(&manager),
-        )
-        .await
-        .expect("enable");
-    session
-        .before_turn(TurnHookContext {
-            session_id: "root".to_string(),
-            state: AgentStateEnvelope::default(),
-            host: Arc::clone(&manager),
-        })
-        .await
-        .expect("before_turn");
-
-    let response = session
-        .transform_assistant_response(
-            "root",
-            crate::llm::types::LlmResponse {
-                full_text: "<proposed_plan>\n- Step one\n- Step two\n</proposed_plan>".into(),
-                deltas: Vec::new(),
-                parts: vec![crate::llm::types::LlmOutputPart::Text {
-                    text: "<proposed_plan>\n- Step one\n- Step two\n</proposed_plan>".into(),
-                }],
-                usage: crate::llm::types::LlmUsage::default(),
-                request_body: None,
-                http_summary: None,
-            },
-            manager,
-        )
-        .await
-        .expect("response");
-
-    assert_eq!(response.len(), 1);
-    assert_eq!(response[0].value.response.full_text, "");
-    assert!(response[0].value.events.iter().any(|event| matches!(
-        event,
-        crate::plugin::PluginSurfaceEvent::PanelUpsert { title, content, .. }
-            if title == "PROPOSED PLAN"
-                && content.contains("Step one")
-                && content.contains("Step two")
-    )));
+    assert!(response.is_empty());
 }

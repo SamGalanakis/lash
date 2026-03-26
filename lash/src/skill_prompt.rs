@@ -123,7 +123,7 @@ mod tests {
             )
             .expect("skill file");
         }
-        let catalog = SkillCatalog::from_dirs(&[root.clone()]);
+        let catalog = SkillCatalog::from_dirs(std::slice::from_ref(&root));
         let _ = std::fs::remove_dir_all(root);
         catalog
     }

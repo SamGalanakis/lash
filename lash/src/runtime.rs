@@ -7,7 +7,6 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::message::IMAGE_REF_PREFIX;
 use crate::agent::{
     AgentEvent, DurableTurnSnapshot, Message, MessageRole, Part, PartKind, PruneState,
     SessionPolicy, TokenUsage, build_execution_preamble, context::build_context,
@@ -841,6 +840,7 @@ fn plugin_message_to_message(
             id: format!("m{msg_idx}.p0"),
             kind: PartKind::Text,
             content: plugin_message.content.clone(),
+            attachment: None,
             tool_call_id: None,
             tool_name: None,
             prune_state: PruneState::Intact,
@@ -848,6 +848,24 @@ fn plugin_message_to_message(
     } else {
         plugin_message.parts.clone()
     };
+    let has_image_parts = parts
+        .iter()
+        .any(|part| matches!(part.kind, PartKind::Image));
+    if matches!(plugin_message.role, MessageRole::User) && !has_image_parts {
+        parts.extend(plugin_message.images.iter().map(|bytes| Part {
+            id: String::new(),
+            kind: PartKind::Image,
+            content: String::new(),
+            attachment: Some(crate::agent::message::PartAttachment {
+                mime: "image/png".to_string(),
+                url: crate::agent::message::data_url_for_bytes("image/png", bytes),
+                filename: None,
+            }),
+            tool_call_id: None,
+            tool_name: None,
+            prune_state: PruneState::Intact,
+        }));
+    }
     for (part_idx, part) in parts.iter_mut().enumerate() {
         part.id = format!("m{msg_idx}.p{part_idx}");
     }
@@ -1236,6 +1254,7 @@ impl LashRuntime {
                     id: format!("{}.p0", sys_id),
                     kind: PartKind::Text,
                     content,
+                    attachment: None,
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
@@ -1246,7 +1265,6 @@ impl LashRuntime {
 
         let user_id = format!("m{}", messages.len());
         let mut user_parts: Vec<Part> = Vec::new();
-        let mut user_images_png: Vec<Vec<u8>> = Vec::new();
         for item in normalized {
             match item {
                 NormalizedItem::Text(text) => {
@@ -1257,18 +1275,22 @@ impl LashRuntime {
                         id: format!("{}.p{}", user_id, user_parts.len()),
                         kind: PartKind::Text,
                         content: text,
+                        attachment: None,
                         tool_call_id: None,
                         tool_name: None,
                         prune_state: PruneState::Intact,
                     });
                 }
                 NormalizedItem::Image(bytes) => {
-                    let image_idx = user_images_png.len();
-                    user_images_png.push(bytes);
                     user_parts.push(Part {
                         id: format!("{}.p{}", user_id, user_parts.len()),
-                        kind: PartKind::Text,
-                        content: format!("{IMAGE_REF_PREFIX}{image_idx}"),
+                        kind: PartKind::Image,
+                        content: String::new(),
+                        attachment: Some(crate::agent::message::PartAttachment {
+                            mime: "image/png".to_string(),
+                            url: crate::agent::message::data_url_for_bytes("image/png", &bytes),
+                            filename: None,
+                        }),
                         tool_call_id: None,
                         tool_name: None,
                         prune_state: PruneState::Intact,
@@ -1281,6 +1303,7 @@ impl LashRuntime {
                 id: format!("{}.p0", user_id),
                 kind: PartKind::Text,
                 content: String::new(),
+                attachment: None,
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
@@ -1326,14 +1349,8 @@ impl LashRuntime {
 
         self.state.last_prompt_usage = None;
 
-        self.stream_prepared_turn(
-            messages,
-            user_images_png,
-            previous_prompt_usage,
-            events,
-            cancel,
-        )
-        .await
+        self.stream_prepared_turn(messages, previous_prompt_usage, events, cancel)
+            .await
     }
 
     /// Run a single turn and return only the assembled terminal result.
@@ -1349,7 +1366,6 @@ impl LashRuntime {
     pub async fn stream_prepared_turn(
         &mut self,
         messages: Vec<Message>,
-        images_png: Vec<Vec<u8>>,
         _previous_prompt_usage: Option<PromptUsage>,
         events: &dyn EventSink,
         cancel: CancellationToken,
@@ -1426,7 +1442,7 @@ impl LashRuntime {
         let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
         let run_task = tokio::spawn(async move {
             let (new_messages, new_iteration) = driver
-                .run(prepared.messages, images_png, event_tx, cancel, run_offset)
+                .run(prepared.messages, event_tx, cancel, run_offset)
                 .await;
             (driver, new_messages, new_iteration)
         });
@@ -1574,7 +1590,6 @@ impl RuntimeTurnDriver {
     async fn run(
         &mut self,
         messages: Vec<Message>,
-        images: Vec<Vec<u8>>,
         event_tx: mpsc::Sender<AgentEvent>,
         cancel: CancellationToken,
         run_offset: usize,
@@ -1585,7 +1600,7 @@ impl RuntimeTurnDriver {
             };
         }
         let mut machine = match self
-            .prepare_turn_machine(messages, images, &event_tx, run_offset)
+            .prepare_turn_machine(messages, &event_tx, run_offset)
             .await
         {
             Ok(machine) => machine,
@@ -1702,7 +1717,6 @@ impl RuntimeTurnDriver {
     async fn prepare_turn_machine(
         &mut self,
         messages: Vec<Message>,
-        images: Vec<Vec<u8>>,
         event_tx: &mpsc::Sender<AgentEvent>,
         run_offset: usize,
     ) -> Result<TurnMachine, (Vec<Message>, usize)> {
@@ -1760,12 +1774,7 @@ impl RuntimeTurnDriver {
         preamble.prompt = finalize_prompt_context(preamble.prompt, all_prompt_contributions);
         self.policy = session_policy;
         let machine_config = self.machine_config(preamble, execution_mode);
-        Ok(TurnMachine::new(
-            machine_config,
-            messages,
-            images,
-            run_offset,
-        ))
+        Ok(TurnMachine::new(machine_config, messages, run_offset))
     }
 
     async fn run_llm_call(
@@ -2981,6 +2990,7 @@ mod tests {
                 id: format!("{id}.p0"),
                 kind: PartKind::Text,
                 content: content.to_string(),
+                attachment: None,
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
@@ -3689,8 +3699,13 @@ mod tests {
                 parts: vec![
                     crate::Part {
                         id: String::new(),
-                        kind: crate::PartKind::Text,
-                        content: format!("{}0", crate::agent::message::IMAGE_REF_PREFIX),
+                        kind: crate::PartKind::Image,
+                        content: String::new(),
+                        attachment: Some(crate::agent::message::PartAttachment {
+                            mime: "image/png".to_string(),
+                            url: crate::agent::message::data_url_for_bytes("image/png", &[9, 8, 7]),
+                            filename: None,
+                        }),
                         tool_call_id: None,
                         tool_name: None,
                         prune_state: crate::PruneState::Intact,
@@ -3699,12 +3714,13 @@ mod tests {
                         id: String::new(),
                         kind: crate::PartKind::Text,
                         content: "see image".to_string(),
+                        attachment: None,
                         tool_call_id: None,
                         tool_name: None,
                         prune_state: crate::PruneState::Intact,
                     },
                 ],
-                images: vec![vec![9, 8, 7]],
+                images: Vec::new(),
             }])
             .expect("enqueue");
         let transport = MockTransport::new(vec![
@@ -3747,9 +3763,10 @@ mod tests {
 
         assert!(turn.state.messages.iter().any(|message| {
             message.role == MessageRole::User
-                && message.parts.iter().any(|part| {
-                    part.content == format!("{}0", crate::agent::message::IMAGE_REF_PREFIX)
-                })
+                && message
+                    .parts
+                    .iter()
+                    .any(|part| matches!(part.kind, PartKind::Image) && part.attachment.is_some())
         }));
     }
 
@@ -3901,6 +3918,7 @@ mod tests {
                 id: "m0.p0".to_string(),
                 kind: PartKind::Text,
                 content: "root msg".to_string(),
+                attachment: None,
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
@@ -4136,6 +4154,7 @@ mod tests {
                 id: "m0.p0".to_string(),
                 kind: PartKind::Text,
                 content: "Turn limit reached (5).".to_string(),
+                attachment: None,
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
@@ -4159,10 +4178,10 @@ mod tests {
     fn assembler_tracks_plugin_panel_output() {
         let mut assembler = TurnAssembler::default();
         assembler.push(&AgentEvent::PluginEvent {
-            plugin_id: "plan_mode".to_string(),
+            plugin_id: "demo".to_string(),
             event: crate::PluginSurfaceEvent::PanelUpsert {
-                key: "proposed_plan:1".to_string(),
-                title: "PROPOSED PLAN".to_string(),
+                key: "panel:1".to_string(),
+                title: "TASK BOARD".to_string(),
                 content: "1. Inspect\n2. Patch".to_string(),
             },
         });

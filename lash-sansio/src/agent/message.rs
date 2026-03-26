@@ -1,8 +1,7 @@
 use crate::ExecutionMode;
 pub use crate::llm::types::LlmPromptPart;
-use crate::llm::types::{LlmMessage, LlmRole};
-
-pub const IMAGE_REF_PREFIX: &str = "__LASH_IMAGE_IDX:";
+use crate::llm::types::{LlmAttachment, LlmMessage, LlmRole};
+use base64::Engine;
 
 // ─── Structured message types for context-aware pruning ───
 
@@ -36,6 +35,8 @@ pub struct Part {
     pub kind: PartKind,
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<PartAttachment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
@@ -45,12 +46,21 @@ pub struct Part {
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PartKind {
     Text,
+    Image,
     Code,
     Output,
     Error,
     Prose,
     ToolCall,
     ToolResult,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PartAttachment {
+    pub mime: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -68,7 +78,25 @@ pub enum PruneState {
 }
 
 impl Part {
+    pub fn prompt_char_count(&self) -> usize {
+        if matches!(self.kind, PartKind::Image) {
+            return self
+                .attachment
+                .as_ref()
+                .map(|attachment| attachment.url.len())
+                .unwrap_or_else(|| self.render().len());
+        }
+        self.render().len()
+    }
+
     pub(crate) fn render(&self) -> String {
+        if matches!(self.kind, PartKind::Image) {
+            return if self.attachment.is_some() || self.content.trim().is_empty() {
+                "[Image attached]".to_string()
+            } else {
+                self.content.clone()
+            };
+        }
         match &self.prune_state {
             PruneState::Intact => self.content.clone(),
             PruneState::Cleared => "[Old tool result content cleared]".to_string(),
@@ -87,8 +115,13 @@ impl Part {
 impl Message {
     /// Total character count of all parts (rendered).
     pub fn char_count(&self) -> usize {
-        self.parts.iter().map(|p| p.render().len()).sum()
+        self.parts.iter().map(Part::prompt_char_count).sum()
     }
+}
+
+pub fn data_url_for_bytes(mime: &str, bytes: &[u8]) -> String {
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    format!("data:{mime};base64,{b64}")
 }
 
 fn render_part_for_chat(role: MessageRole, part: &Part) -> String {
@@ -98,14 +131,16 @@ fn render_part_for_chat(role: MessageRole, part: &Part) -> String {
             PartKind::Code => format!("<repl>\n{}\n</repl>", rendered),
             PartKind::Output => format!("<output>\n{}\n</output>", rendered),
             PartKind::Error => format!("<error>\n{}\n</error>", rendered),
-            PartKind::Text | PartKind::Prose | PartKind::ToolCall | PartKind::ToolResult => {
-                rendered
-            }
+            PartKind::Text
+            | PartKind::Image
+            | PartKind::Prose
+            | PartKind::ToolCall
+            | PartKind::ToolResult => rendered,
         },
         MessageRole::Assistant => match part.kind {
             PartKind::Code => format!("<repl>\n{}\n</repl>", rendered),
             PartKind::ToolCall => render_assistant_tool_call(part, &rendered),
-            PartKind::Prose | PartKind::Text | PartKind::ToolResult => rendered,
+            PartKind::Prose | PartKind::Text | PartKind::Image | PartKind::ToolResult => rendered,
             _ => rendered,
         },
         MessageRole::User => rendered,
@@ -122,17 +157,34 @@ fn render_assistant_tool_call(part: &Part, rendered: &str) -> String {
     }
 }
 
-fn render_message_for_transcript(msg: &Message, image_indices: &mut Vec<usize>) -> String {
+fn attachment_from_part(part: &Part) -> Option<LlmAttachment> {
+    if !matches!(part.kind, PartKind::Image) {
+        return None;
+    }
+    let attachment = part.attachment.as_ref()?;
+    let encoded = attachment
+        .url
+        .strip_prefix("data:")
+        .and_then(|rest| rest.split_once(";base64,"))
+        .map(|(_, encoded)| encoded)?;
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    Some(LlmAttachment {
+        mime: attachment.mime.clone(),
+        data,
+    })
+}
+
+fn render_message_for_transcript(msg: &Message, attachments: &mut Vec<LlmAttachment>) -> String {
     let mut out = Vec::new();
     for part in &msg.parts {
-        let rendered = render_part_for_chat(msg.role, part);
-        if let Some(idx_str) = rendered.strip_prefix(IMAGE_REF_PREFIX)
-            && let Ok(idx) = idx_str.parse::<usize>()
-        {
-            image_indices.push(idx);
+        if let Some(attachment) = attachment_from_part(part) {
+            attachments.push(attachment);
             out.push("[Image attached]".to_string());
             continue;
         }
+        let rendered = render_part_for_chat(msg.role, part);
         if !rendered.trim().is_empty() {
             out.push(rendered);
         }
@@ -144,7 +196,7 @@ fn render_message_for_transcript(msg: &Message, image_indices: &mut Vec<usize>) 
 pub struct RenderedPrompt {
     pub user_prompt: Vec<LlmPromptPart>,
     pub messages: Vec<LlmMessage>,
-    pub image_indices: Vec<usize>,
+    pub attachments: Vec<LlmAttachment>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -161,13 +213,13 @@ pub fn render_prompt(msgs: &[Message], mode: ExecutionMode) -> RenderedPrompt {
 }
 
 pub fn render_transcript_prompt(msgs: &[Message]) -> RenderedPrompt {
-    let mut image_indices = Vec::new();
+    let mut attachments = Vec::new();
     let mut turns = Vec::new();
     let mut current = TranscriptTurn::default();
     let mut has_current = false;
 
     for msg in msgs {
-        let text = render_message_for_transcript(msg, &mut image_indices);
+        let text = render_message_for_transcript(msg, &mut attachments);
         let has_text = !text.trim().is_empty();
         match msg.role {
             MessageRole::User => {
@@ -226,18 +278,19 @@ pub fn render_transcript_prompt(msgs: &[Message]) -> RenderedPrompt {
     RenderedPrompt {
         user_prompt: vec![LlmPromptPart::Text(text)],
         messages: Vec::new(),
-        image_indices,
+        attachments,
     }
 }
 
 fn render_repl_chat_prompt(msgs: &[Message]) -> RenderedPrompt {
+    let mut attachments = Vec::new();
     let mut messages = Vec::new();
 
     for msg in msgs {
         let mut current_chunks = Vec::new();
 
         for part in &msg.parts {
-            if let Some(image_idx) = parse_image_ref(&part.content)
+            if let Some(attachment) = attachment_from_part(part)
                 && matches!(msg.role, MessageRole::User)
             {
                 if !current_chunks.is_empty() {
@@ -252,6 +305,8 @@ fn render_repl_chat_prompt(msgs: &[Message]) -> RenderedPrompt {
                     current_chunks.clear();
                 }
 
+                let image_idx = attachments.len();
+                attachments.push(attachment);
                 messages.push(LlmMessage {
                     role: LlmRole::User,
                     content: String::new(),
@@ -264,9 +319,6 @@ fn render_repl_chat_prompt(msgs: &[Message]) -> RenderedPrompt {
             }
 
             let mut rendered = render_part_for_chat(msg.role, part);
-            if parse_image_ref(&rendered).is_some() {
-                rendered = "[Image attached]".to_string();
-            }
             if rendered.trim().is_empty() {
                 continue;
             }
@@ -291,11 +343,12 @@ fn render_repl_chat_prompt(msgs: &[Message]) -> RenderedPrompt {
     RenderedPrompt {
         user_prompt: Vec::new(),
         messages,
-        image_indices: Vec::new(),
+        attachments,
     }
 }
 
 fn render_structured_prompt(msgs: &[Message]) -> RenderedPrompt {
+    let mut attachments = Vec::new();
     let mut messages = Vec::new();
 
     for msg in msgs {
@@ -323,9 +376,11 @@ fn render_structured_prompt(msgs: &[Message]) -> RenderedPrompt {
                     });
                 }
                 _ => {
-                    if let Some(image_idx) = parse_image_ref(&part.content)
+                    if let Some(attachment) = attachment_from_part(part)
                         && matches!(msg.role, MessageRole::User)
                     {
+                        let image_idx = attachments.len();
+                        attachments.push(attachment);
                         messages.push(LlmMessage {
                             role: LlmRole::User,
                             content: String::new(),
@@ -338,9 +393,6 @@ fn render_structured_prompt(msgs: &[Message]) -> RenderedPrompt {
                     }
 
                     let mut rendered = render_part_for_chat(msg.role, part);
-                    if parse_image_ref(&rendered).is_some() {
-                        rendered = "[Image attached]".to_string();
-                    }
                     if rendered.trim().is_empty() {
                         continue;
                     }
@@ -365,7 +417,7 @@ fn render_structured_prompt(msgs: &[Message]) -> RenderedPrompt {
     RenderedPrompt {
         user_prompt: Vec::new(),
         messages,
-        image_indices: Vec::new(),
+        attachments,
     }
 }
 
@@ -377,12 +429,6 @@ fn llm_role_for_message(role: MessageRole) -> LlmRole {
     }
 }
 
-fn parse_image_ref(content: &str) -> Option<usize> {
-    content
-        .strip_prefix(IMAGE_REF_PREFIX)
-        .and_then(|idx| idx.parse::<usize>().ok())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,6 +438,23 @@ mod tests {
             id: "p0".to_string(),
             kind,
             content: content.to_string(),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            prune_state: PruneState::Intact,
+        }
+    }
+
+    fn image_part(bytes: &[u8]) -> Part {
+        Part {
+            id: "p0".to_string(),
+            kind: PartKind::Image,
+            content: String::new(),
+            attachment: Some(PartAttachment {
+                mime: "image/png".to_string(),
+                url: data_url_for_bytes("image/png", bytes),
+                filename: None,
+            }),
             tool_call_id: None,
             tool_name: None,
             prune_state: PruneState::Intact,
@@ -483,10 +546,7 @@ mod tests {
             Message {
                 id: "m1".to_string(),
                 role: MessageRole::User,
-                parts: vec![
-                    part(PartKind::Text, "show this"),
-                    part(PartKind::Text, "__LASH_IMAGE_IDX:3"),
-                ],
+                parts: vec![part(PartKind::Text, "show this"), image_part(&[1, 2, 3])],
                 origin: None,
             },
             Message {
@@ -496,6 +556,7 @@ mod tests {
                     id: "m2.p0".to_string(),
                     kind: PartKind::ToolCall,
                     content: r#"{"path":"README.md"}"#.to_string(),
+                    attachment: None,
                     tool_call_id: Some("tc1".to_string()),
                     tool_name: Some("read_file".to_string()),
                     prune_state: PruneState::Intact,
@@ -509,6 +570,7 @@ mod tests {
                     id: "m3.p0".to_string(),
                     kind: PartKind::ToolResult,
                     content: "ok".to_string(),
+                    attachment: None,
                     tool_call_id: Some("tc1".to_string()),
                     tool_name: Some("read_file".to_string()),
                     prune_state: PruneState::Intact,
@@ -524,7 +586,8 @@ mod tests {
         assert_eq!(rendered.messages[0].content, "Runtime note:\nnote");
         assert_eq!(rendered.messages[1].kind, "text");
         assert_eq!(rendered.messages[2].kind, "image");
-        assert_eq!(rendered.messages[2].image_idx, 3);
+        assert_eq!(rendered.messages[2].image_idx, 0);
+        assert_eq!(rendered.attachments.len(), 1);
         assert_eq!(rendered.messages[3].kind, "tool_call");
         assert_eq!(rendered.messages[4].kind, "tool_result");
     }
@@ -539,6 +602,7 @@ mod tests {
                     id: "m0.p0".to_string(),
                     kind: PartKind::ToolCall,
                     content: r#"{"question":"Pick one"}"#.to_string(),
+                    attachment: None,
                     tool_call_id: Some("ask_1".to_string()),
                     tool_name: Some("ask".to_string()),
                     prune_state: PruneState::Intact,
@@ -552,6 +616,7 @@ mod tests {
                     id: "m1.p0".to_string(),
                     kind: PartKind::ToolResult,
                     content: String::new(),
+                    attachment: None,
                     tool_call_id: Some("ask_1".to_string()),
                     tool_name: Some("ask".to_string()),
                     prune_state: PruneState::Intact,
@@ -573,17 +638,17 @@ mod tests {
         let msgs = vec![Message {
             id: "m0".to_string(),
             role: MessageRole::User,
-            parts: vec![part(PartKind::Text, "__LASH_IMAGE_IDX:3")],
+            parts: vec![image_part(&[9, 8, 7])],
             origin: None,
         }];
 
         let rendered = render_transcript_prompt(&msgs);
-        assert_eq!(rendered.image_indices, vec![3]);
         let text = match &rendered.user_prompt[0] {
             LlmPromptPart::Text(text) => text,
             LlmPromptPart::Image(_) => panic!("expected text prompt"),
         };
         assert!(text.contains("[Image attached]"));
+        assert_eq!(rendered.attachments.len(), 1);
     }
 
     #[test]
@@ -635,6 +700,7 @@ mod tests {
                     id: "m1.p0".to_string(),
                     kind: PartKind::ToolCall,
                     content: r#"{"cmd":"date"}"#.to_string(),
+                    attachment: None,
                     tool_call_id: Some("tc1".to_string()),
                     tool_name: Some("exec_command".to_string()),
                     prune_state: PruneState::Intact,

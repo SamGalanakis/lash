@@ -159,7 +159,6 @@ impl AgentCall {
             .tool_providers
             .iter()
             .flat_map(|provider| provider.definitions())
-            .into_iter()
             .map(|tool| tool.name)
             .collect())
     }

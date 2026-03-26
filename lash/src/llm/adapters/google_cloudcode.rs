@@ -1,6 +1,10 @@
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 use async_trait::async_trait;
 use base64::Engine;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::llm::adapters::streaming::{drive_sse_response, emit_progress};
 use crate::llm::timeouts::{
@@ -16,6 +20,20 @@ use crate::provider::Provider;
 
 const CODE_ASSIST_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com";
 const CODE_ASSIST_API_VERSION: &str = "v1internal";
+const GEMINI_FILES_UPLOAD_URL: &str =
+    "https://generativelanguage.googleapis.com/upload/v1beta/files";
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct UploadedAttachmentCacheKey {
+    project_id: String,
+    mime: String,
+    hash: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UploadedAttachmentRef {
+    uri: String,
+}
 
 pub struct GoogleCloudCodeAdapter {
     client: reqwest::Client,
@@ -30,6 +48,14 @@ impl Default for GoogleCloudCodeAdapter {
 }
 
 impl GoogleCloudCodeAdapter {
+    fn uploaded_attachment_cache()
+    -> &'static tokio::sync::Mutex<HashMap<UploadedAttachmentCacheKey, UploadedAttachmentRef>> {
+        static CACHE: OnceLock<
+            tokio::sync::Mutex<HashMap<UploadedAttachmentCacheKey, UploadedAttachmentRef>>,
+        > = OnceLock::new();
+        CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
+    }
+
     pub fn new(timeouts: LlmTimeouts) -> Self {
         Self {
             client: build_http_client(),
@@ -50,7 +76,27 @@ impl GoogleCloudCodeAdapter {
         format!("{}:{}", Self::endpoint_base_url(), method)
     }
 
-    fn build_contents(req: &LlmRequest) -> Vec<Value> {
+    fn inline_attachment_part(att: &crate::llm::types::LlmAttachment) -> Value {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
+        json!({
+            "inlineData": {
+                "mimeType": att.mime,
+                "data": b64,
+            }
+        })
+    }
+
+    fn attachment_part_for_index(attachment_parts: &[Value], idx: usize) -> Value {
+        attachment_parts
+            .get(idx)
+            .cloned()
+            .unwrap_or_else(|| json!({ "text": "[Image attached]" }))
+    }
+
+    fn build_contents_with_attachment_parts(
+        req: &LlmRequest,
+        attachment_parts: &[Value],
+    ) -> Vec<Value> {
         if !req.messages.is_empty() {
             let mut out = Vec::new();
             for chunk in coalesce_replay_messages(&req.messages) {
@@ -60,7 +106,10 @@ impl GoogleCloudCodeAdapter {
                             LlmRole::Assistant => "model",
                             LlmRole::User | LlmRole::System => "user",
                         };
-                        let part = Self::content_part_for_message(req, &msg);
+                        let part = Self::content_part_for_message_with_attachment_parts(
+                            attachment_parts,
+                            &msg,
+                        );
                         out.push(json!({
                             "role": role,
                             "parts": [part],
@@ -118,15 +167,7 @@ impl GoogleCloudCodeAdapter {
                     }
                 }
                 LlmPromptPart::Image(idx) => {
-                    if let Some(att) = req.attachments.get(*idx) {
-                        let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
-                        parts.push(json!({
-                            "inlineData": {
-                                "mimeType": att.mime,
-                                "data": b64,
-                            }
-                        }));
-                    }
+                    parts.push(Self::attachment_part_for_index(attachment_parts, *idx));
                 }
             }
         }
@@ -136,21 +177,24 @@ impl GoogleCloudCodeAdapter {
         })]
     }
 
-    fn content_part_for_message(req: &LlmRequest, msg: &LlmMessage) -> Value {
+    #[cfg(test)]
+    fn build_contents(req: &LlmRequest) -> Vec<Value> {
+        let attachment_parts = req
+            .attachments
+            .iter()
+            .map(Self::inline_attachment_part)
+            .collect::<Vec<_>>();
+        Self::build_contents_with_attachment_parts(req, &attachment_parts)
+    }
+
+    fn content_part_for_message_with_attachment_parts(
+        attachment_parts: &[Value],
+        msg: &LlmMessage,
+    ) -> Value {
         match msg.kind.as_str() {
             "image" if matches!(msg.role, LlmRole::User) => {
                 let idx = msg.image_idx.max(0) as usize;
-                if let Some(att) = req.attachments.get(idx) {
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
-                    json!({
-                        "inlineData": {
-                            "mimeType": att.mime,
-                            "data": b64,
-                        }
-                    })
-                } else {
-                    json!({ "text": "[Image attached]" })
-                }
+                Self::attachment_part_for_index(attachment_parts, idx)
             }
             _ => {
                 let text = if matches!(msg.role, LlmRole::System) {
@@ -360,133 +404,246 @@ impl GoogleCloudCodeAdapter {
         parts
     }
 
-    async fn resolve_project_id(
+    fn upload_cache_key(
+        project_id: Option<&str>,
+        att: &crate::llm::types::LlmAttachment,
+    ) -> UploadedAttachmentCacheKey {
+        UploadedAttachmentCacheKey {
+            project_id: project_id.unwrap_or_default().to_string(),
+            mime: att.mime.clone(),
+            hash: format!("{:x}", Sha256::digest(&att.data)),
+        }
+    }
+
+    fn uploaded_attachment_filename(key: &UploadedAttachmentCacheKey) -> String {
+        let ext = match key.mime.as_str() {
+            "image/png" => "png",
+            "image/jpeg" => "jpg",
+            "image/jpg" => "jpg",
+            "image/webp" => "webp",
+            "image/gif" => "gif",
+            "image/heic" => "heic",
+            "image/heif" => "heif",
+            "image/bmp" => "bmp",
+            "image/tiff" => "tiff",
+            _ => "bin",
+        };
+        format!("lash-{}.{}", &key.hash[..12], ext)
+    }
+
+    async fn upload_attachment_cached(
         &self,
         access_token: &str,
-        project_hint: Option<&str>,
-    ) -> Result<Option<String>, LlmTransportError> {
-        let mut metadata = json!({
-            "ideType": "IDE_UNSPECIFIED",
-            "platform": "PLATFORM_UNSPECIFIED",
-            "pluginType": "GEMINI",
-        });
-        if let Some(project) = project_hint.filter(|p| !p.trim().is_empty()) {
-            metadata["duetProject"] = json!(project);
+        project_id: Option<&str>,
+        att: &crate::llm::types::LlmAttachment,
+    ) -> Result<UploadedAttachmentRef, LlmTransportError> {
+        let key = Self::upload_cache_key(project_id, att);
+        if let Some(existing) = Self::uploaded_attachment_cache()
+            .lock()
+            .await
+            .get(&key)
+            .cloned()
+        {
+            return Ok(existing);
         }
 
-        let req = json!({
-            "cloudaicompanionProject": project_hint,
-            "metadata": metadata,
-        });
-
-        let resp = self
-            .client
-            .post(Self::method_url("loadCodeAssist"))
-            .bearer_auth(access_token)
-            .json(&req)
-            .send()
+        let uploaded = self
+            .upload_attachment(
+                access_token,
+                project_id,
+                att,
+                &Self::uploaded_attachment_filename(&key),
+            )
+            .await?;
+        Self::uploaded_attachment_cache()
+            .lock()
             .await
-            .map_err(|e| LlmTransportError::new(format!("HTTP request failed: {e}")))?;
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
+            .insert(key, uploaded.clone());
+        Ok(uploaded)
+    }
+
+    async fn upload_attachment(
+        &self,
+        access_token: &str,
+        project_id: Option<&str>,
+        att: &crate::llm::types::LlmAttachment,
+        filename: &str,
+    ) -> Result<UploadedAttachmentRef, LlmTransportError> {
+        let mut start = self
+            .client
+            .post(GEMINI_FILES_UPLOAD_URL)
+            .bearer_auth(access_token)
+            .header("Content-Type", "application/json")
+            .header("X-Goog-Upload-Protocol", "resumable")
+            .header("X-Goog-Upload-Command", "start")
+            .header(
+                "X-Goog-Upload-Header-Content-Length",
+                att.data.len().to_string(),
+            )
+            .header("X-Goog-Upload-Header-Content-Type", att.mime.as_str())
+            .header("X-Goog-Upload-File-Name", filename)
+            .json(&json!({
+                "file": {
+                    "displayName": filename,
+                    "mimeType": att.mime,
+                    "sizeBytes": att.data.len().to_string(),
+                }
+            }));
+        if let Some(project_id) = project_id.filter(|project_id| !project_id.trim().is_empty()) {
+            start = start.header("x-goog-user-project", project_id);
+        }
+
+        let start_resp = send_request(
+            start,
+            self.request_timeout,
+            "Gemini Files upload start timed out",
+        )
+        .await?;
+        if !start_resp.status().is_success() {
+            let status = start_resp.status().as_u16();
+            let body = read_response_text(
+                start_resp,
+                self.request_timeout,
+                "Gemini Files upload start body timed out",
+            )
+            .await
+            .unwrap_or_default();
             return Err(LlmTransportError {
-                message: format!("Cloud Code loadCodeAssist failed with {}", status),
+                message: format!("Gemini Files upload start failed with {}", status),
                 retryable: status == 429 || status >= 500,
                 raw: Some(body),
                 code: Some(status.to_string()),
             });
         }
-        let body: Value = resp.json().await.map_err(|e| {
-            LlmTransportError::new(format!("Invalid Cloud Code loadCodeAssist JSON: {e}"))
+
+        let upload_url = start_resp
+            .headers()
+            .get("x-goog-upload-url")
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| {
+                LlmTransportError::new(
+                    "Gemini Files upload start response missing x-goog-upload-url header",
+                )
+            })?
+            .to_string();
+
+        let mut finalize = self
+            .client
+            .post(upload_url)
+            .bearer_auth(access_token)
+            .header("X-Goog-Upload-Command", "upload, finalize")
+            .header("X-Goog-Upload-Offset", "0")
+            .header("Content-Length", att.data.len().to_string())
+            .body(att.data.clone());
+        if let Some(project_id) = project_id.filter(|project_id| !project_id.trim().is_empty()) {
+            finalize = finalize.header("x-goog-user-project", project_id);
+        }
+
+        let finalize_resp = send_request(
+            finalize,
+            self.request_timeout,
+            "Gemini Files upload finalize timed out",
+        )
+        .await?;
+        if !finalize_resp.status().is_success() {
+            let status = finalize_resp.status().as_u16();
+            let body = read_response_text(
+                finalize_resp,
+                self.request_timeout,
+                "Gemini Files upload finalize body timed out",
+            )
+            .await
+            .unwrap_or_default();
+            return Err(LlmTransportError {
+                message: format!("Gemini Files upload finalize failed with {}", status),
+                retryable: status == 429 || status >= 500,
+                raw: Some(body),
+                code: Some(status.to_string()),
+            });
+        }
+
+        let upload_status = finalize_resp
+            .headers()
+            .get("x-goog-upload-status")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let body = read_response_text(
+            finalize_resp,
+            self.request_timeout,
+            "Gemini Files upload finalize body timed out",
+        )
+        .await?;
+        if upload_status
+            .as_deref()
+            .is_some_and(|status| status != "final")
+        {
+            return Err(LlmTransportError::new(format!(
+                "Gemini Files upload finalize returned unexpected status `{}`",
+                upload_status.unwrap_or_default()
+            ))
+            .with_raw(body));
+        }
+
+        let value: Value = serde_json::from_str(&body).map_err(|err| {
+            LlmTransportError::new(format!("Invalid Gemini Files upload JSON: {err}"))
+                .with_raw(body.clone())
         })?;
-        Ok(body
-            .get("cloudaicompanionProject")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .or_else(|| project_hint.map(|s| s.to_string())))
-    }
-}
-
-#[async_trait]
-impl LlmTransport for GoogleCloudCodeAdapter {
-    fn default_root_model(&self) -> &'static str {
-        "gemini-3.1-pro-preview"
-    }
-
-    fn default_agent_model(&self, tier: &str) -> Option<ModelSelection> {
-        match tier {
-            "low" => Some(ModelSelection {
-                model: "gemini-3-flash-preview",
-                variant: Some("low"),
-            }),
-            "medium" | "high" => Some(ModelSelection {
-                model: "gemini-3.1-pro-preview",
-                variant: Some(if tier == "medium" { "medium" } else { "high" }),
-            }),
-            _ => None,
-        }
-    }
-
-    fn normalize_model(&self, model: &str) -> String {
-        model.strip_prefix("google/").unwrap_or(model).to_string()
-    }
-
-    fn context_lookup_model(&self, model: &str) -> String {
-        if model.contains('/') {
-            model.to_string()
+        let file = value.get("file").unwrap_or(&value);
+        let uri = if let Some(uri) = file.get("uri").and_then(|value| value.as_str()) {
+            uri.to_string()
+        } else if let Some(name) = file.get("name").and_then(|value| value.as_str()) {
+            format!("https://generativelanguage.googleapis.com/v1beta/{name}")
         } else {
-            format!("google/{model}")
-        }
-    }
-
-    async fn ensure_ready(&self, provider: &mut Provider) -> Result<bool, LlmTransportError> {
-        let Provider::GoogleOAuth {
-            access_token,
-            project_id,
-            ..
-        } = provider
-        else {
-            return Err(LlmTransportError::new(
-                "Google Cloud Code adapter received non-Google provider",
-            ));
+            return Err(
+                LlmTransportError::new("Gemini Files upload response missing file uri")
+                    .with_raw(body.clone()),
+            );
         };
 
-        if project_id.is_none() {
-            let hint = std::env::var("GOOGLE_CLOUD_PROJECT")
-                .ok()
-                .or_else(|| std::env::var("GOOGLE_CLOUD_PROJECT_ID").ok());
-            let resolved = self
-                .resolve_project_id(access_token, hint.as_deref())
-                .await?;
-            *project_id = resolved;
-            return Ok(true);
-        }
-
-        Ok(false)
+        Ok(UploadedAttachmentRef { uri })
     }
 
-    async fn complete(
+    async fn prepare_attachment_parts(
         &self,
-        provider: &mut Provider,
-        req: LlmRequest,
-    ) -> Result<LlmResponse, LlmTransportError> {
-        let stream_events = req.stream_events.clone();
-        let (access_token, project_id) = match provider {
-            Provider::GoogleOAuth {
-                access_token,
-                project_id,
-                ..
-            } => (access_token.clone(), project_id.clone()),
-            _ => {
-                return Err(LlmTransportError::new(
-                    "Google Cloud Code adapter received non-Google provider",
-                ));
+        access_token: &str,
+        project_id: Option<&str>,
+        attachments: &[crate::llm::types::LlmAttachment],
+    ) -> (Vec<Value>, bool) {
+        let mut parts = Vec::with_capacity(attachments.len());
+        let mut used_uploaded_files = false;
+
+        for att in attachments {
+            if !att.mime.starts_with("image/") {
+                parts.push(Self::inline_attachment_part(att));
+                continue;
             }
-        };
 
-        let contents = Self::build_contents(&req);
+            match self
+                .upload_attachment_cached(access_token, project_id, att)
+                .await
+            {
+                Ok(uploaded) => {
+                    used_uploaded_files = true;
+                    parts.push(json!({
+                        "fileData": {
+                            "mimeType": att.mime,
+                            "fileUri": uploaded.uri,
+                        }
+                    }));
+                }
+                Err(_) => parts.push(Self::inline_attachment_part(att)),
+            }
+        }
 
+        (parts, used_uploaded_files)
+    }
+
+    fn build_request(
+        provider: &Provider,
+        req: &LlmRequest,
+        contents: Vec<Value>,
+        project_id: Option<&str>,
+    ) -> Value {
         let mut request = json!({
             "model": req.model,
             "user_prompt_id": uuid::Uuid::new_v4().to_string(),
@@ -537,7 +694,22 @@ impl LlmTransport for GoogleCloudCodeAdapter {
         if let Some(project) = project_id.filter(|p| !p.trim().is_empty()) {
             request["project"] = json!(project);
         }
+        request
+    }
 
+    fn should_retry_inline(err: &LlmTransportError) -> bool {
+        matches!(err.code.as_deref(), Some("400" | "404"))
+            || err.raw.as_deref().is_some_and(|raw| {
+                raw.contains("fileData") || raw.contains("fileUri") || raw.contains("file_uri")
+            })
+    }
+
+    async fn execute_request(
+        &self,
+        access_token: &str,
+        request: Value,
+        stream_events: Option<crate::llm::types::LlmEventSender>,
+    ) -> Result<LlmResponse, LlmTransportError> {
         let request_body = serde_json::to_string(&request).ok();
         let method = if stream_events.is_some() {
             "streamGenerateContent"
@@ -666,6 +838,165 @@ impl LlmTransport for GoogleCloudCodeAdapter {
             http_summary: Some(format!("HTTP POST {}?alt=sse", url)),
         })
     }
+
+    async fn resolve_project_id(
+        &self,
+        access_token: &str,
+        project_hint: Option<&str>,
+    ) -> Result<Option<String>, LlmTransportError> {
+        let mut metadata = json!({
+            "ideType": "IDE_UNSPECIFIED",
+            "platform": "PLATFORM_UNSPECIFIED",
+            "pluginType": "GEMINI",
+        });
+        if let Some(project) = project_hint.filter(|p| !p.trim().is_empty()) {
+            metadata["duetProject"] = json!(project);
+        }
+
+        let req = json!({
+            "cloudaicompanionProject": project_hint,
+            "metadata": metadata,
+        });
+
+        let resp = self
+            .client
+            .post(Self::method_url("loadCodeAssist"))
+            .bearer_auth(access_token)
+            .json(&req)
+            .send()
+            .await
+            .map_err(|e| LlmTransportError::new(format!("HTTP request failed: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(LlmTransportError {
+                message: format!("Cloud Code loadCodeAssist failed with {}", status),
+                retryable: status == 429 || status >= 500,
+                raw: Some(body),
+                code: Some(status.to_string()),
+            });
+        }
+        let body: Value = resp.json().await.map_err(|e| {
+            LlmTransportError::new(format!("Invalid Cloud Code loadCodeAssist JSON: {e}"))
+        })?;
+        Ok(body
+            .get("cloudaicompanionProject")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| project_hint.map(|s| s.to_string())))
+    }
+}
+
+#[async_trait]
+impl LlmTransport for GoogleCloudCodeAdapter {
+    fn default_root_model(&self) -> &'static str {
+        "gemini-3.1-pro-preview"
+    }
+
+    fn default_agent_model(&self, tier: &str) -> Option<ModelSelection> {
+        match tier {
+            "low" => Some(ModelSelection {
+                model: "gemini-3-flash-preview",
+                variant: Some("low"),
+            }),
+            "medium" | "high" => Some(ModelSelection {
+                model: "gemini-3.1-pro-preview",
+                variant: Some(if tier == "medium" { "medium" } else { "high" }),
+            }),
+            _ => None,
+        }
+    }
+
+    fn normalize_model(&self, model: &str) -> String {
+        model.strip_prefix("google/").unwrap_or(model).to_string()
+    }
+
+    fn context_lookup_model(&self, model: &str) -> String {
+        if model.contains('/') {
+            model.to_string()
+        } else {
+            format!("google/{model}")
+        }
+    }
+
+    async fn ensure_ready(&self, provider: &mut Provider) -> Result<bool, LlmTransportError> {
+        let Provider::GoogleOAuth {
+            access_token,
+            project_id,
+            ..
+        } = provider
+        else {
+            return Err(LlmTransportError::new(
+                "Google Cloud Code adapter received non-Google provider",
+            ));
+        };
+
+        if project_id.is_none() {
+            let hint = std::env::var("GOOGLE_CLOUD_PROJECT")
+                .ok()
+                .or_else(|| std::env::var("GOOGLE_CLOUD_PROJECT_ID").ok());
+            let resolved = self
+                .resolve_project_id(access_token, hint.as_deref())
+                .await?;
+            *project_id = resolved;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    async fn complete(
+        &self,
+        provider: &mut Provider,
+        req: LlmRequest,
+    ) -> Result<LlmResponse, LlmTransportError> {
+        let stream_events = req.stream_events.clone();
+        let (access_token, project_id) = match provider {
+            Provider::GoogleOAuth {
+                access_token,
+                project_id,
+                ..
+            } => (access_token.clone(), project_id.clone()),
+            _ => {
+                return Err(LlmTransportError::new(
+                    "Google Cloud Code adapter received non-Google provider",
+                ));
+            }
+        };
+
+        let inline_attachment_parts = req
+            .attachments
+            .iter()
+            .map(Self::inline_attachment_part)
+            .collect::<Vec<_>>();
+        let inline_contents =
+            Self::build_contents_with_attachment_parts(&req, &inline_attachment_parts);
+
+        let (attachment_parts, used_uploaded_files) = self
+            .prepare_attachment_parts(&access_token, project_id.as_deref(), &req.attachments)
+            .await;
+        let contents = if used_uploaded_files {
+            Self::build_contents_with_attachment_parts(&req, &attachment_parts)
+        } else {
+            inline_contents.clone()
+        };
+
+        let request = Self::build_request(provider, &req, contents, project_id.as_deref());
+
+        match self
+            .execute_request(&access_token, request, stream_events.clone())
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(err) if used_uploaded_files && Self::should_retry_inline(&err) => {
+                let inline_request =
+                    Self::build_request(provider, &req, inline_contents, project_id.as_deref());
+                self.execute_request(&access_token, inline_request, stream_events)
+                    .await
+            }
+            Err(err) => Err(err),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -759,7 +1090,6 @@ mod tests {
         let mut usage = LlmUsage::default();
         let mut tool_parts = Vec::new();
 
-        // Text event
         GoogleCloudCodeAdapter::process_sse_event(
             r#"{"response":{"candidates":[{"content":{"parts":[{"text":"Let me check."}]}}]}}"#,
             &mut full,
@@ -769,7 +1099,6 @@ mod tests {
         )
         .unwrap();
 
-        // Function call event
         GoogleCloudCodeAdapter::process_sse_event(
             r#"{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"read_file","args":{"path":"b.rs"}}}]}}]}}"#,
             &mut full,
@@ -807,5 +1136,83 @@ mod tests {
         assert_eq!(contents[0]["role"], "user");
         assert_eq!(contents[0]["parts"].as_array().map(Vec::len), Some(1));
         assert_eq!(contents[0]["parts"][0]["text"], "history");
+    }
+
+    #[test]
+    fn build_contents_can_use_uploaded_file_data_for_prompt_images() {
+        let req = LlmRequest {
+            model: "gemini".to_string(),
+            system_prompt: "sys".to_string(),
+            user_prompt: vec![
+                LlmPromptPart::Text("look".to_string()),
+                LlmPromptPart::Image(0),
+            ],
+            messages: vec![],
+            attachments: vec![crate::llm::types::LlmAttachment {
+                mime: "image/png".to_string(),
+                data: vec![1, 2, 3],
+            }],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: None,
+            stream_events: None,
+        };
+
+        let contents = GoogleCloudCodeAdapter::build_contents_with_attachment_parts(
+            &req,
+            &[json!({
+                "fileData": {
+                    "mimeType": "image/png",
+                    "fileUri": "https://generativelanguage.googleapis.com/v1beta/files/abc"
+                }
+            })],
+        );
+
+        assert_eq!(
+            contents[0]["parts"][1]["fileData"]["fileUri"],
+            "https://generativelanguage.googleapis.com/v1beta/files/abc"
+        );
+    }
+
+    #[test]
+    fn build_contents_can_use_uploaded_file_data_for_replay_images() {
+        let req = LlmRequest {
+            model: "gemini".to_string(),
+            system_prompt: "sys".to_string(),
+            user_prompt: vec![],
+            messages: vec![LlmMessage {
+                role: LlmRole::User,
+                content: String::new(),
+                kind: "image".to_string(),
+                image_idx: 0,
+                tool_call_id: None,
+                tool_name: None,
+            }],
+            attachments: vec![crate::llm::types::LlmAttachment {
+                mime: "image/png".to_string(),
+                data: vec![1, 2, 3],
+            }],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            model_variant: None,
+            session_id: None,
+            stream_events: None,
+        };
+
+        let contents = GoogleCloudCodeAdapter::build_contents_with_attachment_parts(
+            &req,
+            &[json!({
+                "fileData": {
+                    "mimeType": "image/png",
+                    "fileUri": "https://generativelanguage.googleapis.com/v1beta/files/replay"
+                }
+            })],
+        );
+
+        assert_eq!(
+            contents[0]["parts"][0]["fileData"]["fileUri"],
+            "https://generativelanguage.googleapis.com/v1beta/files/replay"
+        );
     }
 }

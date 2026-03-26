@@ -755,6 +755,7 @@ mod tests {
                 id: format!("{id}.p0"),
                 kind: PartKind::Text,
                 content: content.to_string(),
+                attachment: None,
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,

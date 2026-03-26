@@ -3,6 +3,7 @@
 target-bookworm/
 target-bullseye/
 *.pdb
+.envrc
 .env
 .env.*
 !.env.example
@@ -13,8 +14,10 @@ test.txt
 __pycache__/
 *.pyc
 .DS_Store
+Thumbs.db
 *.swp
 *.swo
+*~
 .vscode/
 .idea/
 /.agents/lash/

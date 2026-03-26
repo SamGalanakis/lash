@@ -8,15 +8,14 @@ use lash::{
 };
 
 use crate::activity::{
-    ActivityBlock, ActivityKind, ActivityState, ActivityStatus, PatchFilePreview,
-    merge_edit_activity, merge_exploration_activity,
+    ActivityBlock, ActivityKind, ActivityState, ActivityStatus, merge_edit_activity,
+    merge_exploration_activity,
 };
 use crate::command;
-use crate::diff::inline_diff_height;
 use crate::input_items::image_marker_ranges;
-use crate::markdown;
 use crate::plugin_surface;
 use crate::replay::{normalize_stream_text, push_assistant_text_block};
+use crate::ui;
 use crate::util::{is_manual_interrupt_error, manual_interrupt_message};
 
 /// Find the byte offset within `line` that corresponds to a given display column.
@@ -41,18 +40,139 @@ pub struct PluginPanelBlock {
 }
 
 /// State for an active agent prompt dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptSelection {
+    Option(usize),
+    CustomReply,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptFocus {
+    Selection,
+    ReplyEditor,
+}
+
 pub struct PromptState {
     pub question: String,
     /// Original options (may be empty for freeform-only prompts).
     pub options: Vec<String>,
-    /// 0..options.len() = option, options.len() = "Other"
-    pub selected_idx: usize,
-    /// Freeform answer/context text.
-    pub extra_text: String,
-    pub extra_cursor: usize,
-    /// True when extra text editing is active.
-    pub editing_extra: bool,
+    pub selection: PromptSelection,
+    /// Which part of the prompt UI currently owns interaction.
+    pub focus: PromptFocus,
+    /// Optional extra text appended to a selected option, or the full response in freeform mode.
+    pub reply_text: String,
+    pub reply_cursor: usize,
     pub response_tx: std::sync::mpsc::Sender<String>,
+}
+
+impl PromptState {
+    pub fn has_options(&self) -> bool {
+        !self.options.is_empty()
+    }
+
+    pub fn is_freeform(&self) -> bool {
+        self.options.is_empty()
+    }
+
+    pub fn is_editing_reply(&self) -> bool {
+        self.is_freeform() || self.focus == PromptFocus::ReplyEditor
+    }
+
+    pub fn selected_option_idx(&self) -> Option<usize> {
+        match self.selection {
+            PromptSelection::Option(idx) if idx < self.options.len() => Some(idx),
+            _ => None,
+        }
+    }
+
+    pub fn selects_custom_reply(&self) -> bool {
+        self.selection == PromptSelection::CustomReply
+    }
+
+    pub fn move_up(&mut self) {
+        if !self.has_options() {
+            return;
+        }
+
+        self.selection = match self.selection {
+            PromptSelection::Option(idx) => PromptSelection::Option(idx.saturating_sub(1)),
+            PromptSelection::CustomReply => {
+                PromptSelection::Option(self.options.len().saturating_sub(1))
+            }
+        };
+    }
+
+    pub fn move_down(&mut self) {
+        if !self.has_options() {
+            return;
+        }
+
+        self.selection = match self.selection {
+            PromptSelection::Option(idx) if idx + 1 < self.options.len() => {
+                PromptSelection::Option(idx + 1)
+            }
+            _ => PromptSelection::CustomReply,
+        };
+    }
+
+    pub fn toggle_focus(&mut self) {
+        if !self.has_options() {
+            self.focus = PromptFocus::ReplyEditor;
+            return;
+        }
+
+        self.focus = match self.focus {
+            PromptFocus::Selection => PromptFocus::ReplyEditor,
+            PromptFocus::ReplyEditor => PromptFocus::Selection,
+        };
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        self.reply_text.insert(self.reply_cursor, c);
+        self.reply_cursor += c.len_utf8();
+    }
+
+    pub fn insert_text(&mut self, text: &str) {
+        self.reply_text.insert_str(self.reply_cursor, text);
+        self.reply_cursor += text.len();
+    }
+
+    pub fn backspace(&mut self) {
+        if self.reply_cursor == 0 {
+            return;
+        }
+
+        let prev = self.reply_text[..self.reply_cursor]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        self.reply_text.drain(prev..self.reply_cursor);
+        self.reply_cursor = prev;
+    }
+
+    pub fn submitted_response(&self) -> String {
+        if self.is_freeform() || self.selects_custom_reply() {
+            return self.reply_text.clone();
+        }
+
+        let Some(idx) = self.selected_option_idx() else {
+            return self.reply_text.clone();
+        };
+        let label = &self.options[idx];
+        let truncated: String = label.chars().take(40).collect();
+        let suffix = if label.chars().count() > 40 {
+            "..."
+        } else {
+            ""
+        };
+        let base = format!("{}. {}{}", idx + 1, truncated, suffix);
+        if self.reply_text.is_empty() {
+            base
+        } else {
+            format!("{}\n\n{}", base, self.reply_text)
+        }
+    }
 }
 
 pub struct LiveTurnState {
@@ -281,7 +401,7 @@ fn append_message_blocks(blocks: &mut Vec<DisplayBlock>, message: &Message) {
                     continue;
                 };
                 match part.kind {
-                    PartKind::Text | PartKind::Prose => prose.push(text),
+                    PartKind::Text | PartKind::Prose | PartKind::Image => prose.push(text),
                     PartKind::Code => {
                         flush_assistant_prose(blocks, &mut prose);
                         blocks.push(DisplayBlock::CodeBlock {
@@ -335,26 +455,17 @@ fn rendered_message_text(message: &Message) -> String {
 }
 
 fn rendered_part_text(kind: &PartKind, content: &str) -> Option<String> {
-    let rendered = if let Some(index) = content.strip_prefix(lash::agent::message::IMAGE_REF_PREFIX)
-    {
-        format!("[Image #{}]", index)
-    } else {
-        content.to_string()
-    };
-
-    if rendered.trim().is_empty() {
-        return None;
-    }
-
     match kind {
         PartKind::ToolCall | PartKind::ToolResult => None,
-        _ => Some(rendered),
+        PartKind::Image => Some("[Image attached]".to_string()),
+        _ => (!content.trim().is_empty()).then(|| content.to_string()),
     }
 }
 
 pub(crate) const SPLASH_CONTENT_HEIGHT: usize = 8;
 pub(crate) const SPLASH_SCROLLBACK_HEIGHT: usize = SPLASH_CONTENT_HEIGHT + 2;
 
+#[cfg(test)]
 /// How many visual rows a single line of text takes when wrapped to `width`.
 fn wrapped_line_height(line: &str, width: usize) -> usize {
     if width == 0 {
@@ -364,6 +475,7 @@ fn wrapped_line_height(line: &str, width: usize) -> usize {
     if len == 0 { 1 } else { len.div_ceil(width) }
 }
 
+#[cfg(test)]
 /// Sum of wrapped visual rows for a multi-line string, with an optional prefix width per line.
 fn wrapped_text_height(text: &str, width: usize, prefix_chars: usize) -> usize {
     let effective = width.saturating_sub(prefix_chars);
@@ -437,188 +549,16 @@ fn smart_truncate_preview_line(text: &str, max_chars: usize) -> String {
     format!("{prefix}{marker}{suffix}")
 }
 
-fn activity_artifact_height(
-    artifact: &crate::activity::ActivityArtifact,
-    indent_width: usize,
-    width: usize,
-    expand_level: u8,
-) -> usize {
-    match artifact {
-        crate::activity::ActivityArtifact::DiffPreview { diff, .. } => {
-            1 + wrapped_text_height(diff, width, indent_width + 2)
-        }
-        crate::activity::ActivityArtifact::PatchPreview { files, .. } => {
-            patch_preview_height(files, indent_width, width, expand_level >= 2)
-        }
-        crate::activity::ActivityArtifact::TextPreview { title, text } => {
-            usize::from(title.is_some())
-                + preview_text_lines(text)
-                    .iter()
-                    .map(|line| wrapped_text_height(line, width, indent_width + 2))
-                    .sum::<usize>()
-        }
-        crate::activity::ActivityArtifact::SourceList { items, .. } => {
-            1 + items
-                .iter()
-                .map(|item| wrapped_text_height(item, width, indent_width + 2))
-                .sum::<usize>()
-        }
-    }
-}
-
-fn patch_file_heading(file: &PatchFilePreview) -> String {
-    let subject = match &file.from_path {
-        Some(from_path) => format!("{from_path} → {}", file.path),
-        None => file.path.clone(),
-    };
-    let prefix = match file.status.as_str() {
-        "added" => Some("added"),
-        "deleted" => Some("deleted"),
-        "moved" => Some("moved"),
-        _ => None,
-    };
-    match prefix {
-        Some(prefix) => format!("{prefix} {subject} (+{} -{})", file.added, file.removed),
-        None => format!("{subject} (+{} -{})", file.added, file.removed),
-    }
-}
-
-fn patch_preview_height(
-    files: &[PatchFilePreview],
-    indent_width: usize,
-    width: usize,
-    include_diffs: bool,
-) -> usize {
-    files
-        .iter()
-        .map(|file| {
-            let mut height =
-                wrapped_text_height(&patch_file_heading(file), width, indent_width + 2);
-            if include_diffs && !file.diff.trim().is_empty() {
-                height += inline_diff_height(&file.diff, width, indent_width + 2);
-            }
-            height
-        })
-        .sum()
-}
-
 /// Fast, coarse token estimate used only for live UI counters while streaming.
 fn estimate_tokens_from_char_count(chars: i64) -> i64 {
     if chars <= 0 { 0 } else { (chars + 3) / 4 }
 }
 
+#[cfg(test)]
 impl DisplayBlock {
-    /// Number of visual lines this block takes when rendered at `width` columns.
-    /// `viewport_height` is needed for Splash centering; pass 0 for non-Splash blocks.
-    ///
-    /// `expand_level`: 0 = ghost fold, 1 = compact activity-only, 2 = full.
     pub fn height(&self, expand_level: u8, width: usize, viewport_height: usize) -> usize {
-        match self {
-            DisplayBlock::UserInput(s) => {
-                // Left-aligned with "\u{25CF} " prefix (2 chars)
-                wrapped_text_height(s, width, 2)
-            }
-            DisplayBlock::AssistantText(s) => {
-                markdown::markdown_height_compact(s, width.saturating_sub(2))
-            }
-            DisplayBlock::CodeBlock {
-                code, continuation, ..
-            } => {
-                match expand_level {
-                    0 => {
-                        // Ghost fold: first in group = 1 (summary line), continuation = 0.
-                        if *continuation { 0 } else { 1 }
-                    }
-                    1 => 0, // Compact: hide raw code; keep semantic activity rows only.
-                    _ => {
-                        // Full: show actual code lines
-                        wrapped_text_height(code, width, 2)
-                    }
-                }
-            }
-            DisplayBlock::Activity(activity) => {
-                let mut h = 1; // summary is truncated to one rendered row
-                if expand_level >= 1 {
-                    h += activity.detail_lines.len();
-                    if activity.kind == ActivityKind::Parallel {
-                        h += activity.children.len();
-                    }
-                }
-                if expand_level >= 2 {
-                    if let Some(artifact) = &activity.artifact {
-                        h += activity_artifact_height(artifact, 2, width, expand_level);
-                    }
-                    if activity.kind == ActivityKind::Parallel {
-                        h += activity
-                            .children
-                            .iter()
-                            .map(|child| {
-                                let mut child_h = 0usize;
-                                if !child.summary.is_empty() {
-                                    child_h += 1;
-                                }
-                                if let Some(artifact) = &child.artifact {
-                                    child_h +=
-                                        activity_artifact_height(artifact, 4, width, expand_level);
-                                }
-                                child_h
-                            })
-                            .sum::<usize>();
-                    }
-                } else if expand_level >= 1
-                    && let Some(crate::activity::ActivityArtifact::PatchPreview { files, .. }) =
-                        &activity.artifact
-                {
-                    h += patch_preview_height(files, 2, width, true);
-                }
-                h
-            }
-            DisplayBlock::CodeOutput { output, error } => {
-                let mut h = 0;
-                if expand_level >= 2 && !output.is_empty() {
-                    h += wrapped_text_height(output, width, 2);
-                }
-                if let Some(err) = error {
-                    if expand_level >= 2 {
-                        h += wrapped_text_height(err, width, 2);
-                    } else {
-                        h += 1; // error summary at levels 0 and 1
-                    }
-                }
-                h
-            }
-            DisplayBlock::ShellOutput { output, error, .. } => {
-                let mut h = 1; // "$ command" header
-                if !output.is_empty() {
-                    h += wrapped_text_height(output, width, 2); // "│ " prefix
-                }
-                if let Some(err) = error {
-                    h += wrapped_text_height(err, width, 2);
-                }
-                h
-            }
-            DisplayBlock::Error(msg) => wrapped_line_height(&format!("Error: {}", msg), width),
-            DisplayBlock::SystemMessage(s) => wrapped_text_height(s, width, 0),
-            DisplayBlock::PlanContent(s) => {
-                // borders (2) + plain-text content lines (not markdown)
-                let inner_w = width.saturating_sub(4).max(1);
-                let content_h: usize = s
-                    .lines()
-                    .map(|line| {
-                        if line.is_empty() {
-                            1
-                        } else {
-                            wrapped_line_height(line, inner_w)
-                        }
-                    })
-                    .sum();
-                2 + content_h.max(1)
-            }
-            DisplayBlock::PluginPanel(panel) => {
-                2 + markdown::markdown_height(&panel.content, width.saturating_sub(2))
-            }
-            DisplayBlock::Splash => viewport_height,
-        }
+        let blocks = [self.clone()];
+        ui::rendered_block_height(&blocks, 0, expand_level, width, viewport_height)
     }
 }
 
@@ -1108,6 +1048,24 @@ impl App {
         }
     }
 
+    fn queue_plan_exit_follow_up(&mut self, result: &serde_json::Value, success: bool) {
+        if !success {
+            return;
+        }
+        let Some(next_turn_input) = result
+            .get("next_turn_input")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return;
+        };
+        self.queue_turn(PreparedTurn::prepare(
+            next_turn_input.to_string(),
+            Vec::new(),
+            &self.skills,
+        ));
+    }
+
     pub fn push_prepared_user_input(&mut self, turn: &PreparedTurn) {
         let history_text = turn.history_text();
         if history_text.is_empty() {
@@ -1154,6 +1112,9 @@ impl App {
             } => {
                 self.close_pending_text();
                 self.clear_streaming_output();
+                if name == "plan_exit" {
+                    self.queue_plan_exit_follow_up(&result, success);
+                }
                 if matches!(name.as_str(), "agent_result" | "agent_kill") {
                     self.active_delegate = None;
                 }
@@ -1670,6 +1631,10 @@ impl App {
         };
         let block_end = self.height_cache[last_idx];
         let block_height = block_end.saturating_sub(block_start);
+        let block_content_start = block_start
+            + usize::from(
+                last_idx > 0 && !matches!(self.blocks[last_idx - 1], DisplayBlock::Splash),
+            );
         let has_splash_before = self.blocks[..last_idx]
             .iter()
             .any(|block| matches!(block, DisplayBlock::Splash));
@@ -1682,7 +1647,7 @@ impl App {
         self.scroll_offset = if awaiting_first_visible_output
             && (has_splash_before || block_height >= viewport_height)
         {
-            block_start.min(max_scroll)
+            block_content_start.min(max_scroll)
         } else {
             block_end.saturating_sub(viewport_height).min(max_scroll)
         };
@@ -1712,27 +1677,14 @@ impl App {
         self.height_cache.reserve(self.blocks.len());
         let mut cumulative: usize = 0;
         for (i, block) in self.blocks.iter().enumerate() {
-            // Blank line before UserInput to separate turns (matches render_block)
-            if i > 0
-                && matches!(block, DisplayBlock::UserInput(_))
-                && !matches!(self.blocks[i - 1], DisplayBlock::Splash)
-            {
-                cumulative += 1;
-            }
-            // Blank line before AssistantText (matches render_block breathing line)
-            if i > 0
-                && matches!(block, DisplayBlock::AssistantText(_))
-                && !matches!(
-                    self.blocks[i - 1],
-                    DisplayBlock::AssistantText(_) | DisplayBlock::Splash
-                )
-            {
-                cumulative += 1;
-            }
-            cumulative += match block {
-                DisplayBlock::Splash if self.blocks.len() > 1 => SPLASH_SCROLLBACK_HEIGHT,
-                _ => block.height(self.expand_level, width, viewport_height),
-            };
+            let _ = block;
+            cumulative += ui::rendered_block_height(
+                &self.blocks,
+                i,
+                self.expand_level,
+                width,
+                viewport_height,
+            );
             self.height_cache.push(cumulative);
         }
     }
@@ -2306,100 +2258,64 @@ impl App {
         self.prompt.is_some()
     }
 
-    /// Whether the prompt is in extra-text editing mode.
-    pub fn is_prompt_editing_extra(&self) -> bool {
-        self.prompt.as_ref().is_some_and(|p| p.editing_extra)
+    /// Whether the prompt is currently focused on reply editing.
+    pub fn is_prompt_editing_reply(&self) -> bool {
+        self.prompt
+            .as_ref()
+            .is_some_and(PromptState::is_editing_reply)
     }
 
     /// Whether the prompt is freeform-only (no options).
     pub fn is_prompt_freeform(&self) -> bool {
-        self.prompt.as_ref().is_some_and(|p| p.options.is_empty())
+        self.prompt.as_ref().is_some_and(PromptState::is_freeform)
     }
 
     /// Move prompt selection up.
     pub fn prompt_up(&mut self) {
-        if let Some(p) = &mut self.prompt
-            && !p.options.is_empty()
-        {
-            p.selected_idx = p.selected_idx.saturating_sub(1);
+        if let Some(p) = &mut self.prompt {
+            p.move_up();
         }
     }
 
     /// Move prompt selection down.
     pub fn prompt_down(&mut self) {
-        if let Some(p) = &mut self.prompt
-            && !p.options.is_empty()
-        {
-            // options.len() = "Other" index
-            p.selected_idx = (p.selected_idx + 1).min(p.options.len());
+        if let Some(p) = &mut self.prompt {
+            p.move_down();
         }
     }
 
     /// Toggle extra text editing for prompts that also have discrete options.
     pub fn prompt_toggle_extra(&mut self) {
-        if let Some(p) = &mut self.prompt
-            && !p.options.is_empty()
-        {
-            p.editing_extra = !p.editing_extra;
+        if let Some(p) = &mut self.prompt {
+            p.toggle_focus();
         }
     }
 
     /// Insert a character into the prompt extra text (or freeform input).
     pub fn prompt_insert_char(&mut self, c: char) {
         if let Some(p) = &mut self.prompt {
-            p.extra_text.insert(p.extra_cursor, c);
-            p.extra_cursor += c.len_utf8();
+            p.insert_char(c);
         }
     }
 
     /// Insert literal text into the prompt extra text (or freeform input).
     pub fn prompt_insert_text(&mut self, text: &str) {
         if let Some(p) = &mut self.prompt {
-            p.extra_text.insert_str(p.extra_cursor, text);
-            p.extra_cursor += text.len();
+            p.insert_text(text);
         }
     }
 
     /// Delete character before cursor in prompt extra text.
     pub fn prompt_backspace(&mut self) {
-        if let Some(p) = &mut self.prompt
-            && p.extra_cursor > 0
-        {
-            let prev = p.extra_text[..p.extra_cursor]
-                .char_indices()
-                .next_back()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            p.extra_text.drain(prev..p.extra_cursor);
-            p.extra_cursor = prev;
+        if let Some(p) = &mut self.prompt {
+            p.backspace();
         }
     }
 
     /// Submit the prompt response, render it as user input, and dismiss the dialog.
     pub fn take_prompt_response(&mut self) -> Option<String> {
         if let Some(p) = self.prompt.take() {
-            let response = if p.options.is_empty() {
-                // Freeform-only: just the text
-                p.extra_text
-            } else if p.selected_idx < p.options.len() {
-                // Option selected
-                let label = &p.options[p.selected_idx];
-                let truncated: String = label.chars().take(40).collect();
-                let suffix = if label.chars().count() > 40 {
-                    "..."
-                } else {
-                    ""
-                };
-                let base = format!("{}. {}{}", p.selected_idx + 1, truncated, suffix);
-                if p.extra_text.is_empty() {
-                    base
-                } else {
-                    format!("{}\n\n{}", base, p.extra_text)
-                }
-            } else {
-                // "Other" selected
-                p.extra_text
-            };
+            let response = p.submitted_response();
             let _ = p.response_tx.send(response.clone());
             self.invalidate_height_cache();
             self.scroll_to_bottom();
@@ -2999,16 +2915,16 @@ mod tests {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
         app.handle_agent_event(AgentEvent::PluginEvent {
-            plugin_id: "plan_mode".into(),
+            plugin_id: "demo".into(),
             event: lash::PluginSurfaceEvent::PanelUpsert {
-                key: "proposed_plan:1".into(),
-                title: "PROPOSED PLAN".into(),
+                key: "panel:1".into(),
+                title: "TASK BOARD".into(),
                 content: "1. Inspect\n2. Patch".into(),
             },
         });
         assert!(matches!(
             app.blocks.last(),
-            Some(DisplayBlock::PluginPanel(panel)) if panel.title == "PROPOSED PLAN"
+            Some(DisplayBlock::PluginPanel(panel)) if panel.title == "TASK BOARD"
         ));
         assert!(
             app.live_turn
@@ -3017,15 +2933,39 @@ mod tests {
         );
 
         app.handle_agent_event(AgentEvent::PluginEvent {
-            plugin_id: "plan_mode".into(),
+            plugin_id: "demo".into(),
             event: lash::PluginSurfaceEvent::PanelClear {
-                key: "proposed_plan:1".into(),
+                key: "panel:1".into(),
             },
         });
         assert!(
             !app.blocks
                 .iter()
                 .any(|block| matches!(block, DisplayBlock::PluginPanel(_)))
+        );
+    }
+
+    #[test]
+    fn plan_exit_tool_queues_fresh_follow_up_turn() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.handle_agent_event(AgentEvent::ToolCall {
+            call_id: Some("tc-plan-exit".into()),
+            name: "plan_exit".into(),
+            args: serde_json::json!({}),
+            result: serde_json::json!({
+                "approved": true,
+                "plan_path": ".lash/plans/session.md",
+                "next_turn_input": "The plan at `.lash/plans/session.md` is approved. Execute that plan."
+            }),
+            success: true,
+            duration_ms: 5,
+        });
+
+        let (queued, was_pending) = app.take_next_queued_turn().expect("queued turn");
+        assert!(!was_pending);
+        assert_eq!(
+            queued.display_text,
+            "The plan at `.lash/plans/session.md` is approved. Execute that plan."
         );
     }
 
@@ -3326,10 +3266,10 @@ mod tests {
         app.prompt = Some(PromptState {
             question: "Pick one".into(),
             options: vec!["red".into(), "blue".into()],
-            selected_idx: 0,
-            extra_text: String::new(),
-            extra_cursor: 0,
-            editing_extra: false,
+            selection: PromptSelection::Option(0),
+            focus: PromptFocus::Selection,
+            reply_text: String::new(),
+            reply_cursor: 0,
             response_tx: tx,
         });
 
@@ -3352,10 +3292,10 @@ mod tests {
         app.prompt = Some(PromptState {
             question: "Pick one".into(),
             options: vec!["red".into()],
-            selected_idx: 0,
-            extra_text: String::new(),
-            extra_cursor: 0,
-            editing_extra: false,
+            selection: PromptSelection::Option(0),
+            focus: PromptFocus::Selection,
+            reply_text: String::new(),
+            reply_cursor: 0,
             response_tx: tx,
         });
 
@@ -3398,7 +3338,7 @@ mod tests {
         let cache = app.height_cache_snapshot().to_vec();
         let last_idx = app.blocks.len() - 1;
         let block_start = cache[last_idx - 1];
-        assert_eq!(app.scroll_offset, block_start);
+        assert_eq!(app.scroll_offset, block_start + 1);
     }
 
     #[test]
@@ -3965,18 +3905,18 @@ mod tests {
         app.prompt = Some(PromptState {
             question: "Question?".into(),
             options: Vec::new(),
-            selected_idx: 0,
-            extra_text: "startend".into(),
-            extra_cursor: "start".len(),
-            editing_extra: true,
+            selection: PromptSelection::Option(0),
+            focus: PromptFocus::ReplyEditor,
+            reply_text: "startend".into(),
+            reply_cursor: "start".len(),
             response_tx: std::sync::mpsc::channel().0,
         });
 
         app.prompt_insert_text("\nplain pasted text\n");
 
         let prompt = app.prompt.as_ref().expect("prompt");
-        assert_eq!(prompt.extra_text, "start\nplain pasted text\nend");
-        assert_eq!(prompt.extra_cursor, "start\nplain pasted text\n".len());
+        assert_eq!(prompt.reply_text, "start\nplain pasted text\nend");
+        assert_eq!(prompt.reply_cursor, "start\nplain pasted text\n".len());
     }
 
     #[test]
@@ -3985,17 +3925,17 @@ mod tests {
         app.prompt = Some(PromptState {
             question: "Question?".into(),
             options: Vec::new(),
-            selected_idx: 0,
-            extra_text: String::new(),
-            extra_cursor: 0,
-            editing_extra: true,
+            selection: PromptSelection::Option(0),
+            focus: PromptFocus::ReplyEditor,
+            reply_text: String::new(),
+            reply_cursor: 0,
             response_tx: std::sync::mpsc::channel().0,
         });
 
         app.prompt_toggle_extra();
 
         assert!(
-            app.prompt.as_ref().expect("prompt").editing_extra,
+            app.prompt.as_ref().expect("prompt").is_editing_reply(),
             "freeform prompts should stay in text-entry mode"
         );
     }

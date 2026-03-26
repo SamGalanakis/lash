@@ -281,7 +281,10 @@ pub(crate) async fn run(
             PromptContextPluginConfig::default(),
         )) as Arc<dyn PluginFactory>,
         Arc::new(BuiltinPlanTrackerPluginFactory),
-        Arc::new(BuiltinPlanModePluginFactory::default()),
+        Arc::new(BuiltinPlanModePluginFactory::with_prompt_bridge(
+            Default::default(),
+            prompt_bridge.clone(),
+        )),
         Arc::new(AgentCallPluginFactory::new(
             session_policy.clone(),
             agent_call_config,

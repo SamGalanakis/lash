@@ -12,6 +12,7 @@ pub enum ActivityKind {
     Edit,
     Delegate,
     Parallel,
+    Ask,
     GenericTool,
 }
 
@@ -567,11 +568,11 @@ impl ActivityState {
                 }
             }
             "ask" => ActivityBlock {
-                kind: ActivityKind::GenericTool,
+                kind: ActivityKind::Ask,
                 status,
                 tool_name: name.to_string(),
                 summary: ask_summary(&args),
-                detail_lines: ask_detail_lines(&result),
+                detail_lines: ask_detail_lines(&args, &result),
                 duration_ms,
                 args,
                 artifact: None,
@@ -1017,17 +1018,34 @@ fn shell_output_artifact(result: &Value) -> Option<ActivityArtifact> {
 }
 
 fn ask_summary(args: &Value) -> String {
-    tool_arg_str(args, "question")
-        .map(|question| format!("asked user · {}", inline_text(question)))
-        .unwrap_or_else(|| "asked user".to_string())
+    let _ = args;
+    "Question".to_string()
 }
 
-fn ask_detail_lines(result: &Value) -> Vec<String> {
-    result
-        .as_str()
-        .filter(|answer| !answer.trim().is_empty())
-        .map(|answer| vec![format!("Answer {}", inline_snippet(answer, 72))])
-        .unwrap_or_default()
+fn ask_detail_lines(args: &Value, result: &Value) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    if let Some(question) = tool_arg_str(args, "question") {
+        let mut question_lines = question
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(inline_text);
+        if let Some(first_line) = question_lines.next() {
+            lines.push(format!("Question · {first_line}"));
+            lines.extend(question_lines);
+        }
+    }
+
+    for (idx, option) in tool_arg_list(args, "options").into_iter().enumerate() {
+        lines.push(format!("{}. {}", idx + 1, option));
+    }
+
+    if let Some(answer) = result.as_str().filter(|answer| !answer.trim().is_empty()) {
+        lines.push(format!("Answer · {}", inline_snippet(answer, 72)));
+    }
+
+    lines
 }
 
 fn tool_search_summary(args: &Value) -> String {
@@ -1150,6 +1168,22 @@ fn tool_arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key)
         .and_then(|value| value.as_str())
         .filter(|value| !value.is_empty())
+}
+
+fn tool_arg_list(args: &Value, key: &str) -> Vec<String> {
+    args.get(key)
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| match value {
+                    Value::String(text) if !text.is_empty() => Some(inline_text(text)),
+                    Value::Bool(_) | Value::Number(_) => Some(value.to_string()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn patch_preview_artifact(result: &Value) -> Option<ActivityArtifact> {
@@ -1573,11 +1607,16 @@ mod tests {
             search_blocks[0].detail_lines,
             vec!["update_plan: Update the active execution plan with concrete steps."]
         );
+        assert_eq!(ask_blocks[0].summary, "Question");
         assert_eq!(
-            ask_blocks[0].summary,
-            "asked user · Which environment should I use?"
+            ask_blocks[0].detail_lines,
+            vec![
+                "Question · Which environment should I use?",
+                "1. staging",
+                "2. prod",
+                "Answer · staging",
+            ]
         );
-        assert_eq!(ask_blocks[0].detail_lines, vec!["Answer staging"]);
     }
 
     #[test]

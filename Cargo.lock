@@ -1445,7 +1445,6 @@ dependencies = [
  "ignore",
  "lash-sansio",
  "lashlang",
- "libc",
  "pdf-extract",
  "portable-pty",
  "regex",
@@ -1495,6 +1494,7 @@ dependencies = [
 name = "lash-sansio"
 version = "0.2.16"
 dependencies = [
+ "base64",
  "serde",
  "serde_json",
 ]

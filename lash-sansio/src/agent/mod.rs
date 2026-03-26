@@ -194,6 +194,7 @@ impl TurnTerminationPolicyState {
                         3. Recommended next steps\n\
                         Do NOT make any more tool calls and do NOT emit `<repl>`."
                 ),
+                attachment: None,
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
@@ -324,6 +325,7 @@ pub fn build_assistant_parts(
                 id: format!("{}.p{}", msg_id, idx),
                 kind: PartKind::Prose,
                 content: p.clone(),
+                attachment: None,
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
@@ -337,6 +339,7 @@ pub fn build_assistant_parts(
                 id: format!("{}.p{}", msg_id, idx),
                 kind: PartKind::Code,
                 content: c.clone(),
+                attachment: None,
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
@@ -350,6 +353,7 @@ pub fn build_assistant_parts(
             id: format!("{}.p0", msg_id),
             kind: PartKind::Prose,
             content: String::new(),
+            attachment: None,
             tool_call_id: None,
             tool_name: None,
             prune_state: PruneState::Intact,
