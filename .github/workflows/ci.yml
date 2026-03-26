@@ -166,6 +166,30 @@ jobs:
           git push origin HEAD:main
           echo "created=true" >> "$GITHUB_OUTPUT"
 
+      - name: Sync release version to staging
+        run: |
+          if ! git ls-remote --exit-code --heads origin staging >/dev/null 2>&1; then
+            echo "origin/staging not found; skipping version sync."
+            exit 0
+          fi
+
+          sync_dir="$(mktemp -d)"
+          trap 'git worktree remove --force "$sync_dir"' EXIT
+          git worktree add --detach "$sync_dir" origin/staging
+
+          cd "$sync_dir"
+          python3 scripts/release_version.py set "${{ steps.version.outputs.version }}"
+          if git diff --quiet -- Cargo.toml Cargo.lock; then
+            echo "origin/staging already has version ${{ steps.version.outputs.version }}."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "Sync release version to staging (v${{ steps.version.outputs.version }}) [skip ci]"
+          git push origin HEAD:staging
+
       - name: Create and push release tag
         run: |
           tag="v${{ steps.version.outputs.version }}"

@@ -1525,22 +1525,26 @@ pub(crate) async fn run_app(
                         && key.code == KeyCode::Char('u')
                     {
                         app.scroll_up(half_page);
+                        app.dirty = true;
                         continue;
                     }
                     if key.modifiers.contains(KeyModifiers::CONTROL)
                         && key.code == KeyCode::Char('d')
                     {
                         app.scroll_down(half_page, vh, vw);
+                        app.dirty = true;
                         continue;
                     }
 
                     // PgUp / PgDn
                     if key.code == KeyCode::PageUp {
                         app.scroll_up(vh);
+                        app.dirty = true;
                         continue;
                     }
                     if key.code == KeyCode::PageDown {
                         app.scroll_down(vh, vh, vw);
+                        app.dirty = true;
                         continue;
                     }
                 }

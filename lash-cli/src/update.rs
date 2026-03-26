@@ -25,6 +25,7 @@ struct LatestRelease {
     repo: String,
     tag: String,
     version: Version,
+    commit: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -32,6 +33,7 @@ struct UpdateState {
     repo: String,
     last_checked_unix: i64,
     latest_tag: Option<String>,
+    latest_commit: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -153,7 +155,7 @@ async fn latest_release(mode: CheckMode) -> anyhow::Result<Option<LatestRelease>
         && let Some(state) = cached.as_ref()
         && !is_stale(state, now)
     {
-        return release_from_tag(&repo, state.latest_tag.as_deref(), &current);
+        return release_from_cached_state(&repo, state, &current);
     }
 
     match fetch_latest_release(&repo).await {
@@ -162,8 +164,9 @@ async fn latest_release(mode: CheckMode) -> anyhow::Result<Option<LatestRelease>
                 repo: repo.clone(),
                 last_checked_unix: now,
                 latest_tag: Some(release.tag.clone()),
+                latest_commit: release.commit.clone(),
             });
-            if release.version > current {
+            if should_offer_update(&release, &current) {
                 Ok(Some(release))
             } else {
                 Ok(None)
@@ -171,7 +174,7 @@ async fn latest_release(mode: CheckMode) -> anyhow::Result<Option<LatestRelease>
         }
         Err(err) if matches!(mode, CheckMode::CachedOrLive) => {
             if let Some(state) = cached.as_ref() {
-                return release_from_tag(&repo, state.latest_tag.as_deref(), &current);
+                return release_from_cached_state(&repo, state, &current);
             }
             Err(err)
         }
@@ -200,6 +203,7 @@ async fn fetch_latest_release(repo: &str) -> anyhow::Result<LatestRelease> {
     Ok(LatestRelease {
         repo: repo.to_string(),
         version: parse_release_tag(&release.tag_name)?,
+        commit: resolve_release_commit(repo, &release.tag_name).await.ok(),
         tag: release.tag_name,
     })
 }
@@ -223,6 +227,7 @@ fn parse_release_tag(tag: &str) -> anyhow::Result<Version> {
 fn release_from_tag(
     repo: &str,
     tag: Option<&str>,
+    commit: Option<&str>,
     current: &Version,
 ) -> anyhow::Result<Option<LatestRelease>> {
     let Some(tag) = nonempty_string(tag.map(ToOwned::to_owned)) else {
@@ -235,8 +240,159 @@ fn release_from_tag(
     Ok(Some(LatestRelease {
         repo: repo.to_string(),
         version,
+        commit: commit.map(ToOwned::to_owned),
         tag: tag.clone(),
     }))
+}
+
+fn release_from_cached_state(
+    repo: &str,
+    state: &UpdateState,
+    current: &Version,
+) -> anyhow::Result<Option<LatestRelease>> {
+    release_from_tag(
+        repo,
+        state.latest_tag.as_deref(),
+        state.latest_commit.as_deref(),
+        current,
+    )
+}
+
+fn should_offer_update(release: &LatestRelease, current: &Version) -> bool {
+    should_offer_update_for_build(
+        release,
+        current,
+        crate::BUILD_GIT_HEAD,
+        build_workspace_root().as_deref(),
+    )
+}
+
+fn should_offer_update_for_build(
+    release: &LatestRelease,
+    current: &Version,
+    build_head: &str,
+    workspace_root: Option<&Path>,
+) -> bool {
+    if release.version <= *current {
+        return false;
+    }
+
+    !current_build_matches_release_source(release, build_head, workspace_root)
+}
+
+fn current_build_matches_release_source(
+    release: &LatestRelease,
+    build_head: &str,
+    workspace_root: Option<&Path>,
+) -> bool {
+    if build_git_head_is_dirty_at(workspace_root) {
+        return false;
+    }
+    let Some(workspace_root) = workspace_root else {
+        return false;
+    };
+    let Some(release_commit) = release.commit.as_deref() else {
+        return false;
+    };
+    build_matches_release_source(workspace_root, build_head, release_commit)
+}
+
+fn build_matches_release_source(
+    workspace_root: &Path,
+    build_head: &str,
+    release_commit: &str,
+) -> bool {
+    if build_head == "unknown" || release_commit.is_empty() {
+        return false;
+    }
+
+    let output = std::process::Command::new("git")
+        .args(["diff", "--name-only", build_head, release_commit])
+        .current_dir(workspace_root)
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let Ok(stdout) = String::from_utf8(output.stdout) else {
+        return false;
+    };
+    let paths: Vec<_> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    !paths.is_empty() && paths.into_iter().all(is_version_metadata_path)
+}
+
+fn is_version_metadata_path(path: &str) -> bool {
+    matches!(path, "Cargo.toml" | "Cargo.lock")
+}
+
+fn build_git_head_is_dirty_at(workspace_root: Option<&Path>) -> bool {
+    let Some(workspace_root) = workspace_root else {
+        return true;
+    };
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .current_dir(workspace_root)
+        .output();
+    match output {
+        Ok(output) if output.status.success() => !output.stdout.is_empty(),
+        _ => true,
+    }
+}
+
+fn build_workspace_root() -> Option<PathBuf> {
+    let build_head = crate::BUILD_GIT_HEAD;
+    if build_head == "unknown" {
+        return None;
+    }
+
+    let current_exe = env::current_exe().ok()?;
+    let mut dir = current_exe.parent()?.to_path_buf();
+    loop {
+        let git_dir = dir.join(".git");
+        if git_dir.is_dir() || git_dir.is_file() {
+            let output = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&dir)
+                .output()
+                .ok()?;
+            if output.status.success() {
+                let head = String::from_utf8(output.stdout).ok()?;
+                if head.trim() == build_head {
+                    return Some(dir);
+                }
+            }
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+async fn resolve_release_commit(repo: &str, tag: &str) -> anyhow::Result<String> {
+    let output = Command::new("git")
+        .args(["ls-remote", &format!("https://github.com/{repo}"), tag])
+        .output()
+        .await
+        .context("Failed to resolve release tag commit")?;
+    if !output.status.success() {
+        bail!("git ls-remote failed for release tag {tag}");
+    }
+    let stdout = String::from_utf8(output.stdout).context("Release tag lookup was not UTF-8")?;
+    let line = stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .with_context(|| format!("Release tag {tag} was not found on remote"))?;
+    let commit = line
+        .split_whitespace()
+        .next()
+        .with_context(|| format!("Failed to parse commit for release tag {tag}"))?;
+    Ok(commit.to_string())
 }
 
 fn format_available_update(release: &LatestRelease, in_session: bool) -> String {
@@ -450,6 +606,7 @@ fn user_home_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn parses_release_tags_as_semver() {
@@ -463,13 +620,126 @@ mod tests {
     fn newer_cached_release_counts_as_update() {
         let current = Version::parse("0.2.12").expect("current version");
         let release =
-            release_from_tag(DEFAULT_REPO, Some("v0.2.13"), &current).expect("release parse");
+            release_from_tag(DEFAULT_REPO, Some("v0.2.13"), None, &current).expect("release parse");
         assert_eq!(release.expect("available").tag, "v0.2.13");
         assert!(
-            release_from_tag(DEFAULT_REPO, Some("v0.2.12"), &current)
+            release_from_tag(DEFAULT_REPO, Some("v0.2.12"), None, &current)
                 .expect("same version")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn source_equivalent_release_does_not_offer_update() {
+        let temp = TempDir::new().expect("tempdir");
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(temp.path())
+            .status()
+            .expect("init git repo");
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .args(["remote", "add", "origin", "/home/sam/code/lash"])
+            .current_dir(temp.path())
+            .status()
+            .expect("add origin");
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .args(["fetch", "-q", "origin", crate::BUILD_GIT_HEAD])
+            .current_dir(temp.path())
+            .status()
+            .expect("fetch build head");
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .args([
+                "fetch",
+                "-q",
+                "origin",
+                "fd3a7421626c3d5023f2624d02e4f1cc11027bc1",
+            ])
+            .current_dir(temp.path())
+            .status()
+            .expect("fetch release head");
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .args(["checkout", "-q", "FETCH_HEAD"])
+            .current_dir(temp.path())
+            .status()
+            .expect("checkout build head");
+        assert!(status.success());
+        let current = Version::parse("0.2.12").expect("current version");
+        let release = LatestRelease {
+            repo: DEFAULT_REPO.to_string(),
+            tag: "v0.2.18".to_string(),
+            version: Version::parse("0.2.18").expect("release version"),
+            commit: Some("fd3a7421626c3d5023f2624d02e4f1cc11027bc1".to_string()),
+        };
+        assert!(!should_offer_update_for_build(
+            &release,
+            &current,
+            crate::BUILD_GIT_HEAD,
+            Some(temp.path())
+        ));
+    }
+
+    #[test]
+    fn dirty_source_checkout_still_offers_update() {
+        let temp = TempDir::new().expect("tempdir");
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(temp.path())
+            .status()
+            .expect("init git repo");
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .args(["remote", "add", "origin", "/home/sam/code/lash"])
+            .current_dir(temp.path())
+            .status()
+            .expect("add origin");
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .args(["fetch", "-q", "origin", crate::BUILD_GIT_HEAD])
+            .current_dir(temp.path())
+            .status()
+            .expect("fetch build head");
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .args([
+                "fetch",
+                "-q",
+                "origin",
+                "fd3a7421626c3d5023f2624d02e4f1cc11027bc1",
+            ])
+            .current_dir(temp.path())
+            .status()
+            .expect("fetch release head");
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .args(["checkout", "-q", "FETCH_HEAD"])
+            .current_dir(temp.path())
+            .status()
+            .expect("checkout build head");
+        assert!(status.success());
+        std::fs::write(
+            temp.path().join("Cargo.toml"),
+            std::fs::read_to_string(temp.path().join("Cargo.toml")).expect("read Cargo.toml")
+                + "\n",
+        )
+        .expect("modify tracked file");
+        let current = Version::parse("0.2.12").expect("current version");
+        let release = LatestRelease {
+            repo: DEFAULT_REPO.to_string(),
+            tag: "v0.2.18".to_string(),
+            version: Version::parse("0.2.18").expect("release version"),
+            commit: Some("fd3a7421626c3d5023f2624d02e4f1cc11027bc1".to_string()),
+        };
+        assert!(build_git_head_is_dirty_at(Some(temp.path())));
+        assert!(should_offer_update_for_build(
+            &release,
+            &current,
+            crate::BUILD_GIT_HEAD,
+            Some(temp.path())
+        ));
     }
 
     #[test]

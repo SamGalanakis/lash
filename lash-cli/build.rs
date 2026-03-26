@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn main() {
+    emit_git_build_metadata();
+
     let target = std::env::var("TARGET").unwrap_or_default();
 
     if target.contains("apple") {
@@ -27,6 +30,34 @@ fn main() {
             }
         }
     }
+}
+
+fn emit_git_build_metadata() {
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let workspace_root = manifest_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or(manifest_dir);
+
+    let head = git_output(&workspace_root, &["rev-parse", "HEAD"]);
+
+    println!(
+        "cargo:rustc-env=LASH_BUILD_GIT_HEAD={}",
+        head.as_deref().unwrap_or("unknown")
+    );
+}
+
+fn git_output(cwd: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    Some(text.trim().to_string())
 }
 
 /// Find the darwin compiler-rt directory under <llvm_prefix>/lib/clang/<ver>/lib/darwin.

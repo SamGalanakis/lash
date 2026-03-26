@@ -67,16 +67,6 @@ pub fn image_marker() -> Style {
     Style::default().fg(SODIUM).add_modifier(Modifier::BOLD)
 }
 
-/// Label for compact pasted-content summaries in user history.
-pub fn pasted_label() -> Style {
-    Style::default().fg(ASH_TEXT).add_modifier(Modifier::DIM)
-}
-
-/// Preview text for compact pasted-content summaries in user history.
-pub fn pasted_preview() -> Style {
-    Style::default().fg(CHALK)
-}
-
 /// Assistant ghost bar (very dim warm amber)
 pub fn assistant_bar() -> Style {
     Style::default().fg(GHOST_BAR)
