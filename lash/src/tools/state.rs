@@ -313,6 +313,7 @@ mod tests {
         ) -> Result<crate::SessionHandle, crate::PluginError> {
             Ok(crate::SessionHandle {
                 session_id: request.agent_id.unwrap_or_else(|| "child".to_string()),
+                parent_session_id: request.parent_session_id,
                 policy: crate::SessionPolicy {
                     provider: crate::Provider::OpenAiGeneric {
                         api_key: String::new(),

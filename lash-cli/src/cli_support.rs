@@ -113,11 +113,8 @@ pub(crate) fn parse_context_strategy(input: &str) -> Result<ContextStrategy, Str
     match input.trim().to_ascii_lowercase().as_str() {
         "" => Err("Context strategy cannot be empty.".to_string()),
         "rolling_context" | "rolling-context" | "rolling" => Ok(ContextStrategy::RollingContext),
-        "recall_agent" | "recall-agent" | "recall_agent_context" | "recall-agent-context" => {
-            Ok(ContextStrategy::recall_agent_default())
-        }
         other => Err(format!(
-            "Unknown context strategy `{other}`. Expected `rolling_context` or `recall_agent`."
+            "Unknown context strategy `{other}`. Expected `rolling_context`."
         )),
     }
 }
@@ -126,12 +123,7 @@ pub(crate) fn resolve_context_strategy(
     configured: ContextStrategy,
     requested: Option<ContextStrategy>,
 ) -> Result<ContextStrategy, String> {
-    match requested.unwrap_or(configured) {
-        ContextStrategy::RollingContext => Ok(ContextStrategy::RollingContext),
-        ContextStrategy::RecallAgent { keep_recent_pct } => {
-            ContextStrategy::recall_agent(keep_recent_pct)
-        }
-    }
+    requested.unwrap_or(configured).validate()
 }
 
 pub(crate) fn validate_model_selection(
@@ -465,12 +457,6 @@ pub(crate) fn info_text(
 
     let context_line = match context_strategy {
         ContextStrategy::RollingContext => "context strategy: rolling_context".to_string(),
-        ContextStrategy::RecallAgent { keep_recent_pct } => {
-            format!(
-                "context strategy: recall_agent (keep_recent={}%)",
-                keep_recent_pct
-            )
-        }
     };
     lines.extend([
         context_line,

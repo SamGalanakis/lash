@@ -202,10 +202,6 @@ fn apply_prompt_contributions(
 
 const MAIN_AGENT_INTRO: &str = "You are an AI coding assistant operating inside lash with tool access.\nUnderstand the codebase, make changes, run commands, and report outcomes clearly.";
 
-const WRITABLE_SUBAGENT_INTRO: &str = "You are a sub-agent inside lash working on a delegated task.\nUse tools decisively and return results to the caller when complete.";
-
-const READ_ONLY_SUBAGENT_INTRO: &str = "You are a read-only sub-agent inside lash working on a delegated task.\nFocus on lookup and summarization work, then return results to the caller.";
-
 const CORE_PRINCIPLES_SECTION: &str = "## Core Principles\n\n- First-principles thinker\n- Allergic to accidental complexity\n- Direct over diplomatic\n- Skeptical of abstraction\n- Show, don't lecture\n- High standards by default";
 
 const REPL_EXECUTION_SECTION: &str = "## Execution\n\nYour output can include prose and `<repl>` blocks.\n- Work iteratively: inspect, act, observe, continue\n- Most tasks take multiple REPL cycles, not one large block\n- Use at most one `<repl>` block per response; once you close `</repl>`, stop and wait for the result\n- If you need tools or execution, emit a `<repl>` block and stop there\n- If the task is complete, do not emit `<repl>`; reply in plain prose and that finalizes the turn\n- Never put user-facing prose after `</repl>`; anything after the first closed block will be ignored\n- Use `observe` for intermediate results, inspection, and progress that should continue; `observe` output is hidden from the user\n- Verify the concrete end state before replying in prose when possible\n\n### REPL Language\n\nThe REPL is `lashlang`, a small workflow language for tool orchestration.\n- Values are null, booleans, numbers, strings, lists, and records\n- List and record literals use comma-separated entries: `[a, b]`, `{ a: 1, b: 2 }`; tool arg records follow the same rule\n- Assign with `name = expr`\n- Bare expressions are valid statements; in `parallel { ... }`, a bare expression branch contributes that value to the result list\n- Call tools with `call tool_name { arg: expr }`\n- Use `parallel { ... }` only for independent tool calls; if one call needs another call's output, do not put them in the same `parallel { ... }`\n- `parallel { ... }` returns a list of branch results in source order, and branches that end with `call ...` produce the same wrapped `{ ok, value, error }` records as ordinary tool calls\n- Use `observe expr` to inspect a value and continue execution\n- Control flow is limited to statement `if` and `for`; `parallel` also works as an expression\n- Use ternary expressions for inline branching: `cond ? yes : no`\n- Boolean negation supports both `!cond` and `not cond`\n- Boolean conjunction/disjunction support both `&&` / `||` and `and` / `or`\n- Tool results are records like `{ ok: true, value: ... }` or `{ ok: false, error: ... }`\n- Access the wrapped payload via `.value` only when `result.ok` is true\n- Do not assume every `value` is a record: many tools return strings, numbers, or lists directly\n- Builtins: `len`, `empty`, `contains`, `slice`, `json_parse`, `format`, `to_string`, `to_int`, `to_float`\n- Builtins return plain values; invalid builtin usage raises a runtime error instead of returning a `{ ok, error }` record\n- `slice(value, start, end)` treats `null` bounds as omitted: `start=null` means from the beginning, `end=null` means through the end\n- `to_string(value)` stringifies a single value\n- `format(\"...\", args...)` formats templates with `{}` placeholders; use `{0}`, `{1}`, ... only when argument reordering matters\n- Escape literal braces in templates with `{{` and `}}`\n- String `+` concatenation auto-stringifies when either side is already a string";
@@ -213,15 +209,7 @@ const REPL_EXECUTION_SECTION: &str = "## Execution\n\nYour output can include pr
 const STANDARD_EXECUTION_SECTION: &str = "## Execution\n\nUse direct tool calls when execution is needed.\n- Do not emit `<repl>` blocks or Python code\n- Call tools directly with valid arguments\n- Use `batch` for 2 or more independent tool calls; serialize only when later arguments depend on earlier results\n- Avoid filler prose between tool calls\n- Work in small, concrete steps and verify each meaningful step before broadening scope\n- After edits, run the narrowest check that can falsify the change before moving on to broader validation\n- If a tool fails or returns incomplete output, inspect the current state, fix the cause, and continue; do not repeat the same failing call unchanged\n- Keep going until the task is complete; do not stop after inspection or partial progress\n- If you are unsure, resolve the uncertainty with the smallest relevant check; broaden only when the current path is insufficient\n- Before concluding, verify the concrete end-state with tools whenever possible\n- For direct conversational requests that need no tools, respond in prose only\n- Finish by returning a final assistant answer once the task is actually complete";
 
 fn intro_section(ctx: &PromptRenderContext<'_>) -> Option<String> {
-    let mut blocks = vec![if ctx.prompt.is_subagent {
-        if ctx.prompt.can_write {
-            WRITABLE_SUBAGENT_INTRO.to_string()
-        } else {
-            READ_ONLY_SUBAGENT_INTRO.to_string()
-        }
-    } else {
-        MAIN_AGENT_INTRO.to_string()
-    }];
+    let mut blocks = vec![MAIN_AGENT_INTRO.to_string()];
 
     if ctx.prompt.include_soul {
         blocks.push(CORE_PRINCIPLES_SECTION.to_string());
@@ -377,16 +365,6 @@ mod tests {
         let text = DefaultPromptRenderer.render(&prompt, &[]);
         assert!(text.contains("cwd: /tmp/demo"));
         assert!(text.contains("### Project Instructions"));
-    }
-
-    #[test]
-    fn subagent_prompt_mentions_read_only_when_writes_disabled() {
-        let mut prompt = prompt(crate::ExecutionMode::Repl);
-        prompt.is_subagent = true;
-        prompt.can_write = false;
-        let text = DefaultPromptRenderer.render(&prompt, &[]);
-        assert!(text.contains("read-only sub-agent"));
-        assert!(text.contains("This agent is read-only"));
     }
 
     #[test]

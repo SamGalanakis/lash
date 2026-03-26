@@ -287,7 +287,7 @@ lifecycle orchestration is plugin-owned: the active `PluginSession` prepares tur
 checkpoint directives, and finalizes committed turns before history is persisted. The host-facing
 `SessionManager` also exposes generic child-session orchestration primitives such as
 `create_session`, `start_turn_stream`, `await_turn`, `cancel_turn`, and `close_session`, which is
-how `agent_call` launches delegated workers without special core-level subagent state.
+how host-owned delegation tools launch child sessions without special core-level worker state.
 
 ## Config
 
@@ -300,7 +300,7 @@ Stored config lives at:
 Relevant runtime settings include:
 
 - `runtime.context_strategy`
-- `runtime.low_tier_subagent_execution_mode`
+- `runtime.low_tier_delegate_execution_mode`
   `standard` by default for `agent_call` low-tier child sessions; set to `repl` only if you want low-tier delegates to execute via `lashlang`
 
 Supported provider ids:
@@ -312,7 +312,6 @@ Supported provider ids:
 Supported context strategies:
 
 - `rolling_context`
-- `recall_agent`
 
 Config shape:
 
@@ -338,7 +337,7 @@ Config shape:
     "context_strategy": {
       "type": "rolling_context"
     },
-    "low_tier_subagent_execution_mode": "standard"
+    "low_tier_delegate_execution_mode": "standard"
   }
 }
 ```

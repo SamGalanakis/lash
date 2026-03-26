@@ -7,29 +7,22 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
 use crate::agent::format_tool_result_content;
-#[cfg(feature = "sqlite-store")]
-use crate::plugin::history::{HistoryTools, history_prompt_contributions};
 use crate::plugin::{
     PluginError, PromptContribution, SessionContextSurface, SessionCreateRequest, SessionManager,
     SessionPluginMode, SessionStartPoint,
 };
-#[cfg(feature = "sqlite-store")]
-use crate::store::Store;
-use crate::tools::RecallAgentTools;
 use crate::{
     AgentStateEnvelope, ContextStrategy, ExecutionMode, InputItem, Message, MessageOrigin,
     MessageRole, Part, PartKind, PromptUsage, ToolCallRecord, ToolProvider, TurnInput,
     lash_cache_dir,
 };
 
-const MIN_RECENT_USER_TURNS: usize = 3;
 const TOOL_RESULT_MAX_LINES: usize = 2_000;
 const TOOL_RESULT_MAX_BYTES: usize = 50 * 1024;
 const PRUNE_MINIMUM_TOKENS: usize = 20_000;
 const PRUNE_PROTECT_TOKENS: usize = 40_000;
 const PRUNE_RECENT_USER_TURNS: usize = 2;
 const COMPACTION_BUFFER_TOKENS: usize = 20_000;
-const RECALL_AGENT_ABSOLUTE_TRIGGER_TOKENS: usize = 16_000;
 const COMPACTION_PLUGIN_ID: &str = "context_strategy";
 const COMPACTION_SUMMARY_TITLE: &str = "Compaction summary:";
 const COMPACTION_PROMPT: &str = "Provide a detailed summary of the conversation above so another agent can continue the work without the full history.\n\nUse this template:\n---\n## Goal\n[What is the user trying to accomplish?]\n\n## Instructions\n- [Relevant instructions or constraints]\n\n## Discoveries\n[Important findings, failures, or decisions]\n\n## Accomplished\n[What is done, what is in progress, what remains]\n\n## Relevant files / directories\n[List important files or directories]\n---";
@@ -45,8 +38,6 @@ pub struct ContextBuildRequest {
     pub prompt_usage: Option<PromptUsage>,
     pub max_context_tokens: Option<usize>,
     pub host: Arc<dyn SessionManager>,
-    #[cfg(feature = "sqlite-store")]
-    pub store: Option<Arc<Store>>,
 }
 
 #[derive(Clone)]
@@ -91,14 +82,14 @@ trait ContextBuilder: Send + Sync {
 pub async fn build_context(
     request: ContextBuildRequest,
 ) -> Result<PreparedContext, ContextBuildError> {
-    match request.state.policy.context_strategy {
-        ContextStrategy::RollingContext => RollingContextBuilder.build(request).await,
-        ContextStrategy::RecallAgent { .. } => RecallAgentBuilder.build(request).await,
-    }
+    debug_assert_eq!(
+        request.state.policy.context_strategy,
+        ContextStrategy::RollingContext
+    );
+    RollingContextBuilder.build(request).await
 }
 
 struct RollingContextBuilder;
-struct RecallAgentBuilder;
 
 #[async_trait]
 impl ContextBuilder for RollingContextBuilder {
@@ -113,8 +104,6 @@ impl ContextBuilder for RollingContextBuilder {
             prompt_usage,
             max_context_tokens,
             host,
-            #[cfg(feature = "sqlite-store")]
-                store: _,
         } = request;
 
         let tool_calls = tool_record_map(&state.tool_calls);
@@ -155,105 +144,10 @@ impl ContextBuilder for RollingContextBuilder {
     }
 }
 
-#[async_trait]
-impl ContextBuilder for RecallAgentBuilder {
-    async fn build(
-        &self,
-        request: ContextBuildRequest,
-    ) -> Result<PreparedContext, ContextBuildError> {
-        let ContextBuildRequest {
-            session_id,
-            state,
-            mut messages,
-            prompt_usage,
-            max_context_tokens,
-            #[cfg(feature = "sqlite-store")]
-            store,
-            ..
-        } = request;
-        let ContextStrategy::RecallAgent { keep_recent_pct } = state.policy.context_strategy else {
-            unreachable!();
-        };
-
-        let tool_calls = tool_record_map(&state.tool_calls);
-        hydrate_tool_result_parts(&session_id, &mut messages, &tool_calls);
-        prune_old_tool_results(&mut messages, &tool_calls);
-        prune_old_images(&mut messages);
-        let mut recall_available = false;
-        let mut recall_trimmed = false;
-
-        if let (Some(prompt_usage), Some(max_context)) = (prompt_usage, max_context_tokens) {
-            let target_budget = (max_context * usize::from(keep_recent_pct) / 100)
-                .min(RECALL_AGENT_ABSOLUTE_TRIGGER_TOKENS);
-            if prompt_usage.context_budget_tokens > target_budget {
-                recall_available = true;
-                let prefix_len = leading_system_prefix_len(&messages);
-                let total_chars: usize = messages.iter().map(Message::char_count).sum();
-                let target_chars = total_chars.saturating_mul(target_budget)
-                    / prompt_usage.context_budget_tokens.max(1);
-
-                let mut keep_from = messages.len();
-                let mut tail_chars = 0usize;
-                for i in (prefix_len..messages.len()).rev() {
-                    let cost = messages[i].char_count();
-                    if tail_chars + cost > target_chars {
-                        break;
-                    }
-                    tail_chars += cost;
-                    keep_from = i;
-                }
-
-                keep_from = keep_from.min(keep_from_for_recent_turns(&messages, prefix_len));
-                if keep_from > prefix_len {
-                    messages.drain(prefix_len..keep_from);
-                    recall_trimmed = true;
-                }
-            }
-        }
-
-        let mut prompt_contributions = Vec::new();
-        let mut tool_providers = Vec::new();
-
-        if recall_available {
-            prompt_contributions.extend(RecallAgentTools::prompt_contributions(recall_trimmed));
-            tool_providers.push(Arc::new(RecallAgentTools) as Arc<dyn ToolProvider>);
-
-            #[cfg(feature = "sqlite-store")]
-            if let Some(store) = store {
-                prompt_contributions.extend(history_prompt_contributions(&crate::PromptContext {
-                    tool_names: vec!["search_history".to_string()],
-                    ..Default::default()
-                }));
-                tool_providers.push(Arc::new(HistoryTools::new(store)) as Arc<dyn ToolProvider>);
-            }
-        }
-
-        Ok(PreparedContext {
-            messages,
-            prompt_contributions,
-            tool_providers,
-            include_base_tools: true,
-        })
-    }
-}
-
 fn leading_system_prefix_len(msgs: &[Message]) -> usize {
     msgs.iter()
         .take_while(|msg| msg.role == MessageRole::System)
         .count()
-}
-
-fn keep_from_for_recent_turns(msgs: &[Message], prefix_len: usize) -> usize {
-    let mut user_turns = 0usize;
-    for i in (prefix_len..msgs.len()).rev() {
-        if msgs[i].role == MessageRole::User {
-            user_turns += 1;
-            if user_turns >= MIN_RECENT_USER_TURNS {
-                return i;
-            }
-        }
-    }
-    prefix_len
 }
 
 fn approx_token_count(text: &str) -> usize {
@@ -684,6 +578,7 @@ async fn summarize_compaction_prefix(
     let handle = host
         .create_session(SessionCreateRequest {
             agent_id: Some(compaction_session_id),
+            parent_session_id: Some(session_id.to_string()),
             start: SessionStartPoint::Snapshot {
                 snapshot: Box::new(snapshot),
             },
@@ -897,6 +792,7 @@ mod tests {
             self.created.lock().await.push(request.clone());
             Ok(SessionHandle {
                 session_id: request.agent_id.unwrap_or_else(|| "child".to_string()),
+                parent_session_id: request.parent_session_id,
                 policy: SessionPolicy {
                     model: "mock-model".to_string(),
                     execution_mode: ExecutionMode::Standard,
@@ -986,8 +882,6 @@ mod tests {
             prompt_usage: None,
             max_context_tokens: None,
             host: Arc::new(MockSessionManager::default()),
-            #[cfg(feature = "sqlite-store")]
-            store: None,
         })
         .await
         .expect("context")
@@ -1022,8 +916,6 @@ mod tests {
             prompt_usage: None,
             max_context_tokens: None,
             host: Arc::new(MockSessionManager::default()),
-            #[cfg(feature = "sqlite-store")]
-            store: None,
         })
         .await
         .expect("context")
@@ -1033,69 +925,6 @@ mod tests {
         assert!(matches!(image_part.kind, PartKind::Image));
         assert!(image_part.attachment.is_none());
         assert_eq!(image_part.content, PRUNED_IMAGE_PLACEHOLDER);
-    }
-
-    #[tokio::test]
-    async fn recall_agent_builder_clears_old_tool_outputs() {
-        let tool_calls = (0..12)
-            .map(|idx| ToolCallRecord {
-                call_id: Some(format!("call-{idx}")),
-                tool: "exec_command".to_string(),
-                args: json!({"cmd": format!("echo {idx}")}),
-                result: json!(format!("{}\n{}", "line".repeat(12_000), idx)),
-                success: true,
-                duration_ms: 1,
-            })
-            .collect::<Vec<_>>();
-        let mut messages = vec![text_message("u0", MessageRole::User, "older")];
-        messages.push(Message {
-            id: "a1".to_string(),
-            role: MessageRole::Assistant,
-            parts: tool_calls
-                .iter()
-                .enumerate()
-                .map(|(idx, record)| Part {
-                    id: format!("a1.p{idx}"),
-                    kind: PartKind::ToolResult,
-                    content: String::new(),
-                    attachment: None,
-                    tool_call_id: record.call_id.clone(),
-                    tool_name: Some(record.tool.clone()),
-                    prune_state: crate::PruneState::Intact,
-                })
-                .collect(),
-            origin: None,
-        });
-        messages.push(text_message("u2", MessageRole::User, "recent"));
-        messages.push(text_message("u3", MessageRole::User, "latest"));
-
-        let built = build_context(ContextBuildRequest {
-            session_id: "root".to_string(),
-            state: AgentStateEnvelope {
-                policy: SessionPolicy {
-                    context_strategy: ContextStrategy::recall_agent_default(),
-                    ..Default::default()
-                },
-                tool_calls,
-                ..Default::default()
-            },
-            messages,
-            prompt_usage: None,
-            max_context_tokens: None,
-            host: Arc::new(MockSessionManager::default()),
-            #[cfg(feature = "sqlite-store")]
-            store: None,
-        })
-        .await
-        .expect("context")
-        .messages;
-
-        let cleared = built
-            .iter()
-            .flat_map(|message| message.parts.iter())
-            .filter(|part| matches!(part.prune_state, crate::PruneState::Cleared))
-            .count();
-        assert!(cleared > 0);
     }
 
     #[tokio::test]
@@ -1125,8 +954,6 @@ mod tests {
             }),
             max_context_tokens: Some(100_000),
             host: manager.clone(),
-            #[cfg(feature = "sqlite-store")]
-            store: None,
         })
         .await
         .expect("context")
@@ -1159,137 +986,6 @@ mod tests {
                 .as_ref()
                 .map(|policy| policy.context_strategy),
             Some(ContextStrategy::RollingContext)
-        );
-    }
-
-    #[tokio::test]
-    async fn recall_agent_builder_only_injects_tools_after_threshold() {
-        let prepared = build_context(ContextBuildRequest {
-            session_id: "root".to_string(),
-            state: AgentStateEnvelope {
-                policy: SessionPolicy {
-                    context_strategy: ContextStrategy::recall_agent_default(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            messages: vec![
-                text_message("u1", MessageRole::User, "short request"),
-                text_message("a1", MessageRole::Assistant, "short reply"),
-            ],
-            prompt_usage: Some(PromptUsage {
-                prompt_context_tokens: 5,
-                input_tokens: 5,
-                cached_input_tokens: 0,
-                context_budget_tokens: 5,
-            }),
-            max_context_tokens: Some(1_000),
-            host: Arc::new(MockSessionManager::default()),
-            #[cfg(feature = "sqlite-store")]
-            store: None,
-        })
-        .await
-        .expect("context");
-
-        assert!(prepared.prompt_contributions.is_empty());
-        assert!(prepared.tool_providers.is_empty());
-    }
-
-    #[tokio::test]
-    async fn recall_agent_builder_uses_absolute_trigger_for_large_context_models() {
-        let prepared = build_context(ContextBuildRequest {
-            session_id: "root".to_string(),
-            state: AgentStateEnvelope {
-                policy: SessionPolicy {
-                    context_strategy: ContextStrategy::recall_agent_default(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            messages: vec![
-                text_message("u1", MessageRole::User, &"x".repeat(12_000)),
-                text_message("a1", MessageRole::Assistant, &"y".repeat(12_000)),
-                text_message("u2", MessageRole::User, "latest request"),
-            ],
-            prompt_usage: Some(PromptUsage {
-                prompt_context_tokens: 20_000,
-                input_tokens: 20_000,
-                cached_input_tokens: 0,
-                context_budget_tokens: 20_000,
-            }),
-            max_context_tokens: Some(1_050_000),
-            host: Arc::new(MockSessionManager::default()),
-            #[cfg(feature = "sqlite-store")]
-            store: None,
-        })
-        .await
-        .expect("context");
-
-        assert!(!prepared.prompt_contributions.is_empty());
-        assert_eq!(prepared.tool_providers.len(), 1);
-    }
-
-    #[cfg(feature = "sqlite-store")]
-    #[tokio::test]
-    async fn rolling_context_does_not_inject_history_tools_with_store() {
-        let prepared = build_context(ContextBuildRequest {
-            session_id: "root".to_string(),
-            state: AgentStateEnvelope {
-                policy: SessionPolicy {
-                    context_strategy: ContextStrategy::RollingContext,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            messages: vec![text_message("u1", MessageRole::User, "short request")],
-            prompt_usage: None,
-            max_context_tokens: None,
-            host: Arc::new(MockSessionManager::default()),
-            store: Some(Arc::new(Store::memory().expect("store"))),
-        })
-        .await
-        .expect("context");
-
-        assert!(prepared.prompt_contributions.is_empty());
-        assert!(prepared.tool_providers.is_empty());
-    }
-
-    #[cfg(feature = "sqlite-store")]
-    #[tokio::test]
-    async fn recall_agent_injects_history_tools_with_store_after_threshold() {
-        let prepared = build_context(ContextBuildRequest {
-            session_id: "root".to_string(),
-            state: AgentStateEnvelope {
-                policy: SessionPolicy {
-                    context_strategy: ContextStrategy::recall_agent_default(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            messages: vec![
-                text_message("u1", MessageRole::User, &"x".repeat(12_000)),
-                text_message("a1", MessageRole::Assistant, &"y".repeat(12_000)),
-                text_message("u2", MessageRole::User, "latest request"),
-            ],
-            prompt_usage: Some(PromptUsage {
-                prompt_context_tokens: 20_000,
-                input_tokens: 20_000,
-                cached_input_tokens: 0,
-                context_budget_tokens: 20_000,
-            }),
-            max_context_tokens: Some(1_050_000),
-            host: Arc::new(MockSessionManager::default()),
-            store: Some(Arc::new(Store::memory().expect("store"))),
-        })
-        .await
-        .expect("context");
-
-        assert_eq!(prepared.tool_providers.len(), 2);
-        assert!(
-            prepared
-                .prompt_contributions
-                .iter()
-                .any(|c| c.content.contains("search_history"))
         );
     }
 }

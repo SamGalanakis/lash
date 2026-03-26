@@ -64,6 +64,8 @@ pub enum PluginError {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionHandle {
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     pub policy: SessionPolicy,
 }
 
@@ -133,6 +135,8 @@ impl std::fmt::Debug for SessionContextSurface {
 pub struct SessionCreateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     pub start: SessionStartPoint,
     #[serde(default)]
     pub policy: Option<SessionPolicy>,
@@ -934,6 +938,7 @@ mod tests {
         ) -> Result<SessionHandle, PluginError> {
             Ok(SessionHandle {
                 session_id: request.agent_id.unwrap_or_else(|| "child".to_string()),
+                parent_session_id: request.parent_session_id,
                 policy: SessionPolicy {
                     provider: crate::Provider::OpenAiGeneric {
                         api_key: String::new(),

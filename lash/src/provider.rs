@@ -74,13 +74,11 @@ impl ProviderKind {
     }
 }
 
-/// User-overridable model names for agent_call intelligence tiers.
+/// User-overridable model names for delegation intelligence tiers.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct AgentModels {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub low: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recall_agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub medium: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -186,13 +184,13 @@ pub struct RuntimeSettings {
     #[serde(default, skip_serializing_if = "is_default_context_strategy")]
     pub context_strategy: crate::ContextStrategy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub low_tier_subagent_execution_mode: Option<crate::ExecutionMode>,
+    pub low_tier_delegate_execution_mode: Option<crate::ExecutionMode>,
 }
 
 impl RuntimeSettings {
     fn is_default(&self) -> bool {
         is_default_context_strategy(&self.context_strategy)
-            && self.low_tier_subagent_execution_mode.is_none()
+            && self.low_tier_delegate_execution_mode.is_none()
     }
 }
 

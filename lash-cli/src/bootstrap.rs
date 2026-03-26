@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use lash::provider::{LashConfig, Provider};
-use lash::tools::{AgentCallConfig, DefaultToolPluginDeps};
 use lash::*;
 
 use crate::autonomous::{AutonomousPersistenceContext, run_autonomous};
+use crate::delegate_tools::{DelegateToolConfig, DelegateToolsPluginFactory};
 use crate::interactive::{generate_session_name, run_app};
 use crate::session_log::{self, SessionLogger};
 use crate::{Args, setup};
@@ -140,11 +140,6 @@ pub(crate) async fn run(
     if let Some(ref key) = args.tavily_api_key {
         lash_config.set_tavily_api_key(Some(key.clone()));
     }
-    if let Some(models) = lash_config.agent_models.as_mut()
-        && models.recall_agent.is_none()
-    {
-        models.recall_agent = models.low.clone();
-    }
     let requested_context_strategy = match args.context_strategy.as_deref() {
         Some(raw) => Some(parse_context_strategy(raw).map_err(anyhow::Error::msg)?),
         None => None,
@@ -230,10 +225,6 @@ pub(crate) async fn run(
         model: model.clone(),
         provider: lash_config.active_provider().clone(),
         model_variant,
-        recall_agent_model: lash_config
-            .agent_models
-            .as_ref()
-            .and_then(|models| models.recall_agent.clone()),
         max_context_tokens: Some(resolved_model_spec.context_window() as usize),
         session_id: run_session_id.clone(),
         execution_mode,
@@ -255,10 +246,10 @@ pub(crate) async fn run(
     let prompt_bridge = PromptBridge::new();
     let turn_injection_bridge = TurnInjectionBridge::new();
 
-    let agent_call_config = AgentCallConfig {
+    let delegate_tool_config = DelegateToolConfig {
         low_tier_execution_mode: lash_config
             .runtime
-            .low_tier_subagent_execution_mode
+            .low_tier_delegate_execution_mode
             .unwrap_or(ExecutionMode::Standard),
     };
 
@@ -285,9 +276,9 @@ pub(crate) async fn run(
             Default::default(),
             prompt_bridge.clone(),
         )),
-        Arc::new(AgentCallPluginFactory::new(
+        Arc::new(DelegateToolsPluginFactory::new(
             session_policy.clone(),
-            agent_call_config,
+            delegate_tool_config,
             lash_config.agent_models.clone(),
         )),
     ]);

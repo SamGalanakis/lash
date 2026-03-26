@@ -346,19 +346,6 @@ impl ActivityState {
                     extra: None,
                 }
             }
-            "search_history" => ActivityBlock {
-                kind: ActivityKind::GenericTool,
-                status,
-                tool_name: name.to_string(),
-                summary: history_search_summary(&args),
-                detail_lines: history_search_detail_lines(&result),
-                duration_ms,
-                args,
-                artifact: None,
-                children: Vec::new(),
-                extra: None,
-                result,
-            },
             "search_web" => {
                 let query = tool_arg_str(&args, "query")
                     .unwrap_or("search web")
@@ -466,7 +453,7 @@ impl ActivityState {
             }
             "agent_result" => {
                 let handle_id = tool_arg_str(&args, "id").unwrap_or_default().to_string();
-                let meta = result.get("_sub_agent");
+                let meta = result.get("session");
                 let child_status = result
                     .get("status")
                     .and_then(|value| value.as_str())
@@ -1184,29 +1171,6 @@ fn shell_input_preview(input: &str) -> String {
     }
 }
 
-fn history_search_summary(args: &Value) -> String {
-    tool_arg_str(args, "query")
-        .map(|query| format!("searched history for {:?}", inline_text(query)))
-        .unwrap_or_else(|| "searched history".to_string())
-}
-
-fn history_search_detail_lines(result: &Value) -> Vec<String> {
-    result
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .take(3)
-                .filter_map(|item| {
-                    let turn = item.get("turn").and_then(|value| value.as_i64())?;
-                    let preview = item.get("preview").and_then(|value| value.as_str())?;
-                    Some(format!("Turn {}: {}", turn, inline_snippet(preview, 72)))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 fn shell_result_running(result: &Value) -> bool {
     result
         .get("running")
@@ -1799,7 +1763,9 @@ mod tests {
             json!({
                 "result":"delegate result",
                 "status":"interrupted",
-                "_sub_agent":{
+                "session":{
+                    "id":"child-1",
+                    "parent_session_id":"root",
                     "task":"inspect queue rendering",
                     "model":"gpt-5.4",
                     "model_variant":"high",
@@ -1855,7 +1821,9 @@ mod tests {
                 "result":"",
                 "status":"failed",
                 "error":"LLM error: Codex request failed with 400",
-                "_sub_agent":{
+                "session":{
+                    "id":"child-1",
+                    "parent_session_id":"root",
                     "task":"inspect queue rendering",
                     "model":"gpt-5.4-mini",
                     "model_variant":"low",

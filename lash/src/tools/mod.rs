@@ -1,4 +1,3 @@
-mod agent_call;
 mod apply_patch;
 mod ask;
 mod batch;
@@ -7,7 +6,6 @@ mod fetch_url;
 mod glob;
 mod grep;
 mod ls;
-mod memory;
 mod read_file;
 mod shell;
 #[cfg(feature = "sqlite-store")]
@@ -15,7 +13,6 @@ mod state;
 mod update_plan;
 mod web_search;
 
-pub use agent_call::{AgentCall, AgentCallConfig, AgentCallPluginFactory};
 pub use apply_patch::ApplyPatchTool;
 #[cfg(feature = "sqlite-store")]
 pub(crate) use apply_patch::{PatchAction, inspect_patch_ops};
@@ -26,7 +23,6 @@ pub use fetch_url::FetchUrl;
 pub use glob::Glob;
 pub use grep::Grep;
 pub use ls::Ls;
-pub(crate) use memory::{FilteredToolProvider, RecallAgentTools};
 pub use read_file::{ReadFile, ReadFilePluginFactory};
 pub use shell::StandardShell;
 #[cfg(feature = "sqlite-store")]
