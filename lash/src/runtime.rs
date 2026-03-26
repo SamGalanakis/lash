@@ -2973,6 +2973,8 @@ mod tests {
     use crate::llm::transport::LlmTransportError;
     use crate::llm::types::{LlmRequest, LlmUsage};
     use crate::plugin::StaticPluginFactory;
+    #[cfg(feature = "sqlite-store")]
+    use crate::plugin::history::HistoryTools;
     use crate::provider::Provider;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
@@ -4973,18 +4975,12 @@ mod tests {
             .await
             .expect("turn");
 
-        let history_provider = runtime.session.as_ref().expect("runtime session").tools();
-        let result = history_provider
-            .execute(
-                "search_history",
-                &serde_json::json!({
-                    "__agent_id__":"root",
-                    "query":"where did this go",
-                    "mode":"hybrid",
-                    "limit":10
-                }),
-            )
-            .await;
+        let result = HistoryTools::new(Arc::clone(&store)).search_history(&serde_json::json!({
+            "__agent_id__":"root",
+            "query":"where did this go",
+            "mode":"hybrid",
+            "limit":10
+        }));
         assert!(result.success);
         let items = result.result.as_array().cloned().unwrap_or_default();
         assert_eq!(items.len(), 1);
