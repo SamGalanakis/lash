@@ -9,6 +9,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::activity::{
     ActivityArtifact, ActivityBlock, ActivityKind, ActivityStatus, PatchFilePreview,
+    patch_file_subject, patch_status_title,
 };
 use crate::app::{
     App, DisplayBlock, PreparedTurn, PromptState, SPLASH_CONTENT_HEIGHT, SPLASH_SCROLLBACK_HEIGHT,
@@ -24,6 +25,7 @@ const INPUT_HORIZONTAL_PADDING: u16 = 1;
 const PROMPT_HORIZONTAL_PADDING: u16 = 1;
 const MIN_HISTORY_HEIGHT: u16 = 3;
 const MAX_INPUT_HEIGHT: u16 = 20;
+const EXPLORATION_DETAIL_MAX_ROWS: usize = 3;
 
 fn padded_content_width(frame_width: u16, horizontal_padding: u16) -> usize {
     frame_width.saturating_sub(horizontal_padding.saturating_mul(2)) as usize
@@ -547,6 +549,90 @@ fn push_wrapped_prefixed<'a>(
     ]));
 }
 
+fn truncate_with_forced_ellipsis(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
+        return "\u{2026}".to_string();
+    }
+
+    let target = max_width.saturating_sub(1);
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > target {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out.push('\u{2026}');
+    out
+}
+
+fn render_exploration_detail_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    detail_lines: &'a [String],
+    viewport_width: usize,
+    prefix: &str,
+    prefix_style: Style,
+) {
+    let prefix_width = UnicodeWidthStr::width(prefix);
+    let available = viewport_width.saturating_sub(prefix_width);
+    let detail_style = Style::default().fg(theme::ASH_TEXT);
+
+    if available == 0 {
+        let limit = detail_lines.len().min(EXPLORATION_DETAIL_MAX_ROWS);
+        for _ in 0..limit {
+            lines.push(Line::from(Span::styled(prefix.to_string(), prefix_style)));
+        }
+        return;
+    }
+
+    let mut rendered_rows = 0usize;
+    for (line_idx, detail) in detail_lines.iter().enumerate() {
+        let segments = if detail.is_empty() {
+            vec![(0usize, 0usize)]
+        } else {
+            wrap_line(detail, prefix_width, prefix_width, viewport_width)
+        };
+
+        for (segment_idx, &(start, end)) in segments.iter().enumerate() {
+            if rendered_rows == EXPLORATION_DETAIL_MAX_ROWS {
+                return;
+            }
+            rendered_rows += 1;
+
+            let has_more_content =
+                segment_idx + 1 < segments.len() || line_idx + 1 < detail_lines.len();
+            let is_last_visible = rendered_rows == EXPLORATION_DETAIL_MAX_ROWS && has_more_content;
+            let chunk = if detail.is_empty() {
+                if is_last_visible {
+                    "\u{2026}".to_string()
+                } else {
+                    String::new()
+                }
+            } else if is_last_visible {
+                truncate_with_forced_ellipsis(&detail[start..end], available)
+            } else {
+                truncate_to_display_width(&detail[start..end], available)
+            };
+
+            let mut spans = vec![Span::styled(prefix.to_string(), prefix_style)];
+            if !chunk.is_empty() {
+                spans.push(Span::styled(chunk, detail_style));
+            }
+            lines.push(Line::from(spans));
+
+            if is_last_visible {
+                return;
+            }
+        }
+    }
+}
+
 fn render_activity_artifact<'a>(
     lines: &mut Vec<Line<'a>>,
     artifact: &ActivityArtifact,
@@ -603,40 +689,23 @@ fn render_activity_artifact<'a>(
     }
 }
 
-fn patch_status_label(status: &str) -> Option<&'static str> {
-    match status {
-        "added" => Some("added"),
-        "deleted" => Some("deleted"),
-        "moved" => Some("moved"),
-        _ => None,
-    }
-}
-
 fn render_patch_summary_line<'a>(
     lines: &mut Vec<Line<'a>>,
     prefix: &str,
     file: &PatchFilePreview,
     viewport_width: usize,
 ) {
-    let subject = match &file.from_path {
-        Some(from_path) => format!("{from_path} → {}", file.path),
-        None => file.path.clone(),
-    };
+    let subject = patch_file_subject(file);
     let counts = format!(" (+{} -{})", file.added, file.removed);
-    let status_label = patch_status_label(&file.status);
-    let label_width = status_label
-        .map(UnicodeWidthStr::width)
-        .unwrap_or(0)
-        .saturating_add(usize::from(status_label.is_some()));
+    let label = patch_status_title(&file.status);
+    let label_width = UnicodeWidthStr::width(label).saturating_add(1);
     let available = viewport_width
         .saturating_sub(UnicodeWidthStr::width(prefix))
         .saturating_sub(label_width)
         .saturating_sub(UnicodeWidthStr::width(counts.as_str()));
     let mut spans = vec![Span::styled(prefix.to_string(), theme::patch_frame())];
-    if let Some(label) = status_label {
-        spans.push(Span::styled(label.to_string(), theme::patch_label()));
-        spans.push(Span::raw(" "));
-    }
+    spans.push(Span::styled(label.to_string(), theme::patch_label()));
+    spans.push(Span::raw(" "));
     spans.push(Span::styled(
         truncate_to_display_width(&subject, available),
         theme::assistant_text(),
@@ -1117,18 +1186,28 @@ fn render_activity_block_with_lane<'a>(
     ) && activity.status != ActivityStatus::Failed;
 
     if expand_level >= 1 && !hide_success_shell_details {
-        for detail in &activity.detail_lines {
-            lines.push(Line::from(vec![
-                Span::styled(detail_prefix.clone(), detail_prefix_style),
-                Span::styled(
-                    truncate_to_display_width(
-                        detail,
-                        viewport_width
-                            .saturating_sub(UnicodeWidthStr::width(detail_prefix.as_str())),
+        if activity.kind == ActivityKind::Exploration {
+            render_exploration_detail_lines(
+                lines,
+                &activity.detail_lines,
+                viewport_width,
+                detail_prefix.as_str(),
+                detail_prefix_style,
+            );
+        } else {
+            for detail in &activity.detail_lines {
+                lines.push(Line::from(vec![
+                    Span::styled(detail_prefix.clone(), detail_prefix_style),
+                    Span::styled(
+                        truncate_to_display_width(
+                            detail,
+                            viewport_width
+                                .saturating_sub(UnicodeWidthStr::width(detail_prefix.as_str())),
+                        ),
+                        Style::default().fg(theme::ASH_TEXT),
                     ),
-                    Style::default().fg(theme::ASH_TEXT),
-                ),
-            ]));
+                ]));
+            }
         }
         if expand_level == 1
             && let Some(ActivityArtifact::PatchPreview { files, .. }) = &activity.artifact
@@ -3725,8 +3804,8 @@ mod tests {
         render_activity_block(&activity, 1, &mut lines, 80, false);
 
         assert_eq!(line_text(&lines[0]), "╭─ Edited 2 files (+4 -1)");
-        assert_eq!(line_text(&lines[1]), "  ├ a.rs (+3 -1)");
-        assert_eq!(line_text(&lines[2]), "  ╰ added b.rs (+1 -0)");
+        assert_eq!(line_text(&lines[1]), "  ├ Edited a.rs (+3 -1)");
+        assert_eq!(line_text(&lines[2]), "  ╰ Added b.rs (+1 -0)");
     }
 
     #[test]
@@ -3889,7 +3968,7 @@ mod tests {
             status: ActivityStatus::Completed,
             tool_name: "read_file".into(),
             summary: "EXPLORE".into(),
-            detail_lines: vec!["read src/components/really_long_file_name.rs".into()],
+            detail_lines: vec!["abcdefghijklmnopqrstuvwx".into()],
             duration_ms: 3,
             args: serde_json::Value::Null,
             result: serde_json::Value::Null,
@@ -3902,7 +3981,37 @@ mod tests {
         render_activity_block(&activity, 1, &mut lines, 20, false);
 
         assert_eq!(line_text(&lines[0]), "╭─ EXPLORE");
-        assert_eq!(line_text(&lines[1]), "│   read src/compon…");
+        assert_eq!(line_text(&lines[1]), "│   abcdefghijklmnop");
+        assert_eq!(line_text(&lines[2]), "│   qrstuvwx");
+    }
+
+    #[test]
+    fn exploration_activity_caps_wrapped_details_with_ellipsis() {
+        let activity = ActivityBlock {
+            kind: ActivityKind::Exploration,
+            status: ActivityStatus::Completed,
+            tool_name: "read_file".into(),
+            summary: "EXPLORE".into(),
+            detail_lines: vec![
+                "abcdefghijklmnopqrstuvwxyz0123456789".into(),
+                "second line".into(),
+            ],
+            duration_ms: 3,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: None,
+            children: Vec::new(),
+            extra: None,
+        };
+
+        let mut lines = Vec::new();
+        render_activity_block(&activity, 1, &mut lines, 20, false);
+
+        assert_eq!(line_text(&lines[0]), "╭─ EXPLORE");
+        assert_eq!(lines.len(), 4);
+        assert_eq!(line_text(&lines[1]), "│   abcdefghijklmnop");
+        assert_eq!(line_text(&lines[2]), "│   qrstuvwxyz012345");
+        assert!(line_text(&lines[3]).ends_with('…'));
     }
 
     #[test]
@@ -3935,7 +4044,10 @@ mod tests {
             status: ActivityStatus::Completed,
             tool_name: "read_file".into(),
             summary: "EXPLORE".into(),
-            detail_lines: vec!["read src/components/really_long_file_name.rs".into()],
+            detail_lines: vec![
+                "abcdefghijklmnopqrstuvwxyz0123456789".into(),
+                "second line".into(),
+            ],
             duration_ms: 3,
             args: serde_json::Value::Null,
             result: serde_json::Value::Null,

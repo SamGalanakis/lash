@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Component, Path, PathBuf},
+};
 
 use serde_json::Value;
 
@@ -190,8 +193,9 @@ impl ActivityState {
 
         match name {
             "read_file" => {
-                let subject = read_label(&result)
-                    .unwrap_or_else(|| tool_arg_str(&args, "path").unwrap_or("file").to_string());
+                let subject = read_label(&result).unwrap_or_else(|| {
+                    compact_path_display(tool_arg_str(&args, "path").unwrap_or("file"))
+                });
                 exploration_block(
                     name,
                     status,
@@ -233,7 +237,7 @@ impl ActivityState {
                 )
             }
             "ls" => {
-                let subject = tool_arg_str(&args, "path").unwrap_or(".").to_string();
+                let subject = compact_path_display(tool_arg_str(&args, "path").unwrap_or("."));
                 exploration_block(
                     name,
                     status,
@@ -678,7 +682,7 @@ fn semantic_tool_summary(name: &str, args: &Value) -> String {
     match name {
         "read_file" => tool_arg_str(args, "path")
             .map(|path| {
-                let mut label = format!("read {}", path);
+                let mut label = format!("read {}", compact_path_display(path));
                 if let Some(offset) = args.get("offset").and_then(|value| value.as_u64())
                     && offset > 1
                 {
@@ -690,7 +694,10 @@ fn semantic_tool_summary(name: &str, args: &Value) -> String {
         "apply_patch" => "apply patch".to_string(),
         "grep" => grep_label(args),
         "glob" => glob_label(args),
-        "ls" => format!("list {}", tool_arg_str(args, "path").unwrap_or(".")),
+        "ls" => format!(
+            "list {}",
+            compact_path_display(tool_arg_str(args, "path").unwrap_or("."))
+        ),
         "exec_command" => tool_arg_str(args, "cmd")
             .map(inline_text)
             .unwrap_or_else(|| "command".to_string()),
@@ -816,7 +823,10 @@ fn exploration_detail_lines(ops: &[ExplorationOp]) -> Vec<String> {
 
     let mut lines = Vec::new();
     if !searches.is_empty() {
-        lines.push(format!("Search {}", searches.join(", ")));
+        lines.push(format!(
+            "Search {}",
+            dedupe_preserve_order(searches).join(", ")
+        ));
     }
     if !reads.is_empty() {
         lines.push(format!("Read {}", dedupe_preserve_order(reads).join(", ")));
@@ -844,7 +854,7 @@ fn dedupe_preserve_order(values: Vec<String>) -> Vec<String> {
 fn grep_label(args: &Value) -> String {
     let pattern = tool_arg_str(args, "pattern").unwrap_or("pattern");
     if let Some(path) = tool_arg_str(args, "path") {
-        format!("{:?} in {}", pattern, path)
+        format!("{:?} in {}", pattern, compact_path_display(path))
     } else {
         format!("{:?}", pattern)
     }
@@ -853,7 +863,7 @@ fn grep_label(args: &Value) -> String {
 fn glob_label(args: &Value) -> String {
     let pattern = tool_arg_str(args, "pattern").unwrap_or("*");
     if let Some(path) = tool_arg_str(args, "path") {
-        format!("{} in {}", pattern, path)
+        format!("{} in {}", pattern, compact_path_display(path))
     } else {
         pattern.to_string()
     }
@@ -868,14 +878,86 @@ fn read_label(result: &Value) -> Option<String> {
     if let Some(rest) = first_line.strip_prefix("==> ")
         && let Some(path) = rest.strip_suffix(" <==")
     {
-        return Some(path.to_string());
+        return Some(compact_path_display(path));
     }
     if let Some(path) = first_line.split_whitespace().next()
         && path.contains('/')
     {
-        return Some(path.to_string());
+        return Some(compact_path_display(path));
     }
     None
+}
+
+pub(crate) fn compact_path_display(path: &str) -> String {
+    let path = Path::new(path);
+    if !path.is_absolute() {
+        return path.to_string_lossy().into_owned();
+    }
+
+    if let Ok(cwd) = std::env::current_dir()
+        && let Ok(relative) = path.strip_prefix(&cwd)
+    {
+        let label = relative.to_string_lossy();
+        return if label.is_empty() {
+            ".".to_string()
+        } else {
+            label.into_owned()
+        };
+    }
+
+    if let Some(home) = user_home_dir()
+        && let Ok(relative) = path.strip_prefix(home)
+    {
+        return compact_home_relative_path(relative);
+    }
+
+    compact_absolute_path(path)
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+fn compact_home_relative_path(path: &Path) -> String {
+    let components = display_path_components(path);
+    if components.is_empty() {
+        return "~".to_string();
+    }
+    if components.len() <= 3 {
+        return format!("~/{}", components.join("/"));
+    }
+    format!("~/…/{}", tail_components(&components, 3))
+}
+
+fn compact_absolute_path(path: &Path) -> String {
+    let components = display_path_components(path);
+    if components.is_empty() {
+        return "/".to_string();
+    }
+    if components.len() <= 3 {
+        return format!("/{}", components.join("/"));
+    }
+    format!("…/{}", tail_components(&components, 3))
+}
+
+fn display_path_components(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+            Component::CurDir => Some(".".to_string()),
+            Component::ParentDir => Some("..".to_string()),
+            Component::RootDir | Component::Prefix(_) => None,
+        })
+        .collect()
+}
+
+fn tail_components(components: &[String], count: usize) -> String {
+    components
+        .iter()
+        .skip(components.len().saturating_sub(count))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn web_sources(result: &Value) -> Vec<String> {
@@ -1306,7 +1388,7 @@ fn patch_group_title(files: &[PatchFilePreview]) -> &'static str {
     }
 }
 
-fn patch_status_title(status: &str) -> &'static str {
+pub(crate) fn patch_status_title(status: &str) -> &'static str {
     match status {
         "added" => "Added",
         "deleted" => "Deleted",
@@ -1323,10 +1405,11 @@ fn patch_unique_file_count(files: &[PatchFilePreview]) -> usize {
     unique.len()
 }
 
-fn patch_file_subject(file: &PatchFilePreview) -> String {
+pub(crate) fn patch_file_subject(file: &PatchFilePreview) -> String {
+    let path = compact_path_display(&file.path);
     match &file.from_path {
-        Some(from_path) => format!("{from_path} → {}", file.path),
-        None => file.path.clone(),
+        Some(from_path) => format!("{} → {path}", compact_path_display(from_path)),
+        None => path,
     }
 }
 
@@ -1524,6 +1607,52 @@ mod tests {
         assert_eq!(blocks[1].detail_lines, vec!["Search \"foo\" in ."]);
         assert_ne!(blocks[0].tool_name, "batch");
         assert_ne!(blocks[1].tool_name, "batch");
+    }
+
+    #[test]
+    fn read_file_labels_prefer_repo_relative_paths() {
+        let mut state = ActivityState::default();
+        let path = std::env::current_dir()
+            .expect("cwd")
+            .join("lash-cli/src/ui.rs");
+        let blocks = state.blocks_for_tool_call(
+            "read_file",
+            json!({ "path": path }),
+            json!("fn render() {}"),
+            true,
+            4,
+        );
+
+        assert_eq!(blocks[0].summary, "EXPLORE");
+        assert_eq!(blocks[0].detail_lines, vec!["Read lash-cli/src/ui.rs"]);
+    }
+
+    #[test]
+    fn grep_labels_prefer_repo_relative_paths() {
+        let mut state = ActivityState::default();
+        let path = std::env::current_dir()
+            .expect("cwd")
+            .join("lash-cli/src/ui.rs");
+        let blocks = state.blocks_for_tool_call(
+            "grep",
+            json!({ "pattern": "render_activity_block", "path": path }),
+            json!("match"),
+            true,
+            4,
+        );
+
+        assert_eq!(
+            blocks[0].detail_lines,
+            vec!["Search \"render_activity_block\" in lash-cli/src/ui.rs"]
+        );
+    }
+
+    #[test]
+    fn compact_path_display_collapses_external_absolute_paths() {
+        assert_eq!(
+            compact_path_display("/tmp/std-template/spacetimedb/src/lib.rs"),
+            "…/spacetimedb/src/lib.rs"
+        );
     }
 
     #[test]

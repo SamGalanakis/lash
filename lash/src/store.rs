@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
@@ -62,14 +63,29 @@ CREATE TABLE IF NOT EXISTS session_meta (
 
 const SCHEMA_VERSION: i32 = 1;
 
-fn apply_pragmas(conn: &Connection) -> rusqlite::Result<()> {
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
+const SQLITE_WAL_AUTOCHECKPOINT_PAGES: i64 = 1_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StoreBacking {
+    File,
+    Memory,
+}
+
+fn apply_pragmas(conn: &Connection, backing: StoreBacking) -> rusqlite::Result<()> {
+    conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
     conn.execute_batch(
-        "PRAGMA journal_mode = DELETE;
-         PRAGMA synchronous = NORMAL;
-         PRAGMA busy_timeout = 5000;
+        "PRAGMA synchronous = NORMAL;
          PRAGMA foreign_keys = ON;
          PRAGMA cache_size = -2000;",
-    )
+    )?;
+    if matches!(backing, StoreBacking::File) {
+        conn.execute_batch(&format!(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA wal_autocheckpoint = {SQLITE_WAL_AUTOCHECKPOINT_PAGES};"
+        ))?;
+    }
+    Ok(())
 }
 
 /// Persisted agent state for snapshot/resume.
@@ -140,7 +156,7 @@ impl Store {
     /// Open (or create) a SQLite database at `path`.
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
-        apply_pragmas(&conn)?;
+        apply_pragmas(&conn, StoreBacking::File)?;
         ensure_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -150,7 +166,7 @@ impl Store {
     /// In-memory database (for child-session flows / tests).
     pub fn memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
-        apply_pragmas(&conn)?;
+        apply_pragmas(&conn, StoreBacking::Memory)?;
         ensure_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -164,10 +180,12 @@ impl Store {
         let hash = format!("{:x}", Sha256::digest(content.as_bytes()));
         let short = hash[..12].to_string();
         let conn = self.conn.lock().unwrap();
-        let _ = conn.execute(
+        if let Err(err) = conn.execute(
             "INSERT OR IGNORE INTO archive (hash, content) VALUES (?1, ?2)",
             params![short, content],
-        );
+        ) {
+            tracing::warn!(error = %err, hash = %short, "failed to persist archive content");
+        }
         short
     }
 
@@ -245,7 +263,14 @@ impl Store {
 
     pub fn history_upsert_turn(&self, agent_id: &str, turn: &HistoryTurnRecord) {
         let conn = self.conn.lock().unwrap();
-        Self::history_upsert_turn_locked(&conn, agent_id, turn);
+        if let Err(err) = Self::history_upsert_turn_locked(&conn, agent_id, turn) {
+            tracing::warn!(
+                error = %err,
+                agent_id = agent_id,
+                turn_index = turn.index,
+                "failed to persist history turn"
+            );
+        }
     }
 
     pub fn history_export(&self, agent_id: &str) -> Vec<HistoryTurnRecord> {
@@ -313,17 +338,43 @@ impl Store {
         let mut conn = self.conn.lock().unwrap();
         let tx = match conn.transaction() {
             Ok(tx) => tx,
-            Err(_) => return,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    agent_id = agent_id,
+                    "failed to open history transaction"
+                );
+                return;
+            }
         };
-        let _ = tx.execute(
+        if let Err(err) = tx.execute(
             "DELETE FROM history_turns WHERE agent_id = ?1",
             params![agent_id],
-        );
+        ) {
+            tracing::warn!(
+                error = %err,
+                agent_id = agent_id,
+                "failed to clear history before reload"
+            );
+        }
         for turn in turns {
             let record = history_record_from_value(turn);
-            Self::history_upsert_turn_locked(&tx, agent_id, &record);
+            if let Err(err) = Self::history_upsert_turn_locked(&tx, agent_id, &record) {
+                tracing::warn!(
+                    error = %err,
+                    agent_id = agent_id,
+                    turn_index = record.index,
+                    "failed to reload history turn"
+                );
+            }
         }
-        let _ = tx.commit();
+        if let Err(err) = tx.commit() {
+            tracing::warn!(
+                error = %err,
+                agent_id = agent_id,
+                "failed to commit reloaded history"
+            );
+        }
     }
 
     pub fn history_copy(&self, source_agent_id: &str, target_agent_id: &str) {
@@ -363,7 +414,7 @@ impl Store {
 
     pub fn save_session_meta(&self, meta: SessionMetaSave<'_>) {
         let conn = self.conn.lock().unwrap();
-        let _ = conn.execute(
+        if let Err(err) = conn.execute(
             "INSERT OR REPLACE INTO session_meta
              (singleton, session_id, session_name, created_at, model, cwd, parent_session_id)
              VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
@@ -375,7 +426,36 @@ impl Store {
                 meta.cwd,
                 meta.parent_session_id
             ],
-        );
+        ) {
+            tracing::warn!(
+                error = %err,
+                session_id = meta.session_id,
+                "failed to persist session metadata"
+            );
+        }
+    }
+
+    pub fn update_agent_ui_state(&self, agent_id: &str, ui_json: &str) {
+        let conn = self.conn.lock().unwrap();
+        match conn.execute(
+            "UPDATE agents SET ui_json = ?2 WHERE agent_id = ?1",
+            params![agent_id, ui_json],
+        ) {
+            Ok(0) => {
+                tracing::warn!(
+                    agent_id = agent_id,
+                    "skipped UI snapshot update because no agent row exists"
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    agent_id = agent_id,
+                    "failed to persist UI snapshot update"
+                );
+            }
+        }
     }
 
     pub fn load_session_meta(&self) -> Option<SessionMeta> {
@@ -400,7 +480,11 @@ impl Store {
 
     // ─── Internal helpers (require caller to already hold the lock) ───
 
-    fn history_upsert_turn_locked(conn: &Connection, agent_id: &str, turn: &HistoryTurnRecord) {
+    fn history_upsert_turn_locked(
+        conn: &Connection,
+        agent_id: &str,
+        turn: &HistoryTurnRecord,
+    ) -> rusqlite::Result<()> {
         let (files_read, files_written) = derive_history_files(&turn.tool_calls);
         let tool_calls_json =
             serde_json::to_string(&turn.tool_calls).unwrap_or_else(|_| "[]".into());
@@ -408,7 +492,7 @@ impl Store {
         let files_written_json =
             serde_json::to_string(&files_written).unwrap_or_else(|_| "[]".into());
 
-        let _ = conn.execute(
+        conn.execute(
             "INSERT OR REPLACE INTO history_turns
              (agent_id, turn_index, user_message, prose, code, output, error, tool_calls_json, files_read_json, files_written_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -424,7 +508,8 @@ impl Store {
                 files_read_json,
                 files_written_json
             ],
-        );
+        )?;
+        Ok(())
     }
 }
 
@@ -620,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn open_uses_delete_journal_mode() {
+    fn open_uses_wal_journal_mode_and_busy_timeout() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.db");
         let store = Store::open(&path).unwrap();
@@ -628,7 +713,11 @@ mod tests {
         let journal_mode: String = conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(journal_mode.to_ascii_lowercase(), "delete");
+        let busy_timeout_ms: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        assert_eq!(busy_timeout_ms, SQLITE_BUSY_TIMEOUT.as_millis() as i64);
     }
 
     #[test]
@@ -674,5 +763,28 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].user_message, "hello");
         assert_eq!(turns[0].prose, "world");
+    }
+
+    #[test]
+    fn update_agent_ui_state_rewrites_existing_snapshot() {
+        let s = mem();
+        s.save_agent_state(AgentStateSave {
+            agent_id: "ag1",
+            messages_json: "[]",
+            tool_calls_json: "[]",
+            ui_json: "{}",
+            iteration: 0,
+            config_json: "{}",
+            repl_snapshot: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+            reasoning_tokens: 0,
+        });
+
+        s.update_agent_ui_state("ag1", r#"{"blocks":["updated"]}"#);
+
+        let state = s.load_agent_state("ag1").expect("agent state");
+        assert_eq!(state.ui_json, r#"{"blocks":["updated"]}"#);
     }
 }

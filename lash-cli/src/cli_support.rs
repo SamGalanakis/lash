@@ -385,6 +385,11 @@ pub(crate) fn persist_live_runtime_snapshot(
     );
 }
 
+pub(crate) fn persist_live_ui_state(store: &Store, ui_state: &PersistedUiState) {
+    let ui_json = serde_json::to_string(ui_state).unwrap_or_else(|_| "{}".to_string());
+    store.update_agent_ui_state(ROOT_SESSION_ID, &ui_json);
+}
+
 pub(crate) fn push_system_message(app: &mut App, msg: impl Into<String>) {
     let msg = msg.into();
     let duplicate = matches!(
@@ -625,4 +630,145 @@ pub(crate) fn shell_escape_command(input: &str) -> Option<&str> {
         .strip_prefix('!')
         .map(str::trim)
         .filter(|cmd| !cmd.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use rusqlite::params;
+
+    use super::*;
+    use crate::app::PersistedLiveTurnState;
+    use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
+    use lash::store::{AgentStateSave, SessionMetaSave};
+
+    #[test]
+    fn persist_live_ui_state_updates_existing_agent_snapshot() {
+        let _env_guard = env_lock().blocking_lock();
+        let temp = TempDirGuard::new("lash-cli-persist-live-ui-state");
+        let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
+        let db_path = temp.path().join("session.db");
+        let store = Store::open(&db_path).expect("store");
+
+        store.save_agent_state(AgentStateSave {
+            agent_id: ROOT_SESSION_ID,
+            messages_json: "[]",
+            tool_calls_json: "[]",
+            ui_json: "{}",
+            iteration: 0,
+            config_json: "{}",
+            repl_snapshot: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+            reasoning_tokens: 0,
+        });
+
+        persist_live_ui_state(
+            &store,
+            &PersistedUiState {
+                live_turn: Some(PersistedLiveTurnState {
+                    status_text: "retrying".to_string(),
+                    status_detail: Some("in 5s".to_string()),
+                    has_visible_output: false,
+                }),
+                ..PersistedUiState::default()
+            },
+        );
+
+        let state = store.load_agent_state(ROOT_SESSION_ID).expect("root state");
+        assert!(state.ui_json.contains("\"retrying\""));
+        assert!(state.ui_json.contains("\"in 5s\""));
+    }
+
+    #[test]
+    fn file_backed_store_creates_wal_file() {
+        let _env_guard = env_lock().blocking_lock();
+        let temp = TempDirGuard::new("lash-cli-store-wal");
+        let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
+        let db_path = temp.path().join("session.db");
+        let store = Store::open(&db_path).expect("store");
+
+        store.save_session_meta(SessionMetaSave {
+            session_id: "s1",
+            session_name: "demo",
+            created_at: "2026-03-26T10:00:00Z",
+            model: "gpt-5",
+            cwd: Some("/tmp/demo"),
+            parent_session_id: None,
+        });
+
+        assert!(db_path.with_extension("db-wal").exists());
+    }
+
+    #[test]
+    fn store_waits_for_concurrent_writer_before_updating_ui_state() {
+        let _env_guard = env_lock().blocking_lock();
+        let temp = TempDirGuard::new("lash-cli-store-busy-timeout");
+        let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
+        let db_path = temp.path().join("session.db");
+        let store = Arc::new(Store::open(&db_path).expect("store"));
+
+        store.save_agent_state(AgentStateSave {
+            agent_id: ROOT_SESSION_ID,
+            messages_json: "[]",
+            tool_calls_json: "[]",
+            ui_json: "{}",
+            iteration: 0,
+            config_json: "{}",
+            repl_snapshot: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+            reasoning_tokens: 0,
+        });
+
+        let lock_conn = rusqlite::Connection::open(&db_path).expect("lock connection");
+        lock_conn
+            .execute_batch("BEGIN IMMEDIATE;")
+            .expect("begin immediate");
+        lock_conn
+            .execute(
+                "UPDATE agents SET ui_json = ?1 WHERE agent_id = ?2",
+                params![r#"{"locked":true}"#, ROOT_SESSION_ID],
+            )
+            .expect("hold write lock");
+
+        let store_clone = Arc::clone(&store);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let started = Instant::now();
+            persist_live_ui_state(
+                &store_clone,
+                &PersistedUiState {
+                    live_turn: Some(PersistedLiveTurnState {
+                        status_text: "retrying".to_string(),
+                        status_detail: Some("in 5s".to_string()),
+                        has_visible_output: false,
+                    }),
+                    ..PersistedUiState::default()
+                },
+            );
+            done_tx.send(started.elapsed()).expect("send elapsed");
+        });
+
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+            "store update should wait while another connection holds the write lock"
+        );
+
+        lock_conn.execute_batch("COMMIT;").expect("commit lock");
+
+        let waited = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("writer should finish after lock release");
+        writer.join().expect("writer thread");
+
+        let state = store.load_agent_state(ROOT_SESSION_ID).expect("root state");
+        assert!(state.ui_json.contains("\"retrying\""));
+        assert!(waited >= Duration::from_millis(150));
+    }
 }

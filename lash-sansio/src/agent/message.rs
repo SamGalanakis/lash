@@ -1,5 +1,4 @@
 use crate::ExecutionMode;
-pub use crate::llm::types::LlmPromptPart;
 use crate::llm::types::{LlmAttachment, LlmMessage, LlmRole};
 use base64::Engine;
 
@@ -194,7 +193,6 @@ fn render_message_for_transcript(msg: &Message, attachments: &mut Vec<LlmAttachm
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RenderedPrompt {
-    pub user_prompt: Vec<LlmPromptPart>,
     pub messages: Vec<LlmMessage>,
     pub attachments: Vec<LlmAttachment>,
 }
@@ -276,8 +274,14 @@ pub fn render_transcript_prompt(msgs: &[Message]) -> RenderedPrompt {
     );
 
     RenderedPrompt {
-        user_prompt: vec![LlmPromptPart::Text(text)],
-        messages: Vec::new(),
+        messages: vec![LlmMessage {
+            role: LlmRole::User,
+            content: text,
+            kind: "text".to_string(),
+            image_idx: -1,
+            tool_call_id: None,
+            tool_name: None,
+        }],
         attachments,
     }
 }
@@ -341,7 +345,6 @@ fn render_repl_chat_prompt(msgs: &[Message]) -> RenderedPrompt {
     }
 
     RenderedPrompt {
-        user_prompt: Vec::new(),
         messages,
         attachments,
     }
@@ -415,7 +418,6 @@ fn render_structured_prompt(msgs: &[Message]) -> RenderedPrompt {
     }
 
     RenderedPrompt {
-        user_prompt: Vec::new(),
         messages,
         attachments,
     }
@@ -485,10 +487,7 @@ mod tests {
         ];
 
         let rendered = render_transcript_prompt(&msgs);
-        let text = match &rendered.user_prompt[0] {
-            LlmPromptPart::Text(text) => text,
-            LlmPromptPart::Image(_) => panic!("expected text prompt"),
-        };
+        let text = &rendered.messages[0].content;
 
         assert!(text.contains("=== Turn 1 ===\nUser:\nfirst"));
         assert!(text.contains("Assistant (Lash, continuing this transcript):\nreply one"));
@@ -522,7 +521,6 @@ mod tests {
         ];
 
         let rendered = render_prompt(&msgs, ExecutionMode::Repl);
-        assert!(rendered.user_prompt.is_empty());
         assert_eq!(rendered.messages.len(), 3);
         assert_eq!(rendered.messages[0].content, "first");
         assert!(rendered.messages[1].content.contains("reply one"));
@@ -580,7 +578,6 @@ mod tests {
         ];
 
         let rendered = render_structured_prompt(&msgs);
-        assert!(rendered.user_prompt.is_empty());
         assert_eq!(rendered.messages.len(), 5);
         assert_eq!(rendered.messages[0].role, LlmRole::System);
         assert_eq!(rendered.messages[0].content, "Runtime note:\nnote");
@@ -643,10 +640,7 @@ mod tests {
         }];
 
         let rendered = render_transcript_prompt(&msgs);
-        let text = match &rendered.user_prompt[0] {
-            LlmPromptPart::Text(text) => text,
-            LlmPromptPart::Image(_) => panic!("expected text prompt"),
-        };
+        let text = &rendered.messages[0].content;
         assert!(text.contains("[Image attached]"));
         assert_eq!(rendered.attachments.len(), 1);
     }
@@ -675,10 +669,7 @@ mod tests {
         ];
 
         let rendered = render_transcript_prompt(&msgs);
-        let text = match &rendered.user_prompt[0] {
-            LlmPromptPart::Text(text) => text,
-            LlmPromptPart::Image(_) => panic!("expected text prompt"),
-        };
+        let text = &rendered.messages[0].content;
 
         assert!(text.contains("=== Turn 2 ===\nUser:\nsecond"));
         assert!(!text.contains("=== Turn 2 ===\nUser:\nsecond\n\nAssistant (Lash, continuing this transcript):\n[No assistant content recorded]"));
@@ -710,10 +701,7 @@ mod tests {
         ];
 
         let rendered = render_transcript_prompt(&msgs);
-        let text = match &rendered.user_prompt[0] {
-            LlmPromptPart::Text(text) => text,
-            LlmPromptPart::Image(_) => panic!("expected text prompt"),
-        };
+        let text = &rendered.messages[0].content;
 
         assert!(text.contains(r#"exec_command({"cmd":"date"})"#));
     }
@@ -728,10 +716,7 @@ mod tests {
         }];
 
         let rendered = render_transcript_prompt(&msgs);
-        let text = match &rendered.user_prompt[0] {
-            LlmPromptPart::Text(text) => text,
-            LlmPromptPart::Image(_) => panic!("expected text prompt"),
-        };
+        let text = &rendered.messages[0].content;
         assert!(!text.contains("Runtime Notes:"));
     }
 }

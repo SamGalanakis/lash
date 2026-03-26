@@ -2613,8 +2613,9 @@ impl RuntimeTurnDriver {
                 usage,
                 request_body,
                 response_text,
+                response_parts,
             } => {
-                let entry = serde_json::json!({
+                let mut entry = serde_json::json!({
                     "turn": iteration,
                     "ts": chrono::Utc::now().to_rfc3339(),
                     "agent_id": agent_id,
@@ -2627,13 +2628,25 @@ impl RuntimeTurnDriver {
                         "reasoning_tokens": usage.reasoning_tokens,
                     }
                 });
-                if let Ok(mut file) = std::fs::OpenOptions::new()
+                if let Some(parts) = response_parts
+                    && let Some(object) = entry.as_object_mut()
+                {
+                    object.insert("response_parts".to_string(), parts);
+                }
+                match std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(path)
                 {
-                    use std::io::Write;
-                    let _ = writeln!(file, "{}", entry);
+                    Ok(mut file) => {
+                        use std::io::Write;
+                        if let Err(err) = writeln!(file, "{}", entry) {
+                            tracing::warn!(error = %err, path = %path.display(), "failed to append llm debug log");
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, path = %path.display(), "failed to open llm debug log");
+                    }
                 }
             }
         }
@@ -2708,20 +2721,6 @@ fn response_usage_is_empty(usage: &LlmUsage) -> bool {
 }
 
 fn debug_request_body(req: &LlmRequest) -> String {
-    let user_prompt = req
-        .user_prompt
-        .iter()
-        .map(|part| match part {
-            crate::llm::types::LlmPromptPart::Text(text) => serde_json::json!({
-                "type": "text",
-                "text": text,
-            }),
-            crate::llm::types::LlmPromptPart::Image(index) => serde_json::json!({
-                "type": "image",
-                "index": index,
-            }),
-        })
-        .collect::<Vec<_>>();
     let messages = req
         .messages
         .iter()
@@ -2750,14 +2749,26 @@ fn debug_request_body(req: &LlmRequest) -> String {
         .collect::<Vec<_>>();
     serde_json::json!({
         "model": req.model,
-        "system_prompt": req.system_prompt,
-        "user_prompt": user_prompt,
         "messages": messages,
         "attachments": req.attachments.len(),
         "tools": tools,
         "tool_choice": format!("{:?}", req.tool_choice).to_ascii_lowercase(),
         "model_variant": req.model_variant,
         "session_id": req.session_id,
+        "output_spec": match &req.output_spec {
+            None => serde_json::Value::Null,
+            Some(crate::llm::types::LlmOutputSpec::JsonObject) => {
+                serde_json::json!({ "type": "json_object" })
+            }
+            Some(crate::llm::types::LlmOutputSpec::JsonSchema(schema)) => {
+                serde_json::json!({
+                    "type": "json_schema",
+                    "name": schema.name,
+                    "schema": schema.schema,
+                    "strict": schema.strict,
+                })
+            }
+        },
         "stream": req.stream_events.is_some(),
     })
     .to_string()
@@ -4560,7 +4571,7 @@ mod tests {
         assert!(!request.is_empty());
         assert_ne!(request, "null");
         assert!(request.contains("\"model\":\"mock-model\""));
-        assert!(request.contains("\"system_prompt\""));
+        assert!(request.contains("\"messages\""));
         assert!(entry.get("usage").is_some());
         assert!(entry["usage"]["input_tokens"].as_i64().unwrap_or_default() >= 0);
 
