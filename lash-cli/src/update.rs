@@ -618,28 +618,14 @@ mod tests {
     fn prepare_build_checkout() -> TempDir {
         let temp = TempDir::new().expect("tempdir");
         let status = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(temp.path())
-            .status()
-            .expect("init git repo");
-        assert!(status.success());
-        let status = std::process::Command::new("git")
-            .arg("remote")
-            .arg("add")
-            .arg("origin")
+            .args(["clone", "-q", "--no-local"])
             .arg(workspace_repo_root())
-            .current_dir(temp.path())
+            .arg(temp.path())
             .status()
-            .expect("add origin");
+            .expect("clone workspace repo");
         assert!(status.success());
         let status = std::process::Command::new("git")
-            .args(["fetch", "-q", "origin", crate::BUILD_GIT_HEAD])
-            .current_dir(temp.path())
-            .status()
-            .expect("fetch build head");
-        assert!(status.success());
-        let status = std::process::Command::new("git")
-            .args(["checkout", "-q", "FETCH_HEAD"])
+            .args(["checkout", "-q", crate::BUILD_GIT_HEAD])
             .current_dir(temp.path())
             .status()
             .expect("checkout build head");
