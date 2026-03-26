@@ -122,17 +122,40 @@ fn plugin_message_to_message(
     plugin_message: &PluginMessage,
 ) -> Message {
     let msg_idx = existing.len() + idx;
-    Message {
-        id: format!("m{msg_idx}"),
-        role: plugin_message.role,
-        parts: vec![Part {
-            id: format!("m{msg_idx}.p0"),
-            kind: PartKind::Text,
-            content: plugin_message.content.clone(),
+    let mut parts = vec![Part {
+        id: format!("m{msg_idx}.p0"),
+        kind: PartKind::Text,
+        content: plugin_message.content.clone(),
+        attachment: None,
+        tool_call_id: None,
+        tool_name: None,
+        prune_state: PruneState::Intact,
+    }];
+    let has_image_parts = parts
+        .iter()
+        .any(|part| matches!(part.kind, PartKind::Image));
+    if matches!(plugin_message.role, MessageRole::User) && !has_image_parts {
+        parts.extend(plugin_message.images.iter().map(|bytes| Part {
+            id: String::new(),
+            kind: PartKind::Image,
+            content: String::new(),
+            attachment: Some(lash_sansio::agent::message::PartAttachment {
+                mime: "image/png".to_string(),
+                url: lash_sansio::agent::message::data_url_for_bytes("image/png", bytes),
+                filename: None,
+            }),
             tool_call_id: None,
             tool_name: None,
             prune_state: PruneState::Intact,
-        }],
+        }));
+    }
+    for (part_idx, part) in parts.iter_mut().enumerate() {
+        part.id = format!("m{msg_idx}.p{part_idx}");
+    }
+    Message {
+        id: format!("m{msg_idx}"),
+        role: plugin_message.role,
+        parts,
         origin: Some(MessageOrigin::Plugin {
             plugin_id: "plugin".to_string(),
         }),
@@ -157,6 +180,7 @@ fn normalize_message_ids(messages: &mut [Message]) {
                 id: String::new(),
                 kind: PartKind::Text,
                 content: String::new(),
+                attachment: None,
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,

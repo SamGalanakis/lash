@@ -418,8 +418,10 @@ mod tests {
 
     #[test]
     fn prompt_contributions_only_describe_tool_discovery_when_needed() {
-        let mut prompt = PromptContext::default();
-        prompt.omitted_tool_count = 1;
+        let mut prompt = PromptContext {
+            omitted_tool_count: 1,
+            ..PromptContext::default()
+        };
         let with_omissions = repl_state_prompt_contributions(&prompt);
         assert_eq!(with_omissions.len(), 1);
         assert!(with_omissions[0].content.contains("search_tools"));

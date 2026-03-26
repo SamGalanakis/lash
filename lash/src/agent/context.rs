@@ -34,6 +34,8 @@ const COMPACTION_PLUGIN_ID: &str = "context_strategy";
 const COMPACTION_SUMMARY_TITLE: &str = "Compaction summary:";
 const COMPACTION_PROMPT: &str = "Provide a detailed summary of the conversation above so another agent can continue the work without the full history.\n\nUse this template:\n---\n## Goal\n[What is the user trying to accomplish?]\n\n## Instructions\n- [Relevant instructions or constraints]\n\n## Discoveries\n[Important findings, failures, or decisions]\n\n## Accomplished\n[What is done, what is in progress, what remains]\n\n## Relevant files / directories\n[List important files or directories]\n---";
 const PRUNE_PROTECTED_TOOLS: &[&str] = &["skill"];
+const PRUNED_IMAGE_PLACEHOLDER: &str = "[Image omitted from older context]";
+const COMPACTED_IMAGE_PLACEHOLDER: &str = "[Image omitted during compaction]";
 
 #[derive(Clone)]
 pub struct ContextBuildRequest {
@@ -112,28 +114,18 @@ impl ContextBuilder for RollingContextBuilder {
             max_context_tokens,
             host,
             #[cfg(feature = "sqlite-store")]
-            store,
+                store: _,
         } = request;
 
         let tool_calls = tool_record_map(&state.tool_calls);
         hydrate_tool_result_parts(&session_id, &mut messages, &tool_calls);
         prune_old_tool_results(&mut messages, &tool_calls);
+        prune_old_images(&mut messages);
 
         let mut prepared = PreparedContext {
             messages: messages.clone(),
             ..Default::default()
         };
-        #[cfg(feature = "sqlite-store")]
-        if let Some(store) = store {
-            let tools = Arc::new(HistoryTools::new(store)) as Arc<dyn ToolProvider>;
-            prepared
-                .prompt_contributions
-                .extend(history_prompt_contributions(&crate::PromptContext {
-                    tool_names: vec!["search_history".to_string()],
-                    ..Default::default()
-                }));
-            prepared.tool_providers.push(tools);
-        }
 
         if !compaction_needed(prompt_usage, max_context_tokens) {
             prepared.messages = messages;
@@ -175,6 +167,8 @@ impl ContextBuilder for RecallAgentBuilder {
             mut messages,
             prompt_usage,
             max_context_tokens,
+            #[cfg(feature = "sqlite-store")]
+            store,
             ..
         } = request;
         let ContextStrategy::RecallAgent { keep_recent_pct } = state.policy.context_strategy else {
@@ -184,6 +178,7 @@ impl ContextBuilder for RecallAgentBuilder {
         let tool_calls = tool_record_map(&state.tool_calls);
         hydrate_tool_result_parts(&session_id, &mut messages, &tool_calls);
         prune_old_tool_results(&mut messages, &tool_calls);
+        prune_old_images(&mut messages);
         let mut recall_available = false;
         let mut recall_trimmed = false;
 
@@ -216,18 +211,27 @@ impl ContextBuilder for RecallAgentBuilder {
             }
         }
 
+        let mut prompt_contributions = Vec::new();
+        let mut tool_providers = Vec::new();
+
+        if recall_available {
+            prompt_contributions.extend(RecallAgentTools::prompt_contributions(recall_trimmed));
+            tool_providers.push(Arc::new(RecallAgentTools) as Arc<dyn ToolProvider>);
+
+            #[cfg(feature = "sqlite-store")]
+            if let Some(store) = store {
+                prompt_contributions.extend(history_prompt_contributions(&crate::PromptContext {
+                    tool_names: vec!["search_history".to_string()],
+                    ..Default::default()
+                }));
+                tool_providers.push(Arc::new(HistoryTools::new(store)) as Arc<dyn ToolProvider>);
+            }
+        }
+
         Ok(PreparedContext {
             messages,
-            prompt_contributions: if recall_available {
-                RecallAgentTools::prompt_contributions(recall_trimmed)
-            } else {
-                Vec::new()
-            },
-            tool_providers: if recall_available {
-                vec![Arc::new(RecallAgentTools) as Arc<dyn ToolProvider>]
-            } else {
-                Vec::new()
-            },
+            prompt_contributions,
+            tool_providers,
             include_base_tools: true,
         })
     }
@@ -544,6 +548,47 @@ fn prune_old_tool_results(
     true
 }
 
+fn strip_image_attachment(part: &mut Part, placeholder: &str) -> bool {
+    if !matches!(part.kind, PartKind::Image) || part.attachment.is_none() {
+        return false;
+    }
+    part.attachment = None;
+    part.content = placeholder.to_string();
+    true
+}
+
+fn prune_old_images(messages: &mut [Message]) -> bool {
+    let mut changed = false;
+    let mut recent_user_turns = 0usize;
+
+    'scan: for msg_idx in (0..messages.len()).rev() {
+        if is_compaction_summary_message(&messages[msg_idx]) {
+            break 'scan;
+        }
+        if messages[msg_idx].role == MessageRole::User {
+            recent_user_turns += 1;
+        }
+        if recent_user_turns < PRUNE_RECENT_USER_TURNS {
+            continue;
+        }
+        for part in &mut messages[msg_idx].parts {
+            changed |= strip_image_attachment(part, PRUNED_IMAGE_PLACEHOLDER);
+        }
+    }
+
+    changed
+}
+
+fn strip_all_image_attachments(messages: &mut [Message], placeholder: &str) -> bool {
+    let mut changed = false;
+    for message in messages {
+        for part in &mut message.parts {
+            changed |= strip_image_attachment(part, placeholder);
+        }
+    }
+    changed
+}
+
 fn is_compaction_summary_message(message: &Message) -> bool {
     matches!(
         message.origin,
@@ -619,6 +664,7 @@ async fn summarize_compaction_prefix(
     snapshot.policy.execution_mode = ExecutionMode::Standard;
     snapshot.policy.context_strategy = ContextStrategy::RollingContext;
     snapshot.policy.max_turns = Some(1);
+    strip_all_image_attachments(&mut snapshot.messages, COMPACTED_IMAGE_PLACEHOLDER);
     snapshot.plugin_snapshot = None;
     snapshot.repl_snapshot = None;
     snapshot.last_prompt_usage = None;
@@ -691,6 +737,7 @@ fn apply_compaction_summary(messages: &[Message], summary: &str) -> Vec<Message>
             id: "compaction-summary.p0".to_string(),
             kind: PartKind::Prose,
             content: format!("{COMPACTION_SUMMARY_TITLE}\n{summary}"),
+            attachment: None,
             tool_call_id: None,
             tool_name: None,
             prune_state: crate::PruneState::Intact,
@@ -724,6 +771,28 @@ mod tests {
                 id: format!("{id}.p0"),
                 kind: PartKind::Text,
                 content: content.to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: crate::PruneState::Intact,
+            }],
+            origin: None,
+        }
+    }
+
+    fn image_message(id: &str, role: MessageRole, bytes: &[u8]) -> Message {
+        Message {
+            id: id.to_string(),
+            role,
+            parts: vec![Part {
+                id: format!("{id}.p0"),
+                kind: PartKind::Image,
+                content: String::new(),
+                attachment: Some(crate::agent::message::PartAttachment {
+                    mime: "image/png".to_string(),
+                    url: crate::agent::message::data_url_for_bytes("image/png", bytes),
+                    filename: None,
+                }),
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: crate::PruneState::Intact,
@@ -892,6 +961,7 @@ mod tests {
                     id: format!("a1.p{idx}"),
                     kind: PartKind::ToolResult,
                     content: String::new(),
+                    attachment: None,
                     tool_call_id: record.call_id.clone(),
                     tool_name: Some(record.tool.clone()),
                     prune_state: crate::PruneState::Intact,
@@ -932,6 +1002,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rolling_context_builder_strips_old_image_attachments() {
+        let messages = vec![
+            image_message("u0", MessageRole::User, &[1, 2, 3]),
+            text_message("u1", MessageRole::User, "recent"),
+            text_message("u2", MessageRole::User, "latest"),
+        ];
+
+        let built = build_context(ContextBuildRequest {
+            session_id: "root".to_string(),
+            state: AgentStateEnvelope {
+                policy: SessionPolicy {
+                    context_strategy: ContextStrategy::RollingContext,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            messages,
+            prompt_usage: None,
+            max_context_tokens: None,
+            host: Arc::new(MockSessionManager::default()),
+            #[cfg(feature = "sqlite-store")]
+            store: None,
+        })
+        .await
+        .expect("context")
+        .messages;
+
+        let image_part = built[0].parts.first().expect("image part");
+        assert!(matches!(image_part.kind, PartKind::Image));
+        assert!(image_part.attachment.is_none());
+        assert_eq!(image_part.content, PRUNED_IMAGE_PLACEHOLDER);
+    }
+
+    #[tokio::test]
     async fn recall_agent_builder_clears_old_tool_outputs() {
         let tool_calls = (0..12)
             .map(|idx| ToolCallRecord {
@@ -954,6 +1058,7 @@ mod tests {
                     id: format!("a1.p{idx}"),
                     kind: PartKind::ToolResult,
                     content: String::new(),
+                    attachment: None,
                     tool_call_id: record.call_id.clone(),
                     tool_name: Some(record.tool.clone()),
                     prune_state: crate::PruneState::Intact,
@@ -1122,5 +1227,69 @@ mod tests {
 
         assert!(!prepared.prompt_contributions.is_empty());
         assert_eq!(prepared.tool_providers.len(), 1);
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    #[tokio::test]
+    async fn rolling_context_does_not_inject_history_tools_with_store() {
+        let prepared = build_context(ContextBuildRequest {
+            session_id: "root".to_string(),
+            state: AgentStateEnvelope {
+                policy: SessionPolicy {
+                    context_strategy: ContextStrategy::RollingContext,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            messages: vec![text_message("u1", MessageRole::User, "short request")],
+            prompt_usage: None,
+            max_context_tokens: None,
+            host: Arc::new(MockSessionManager::default()),
+            store: Some(Arc::new(Store::memory().expect("store"))),
+        })
+        .await
+        .expect("context");
+
+        assert!(prepared.prompt_contributions.is_empty());
+        assert!(prepared.tool_providers.is_empty());
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    #[tokio::test]
+    async fn recall_agent_injects_history_tools_with_store_after_threshold() {
+        let prepared = build_context(ContextBuildRequest {
+            session_id: "root".to_string(),
+            state: AgentStateEnvelope {
+                policy: SessionPolicy {
+                    context_strategy: ContextStrategy::recall_agent_default(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            messages: vec![
+                text_message("u1", MessageRole::User, &"x".repeat(12_000)),
+                text_message("a1", MessageRole::Assistant, &"y".repeat(12_000)),
+                text_message("u2", MessageRole::User, "latest request"),
+            ],
+            prompt_usage: Some(PromptUsage {
+                prompt_context_tokens: 20_000,
+                input_tokens: 20_000,
+                cached_input_tokens: 0,
+                context_budget_tokens: 20_000,
+            }),
+            max_context_tokens: Some(1_050_000),
+            host: Arc::new(MockSessionManager::default()),
+            store: Some(Arc::new(Store::memory().expect("store"))),
+        })
+        .await
+        .expect("context");
+
+        assert_eq!(prepared.tool_providers.len(), 2);
+        assert!(
+            prepared
+                .prompt_contributions
+                .iter()
+                .any(|c| c.content.contains("search_history"))
+        );
     }
 }

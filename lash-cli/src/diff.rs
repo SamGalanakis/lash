@@ -23,6 +23,7 @@ struct InlineDiffRow {
     kind: InlineDiffKind,
 }
 
+#[cfg(test)]
 pub fn inline_diff_height(diff: &str, width: usize, prefix_width: usize) -> usize {
     let rows = parse_inline_diff_rows(diff);
     if rows.is_empty() {
@@ -146,6 +147,7 @@ fn wrap_segments(text: &str, width: usize) -> Vec<String> {
     segments
 }
 
+#[cfg(test)]
 fn wrapped_line_height(text: &str, width: usize) -> usize {
     if width == 0 {
         return 1;

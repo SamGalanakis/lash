@@ -635,6 +635,7 @@ impl MdRenderer {
     }
 }
 
+#[cfg(test)]
 /// Count the visual height of rendered markdown, accounting for line wrapping at `width`.
 pub fn markdown_height(text: &str, width: usize) -> usize {
     let lines = render_markdown(text, width);
@@ -649,24 +650,6 @@ pub fn markdown_height(text: &str, width: usize) -> usize {
         })
         .sum::<usize>()
         .max(1)
-}
-
-/// Count visual height after chat-style compaction.
-pub fn markdown_height_compact(text: &str, width: usize) -> usize {
-    if text.trim().is_empty() {
-        return 0;
-    }
-    let lines = render_markdown_compact(text, width);
-    if width == 0 {
-        return lines.len();
-    }
-    lines
-        .iter()
-        .map(|line| {
-            let w = line.width();
-            if w == 0 { 1 } else { w.div_ceil(width) }
-        })
-        .sum()
 }
 
 #[cfg(test)]

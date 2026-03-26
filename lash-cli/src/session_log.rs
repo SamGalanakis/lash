@@ -309,13 +309,10 @@ fn preview_part_text(kind: &PartKind, content: &str) -> Option<String> {
     if matches!(kind, PartKind::ToolCall | PartKind::ToolResult) {
         return None;
     }
-    let rendered = if let Some(index) = content.strip_prefix(lash::agent::message::IMAGE_REF_PREFIX)
-    {
-        format!("[Image #{index}]")
-    } else {
-        content.to_string()
-    };
-    (!rendered.trim().is_empty()).then_some(rendered)
+    if matches!(kind, PartKind::Image) {
+        return Some("[Image attached]".to_string());
+    }
+    (!content.trim().is_empty()).then(|| content.to_string())
 }
 
 #[cfg(test)]
@@ -357,6 +354,7 @@ mod tests {
                 id: format!("{id}.p0"),
                 kind: PartKind::Text,
                 content: content.to_string(),
+                attachment: None,
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: lash::PruneState::Intact,

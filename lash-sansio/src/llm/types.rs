@@ -143,7 +143,7 @@ pub fn coalesce_replay_messages(messages: &[LlmMessage]) -> Vec<LlmReplayChunk> 
     out
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LlmAttachment {
     pub mime: String,
     pub data: Vec<u8>,

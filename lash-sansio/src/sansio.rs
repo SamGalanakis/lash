@@ -10,8 +10,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::agent::exec::ExecAccumulator;
-use crate::agent::message::IMAGE_REF_PREFIX;
-use crate::agent::message::MessageOrigin;
+use crate::agent::message::{MessageOrigin, PartAttachment, data_url_for_bytes};
 use crate::agent::{
     AgentEvent, LLM_MAX_RETRIES, LLM_RETRY_DELAYS, Message, MessageRole, Part, PartKind,
     PromptSectionOverride, PruneState, TokenUsage, TurnTerminationPolicyState,
@@ -265,10 +264,6 @@ pub struct TurnMachine {
     pending_effects: VecDeque<Effect>,
     next_effect_id: u64,
     messages: Vec<Message>,
-    /// User-provided images (mime, data).
-    user_images: Vec<(String, Vec<u8>)>,
-    /// Tool-produced images for the next turn.
-    tool_images: Vec<(String, Vec<u8>)>,
     iteration: usize,
     run_offset: usize,
     cumulative_usage: TokenUsage,
@@ -278,24 +273,13 @@ pub struct TurnMachine {
 
 impl TurnMachine {
     /// Create a new machine in `PrepareIteration` state.
-    pub fn new(
-        config: TurnMachineConfig,
-        messages: Vec<Message>,
-        images: Vec<Vec<u8>>,
-        run_offset: usize,
-    ) -> Self {
-        let user_images: Vec<(String, Vec<u8>)> = images
-            .into_iter()
-            .map(|png_bytes| ("image/png".to_string(), png_bytes))
-            .collect();
+    pub fn new(config: TurnMachineConfig, messages: Vec<Message>, run_offset: usize) -> Self {
         Self {
             config,
             state: MachineState::PreparingMode,
             pending_effects: VecDeque::new(),
             next_effect_id: 1,
             messages,
-            user_images,
-            tool_images: Vec::new(),
             iteration: run_offset,
             run_offset,
             cumulative_usage: TokenUsage::default(),
@@ -385,36 +369,12 @@ impl TurnMachine {
             .prompt_renderer
             .render(&self.config.prompt, &self.config.prompt_overrides);
 
-        let all_images: Vec<(String, Vec<u8>)> = self
-            .user_images
-            .iter()
-            .chain(self.tool_images.iter())
-            .map(|(mime, data)| (mime.clone(), data.clone()))
-            .collect();
         let rendered_prompt = render_prompt(&self.messages, self.config.execution_mode);
 
         let is_standard = matches!(self.config.execution_mode, ExecutionMode::Standard);
         let has_structured_messages = !rendered_prompt.messages.is_empty();
 
-        let attachments: Vec<LlmAttachment> = if has_structured_messages {
-            all_images
-                .iter()
-                .map(|(mime, data)| LlmAttachment {
-                    mime: mime.clone(),
-                    data: data.clone(),
-                })
-                .collect()
-        } else {
-            rendered_prompt
-                .image_indices
-                .into_iter()
-                .filter_map(|idx| all_images.get(idx))
-                .map(|(mime, data)| LlmAttachment {
-                    mime: mime.clone(),
-                    data: data.clone(),
-                })
-                .collect()
-        };
+        let attachments: Vec<LlmAttachment> = rendered_prompt.attachments;
         let mut user_prompt = rendered_prompt.user_prompt;
         if !has_structured_messages {
             user_prompt.extend((0..attachments.len()).map(LlmPromptPart::Image));
@@ -440,8 +400,6 @@ impl TurnMachine {
             session_id: self.config.session_id.clone(),
             stream_events: None,
         };
-
-        self.tool_images.clear();
         self.queue_llm_request(llm_request, 0, None);
     }
 
@@ -679,7 +637,6 @@ impl TurnMachine {
 
     fn append_checkpoint_messages(&mut self, plugin_messages: &[PluginMessage]) {
         let base_len = self.messages.len();
-        let mut appended_images = Vec::new();
         let appended = plugin_messages
             .iter()
             .filter(|message| matches!(message.role, MessageRole::User | MessageRole::System))
@@ -691,6 +648,7 @@ impl TurnMachine {
                         id: format!("{message_id}.p0"),
                         kind: PartKind::Text,
                         content: message.content.clone(),
+                        attachment: None,
                         tool_call_id: None,
                         tool_name: None,
                         prune_state: PruneState::Intact,
@@ -698,17 +656,26 @@ impl TurnMachine {
                 } else {
                     message.parts.clone()
                 };
+                let has_image_parts = parts
+                    .iter()
+                    .any(|part| matches!(part.kind, PartKind::Image));
+                if matches!(message.role, MessageRole::User) && !has_image_parts {
+                    parts.extend(message.images.iter().map(|bytes| Part {
+                        id: String::new(),
+                        kind: PartKind::Image,
+                        content: String::new(),
+                        attachment: Some(PartAttachment {
+                            mime: "image/png".to_string(),
+                            url: data_url_for_bytes("image/png", bytes),
+                            filename: None,
+                        }),
+                        tool_call_id: None,
+                        tool_name: None,
+                        prune_state: PruneState::Intact,
+                    }));
+                }
                 for (part_idx, part) in parts.iter_mut().enumerate() {
                     part.id = format!("{message_id}.p{part_idx}");
-                }
-                if matches!(message.role, MessageRole::User) {
-                    appended_images.extend(
-                        message
-                            .images
-                            .iter()
-                            .cloned()
-                            .map(|bytes| ("image/png".to_string(), bytes)),
-                    );
                 }
                 Message {
                     id: message_id.clone(),
@@ -720,7 +687,6 @@ impl TurnMachine {
                 }
             })
             .collect::<Vec<_>>();
-        self.user_images.extend(appended_images);
         self.messages.extend(appended);
     }
 
@@ -997,6 +963,7 @@ impl TurnMachine {
                     id: format!("{}.p0", mid),
                     kind: PartKind::Prose,
                     content: assistant_text,
+                    attachment: None,
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
@@ -1015,6 +982,7 @@ impl TurnMachine {
                 id: format!("{}.p{}", asst_id, assistant_parts.len()),
                 kind: PartKind::Prose,
                 content: assistant_text.clone(),
+                attachment: None,
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
@@ -1027,6 +995,7 @@ impl TurnMachine {
                 id: format!("{}.p{}", asst_id, assistant_parts.len()),
                 kind: PartKind::ToolCall,
                 content: input_json.clone(),
+                attachment: None,
                 tool_call_id: Some(call_id.clone()),
                 tool_name: Some(tool_name.clone()),
                 prune_state: PruneState::Intact,
@@ -1109,28 +1078,31 @@ impl TurnMachine {
                     outcome.model_result.success,
                     &outcome.model_result.result,
                 ),
+                attachment: None,
                 tool_call_id: Some(outcome.call_id.clone()),
                 tool_name: Some(outcome.tool_name.clone()),
                 prune_state: PruneState::Intact,
             });
 
-            let base_image_idx = self.user_images.len() + self.tool_images.len();
             for (image_offset, image) in outcome.model_result.images.into_iter().enumerate() {
-                self.tool_images
-                    .push((image.mime.clone(), image.data.clone()));
-                let image_idx = base_image_idx + image_offset;
                 result_parts.push(Part {
                     id: String::new(),
                     kind: PartKind::Text,
                     content: format!("[Tool image: {}]", image.label),
+                    attachment: None,
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
                 });
                 result_parts.push(Part {
                     id: String::new(),
-                    kind: PartKind::Text,
-                    content: format!("{IMAGE_REF_PREFIX}{image_idx}"),
+                    kind: PartKind::Image,
+                    content: String::new(),
+                    attachment: Some(PartAttachment {
+                        mime: image.mime.clone(),
+                        url: data_url_for_bytes(&image.mime, &image.data),
+                        filename: Some(format!("tool-image-{image_offset}")),
+                    }),
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
@@ -1165,6 +1137,7 @@ impl TurnMachine {
                     content: format!(
                         "Turn limit reached ({max_turns}) before a final assistant response."
                     ),
+                    attachment: None,
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
@@ -1472,13 +1445,7 @@ impl TurnMachine {
             return;
         }
 
-        // Keep tool images
-        let mut next_tool_image_refs: Vec<(usize, String)> = Vec::new();
-        let base_image_idx = self.user_images.len();
-        for (i, img) in fence.acc.images.iter().enumerate() {
-            self.tool_images.push((img.mime.clone(), img.data.clone()));
-            next_tool_image_refs.push((base_image_idx + i, img.label.clone()));
-        }
+        let next_tool_images = fence.acc.images.clone();
 
         let has_output = !fence.acc.combined_output.is_empty();
         let has_tool_calls = !fence.acc.tool_calls.is_empty();
@@ -1513,6 +1480,7 @@ impl TurnMachine {
                 id: String::new(),
                 kind: PartKind::Output,
                 content: output_text,
+                attachment: None,
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
@@ -1522,6 +1490,7 @@ impl TurnMachine {
                 id: String::new(),
                 kind: PartKind::Output,
                 content: format!("[{} tool call(s) executed]", fence.acc.tool_calls.len()),
+                attachment: None,
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
@@ -1532,25 +1501,32 @@ impl TurnMachine {
                 id: String::new(),
                 kind: PartKind::Error,
                 content: format!("{}\nFix and retry.", err),
+                attachment: None,
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
             });
         }
-        if !next_tool_image_refs.is_empty() {
-            for (idx, label) in &next_tool_image_refs {
+        if !next_tool_images.is_empty() {
+            for img in &next_tool_images {
                 feedback_parts.push(Part {
                     id: String::new(),
                     kind: PartKind::Text,
-                    content: format!("[Tool image: {}]", label),
+                    content: format!("[Tool image: {}]", img.label),
+                    attachment: None,
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
                 });
                 feedback_parts.push(Part {
                     id: String::new(),
-                    kind: PartKind::Text,
-                    content: format!("{IMAGE_REF_PREFIX}{idx}"),
+                    kind: PartKind::Image,
+                    content: String::new(),
+                    attachment: Some(PartAttachment {
+                        mime: img.mime.clone(),
+                        url: data_url_for_bytes(&img.mime, &img.data),
+                        filename: Some(img.label.clone()),
+                    }),
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
@@ -1684,6 +1660,7 @@ mod tests {
                 id: "m0.p0".to_string(),
                 kind: PartKind::Text,
                 content: content.to_string(),
+                attachment: None,
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
@@ -1794,7 +1771,7 @@ mod tests {
     fn standard_prose_only_response_emits_done() {
         let config = test_config(ExecutionMode::Standard);
         let msgs = vec![user_message("hello")];
-        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).expect("should emit LlmCall");
@@ -1834,8 +1811,13 @@ mod tests {
             parts: vec![
                 Part {
                     id: "m0.p0".to_string(),
-                    kind: PartKind::Text,
-                    content: "__LASH_IMAGE_IDX:0".to_string(),
+                    kind: PartKind::Image,
+                    content: String::new(),
+                    attachment: Some(PartAttachment {
+                        mime: "image/png".to_string(),
+                        url: data_url_for_bytes("image/png", &[1, 2, 3]),
+                        filename: None,
+                    }),
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
@@ -1844,6 +1826,7 @@ mod tests {
                     id: "m0.p1".to_string(),
                     kind: PartKind::Text,
                     content: "explain this".to_string(),
+                    attachment: None,
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
@@ -1851,7 +1834,7 @@ mod tests {
             ],
             origin: None,
         }];
-        let mut machine = TurnMachine::new(config, msgs, vec![vec![1, 2, 3]], 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let request = effects
@@ -1882,7 +1865,7 @@ mod tests {
     fn standard_tool_calls_produce_effects_and_loop() {
         let config = test_config(ExecutionMode::Standard);
         let msgs = vec![user_message("read file")];
-        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).expect("should emit LlmCall");
@@ -1980,7 +1963,7 @@ mod tests {
     fn standard_tool_results_preserve_original_args() {
         let config = test_config(ExecutionMode::Standard);
         let msgs = vec![user_message("what time is it")];
-        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).expect("should emit LlmCall");
@@ -2055,7 +2038,7 @@ mod tests {
     fn standard_retryable_error_sleeps_then_retries() {
         let config = test_config(ExecutionMode::Standard);
         let msgs = vec![user_message("hello")];
-        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).unwrap();
@@ -2100,7 +2083,7 @@ mod tests {
     fn standard_retryable_error_exhaustion_emits_error_and_done() {
         let config = test_config(ExecutionMode::Standard);
         let msgs = vec![user_message("hello")];
-        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let mut effects = drain_effects(&mut machine);
         let mut llm_id = *find_llm_call(&effects).expect("initial llm call");
@@ -2156,7 +2139,7 @@ mod tests {
     fn standard_fatal_error_emits_done() {
         let config = test_config(ExecutionMode::Standard);
         let msgs = vec![user_message("hello")];
-        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).unwrap();
@@ -2181,7 +2164,7 @@ mod tests {
     fn standard_empty_response_emits_error() {
         let config = test_config(ExecutionMode::Standard);
         let msgs = vec![user_message("hello")];
-        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).unwrap();
@@ -2205,7 +2188,7 @@ mod tests {
         let mut config = test_config(ExecutionMode::Standard);
         config.max_turns = Some(1);
         let msgs = vec![user_message("hello")];
-        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).unwrap();
@@ -2256,7 +2239,7 @@ mod tests {
     fn repl_prose_only_response_emits_done() {
         let config = test_config(ExecutionMode::Repl);
         let msgs = vec![user_message("hello")];
-        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).unwrap();
@@ -2288,7 +2271,7 @@ mod tests {
     fn standard_checkpoint_messages_continue_turn_before_completion() {
         let config = test_config(ExecutionMode::Standard);
         let msgs = vec![user_message("hello")];
-        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).expect("should emit LlmCall");
@@ -2329,7 +2312,7 @@ mod tests {
     fn repl_checkpoint_after_work_continues_turn() {
         let config = test_config(ExecutionMode::Repl);
         let msgs = vec![user_message("run some code")];
-        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).expect("llm call");
@@ -2380,7 +2363,7 @@ mod tests {
     fn repl_code_block_triggers_exec() {
         let config = test_config(ExecutionMode::Repl);
         let msgs = vec![user_message("run some code")];
-        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).unwrap();
@@ -2464,7 +2447,7 @@ mod tests {
         let mut config = test_config(ExecutionMode::Repl);
         config.emit_llm_debug_log = true;
         let msgs = vec![user_message("run some code")];
-        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).expect("llm call");
@@ -2518,7 +2501,7 @@ mod tests {
     fn repl_prose_after_exec_finishes_turn() {
         let config = test_config(ExecutionMode::Repl);
         let msgs = vec![user_message("run code then summarize")];
-        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).unwrap();
@@ -2598,7 +2581,7 @@ mod tests {
     fn repl_followup_prompt_replays_executed_code_once() {
         let config = test_config(ExecutionMode::Repl);
         let msgs = vec![user_message("run code then continue")];
-        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).expect("llm call");
@@ -2676,7 +2659,7 @@ mod tests {
     fn repl_exec_error_produces_feedback() {
         let config = test_config(ExecutionMode::Repl);
         let msgs = vec![user_message("run code")];
-        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).unwrap();
@@ -2726,7 +2709,7 @@ mod tests {
     fn repl_observations_feed_back_without_visible_code_output() {
         let config = test_config(ExecutionMode::Repl);
         let msgs = vec![user_message("inspect a value")];
-        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).unwrap();
@@ -2793,7 +2776,7 @@ mod tests {
     fn repl_malformed_output_retries() {
         let config = test_config(ExecutionMode::Repl);
         let msgs = vec![user_message("hello")];
-        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).unwrap();
@@ -2818,7 +2801,7 @@ mod tests {
     fn repl_mid_stream_cancel_when_fence_closes() {
         let config = test_config(ExecutionMode::Repl);
         let msgs = vec![user_message("code")];
-        let mut machine = TurnMachine::new(config, msgs, Vec::new(), 0);
+        let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).unwrap();

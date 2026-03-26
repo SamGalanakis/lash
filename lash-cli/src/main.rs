@@ -374,17 +374,17 @@ mod tests {
     fn autonomous_renderer_collects_plugin_panel_output() {
         let mut renderer = AutonomousRenderer::new();
         renderer.handle(AgentEvent::PluginEvent {
-            plugin_id: "plan_mode".to_string(),
+            plugin_id: "demo".to_string(),
             event: PluginSurfaceEvent::PanelUpsert {
-                key: "proposed_plan:1".to_string(),
-                title: "PROPOSED PLAN".to_string(),
+                key: "panel:1".to_string(),
+                title: "TASK BOARD".to_string(),
                 content: "1. Inspect\n2. Patch".to_string(),
             },
         });
 
         assert_eq!(
             renderer.rendered_plugin_output().as_deref(),
-            Some("PROPOSED PLAN\n1. Inspect\n2. Patch")
+            Some("TASK BOARD\n1. Inspect\n2. Patch")
         );
     }
 
@@ -395,7 +395,7 @@ mod tests {
             status: TurnStatus::Completed,
             assistant_output: AssistantOutput {
                 safe_text: String::new(),
-                raw_text: "<proposed_plan>\n1. Inspect\n</proposed_plan>".to_string(),
+                raw_text: String::new(),
                 state: OutputState::Sanitized,
             },
             has_plugin_visible_output: true,
@@ -471,8 +471,8 @@ mod tests {
         let message = make_injected_plugin_message(&turn);
 
         assert_eq!(message.role, MessageRole::User);
-        assert_eq!(message.images, vec![vec![1, 2, 3], vec![4, 5, 6]]);
-        assert_eq!(injected_image_part_indices(&message), vec![0, 1]);
+        assert!(message.images.is_empty());
+        assert_eq!(injected_image_part_indices(&message).len(), 2);
         assert!(
             message
                 .parts

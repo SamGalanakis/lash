@@ -1356,7 +1356,7 @@ pub(crate) async fn run_app(
                 }
                 app.dirty = true;
 
-                if app.has_prompt() && (app.is_prompt_editing_extra() || app.is_prompt_freeform()) {
+                if app.has_prompt() && (app.is_prompt_editing_reply() || app.is_prompt_freeform()) {
                     app.prompt_insert_text(&text);
                     continue;
                 }
@@ -1623,7 +1623,7 @@ pub(crate) async fn run_app(
 
                 // ── Prompt (ask dialog) key handling ──
                 if app.has_prompt() {
-                    let editing_text = app.is_prompt_editing_extra() || app.is_prompt_freeform();
+                    let editing_text = app.is_prompt_editing_reply() || app.is_prompt_freeform();
                     match key.code {
                         KeyCode::Up if !editing_text => app.prompt_up(),
                         KeyCode::Down if !editing_text => app.prompt_down(),
@@ -2127,14 +2127,18 @@ pub(crate) async fn run_app(
                     response_tx,
                 } = event
                 {
-                    let is_freeform = options.is_empty();
+                    let focus = if options.is_empty() {
+                        app::PromptFocus::ReplyEditor
+                    } else {
+                        app::PromptFocus::Selection
+                    };
                     app.prompt = Some(app::PromptState {
                         question,
                         options,
-                        selected_idx: 0,
-                        extra_text: String::new(),
-                        extra_cursor: 0,
-                        editing_extra: is_freeform, // freeform starts in edit mode
+                        selection: app::PromptSelection::Option(0),
+                        focus,
+                        reply_text: String::new(),
+                        reply_cursor: 0,
                         response_tx,
                     });
                 } else {
@@ -2186,6 +2190,7 @@ fn append_turn_input_message(messages: &mut Vec<Message>, turn_input: &TurnInput
                     id: format!("{}.p{}", user_id, user_parts.len()),
                     kind: PartKind::Text,
                     content: text.clone(),
+                    attachment: None,
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
@@ -2196,6 +2201,7 @@ fn append_turn_input_message(messages: &mut Vec<Message>, turn_input: &TurnInput
                     id: format!("{}.p{}", user_id, user_parts.len()),
                     kind: PartKind::Text,
                     content: format!("[file: {path}]"),
+                    attachment: None,
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
@@ -2206,26 +2212,29 @@ fn append_turn_input_message(messages: &mut Vec<Message>, turn_input: &TurnInput
                     id: format!("{}.p{}", user_id, user_parts.len()),
                     kind: PartKind::Text,
                     content: format!("[directory: {}]", path.trim_end_matches('/')),
+                    attachment: None,
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
                 });
             }
             InputItem::ImageRef { id } => {
-                let Some(_) = turn_input.image_blobs.get(id) else {
+                let Some(bytes) = turn_input.image_blobs.get(id) else {
                     continue;
                 };
-                let image_idx =
-                    if let Some(idx) = image_ids.iter().position(|candidate| candidate == id) {
-                        idx
-                    } else {
-                        image_ids.push(id.clone());
-                        image_ids.len() - 1
-                    };
+                if image_ids.iter().any(|candidate| candidate == id) {
+                    continue;
+                }
+                image_ids.push(id.clone());
                 user_parts.push(Part {
                     id: format!("{}.p{}", user_id, user_parts.len()),
-                    kind: PartKind::Text,
-                    content: format!("{}{}", lash::agent::message::IMAGE_REF_PREFIX, image_idx),
+                    kind: PartKind::Image,
+                    content: String::new(),
+                    attachment: Some(lash::agent::message::PartAttachment {
+                        mime: "image/png".to_string(),
+                        url: lash::agent::message::data_url_for_bytes("image/png", bytes),
+                        filename: None,
+                    }),
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
@@ -2239,6 +2248,7 @@ fn append_turn_input_message(messages: &mut Vec<Message>, turn_input: &TurnInput
             id: format!("{user_id}.p0"),
             kind: PartKind::Text,
             content: String::new(),
+            attachment: None,
             tool_call_id: None,
             tool_name: None,
             prune_state: PruneState::Intact,
@@ -2281,6 +2291,7 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     id: String::new(),
                     kind: PartKind::Text,
                     content: text,
+                    attachment: None,
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
@@ -2291,6 +2302,7 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     id: String::new(),
                     kind: PartKind::Text,
                     content: format!("[file: {path}]"),
+                    attachment: None,
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
@@ -2301,23 +2313,29 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     id: String::new(),
                     kind: PartKind::Text,
                     content: format!("[directory: {}]", path.trim_end_matches('/')),
+                    attachment: None,
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
                 });
             }
             InputItem::ImageRef { id } => {
-                let image_idx =
-                    if let Some(idx) = image_ids.iter().position(|candidate| candidate == &id) {
-                        idx
-                    } else {
-                        image_ids.push(id.clone());
-                        image_ids.len() - 1
-                    };
+                let Some(bytes) = image_blobs.get(&id) else {
+                    continue;
+                };
+                if image_ids.iter().any(|candidate| candidate == &id) {
+                    continue;
+                }
+                image_ids.push(id.clone());
                 parts.push(Part {
                     id: String::new(),
-                    kind: PartKind::Text,
-                    content: format!("{}{}", lash::agent::message::IMAGE_REF_PREFIX, image_idx),
+                    kind: PartKind::Image,
+                    content: String::new(),
+                    attachment: Some(lash::agent::message::PartAttachment {
+                        mime: "image/png".to_string(),
+                        url: lash::agent::message::data_url_for_bytes("image/png", bytes),
+                        filename: None,
+                    }),
                     tool_call_id: None,
                     tool_name: None,
                     prune_state: PruneState::Intact,
@@ -2330,10 +2348,7 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
         role: MessageRole::User,
         content: turn.effective_text.clone(),
         parts,
-        images: image_ids
-            .into_iter()
-            .filter_map(|id| image_blobs.get(&id).cloned())
-            .collect(),
+        images: Vec::new(),
     }
 }
 
@@ -2342,11 +2357,8 @@ pub(crate) fn injected_image_part_indices(message: &PluginMessage) -> Vec<usize>
     message
         .parts
         .iter()
-        .filter_map(|part| {
-            part.content
-                .strip_prefix(lash::agent::message::IMAGE_REF_PREFIX)
-                .and_then(|raw| raw.parse::<usize>().ok())
-        })
+        .enumerate()
+        .filter_map(|(idx, part)| matches!(part.kind, PartKind::Image).then_some(idx))
         .collect()
 }
 

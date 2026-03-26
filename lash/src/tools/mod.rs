@@ -17,6 +17,8 @@ mod web_search;
 
 pub use agent_call::{AgentCall, AgentCallConfig, AgentCallPluginFactory};
 pub use apply_patch::ApplyPatchTool;
+#[cfg(feature = "sqlite-store")]
+pub(crate) use apply_patch::{PatchAction, inspect_patch_ops};
 pub use ask::AskTool;
 pub(crate) use default_plugins::CompositeToolProvider;
 pub use default_plugins::{DefaultToolPluginDeps, default_tool_plugin_factories};
