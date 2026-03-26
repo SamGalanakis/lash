@@ -1434,7 +1434,7 @@ dependencies = [
 
 [[package]]
 name = "lash"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "async-trait",
  "base64",
@@ -1464,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "lash-cli"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1494,7 +1494,7 @@ dependencies = [
 
 [[package]]
 name = "lash-sansio"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "base64",
  "serde",
@@ -1503,7 +1503,7 @@ dependencies = [
 
 [[package]]
 name = "lashlang"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "compact_str 0.9.0",
  "criterion",
@@ -4015,7 +4015,7 @@ checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
 
 [[package]]
 name = "xtask"
-version = "0.2.18"
+version = "0.2.19"
 
 [[package]]
 name = "yoke"
