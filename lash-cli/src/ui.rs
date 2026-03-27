@@ -3031,7 +3031,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_prompt_does_not_lose_last_visible_line_to_separator_row() {
+    fn pending_prompt_keeps_prompt_start_visible_above_footer() {
         let backend = TestBackend::new(20, 8);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut app = App::new("model".into(), "session".into());
@@ -3061,8 +3061,12 @@ mod tests {
             .collect();
 
         assert!(
-            rows.iter().take(4).any(|row| row.contains("line3")),
-            "last visible prompt line should not be lost above footer: {rows:?}"
+            rows.iter().take(4).any(|row| row.contains("history")),
+            "history above the pending prompt should remain visible: {rows:?}"
+        );
+        assert!(
+            rows.iter().take(4).any(|row| row.contains("line1")),
+            "prompt start should remain visible above footer: {rows:?}"
         );
         assert!(
             rows[4].contains("Working"),
@@ -3071,7 +3075,7 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_assistant_tail_stays_visible_above_footer() {
+    fn wrapped_assistant_start_stays_visible_above_footer() {
         let backend = TestBackend::new(20, 8);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut app = App::new("model".into(), "session".into());
@@ -3102,8 +3106,8 @@ mod tests {
             .collect();
 
         assert!(
-            rows.iter().take(4).any(|row| row.contains("omega")),
-            "assistant tail should stay visible above footer: {rows:?}"
+            rows.iter().take(4).any(|row| row.contains("alpha")),
+            "assistant start should stay visible above footer: {rows:?}"
         );
         assert!(
             rows[4].contains("Working"),

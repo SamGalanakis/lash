@@ -532,6 +532,7 @@ const TEXT_PREVIEW_MAX_TAIL_LINES: usize = 3;
 const TEXT_PREVIEW_LINE_CHAR_LIMIT: usize = 240;
 const STREAMING_OUTPUT_MAX_LINES: usize = 48;
 const STREAMING_OUTPUT_LINE_CHAR_LIMIT: usize = 240;
+const FOLLOW_OUTPUT_CONTEXT_LINES: usize = 2;
 
 pub(crate) fn preview_text_lines(text: &str) -> Vec<String> {
     let lines: Vec<&str> = text.lines().collect();
@@ -1597,9 +1598,8 @@ impl App {
         if self.follow_output {
             self.follow_output = false;
             if self.height_cache_width > 0 && self.height_cache_vh > 0 {
-                let total =
-                    self.total_content_height(self.height_cache_width, self.height_cache_vh);
-                self.scroll_offset = total.saturating_sub(self.height_cache_vh);
+                self.scroll_offset =
+                    self.follow_output_anchor_offset(self.height_cache_width, self.height_cache_vh);
             } else {
                 self.scroll_offset = 0;
             }
@@ -1638,18 +1638,7 @@ impl App {
             return;
         }
 
-        let awaiting_first_visible_output = self
-            .live_turn
-            .as_ref()
-            .is_some_and(|turn| !turn.has_visible_output);
-
-        if awaiting_first_visible_output {
-            self.keep_latest_user_block_visible();
-            return;
-        }
-
-        let total_height = self.total_content_height(viewport_width, viewport_height);
-        self.scroll_offset = total_height.saturating_sub(viewport_height);
+        self.scroll_offset = self.follow_output_anchor_offset(viewport_width, viewport_height);
     }
 
     /// Keep the latest user-authored block visible while following output.
@@ -1682,17 +1671,10 @@ impl App {
 
         let total_height = self.total_content_height(width, viewport_height);
         let max_scroll = total_height.saturating_sub(viewport_height);
-        let block_start = if last_idx == 0 {
-            0
-        } else {
-            self.height_cache[last_idx - 1]
-        };
+        let block_start = self.block_start_offset(last_idx);
         let block_end = self.height_cache[last_idx];
         let block_height = block_end.saturating_sub(block_start);
-        let block_content_start = block_start
-            + usize::from(
-                last_idx > 0 && !matches!(self.blocks[last_idx - 1], DisplayBlock::Splash),
-            );
+        let block_content_start = self.block_content_start_offset(last_idx);
         let has_splash_before = self.blocks[..last_idx]
             .iter()
             .any(|block| matches!(block, DisplayBlock::Splash));
@@ -1705,10 +1687,96 @@ impl App {
         self.scroll_offset = if awaiting_first_visible_output
             && (has_splash_before || block_height >= viewport_height)
         {
-            block_content_start.min(max_scroll)
+            self.contextual_follow_offset(block_content_start, max_scroll)
         } else {
             block_end.saturating_sub(viewport_height).min(max_scroll)
         };
+    }
+
+    fn follow_output_anchor_offset(
+        &mut self,
+        viewport_width: usize,
+        viewport_height: usize,
+    ) -> usize {
+        let total_height = self.total_content_height(viewport_width, viewport_height);
+        let max_scroll = total_height.saturating_sub(viewport_height);
+
+        if !self.running {
+            return max_scroll;
+        }
+
+        let awaiting_first_visible_output = self
+            .live_turn
+            .as_ref()
+            .is_some_and(|turn| !turn.has_visible_output);
+
+        if awaiting_first_visible_output {
+            return self.latest_user_block_anchor_offset(max_scroll);
+        }
+
+        if self.streaming_output_height() > 0 {
+            let streaming_start = self.height_cache.last().copied().unwrap_or(0);
+            return self.contextual_follow_offset(streaming_start, max_scroll);
+        }
+
+        let Some(last_idx) = self.latest_output_block_index() else {
+            return max_scroll;
+        };
+
+        self.contextual_follow_offset(self.block_content_start_offset(last_idx), max_scroll)
+    }
+
+    fn latest_output_block_index(&self) -> Option<usize> {
+        self.blocks
+            .iter()
+            .rposition(|block| !matches!(block, DisplayBlock::UserInput(_) | DisplayBlock::Splash))
+    }
+
+    fn latest_user_block_anchor_offset(&self, max_scroll: usize) -> usize {
+        let Some(last_idx) = self
+            .blocks
+            .iter()
+            .rposition(|block| matches!(block, DisplayBlock::UserInput(_)))
+        else {
+            return max_scroll;
+        };
+
+        self.contextual_follow_offset(self.block_content_start_offset(last_idx), max_scroll)
+    }
+
+    fn contextual_follow_offset(&self, content_start: usize, max_scroll: usize) -> usize {
+        content_start
+            .saturating_sub(FOLLOW_OUTPUT_CONTEXT_LINES)
+            .min(max_scroll)
+    }
+
+    fn block_start_offset(&self, idx: usize) -> usize {
+        if idx == 0 {
+            0
+        } else {
+            self.height_cache[idx - 1]
+        }
+    }
+
+    fn block_content_start_offset(&self, idx: usize) -> usize {
+        self.block_start_offset(idx) + self.block_leading_padding(idx)
+    }
+
+    fn block_leading_padding(&self, idx: usize) -> usize {
+        if idx == 0 {
+            return 0;
+        }
+
+        match self.blocks.get(idx) {
+            Some(DisplayBlock::UserInput(_)) => {
+                usize::from(!matches!(self.blocks[idx - 1], DisplayBlock::Splash))
+            }
+            Some(DisplayBlock::AssistantText(_)) => usize::from(!matches!(
+                self.blocks[idx - 1],
+                DisplayBlock::AssistantText(_) | DisplayBlock::Splash
+            )),
+            _ => 0,
+        }
     }
 
     /// Public accessor to pre-warm the height cache before an immutable borrow (e.g. draw).
@@ -3429,10 +3497,13 @@ mod tests {
 
         app.keep_latest_user_block_visible();
 
-        let cache = app.height_cache_snapshot().to_vec();
         let last_idx = app.blocks.len() - 1;
-        let block_start = cache[last_idx - 1];
-        assert_eq!(app.scroll_offset, block_start + 1);
+        let max_scroll = app
+            .total_content_height(width, viewport_height)
+            .saturating_sub(viewport_height);
+        let expected =
+            app.contextual_follow_offset(app.block_content_start_offset(last_idx), max_scroll);
+        assert_eq!(app.scroll_offset, expected);
     }
 
     #[test]
@@ -3692,7 +3763,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_follow_output_anchor_tracks_bottom_across_viewport_changes() {
+    fn refresh_follow_output_anchor_tracks_bottom_when_idle() {
         let mut app = App::new("test-model".into(), "test".into());
         app.blocks.clear();
 
@@ -3711,6 +3782,32 @@ mod tests {
         app.refresh_follow_output_anchor(width, 6);
         let large_bottom = app.total_content_height(width, 6).saturating_sub(6);
         assert_eq!(app.scroll_offset, large_bottom);
+    }
+
+    #[test]
+    fn refresh_follow_output_anchor_tracks_latest_output_start_while_running() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.blocks.clear();
+
+        app.blocks.push(DisplayBlock::UserInput("Message 1".into()));
+        app.blocks.push(DisplayBlock::AssistantText(
+            "Line 1\nLine 2\nLine 3\nLine 4\nLine 5".into(),
+        ));
+        app.start_turn();
+        app.follow_output = true;
+        if let Some(turn) = app.live_turn.as_mut() {
+            turn.has_visible_output = true;
+        }
+
+        let width = 80;
+
+        app.refresh_follow_output_anchor(width, 3);
+        let small_anchor = app.follow_output_anchor_offset(width, 3);
+        assert_eq!(app.scroll_offset, small_anchor);
+
+        app.refresh_follow_output_anchor(width, 6);
+        let large_anchor = app.follow_output_anchor_offset(width, 6);
+        assert_eq!(app.scroll_offset, large_anchor);
     }
 
     #[test]
@@ -3767,6 +3864,37 @@ mod tests {
 
         assert_eq!(app.scroll_offset, 3);
         assert!(!app.follow_output);
+    }
+
+    #[test]
+    fn text_delta_follow_output_anchors_to_message_start_instead_of_tail() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.blocks.clear();
+        app.blocks.push(DisplayBlock::UserInput("prompt".into()));
+        app.start_turn();
+        app.follow_output = true;
+
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: (0..20)
+                .map(|idx| format!("line {idx}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        });
+
+        let width = 24;
+        let viewport_height = 5;
+        app.refresh_follow_output_anchor(width, viewport_height);
+
+        let max_scroll = app
+            .total_content_height(width, viewport_height)
+            .saturating_sub(viewport_height);
+        let expected = app.follow_output_anchor_offset(width, viewport_height);
+
+        assert_eq!(app.scroll_offset, expected);
+        assert!(
+            app.scroll_offset < max_scroll,
+            "follow mode should anchor above the tail for tall streamed output"
+        );
     }
 
     #[test]

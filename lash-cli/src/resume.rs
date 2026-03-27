@@ -93,6 +93,10 @@ pub async fn load_resumed_session(
         model_catalog,
     )
     .await?;
+    // Resumed sessions restore persisted history and state, but they do not
+    // reconnect to a still-running turn. Clear any stale "Working" footer and
+    // other transient live-output UI before showing the restored transcript.
+    app.stop_turn();
     app.invalidate_height_cache();
     app.resume_follow_output();
     Ok(())
@@ -661,6 +665,118 @@ mod tests {
             block,
             DisplayBlock::SystemMessage(msg)
                 if msg == "Interrupted runtime state restored from a live snapshot."
+        )));
+    }
+
+    #[tokio::test]
+    async fn load_resumed_session_clears_stale_live_turn_ui() {
+        let _env_guard = env_lock().lock().await;
+        let temp = TempDirGuard::new("lash-load-resume-live-turn");
+        let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
+        let sessions_dir = lash::lash_home().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+
+        let filename = "resume-ui.db";
+        let db_path = sessions_dir.join(filename);
+        let store = Store::open(&db_path).expect("store");
+        let messages = vec![Message {
+            id: "m0".into(),
+            role: MessageRole::User,
+            parts: vec![Part {
+                id: "m0.p0".into(),
+                kind: PartKind::Text,
+                content: "hello".into(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: PruneState::Intact,
+            }],
+            origin: None,
+        }];
+        let messages_json = serde_json::to_string(&messages).expect("messages");
+        let ui_json = serde_json::json!({
+            "blocks": [{
+                "UserInput": "hello"
+            }],
+            "last_response_usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cached_input_tokens": 0,
+                "reasoning_tokens": 0
+            },
+            "plugin_mode_indicators": {},
+            "live_turn": {
+                "status_text": "thinking",
+                "status_detail": "waiting for first token",
+                "has_visible_output": false
+            }
+        })
+        .to_string();
+        let config_json = serde_json::json!({
+            "manifest": {
+                "execution_mode": "standard"
+            }
+        })
+        .to_string();
+        store.save_agent_state(lash::store::AgentStateSave {
+            agent_id: crate::ROOT_SESSION_ID,
+            messages_json: &messages_json,
+            tool_calls_json: "[]",
+            ui_json: &ui_json,
+            iteration: 1,
+            config_json: &config_json,
+            repl_snapshot: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+            reasoning_tokens: 0,
+        });
+
+        let provider = Provider::OpenAiGeneric {
+            api_key: "test-key".into(),
+            base_url: "https://example.invalid/v1".into(),
+            options: lash::ProviderOptions::default(),
+        };
+        let model_catalog =
+            CachedModelCatalog::models_dev(Arc::new(MemoryModelCatalogStore::new(None)), None)
+                .expect("catalog");
+        let plugins = PluginHost::new(vec![])
+            .with_dynamic_tools()
+            .build_standard_session("root", None)
+            .expect("plugins");
+        let dynamic_tools = plugins.dynamic_tools().expect("dynamic tools");
+        let mut desired_dynamic = dynamic_tools.export_state();
+
+        let mut app = App::new("gpt-5".into(), "resume-ui".into());
+        let mut history = Vec::new();
+        let mut runtime: Option<LashRuntime> = None;
+        let mut turn_counter = 0;
+        let mut execution_mode = ExecutionMode::Standard;
+        let mut context_strategy = lash::default_context_strategy();
+        let mut current_model_variant = None;
+
+        load_resumed_session(
+            filename,
+            &mut app,
+            &mut history,
+            &mut runtime,
+            &mut turn_counter,
+            &mut execution_mode,
+            &mut context_strategy,
+            &provider,
+            &mut current_model_variant,
+            &dynamic_tools,
+            &mut desired_dynamic,
+            &model_catalog,
+        )
+        .await
+        .expect("load resumed session");
+
+        assert!(!app.running);
+        assert!(app.live_turn.is_none());
+        assert!(app.blocks.iter().any(|block| matches!(
+            block,
+            DisplayBlock::SystemMessage(msg) if msg == &format!("Resumed: {}", filename)
         )));
     }
 }
