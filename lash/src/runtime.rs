@@ -539,8 +539,7 @@ struct RuntimeSessionManager {
     current_plugins: Arc<crate::PluginSession>,
     current_tool_catalog: Vec<serde_json::Value>,
     llm_factory: LlmFactory,
-    #[cfg(feature = "sqlite-store")]
-    current_store: Option<Arc<crate::store::Store>>,
+    current_store: Option<Arc<dyn crate::store::RuntimeStore>>,
     registry: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
     turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
 }
@@ -678,13 +677,10 @@ impl SessionManager for RuntimeSessionManager {
                 .fork_for_agent(&agent_id, policy.execution_mode)
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?,
         };
-        #[cfg(feature = "sqlite-store")]
         let services = match &self.current_store {
             Some(store) => RuntimeServices::new(plugins).with_store(Arc::clone(store)),
             None => RuntimeServices::new(plugins),
         };
-        #[cfg(not(feature = "sqlite-store"))]
-        let services = RuntimeServices::new(plugins);
         let mut runtime =
             LashRuntime::from_state(policy.clone(), self.current_host.clone(), services, state)
                 .await
@@ -697,7 +693,6 @@ impl SessionManager for RuntimeSessionManager {
                 request.context_surface.include_base_tools,
             );
         }
-        #[cfg(feature = "sqlite-store")]
         if let Some(store) = &self.current_store {
             let source_agent = match &request.start {
                 SessionStartPoint::CurrentSession => Some(self.current_agent_id.as_str()),
@@ -968,7 +963,6 @@ impl LashRuntime {
             current_tool_catalog: session
                 .tool_catalog(&self.state.agent_id, self.policy.execution_mode),
             llm_factory: Arc::clone(&self.llm_factory),
-            #[cfg(feature = "sqlite-store")]
             current_store: session.history_store(),
             registry: Arc::clone(&self.managed_sessions),
             turns: Arc::clone(&self.managed_turns),
@@ -1173,29 +1167,6 @@ impl LashRuntime {
         args: serde_json::Value,
         session_id: Option<String>,
     ) -> Result<crate::ToolResult, ExternalInvokeError> {
-        #[cfg(feature = "sqlite-store")]
-        if name == "history.summary" {
-            let Some(session) = self.session.as_ref() else {
-                return Err(ExternalInvokeError::Unknown(name.to_string()));
-            };
-            let Some(store) = session.history_store() else {
-                return Err(ExternalInvokeError::Unknown(name.to_string()));
-            };
-            let Some(effective_session) = session_id.or_else(|| Some(self.state.agent_id.clone()))
-            else {
-                return Err(ExternalInvokeError::MissingSession(name.to_string()));
-            };
-            let limit = args
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .and_then(|v| usize::try_from(v).ok())
-                .unwrap_or(5);
-            return Ok(crate::plugin::history::history_summary(
-                &store,
-                &effective_session,
-                limit,
-            ));
-        }
         let manager = self.runtime_session_manager()?;
         let Some(session) = self.session.as_ref() else {
             return Err(ExternalInvokeError::Unknown(name.to_string()));
@@ -1506,7 +1477,6 @@ impl LashRuntime {
                     code: "plugin_finalize_turn".to_string(),
                     message: err.to_string(),
                 })?;
-            #[cfg(feature = "sqlite-store")]
             if let Some(store) = self
                 .session
                 .as_ref()
@@ -2984,6 +2954,7 @@ mod tests {
     use crate::llm::types::{LlmRequest, LlmUsage};
     use crate::plugin::StaticPluginFactory;
     use crate::provider::Provider;
+    use crate::store::RuntimeStore;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
@@ -3024,6 +2995,62 @@ mod tests {
     impl RecordingSink {
         fn snapshot(&self) -> Vec<AgentEvent> {
             self.events.lock().expect("lock sink").clone()
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingStore {
+        turns: Mutex<HashMap<String, Vec<crate::store::HistoryTurnRecord>>>,
+    }
+
+    impl crate::store::RuntimeStore for RecordingStore {
+        fn store_archive(&self, content: &str) -> String {
+            format!("archive:{}", content.len())
+        }
+
+        fn get_archive(&self, _hash: &str) -> Option<String> {
+            None
+        }
+
+        fn save_agent_state(&self, _state: crate::store::AgentStateSave<'_>) {}
+
+        fn load_agent_state(&self, _agent_id: &str) -> Option<crate::store::AgentState> {
+            None
+        }
+
+        fn history_upsert_turn(&self, agent_id: &str, turn: &crate::store::HistoryTurnRecord) {
+            let mut turns = self.turns.lock().expect("lock store");
+            let entries = turns.entry(agent_id.to_string()).or_default();
+            if let Some(existing) = entries.iter_mut().find(|entry| entry.index == turn.index) {
+                *existing = turn.clone();
+            } else {
+                entries.push(turn.clone());
+                entries.sort_by_key(|entry| entry.index);
+            }
+        }
+
+        fn history_export(&self, agent_id: &str) -> Vec<crate::store::HistoryTurnRecord> {
+            self.turns
+                .lock()
+                .expect("lock store")
+                .get(agent_id)
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        fn history_replace(&self, agent_id: &str, turns: &[crate::store::HistoryTurnRecord]) {
+            self.turns
+                .lock()
+                .expect("lock store")
+                .insert(agent_id.to_string(), turns.to_vec());
+        }
+
+        fn save_session_meta(&self, _meta: crate::store::SessionMetaSave<'_>) {}
+
+        fn update_agent_ui_state(&self, _agent_id: &str, _ui_json: &str) {}
+
+        fn load_session_meta(&self) -> Option<crate::store::SessionMeta> {
+            None
         }
     }
 
@@ -4678,7 +4705,8 @@ mod tests {
         let mut runtime = LashRuntime::from_state(
             standard_test_policy(),
             test_host_config(),
-            crate::RuntimeServices::new(Arc::clone(&plugins)).with_store(Arc::clone(&store)),
+            crate::RuntimeServices::new(Arc::clone(&plugins))
+                .with_store(store.clone() as Arc<dyn crate::store::RuntimeStore>),
             AgentStateEnvelope::default(),
         )
         .await
@@ -4938,6 +4966,54 @@ mod tests {
         }));
     }
 
+    #[tokio::test]
+    async fn completed_turns_are_persisted_for_custom_runtime_store() {
+        let transport = MockTransport::new(vec![MockCall {
+            stream_events: vec![LlmStreamEvent::Delta("Stored answer".to_string())],
+            response: Ok(LlmResponse {
+                full_text: "Stored answer".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "Stored answer".to_string(),
+                }],
+                ..LlmResponse::default()
+            }),
+        }]);
+
+        let store = Arc::new(RecordingStore::default());
+        let plugins =
+            plugin_session_with_tools("root", ExecutionMode::Standard, Arc::new(EmptyTools));
+        let mut runtime = LashRuntime::from_state(
+            standard_test_policy(),
+            test_host_config(),
+            crate::RuntimeServices::new(Arc::clone(&plugins))
+                .with_store(store.clone() as Arc<dyn crate::store::RuntimeStore>),
+            AgentStateEnvelope::default(),
+        )
+        .await
+        .expect("runtime");
+        runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
+
+        let _turn = runtime
+            .run_turn_assembled(
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "where did this go?".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    mode: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("turn");
+
+        let items = store.history_export("root");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].index, 1);
+        assert_eq!(items[0].user_message, "where did this go?");
+        assert_eq!(items[0].prose, "Stored answer");
+    }
+
     #[cfg(feature = "sqlite-store")]
     #[tokio::test]
     async fn completed_turns_are_persisted_for_history_export() {
@@ -4965,7 +5041,8 @@ mod tests {
         let mut runtime = LashRuntime::from_state(
             standard_test_policy(),
             test_host_config(),
-            crate::RuntimeServices::new(Arc::clone(&plugins)).with_store(Arc::clone(&store)),
+            crate::RuntimeServices::new(Arc::clone(&plugins))
+                .with_store(store.clone() as Arc<dyn crate::store::RuntimeStore>),
             AgentStateEnvelope::default(),
         )
         .await
@@ -5025,7 +5102,8 @@ mod tests {
         let mut runtime = LashRuntime::from_state(
             standard_test_policy(),
             test_host_config(),
-            crate::RuntimeServices::new(Arc::clone(&plugins)).with_store(Arc::clone(&store)),
+            crate::RuntimeServices::new(Arc::clone(&plugins))
+                .with_store(store.clone() as Arc<dyn crate::store::RuntimeStore>),
             AgentStateEnvelope {
                 agent_id: "root".to_string(),
                 policy: SessionPolicy {

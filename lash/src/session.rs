@@ -192,14 +192,8 @@ impl Session {
         &self.context_prompt_contributions
     }
 
-    #[cfg(feature = "sqlite-store")]
-    pub fn history_store(&self) -> Option<Arc<crate::store::Store>> {
+    pub fn history_store(&self) -> Option<Arc<dyn crate::store::RuntimeStore>> {
         self.services.store.clone()
-    }
-
-    #[cfg(not(feature = "sqlite-store"))]
-    pub fn history_store(&self) -> Option<()> {
-        None
     }
 
     pub fn execution_surface(

@@ -59,6 +59,28 @@ pub(crate) fn parse_model_selection(input: &str) -> Result<ModelSelection, Strin
     }
 }
 
+fn log_filter_enables_debug(filter: &str) -> bool {
+    let lowered = filter.to_ascii_lowercase();
+    lowered.contains("debug") || lowered.contains("trace")
+}
+
+pub(crate) fn effective_lash_log_filter(debug_flag: bool) -> String {
+    let env_filter = std::env::var("LASH_LOG")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    match (debug_flag, env_filter) {
+        (true, Some(filter)) if log_filter_enables_debug(&filter) => filter,
+        (true, _) => "debug".to_string(),
+        (false, Some(filter)) => filter,
+        (false, None) => "warn".to_string(),
+    }
+}
+
+pub(crate) fn detailed_debug_logging_enabled(debug_flag: bool) -> bool {
+    log_filter_enables_debug(&effective_lash_log_filter(debug_flag))
+}
+
 fn parse_variant_input(input: &str) -> Result<String, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -302,6 +324,17 @@ pub(crate) fn persist_root_agent_state(
     let tool_calls_json =
         serde_json::to_string(&state.tool_calls).unwrap_or_else(|_| "[]".to_string());
     let ui_json = serde_json::to_string(ui_state).unwrap_or_else(|_| "{}".to_string());
+    tracing::debug!(
+        iteration = state.iteration,
+        messages = state.messages.len(),
+        tool_calls = state.tool_calls.len(),
+        blocks = ui_state.blocks.len(),
+        input_tokens = state.token_usage.input_tokens,
+        output_tokens = state.token_usage.output_tokens,
+        cached_input_tokens = state.token_usage.cached_input_tokens,
+        reasoning_tokens = state.token_usage.reasoning_tokens,
+        "persisting root agent state"
+    );
     store.save_agent_state(lash::store::AgentStateSave {
         agent_id: ROOT_SESSION_ID,
         messages_json: &messages_json,
@@ -360,6 +393,13 @@ pub(crate) fn persist_live_runtime_snapshot(
         ..Default::default()
     };
     let prompt_hash = latest_user_prompt_hash(&state.messages);
+    tracing::debug!(
+        iteration = state.iteration,
+        messages = state.messages.len(),
+        tool_calls = state.tool_calls.len(),
+        blocks = ui_state.blocks.len(),
+        "persisting live runtime snapshot"
+    );
     persist_root_agent_state(
         store,
         &mut state,
@@ -379,6 +419,13 @@ pub(crate) fn persist_live_runtime_snapshot(
 
 pub(crate) fn persist_live_ui_state(store: &Store, ui_state: &PersistedUiState) {
     let ui_json = serde_json::to_string(ui_state).unwrap_or_else(|_| "{}".to_string());
+    tracing::debug!(
+        blocks = ui_state.blocks.len(),
+        response_input_tokens = ui_state.last_response_usage.input_tokens,
+        response_output_tokens = ui_state.last_response_usage.output_tokens,
+        plugin_mode_indicators = ui_state.plugin_mode_indicators.len(),
+        "persisting live ui snapshot"
+    );
     store.update_agent_ui_state(ROOT_SESSION_ID, &ui_json);
 }
 
@@ -626,7 +673,6 @@ mod tests {
     use rusqlite::params;
 
     use super::*;
-    use crate::app::PersistedLiveTurnState;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
     use lash::store::{AgentStateSave, SessionMetaSave};
 
@@ -655,18 +701,14 @@ mod tests {
         persist_live_ui_state(
             &store,
             &PersistedUiState {
-                live_turn: Some(PersistedLiveTurnState {
-                    status_text: "retrying".to_string(),
-                    status_detail: Some("in 5s".to_string()),
-                    has_visible_output: false,
-                }),
+                blocks: vec![DisplayBlock::SystemMessage("live".into())],
                 ..PersistedUiState::default()
             },
         );
 
         let state = store.load_agent_state(ROOT_SESSION_ID).expect("root state");
-        assert!(state.ui_json.contains("\"retrying\""));
-        assert!(state.ui_json.contains("\"in 5s\""));
+        assert!(state.ui_json.contains("\"SystemMessage\":\"live\""));
+        assert!(!state.ui_json.contains("live_turn"));
     }
 
     #[test]
@@ -729,11 +771,7 @@ mod tests {
             persist_live_ui_state(
                 &store_clone,
                 &PersistedUiState {
-                    live_turn: Some(PersistedLiveTurnState {
-                        status_text: "retrying".to_string(),
-                        status_detail: Some("in 5s".to_string()),
-                        has_visible_output: false,
-                    }),
+                    blocks: vec![DisplayBlock::SystemMessage("live".into())],
                     ..PersistedUiState::default()
                 },
             );
@@ -754,7 +792,22 @@ mod tests {
         writer.join().expect("writer thread");
 
         let state = store.load_agent_state(ROOT_SESSION_ID).expect("root state");
-        assert!(state.ui_json.contains("\"retrying\""));
+        assert!(state.ui_json.contains("\"SystemMessage\":\"live\""));
         assert!(waited >= Duration::from_millis(150));
+    }
+
+    #[test]
+    fn effective_lash_log_filter_defaults_and_promotes_debug_flag() {
+        let _env_guard = env_lock().blocking_lock();
+        unsafe { std::env::remove_var("LASH_LOG") };
+        assert_eq!(effective_lash_log_filter(false), "warn");
+        assert_eq!(effective_lash_log_filter(true), "debug");
+
+        unsafe { std::env::set_var("LASH_LOG", "trace") };
+        assert_eq!(effective_lash_log_filter(false), "trace");
+        assert_eq!(effective_lash_log_filter(true), "trace");
+
+        unsafe { std::env::set_var("LASH_LOG", "warn") };
+        assert_eq!(effective_lash_log_filter(true), "debug");
     }
 }

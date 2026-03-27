@@ -111,6 +111,10 @@ struct Args {
     #[arg(long)]
     no_mouse: bool,
 
+    /// Enable detailed lifecycle/debug logs and per-session LLM traces
+    #[arg(long)]
+    debug: bool,
+
     /// Resume an existing session file on startup
     #[arg(long, value_name = "SESSION.db")]
     resume: Option<String>,
@@ -210,14 +214,17 @@ fn configure_terminal_ui(no_mouse: bool) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
     // Set up file-based structured tracing (JSON logs at $LASH_HOME/lash.log)
     {
         let log_dir = lash::lash_home();
         std::fs::create_dir_all(&log_dir).ok();
         let log_file = std::fs::File::create(log_dir.join("lash.log"))?;
+        let filter_text = effective_lash_log_filter(args.debug);
 
         use tracing_subscriber::EnvFilter;
-        let filter = EnvFilter::try_from_env("LASH_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
+        let fallback = if args.debug { "debug" } else { "warn" };
+        let filter = EnvFilter::try_new(&filter_text).unwrap_or_else(|_| EnvFilter::new(fallback));
         tracing_subscriber::fmt()
             .json()
             .flatten_event(true)
@@ -227,9 +234,16 @@ async fn main() -> anyhow::Result<()> {
             .with_writer(log_file)
             .with_ansi(false)
             .init();
-    }
 
-    let args = Args::parse();
+        tracing::debug!(
+            current_exe = ?std::env::current_exe().ok(),
+            cwd = ?std::env::current_dir().ok(),
+            build_git_head = BUILD_GIT_HEAD,
+            cli_debug = args.debug,
+            filter = %filter_text,
+            "initialized lash tracing"
+        );
+    }
     let prompt_overrides = resolve_prompt_overrides(&args)?;
     bootstrap::run(args, prompt_overrides).await
 }

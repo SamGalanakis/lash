@@ -16,7 +16,6 @@ mod search;
 pub mod session;
 pub mod skill_catalog;
 pub mod skill_prompt;
-#[cfg(feature = "sqlite-store")]
 pub mod store;
 pub mod text;
 mod tool_dispatch;
@@ -133,8 +132,11 @@ pub use skill_catalog::{LoadedSkill, SkillCatalog};
 pub use skill_prompt::{
     append_skill_blocks, collect_skill_mentions, collect_skill_mentions_with_ranges,
 };
+pub use store::{
+    AgentState, AgentStateSave, HistoryTurnRecord, RuntimeStore, SessionMeta, SessionMetaSave,
+};
 #[cfg(feature = "sqlite-store")]
-pub use store::{AgentState, Store};
+pub use store::{SqliteStore, Store};
 pub use text::strip_repl_fragments;
 pub use tools::{DefaultToolPluginDeps, default_tool_plugin_factories};
 
