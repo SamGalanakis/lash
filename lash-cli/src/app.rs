@@ -1714,22 +1714,43 @@ impl App {
             return self.latest_user_block_anchor_offset(max_scroll);
         }
 
-        if self.streaming_output_height() > 0 {
-            let streaming_start = self.height_cache.last().copied().unwrap_or(0);
-            return self.contextual_follow_offset(streaming_start, max_scroll);
-        }
-
-        let Some(last_idx) = self.latest_output_block_index() else {
+        let Some(last_idx) = self.latest_turn_output_start_index() else {
+            if self.streaming_output_height() > 0 {
+                let streaming_start = self.height_cache.last().copied().unwrap_or(0);
+                return self.contextual_follow_offset(streaming_start, max_scroll);
+            }
             return max_scroll;
         };
 
         self.contextual_follow_offset(self.block_content_start_offset(last_idx), max_scroll)
     }
 
-    fn latest_output_block_index(&self) -> Option<usize> {
-        self.blocks
+    fn latest_turn_output_start_index(&self) -> Option<usize> {
+        let search_start = self
+            .blocks
             .iter()
-            .rposition(|block| !matches!(block, DisplayBlock::UserInput(_) | DisplayBlock::Splash))
+            .rposition(|block| matches!(block, DisplayBlock::UserInput(_)))
+            .map(|idx| idx + 1)
+            .unwrap_or(0);
+
+        self.blocks[search_start..]
+            .iter()
+            .position(Self::is_turn_visible_output_block)
+            .map(|offset| search_start + offset)
+    }
+
+    fn is_turn_visible_output_block(block: &DisplayBlock) -> bool {
+        matches!(
+            block,
+            DisplayBlock::AssistantText(_)
+                | DisplayBlock::CodeBlock { .. }
+                | DisplayBlock::Activity(_)
+                | DisplayBlock::CodeOutput { .. }
+                | DisplayBlock::ShellOutput { .. }
+                | DisplayBlock::Error(_)
+                | DisplayBlock::PlanContent(_)
+                | DisplayBlock::PluginPanel(_)
+        )
     }
 
     fn latest_user_block_anchor_offset(&self, max_scroll: usize) -> usize {
@@ -3808,6 +3829,45 @@ mod tests {
         app.refresh_follow_output_anchor(width, 6);
         let large_anchor = app.follow_output_anchor_offset(width, 6);
         assert_eq!(app.scroll_offset, large_anchor);
+    }
+
+    #[test]
+    fn refresh_follow_output_anchor_uses_first_visible_output_block_of_turn() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.blocks.clear();
+
+        app.blocks
+            .push(DisplayBlock::AssistantText("older history".into()));
+        app.blocks.push(DisplayBlock::UserInput("prompt".into()));
+        app.blocks
+            .push(DisplayBlock::AssistantText("response start".into()));
+        app.blocks.push(DisplayBlock::CodeBlock {
+            code: "let value = 1;".into(),
+            continuation: false,
+        });
+        app.blocks.push(DisplayBlock::CodeOutput {
+            output: "ok".into(),
+            error: None,
+        });
+        app.blocks
+            .push(DisplayBlock::AssistantText("response tail".into()));
+        app.start_turn();
+        app.follow_output = true;
+        if let Some(turn) = app.live_turn.as_mut() {
+            turn.has_visible_output = true;
+        }
+
+        let width = 80;
+        let viewport_height = 6;
+
+        app.refresh_follow_output_anchor(width, viewport_height);
+
+        let max_scroll = app
+            .total_content_height(width, viewport_height)
+            .saturating_sub(viewport_height);
+        let expected = app.contextual_follow_offset(app.block_content_start_offset(2), max_scroll);
+
+        assert_eq!(app.scroll_offset, expected);
     }
 
     #[test]
