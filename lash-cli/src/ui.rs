@@ -3042,7 +3042,7 @@ mod tests {
             ["line1", "line2", "line3"].join("\n"),
         ));
         app.start_turn();
-        app.follow_output = true;
+        app.follow_mode = crate::app::FollowOutputMode::Contextual;
 
         terminal
             .draw(|frame| {
@@ -3084,7 +3084,7 @@ mod tests {
             "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda omega".into(),
         ));
         app.start_turn();
-        app.follow_output = true;
+        app.follow_mode = crate::app::FollowOutputMode::Contextual;
         if let Some(turn) = app.live_turn.as_mut() {
             turn.has_visible_output = true;
         }

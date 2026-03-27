@@ -1374,8 +1374,7 @@ pub struct RuntimeServices {
     pub plugins: Arc<PluginSession>,
     pub prompt_bridge: crate::session::PromptBridge,
     pub turn_injection_bridge: crate::session::TurnInjectionBridge,
-    #[cfg(feature = "sqlite-store")]
-    pub store: Option<Arc<crate::store::Store>>,
+    pub store: Option<Arc<dyn crate::store::RuntimeStore>>,
 }
 
 struct EmptySnapshotReader;
@@ -1464,13 +1463,11 @@ impl RuntimeServices {
             plugins,
             prompt_bridge,
             turn_injection_bridge,
-            #[cfg(feature = "sqlite-store")]
             store: None,
         }
     }
 
-    #[cfg(feature = "sqlite-store")]
-    pub fn with_store(mut self, store: Arc<crate::store::Store>) -> Self {
+    pub fn with_store(mut self, store: Arc<dyn crate::store::RuntimeStore>) -> Self {
         self.store = Some(store);
         self
     }

@@ -1193,6 +1193,18 @@ pub(crate) async fn run_app(
                     app.token_usage = state.token_usage.clone();
                     app.last_prompt_usage = state.last_prompt_usage.clone();
                     current_context_strategy = state.policy.context_strategy;
+                    tracing::debug!(
+                        stream_id = done.stream_id,
+                        iteration = state.iteration,
+                        status = ?done.result.status,
+                        reason = ?done.result.done_reason,
+                        messages = state.messages.len(),
+                        blocks = app.blocks.len(),
+                        had_live_turn = app.live_turn.is_some(),
+                        running = app.running,
+                        "reconciling completed runtime turn"
+                    );
+                    app.stop_turn();
 
                     let persisted_execution_mode = state.policy.execution_mode;
                     let persisted_context_strategy = state.policy.context_strategy;
@@ -2538,7 +2550,7 @@ fn send_user_message(
         app.push_prepared_user_input(&prepared_turn);
     }
     app.start_turn();
-    app.resume_follow_output();
+    app.resume_contextual_follow_output();
     app.keep_latest_user_block_visible();
 
     let mut rt = runtime

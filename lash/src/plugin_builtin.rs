@@ -10,10 +10,6 @@ pub use plan_tracker::PlanTrackerPluginFactory as BuiltinPlanTrackerPluginFactor
 pub use prompt_context::PromptContextPluginConfig;
 pub use prompt_context::PromptContextPluginFactory as BuiltinPromptContextPluginFactory;
 
-#[cfg(feature = "sqlite-store")]
-#[path = "plugin_builtin/history.rs"]
-pub(crate) mod history;
-
 #[cfg(test)]
 #[path = "plugin_builtin/tests.rs"]
 mod tests;

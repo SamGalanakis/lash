@@ -1,8 +1,5 @@
-use serde_json::json;
-
-use crate::search::truncate_preview;
-use crate::store::{HistoryTurnRecord, Store};
-use crate::{AssembledTurn, Message, MessageRole, PartKind, ToolResult};
+use crate::store::HistoryTurnRecord;
+use crate::{AssembledTurn, Message, MessageRole, PartKind};
 
 fn history_message_text(msg: &Message) -> String {
     msg.parts
@@ -125,36 +122,4 @@ pub(crate) fn final_history_record(turn: &AssembledTurn) -> HistoryTurnRecord {
         files_read: Vec::new(),
         files_written: Vec::new(),
     }
-}
-
-pub(crate) fn history_summary(store: &Store, session_id: &str, limit: usize) -> ToolResult {
-    let turns = store.history_export(session_id);
-    let latest_user_message = turns.iter().rev().find_map(|turn| {
-        (!turn.user_message.trim().is_empty()).then_some(turn.user_message.clone())
-    });
-    let recent_turns = turns
-        .iter()
-        .rev()
-        .take(limit.clamp(1, 20))
-        .map(|turn| {
-            let preview_source = if !turn.user_message.trim().is_empty() {
-                &turn.user_message
-            } else if !turn.prose.trim().is_empty() {
-                &turn.prose
-            } else {
-                &turn.output
-            };
-            json!({
-                "turn": turn.index,
-                "preview": truncate_preview(preview_source, 180),
-                "tool_calls": turn.tool_calls.len(),
-            })
-        })
-        .collect::<Vec<_>>();
-    ToolResult::ok(json!({
-        "session_id": session_id,
-        "turn_count": turns.len(),
-        "latest_user_message": latest_user_message,
-        "recent_turns": recent_turns,
-    }))
 }

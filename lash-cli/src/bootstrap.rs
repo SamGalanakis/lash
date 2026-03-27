@@ -185,18 +185,15 @@ pub(crate) async fn run(
     })
     .map_err(anyhow::Error::msg)?;
 
-    let llm_log_path = std::env::var("LASH_LOG").ok().and_then(|level| {
-        let l = level.to_lowercase();
-        if l == "debug" || l == "trace" || l.contains("debug") || l.contains("trace") {
-            let dir = lash::lash_home().join("sessions");
-            Some(dir.join(format!(
-                "{}.llm.jsonl",
-                chrono::Local::now().format("%Y%m%d_%H%M%S")
-            )))
-        } else {
-            None
-        }
-    });
+    let llm_log_path = if crate::detailed_debug_logging_enabled(args.debug) {
+        let dir = lash::lash_home().join("sessions");
+        Some(dir.join(format!(
+            "{}.llm.jsonl",
+            chrono::Local::now().format("%Y%m%d_%H%M%S")
+        )))
+    } else {
+        None
+    };
 
     let sessions_dir = lash::lash_home().join("sessions");
     std::fs::create_dir_all(&sessions_dir)?;
@@ -204,6 +201,13 @@ pub(crate) async fn run(
         .resume
         .clone()
         .unwrap_or_else(session_log::new_session_filename);
+    tracing::debug!(
+        session_file = session_filename,
+        resumed = args.resume.is_some(),
+        llm_log_path = ?llm_log_path,
+        debug_logging = crate::detailed_debug_logging_enabled(args.debug),
+        "prepared session bootstrap"
+    );
     let resume_start = if args.resume.is_some() {
         Some(session_log::load_session_start(&session_filename)?)
     } else {
@@ -256,7 +260,7 @@ pub(crate) async fn run(
     let mut plugin_factories = default_tool_plugin_factories(
         execution_mode,
         DefaultToolPluginDeps {
-            store: Some(Arc::clone(&store)),
+            store: Some(store.clone() as Arc<dyn RuntimeStore>),
             tavily_api_key: if tavily_key.is_empty() {
                 None
             } else {
@@ -325,7 +329,7 @@ pub(crate) async fn run(
             prompt_bridge,
             turn_injection_bridge.clone(),
         )
-        .with_store(Arc::clone(&store)),
+        .with_store(store.clone() as Arc<dyn RuntimeStore>),
         AgentStateEnvelope {
             agent_id: "root".to_string(),
             policy: session_policy.clone(),

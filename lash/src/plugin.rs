@@ -851,8 +851,8 @@ pub use tool_result_projection_builtin::{
 #[path = "plugin_builtin.rs"]
 mod builtin;
 
-#[cfg(feature = "sqlite-store")]
-pub(crate) use builtin::history;
+#[path = "plugin_builtin/history.rs"]
+pub(crate) mod history;
 
 #[cfg(feature = "sqlite-store")]
 pub use builtin::{

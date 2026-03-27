@@ -200,31 +200,11 @@ impl LiveTurnState {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PersistedLiveTurnState {
-    pub status_text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status_detail: Option<String>,
-    #[serde(default)]
-    pub has_visible_output: bool,
-}
-
-impl LiveTurnState {
-    fn persisted(&self) -> PersistedLiveTurnState {
-        PersistedLiveTurnState {
-            status_text: self.status_text.clone(),
-            status_detail: self.status_detail.clone(),
-            has_visible_output: self.has_visible_output,
-        }
-    }
-}
-
-impl From<PersistedLiveTurnState> for LiveTurnState {
-    fn from(value: PersistedLiveTurnState) -> Self {
-        let mut turn = LiveTurnState::new(value.status_text, value.status_detail);
-        turn.has_visible_output = value.has_visible_output;
-        turn
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FollowOutputMode {
+    Paused,
+    Bottom,
+    Contextual,
 }
 
 const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
@@ -399,8 +379,6 @@ pub struct PersistedUiState {
     pub last_response_usage: TokenUsage,
     #[serde(default)]
     pub plugin_mode_indicators: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub live_turn: Option<PersistedLiveTurnState>,
 }
 
 impl PersistedUiState {
@@ -409,7 +387,6 @@ impl PersistedUiState {
             blocks: blocks_from_messages(messages),
             last_response_usage: TokenUsage::default(),
             plugin_mode_indicators: BTreeMap::new(),
-            live_turn: None,
         }
     }
 }
@@ -627,8 +604,8 @@ pub struct App {
     pub session_picker_idx: usize,
     /// Whether the UI needs a redraw.
     pub dirty: bool,
-    /// Auto-scroll to bottom on new output. Disabled when user scrolls up during generation.
-    pub follow_output: bool,
+    /// Output-following mode for the history viewport.
+    pub follow_mode: FollowOutputMode,
     /// Cumulative height prefix sums for each block (used for O(1) total height and O(log n) lookup).
     height_cache: Vec<usize>,
     /// Terminal width the height cache was computed for.
@@ -707,7 +684,6 @@ impl App {
                 .collect(),
             last_response_usage: self.last_response_usage.clone(),
             plugin_mode_indicators: self.plugin_mode_indicators.clone(),
-            live_turn: self.live_turn.as_ref().map(LiveTurnState::persisted),
         }
     }
 
@@ -726,6 +702,7 @@ impl App {
         self.live_output_chars_estimate = 0;
         self.live_output_tokens_estimate = 0;
         self.live_turn = Some(LiveTurnState::new("starting", None));
+        self.follow_mode = FollowOutputMode::Contextual;
     }
 
     pub fn stop_turn(&mut self) {
@@ -736,6 +713,9 @@ impl App {
         self.active_delegate = None;
         self.live_output_chars_estimate = 0;
         self.live_output_tokens_estimate = 0;
+        if self.follow_mode == FollowOutputMode::Contextual {
+            self.follow_mode = FollowOutputMode::Bottom;
+        }
         if self
             .live_turn
             .as_ref()
@@ -888,7 +868,7 @@ impl App {
             session_picker: Vec::new(),
             session_picker_idx: 0,
             dirty: true,
-            follow_output: true,
+            follow_mode: FollowOutputMode::Bottom,
             height_cache: Vec::new(),
             height_cache_width: 0,
             height_cache_vh: 0,
@@ -940,7 +920,7 @@ impl App {
         self.input.clear();
         self.cursor_pos = 0;
         self.input_history_idx = None;
-        self.follow_output = true;
+        self.follow_mode = FollowOutputMode::Bottom;
         text
     }
 
@@ -1445,7 +1425,7 @@ impl App {
     pub fn clear(&mut self) {
         self.blocks = vec![DisplayBlock::Splash];
         self.scroll_offset = 0;
-        self.follow_output = true;
+        self.follow_mode = FollowOutputMode::Bottom;
         self.pending_text.clear();
         self.clear_status();
         self.pending_images.clear();
@@ -1543,11 +1523,17 @@ impl App {
     /// at the top of the viewport so the same content stays visible after
     /// blocks change height.
     pub fn set_expand_level(&mut self, level: u8) {
-        // When following output (at bottom), just set and stay at bottom
-        if self.follow_output {
+        // When following output, keep the active follow mode's anchor.
+        if self.follows_output() {
             self.expand_level = level;
             self.invalidate_height_cache();
-            self.scroll_offset = usize::MAX;
+            if self.height_cache_width > 0 && self.height_cache_vh > 0 {
+                self.ensure_height_cache(self.height_cache_width, self.height_cache_vh);
+                self.scroll_offset =
+                    self.follow_output_anchor_offset(self.height_cache_width, self.height_cache_vh);
+            } else {
+                self.scroll_offset = usize::MAX;
+            }
             return;
         }
 
@@ -1595,31 +1581,31 @@ impl App {
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
-        if self.follow_output {
-            self.follow_output = false;
+        if self.follows_output() {
             if self.height_cache_width > 0 && self.height_cache_vh > 0 {
                 self.scroll_offset =
                     self.follow_output_anchor_offset(self.height_cache_width, self.height_cache_vh);
             } else {
                 self.scroll_offset = 0;
             }
+            self.follow_mode = FollowOutputMode::Paused;
         }
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
-        self.follow_output = false;
+        self.follow_mode = FollowOutputMode::Paused;
     }
 
     pub fn scroll_down(&mut self, amount: usize, viewport_height: usize, viewport_width: usize) {
         let total = self.total_content_height(viewport_width, viewport_height);
         let max_scroll = total.saturating_sub(viewport_height);
         self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max_scroll);
-        // Re-enable follow if we've reached the bottom
+        // Re-enable follow at the tail if we've reached the bottom manually.
         if self.scroll_offset >= max_scroll {
-            self.follow_output = true;
+            self.follow_mode = FollowOutputMode::Bottom;
         }
     }
 
     pub fn scroll_to_bottom(&mut self) {
-        if !self.follow_output {
+        if !self.follows_output() {
             return;
         }
         // We'll clamp this in rendering when we know viewport height
@@ -1628,13 +1614,19 @@ impl App {
 
     /// Explicitly resume following new output from the bottom.
     pub fn resume_follow_output(&mut self) {
-        self.follow_output = true;
+        self.follow_mode = FollowOutputMode::Bottom;
+        self.scroll_offset = usize::MAX;
+    }
+
+    /// Explicitly follow the current running turn from its visible start.
+    pub fn resume_contextual_follow_output(&mut self) {
+        self.follow_mode = FollowOutputMode::Contextual;
         self.scroll_offset = usize::MAX;
     }
 
     /// Recompute the follow-output anchor for the current viewport dimensions.
     pub fn refresh_follow_output_anchor(&mut self, viewport_width: usize, viewport_height: usize) {
-        if !self.follow_output {
+        if !self.follows_output() {
             return;
         }
 
@@ -1647,7 +1639,7 @@ impl App {
     /// tall prompt so the user can still read what they just sent while the
     /// live status row renders beneath the history pane.
     pub fn keep_latest_user_block_visible(&mut self) {
-        if !self.follow_output {
+        if self.follow_mode != FollowOutputMode::Contextual {
             return;
         }
 
@@ -1700,6 +1692,12 @@ impl App {
     ) -> usize {
         let total_height = self.total_content_height(viewport_width, viewport_height);
         let max_scroll = total_height.saturating_sub(viewport_height);
+
+        match self.follow_mode {
+            FollowOutputMode::Paused => return self.scroll_offset.min(max_scroll),
+            FollowOutputMode::Bottom => return max_scroll,
+            FollowOutputMode::Contextual => {}
+        }
 
         if !self.running {
             return max_scroll;
@@ -1769,6 +1767,10 @@ impl App {
         content_start
             .saturating_sub(FOLLOW_OUTPUT_CONTEXT_LINES)
             .min(max_scroll)
+    }
+
+    fn follows_output(&self) -> bool {
+        self.follow_mode != FollowOutputMode::Paused
     }
 
     fn block_start_offset(&self, idx: usize) -> usize {
@@ -3209,7 +3211,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_ui_state_includes_live_turn_snapshot() {
+    fn persisted_ui_state_omits_transient_live_turn() {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
         app.set_status("retrying", Some("in 5s".into()), true);
@@ -3217,11 +3219,8 @@ mod tests {
             turn.has_visible_output = true;
         }
 
-        let persisted = app.persisted_ui_state();
-        let live_turn = persisted.live_turn.expect("live turn");
-        assert_eq!(live_turn.status_text, "retrying");
-        assert_eq!(live_turn.status_detail.as_deref(), Some("in 5s"));
-        assert!(live_turn.has_visible_output);
+        let persisted = serde_json::to_value(app.persisted_ui_state()).expect("serialize ui");
+        assert!(persisted.get("live_turn").is_none());
     }
 
     #[test]
@@ -3509,7 +3508,7 @@ mod tests {
             .join("\n"),
         ));
         app.start_turn();
-        app.follow_output = true;
+        app.follow_mode = FollowOutputMode::Contextual;
 
         let width = 32usize;
         let viewport_height = 4usize;
@@ -3538,7 +3537,7 @@ mod tests {
         app.blocks
             .push(DisplayBlock::UserInput("short prompt".into()));
         app.running = true;
-        app.follow_output = true;
+        app.follow_mode = FollowOutputMode::Contextual;
 
         let width = 32usize;
         let viewport_height = 4usize;
@@ -3656,7 +3655,7 @@ mod tests {
         let block4_start = cache[3]; // cumulative height after first 4 blocks (0-indexed)
         let anchor_idx = cache.partition_point(|&cum| cum <= block4_start);
         app.scroll_offset = block4_start;
-        app.follow_output = false;
+        app.follow_mode = FollowOutputMode::Paused;
 
         // Cycle to level 1 (compact plus)
         app.cycle_expand();
@@ -3715,7 +3714,7 @@ mod tests {
         // Scroll to block 5 (AssistantText "Response 2", index 5 with Splash at 0)
         let block5_start = cache[4]; // after Splash + UserInput + AssistantText + CodeBlock + Activity
         app.scroll_offset = block5_start;
-        app.follow_output = false;
+        app.follow_mode = FollowOutputMode::Paused;
 
         // Cycle to level 1
         app.cycle_expand();
@@ -3757,30 +3756,29 @@ mod tests {
         let width = 80;
         let vh = 24;
 
-        // Simulate being at the bottom (follow_output = true)
-        app.follow_output = true;
+        // Simulate following from the bottom.
+        app.follow_mode = FollowOutputMode::Bottom;
         app.scroll_offset = usize::MAX;
         app.ensure_height_cache_pub(width, vh);
 
         // Cycle to level 1
         app.cycle_expand();
 
-        // scroll_offset should be usize::MAX (stay at bottom)
+        let expanded_bottom = app.total_content_height(width, vh).saturating_sub(vh);
         assert_eq!(
-            app.scroll_offset,
-            usize::MAX,
-            "should stay at bottom after expanding"
+            app.scroll_offset, expanded_bottom,
+            "should stay at the bottom after expanding"
         );
-        assert!(app.follow_output, "follow_output should remain true");
+        assert_eq!(app.follow_mode, FollowOutputMode::Bottom);
 
         // Cycle back to level 0
         app.cycle_expand();
+        let collapsed_bottom = app.total_content_height(width, vh).saturating_sub(vh);
         assert_eq!(
-            app.scroll_offset,
-            usize::MAX,
-            "should stay at bottom after collapsing"
+            app.scroll_offset, collapsed_bottom,
+            "should stay at the bottom after collapsing"
         );
-        assert!(app.follow_output, "follow_output should remain true");
+        assert_eq!(app.follow_mode, FollowOutputMode::Bottom);
     }
 
     #[test]
@@ -3794,7 +3792,7 @@ mod tests {
         ));
 
         let width = 80;
-        app.follow_output = true;
+        app.follow_mode = FollowOutputMode::Bottom;
 
         app.refresh_follow_output_anchor(width, 3);
         let small_bottom = app.total_content_height(width, 3).saturating_sub(3);
@@ -3815,7 +3813,7 @@ mod tests {
             "Line 1\nLine 2\nLine 3\nLine 4\nLine 5".into(),
         ));
         app.start_turn();
-        app.follow_output = true;
+        app.follow_mode = FollowOutputMode::Contextual;
         if let Some(turn) = app.live_turn.as_mut() {
             turn.has_visible_output = true;
         }
@@ -3852,7 +3850,7 @@ mod tests {
         app.blocks
             .push(DisplayBlock::AssistantText("response tail".into()));
         app.start_turn();
-        app.follow_output = true;
+        app.follow_mode = FollowOutputMode::Contextual;
         if let Some(turn) = app.live_turn.as_mut() {
             turn.has_visible_output = true;
         }
@@ -3876,12 +3874,12 @@ mod tests {
         app.blocks.clear();
         app.blocks.push(DisplayBlock::UserInput("hello".into()));
         app.blocks.push(DisplayBlock::AssistantText("world".into()));
-        app.follow_output = false;
+        app.follow_mode = FollowOutputMode::Paused;
         app.scroll_offset = 3;
 
         app.resume_follow_output();
 
-        assert!(app.follow_output);
+        assert_eq!(app.follow_mode, FollowOutputMode::Bottom);
         assert_eq!(app.scroll_offset, usize::MAX);
     }
 
@@ -3898,15 +3896,56 @@ mod tests {
         ));
         let width = 24;
         let viewport_height = 5;
-        app.follow_output = true;
+        app.follow_mode = FollowOutputMode::Bottom;
         app.ensure_height_cache_pub(width, viewport_height);
         app.refresh_follow_output_anchor(width, viewport_height);
 
         let bottom = app.scroll_offset;
         app.scroll_up(2);
 
-        assert!(!app.follow_output);
+        assert_eq!(app.follow_mode, FollowOutputMode::Paused);
         assert_eq!(app.scroll_offset, bottom.saturating_sub(2));
+    }
+
+    #[test]
+    fn scroll_down_to_bottom_reenables_tail_follow_instead_of_contextual_anchor() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.blocks.clear();
+        app.blocks
+            .push(DisplayBlock::AssistantText("older history".into()));
+        app.blocks.push(DisplayBlock::UserInput("prompt".into()));
+        app.start_turn();
+        app.follow_mode = FollowOutputMode::Contextual;
+
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: (0..20)
+                .map(|idx| format!("line {idx}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        });
+
+        let width = 24;
+        let viewport_height = 5;
+        app.refresh_follow_output_anchor(width, viewport_height);
+        let contextual_anchor = app.scroll_offset;
+
+        app.scroll_up(2);
+        assert_eq!(app.follow_mode, FollowOutputMode::Paused);
+
+        app.scroll_down(usize::MAX / 2, viewport_height, width);
+        assert_eq!(app.follow_mode, FollowOutputMode::Bottom);
+
+        let max_scroll = app
+            .total_content_height(width, viewport_height)
+            .saturating_sub(viewport_height);
+        assert!(
+            contextual_anchor < max_scroll,
+            "test requires contextual anchor above the tail"
+        );
+
+        app.refresh_follow_output_anchor(width, viewport_height);
+
+        assert_eq!(app.scroll_offset, max_scroll);
     }
 
     #[test]
@@ -3915,7 +3954,7 @@ mod tests {
         app.blocks.clear();
         app.blocks.push(DisplayBlock::UserInput("prompt".into()));
         app.start_turn();
-        app.follow_output = false;
+        app.follow_mode = FollowOutputMode::Paused;
         app.scroll_offset = 3;
 
         app.handle_agent_event(AgentEvent::TextDelta {
@@ -3923,7 +3962,7 @@ mod tests {
         });
 
         assert_eq!(app.scroll_offset, 3);
-        assert!(!app.follow_output);
+        assert_eq!(app.follow_mode, FollowOutputMode::Paused);
     }
 
     #[test]
@@ -3932,7 +3971,7 @@ mod tests {
         app.blocks.clear();
         app.blocks.push(DisplayBlock::UserInput("prompt".into()));
         app.start_turn();
-        app.follow_output = true;
+        app.follow_mode = FollowOutputMode::Contextual;
 
         app.handle_agent_event(AgentEvent::TextDelta {
             content: (0..20)
@@ -3965,7 +4004,7 @@ mod tests {
                 .into(),
         ));
         app.running = true;
-        app.follow_output = true;
+        app.follow_mode = FollowOutputMode::Contextual;
 
         let width = 24;
         app.refresh_follow_output_anchor(width, 3);
@@ -4001,7 +4040,7 @@ mod tests {
         let cache = app.height_cache_snapshot().to_vec();
         let block3_start = cache[2]; // after UserInput + AssistantText + CodeBlock
         app.scroll_offset = block3_start;
-        app.follow_output = false;
+        app.follow_mode = FollowOutputMode::Paused;
 
         // Invalidate cache (simulates agent event arriving between frames)
         app.invalidate_height_cache();

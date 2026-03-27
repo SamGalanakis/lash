@@ -1,19 +1,30 @@
+#[cfg(feature = "sqlite-store")]
 use std::collections::BTreeSet;
+#[cfg(feature = "sqlite-store")]
 use std::path::Path;
+#[cfg(feature = "sqlite-store")]
 use std::sync::Mutex;
+#[cfg(feature = "sqlite-store")]
 use std::time::Duration;
 
+#[cfg(feature = "sqlite-store")]
 use rusqlite::{Connection, params};
+#[cfg(feature = "sqlite-store")]
 use sha2::{Digest, Sha256};
 
 /// SQLite-backed store for archive, agent state, and history.
 /// Single `Mutex<Connection>` serializes all access (same as the old `Mutex<HashMap>`).
+#[cfg(feature = "sqlite-store")]
 pub struct Store {
     conn: Mutex<Connection>,
 }
 
+#[cfg(feature = "sqlite-store")]
+pub type SqliteStore = Store;
+
 // ─── Schema ───
 
+#[cfg(feature = "sqlite-store")]
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS archive (
     hash    TEXT PRIMARY KEY,
@@ -61,17 +72,22 @@ CREATE TABLE IF NOT EXISTS session_meta (
 );
 ";
 
+#[cfg(feature = "sqlite-store")]
 const SCHEMA_VERSION: i32 = 1;
 
+#[cfg(feature = "sqlite-store")]
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(feature = "sqlite-store")]
 const SQLITE_WAL_AUTOCHECKPOINT_PAGES: i64 = 1_000;
 
+#[cfg(feature = "sqlite-store")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StoreBacking {
     File,
     Memory,
 }
 
+#[cfg(feature = "sqlite-store")]
 fn apply_pragmas(conn: &Connection, backing: StoreBacking) -> rusqlite::Result<()> {
     conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
     conn.execute_batch(
@@ -152,6 +168,39 @@ pub struct SessionMetaSave<'a> {
     pub parent_session_id: Option<&'a str>,
 }
 
+/// Persistence backend for archived content, session snapshots, and turn history.
+///
+/// Implement this trait to back lash with a custom store such as Postgres while
+/// keeping the built-in SQLite `Store` as the default first-party implementation.
+pub trait RuntimeStore: Send + Sync {
+    fn store_archive(&self, content: &str) -> String;
+    fn get_archive(&self, hash: &str) -> Option<String>;
+    fn save_agent_state(&self, state: AgentStateSave<'_>);
+    fn load_agent_state(&self, agent_id: &str) -> Option<AgentState>;
+    fn history_upsert_turn(&self, agent_id: &str, turn: &HistoryTurnRecord);
+    fn history_export(&self, agent_id: &str) -> Vec<HistoryTurnRecord>;
+    fn history_replace(&self, agent_id: &str, turns: &[HistoryTurnRecord]);
+    fn save_session_meta(&self, meta: SessionMetaSave<'_>);
+    fn update_agent_ui_state(&self, agent_id: &str, ui_json: &str);
+    fn load_session_meta(&self) -> Option<SessionMeta>;
+
+    fn history_copy(&self, source_agent_id: &str, target_agent_id: &str) {
+        let turns = self.history_export(source_agent_id);
+        self.history_replace(target_agent_id, &turns);
+    }
+
+    fn history_copy_from_store(
+        &self,
+        source: &(dyn RuntimeStore + '_),
+        source_agent_id: &str,
+        target_agent_id: &str,
+    ) {
+        let turns = source.history_export(source_agent_id);
+        self.history_replace(target_agent_id, &turns);
+    }
+}
+
+#[cfg(feature = "sqlite-store")]
 impl Store {
     /// Open (or create) a SQLite database at `path`.
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
@@ -334,7 +383,7 @@ impl Store {
             .collect()
     }
 
-    pub fn history_load(&self, agent_id: &str, turns: &[serde_json::Value]) {
+    pub fn history_replace(&self, agent_id: &str, turns: &[HistoryTurnRecord]) {
         let mut conn = self.conn.lock().unwrap();
         let tx = match conn.transaction() {
             Ok(tx) => tx,
@@ -358,12 +407,11 @@ impl Store {
             );
         }
         for turn in turns {
-            let record = history_record_from_value(turn);
-            if let Err(err) = Self::history_upsert_turn_locked(&tx, agent_id, &record) {
+            if let Err(err) = Self::history_upsert_turn_locked(&tx, agent_id, turn) {
                 tracing::warn!(
                     error = %err,
                     agent_id = agent_id,
-                    turn_index = record.index,
+                    turn_index = turn.index,
                     "failed to reload history turn"
                 );
             }
@@ -377,37 +425,25 @@ impl Store {
         }
     }
 
+    pub fn history_load(&self, agent_id: &str, turns: &[serde_json::Value]) {
+        let records = turns
+            .iter()
+            .map(history_record_from_value)
+            .collect::<Vec<_>>();
+        self.history_replace(agent_id, &records);
+    }
+
     pub fn history_copy(&self, source_agent_id: &str, target_agent_id: &str) {
-        self.history_copy_from_store(self, source_agent_id, target_agent_id);
+        RuntimeStore::history_copy(self, source_agent_id, target_agent_id);
     }
 
     pub fn history_copy_from_store(
         &self,
-        source: &Store,
+        source: &(dyn RuntimeStore + '_),
         source_agent_id: &str,
         target_agent_id: &str,
     ) {
-        if std::ptr::eq(source, self) && source_agent_id == target_agent_id {
-            return;
-        }
-        let turns = source.history_export(source_agent_id);
-        let values = turns
-            .into_iter()
-            .map(|turn| {
-                serde_json::json!({
-                    "index": turn.index,
-                    "user_message": turn.user_message,
-                    "prose": turn.prose,
-                    "code": turn.code,
-                    "output": turn.output,
-                    "error": turn.error,
-                    "tool_calls": turn.tool_calls,
-                    "files_read": turn.files_read,
-                    "files_written": turn.files_written,
-                })
-            })
-            .collect::<Vec<_>>();
-        self.history_load(target_agent_id, &values);
+        RuntimeStore::history_copy_from_store(self, source, source_agent_id, target_agent_id);
     }
 
     // ─── Session metadata ───
@@ -513,6 +549,50 @@ impl Store {
     }
 }
 
+#[cfg(feature = "sqlite-store")]
+impl RuntimeStore for Store {
+    fn store_archive(&self, content: &str) -> String {
+        Self::store_archive(self, content)
+    }
+
+    fn get_archive(&self, hash: &str) -> Option<String> {
+        Self::get_archive(self, hash)
+    }
+
+    fn save_agent_state(&self, state: AgentStateSave<'_>) {
+        Self::save_agent_state(self, state);
+    }
+
+    fn load_agent_state(&self, agent_id: &str) -> Option<AgentState> {
+        Self::load_agent_state(self, agent_id)
+    }
+
+    fn history_upsert_turn(&self, agent_id: &str, turn: &HistoryTurnRecord) {
+        Self::history_upsert_turn(self, agent_id, turn);
+    }
+
+    fn history_export(&self, agent_id: &str) -> Vec<HistoryTurnRecord> {
+        Self::history_export(self, agent_id)
+    }
+
+    fn history_replace(&self, agent_id: &str, turns: &[HistoryTurnRecord]) {
+        Self::history_replace(self, agent_id, turns);
+    }
+
+    fn save_session_meta(&self, meta: SessionMetaSave<'_>) {
+        Self::save_session_meta(self, meta);
+    }
+
+    fn update_agent_ui_state(&self, agent_id: &str, ui_json: &str) {
+        Self::update_agent_ui_state(self, agent_id, ui_json);
+    }
+
+    fn load_session_meta(&self) -> Option<SessionMeta> {
+        Self::load_session_meta(self)
+    }
+}
+
+#[cfg(feature = "sqlite-store")]
 fn derive_history_files(tool_calls: &[serde_json::Value]) -> (Vec<String>, Vec<String>) {
     let mut files_read = BTreeSet::new();
     let mut files_written = BTreeSet::new();
@@ -548,6 +628,7 @@ fn derive_history_files(tool_calls: &[serde_json::Value]) -> (Vec<String>, Vec<S
     )
 }
 
+#[cfg(feature = "sqlite-store")]
 fn history_record_from_value(turn: &serde_json::Value) -> HistoryTurnRecord {
     HistoryTurnRecord {
         index: turn.get("index").and_then(|v| v.as_i64()).unwrap_or(0),
@@ -585,6 +666,7 @@ fn history_record_from_value(turn: &serde_json::Value) -> HistoryTurnRecord {
     }
 }
 
+#[cfg(feature = "sqlite-store")]
 fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     let user_version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if user_version == SCHEMA_VERSION {
@@ -603,6 +685,7 @@ fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     ))
 }
 
+#[cfg(feature = "sqlite-store")]
 fn has_user_schema_objects(conn: &Connection) -> rusqlite::Result<bool> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master
@@ -614,6 +697,7 @@ fn has_user_schema_objects(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(count > 0)
 }
 
+#[cfg(feature = "sqlite-store")]
 fn unsupported_schema_message() -> String {
     format!(
         "Unsupported lash session schema. Delete {} and try again.",
@@ -621,7 +705,7 @@ fn unsupported_schema_message() -> String {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite-store"))]
 mod tests {
     use super::*;
     use rusqlite::Connection;

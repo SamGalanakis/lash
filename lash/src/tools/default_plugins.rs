@@ -9,8 +9,7 @@ use crate::{
 
 #[derive(Default)]
 pub struct DefaultToolPluginDeps {
-    #[cfg(feature = "sqlite-store")]
-    pub store: Option<Arc<crate::store::Store>>,
+    pub store: Option<Arc<dyn crate::store::RuntimeStore>>,
     pub tavily_api_key: Option<String>,
     pub prompt_bridge: Option<crate::PromptBridge>,
     pub instruction_source: Option<Arc<dyn InstructionSource>>,

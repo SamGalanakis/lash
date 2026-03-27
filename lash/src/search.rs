@@ -319,12 +319,3 @@ pub(crate) fn rank_docs(
     }
     ranked
 }
-
-pub(crate) fn truncate_preview(text: &str, limit: usize) -> String {
-    let compact = text.trim().replace('\n', " ");
-    if compact.len() <= limit {
-        compact
-    } else {
-        format!("{}...", &compact[..limit.saturating_sub(3)])
-    }
-}

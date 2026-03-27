@@ -73,7 +73,6 @@ pub async fn load_resumed_session(
     app.last_response_usage = loaded.last_token_usage;
     app.last_prompt_usage = None;
     app.plugin_mode_indicators = loaded.plugin_mode_indicators;
-    app.live_turn = loaded.live_turn.map(Into::into);
     app.blocks.push(DisplayBlock::SystemMessage(format!(
         "Resumed: {}",
         filename
@@ -93,9 +92,14 @@ pub async fn load_resumed_session(
         model_catalog,
     )
     .await?;
-    // Resumed sessions restore persisted history and state, but they do not
-    // reconnect to a still-running turn. Clear any stale "Working" footer and
-    // other transient live-output UI before showing the restored transcript.
+    tracing::debug!(
+        session_file = filename,
+        history = history.len(),
+        blocks = app.blocks.len(),
+        "restored resumed session state"
+    );
+    // Resumed sessions restore persisted history and durable state, but they do
+    // not reconnect to a still-running turn. Keep transient live-turn UI cleared.
     app.stop_turn();
     app.invalidate_height_cache();
     app.resume_follow_output();
