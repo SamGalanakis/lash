@@ -5,7 +5,6 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use lash::agent::{Message, MessageRole, PartKind};
-use lash::store::SessionMetaSave;
 use lash::{Store, TokenUsage};
 
 use crate::app::{DisplayBlock, PersistedUiState};
@@ -47,15 +46,14 @@ impl SessionLogger {
     ) -> Result<Self> {
         std::fs::create_dir_all(sessions_dir())?;
         let session_id = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        store.save_session_meta(SessionMetaSave {
-            session_id: &session_id,
-            session_name: &session_name,
-            created_at: &chrono::Local::now().to_rfc3339(),
-            model,
+        store.save_session_meta(lash::SessionMeta {
+            session_id: session_id.clone(),
+            session_name: session_name.clone(),
+            created_at: chrono::Local::now().to_rfc3339(),
+            model: model.to_string(),
             cwd: std::env::current_dir()
                 .ok()
-                .as_ref()
-                .and_then(|path| path.to_str()),
+                .and_then(|path| path.to_str().map(str::to_string)),
             parent_session_id: None,
         });
         Ok(Self {
@@ -104,13 +102,13 @@ impl SessionLogger {
             .store
             .load_session_meta()
             .ok_or_else(|| anyhow::anyhow!("Missing session metadata for {}", self.filename))?;
-        self.store.save_session_meta(SessionMetaSave {
-            session_id: &meta.session_id,
-            session_name: &meta.session_name,
-            created_at: &meta.created_at,
-            model: &meta.model,
-            cwd: meta.cwd.as_deref(),
-            parent_session_id: Some(parent_session_id),
+        self.store.save_session_meta(lash::SessionMeta {
+            session_id: meta.session_id,
+            session_name: meta.session_name,
+            created_at: meta.created_at,
+            model: meta.model,
+            cwd: meta.cwd,
+            parent_session_id: Some(parent_session_id.to_string()),
         });
         Ok(())
     }
@@ -338,13 +336,13 @@ mod tests {
     fn persist_root_snapshot(store: &Store, messages: Vec<Message>, ui_state: PersistedUiState) {
         let messages_json = serde_json::to_string(&messages).expect("messages");
         let ui_json = serde_json::to_string(&ui_state).expect("ui state");
-        store.save_agent_state(lash::store::AgentStateSave {
-            agent_id: crate::ROOT_SESSION_ID,
-            messages_json: &messages_json,
-            tool_calls_json: "[]",
-            ui_json: &ui_json,
+        store.save_agent_state(lash::AgentState {
+            agent_id: crate::ROOT_SESSION_ID.to_string(),
+            messages_json,
+            tool_calls_json: "[]".to_string(),
+            ui_json,
             iteration: 1,
-            config_json: "{}",
+            config_json: "{}".to_string(),
             repl_snapshot: None,
             input_tokens: 0,
             output_tokens: 0,
@@ -450,16 +448,15 @@ mod tests {
                     ..PersistedUiState::default()
                 },
             );
-            child_store.save_session_meta(SessionMetaSave {
-                session_id: "child",
-                session_name: "demo",
-                created_at: "2026-03-25T10:00:00Z",
-                model: "gpt-test",
+            child_store.save_session_meta(lash::SessionMeta {
+                session_id: "child".to_string(),
+                session_name: "demo".to_string(),
+                created_at: "2026-03-25T10:00:00Z".to_string(),
+                model: "gpt-test".to_string(),
                 cwd: std::env::current_dir()
                     .ok()
-                    .as_ref()
-                    .and_then(|path| path.to_str()),
-                parent_session_id: Some("parent"),
+                    .and_then(|path| path.to_str().map(str::to_string)),
+                parent_session_id: Some("parent".to_string()),
             });
             persist_root_snapshot(
                 &child_store,
@@ -497,7 +494,7 @@ mod tests {
             .unwrap();
             source_store.history_upsert_turn(
                 crate::ROOT_SESSION_ID,
-                &lash::store::HistoryTurnRecord {
+                lash::store::HistoryTurnRecord {
                     index: 0,
                     user_message: "hello".into(),
                     prose: "world".into(),

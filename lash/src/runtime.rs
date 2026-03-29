@@ -703,7 +703,7 @@ impl SessionManager for RuntimeSessionManager {
             if let Some(source_agent) = source_agent
                 && source_agent != agent_id
             {
-                store.history_copy(source_agent, &agent_id);
+                store.history_copy(source_agent, &agent_id).await;
             }
         }
         self.registry
@@ -1482,10 +1482,14 @@ impl LashRuntime {
                 .as_ref()
                 .and_then(|session| session.history_store())
             {
-                store.history_upsert_turn(
-                    &finalized.turn.state.agent_id,
-                    &crate::plugin::history::final_history_record(&finalized.turn),
-                );
+                store
+                    .save_turn_checkpoint(crate::store::TurnCheckpoint {
+                        agent_state: persisted_agent_state(&finalized.turn.state),
+                        latest_history_turn: Some(crate::plugin::history::final_history_record(
+                            &finalized.turn,
+                        )),
+                    })
+                    .await;
             }
             emit_agent_events_to_sink(events, finalized.events).await;
             self.state = finalized.turn.state.clone();
@@ -1494,6 +1498,30 @@ impl LashRuntime {
             self.state = assembled.state.clone();
             Ok(assembled)
         }
+    }
+}
+
+fn persisted_agent_state(state: &AgentStateEnvelope) -> crate::store::AgentState {
+    let config_json = serde_json::json!({
+        "last_prompt_usage": state.last_prompt_usage,
+        "task_state": state.task_state,
+        "replay_manifest": state.replay_manifest,
+        "plugin_snapshot": state.plugin_snapshot,
+    })
+    .to_string();
+    crate::store::AgentState {
+        agent_id: state.agent_id.clone(),
+        messages_json: serde_json::to_string(&state.messages).unwrap_or_else(|_| "[]".to_string()),
+        tool_calls_json: serde_json::to_string(&state.tool_calls)
+            .unwrap_or_else(|_| "[]".to_string()),
+        ui_json: "{}".to_string(),
+        iteration: state.iteration as i64,
+        config_json,
+        repl_snapshot: state.repl_snapshot.clone(),
+        input_tokens: state.token_usage.input_tokens,
+        output_tokens: state.token_usage.output_tokens,
+        cached_input_tokens: state.token_usage.cached_input_tokens,
+        reasoning_tokens: state.token_usage.reasoning_tokens,
     }
 }
 
@@ -3003,33 +3031,34 @@ mod tests {
         turns: Mutex<HashMap<String, Vec<crate::store::HistoryTurnRecord>>>,
     }
 
+    #[async_trait::async_trait]
     impl crate::store::RuntimeStore for RecordingStore {
-        fn store_archive(&self, content: &str) -> String {
+        async fn store_archive(&self, content: &str) -> String {
             format!("archive:{}", content.len())
         }
 
-        fn get_archive(&self, _hash: &str) -> Option<String> {
+        async fn get_archive(&self, _hash: &str) -> Option<String> {
             None
         }
 
-        fn save_agent_state(&self, _state: crate::store::AgentStateSave<'_>) {}
+        async fn save_agent_state(&self, _state: crate::store::AgentState) {}
 
-        fn load_agent_state(&self, _agent_id: &str) -> Option<crate::store::AgentState> {
+        async fn load_agent_state(&self, _agent_id: &str) -> Option<crate::store::AgentState> {
             None
         }
 
-        fn history_upsert_turn(&self, agent_id: &str, turn: &crate::store::HistoryTurnRecord) {
+        async fn history_upsert_turn(&self, agent_id: &str, turn: crate::store::HistoryTurnRecord) {
             let mut turns = self.turns.lock().expect("lock store");
             let entries = turns.entry(agent_id.to_string()).or_default();
             if let Some(existing) = entries.iter_mut().find(|entry| entry.index == turn.index) {
-                *existing = turn.clone();
+                *existing = turn;
             } else {
-                entries.push(turn.clone());
+                entries.push(turn);
                 entries.sort_by_key(|entry| entry.index);
             }
         }
 
-        fn history_export(&self, agent_id: &str) -> Vec<crate::store::HistoryTurnRecord> {
+        async fn history_export(&self, agent_id: &str) -> Vec<crate::store::HistoryTurnRecord> {
             self.turns
                 .lock()
                 .expect("lock store")
@@ -3038,18 +3067,22 @@ mod tests {
                 .unwrap_or_default()
         }
 
-        fn history_replace(&self, agent_id: &str, turns: &[crate::store::HistoryTurnRecord]) {
+        async fn history_replace(
+            &self,
+            agent_id: &str,
+            turns: Vec<crate::store::HistoryTurnRecord>,
+        ) {
             self.turns
                 .lock()
                 .expect("lock store")
-                .insert(agent_id.to_string(), turns.to_vec());
+                .insert(agent_id.to_string(), turns);
         }
 
-        fn save_session_meta(&self, _meta: crate::store::SessionMetaSave<'_>) {}
+        async fn save_session_meta(&self, _meta: crate::store::SessionMeta) {}
 
-        fn update_agent_ui_state(&self, _agent_id: &str, _ui_json: &str) {}
+        async fn update_agent_ui_state(&self, _agent_id: &str, _ui_json: &str) {}
 
-        fn load_session_meta(&self) -> Option<crate::store::SessionMeta> {
+        async fn load_session_meta(&self) -> Option<crate::store::SessionMeta> {
             None
         }
     }
@@ -5007,7 +5040,7 @@ mod tests {
             .await
             .expect("turn");
 
-        let items = store.history_export("root");
+        let items = store.history_export("root").await;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].index, 1);
         assert_eq!(items[0].user_message, "where did this go?");

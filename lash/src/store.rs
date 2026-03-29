@@ -120,21 +120,6 @@ pub struct AgentState {
     pub reasoning_tokens: i64,
 }
 
-#[derive(Clone, Debug)]
-pub struct AgentStateSave<'a> {
-    pub agent_id: &'a str,
-    pub messages_json: &'a str,
-    pub tool_calls_json: &'a str,
-    pub ui_json: &'a str,
-    pub iteration: i64,
-    pub config_json: &'a str,
-    pub repl_snapshot: Option<&'a [u8]>,
-    pub input_tokens: i64,
-    pub output_tokens: i64,
-    pub cached_input_tokens: i64,
-    pub reasoning_tokens: i64,
-}
-
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct HistoryTurnRecord {
     pub index: i64,
@@ -159,44 +144,53 @@ pub struct SessionMeta {
 }
 
 #[derive(Clone, Debug)]
-pub struct SessionMetaSave<'a> {
-    pub session_id: &'a str,
-    pub session_name: &'a str,
-    pub created_at: &'a str,
-    pub model: &'a str,
-    pub cwd: Option<&'a str>,
-    pub parent_session_id: Option<&'a str>,
+pub struct TurnCheckpoint {
+    pub agent_state: AgentState,
+    pub latest_history_turn: Option<HistoryTurnRecord>,
 }
 
 /// Persistence backend for archived content, session snapshots, and turn history.
 ///
 /// Implement this trait to back lash with a custom store such as Postgres while
 /// keeping the built-in SQLite `Store` as the default first-party implementation.
+#[async_trait::async_trait]
 pub trait RuntimeStore: Send + Sync {
-    fn store_archive(&self, content: &str) -> String;
-    fn get_archive(&self, hash: &str) -> Option<String>;
-    fn save_agent_state(&self, state: AgentStateSave<'_>);
-    fn load_agent_state(&self, agent_id: &str) -> Option<AgentState>;
-    fn history_upsert_turn(&self, agent_id: &str, turn: &HistoryTurnRecord);
-    fn history_export(&self, agent_id: &str) -> Vec<HistoryTurnRecord>;
-    fn history_replace(&self, agent_id: &str, turns: &[HistoryTurnRecord]);
-    fn save_session_meta(&self, meta: SessionMetaSave<'_>);
-    fn update_agent_ui_state(&self, agent_id: &str, ui_json: &str);
-    fn load_session_meta(&self) -> Option<SessionMeta>;
+    async fn store_archive(&self, content: &str) -> String;
+    async fn get_archive(&self, hash: &str) -> Option<String>;
+    async fn save_agent_state(&self, state: AgentState);
+    async fn load_agent_state(&self, agent_id: &str) -> Option<AgentState>;
+    async fn history_upsert_turn(&self, agent_id: &str, turn: HistoryTurnRecord);
+    async fn history_export(&self, agent_id: &str) -> Vec<HistoryTurnRecord>;
+    async fn history_replace(&self, agent_id: &str, turns: Vec<HistoryTurnRecord>);
+    async fn save_session_meta(&self, meta: SessionMeta);
+    async fn update_agent_ui_state(&self, agent_id: &str, ui_json: &str);
+    async fn load_session_meta(&self) -> Option<SessionMeta>;
 
-    fn history_copy(&self, source_agent_id: &str, target_agent_id: &str) {
-        let turns = self.history_export(source_agent_id);
-        self.history_replace(target_agent_id, &turns);
+    async fn save_turn_checkpoint(&self, checkpoint: TurnCheckpoint) {
+        let TurnCheckpoint {
+            agent_state,
+            latest_history_turn,
+        } = checkpoint;
+        let agent_id = agent_state.agent_id.clone();
+        self.save_agent_state(agent_state).await;
+        if let Some(turn) = latest_history_turn {
+            self.history_upsert_turn(&agent_id, turn).await;
+        }
     }
 
-    fn history_copy_from_store(
+    async fn history_copy(&self, source_agent_id: &str, target_agent_id: &str) {
+        let turns = self.history_export(source_agent_id).await;
+        self.history_replace(target_agent_id, turns).await;
+    }
+
+    async fn history_copy_from_store(
         &self,
         source: &(dyn RuntimeStore + '_),
         source_agent_id: &str,
         target_agent_id: &str,
     ) {
-        let turns = source.history_export(source_agent_id);
-        self.history_replace(target_agent_id, &turns);
+        let turns = source.history_export(source_agent_id).await;
+        self.history_replace(target_agent_id, turns).await;
     }
 }
 
@@ -252,7 +246,7 @@ impl Store {
     // ─── Agent state operations (snapshot/resume) ───
 
     /// Save or update an agent's state in the store.
-    pub fn save_agent_state(&self, state: AgentStateSave<'_>) {
+    pub fn save_agent_state(&self, state: AgentState) {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO agents (
@@ -307,12 +301,12 @@ impl Store {
 
     pub fn history_add_turn(&self, agent_id: &str, turn: &serde_json::Value) {
         let record = history_record_from_value(turn);
-        self.history_upsert_turn(agent_id, &record);
+        self.history_upsert_turn(agent_id, record);
     }
 
-    pub fn history_upsert_turn(&self, agent_id: &str, turn: &HistoryTurnRecord) {
+    pub fn history_upsert_turn(&self, agent_id: &str, turn: HistoryTurnRecord) {
         let conn = self.conn.lock().unwrap();
-        if let Err(err) = Self::history_upsert_turn_locked(&conn, agent_id, turn) {
+        if let Err(err) = Self::history_upsert_turn_locked(&conn, agent_id, &turn) {
             tracing::warn!(
                 error = %err,
                 agent_id = agent_id,
@@ -434,21 +428,23 @@ impl Store {
     }
 
     pub fn history_copy(&self, source_agent_id: &str, target_agent_id: &str) {
-        RuntimeStore::history_copy(self, source_agent_id, target_agent_id);
+        let turns = self.history_export(source_agent_id);
+        self.history_replace(target_agent_id, &turns);
     }
 
     pub fn history_copy_from_store(
         &self,
-        source: &(dyn RuntimeStore + '_),
+        source: &Store,
         source_agent_id: &str,
         target_agent_id: &str,
     ) {
-        RuntimeStore::history_copy_from_store(self, source, source_agent_id, target_agent_id);
+        let turns = source.history_export(source_agent_id);
+        self.history_replace(target_agent_id, &turns);
     }
 
     // ─── Session metadata ───
 
-    pub fn save_session_meta(&self, meta: SessionMetaSave<'_>) {
+    pub fn save_session_meta(&self, meta: SessionMeta) {
         let conn = self.conn.lock().unwrap();
         if let Err(err) = conn.execute(
             "INSERT OR REPLACE INTO session_meta
@@ -550,44 +546,45 @@ impl Store {
 }
 
 #[cfg(feature = "sqlite-store")]
+#[async_trait::async_trait]
 impl RuntimeStore for Store {
-    fn store_archive(&self, content: &str) -> String {
+    async fn store_archive(&self, content: &str) -> String {
         Self::store_archive(self, content)
     }
 
-    fn get_archive(&self, hash: &str) -> Option<String> {
+    async fn get_archive(&self, hash: &str) -> Option<String> {
         Self::get_archive(self, hash)
     }
 
-    fn save_agent_state(&self, state: AgentStateSave<'_>) {
+    async fn save_agent_state(&self, state: AgentState) {
         Self::save_agent_state(self, state);
     }
 
-    fn load_agent_state(&self, agent_id: &str) -> Option<AgentState> {
+    async fn load_agent_state(&self, agent_id: &str) -> Option<AgentState> {
         Self::load_agent_state(self, agent_id)
     }
 
-    fn history_upsert_turn(&self, agent_id: &str, turn: &HistoryTurnRecord) {
+    async fn history_upsert_turn(&self, agent_id: &str, turn: HistoryTurnRecord) {
         Self::history_upsert_turn(self, agent_id, turn);
     }
 
-    fn history_export(&self, agent_id: &str) -> Vec<HistoryTurnRecord> {
+    async fn history_export(&self, agent_id: &str) -> Vec<HistoryTurnRecord> {
         Self::history_export(self, agent_id)
     }
 
-    fn history_replace(&self, agent_id: &str, turns: &[HistoryTurnRecord]) {
-        Self::history_replace(self, agent_id, turns);
+    async fn history_replace(&self, agent_id: &str, turns: Vec<HistoryTurnRecord>) {
+        Self::history_replace(self, agent_id, &turns);
     }
 
-    fn save_session_meta(&self, meta: SessionMetaSave<'_>) {
+    async fn save_session_meta(&self, meta: SessionMeta) {
         Self::save_session_meta(self, meta);
     }
 
-    fn update_agent_ui_state(&self, agent_id: &str, ui_json: &str) {
+    async fn update_agent_ui_state(&self, agent_id: &str, ui_json: &str) {
         Self::update_agent_ui_state(self, agent_id, ui_json);
     }
 
-    fn load_session_meta(&self) -> Option<SessionMeta> {
+    async fn load_session_meta(&self) -> Option<SessionMeta> {
         Self::load_session_meta(self)
     }
 }
@@ -743,13 +740,13 @@ mod tests {
     #[test]
     fn agent_state_round_trip() {
         let s = mem();
-        s.save_agent_state(AgentStateSave {
-            agent_id: "ag1",
-            messages_json: "[]",
-            tool_calls_json: "[]",
-            ui_json: "{}",
+        s.save_agent_state(AgentState {
+            agent_id: "ag1".into(),
+            messages_json: "[]".into(),
+            tool_calls_json: "[]".into(),
+            ui_json: "{}".into(),
             iteration: 5,
-            config_json: "{}",
+            config_json: "{}".into(),
             repl_snapshot: None,
             input_tokens: 100,
             output_tokens: 50,
@@ -807,12 +804,12 @@ mod tests {
     #[test]
     fn session_meta_round_trip() {
         let s = mem();
-        s.save_session_meta(SessionMetaSave {
-            session_id: "s1",
-            session_name: "demo",
-            created_at: "2026-03-25T10:00:00Z",
-            model: "gpt-5",
-            cwd: Some("/tmp/demo"),
+        s.save_session_meta(SessionMeta {
+            session_id: "s1".into(),
+            session_name: "demo".into(),
+            created_at: "2026-03-25T10:00:00Z".into(),
+            model: "gpt-5".into(),
+            cwd: Some("/tmp/demo".into()),
             parent_session_id: None,
         });
         let meta = s.load_session_meta().expect("meta");
@@ -827,7 +824,7 @@ mod tests {
         let source = mem();
         source.history_upsert_turn(
             "root",
-            &HistoryTurnRecord {
+            HistoryTurnRecord {
                 index: 0,
                 user_message: "hello".into(),
                 prose: "world".into(),
@@ -852,13 +849,13 @@ mod tests {
     #[test]
     fn update_agent_ui_state_rewrites_existing_snapshot() {
         let s = mem();
-        s.save_agent_state(AgentStateSave {
-            agent_id: "ag1",
-            messages_json: "[]",
-            tool_calls_json: "[]",
-            ui_json: "{}",
+        s.save_agent_state(AgentState {
+            agent_id: "ag1".into(),
+            messages_json: "[]".into(),
+            tool_calls_json: "[]".into(),
+            ui_json: "{}".into(),
             iteration: 0,
-            config_json: "{}",
+            config_json: "{}".into(),
             repl_snapshot: None,
             input_tokens: 0,
             output_tokens: 0,

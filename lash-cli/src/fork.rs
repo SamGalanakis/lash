@@ -591,14 +591,14 @@ pub async fn fork_current_session(
     )?;
     child_logger.mark_as_child_of(&logger.session_id)?;
     child_logger.clone_history_from(logger.filename())?;
-    child_store.save_agent_state(lash::store::AgentStateSave {
-        agent_id: crate::ROOT_SESSION_ID,
-        messages_json: &parent_state.messages_json,
-        tool_calls_json: &parent_state.tool_calls_json,
-        ui_json: &parent_state.ui_json,
+    child_store.save_agent_state(lash::AgentState {
+        agent_id: crate::ROOT_SESSION_ID.to_string(),
+        messages_json: parent_state.messages_json.clone(),
+        tool_calls_json: parent_state.tool_calls_json.clone(),
+        ui_json: parent_state.ui_json.clone(),
         iteration: parent_state.iteration,
-        config_json: &parent_state.config_json,
-        repl_snapshot: parent_state.repl_snapshot.as_deref(),
+        config_json: parent_state.config_json.clone(),
+        repl_snapshot: parent_state.repl_snapshot.clone(),
         input_tokens: parent_state.input_tokens,
         output_tokens: parent_state.output_tokens,
         cached_input_tokens: parent_state.cached_input_tokens,
@@ -651,17 +651,17 @@ mod fork_tests {
             "parent".into(),
         )
         .expect("parent logger");
-        parent_store.save_agent_state(lash::store::AgentStateSave {
-            agent_id: crate::ROOT_SESSION_ID,
-            messages_json: r#"[{"id":"u1","role":"user","parts":[{"id":"u1.p0","kind":"text","content":"hello","tool_call_id":null,"tool_name":null,"prune_state":"intact"}],"origin":null}]"#,
-            tool_calls_json: "[]",
-            ui_json: &serde_json::to_string(&PersistedUiState {
+        parent_store.save_agent_state(lash::AgentState {
+            agent_id: crate::ROOT_SESSION_ID.to_string(),
+            messages_json: r#"[{"id":"u1","role":"user","parts":[{"id":"u1.p0","kind":"text","content":"hello","tool_call_id":null,"tool_name":null,"prune_state":"intact"}],"origin":null}]"#.to_string(),
+            tool_calls_json: "[]".to_string(),
+            ui_json: serde_json::to_string(&PersistedUiState {
                 blocks: vec![DisplayBlock::UserInput("hello".into())],
                 ..PersistedUiState::default()
             })
             .expect("ui json"),
             iteration: 1,
-            config_json: r#"{"task_state":{"kind":"live_resume","status":"running"}}"#,
+            config_json: r#"{"task_state":{"kind":"live_resume","status":"running"}}"#.to_string(),
             repl_snapshot: None,
             input_tokens: 10,
             output_tokens: 3,
@@ -670,7 +670,7 @@ mod fork_tests {
         });
         parent_store.history_upsert_turn(
             crate::ROOT_SESSION_ID,
-            &HistoryTurnRecord {
+            HistoryTurnRecord {
                 index: 0,
                 user_message: "hello".into(),
                 prose: "world".into(),

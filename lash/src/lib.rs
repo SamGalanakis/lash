@@ -132,9 +132,7 @@ pub use skill_catalog::{LoadedSkill, SkillCatalog};
 pub use skill_prompt::{
     append_skill_blocks, collect_skill_mentions, collect_skill_mentions_with_ranges,
 };
-pub use store::{
-    AgentState, AgentStateSave, HistoryTurnRecord, RuntimeStore, SessionMeta, SessionMetaSave,
-};
+pub use store::{AgentState, HistoryTurnRecord, RuntimeStore, SessionMeta, TurnCheckpoint};
 #[cfg(feature = "sqlite-store")]
 pub use store::{SqliteStore, Store};
 pub use text::strip_repl_fragments;

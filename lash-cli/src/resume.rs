@@ -408,13 +408,13 @@ mod tests {
             }
         })
         .to_string();
-        store.save_agent_state(lash::store::AgentStateSave {
-            agent_id: "root",
-            messages_json: "[]",
-            tool_calls_json: "[]",
-            ui_json: "{}",
+        store.save_agent_state(lash::AgentState {
+            agent_id: "root".to_string(),
+            messages_json: "[]".to_string(),
+            tool_calls_json: "[]".to_string(),
+            ui_json: "{}".to_string(),
             iteration: 7,
-            config_json: &config_json,
+            config_json,
             repl_snapshot: None,
             input_tokens: 1200,
             output_tokens: 340,
@@ -551,13 +551,13 @@ mod tests {
             }
         })
         .to_string();
-        store.save_agent_state(lash::store::AgentStateSave {
-            agent_id: "root",
-            messages_json: "[]",
-            tool_calls_json: "[]",
-            ui_json: "{}",
+        store.save_agent_state(lash::AgentState {
+            agent_id: "root".to_string(),
+            messages_json: "[]".to_string(),
+            tool_calls_json: "[]".to_string(),
+            ui_json: "{}".to_string(),
             iteration: 2,
-            config_json: &config_json,
+            config_json,
             repl_snapshot: None,
             input_tokens: 0,
             output_tokens: 0,
@@ -722,13 +722,13 @@ mod tests {
             }
         })
         .to_string();
-        store.save_agent_state(lash::store::AgentStateSave {
-            agent_id: crate::ROOT_SESSION_ID,
-            messages_json: &messages_json,
-            tool_calls_json: "[]",
-            ui_json: &ui_json,
+        store.save_agent_state(lash::AgentState {
+            agent_id: crate::ROOT_SESSION_ID.to_string(),
+            messages_json,
+            tool_calls_json: "[]".to_string(),
+            ui_json,
             iteration: 1,
-            config_json: &config_json,
+            config_json,
             repl_snapshot: None,
             input_tokens: 0,
             output_tokens: 0,

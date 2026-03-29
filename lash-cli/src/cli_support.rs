@@ -335,14 +335,14 @@ pub(crate) fn persist_root_agent_state(
         reasoning_tokens = state.token_usage.reasoning_tokens,
         "persisting root agent state"
     );
-    store.save_agent_state(lash::store::AgentStateSave {
-        agent_id: ROOT_SESSION_ID,
-        messages_json: &messages_json,
-        tool_calls_json: &tool_calls_json,
-        ui_json: &ui_json,
+    store.save_agent_state(lash::AgentState {
+        agent_id: ROOT_SESSION_ID.to_string(),
+        messages_json,
+        tool_calls_json,
+        ui_json,
         iteration: state.iteration as i64,
-        config_json: &config_json,
-        repl_snapshot: state.repl_snapshot.as_deref(),
+        config_json,
+        repl_snapshot: state.repl_snapshot.clone(),
         input_tokens: state.token_usage.input_tokens,
         output_tokens: state.token_usage.output_tokens,
         cached_input_tokens: state.token_usage.cached_input_tokens,
@@ -674,7 +674,7 @@ mod tests {
 
     use super::*;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
-    use lash::store::{AgentStateSave, SessionMetaSave};
+    use lash::{AgentState, SessionMeta};
 
     #[test]
     fn persist_live_ui_state_updates_existing_agent_snapshot() {
@@ -684,13 +684,13 @@ mod tests {
         let db_path = temp.path().join("session.db");
         let store = Store::open(&db_path).expect("store");
 
-        store.save_agent_state(AgentStateSave {
-            agent_id: ROOT_SESSION_ID,
-            messages_json: "[]",
-            tool_calls_json: "[]",
-            ui_json: "{}",
+        store.save_agent_state(AgentState {
+            agent_id: ROOT_SESSION_ID.to_string(),
+            messages_json: "[]".to_string(),
+            tool_calls_json: "[]".to_string(),
+            ui_json: "{}".to_string(),
             iteration: 0,
-            config_json: "{}",
+            config_json: "{}".to_string(),
             repl_snapshot: None,
             input_tokens: 0,
             output_tokens: 0,
@@ -719,12 +719,12 @@ mod tests {
         let db_path = temp.path().join("session.db");
         let store = Store::open(&db_path).expect("store");
 
-        store.save_session_meta(SessionMetaSave {
-            session_id: "s1",
-            session_name: "demo",
-            created_at: "2026-03-26T10:00:00Z",
-            model: "gpt-5",
-            cwd: Some("/tmp/demo"),
+        store.save_session_meta(SessionMeta {
+            session_id: "s1".to_string(),
+            session_name: "demo".to_string(),
+            created_at: "2026-03-26T10:00:00Z".to_string(),
+            model: "gpt-5".to_string(),
+            cwd: Some("/tmp/demo".to_string()),
             parent_session_id: None,
         });
 
@@ -739,13 +739,13 @@ mod tests {
         let db_path = temp.path().join("session.db");
         let store = Arc::new(Store::open(&db_path).expect("store"));
 
-        store.save_agent_state(AgentStateSave {
-            agent_id: ROOT_SESSION_ID,
-            messages_json: "[]",
-            tool_calls_json: "[]",
-            ui_json: "{}",
+        store.save_agent_state(AgentState {
+            agent_id: ROOT_SESSION_ID.to_string(),
+            messages_json: "[]".to_string(),
+            tool_calls_json: "[]".to_string(),
+            ui_json: "{}".to_string(),
             iteration: 0,
-            config_json: "{}",
+            config_json: "{}".to_string(),
             repl_snapshot: None,
             input_tokens: 0,
             output_tokens: 0,
