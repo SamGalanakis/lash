@@ -136,7 +136,7 @@ impl OpenAiGenericAdapter {
             } => (api_key.clone(), base_url.clone()),
             _ => {
                 return Err(LlmTransportError::new(
-                    "OpenAI-generic adapter received non-OpenAI-generic provider",
+                    "OpenAI-compatible adapter received non-OpenAI-compatible provider",
                 ));
             }
         };
@@ -324,10 +324,12 @@ impl OpenAiGenericAdapter {
             return Ok(());
         }
         let event: Value = serde_json::from_str(raw).map_err(|e| {
-            LlmTransportError::new(format!("Invalid OpenRouter SSE payload: {e}")).with_raw(raw)
+            LlmTransportError::new(format!("Invalid SSE payload: {e}")).with_raw(raw)
         })?;
         if let Some(err) = event.get("error") {
-            return Err(LlmTransportError::new("OpenRouter stream error").with_raw(err.to_string()));
+            return Err(
+                LlmTransportError::new("OpenAI-compatible stream error").with_raw(err.to_string())
+            );
         }
         if let Some(new_usage) = Self::usage_from_value(&event)
             && (new_usage.input_tokens > 0
@@ -376,8 +378,7 @@ impl OpenAiGenericAdapter {
 
     fn parse_non_stream_response(raw: &str) -> Result<(String, LlmUsage), LlmTransportError> {
         let value: Value = serde_json::from_str(raw).map_err(|e| {
-            LlmTransportError::new(format!("Invalid OpenRouter response JSON: {e}"))
-                .with_raw(raw.to_string())
+            LlmTransportError::new(format!("Invalid response JSON: {e}")).with_raw(raw.to_string())
         })?;
         let mut full = String::new();
         for piece in Self::extract_text_parts(&value) {
@@ -504,7 +505,7 @@ impl LlmTransport for OpenAiGenericAdapter {
             } => (api_key.clone(), base_url.clone()),
             _ => {
                 return Err(LlmTransportError::new(
-                    "OpenAI-generic adapter received non-OpenAI-generic provider",
+                    "OpenAI-compatible adapter received non-OpenAI-compatible provider",
                 ));
             }
         };
@@ -527,7 +528,7 @@ impl LlmTransport for OpenAiGenericAdapter {
                 self.chunk_timeout,
                 stream_events.is_some(),
             ),
-            "OpenAI-generic response start timed out",
+            "OpenAI-compatible response start timed out",
         )
         .await?;
 
@@ -536,12 +537,12 @@ impl LlmTransport for OpenAiGenericAdapter {
             let text = read_response_text(
                 resp,
                 self.request_timeout,
-                "OpenAI-generic response body timed out",
+                "OpenAI-compatible response body timed out",
             )
             .await
             .unwrap_or_default();
             return Err(LlmTransportError {
-                message: format!("OpenAI-generic request failed with {}", status.as_u16()),
+                message: format!("OpenAI-compatible request failed with {}", status.as_u16()),
                 retryable: status.as_u16() == 429 || status.as_u16() >= 500,
                 raw: Some(text),
                 code: Some(status.as_u16().to_string()),
@@ -559,13 +560,12 @@ impl LlmTransport for OpenAiGenericAdapter {
             let text = read_response_text(
                 resp,
                 self.request_timeout,
-                "OpenAI-generic response body timed out",
+                "OpenAI-compatible response body timed out",
             )
             .await?;
             let (content, usage) = Self::parse_non_stream_response(&text)?;
             let value: Value = serde_json::from_str(&text).map_err(|e| {
-                LlmTransportError::new(format!("Invalid OpenRouter response JSON: {e}"))
-                    .with_raw(text.clone())
+                LlmTransportError::new(format!("Invalid response JSON: {e}")).with_raw(text.clone())
             })?;
             let mut parts = Self::response_parts_from_value(&value);
             if parts.is_empty() && !content.is_empty() {
@@ -598,7 +598,7 @@ impl LlmTransport for OpenAiGenericAdapter {
         drive_sse_response(
             resp,
             self.chunk_timeout,
-            "OpenRouter stream chunk timed out",
+            "OpenAI-compatible stream chunk timed out",
             |raw| {
                 let prev_len = deltas.len();
                 let prev_usage = usage.clone();

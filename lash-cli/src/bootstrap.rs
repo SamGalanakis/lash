@@ -98,7 +98,7 @@ pub(crate) async fn run(
     let mut startup_system_message: Option<String> = None;
     let mut lash_config = if args.provider || existing_config.is_none() {
         if let Some(ref key) = args.api_key {
-            // Shortcut: env var or --api-key activates OpenAI-generic directly.
+            // Shortcut: env var or --api-key activates OpenAI-compatible directly.
             let provider = Provider::OpenAiGeneric {
                 api_key: key.clone(),
                 base_url: args.base_url.clone(),

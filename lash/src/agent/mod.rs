@@ -11,7 +11,7 @@ use crate::ToolDefinition;
 use crate::llm::factory::adapter_for;
 use crate::llm::types::{LlmEventSender, LlmStreamEvent, LlmToolSpec};
 use crate::plugin::PromptContribution;
-use crate::provider::{OPENAI_GENERIC_DEFAULT_BASE_URL, Provider};
+use crate::provider::Provider;
 use crate::session::Session;
 
 pub use lash_sansio::agent::{
@@ -50,7 +50,7 @@ impl Default for SessionPolicy {
             model: "anthropic/claude-sonnet-4.6".to_string(),
             provider: Provider::OpenAiGeneric {
                 api_key: String::new(),
-                base_url: OPENAI_GENERIC_DEFAULT_BASE_URL.to_string(),
+                base_url: String::new(),
                 options: crate::provider::ProviderOptions::default(),
             },
             max_context_tokens: None,

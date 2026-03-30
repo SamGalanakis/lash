@@ -1,4 +1,4 @@
-use crate::provider::{OPENAI_GENERIC_DEFAULT_BASE_URL, Provider};
+use crate::provider::{OPENROUTER_BASE_URL, Provider};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VariantRequestConfig {
@@ -26,7 +26,7 @@ fn is_openrouter(provider: &Provider) -> bool {
     matches!(
         provider,
         Provider::OpenAiGeneric { base_url, .. }
-            if base_url.trim_end_matches('/') == OPENAI_GENERIC_DEFAULT_BASE_URL
+            if base_url.trim_end_matches('/') == OPENROUTER_BASE_URL
     )
 }
 
@@ -177,7 +177,7 @@ mod tests {
     fn openrouter() -> Provider {
         Provider::OpenAiGeneric {
             api_key: "key".into(),
-            base_url: OPENAI_GENERIC_DEFAULT_BASE_URL.into(),
+            base_url: OPENROUTER_BASE_URL.into(),
             options: crate::provider::ProviderOptions::default(),
         }
     }
