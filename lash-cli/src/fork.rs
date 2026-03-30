@@ -613,14 +613,14 @@ mod fork_tests {
     use super::*;
     use crate::app::DisplayBlock;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
-    use lash::provider::{OPENAI_GENERIC_DEFAULT_BASE_URL, Provider, ProviderOptions};
+    use lash::provider::{Provider, ProviderOptions};
     use lash::store::HistoryTurnRecord;
     use std::collections::{BTreeMap, BTreeSet};
 
     fn dummy_provider() -> Provider {
         Provider::OpenAiGeneric {
             api_key: "test".to_string(),
-            base_url: OPENAI_GENERIC_DEFAULT_BASE_URL.to_string(),
+            base_url: "https://example.invalid/v1".to_string(),
             options: ProviderOptions::default(),
         }
     }

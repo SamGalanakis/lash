@@ -35,7 +35,7 @@ Interactive setup currently supports:
 
 - `codex`: OpenAI Codex OAuth
 - `google_oauth`: Google OAuth for Gemini
-- `openai-generic`: API key auth, defaulting to the OpenRouter base URL
+- `openai-compatible`: API key auth for any OpenAI-compatible API endpoint
 
 Autonomous single-shot usage:
 
@@ -307,7 +307,7 @@ Supported provider ids:
 
 - `codex`
 - `google_oauth`
-- `openai-generic`
+- `openai-compatible`
 
 Supported context strategies:
 
@@ -317,12 +317,12 @@ Config shape:
 
 ```json
 {
-  "active_provider": "openai-generic",
+  "active_provider": "openai-compatible",
   "providers": {
-    "openai-generic": {
-      "type": "openai-generic",
+    "openai-compatible": {
+      "type": "openai-compatible",
       "api_key": "...",
-      "base_url": "https://openrouter.ai/api/v1"
+      "base_url": "https://your-api-endpoint.com/v1"
     }
   },
   "auxiliary_secrets": {
@@ -344,11 +344,7 @@ Config shape:
 
 The config file is saved with mode `0600` on Unix.
 
-`openai-generic` defaults to:
-
-```txt
-https://openrouter.ai/api/v1
-```
+`openai-compatible` requires an explicit `base_url` — there is no default.
 
 ## License
 

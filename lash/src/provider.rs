@@ -11,11 +11,9 @@ use crate::mcp::McpServerConfig;
 use crate::model_info::{ModelCatalog, ResolvedModelSpec};
 use crate::oauth::{self, OAuthError};
 
-pub const OPENAI_GENERIC_DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
-
-fn default_base_url() -> String {
-    OPENAI_GENERIC_DEFAULT_BASE_URL.to_string()
-}
+/// Well-known OpenRouter base URL; used to detect OpenRouter-specific features
+/// at runtime (prompt caching, reasoning variants) but not as a default.
+pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ProviderKind {
@@ -23,7 +21,7 @@ pub enum ProviderKind {
     Codex,
     #[serde(rename = "google_oauth")]
     GoogleOAuth,
-    #[serde(rename = "openai-generic")]
+    #[serde(rename = "openai-compatible", alias = "openai-generic")]
     OpenAiGeneric,
 }
 
@@ -38,7 +36,7 @@ impl ProviderKind {
         match self {
             ProviderKind::Codex => "codex",
             ProviderKind::GoogleOAuth => "google_oauth",
-            ProviderKind::OpenAiGeneric => "openai-generic",
+            ProviderKind::OpenAiGeneric => "openai-compatible",
         }
     }
 
@@ -46,7 +44,7 @@ impl ProviderKind {
         match self {
             ProviderKind::Codex => "OpenAI Codex OAuth",
             ProviderKind::GoogleOAuth => "Google OAuth (Gemini)",
-            ProviderKind::OpenAiGeneric => "OpenAI-generic (API key)",
+            ProviderKind::OpenAiGeneric => "OpenAI-compatible (API key)",
         }
     }
 
@@ -54,7 +52,7 @@ impl ProviderKind {
         match self {
             ProviderKind::Codex => "Codex",
             ProviderKind::GoogleOAuth => "Google OAuth",
-            ProviderKind::OpenAiGeneric => "OpenAI-generic",
+            ProviderKind::OpenAiGeneric => "OpenAI-compatible",
         }
     }
 
@@ -62,15 +60,12 @@ impl ProviderKind {
         match self {
             ProviderKind::Codex => "ChatGPT Plus/Pro/Team",
             ProviderKind::GoogleOAuth => "Gemini via Google account",
-            ProviderKind::OpenAiGeneric => "API key, defaults to OpenRouter base URL",
+            ProviderKind::OpenAiGeneric => "Any OpenAI-compatible API endpoint",
         }
     }
 
     pub fn default_base_url(self) -> Option<&'static str> {
-        match self {
-            ProviderKind::OpenAiGeneric => Some(OPENAI_GENERIC_DEFAULT_BASE_URL),
-            _ => None,
-        }
+        None
     }
 }
 
@@ -217,10 +212,10 @@ pub struct LashConfig {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum Provider {
-    #[serde(rename = "openai-generic")]
+    #[serde(rename = "openai-compatible", alias = "openai-generic")]
     OpenAiGeneric {
         api_key: String,
-        #[serde(default = "default_base_url")]
+        #[serde(default)]
         base_url: String,
         #[serde(default, skip_serializing_if = "ProviderOptions::is_default")]
         options: ProviderOptions,
@@ -371,7 +366,7 @@ impl Provider {
         })
     }
 
-    /// Refresh OAuth tokens if needed. No-op for OpenAI-generic.
+    /// Refresh OAuth tokens if needed. No-op for OpenAI-compatible.
     /// Returns `true` if tokens were updated (caller should persist).
     pub async fn ensure_fresh(&mut self) -> Result<bool, OAuthError> {
         let now = std::time::SystemTime::now()
@@ -585,7 +580,7 @@ mod tests {
     fn openai_generic() -> Provider {
         Provider::OpenAiGeneric {
             api_key: "test-key".into(),
-            base_url: "https://openrouter.ai/api/v1".into(),
+            base_url: OPENROUTER_BASE_URL.into(),
             options: ProviderOptions::default(),
         }
     }
@@ -785,12 +780,12 @@ mod tests {
     #[test]
     fn rejects_unknown_top_level_config_fields() {
         let raw = serde_json::json!({
-            "active_provider": "openai-generic",
+            "active_provider": "openai-compatible",
             "providers": {
-                "openai-generic": {
-                    "type": "openai-generic",
+                "openai-compatible": {
+                    "type": "openai-compatible",
                     "api_key": "k",
-                    "base_url": "https://openrouter.ai/api/v1"
+                    "base_url": "https://example.com/v1"
                 }
             },
             "tavily_api_key": "legacy-key"
@@ -803,12 +798,12 @@ mod tests {
     #[test]
     fn auxiliary_secrets_preserved() {
         let raw = serde_json::json!({
-            "active_provider": "openai-generic",
+            "active_provider": "openai-compatible",
             "providers": {
-                "openai-generic": {
-                    "type": "openai-generic",
+                "openai-compatible": {
+                    "type": "openai-compatible",
                     "api_key": "k",
-                    "base_url": "https://openrouter.ai/api/v1"
+                    "base_url": "https://example.com/v1"
                 }
             },
             "auxiliary_secrets": {
@@ -823,12 +818,12 @@ mod tests {
     #[test]
     fn mcp_servers_preserved() {
         let raw = serde_json::json!({
-            "active_provider": "openai-generic",
+            "active_provider": "openai-compatible",
             "providers": {
-                "openai-generic": {
-                    "type": "openai-generic",
+                "openai-compatible": {
+                    "type": "openai-compatible",
                     "api_key": "k",
-                    "base_url": "https://openrouter.ai/api/v1"
+                    "base_url": "https://example.com/v1"
                 }
             },
             "mcp_servers": {
@@ -860,12 +855,12 @@ mod tests {
     #[test]
     fn runtime_context_strategy_preserved() {
         let raw = serde_json::json!({
-            "active_provider": "openai-generic",
+            "active_provider": "openai-compatible",
             "providers": {
-                "openai-generic": {
-                    "type": "openai-generic",
+                "openai-compatible": {
+                    "type": "openai-compatible",
                     "api_key": "k",
-                    "base_url": "https://openrouter.ai/api/v1"
+                    "base_url": "https://example.com/v1"
                 }
             },
             "runtime": {
@@ -898,9 +893,9 @@ mod tests {
     #[test]
     fn provider_timeout_false_disables_request_deadline() {
         let raw = serde_json::json!({
-            "type": "openai-generic",
+            "type": "openai-compatible",
             "api_key": "k",
-            "base_url": "https://openrouter.ai/api/v1",
+            "base_url": "https://example.com/v1",
             "options": {
                 "timeout": false,
                 "chunk_timeout": 45000
@@ -916,9 +911,9 @@ mod tests {
     #[test]
     fn provider_timeout_requires_false_or_positive_integer() {
         let err = serde_json::from_value::<Provider>(serde_json::json!({
-            "type": "openai-generic",
+            "type": "openai-compatible",
             "api_key": "k",
-            "base_url": "https://openrouter.ai/api/v1",
+            "base_url": "https://example.com/v1",
             "options": {
                 "timeout": true
             }

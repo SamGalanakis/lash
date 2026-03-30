@@ -26,7 +26,6 @@ mod util;
 
 use clap::Parser;
 use crossterm::cursor::SetCursorStyle;
-use lash::provider::OPENAI_GENERIC_DEFAULT_BASE_URL;
 use lash::*;
 
 #[cfg(test)]
@@ -79,15 +78,15 @@ fn autonomous_prompt_overrides() -> Vec<PromptSectionOverride> {
 #[derive(Parser)]
 #[command(name = "lash-cli", bin_name = "lash", version = APP_VERSION, long_version = LONG_VERSION)]
 struct Args {
-    /// OpenAI-generic API key (optional — use --provider to configure interactively)
-    #[arg(long, env = "OPENAI_GENERIC_API_KEY")]
+    /// OpenAI-compatible API key (optional — use --provider to configure interactively)
+    #[arg(long, env = "OPENAI_COMPATIBLE_API_KEY")]
     api_key: Option<String>,
 
     /// Tavily API key for web search
     #[arg(long, env = "TAVILY_API_KEY")]
     tavily_api_key: Option<String>,
 
-    /// Model name (defaults per provider: Codex/OpenAI-generic/Google OAuth)
+    /// Model name (defaults per provider: Codex/OpenAI-compatible/Google OAuth)
     #[arg(long)]
     model: Option<String>,
 
@@ -104,7 +103,7 @@ struct Args {
     context_strategy: Option<String>,
 
     /// Base URL for the LLM API
-    #[arg(long, default_value = OPENAI_GENERIC_DEFAULT_BASE_URL)]
+    #[arg(long, default_value = "")]
     base_url: String,
 
     /// Disable mouse scroll support (re-enables terminal text selection)

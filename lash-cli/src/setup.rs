@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use lash::oauth;
-use lash::provider::{LashConfig, OPENAI_GENERIC_DEFAULT_BASE_URL, Provider, ProviderKind};
+use lash::provider::{LashConfig, Provider, ProviderKind};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -279,22 +279,29 @@ async fn run_setup_inner(
                             .unwrap_or(0);
                     }
                 }
+                KeyCode::Tab if *mode == CredentialMode::OpenAiGenericKey => {
+                    // Skip API key entirely
+                    app.step = SetupStep::InputBaseUrl {
+                        api_key: String::new(),
+                        input: String::new(),
+                        cursor: 0,
+                    };
+                }
                 KeyCode::Enter => {
                     let val = input.trim().to_string();
-                    if val.is_empty() {
-                        *error = Some("Cannot be empty".into());
-                    } else {
-                        match mode {
-                            CredentialMode::OpenAiGenericKey => {
-                                let default_url = OPENAI_GENERIC_DEFAULT_BASE_URL.to_string();
-                                let cursor_pos = default_url.len();
-                                app.step = SetupStep::InputBaseUrl {
-                                    api_key: val,
-                                    input: default_url,
-                                    cursor: cursor_pos,
-                                };
-                            }
-                            CredentialMode::GoogleOAuth => {
+                    match mode {
+                        CredentialMode::OpenAiGenericKey => {
+                            // API key may be empty (some endpoints don't need auth)
+                            app.step = SetupStep::InputBaseUrl {
+                                api_key: val,
+                                input: String::new(),
+                                cursor: 0,
+                            };
+                        }
+                        CredentialMode::GoogleOAuth => {
+                            if val.is_empty() {
+                                *error = Some("Cannot be empty".into());
+                            } else {
                                 let Some(v) = verifier.take() else {
                                     *error =
                                         Some("Missing auth state; press Esc and retry.".into());
@@ -398,11 +405,10 @@ async fn run_setup_inner(
                 }
                 KeyCode::Enter => {
                     let base_url = input.trim().to_string();
-                    let base_url = if base_url.is_empty() {
-                        OPENAI_GENERIC_DEFAULT_BASE_URL.to_string()
-                    } else {
-                        base_url
-                    };
+                    if base_url.is_empty() {
+                        // Base URL is required — there is no default
+                        continue;
+                    }
                     provider = Some(Provider::OpenAiGeneric {
                         api_key: api_key.clone(),
                         base_url,
@@ -735,7 +741,7 @@ fn draw_provider_select(
                     Style::default().fg(theme::SODIUM),
                 ),
                 Span::styled(
-                    format!("{:<16}", name),
+                    format!("{:<20}", name),
                     Style::default()
                         .fg(theme::CHALK)
                         .add_modifier(Modifier::BOLD),
@@ -746,7 +752,7 @@ fn draw_provider_select(
             lines.push(Line::from(vec![
                 Span::styled(format!("{}  ", pad), Style::default()),
                 Span::styled(
-                    format!("{:<16}", name),
+                    format!("{:<20}", name),
                     Style::default().fg(theme::ASH_TEXT),
                 ),
                 Span::styled(desc, Style::default().fg(theme::ASH_MID)),
@@ -822,10 +828,7 @@ fn draw_credential_input(
         }
         CredentialMode::OpenAiGenericKey => {
             lines.push(Line::from(Span::styled(
-                format!(
-                    "{}Enter your OpenAI-generic API key. Default base URL: {}",
-                    pad, OPENAI_GENERIC_DEFAULT_BASE_URL
-                ),
+                format!("{}API key (enter to skip if not needed):", pad),
                 Style::default().fg(theme::ASH_TEXT),
             )));
             lines.push(Line::from(""));
@@ -891,12 +894,17 @@ fn draw_credential_input(
 
     lines.push(Line::from(""));
     // Help bar
-    lines.push(Line::from(vec![
+    let mut help_spans = vec![
         Span::styled(format!("{}enter", pad), theme::help_key()),
         Span::styled(" submit  ", theme::help_desc()),
-        Span::styled("esc", theme::help_key()),
-        Span::styled(" back", theme::help_desc()),
-    ]));
+    ];
+    if mode == CredentialMode::OpenAiGenericKey {
+        help_spans.push(Span::styled("tab", theme::help_key()));
+        help_spans.push(Span::styled(" skip  ", theme::help_desc()));
+    }
+    help_spans.push(Span::styled("esc", theme::help_key()));
+    help_spans.push(Span::styled(" back", theme::help_desc()));
+    lines.push(Line::from(help_spans));
 
     let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::FORM));
     frame.render_widget(paragraph, area);
@@ -1009,7 +1017,7 @@ fn draw_base_url_input(frame: &mut Frame, area: Rect, input: &str, cursor: usize
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        format!("{}Base URL (enter to keep default):", pad),
+        format!("{}Base URL (required):", pad),
         Style::default().fg(theme::ASH_TEXT),
     )));
     lines.push(Line::from(""));

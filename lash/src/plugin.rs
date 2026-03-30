@@ -942,7 +942,7 @@ mod tests {
                 policy: SessionPolicy {
                     provider: crate::Provider::OpenAiGeneric {
                         api_key: String::new(),
-                        base_url: crate::provider::OPENAI_GENERIC_DEFAULT_BASE_URL.to_string(),
+                        base_url: "https://example.invalid/v1".to_string(),
                         options: crate::ProviderOptions::default(),
                     },
                     model: "mock-model".to_string(),
@@ -973,7 +973,7 @@ mod tests {
                 policy: SessionPolicy {
                     provider: crate::Provider::OpenAiGeneric {
                         api_key: String::new(),
-                        base_url: crate::provider::OPENAI_GENERIC_DEFAULT_BASE_URL.to_string(),
+                        base_url: "https://example.invalid/v1".to_string(),
                         options: crate::ProviderOptions::default(),
                     },
                     model: "mock-model".to_string(),
