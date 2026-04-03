@@ -1002,6 +1002,26 @@ impl App {
         self.invalidate_height_cache();
     }
 
+    fn merge_into_trailing_assistant_block(&mut self, text: &str) -> bool {
+        let Some(DisplayBlock::AssistantText(existing)) = self.blocks.last_mut() else {
+            return false;
+        };
+        let combined = if text.starts_with(existing.as_str()) {
+            text.to_string()
+        } else {
+            format!("{existing}{text}")
+        };
+        let cleaned = normalize_stream_text(&combined);
+        if cleaned.is_empty() {
+            return false;
+        }
+        if *existing != cleaned {
+            *existing = cleaned;
+            self.invalidate_height_cache();
+        }
+        true
+    }
+
     fn close_pending_text(&mut self) {
         if let Some(turn) = self.live_turn.as_mut() {
             turn.assistant_block_idx = None;
@@ -1106,6 +1126,14 @@ impl App {
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::TextDelta { content } => {
+                if !self.running
+                    && self.live_turn.is_none()
+                    && self.pending_text.is_empty()
+                    && self.merge_into_trailing_assistant_block(&content)
+                {
+                    self.scroll_to_bottom();
+                    return;
+                }
                 self.mark_first_token_arrived();
                 self.live_output_chars_estimate += content.chars().count() as i64;
                 self.live_output_tokens_estimate =
@@ -2847,6 +2875,38 @@ mod tests {
             content: "efgh".into(),
         });
         assert_eq!(app.live_output_tokens_estimate, 2);
+    }
+
+    #[test]
+    fn late_text_deltas_after_stop_turn_extend_last_assistant_block() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.start_turn();
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: "I".into(),
+        });
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: "’m".into(),
+        });
+
+        app.stop_turn();
+
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: " an".into(),
+        });
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: " AI".into(),
+        });
+
+        let assistant_blocks: Vec<&str> = app
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                DisplayBlock::AssistantText(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(assistant_blocks, vec!["I’m an AI"]);
     }
 
     #[test]
