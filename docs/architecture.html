@@ -735,7 +735,7 @@
           <code>PluginRegistrar</code> namespaces such as <code>tools()</code>, <code>prompt()</code>,
           <code>surface()</code>, and <code>turn()</code>. The active plugin session also owns turn preparation,
           checkpoint directive handling, and finalization before committed history is projected.
-          Both execution paths are driven by a single synchronous state machine (<code>TurnMachine</code> in <code>lash/src/sansio.rs</code>)
+          Both execution paths are driven by a single synchronous state machine (<code>TurnMachine</code> in <code>lash-sansio/src/sansio.rs</code>)
           that emits I/O effects (<code>LlmCall</code>, <code>ToolCall</code>, <code>ExecCode</code>, <code>Sleep</code>) for the async host driver to fulfil.
         </div>
         <div class="cell-grid cols-3">
@@ -766,7 +766,7 @@
         <div class="arch-card-tag tag-agent"><span class="dot"></span>Core Architecture</div>
         <div class="arch-card-title">Sans-IO Turn Machine</div>
         <div class="arch-card-desc">
-          <code>TurnMachine</code> (<code>lash/src/sansio.rs</code>) is a synchronous state machine that owns all protocol logic
+          <code>TurnMachine</code> (<code>lash-sansio/src/sansio.rs</code>) is a synchronous state machine that owns all protocol logic
           for a single turn. The async host driver (<code>LashRuntime</code> in <code>lash/src/runtime.rs</code>) is a thin loop
           that calls <code>poll_effect()</code> to drain effects and <code>handle_response()</code> to feed results back.
           This separation makes the core turn logic independently testable without a tokio runtime.
@@ -1116,7 +1116,7 @@ format("x", a)         <span class="comment"># unused args are invalid</span></p
             <p>
               In REPL mode, tools are called with <code>call tool_name { ... }</code>. Use <code>call search_tools {}</code>
               only when the prompt tells you additional tools were omitted for brevity. The visible tool list comes from the active plugin-owned
-              tool surface. There is no <code>T</code> namespace or legacy Python runtime layer. Independent
+              tool surface. There is no <code>T</code> namespace or legacy runtime layer. Independent
               branches use <code>parallel { ... }</code>, and branches ending in <code>call ...</code> produce the same
               wrapped <code>{ ok, value, error }</code> result records as ordinary tool calls. Bare expression branches are also legal
               and contribute their direct values to the returned list.
@@ -1182,7 +1182,7 @@ patch = <span class="kw">call</span> apply_patch { input: <span class="str">"""*
         <div class="arch-card-title">Native Tools Execution Model</div>
         <div class="arch-card-desc">
           The Rust agent loop sends tool schemas to the provider. The model responds with native tool calls
-          when execution is needed &mdash; no Python, no <code>&lt;repl&gt;</code>. Tool results are fed back as structured
+          when execution is needed &mdash; no <code>&lt;repl&gt;</code> blocks. Tool results are fed back as structured
           content for the next turn. Native-tools-only builds compile just this backend and make it the default.
         </div>
         <div class="cell-grid cols-2">
@@ -1306,7 +1306,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="arch-card-tag tag-native"><span class="dot"></span>Reinjection</div>
         <div class="arch-card-title">Native Turn Cycle</div>
         <div class="arch-card-desc">
-          The model sees structured tool call/result replay instead of Python state. Tool results are reinjected
+          The model sees structured tool call/result replay instead of REPL state. Tool results are reinjected
           as direct output/error content, and grouped multi-call turns are replayed back to providers where supported.
         </div>
 
@@ -1330,7 +1330,7 @@ Added `timeout_ms: u64` field to the Config struct.</pre>
         <div class="cell-grid cols-2" style="margin-top: 20px;">
           <div class="cell">
             <h4>No Persistent State</h4>
-            <p>Unlike REPL mode, there is no Python namespace. Each tool call is stateless. Context comes from the transcript and prior tool results only.</p>
+            <p>Unlike REPL mode, there is no persistent namespace. Each tool call is stateless. Context comes from the transcript and prior tool results only.</p>
           </div>
           <div class="cell">
             <h4>Provider Streaming</h4>
@@ -1713,10 +1713,10 @@ worker = <span class="kw">call</span> agent_call { prompt: <span class="str">"Se
       <div class="ref"><b>Runtime API</b><code>lash/src/runtime.rs</code></div>
       <div class="ref"><b>Dynamic Runtime</b><code>lash/src/dynamic.rs</code></div>
       <div class="ref"><b>Runtime Loop</b><code>lash/src/runtime.rs</code></div>
-      <div class="ref"><b>Sans-IO Turn Machine</b><code>lash/src/sansio.rs</code></div>
-      <div class="ref"><b>Prompt Contracts</b><code>lash/src/agent/prompt.rs</code></div>
+      <div class="ref"><b>Sans-IO Turn Machine</b><code>lash-sansio/src/sansio.rs</code></div>
+      <div class="ref"><b>Prompt Contracts</b><code>lash-sansio/src/agent/prompt.rs</code></div>
       <div class="ref"><b>Session Bridge</b><code>lash/src/session.rs</code></div>
-      <div class="ref"><b>LLM Message Types</b><code>lash/src/llm/types.rs</code></div>
+      <div class="ref"><b>LLM Message Types</b><code>lash-sansio/src/llm/types.rs</code></div>
       <div class="ref"><b>Embedded REPL</b><code>lash/src/embedded.rs</code></div>
       <div class="ref"><b>Tool Model</b><code>lash/src/lib.rs + lash/src/tools/*</code></div>
       <div class="ref"><b>Plugins &amp; Surface</b><code>lash/src/plugin.rs + lash/src/plugin_builtin.rs</code></div>
