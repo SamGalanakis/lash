@@ -1,24 +1,28 @@
 mod activity;
 mod app;
+mod assistant_text;
 mod autonomous;
 mod bootstrap;
 mod cli_support;
 mod command;
 mod delegate_tools;
 mod diff;
+mod editor;
 mod event;
 mod fork;
 mod input_items;
 mod interactive;
 mod markdown;
+mod overlay;
 mod plugin_surface;
 mod prompt_overrides;
-mod replay;
+mod repo_status;
 mod resume;
 mod session_log;
 mod setup;
 #[cfg(test)]
 mod test_support;
+mod text_display;
 mod theme;
 mod ui;
 mod update;
@@ -106,10 +110,6 @@ struct Args {
     #[arg(long, default_value = "")]
     base_url: String,
 
-    /// Disable mouse scroll support (re-enables terminal text selection)
-    #[arg(long)]
-    no_mouse: bool,
-
     /// Enable detailed lifecycle/debug logs and per-session LLM traces
     #[arg(long)]
     debug: bool,
@@ -181,6 +181,7 @@ fn cleanup_terminal() {
         std::io::stdout(),
         crossterm::event::PopKeyboardEnhancementFlags
     );
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
     let _ = crossterm::execute!(
         std::io::stdout(),
@@ -190,7 +191,7 @@ fn cleanup_terminal() {
     ratatui::restore();
 }
 
-fn configure_terminal_ui(no_mouse: bool) -> anyhow::Result<()> {
+fn configure_terminal_ui() -> anyhow::Result<()> {
     crossterm::execute!(
         std::io::stdout(),
         crossterm::style::Print("\x1b]11;rgb:0e/0d/0b\x1b\\"),
@@ -204,10 +205,8 @@ fn configure_terminal_ui(no_mouse: bool) -> anyhow::Result<()> {
     );
     // Bracketed paste tells the terminal we can accept paste payloads as literal text.
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
-    if !no_mouse {
-        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
-    }
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableFocusChange)?;
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
     Ok(())
 }
 
@@ -277,19 +276,19 @@ mod tests {
     #[test]
     fn insert_inline_marker_adds_spaces_when_touching_text() {
         let mut app = App::new("model".into(), "session".into());
-        app.input = "hello world".into();
-        app.cursor_pos = 5;
+        app.set_input("hello world".into());
+        app.editor.cursor_pos = 5;
         insert_inline_marker(&mut app, "[Image #1]");
-        assert_eq!(app.input, "hello [Image #1] world");
+        assert_eq!(app.input(), "hello [Image #1] world");
     }
 
     #[test]
     fn insert_inline_marker_keeps_existing_spacing() {
         let mut app = App::new("model".into(), "session".into());
-        app.input = "hello ".into();
-        app.cursor_pos = app.input.len();
+        app.set_input("hello ".into());
+        app.editor.cursor_pos = app.input().len();
         insert_inline_marker(&mut app, "[Image #1]");
-        assert_eq!(app.input, "hello [Image #1]");
+        assert_eq!(app.input(), "hello [Image #1]");
     }
 
     #[test]
@@ -368,6 +367,8 @@ mod tests {
         let controls = controls_text();
         assert!(controls.contains("Up (empty draft)   Edit last queued turn"));
         assert!(!controls.contains("Backspace          Restore last next-turn draft"));
+        assert!(!controls.contains("Shift+Drag"));
+        assert!(!controls.contains("F6"));
     }
 
     #[test]

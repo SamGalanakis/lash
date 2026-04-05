@@ -2,7 +2,7 @@ use lash::strip_repl_fragments;
 
 use crate::app::DisplayBlock;
 
-pub fn normalize_stream_text(text: &str) -> String {
+pub fn normalize_assistant_text(text: &str) -> String {
     let sanitized = strip_repl_fragments(text);
     let mut out = String::new();
     let mut started = false;
@@ -40,10 +40,39 @@ pub fn normalize_stream_text(text: &str) -> String {
 }
 
 pub fn push_assistant_text_block(blocks: &mut Vec<DisplayBlock>, text: &str) -> bool {
-    let cleaned = normalize_stream_text(text);
+    let cleaned = normalize_assistant_text(text);
     if cleaned.is_empty() {
         return false;
     }
     blocks.push(DisplayBlock::AssistantText(cleaned));
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_assistant_text_collapses_blank_runs() {
+        let raw = "\n\nline one\n\n\nline two\n\n";
+        assert_eq!(normalize_assistant_text(raw), "line one\n\nline two");
+    }
+
+    #[test]
+    fn normalize_assistant_text_handles_whitespace_only_lines() {
+        let raw = " \n\t\nhello\n   \n\t \nworld\n";
+        assert_eq!(normalize_assistant_text(raw), "hello\n\nworld");
+    }
+
+    #[test]
+    fn normalize_assistant_text_strips_repl_fragments() {
+        let raw = "<repl>\nproc\n</repl>\n\nok";
+        assert_eq!(normalize_assistant_text(raw), "proc\n\nok");
+    }
+
+    #[test]
+    fn normalize_assistant_text_strips_dangling_repl_fragments() {
+        let raw = "<repl\nhello\n</repl";
+        assert_eq!(normalize_assistant_text(raw), "hello");
+    }
 }

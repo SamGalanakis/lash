@@ -69,8 +69,29 @@ impl OpenAiGenericAdapter {
         }
     }
 
+    /// Build a single content part for a message. Images become `image_url` objects;
+    /// text becomes a `{"type":"text","text":"..."}` object suitable for multipart arrays.
+    fn content_part_for_message(req: &LlmRequest, msg: &LlmMessage) -> Value {
+        match msg.kind.as_str() {
+            "image" => {
+                let idx = msg.image_idx.max(0) as usize;
+                if let Some(att) = req.attachments.get(idx) {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
+                    let data_url = format!("data:{};base64,{}", att.mime, b64);
+                    json!({
+                        "type": "image_url",
+                        "image_url": {"url": data_url}
+                    })
+                } else {
+                    json!({"type": "text", "text": "[Image attached]"})
+                }
+            }
+            _ => json!({"type": "text", "text": msg.content}),
+        }
+    }
+
     fn build_messages(&self, req: &LlmRequest) -> Vec<Value> {
-        let mut out = Vec::new();
+        let mut out: Vec<Value> = Vec::new();
         for chunk in coalesce_replay_messages(&req.messages) {
             match chunk {
                 LlmReplayChunk::Message(msg) => {
@@ -79,9 +100,37 @@ impl OpenAiGenericAdapter {
                     } else {
                         Self::role_name(&msg.role)
                     };
+
+                    // Merge consecutive user messages into a single multipart content
+                    // array so text + images land in one API message (required by
+                    // OpenAI-compatible vision APIs).
+                    if role == "user"
+                        && msg.kind != "tool_result"
+                        && let Some(prev) = out.last_mut()
+                        && prev.get("role").and_then(|r| r.as_str()) == Some("user")
+                        && prev.get("tool_call_id").is_none()
+                    {
+                        let part = Self::content_part_for_message(req, &msg);
+                        let content = &mut prev["content"];
+                        if content.is_array() {
+                            content.as_array_mut().unwrap().push(part);
+                        } else {
+                            // Previous message had a plain string content; promote
+                            // it to a multipart array.
+                            let prev_text =
+                                content.as_str().map(|s| s.to_string()).unwrap_or_default();
+                            *content = json!([
+                                {"type": "text", "text": prev_text},
+                                part,
+                            ]);
+                        }
+                        continue;
+                    }
+
+                    let content = Self::content_json_for_message(req, &msg);
                     let mut item = json!({
                         "role": role,
-                        "content": Self::content_json_for_message(req, &msg),
+                        "content": content,
                     });
                     if role == "tool" {
                         item["tool_call_id"] = json!(msg.tool_call_id.clone().unwrap_or_default());

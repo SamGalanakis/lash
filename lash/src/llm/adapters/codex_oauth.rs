@@ -91,9 +91,21 @@ impl CodexOAuthAdapter {
                             "output": msg.content,
                         }));
                     } else {
+                        // Merge consecutive user messages into a single multipart
+                        // content array so text + images land in one API message.
+                        let role_str = Self::role_name(&msg.role);
+                        let part = Self::content_part_for_message(req, &msg);
+                        if role_str == "user"
+                            && let Some(prev) = input.last_mut()
+                            && prev.get("role").and_then(|r| r.as_str()) == Some("user")
+                            && prev.get("content").is_some_and(|c| c.is_array())
+                        {
+                            prev["content"].as_array_mut().unwrap().push(part);
+                            continue;
+                        }
                         input.push(json!({
-                            "role": Self::role_name(&msg.role),
-                            "content": [Self::content_part_for_message(req, &msg)],
+                            "role": role_str,
+                            "content": [part],
                         }));
                     }
                 }

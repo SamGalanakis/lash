@@ -522,6 +522,7 @@ pub struct LashRuntime {
     llm_factory: LlmFactory,
     managed_sessions: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
     managed_turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
+    overflow_recovery_attempted: bool,
 }
 
 struct ManagedSessionTurn {
@@ -879,6 +880,18 @@ fn plugin_message_to_message(
 }
 
 impl LashRuntime {
+    fn has_overflow_error(assembled: &AssembledTurn) -> bool {
+        assembled.errors.iter().any(|issue| {
+            let lower = issue.message.to_lowercase();
+            lower.contains("prompt is too long")
+                || lower.contains("context_length_exceeded")
+                || lower.contains("maximum context length")
+                || lower.contains("too many tokens")
+                || lower.contains("exceeds the maximum number of tokens")
+                || lower.contains("request too large")
+        })
+    }
+
     fn max_context_tokens(&self) -> usize {
         self.policy
             .max_context_tokens
@@ -938,6 +951,7 @@ impl LashRuntime {
             llm_factory: default_llm_factory(),
             managed_sessions: Arc::new(Mutex::new(HashMap::new())),
             managed_turns: Arc::new(Mutex::new(HashMap::new())),
+            overflow_recovery_attempted: false,
         })
     }
 
@@ -1178,7 +1192,49 @@ impl LashRuntime {
     }
 
     /// Run a single turn and stream events to the host sink.
+    /// Includes overflow recovery: if the LLM rejects the prompt as too long,
+    /// the context is force-compacted and the turn is retried once.
     pub async fn stream_turn(
+        &mut self,
+        input: TurnInput,
+        events: &dyn EventSink,
+        cancel: CancellationToken,
+    ) -> Result<AssembledTurn, RuntimeError> {
+        let saved_messages = self.state.messages.clone();
+        let saved_prompt_usage = self.state.last_prompt_usage.clone();
+
+        let assembled = self
+            .stream_turn_inner(input.clone(), events, cancel.clone())
+            .await?;
+
+        if !self.overflow_recovery_attempted && Self::has_overflow_error(&assembled) {
+            self.overflow_recovery_attempted = true;
+            // Restore pre-turn state so the retry appends the user message cleanly.
+            self.state.messages = saved_messages;
+            self.state.last_prompt_usage = saved_prompt_usage;
+            // Force-compact: strip images, prune, summarize.
+            if let Ok(manager) = self.runtime_session_manager() {
+                let max = self.policy.max_context_tokens;
+                let agent_id = self.state.agent_id.clone();
+                let state_snapshot = self.state.clone();
+                let _ = crate::agent::context::force_compact_messages(
+                    &agent_id,
+                    &state_snapshot,
+                    &mut self.state.messages,
+                    max,
+                    manager,
+                )
+                .await;
+            }
+            let retry = self.stream_turn_inner(input, events, cancel).await?;
+            self.overflow_recovery_attempted = false;
+            return Ok(retry);
+        }
+        self.overflow_recovery_attempted = false;
+        Ok(assembled)
+    }
+
+    async fn stream_turn_inner(
         &mut self,
         input: TurnInput,
         events: &dyn EventSink,
@@ -3079,8 +3135,6 @@ mod tests {
         }
 
         async fn save_session_meta(&self, _meta: crate::store::SessionMeta) {}
-
-        async fn update_agent_ui_state(&self, _agent_id: &str, _ui_json: &str) {}
 
         async fn load_session_meta(&self) -> Option<crate::store::SessionMeta> {
             None

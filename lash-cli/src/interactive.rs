@@ -16,6 +16,7 @@ use crate::command;
 use crate::event::AppEvent;
 use crate::fork;
 use crate::input_items::{build_items_from_editor_input, insert_inline_marker};
+use crate::overlay::{PromptFocus, PromptSelection};
 use crate::resume;
 use crate::session_log::{self, SessionLogger};
 use crate::update;
@@ -24,10 +25,10 @@ use crate::{
     cleanup_terminal, configure_terminal_ui, controls_text, ensure_supported_execution_mode,
     execution_mode_label, execution_mode_usage, hash12, help_text, info_text,
     latest_user_prompt_hash, normalize_prepared_turn_for_dispatch, parse_execution_mode,
-    parse_model_selection, persist_live_runtime_snapshot, persist_live_ui_state,
-    persist_root_agent_state, plan_mode_toggle, push_system_message, resolve_model_selection,
-    resolve_model_variant, shell_escape_command, sync_plan_mode, turn_has_visible_output,
-    validate_model_selection, variant_lines, version_text,
+    parse_model_selection, persist_live_runtime_snapshot, persist_root_agent_state,
+    plan_mode_toggle, push_system_message, resolve_model_selection, resolve_model_variant,
+    shell_escape_command, sync_plan_mode, turn_has_visible_output, validate_model_selection,
+    variant_lines, version_text,
 };
 
 /// Returned by the spawned runtime task so we can reclaim ownership.
@@ -65,7 +66,7 @@ async fn handle_slash_command(
     terminal: &mut DefaultTerminal,
     app: &mut App,
     logger: &mut SessionLogger,
-    args: &Args,
+    _args: &Args,
     paused: &Arc<AtomicBool>,
     plugin_host: &PluginHost,
     dynamic_tools: &Arc<DynamicToolProvider>,
@@ -308,10 +309,6 @@ async fn handle_slash_command(
         command::Command::ChangeProvider => {
             paused.store(true, Ordering::Relaxed);
             let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableFocusChange);
-            if !args.no_mouse {
-                let _ =
-                    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
-            }
             let previous_kind = provider.kind();
             let previous_provider = provider.clone();
             let previous_model = app.model.clone();
@@ -323,7 +320,7 @@ async fn handle_slash_command(
             let existing_cfg = LashConfig::load();
             let setup_result = setup::run_setup_with_existing(existing_cfg.as_ref()).await;
             *terminal = ratatui::init();
-            configure_terminal_ui(args.no_mouse)?;
+            configure_terminal_ui()?;
             paused.store(false, Ordering::Relaxed);
 
             match setup_result {
@@ -648,8 +645,14 @@ async fn handle_slash_command(
                 }
             } else {
                 const SESSION_PICKER_LIMIT: usize = 50;
-                let mut sessions = session_log::list_recent_sessions(SESSION_PICKER_LIMIT + 1);
-                sessions.retain(|s| s.session_id != logger.session_id);
+                let current_session_id = logger.session_id.clone();
+                let mut sessions = task::spawn_blocking(move || {
+                    let mut s = session_log::list_recent_sessions(SESSION_PICKER_LIMIT + 1);
+                    s.retain(|si| si.session_id != current_session_id);
+                    s
+                })
+                .await
+                .unwrap_or_default();
                 if sessions.is_empty() {
                     app.blocks.push(DisplayBlock::SystemMessage(
                         "No sessions found.".to_string(),
@@ -658,8 +661,7 @@ async fn handle_slash_command(
                     app.scroll_to_bottom();
                 } else {
                     sessions.truncate(SESSION_PICKER_LIMIT);
-                    app.session_picker = sessions;
-                    app.session_picker_idx = 0;
+                    app.show_session_picker(sessions);
                 }
             }
         }
@@ -876,8 +878,7 @@ async fn handle_slash_command(
                 app.invalidate_height_cache();
                 app.scroll_to_bottom();
             } else {
-                app.skill_picker = items;
-                app.skill_picker_idx = 0;
+                app.show_skill_picker(items);
             }
         }
     }
@@ -1347,6 +1348,7 @@ pub(crate) async fn run_app(
             let max_scroll = total.saturating_sub(vh);
             app.scroll_offset = app.scroll_offset.min(max_scroll);
 
+            app.history_area = ui::history_area(&app, size.width, size.height);
             terminal.draw(|frame| ui::draw(frame, &app))?;
             app.dirty = false;
         }
@@ -1359,13 +1361,6 @@ pub(crate) async fn run_app(
 
         match event {
             AppEvent::Terminal(TermEvent::Paste(text)) => {
-                if !app.mouse_captured && !args.no_mouse {
-                    let _ = crossterm::execute!(
-                        std::io::stdout(),
-                        crossterm::event::EnableMouseCapture
-                    );
-                    app.mouse_captured = true;
-                }
                 app.dirty = true;
 
                 if app.has_prompt() && (app.is_prompt_editing_reply() || app.is_prompt_freeform()) {
@@ -1407,15 +1402,11 @@ pub(crate) async fn run_app(
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                // Re-enable mouse capture if it was released for native selection.
-                if !app.mouse_captured && !args.no_mouse {
-                    let _ = crossterm::execute!(
-                        std::io::stdout(),
-                        crossterm::event::EnableMouseCapture
-                    );
-                    app.mouse_captured = true;
-                }
                 app.dirty = true;
+                // Clear any active text selection on keypress
+                if app.selection.visible {
+                    app.clear_selection();
+                }
                 // CTRL+C: dismiss prompt if active, else quit
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     if app.has_prompt() {
@@ -1569,8 +1560,7 @@ pub(crate) async fn run_app(
                         KeyCode::Down | KeyCode::Char('j') => app.skill_picker_down(),
                         KeyCode::Enter => {
                             if let Some(name) = app.take_skill_pick() {
-                                app.input = format!("${} ", name);
-                                app.cursor_pos = app.input.len();
+                                app.set_input(format!("${} ", name));
                             }
                         }
                         _ => {}
@@ -2072,27 +2062,89 @@ pub(crate) async fn run_app(
                 }
             }
             AppEvent::Terminal(TermEvent::Mouse(mouse)) => {
-                use crossterm::event::{KeyModifiers, MouseEventKind};
-                if mouse.modifiers.contains(KeyModifiers::SHIFT) && app.mouse_captured {
-                    // Release mouse capture so the terminal handles native
-                    // text selection and scrolling while shift is held.
-                    let _ = crossterm::execute!(
-                        std::io::stdout(),
-                        crossterm::event::DisableMouseCapture
-                    );
-                    app.mouse_captured = false;
-                } else {
-                    app.dirty = true;
-                    match mouse.kind {
-                        MouseEventKind::ScrollUp => app.scroll_up(3),
-                        MouseEventKind::ScrollDown => {
+                use crossterm::event::{MouseButton, MouseEventKind};
+                let ha = app.history_area;
+                let in_history = mouse.row >= ha.y
+                    && mouse.row < ha.y + ha.height
+                    && mouse.column >= ha.x
+                    && mouse.column < ha.x + ha.width;
+
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) if in_history => {
+                        let vrow = app.scroll_offset + (mouse.row - ha.y) as usize;
+                        app.selection.anchor = (mouse.column, vrow);
+                        app.selection.end = (mouse.column, vrow);
+                        app.selection.active = true;
+                        app.selection.visible = false;
+                        app.dirty = true;
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) if app.selection.active => {
+                        let col = mouse.column.clamp(ha.x, ha.x + ha.width.saturating_sub(1));
+
+                        // Auto-scroll when dragging above or below the history area
+                        let scroll_lines = 3usize;
+                        if mouse.row < ha.y {
+                            app.scroll_up(scroll_lines);
+                        } else if mouse.row >= ha.y + ha.height {
                             let size = terminal.size()?;
                             let vh = ui::history_viewport_height(&app, size.width, size.height);
                             let vw = size.width as usize;
-                            app.scroll_down(3, vh, vw);
+                            app.scroll_down(scroll_lines, vh, vw);
                         }
-                        _ => {}
+
+                        let clamped_row = mouse.row.clamp(ha.y, ha.y + ha.height.saturating_sub(1));
+                        let vrow = app.scroll_offset + (clamped_row - ha.y) as usize;
+                        app.selection.end = (col, vrow);
+                        app.selection.visible = true;
+                        app.dirty = true;
                     }
+                    MouseEventKind::Up(MouseButton::Left) if app.selection.active => {
+                        app.selection.active = false;
+                        if app.selection.visible {
+                            // Force a draw so the buffer reflects current content, then extract
+                            let size = terminal.size()?;
+                            app.history_area = ui::history_area(&app, size.width, size.height);
+                            let completed = terminal.draw(|frame| ui::draw(frame, &app))?;
+                            let text = ui::extract_selected_text(
+                                completed.buffer,
+                                &app.selection,
+                                app.history_area,
+                                app.scroll_offset,
+                            );
+                            if !text.is_empty()
+                                && let Ok(mut clipboard) = arboard::Clipboard::new()
+                            {
+                                let _ = clipboard.set_text(text);
+                            }
+                        }
+                    }
+                    MouseEventKind::ScrollUp => {
+                        // Scroll extends selection if actively dragging, otherwise just scrolls
+                        let scroll_lines = 3;
+                        app.scroll_up(scroll_lines);
+                        if app.selection.active {
+                            // Extend selection to top of viewport after scroll
+                            let vrow = app.scroll_offset;
+                            app.selection.end = (ha.x, vrow);
+                            app.selection.visible = true;
+                        }
+                        app.dirty = true;
+                    }
+                    MouseEventKind::ScrollDown => {
+                        let size = terminal.size()?;
+                        let vh = ui::history_viewport_height(&app, size.width, size.height);
+                        let vw = size.width as usize;
+                        let scroll_lines = 3;
+                        app.scroll_down(scroll_lines, vh, vw);
+                        if app.selection.active {
+                            // Extend selection to bottom of viewport after scroll
+                            let vrow = app.scroll_offset + vh.saturating_sub(1);
+                            app.selection.end = (ha.x + ha.width, vrow);
+                            app.selection.visible = true;
+                        }
+                        app.dirty = true;
+                    }
+                    _ => {}
                 }
             }
             AppEvent::Terminal(TermEvent::FocusGained) => {
@@ -2145,14 +2197,14 @@ pub(crate) async fn run_app(
                 } = event
                 {
                     let focus = if options.is_empty() {
-                        app::PromptFocus::ReplyEditor
+                        PromptFocus::ReplyEditor
                     } else {
-                        app::PromptFocus::Selection
+                        PromptFocus::Selection
                     };
-                    app.prompt = Some(app::PromptState {
+                    app.show_prompt(app::PromptState {
                         question,
                         options,
-                        selection: app::PromptSelection::Option(0),
+                        selection: PromptSelection::Option(0),
                         focus,
                         reply_text: String::new(),
                         reply_cursor: 0,
@@ -2160,18 +2212,7 @@ pub(crate) async fn run_app(
                     });
                 } else {
                     let is_done = matches!(&event, AgentEvent::Done);
-                    let should_persist_live_ui = runtime_return_rx.is_some()
-                        && matches!(
-                            &event,
-                            AgentEvent::LlmRequest { .. }
-                                | AgentEvent::RetryStatus { .. }
-                                | AgentEvent::Error { .. }
-                                | AgentEvent::Done
-                        );
                     app.handle_agent_event(event);
-                    if should_persist_live_ui {
-                        persist_live_ui_state(&store, &app.persisted_ui_state());
-                    }
                     if is_done && !app.focused {
                         notify_done();
                     }

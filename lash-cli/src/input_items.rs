@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::path::PathBuf;
 
-use crate::app::{App, PendingImage};
+use crate::app::App;
+use crate::editor::PendingImage;
 use lash::InputItem;
 
 /// Build structured turn items from editor input:
@@ -146,17 +147,17 @@ pub(crate) fn image_marker_ranges(input: &str) -> Vec<(Range<usize>, usize)> {
 /// Insert an inline attachment marker like `[Image #1]` at the current cursor,
 /// adding surrounding spaces when needed so it reads naturally in the input.
 pub fn insert_inline_marker(app: &mut App, marker: &str) {
-    let needs_leading_space = app.cursor_pos > 0
-        && app.input[..app.cursor_pos]
+    let needs_leading_space = app.cursor_pos() > 0
+        && app.input()[..app.cursor_pos()]
             .chars()
             .next_back()
-            .is_some_and(|c| !c.is_whitespace());
+            .is_some_and(|c: char| !c.is_whitespace());
 
-    let needs_trailing_space = app.cursor_pos < app.input.len()
-        && app.input[app.cursor_pos..]
+    let needs_trailing_space = app.cursor_pos() < app.input().len()
+        && app.input()[app.cursor_pos()..]
             .chars()
             .next()
-            .is_some_and(|c| !c.is_whitespace());
+            .is_some_and(|c: char| !c.is_whitespace());
 
     if needs_leading_space {
         app.insert_char(' ');

@@ -383,7 +383,7 @@ pub(crate) async fn run(
     // Initialize terminal
     let terminal = ratatui::init();
 
-    configure_terminal_ui(args.no_mouse)?;
+    configure_terminal_ui()?;
 
     let result = run_app(
         terminal,
@@ -408,11 +408,6 @@ pub(crate) async fn run(
 
     // Disable focus change tracking
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableFocusChange);
-
-    // Disable mouse capture
-    if !args.no_mouse {
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
-    }
 
     // Pop kitty keyboard protocol
     let _ = crossterm::execute!(

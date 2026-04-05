@@ -13,11 +13,13 @@ use crate::activity::{
 };
 use crate::app::{
     App, DisplayBlock, PreparedTurn, PromptState, SPLASH_CONTENT_HEIGHT, SPLASH_SCROLLBACK_HEIGHT,
-    SuggestionKind, preview_text_lines,
+    TextSelection, preview_text_lines,
 };
 use crate::diff::render_inline_diff;
+use crate::editor::SuggestionKind;
 use crate::input_items::image_marker_ranges;
 use crate::markdown;
+use crate::text_display;
 use crate::theme;
 use lash::collect_skill_mentions_with_ranges;
 
@@ -36,7 +38,7 @@ fn desired_input_height(app: &App, frame_width: u16) -> u16 {
         prompt_height(app, frame_width)
     } else {
         let inner_w = padded_content_width(frame_width, INPUT_HORIZONTAL_PADDING);
-        let visual_lines = input_visual_lines(&app.input, inner_w);
+        let visual_lines = input_visual_lines(app.input(), inner_w);
         (visual_lines as u16 + 2).min(MAX_INPUT_HEIGHT)
     }
 }
@@ -69,6 +71,23 @@ pub fn history_viewport_height(app: &App, frame_width: u16, frame_height: u16) -
     let input_h = input_height(app, frame_width, frame_height, reserved_height);
     let overhead = 1 + status_h + queued_h + input_h;
     frame_height.saturating_sub(overhead) as usize
+}
+
+/// Compute the history viewport Rect using the same layout math as draw().
+pub fn history_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
+    let status_h = turn_status_height(app);
+    let queued_h = queue_preview_height(app, frame_width);
+    let reserved_height = 1 + status_h + queued_h;
+    let input_h = input_height(app, frame_width, frame_height, reserved_height);
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(status_h),
+        Constraint::Length(queued_h),
+        Constraint::Length(input_h),
+    ])
+    .split(Rect::new(0, 0, frame_width, frame_height));
+    chunks[1]
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -108,6 +127,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     draw_session_picker(frame, app, chunks[1]); // overlay on history area
     draw_skill_picker(frame, app, chunks[1]); // overlay on history area
+
+    // Apply text selection highlight over the rendered buffer
+    if app.selection.active || app.selection.visible {
+        apply_selection_highlight(frame, &app.selection, chunks[1], app.scroll_offset);
+    }
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -217,6 +241,9 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     }
     if !check(left_level, right_idx) {
         right_idx = 3;
+    }
+    if !check(left_level, right_idx) {
+        left_level = 3;
     }
     if !check(left_level, right_idx) {
         left_level = 2;
@@ -426,7 +453,7 @@ fn truncate_to_display_width(text: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
-    if UnicodeWidthStr::width(text) <= max_width {
+    if text_display::visible_width(text) <= max_width {
         return text.to_string();
     }
     let target = max_width.saturating_sub(1);
@@ -448,12 +475,12 @@ fn truncate_with_suffix(text: &str, suffix: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
-    let suffix_width = UnicodeWidthStr::width(suffix);
+    let suffix_width = text_display::visible_width(suffix);
     if suffix_width >= max_width {
         return truncate_to_display_width(suffix, max_width);
     }
 
-    let text_width = UnicodeWidthStr::width(text);
+    let text_width = text_display::visible_width(text);
     if text_width + suffix_width <= max_width {
         return format!("{text}{suffix}");
     }
@@ -533,7 +560,7 @@ fn push_wrapped_prefixed<'a>(
             };
             lines.push(Line::from(vec![
                 Span::styled(shown_prefix, style),
-                Span::styled(text[start..idx].to_string(), style),
+                text_display::sanitize_span(text[start..idx].to_string(), style),
             ]));
             first = false;
             start = idx;
@@ -545,7 +572,7 @@ fn push_wrapped_prefixed<'a>(
     let shown_prefix = if first { prefix } else { continuation };
     lines.push(Line::from(vec![
         Span::styled(shown_prefix, style),
-        Span::styled(text[start..].to_string(), style),
+        text_display::sanitize_span(text[start..].to_string(), style),
     ]));
 }
 
@@ -1068,14 +1095,24 @@ fn default_activity_lane(activity: &ActivityBlock, nested: bool, expand_level: u
                 if activity.status == ActivityStatus::Failed {
                     theme::error().add_modifier(Modifier::BOLD)
                 } else {
-                    theme::patch_frame().add_modifier(Modifier::BOLD)
+                    theme::edit_lane_bold()
                 },
                 format!("{prefix}│  "),
                 if activity.status == ActivityStatus::Failed {
                     theme::error()
                 } else {
-                    theme::patch_frame()
+                    theme::edit_lane()
                 },
+            ),
+            ActivityKind::ShellCommand | ActivityKind::ShellInteraction => (
+                format!("{}{} ", prefix, activity_icon(activity.status)),
+                if activity.status == ActivityStatus::Failed {
+                    activity_style(activity.status)
+                } else {
+                    theme::shell_lane()
+                },
+                format!("{}  ", prefix),
+                theme::shell_lane(),
             ),
             _ => (
                 format!("{}{} ", prefix, activity_icon(activity.status)),
@@ -1095,9 +1132,17 @@ fn default_activity_lane(activity: &ActivityBlock, nested: bool, expand_level: u
     }
 }
 
-fn code_workflow_activity_lane(lane: CodeWorkflowLane) -> ActivityLane {
-    let summary_style = theme::code_scribe().add_modifier(Modifier::BOLD);
-    let detail_style = theme::code_scribe();
+fn code_workflow_activity_lane(lane: CodeWorkflowLane, kind: &ActivityKind) -> ActivityLane {
+    let (summary_style, detail_style) = match kind {
+        ActivityKind::Edit => (theme::edit_lane_bold(), theme::edit_lane()),
+        ActivityKind::ShellCommand | ActivityKind::ShellInteraction => {
+            (theme::shell_lane(), theme::shell_lane())
+        }
+        _ => (
+            theme::code_scribe().add_modifier(Modifier::BOLD),
+            theme::code_scribe(),
+        ),
+    };
     ActivityLane {
         summary_prefix: code_workflow_summary_prefix(lane).to_string(),
         summary_prefix_style: summary_style,
@@ -1338,7 +1383,7 @@ fn clone_line_owned(line: &Line<'_>) -> Line<'static> {
     Line::from(
         line.spans
             .iter()
-            .map(|span| Span::styled(span.content.to_string(), span.style))
+            .map(|span| text_display::sanitize_span(span.content.to_string(), span.style))
             .collect::<Vec<_>>(),
     )
 }
@@ -1363,6 +1408,257 @@ fn push_wrapped_line(
     }
 }
 
+#[derive(Clone, Copy)]
+struct StyledGlyph {
+    ch: char,
+    style: Style,
+}
+
+fn skip_leading_whitespace(text: &str, mut idx: usize) -> usize {
+    while idx < text.len() {
+        let Some(ch) = text[idx..].chars().next() else {
+            break;
+        };
+        if !ch.is_whitespace() {
+            break;
+        }
+        idx += ch.len_utf8();
+    }
+    idx
+}
+
+fn trim_trailing_whitespace(text: &str, start: usize, end: usize) -> usize {
+    let mut trimmed = end;
+    while trimmed > start {
+        let Some(ch) = text[..trimmed].chars().next_back() else {
+            break;
+        };
+        if !ch.is_whitespace() {
+            break;
+        }
+        trimmed -= ch.len_utf8();
+    }
+    trimmed
+}
+
+fn wrap_text_ranges_wordwise(text: &str, width: usize) -> Vec<(usize, usize)> {
+    if width == 0 || text.is_empty() {
+        return vec![(0, text.len())];
+    }
+
+    let mut wrapped = Vec::new();
+    let mut start = 0usize;
+    let mut continuation = false;
+
+    'line: while start < text.len() {
+        let line_start = if continuation {
+            skip_leading_whitespace(text, start)
+        } else {
+            start
+        };
+        if line_start >= text.len() {
+            break;
+        }
+
+        let mut idx = line_start;
+        let mut row_width = 0usize;
+        let mut last_break = None;
+        let mut prev_was_whitespace = false;
+
+        while idx < text.len() {
+            let ch = text[idx..]
+                .chars()
+                .next()
+                .expect("slice should start on a char boundary");
+            let next_idx = idx + ch.len_utf8();
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            let is_whitespace = ch.is_whitespace();
+
+            if is_whitespace && !prev_was_whitespace && row_width > 0 {
+                last_break = Some(idx);
+            }
+
+            if row_width + ch_width > width && row_width > 0 {
+                if is_whitespace {
+                    let line_end = trim_trailing_whitespace(text, line_start, idx);
+                    if line_end > line_start {
+                        wrapped.push((line_start, line_end));
+                        start = skip_leading_whitespace(text, idx);
+                        continuation = true;
+                        continue 'line;
+                    }
+                }
+                break;
+            }
+            row_width += ch_width;
+            prev_was_whitespace = is_whitespace;
+            idx = next_idx;
+        }
+
+        if idx >= text.len() {
+            wrapped.push((line_start, text.len()));
+            break;
+        }
+
+        if let Some(break_idx) = last_break {
+            let line_end = trim_trailing_whitespace(text, line_start, break_idx);
+            if line_end > line_start {
+                wrapped.push((line_start, line_end));
+                start = skip_leading_whitespace(text, break_idx);
+                continuation = true;
+                continue;
+            }
+        }
+
+        wrapped.push((line_start, idx));
+        start = idx;
+        continuation = true;
+    }
+
+    if wrapped.is_empty() {
+        wrapped.push((0, 0));
+    }
+
+    wrapped
+}
+
+fn styled_line_to_glyphs(line: &Line<'_>) -> Vec<StyledGlyph> {
+    let mut glyphs = Vec::new();
+    for span in &line.spans {
+        glyphs.extend(span.content.chars().map(|ch| StyledGlyph {
+            ch,
+            style: span.style,
+        }));
+    }
+    glyphs
+}
+
+fn glyphs_to_line(glyphs: &[StyledGlyph]) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut current = String::new();
+    let mut style = None;
+
+    for glyph in glyphs {
+        if style != Some(glyph.style) && !current.is_empty() {
+            spans.push(Span::styled(
+                std::mem::take(&mut current),
+                style.take().unwrap_or_default(),
+            ));
+        }
+        style = Some(glyph.style);
+        current.push(glyph.ch);
+    }
+
+    if !current.is_empty() {
+        spans.push(Span::styled(current, style.take().unwrap_or_default()));
+    }
+
+    if spans.is_empty() {
+        Line::from("")
+    } else {
+        Line::from(spans)
+    }
+}
+
+fn trim_trailing_whitespace_glyphs(glyphs: &[StyledGlyph], start: usize, end: usize) -> usize {
+    let mut trimmed = end;
+    while trimmed > start && glyphs[trimmed - 1].ch.is_whitespace() {
+        trimmed -= 1;
+    }
+    trimmed
+}
+
+fn skip_leading_whitespace_glyphs(glyphs: &[StyledGlyph], mut idx: usize) -> usize {
+    while idx < glyphs.len() && glyphs[idx].ch.is_whitespace() {
+        idx += 1;
+    }
+    idx
+}
+
+fn wrap_rendered_lines_wordwise(lines: &[Line<'_>], width: usize) -> Vec<Line<'static>> {
+    if width == 0 {
+        return lines.iter().map(clone_line_owned).collect();
+    }
+
+    let mut wrapped = Vec::with_capacity(lines.len());
+    for line in lines {
+        if text_display::line_visible_width(line) <= width {
+            wrapped.push(clone_line_owned(line));
+            continue;
+        }
+
+        let glyphs = styled_line_to_glyphs(line);
+        if glyphs.is_empty() {
+            wrapped.push(Line::from(""));
+            continue;
+        }
+
+        let mut start = 0usize;
+        let mut continuation = false;
+        'line: while start < glyphs.len() {
+            let line_start = if continuation {
+                skip_leading_whitespace_glyphs(&glyphs, start)
+            } else {
+                start
+            };
+            if line_start >= glyphs.len() {
+                break;
+            }
+
+            let mut idx = line_start;
+            let mut row_width = 0usize;
+            let mut last_break = None;
+            let mut prev_was_whitespace = false;
+
+            while idx < glyphs.len() {
+                let is_whitespace = glyphs[idx].ch.is_whitespace();
+                let ch_width = UnicodeWidthChar::width(glyphs[idx].ch).unwrap_or(0);
+
+                if is_whitespace && !prev_was_whitespace && row_width > 0 {
+                    last_break = Some(idx);
+                }
+
+                if row_width + ch_width > width && row_width > 0 {
+                    if is_whitespace {
+                        let line_end = trim_trailing_whitespace_glyphs(&glyphs, line_start, idx);
+                        if line_end > line_start {
+                            wrapped.push(glyphs_to_line(&glyphs[line_start..line_end]));
+                            start = skip_leading_whitespace_glyphs(&glyphs, idx);
+                            continuation = true;
+                            continue 'line;
+                        }
+                    }
+                    break;
+                }
+                row_width += ch_width;
+                prev_was_whitespace = is_whitespace;
+                idx += 1;
+            }
+
+            if idx >= glyphs.len() {
+                wrapped.push(glyphs_to_line(&glyphs[line_start..]));
+                break;
+            }
+
+            if let Some(break_idx) = last_break {
+                let line_end = trim_trailing_whitespace_glyphs(&glyphs, line_start, break_idx);
+                if line_end > line_start {
+                    wrapped.push(glyphs_to_line(&glyphs[line_start..line_end]));
+                    start = skip_leading_whitespace_glyphs(&glyphs, break_idx);
+                    continuation = true;
+                    continue;
+                }
+            }
+
+            wrapped.push(glyphs_to_line(&glyphs[line_start..idx]));
+            start = idx;
+            continuation = true;
+        }
+    }
+
+    wrapped
+}
+
 fn wrap_rendered_lines(lines: &[Line<'_>], width: usize) -> Vec<Line<'static>> {
     if width == 0 {
         return lines.iter().map(clone_line_owned).collect();
@@ -1370,7 +1666,7 @@ fn wrap_rendered_lines(lines: &[Line<'_>], width: usize) -> Vec<Line<'static>> {
 
     let mut wrapped = Vec::with_capacity(lines.len());
     for line in lines {
-        if line.width() <= width {
+        if text_display::line_visible_width(line) <= width {
             wrapped.push(clone_line_owned(line));
             continue;
         }
@@ -1476,9 +1772,13 @@ fn render_block_into<'a>(
     let block = &blocks[idx];
     match block {
         DisplayBlock::UserInput(text) => {
-            // Blank line before user input to separate turns (skip for first block / after Splash)
+            // Horizontal rule before user input to separate turns (skip for first block / after Splash)
             if idx > 0 && !matches!(blocks[idx - 1], DisplayBlock::Splash) {
                 lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "\u{2500}".repeat(viewport_width),
+                    theme::turn_separator(),
+                )));
             }
             // Circle marker on first line only, continuation lines get 2-space indent.
             let marker_style = Style::default().fg(theme::SODIUM);
@@ -1487,38 +1787,13 @@ fn render_block_into<'a>(
             let mut is_first = true;
 
             for line in text.lines() {
-                if cap == 0 || line.is_empty() {
-                    let prefix = if is_first {
-                        Span::styled("\u{25CF} ", marker_style)
-                    } else {
-                        Span::raw("  ")
-                    };
-                    is_first = false;
-                    lines.push(Line::from(vec![
-                        prefix,
-                        Span::styled(line.to_string(), theme::user_input()),
-                    ]));
+                let wrapped = if cap == 0 || line.is_empty() {
+                    vec![(0, line.len())]
                 } else {
-                    let mut seg_start = 0;
-                    let mut col = 0;
-                    for (byte_idx, ch) in line.char_indices() {
-                        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-                        if col + w > cap && col > 0 {
-                            let prefix = if is_first {
-                                Span::styled("\u{25CF} ", marker_style)
-                            } else {
-                                Span::raw("  ")
-                            };
-                            is_first = false;
-                            let mut spans = vec![prefix];
-                            spans.extend(styled_user_input_segment(line, seg_start, byte_idx));
-                            lines.push(Line::from(spans));
-                            seg_start = byte_idx;
-                            col = w;
-                        } else {
-                            col += w;
-                        }
-                    }
+                    wrap_text_ranges_wordwise(line, cap)
+                };
+
+                for (seg_start, seg_end) in wrapped {
                     let prefix = if is_first {
                         Span::styled("\u{25CF} ", marker_style)
                     } else {
@@ -1526,7 +1801,7 @@ fn render_block_into<'a>(
                     };
                     is_first = false;
                     let mut spans = vec![prefix];
-                    spans.extend(styled_user_input_segment(line, seg_start, line.len()));
+                    spans.extend(styled_user_input_segment(line, seg_start, seg_end));
                     lines.push(Line::from(spans));
                 }
             }
@@ -1549,20 +1824,30 @@ fn render_block_into<'a>(
             }
             // Square marker on the first non-empty line, plain indent on others,
             // empty lines pass through with no prefix.
+            // Wrap each markdown line to content_width BEFORE adding the prefix so
+            // that wrapped continuation lines also receive the indent and text stays
+            // aligned with the "■ " marker.
+            let content_width = viewport_width.saturating_sub(prefix_w);
             let mut marker_placed = false;
             for line in rendered {
                 let is_empty = line.spans.iter().all(|s| s.content.trim().is_empty());
                 if is_empty {
                     lines.push(Line::from(""));
-                } else if !marker_placed {
-                    marker_placed = true;
-                    let mut spans = vec![Span::styled("\u{25A0} ", theme::assistant_bar())];
-                    spans.extend(line.spans);
-                    lines.push(Line::from(spans));
-                } else {
-                    let mut spans = vec![Span::raw("  ")];
-                    spans.extend(line.spans);
-                    lines.push(Line::from(spans));
+                    continue;
+                }
+                let wrapped =
+                    wrap_rendered_lines_wordwise(std::slice::from_ref(&line), content_width);
+                for subline in wrapped {
+                    if !marker_placed {
+                        marker_placed = true;
+                        let mut spans = vec![Span::styled("\u{25A0} ", theme::assistant_bar())];
+                        spans.extend(subline.spans);
+                        lines.push(Line::from(spans));
+                    } else {
+                        let mut spans = vec![Span::raw("  ")];
+                        spans.extend(subline.spans);
+                        lines.push(Line::from(spans));
+                    }
                 }
             }
         }
@@ -1611,7 +1896,7 @@ fn render_block_into<'a>(
                     expand_level,
                     lines,
                     viewport_width,
-                    code_workflow_activity_lane(lane),
+                    code_workflow_activity_lane(lane, &activity.kind),
                 );
             } else if let Some((gutter, gutter_style)) = code_workflow_bridge_gutter(blocks, idx) {
                 let start = lines.len();
@@ -1693,9 +1978,44 @@ fn render_block_into<'a>(
             }
         }
         DisplayBlock::Error(msg) => {
+            let title = " ERROR ".to_string();
+            let title_w = UnicodeWidthStr::width(title.as_str());
+            let fill_w = viewport_width.saturating_sub(3 + title_w);
+
+            lines.push(Line::from(vec![
+                Span::styled("\u{250c}\u{2500}", theme::error_border()),
+                Span::styled(title, theme::error_title()),
+                Span::styled("\u{2500}".repeat(fill_w), theme::error_border()),
+                Span::styled("\u{2510}", theme::error_border()),
+            ]));
+
+            let inner_w = viewport_width.saturating_sub(4).max(1);
+            for raw_line in msg.lines() {
+                let segments = if raw_line.is_empty() {
+                    vec![(0usize, 0usize)]
+                } else {
+                    wrap_line(raw_line, 0, 0, inner_w)
+                };
+                for (start, end) in segments {
+                    let chunk = if raw_line.is_empty() {
+                        String::new()
+                    } else {
+                        truncate_to_display_width(&raw_line[start..end], inner_w)
+                    };
+                    let pad = inner_w.saturating_sub(UnicodeWidthStr::width(chunk.as_str()));
+                    lines.push(Line::from(vec![
+                        Span::styled("\u{2502} ", theme::error_border()),
+                        Span::styled(chunk, theme::error()),
+                        Span::raw(" ".repeat(pad)),
+                        Span::styled(" \u{2502}", theme::error_border()),
+                    ]));
+                }
+            }
+
+            let bottom_fill = viewport_width.saturating_sub(2);
             lines.push(Line::from(Span::styled(
-                format!("Error: {}", msg),
-                theme::error(),
+                format!("\u{2514}{}\u{2518}", "\u{2500}".repeat(bottom_fill)),
+                theme::error_border(),
             )));
         }
         DisplayBlock::SystemMessage(text) => {
@@ -1822,6 +2142,15 @@ fn render_plan_block<'a>(
     ]));
 
     let inner_w = viewport_width.saturating_sub(4).max(1);
+
+    // Breathing room after top border
+    let pad_line = Line::from(vec![
+        Span::styled("\u{2502} ", Style::default().fg(theme::ASH)),
+        Span::raw(" ".repeat(inner_w)),
+        Span::styled(" \u{2502}", Style::default().fg(theme::ASH)),
+    ]);
+    lines.push(pad_line.clone());
+
     for raw_line in content.lines() {
         let segments = if raw_line.is_empty() {
             vec![(0usize, 0usize)]
@@ -1849,6 +2178,13 @@ fn render_plan_block<'a>(
             lines.push(Line::from(row));
         }
     }
+
+    // Breathing room before bottom border
+    lines.push(Line::from(vec![
+        Span::styled("\u{2502} ", Style::default().fg(theme::ASH)),
+        Span::raw(" ".repeat(inner_w)),
+        Span::styled(" \u{2502}", Style::default().fg(theme::ASH)),
+    ]));
 
     let bottom_fill = viewport_width.saturating_sub(2);
     lines.push(Line::from(Span::styled(
@@ -2130,7 +2466,7 @@ fn push_wrapped_queue_item(
         };
         lines.push(Line::from(vec![
             Span::styled(prefix.to_string(), Style::default().fg(theme::ASH)),
-            Span::styled(collapsed[start..end].to_string(), style),
+            text_display::sanitize_span(collapsed[start..end].to_string(), style),
         ]));
     }
     if wrap_line(
@@ -2165,20 +2501,58 @@ fn draw_queue_preview(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// Build the session/cwd badge as a Line suitable for `Block::title_bottom`.
+fn build_input_badge(app: &App) -> Option<Line<'static>> {
+    let badge_labels: Vec<&str> = app
+        .plugin_mode_indicators
+        .values()
+        .map(|label| label.as_str())
+        .collect();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if !badge_labels.is_empty() {
+        for (idx, label) in badge_labels.iter().enumerate() {
+            if idx > 0 {
+                spans.push(Span::styled(" \u{b7} ", Style::default().fg(theme::ASH)));
+            }
+            spans.push(Span::styled(
+                (*label).to_string(),
+                Style::default()
+                    .fg(theme::SODIUM)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        spans.push(Span::styled(" \u{b7} ", Style::default().fg(theme::ASH)));
+    }
+    let location_label = app
+        .repo_status
+        .as_ref()
+        .map(|repo| format!("{} · {}", repo.repo_name, repo.display_ref()))
+        .unwrap_or_else(|| app.cwd.clone());
+    spans.extend([
+        Span::styled(
+            app.session_name.clone(),
+            Style::default().fg(theme::ASH_MID),
+        ),
+        Span::styled(" \u{b7} ", Style::default().fg(theme::ASH)),
+        text_display::sanitize_span(location_label, Style::default().fg(theme::ASH_TEXT)),
+    ]);
+    Some(Line::from(spans))
+}
+
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
 
     let mut lines = Vec::new();
-    let image_markers = image_marker_ranges(&app.input);
+    let image_markers = image_marker_ranges(app.input());
 
     // Multi-line input rendering with manual character-level wrapping.
     // We pre-wrap each logical line using wrap_line() so that rendering and
     // cursor positioning use identical wrapping logic (no Paragraph::wrap).
     let total_width = padded_content_width(area.width, INPUT_HORIZONTAL_PADDING);
     let prefix_w = 2; // "❯ " or "  "
-    let input_lines: Vec<&str> = app.input.split('\n').collect();
+    let input_lines: Vec<&str> = app.input().split('\n').collect();
     for (i, logical_line) in input_lines.iter().enumerate() {
         let segments = wrap_line(logical_line, prefix_w, prefix_w, total_width);
         for (j, &(seg_start, seg_end)) in segments.iter().enumerate() {
@@ -2207,8 +2581,8 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     // Position cursor accounting for visual wrapping
-    let clamped_cursor = app.cursor_pos.min(app.input.len());
-    let (vis_row, vis_col) = input_cursor_position(&app.input, clamped_cursor, total_width);
+    let clamped_cursor = app.cursor_pos().min(app.input().len());
+    let (vis_row, vis_col) = input_cursor_position(app.input(), clamped_cursor, total_width);
     let cursor_abs_row = vis_row;
     let content_h = area.height.saturating_sub(2) as usize; // inside borders
 
@@ -2219,71 +2593,19 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         0
     };
 
+    // Build the bottom badge as a proper title on the input border
+    let badge_line = build_input_badge(app);
+    let mut block = Block::default()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .border_style(theme::input_border())
+        .padding(Padding::horizontal(INPUT_HORIZONTAL_PADDING));
+    if let Some(badge) = badge_line {
+        block = block.title_bottom(badge.right_aligned());
+    }
     let input = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::TOP | Borders::BOTTOM)
-                .border_style(theme::input_border())
-                .padding(Padding::horizontal(INPUT_HORIZONTAL_PADDING)),
-        )
+        .block(block)
         .scroll((scroll_offset as u16, 0));
     frame.render_widget(input, area);
-
-    // Session/cwd on the bottom border, right-aligned
-    let badge_labels: Vec<&str> = app
-        .plugin_mode_indicators
-        .values()
-        .map(|label| label.as_str())
-        .collect();
-    let badges_w = if badge_labels.is_empty() {
-        0
-    } else {
-        badge_labels
-            .iter()
-            .map(|label| UnicodeWidthStr::width(*label))
-            .sum::<usize>()
-            + (badge_labels.len().saturating_sub(1) * 3)
-            + 3
-    };
-    let session_w = badges_w
-        + UnicodeWidthStr::width(app.session_name.as_str())
-        + 3 // " · "
-        + UnicodeWidthStr::width(app.cwd.as_str())
-        + 2; // padding
-    if session_w + 2 <= area.width as usize {
-        let x = area.x + area.width - session_w as u16;
-        let y = area.y + area.height - 1;
-        let session_area = Rect::new(x, y, session_w as u16, 1);
-        let mut session_spans = vec![Span::styled(" ", Style::default().fg(theme::ASH))];
-        if !badge_labels.is_empty() {
-            for (idx, label) in badge_labels.iter().enumerate() {
-                if idx > 0 {
-                    session_spans.push(Span::styled(" \u{b7} ", Style::default().fg(theme::ASH)));
-                }
-                session_spans.push(Span::styled(
-                    (*label).to_string(),
-                    Style::default()
-                        .fg(theme::SODIUM)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            }
-            session_spans.push(Span::styled(" \u{b7} ", Style::default().fg(theme::ASH)));
-        }
-        session_spans.extend([
-            Span::styled(
-                app.session_name.as_str(),
-                Style::default().fg(theme::ASH_MID),
-            ),
-            Span::styled(" \u{b7} ", Style::default().fg(theme::ASH)),
-            Span::styled(app.cwd.as_str(), Style::default().fg(theme::ASH_TEXT)),
-            Span::styled(" ", Style::default().fg(theme::ASH)),
-        ]);
-        let session_line = Line::from(session_spans);
-        frame.render_widget(
-            Paragraph::new(session_line).style(theme::history_bg()),
-            session_area,
-        );
-    }
 
     let cursor_x = area.x + INPUT_HORIZONTAL_PADDING + vis_col as u16;
     let cursor_y = area.y + 1 + (cursor_abs_row - scroll_offset) as u16;
@@ -2330,14 +2652,26 @@ fn styled_input_segment<'a>(
 
 /// Draw the autocomplete popup above the input area (slash commands or @path).
 fn draw_suggestions(frame: &mut Frame, app: &App, input_area: Rect) {
-    if app.suggestions.is_empty() {
+    if app.suggestions().is_empty() {
         return;
     }
 
-    let is_path = app.suggestion_kind == SuggestionKind::Path;
-    let count = app.suggestions.len() as u16;
+    let is_path = app.suggestion_kind() == SuggestionKind::Path;
+    let count = app.suggestions().len() as u16;
     let desired_height = count + 2; // +2 for top/bottom border
-    let base_width: u16 = if is_path { 50 } else { 40 };
+
+    // Compute name column width from actual suggestions (+2 for padding)
+    let name_col: usize = app
+        .suggestions()
+        .iter()
+        .map(|(cmd, _)| UnicodeWidthStr::width(cmd.as_str()))
+        .max()
+        .unwrap_or(8)
+        + 2;
+
+    // Size popup to fit content: prefix(1) + name_col + gap(1) + desc(~20) + border(2)
+    let min_desc_w: u16 = 16;
+    let base_width: u16 = (name_col as u16 + min_desc_w + 3).max(if is_path { 50 } else { 40 });
     let width = base_width.min(input_area.width);
 
     // Suggestions should live in the gap directly above the input, never in the
@@ -2358,15 +2692,12 @@ fn draw_suggestions(frame: &mut Frame, app: &App, input_area: Rect) {
     // Clear the area behind the popup
     frame.render_widget(Clear, popup_area);
 
-    // Column width for the left side (name/path)
-    let name_col: usize = if is_path { 34 } else { 12 };
-
     let items: Vec<Line> = app
-        .suggestions
+        .suggestions()
         .iter()
         .enumerate()
         .map(|(i, (cmd, desc))| {
-            if i == app.suggestion_idx {
+            if i == app.suggestion_idx() {
                 Line::from(vec![
                     Span::styled(
                         format!(" {:<w$}", cmd, w = name_col),
@@ -2386,7 +2717,10 @@ fn draw_suggestions(frame: &mut Frame, app: &App, input_area: Rect) {
                         format!(" {:<w$}", cmd, w = name_col),
                         Style::default().fg(theme::CHALK_DIM),
                     ),
-                    Span::styled(format!(" {}", desc), Style::default().fg(theme::ASH_MID)),
+                    text_display::sanitize_span(
+                        format!(" {}", desc),
+                        Style::default().fg(theme::ASH_MID),
+                    ),
                 ])
             }
         })
@@ -2403,12 +2737,12 @@ fn draw_suggestions(frame: &mut Frame, app: &App, input_area: Rect) {
 
 /// Draw the session picker popup centered in the history area.
 fn draw_session_picker(frame: &mut Frame, app: &App, history_area: Rect) {
-    if app.session_picker.is_empty() {
+    let Some(session_picker) = app.session_picker_state() else {
         return;
-    }
+    };
 
     let max_visible = 15u16;
-    let count = app.session_picker.len() as u16;
+    let count = session_picker.items.len() as u16;
     let visible = count.min(max_visible);
     let desired_height = visible + 2; // +2 for borders
     let width = 80u16.min(history_area.width.saturating_sub(4));
@@ -2428,8 +2762,8 @@ fn draw_session_picker(frame: &mut Frame, app: &App, history_area: Rect) {
     frame.render_widget(Clear, popup_area);
 
     // If we have more items than visible, scroll the view to keep selection visible
-    let scroll_offset = if app.session_picker_idx >= visible as usize {
-        app.session_picker_idx - visible as usize + 1
+    let scroll_offset = if session_picker.selected >= visible as usize {
+        session_picker.selected - visible as usize + 1
     } else {
         0
     };
@@ -2440,14 +2774,14 @@ fn draw_session_picker(frame: &mut Frame, app: &App, history_area: Rect) {
     // inner_w = width - 2 (borders) - 3 (prefix " > " or "   ") - 2 (gaps around message)
     let inner_w = (width as usize).saturating_sub(2 + 3 + time_col + count_col + 2);
 
-    let items: Vec<Line> = app
-        .session_picker
+    let items: Vec<Line> = session_picker
+        .items
         .iter()
         .enumerate()
         .skip(scroll_offset)
         .take(visible as usize)
         .map(|(i, session)| {
-            let selected = i == app.session_picker_idx;
+            let selected = i == session_picker.selected;
             let prefix = if selected { " > " } else { "   " };
 
             let time_str = session.relative_time();
@@ -2489,13 +2823,13 @@ fn draw_session_picker(frame: &mut Frame, app: &App, history_area: Rect) {
             Line::from(vec![
                 Span::styled(prefix, prefix_style),
                 Span::styled(format!("{:<tw$}", time_str, tw = time_col), time_style),
-                Span::styled(format!("{:<mw$}", preview, mw = inner_w), msg_style),
+                text_display::sanitize_span(format!("{:<mw$}", preview, mw = inner_w), msg_style),
                 Span::styled(format!("{:>cw$} ", msg_count, cw = count_col), count_style),
             ])
         })
         .collect();
 
-    let title = format!(" Sessions ({}) ", app.session_picker.len());
+    let title = format!(" Sessions ({}) ", session_picker.items.len());
     let block = Block::default()
         .title(Span::styled(title, Style::default().fg(theme::SODIUM)))
         .borders(Borders::ALL)
@@ -2508,12 +2842,12 @@ fn draw_session_picker(frame: &mut Frame, app: &App, history_area: Rect) {
 
 /// Draw the skill picker popup centered in the history area.
 fn draw_skill_picker(frame: &mut Frame, app: &App, history_area: Rect) {
-    if app.skill_picker.is_empty() {
+    let Some(skill_picker) = app.skill_picker_state() else {
         return;
-    }
+    };
 
     let max_visible = 15u16;
-    let count = app.skill_picker.len() as u16;
+    let count = skill_picker.items.len() as u16;
     let visible = count.min(max_visible);
     let desired_height = visible + 2; // +2 for borders
     let width = 60u16.min(history_area.width.saturating_sub(4));
@@ -2533,8 +2867,8 @@ fn draw_skill_picker(frame: &mut Frame, app: &App, history_area: Rect) {
     frame.render_widget(Clear, popup_area);
 
     // Scroll to keep selection visible
-    let scroll_offset = if app.skill_picker_idx >= visible as usize {
-        app.skill_picker_idx - visible as usize + 1
+    let scroll_offset = if skill_picker.selected >= visible as usize {
+        skill_picker.selected - visible as usize + 1
     } else {
         0
     };
@@ -2542,14 +2876,14 @@ fn draw_skill_picker(frame: &mut Frame, app: &App, history_area: Rect) {
     let name_col = 20usize;
     let desc_w = (width as usize).saturating_sub(2 + 3 + name_col + 1); // borders + prefix + name + gap
 
-    let items: Vec<Line> = app
-        .skill_picker
+    let items: Vec<Line> = skill_picker
+        .items
         .iter()
         .enumerate()
         .skip(scroll_offset)
         .take(visible as usize)
         .map(|(i, (name, desc))| {
-            let selected = i == app.skill_picker_idx;
+            let selected = i == skill_picker.selected;
             let prefix = if selected { " > " } else { "   " };
 
             let desc_truncated: String = desc.chars().take(desc_w).collect();
@@ -2583,7 +2917,7 @@ fn draw_skill_picker(frame: &mut Frame, app: &App, history_area: Rect) {
         })
         .collect();
 
-    let title = format!(" Skills ({}) ", app.skill_picker.len());
+    let title = format!(" Skills ({}) ", skill_picker.items.len());
     let block = Block::default()
         .title(Span::styled(title, Style::default().fg(theme::SODIUM)))
         .borders(Borders::ALL)
@@ -2596,7 +2930,7 @@ fn draw_skill_picker(frame: &mut Frame, app: &App, history_area: Rect) {
 
 /// Calculate the height needed for the inline prompt area.
 fn prompt_height(app: &App, frame_width: u16) -> u16 {
-    let prompt = match &app.prompt {
+    let prompt = match app.prompt_state() {
         Some(p) => p,
         None => return 3, // fallback
     };
@@ -2634,7 +2968,7 @@ fn push_wrapped_prefixed_lines(
             };
             lines.push(Line::from(vec![
                 prefix,
-                Span::styled(logical_line[start..end].to_string(), text_style),
+                text_display::sanitize_span(logical_line[start..end].to_string(), text_style),
             ]));
             first_visual_line = false;
         }
@@ -2763,7 +3097,7 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
 
 /// Draw the agent prompt inline in the input area (replaces normal input).
 fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
-    let prompt = match &app.prompt {
+    let prompt = match app.prompt_state() {
         Some(p) => p,
         None => return,
     };
@@ -2878,10 +3212,119 @@ fn input_cursor_position(input: &str, cursor_pos: usize, full_width: usize) -> (
     (vis_row.saturating_sub(1), prefix_w)
 }
 
+/// Selection highlight background — muted steel blue that works on the dark theme.
+const SELECTION_BG: ratatui::style::Color = ratatui::style::Color::Rgb(50, 60, 80);
+
+/// Apply a subtle highlight over the selected region in the frame buffer.
+/// Converts content-space selection coordinates to screen-space for rendering.
+fn apply_selection_highlight(
+    frame: &mut Frame,
+    sel: &TextSelection,
+    history_area: Rect,
+    scroll_offset: usize,
+) {
+    let (start, end) = selection_ordered(sel);
+    let view_top = scroll_offset;
+    let view_bottom = scroll_offset + history_area.height as usize;
+
+    // Only render the visible portion of the selection
+    let vis_start_vrow = start.1.max(view_top);
+    let vis_end_vrow = end.1.min(view_bottom.saturating_sub(1));
+    if vis_start_vrow > vis_end_vrow {
+        return;
+    }
+
+    let buf = frame.buffer_mut();
+    for vrow in vis_start_vrow..=vis_end_vrow {
+        let screen_y = history_area.y + (vrow - scroll_offset) as u16;
+        let col_start = if vrow == start.1 {
+            start.0
+        } else {
+            history_area.x
+        };
+        let col_end = if vrow == end.1 {
+            end.0
+        } else {
+            history_area.x + history_area.width
+        };
+        for col in col_start..col_end {
+            if let Some(cell) = buf.cell_mut((col, screen_y)) {
+                cell.set_bg(SELECTION_BG);
+            }
+        }
+    }
+}
+
+/// Extract the text content under the current selection from the frame buffer.
+/// Converts content-space coordinates to screen-space for buffer reads.
+pub fn extract_selected_text(
+    frame_buf: &ratatui::buffer::Buffer,
+    sel: &TextSelection,
+    history_area: Rect,
+    scroll_offset: usize,
+) -> String {
+    let (start, end) = selection_ordered(sel);
+    let view_top = scroll_offset;
+    let view_bottom = scroll_offset + history_area.height as usize;
+
+    let mut result = String::new();
+    for vrow in start.1..=end.1 {
+        // Only extract text from visible rows
+        if vrow < view_top || vrow >= view_bottom {
+            if !result.is_empty() || vrow < start.1 {
+                // Represent off-screen rows as blank lines to preserve structure
+                if !result.is_empty() {
+                    result.push('\n');
+                }
+            }
+            continue;
+        }
+        let screen_y = history_area.y + (vrow - scroll_offset) as u16;
+        let col_start = if vrow == start.1 {
+            start.0
+        } else {
+            history_area.x
+        };
+        let col_end = if vrow == end.1 {
+            end.0
+        } else {
+            history_area.x + history_area.width
+        };
+        let mut line = String::new();
+        let mut col = col_start;
+        while col < col_end {
+            if let Some(cell) = frame_buf.cell((col, screen_y)) {
+                line.push_str(cell.symbol());
+                let w = unicode_width::UnicodeWidthStr::width(cell.symbol());
+                col += w.max(1) as u16;
+            } else {
+                col += 1;
+            }
+        }
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(line.trim_end());
+    }
+    result
+}
+
+/// Return ordered (top-left, bottom-right) content-space coordinates.
+fn selection_ordered(sel: &TextSelection) -> ((u16, usize), (u16, usize)) {
+    let (ax, ay) = sel.anchor;
+    let (ex, ey) = sel.end;
+    if ay < ey || (ay == ey && ax <= ex) {
+        ((ax, ay), (ex, ey))
+    } else {
+        ((ex, ey), (ax, ay))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::{App, PromptState};
+    use crate::overlay::{PromptFocus, PromptSelection};
     use ratatui::{Terminal, backend::TestBackend};
 
     fn workflow_activity(summary: &str) -> DisplayBlock {
@@ -2920,11 +3363,11 @@ mod tests {
         PromptState {
             question: question.into(),
             options: options.into_iter().map(str::to_string).collect(),
-            selection: crate::app::PromptSelection::Option(0),
+            selection: PromptSelection::Option(0),
             focus: if has_options && !editing_reply {
-                crate::app::PromptFocus::Selection
+                PromptFocus::Selection
             } else {
-                crate::app::PromptFocus::ReplyEditor
+                PromptFocus::ReplyEditor
             },
             reply_text: reply_text.into(),
             reply_cursor: reply_text.len(),
@@ -3006,7 +3449,7 @@ mod tests {
     fn history_viewport_height_respects_dynamic_input_and_trays() {
         let mut app = App::new("model".into(), "session".into());
         app.blocks.clear(); // avoid splash-specific influence on expectations
-        app.input = "line1\nline2\nline3".into();
+        app.set_input("line1\nline2\nline3".into());
         app.queue_turn(crate::app::PreparedTurn::new("queued".into(), Vec::new()));
         app.live_turn = Some(crate::app::LiveTurnState {
             status_text: "thinking".into(),
@@ -3032,7 +3475,7 @@ mod tests {
 
     #[test]
     fn pending_prompt_keeps_prompt_start_visible_above_footer() {
-        let backend = TestBackend::new(20, 8);
+        let backend = TestBackend::new(20, 9);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut app = App::new("model".into(), "session".into());
         app.blocks.clear();
@@ -3056,20 +3499,20 @@ mod tests {
             })
             .expect("draw app");
 
-        let rows: Vec<String> = (0..8)
+        let rows: Vec<String> = (0..9)
             .map(|y| buffer_row_text(terminal.backend(), y, 20))
             .collect();
 
         assert!(
-            rows.iter().take(4).any(|row| row.contains("history")),
+            rows.iter().take(5).any(|row| row.contains("history")),
             "history above the pending prompt should remain visible: {rows:?}"
         );
         assert!(
-            rows.iter().take(4).any(|row| row.contains("line1")),
+            rows.iter().take(5).any(|row| row.contains("line1")),
             "prompt start should remain visible above footer: {rows:?}"
         );
         assert!(
-            rows[4].contains("Working"),
+            rows[5].contains("Working"),
             "footer should still occupy the turn-status row: {rows:?}"
         );
     }
@@ -3139,7 +3582,7 @@ mod tests {
     #[test]
     fn prompt_height_accounts_for_wrapped_prompt_input() {
         let mut app = App::new("model".into(), "session".into());
-        app.prompt = Some(prompt_state(
+        app.show_prompt(prompt_state(
             "Answer the question.",
             Vec::new(),
             "this answer keeps going until it wraps across multiple visible rows",
@@ -3162,6 +3605,93 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(chunks, vec!["12345678", "901234", "567890"]);
+    }
+
+    #[test]
+    fn user_input_wrap_prefers_word_boundaries() {
+        let blocks = [DisplayBlock::UserInput("alpha beta gamma delta".into())];
+        let mut lines = Vec::new();
+
+        render_block_into(&blocks, 0, 1, &mut lines, 12, 20);
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert_eq!(rendered, vec!["● alpha beta", "  gamma", "  delta"]);
+    }
+
+    #[test]
+    fn assistant_wrap_prefers_word_boundaries() {
+        let blocks = [DisplayBlock::AssistantText("alpha beta gamma delta".into())];
+        let mut lines = Vec::new();
+
+        render_block_into(&blocks, 0, 1, &mut lines, 12, 20);
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert_eq!(rendered, vec!["■ alpha beta", "  gamma", "  delta"]);
+    }
+
+    #[test]
+    fn assistant_markdown_lists_preserve_line_boundaries_when_wrapped() {
+        let blocks = [DisplayBlock::AssistantText(
+            "3. **Reusable TUI primitives with explicit overlay/focus model**\n   - pi’s `packages/tui` has a clean model for `Component`, `Focusable`, overlays, focus handoff, cursor markers, and differential rendering.\n   - Lash’s TUI works, but some UX features look more hand-built/special-cased.\n   - Worth adapting as internal architecture, especially if you plan more pickers, popups, menus, or layered tools.\n\n4. **A stronger input editor abstraction**\n   - pi’s editor has explicit undo stack, kill ring, autocomplete plumbing, paste-marker handling, bracketed paste buffering, wrapped layout tracking.\n   - Lash already supports history/paste/images, but if the input box is going to keep growing features, a more editor-like core would pay off.\n   - High leverage if you want fewer ad hoc input-path bugs."
+                .into(),
+        )];
+        let mut lines = Vec::new();
+
+        render_block_into(&blocks, 0, 1, &mut lines, 86, 40);
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("4. A stronger input editor abstraction")),
+            "expected fourth item to begin on its own rendered line: {rendered:#?}"
+        );
+        assert!(
+            rendered.iter().all(|line| !line.contains("tools.4.")),
+            "ordered list boundary collapsed during UI wrapping: {rendered:#?}"
+        );
+        assert!(
+            rendered.iter().all(|line| !line.contains("bugs.5.")),
+            "ordered list boundary collapsed during UI wrapping: {rendered:#?}"
+        );
+    }
+
+    #[test]
+    fn wordwise_wrap_falls_back_to_hard_breaks_for_long_tokens() {
+        let segments = wrap_text_ranges_wordwise("supercalifragilistic", 6);
+        let chunks = segments
+            .iter()
+            .map(|(start, end)| &"supercalifragilistic"[*start..*end])
+            .collect::<Vec<_>>();
+
+        assert_eq!(chunks, vec!["superc", "alifra", "gilist", "ic"]);
+    }
+
+    #[test]
+    fn truncate_width_counts_ignore_ligature_break_markers() {
+        let text = crate::text_display::neutralize_ligatures("a -> b != c && d");
+        let truncated = truncate_to_display_width(&text, 8);
+        assert_eq!(crate::text_display::visible_width(&truncated), 8);
+    }
+
+    #[test]
+    fn queue_preview_sanitizes_ligature_sequences() {
+        let mut app = App::new("model".into(), "session".into());
+        app.queued_turns.push_back(PreparedTurn::new(
+            "rg -n \"a -> b != c && d\"".into(),
+            Vec::new(),
+        ));
+        let lines = queue_preview_lines(&app, 80);
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(rendered.iter().any(|line| line.contains("rg -n")));
+        let sanitized = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .any(|span| span.content.contains('\u{200C}'));
+        assert!(
+            sanitized,
+            "expected ligature-breaking marker in rendered spans"
+        );
     }
 
     #[test]
@@ -3213,10 +3743,12 @@ mod tests {
     #[test]
     fn input_height_grows_until_cap_and_preserves_history() {
         let mut app = App::new("model".into(), "session".into());
-        app.input = (0..40)
-            .map(|idx| format!("line {idx} with enough text to wrap around the viewport"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        app.set_input(
+            (0..40)
+                .map(|idx| format!("line {idx} with enough text to wrap around the viewport"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
 
         let height = input_height(&app, 40, 18, 1);
         assert_eq!(height, 14);
@@ -3227,11 +3759,13 @@ mod tests {
         let backend = TestBackend::new(28, 5);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut app = App::new("model".into(), "session".into());
-        app.input = (0..8)
-            .map(|idx| format!("line {idx} wraps heavily"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        app.cursor_pos = app.input.len();
+        app.set_input(
+            (0..8)
+                .map(|idx| format!("line {idx} wraps heavily"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        app.editor.cursor_pos = app.input().len();
 
         terminal
             .draw(|frame| draw_input(frame, &app, Rect::new(0, 0, 28, 5)))
@@ -3345,10 +3879,10 @@ mod tests {
         let backend = TestBackend::new(40, 6);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut app = App::new("model".into(), "session".into());
-        app.input = "hello".into();
-        app.cursor_pos = app.input.len();
-        app.suggestion_kind = SuggestionKind::Command;
-        app.suggestions = vec![
+        app.set_input("hello".into());
+        app.editor.cursor_pos = app.input().len();
+        app.editor.suggestion_kind = SuggestionKind::Command;
+        app.editor.suggestions = vec![
             ("/one".into(), "first suggestion".into()),
             ("/two".into(), "second suggestion".into()),
             ("/three".into(), "third suggestion".into()),
@@ -3375,18 +3909,20 @@ mod tests {
         let backend = TestBackend::new(40, 8);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut app = App::new("model".into(), "session".into());
-        app.input = "hello".into();
-        app.cursor_pos = app.input.len();
-        app.session_picker = (0..5)
-            .map(|idx| crate::session_log::SessionInfo {
-                filename: format!("session-{idx}.db"),
-                session_id: format!("session-{idx}"),
-                message_count: idx + 1,
-                first_message: format!("first message {idx}"),
-                modified: std::time::SystemTime::now(),
-                cwd: None,
-            })
-            .collect();
+        app.set_input("hello".into());
+        app.editor.cursor_pos = app.input().len();
+        app.show_session_picker(
+            (0..5)
+                .map(|idx| crate::session_log::SessionInfo {
+                    filename: format!("session-{idx}.db"),
+                    session_id: format!("session-{idx}"),
+                    message_count: idx + 1,
+                    first_message: format!("first message {idx}"),
+                    modified: std::time::SystemTime::now(),
+                    cwd: None,
+                })
+                .collect(),
+        );
 
         terminal.draw(|frame| draw(frame, &app)).expect("draw app");
 
@@ -3406,7 +3942,7 @@ mod tests {
         let backend = TestBackend::new(80, 8);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut app = App::new("model".into(), "session".into());
-        app.session_picker = vec![crate::session_log::SessionInfo {
+        app.show_session_picker(vec![crate::session_log::SessionInfo {
             filename: "session-0.db".into(),
             session_id: "session-0".into(),
             message_count: 1,
@@ -3415,7 +3951,7 @@ mod tests {
                     .into(),
             modified: std::time::SystemTime::now(),
             cwd: Some(std::path::PathBuf::from("/home/sam/code/frontend-design")),
-        }];
+        }]);
 
         terminal.draw(|frame| draw(frame, &app)).expect("draw app");
 
@@ -3433,11 +3969,13 @@ mod tests {
         let backend = TestBackend::new(40, 8);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut app = App::new("model".into(), "session".into());
-        app.input = "hello".into();
-        app.cursor_pos = app.input.len();
-        app.skill_picker = (0..5)
-            .map(|idx| (format!("skill-{idx}"), format!("skill description {idx}")))
-            .collect();
+        app.set_input("hello".into());
+        app.editor.cursor_pos = app.input().len();
+        app.show_skill_picker(
+            (0..5)
+                .map(|idx| (format!("skill-{idx}"), format!("skill description {idx}")))
+                .collect(),
+        );
 
         terminal.draw(|frame| draw(frame, &app)).expect("draw app");
 
@@ -3535,8 +4073,8 @@ mod tests {
         let backend = TestBackend::new(40, 4);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut app = App::new("model".into(), "session".into());
-        app.input = "[Image #1] rest".into();
-        app.cursor_pos = app.input.len();
+        app.set_input("[Image #1] rest".into());
+        app.editor.cursor_pos = app.input().len();
 
         terminal
             .draw(|frame| draw_input(frame, &app, Rect::new(0, 0, 40, 4)))

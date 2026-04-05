@@ -1,5 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use lash::{
     AgentEvent, Message, MessageRole, PartKind, PluginMessage, PromptUsage, SkillCatalog,
@@ -7,29 +6,19 @@ use lash::{
     plugin_surface_event_renders_visible_output,
 };
 
+use ratatui::layout::Rect;
+
 use crate::activity::{
     ActivityBlock, ActivityKind, ActivityState, ActivityStatus, merge_edit_activity,
     merge_exploration_activity,
 };
-use crate::command;
-use crate::input_items::image_marker_ranges;
+use crate::assistant_text::{normalize_assistant_text, push_assistant_text_block};
+use crate::editor::EditorState;
+use crate::overlay::{OverlayState, PickerState};
 use crate::plugin_surface;
-use crate::replay::{normalize_stream_text, push_assistant_text_block};
+use crate::repo_status::RepoStatus;
 use crate::ui;
 use crate::util::{is_cancelled_error, manual_interrupt_message};
-
-/// Find the byte offset within `line` that corresponds to a given display column.
-/// If the target column exceeds the line's display width, returns line.len().
-fn byte_pos_at_display_col(line: &str, target_col: usize) -> usize {
-    let mut col = 0;
-    for (byte_idx, ch) in line.char_indices() {
-        if col >= target_col {
-            return byte_idx;
-        }
-        col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-    }
-    line.len()
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PluginPanelBlock {
@@ -39,141 +28,8 @@ pub struct PluginPanelBlock {
     pub content: String,
 }
 
-/// State for an active agent prompt dialog.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PromptSelection {
-    Option(usize),
-    CustomReply,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PromptFocus {
-    Selection,
-    ReplyEditor,
-}
-
-pub struct PromptState {
-    pub question: String,
-    /// Original options (may be empty for freeform-only prompts).
-    pub options: Vec<String>,
-    pub selection: PromptSelection,
-    /// Which part of the prompt UI currently owns interaction.
-    pub focus: PromptFocus,
-    /// Optional extra text appended to a selected option, or the full response in freeform mode.
-    pub reply_text: String,
-    pub reply_cursor: usize,
-    pub response_tx: std::sync::mpsc::Sender<String>,
-}
-
-impl PromptState {
-    pub fn has_options(&self) -> bool {
-        !self.options.is_empty()
-    }
-
-    pub fn is_freeform(&self) -> bool {
-        self.options.is_empty()
-    }
-
-    pub fn is_editing_reply(&self) -> bool {
-        self.is_freeform() || self.focus == PromptFocus::ReplyEditor
-    }
-
-    pub fn selected_option_idx(&self) -> Option<usize> {
-        match self.selection {
-            PromptSelection::Option(idx) if idx < self.options.len() => Some(idx),
-            _ => None,
-        }
-    }
-
-    pub fn selects_custom_reply(&self) -> bool {
-        self.selection == PromptSelection::CustomReply
-    }
-
-    pub fn move_up(&mut self) {
-        if !self.has_options() {
-            return;
-        }
-
-        self.selection = match self.selection {
-            PromptSelection::Option(idx) => PromptSelection::Option(idx.saturating_sub(1)),
-            PromptSelection::CustomReply => {
-                PromptSelection::Option(self.options.len().saturating_sub(1))
-            }
-        };
-    }
-
-    pub fn move_down(&mut self) {
-        if !self.has_options() {
-            return;
-        }
-
-        self.selection = match self.selection {
-            PromptSelection::Option(idx) if idx + 1 < self.options.len() => {
-                PromptSelection::Option(idx + 1)
-            }
-            _ => PromptSelection::CustomReply,
-        };
-    }
-
-    pub fn toggle_focus(&mut self) {
-        if !self.has_options() {
-            self.focus = PromptFocus::ReplyEditor;
-            return;
-        }
-
-        self.focus = match self.focus {
-            PromptFocus::Selection => PromptFocus::ReplyEditor,
-            PromptFocus::ReplyEditor => PromptFocus::Selection,
-        };
-    }
-
-    pub fn insert_char(&mut self, c: char) {
-        self.reply_text.insert(self.reply_cursor, c);
-        self.reply_cursor += c.len_utf8();
-    }
-
-    pub fn insert_text(&mut self, text: &str) {
-        self.reply_text.insert_str(self.reply_cursor, text);
-        self.reply_cursor += text.len();
-    }
-
-    pub fn backspace(&mut self) {
-        if self.reply_cursor == 0 {
-            return;
-        }
-
-        let prev = self.reply_text[..self.reply_cursor]
-            .char_indices()
-            .next_back()
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        self.reply_text.drain(prev..self.reply_cursor);
-        self.reply_cursor = prev;
-    }
-
-    pub fn submitted_response(&self) -> String {
-        if self.is_freeform() || self.selects_custom_reply() {
-            return self.reply_text.clone();
-        }
-
-        let Some(idx) = self.selected_option_idx() else {
-            return self.reply_text.clone();
-        };
-        let label = &self.options[idx];
-        let truncated: String = label.chars().take(40).collect();
-        let suffix = if label.chars().count() > 40 {
-            "..."
-        } else {
-            ""
-        };
-        let base = format!("{}. {}{}", idx + 1, truncated, suffix);
-        if self.reply_text.is_empty() {
-            base
-        } else {
-            format!("{}\n\n{}", base, self.reply_text)
-        }
-    }
-}
+pub use crate::editor::{LargePaste, PendingImage, SuggestionKind};
+pub use crate::overlay::PromptState;
 
 pub struct LiveTurnState {
     pub status_text: String,
@@ -205,20 +61,6 @@ pub enum FollowOutputMode {
     Paused,
     Bottom,
     Contextual,
-}
-
-const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LargePaste {
-    pub placeholder: String,
-    pub content: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PendingImage {
-    pub id: usize,
-    pub png_bytes: Vec<u8>,
 }
 
 fn expand_large_paste_placeholders(text: &str, large_pastes: &[LargePaste]) -> String {
@@ -335,13 +177,6 @@ impl PreparedTurn {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-pub enum SuggestionKind {
-    None,
-    Command, // slash commands
-    Path,    // @ file/dir references
-}
-
 /// A renderable block in the scrollable history.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DisplayBlock {
@@ -374,24 +209,21 @@ pub enum DisplayBlock {
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct PersistedUiState {
     #[serde(default)]
-    pub blocks: Vec<DisplayBlock>,
-    #[serde(default)]
     pub last_response_usage: TokenUsage,
     #[serde(default)]
     pub plugin_mode_indicators: BTreeMap<String, String>,
 }
 
 impl PersistedUiState {
-    pub fn from_messages(messages: &[Message]) -> Self {
+    pub fn from_app(app: &App) -> Self {
         Self {
-            blocks: blocks_from_messages(messages),
-            last_response_usage: TokenUsage::default(),
-            plugin_mode_indicators: BTreeMap::new(),
+            last_response_usage: app.last_response_usage.clone(),
+            plugin_mode_indicators: app.plugin_mode_indicators.clone(),
         }
     }
 }
 
-fn blocks_from_messages(messages: &[Message]) -> Vec<DisplayBlock> {
+pub(crate) fn blocks_from_messages(messages: &[Message]) -> Vec<DisplayBlock> {
     let mut blocks = Vec::new();
     for message in messages {
         append_message_blocks(&mut blocks, message);
@@ -478,32 +310,6 @@ fn rendered_part_text(kind: &PartKind, content: &str) -> Option<String> {
 pub(crate) const SPLASH_CONTENT_HEIGHT: usize = 8;
 pub(crate) const SPLASH_SCROLLBACK_HEIGHT: usize = SPLASH_CONTENT_HEIGHT + 2;
 
-#[cfg(test)]
-/// How many visual rows a single line of text takes when wrapped to `width`.
-fn wrapped_line_height(line: &str, width: usize) -> usize {
-    if width == 0 {
-        return 1;
-    }
-    let len = unicode_width::UnicodeWidthStr::width(line);
-    if len == 0 { 1 } else { len.div_ceil(width) }
-}
-
-#[cfg(test)]
-/// Sum of wrapped visual rows for a multi-line string, with an optional prefix width per line.
-fn wrapped_text_height(text: &str, width: usize, prefix_chars: usize) -> usize {
-    let effective = width.saturating_sub(prefix_chars);
-    let mut h = 0;
-    let mut any = false;
-    for line in text.lines() {
-        h += wrapped_line_height(line, effective);
-        any = true;
-    }
-    if !any {
-        h = 1; // empty string → 1 blank line
-    }
-    h
-}
-
 const TEXT_PREVIEW_MAX_HEAD_LINES: usize = 8;
 const TEXT_PREVIEW_MAX_TAIL_LINES: usize = 3;
 const TEXT_PREVIEW_LINE_CHAR_LIMIT: usize = 240;
@@ -575,33 +381,36 @@ impl DisplayBlock {
     }
 }
 
+/// Mouse text selection state for the history viewport.
+///
+/// Coordinates are in **content space**: (column, virtual_row) where
+/// `virtual_row = screen_row - history_area.y + scroll_offset`.
+/// This makes the selection stable across scrolling.
+#[derive(Clone, Debug, Default)]
+pub struct TextSelection {
+    /// Anchor point (where the drag started) in content-space (col, virtual_row).
+    pub anchor: (u16, usize),
+    /// Current end point of the selection in content-space (col, virtual_row).
+    pub end: (u16, usize),
+    /// Whether a drag is in progress.
+    pub active: bool,
+    /// Whether a completed selection is being displayed.
+    pub visible: bool,
+}
+
 pub struct App {
     pub blocks: Vec<DisplayBlock>,
-    pub input: String,
-    pub cursor_pos: usize,
     pub scroll_offset: usize,
     pub expand_level: u8,
     pub running: bool,
     pub model: String,
     pub iteration: usize,
-    pub input_history: Vec<String>,
-    pub input_history_idx: Option<usize>,
     /// Spinner frame counter
     pub tick: usize,
     /// Active live turn state for the bottom status strip.
     pub live_turn: Option<LiveTurnState>,
     /// Raw TextDelta buffer for the active streamed assistant segment.
     pub pending_text: String,
-    /// Active suggestions (display text, description).
-    pub suggestions: Vec<(String, String)>,
-    /// Currently selected suggestion index.
-    pub suggestion_idx: usize,
-    /// What kind of suggestion is currently active.
-    pub suggestion_kind: SuggestionKind,
-    /// Session picker: list of session info when browsing sessions.
-    pub session_picker: Vec<crate::session_log::SessionInfo>,
-    /// Currently selected session index.
-    pub session_picker_idx: usize,
     /// Whether the UI needs a redraw.
     pub dirty: bool,
     /// Output-following mode for the history viewport.
@@ -612,14 +421,8 @@ pub struct App {
     height_cache_width: usize,
     /// Viewport height the height cache was computed for (needed for Splash centering).
     height_cache_vh: usize,
-    /// PNG-encoded images pasted via Ctrl+V, waiting to be sent with next message.
-    pub pending_images: Vec<PendingImage>,
-    /// Image markers already inserted into the draft whose clipboard payload is still encoding.
-    pub inflight_image_ids: HashSet<usize>,
-    /// Large pasted text payloads represented by compact placeholders in the visible draft.
-    pub pending_large_pastes: Vec<LargePaste>,
-    /// Per-size counters keep placeholder labels unique for repeated same-length pastes.
-    pub large_paste_counters: HashMap<usize, usize>,
+    /// Owned editor/input state.
+    pub editor: EditorState,
     /// Live streaming output lines from tool execution (e.g. bash).
     pub streaming_output: Vec<String>,
     pub streaming_output_hidden: usize,
@@ -629,16 +432,12 @@ pub struct App {
     pub show_live_tool_output: bool,
     /// Loaded skills registry.
     pub skills: SkillCatalog,
-    /// Skill picker: list of (name, description) when browsing skills.
-    pub skill_picker: Vec<(String, String)>,
-    /// Currently selected skill index.
-    pub skill_picker_idx: usize,
     /// Priority follow-ups entered with Enter while a turn is running.
     pub pending_steers: VecDeque<PreparedTurn>,
     /// FIFO drafts explicitly queued for later turns.
     pub queued_turns: VecDeque<PreparedTurn>,
-    /// Active agent prompt (ask() dialog).
-    pub prompt: Option<PromptState>,
+    /// Active overlay/picker/dialog state.
+    pub overlay: Option<OverlayState>,
     /// Whether the terminal window is currently focused.
     pub focused: bool,
     /// Cumulative token usage for the current session.
@@ -659,6 +458,8 @@ pub struct App {
     pub live_output_tokens_estimate: i64,
     /// Unique session name (e.g. "alpine-canyon").
     pub session_name: String,
+    /// Repo/branch/worktree metadata for the current cwd, when available.
+    pub repo_status: Option<RepoStatus>,
     /// Active plugin-owned mode indicators rendered in the input chrome.
     pub plugin_mode_indicators: BTreeMap<String, String>,
     /// Current working directory with ~ substitution.
@@ -667,24 +468,17 @@ pub struct App {
     pub active_delegate: Option<(String, String, std::time::Instant)>,
     /// Handle state used to derive semantic activity rows from raw tool calls.
     pub activity_state: ActivityState,
-    /// Whether mouse capture is currently active (temporarily released during shift+mouse for native selection).
-    pub mouse_captured: bool,
     /// Set only when this local UI requested cancellation via Esc.
     manual_interrupt_requested: bool,
+    /// Current text selection state.
+    pub selection: TextSelection,
+    /// Cached history area rect from the last draw, used to map mouse coords.
+    pub history_area: Rect,
 }
 
 impl App {
     pub fn persisted_ui_state(&self) -> PersistedUiState {
-        PersistedUiState {
-            blocks: self
-                .blocks
-                .iter()
-                .filter(|block| !matches!(block, DisplayBlock::Splash))
-                .cloned()
-                .collect(),
-            last_response_usage: self.last_response_usage.clone(),
-            plugin_mode_indicators: self.plugin_mode_indicators.clone(),
-        }
+        PersistedUiState::from_app(self)
     }
 
     fn ensure_live_turn(&mut self) -> &mut LiveTurnState {
@@ -850,32 +644,20 @@ impl App {
         };
         Self {
             blocks: vec![DisplayBlock::Splash],
-            input: String::new(),
-            cursor_pos: 0,
             scroll_offset: 0,
             expand_level: 1,
             running: false,
             model,
             iteration: 0,
-            input_history: Vec::new(),
-            input_history_idx: None,
             tick: 0,
             live_turn: None,
             pending_text: String::new(),
-            suggestions: Vec::new(),
-            suggestion_idx: 0,
-            suggestion_kind: SuggestionKind::None,
-            session_picker: Vec::new(),
-            session_picker_idx: 0,
             dirty: true,
             follow_mode: FollowOutputMode::Bottom,
             height_cache: Vec::new(),
             height_cache_width: 0,
             height_cache_vh: 0,
-            pending_images: Vec::new(),
-            inflight_image_ids: HashSet::new(),
-            pending_large_pastes: Vec::new(),
-            large_paste_counters: HashMap::new(),
+            editor: EditorState::default(),
             streaming_output: Vec::new(),
             streaming_output_hidden: 0,
             streaming_output_partial: String::new(),
@@ -887,11 +669,9 @@ impl App {
                 "0" | "false" | "no" | "off"
             ),
             skills: SkillCatalog::load(),
-            skill_picker: Vec::new(),
-            skill_picker_idx: 0,
             pending_steers: VecDeque::new(),
             queued_turns: VecDeque::new(),
-            prompt: None,
+            overlay: None,
             focused: true,
             token_usage: TokenUsage::default(),
             context_window: None,
@@ -902,24 +682,27 @@ impl App {
             live_output_chars_estimate: 0,
             live_output_tokens_estimate: 0,
             session_name,
+            repo_status: std::env::current_dir()
+                .ok()
+                .and_then(|cwd| crate::repo_status::detect_repo_status(&cwd)),
             plugin_mode_indicators: BTreeMap::new(),
             cwd,
             active_delegate: None,
             activity_state: ActivityState::default(),
-            mouse_captured: true,
             manual_interrupt_requested: false,
+            selection: TextSelection::default(),
+            history_area: Rect::default(),
         }
+    }
+
+    /// Clear any active text selection.
+    pub fn clear_selection(&mut self) {
+        self.selection = TextSelection::default();
     }
 
     /// Get the current input text and reset input state.
     pub fn take_input(&mut self) -> String {
-        let text = self.input.clone();
-        if !text.is_empty() {
-            self.input_history.push(text.clone());
-        }
-        self.input.clear();
-        self.cursor_pos = 0;
-        self.input_history_idx = None;
+        let text = self.editor.take_input();
         self.follow_mode = FollowOutputMode::Bottom;
         text
     }
@@ -933,13 +716,12 @@ impl App {
 
     /// Take pending images, preserving their stable inline ids for marker parsing.
     pub fn take_pending_images(&mut self) -> Vec<PendingImage> {
-        self.inflight_image_ids.clear();
-        std::mem::take(&mut self.pending_images)
+        self.editor.take_pending_images()
     }
 
     /// Take pending large-paste payloads, clearing them from the draft.
     pub fn take_large_pastes(&mut self) -> Vec<LargePaste> {
-        std::mem::take(&mut self.pending_large_pastes)
+        self.editor.take_large_pastes()
     }
 
     /// Mark the height cache as stale so it will be recomputed on next access.
@@ -974,7 +756,7 @@ impl App {
     }
 
     fn sync_pending_text_block(&mut self) {
-        let cleaned = normalize_stream_text(&self.pending_text);
+        let cleaned = normalize_assistant_text(&self.pending_text);
         if cleaned.is_empty() {
             return;
         }
@@ -1011,7 +793,7 @@ impl App {
         } else {
             format!("{existing}{text}")
         };
-        let cleaned = normalize_stream_text(&combined);
+        let cleaned = normalize_assistant_text(&combined);
         if cleaned.is_empty() {
             return false;
         }
@@ -1030,7 +812,7 @@ impl App {
     }
 
     fn commit_final_assistant_text(&mut self, text: &str) {
-        let cleaned = normalize_stream_text(text);
+        let cleaned = normalize_assistant_text(text);
         if cleaned.is_empty() {
             self.close_pending_text();
             return;
@@ -1456,8 +1238,8 @@ impl App {
         self.follow_mode = FollowOutputMode::Bottom;
         self.pending_text.clear();
         self.clear_status();
-        self.pending_images.clear();
-        self.pending_large_pastes.clear();
+        self.editor.pending_images.clear();
+        self.editor.pending_large_pastes.clear();
         self.clear_streaming_output();
         self.pending_steers.clear();
         self.queued_turns.clear();
@@ -1474,63 +1256,37 @@ impl App {
     }
 
     pub fn restore_prepared_turn(&mut self, turn: PreparedTurn) {
-        self.input = turn.display_text;
-        self.cursor_pos = self.input.len();
-        self.input_history_idx = None;
-        self.pending_images = turn.images;
-        self.inflight_image_ids.clear();
-        self.pending_large_pastes = turn.large_pastes;
+        self.editor
+            .restore_turn(turn.display_text, turn.images, turn.large_pastes);
     }
 
     pub fn next_image_marker_id(&self) -> usize {
-        let max_pending = self
-            .pending_images
-            .iter()
-            .map(|image| image.id)
-            .max()
-            .unwrap_or(0);
-        let max_inline = image_marker_ranges(&self.input)
-            .into_iter()
-            .map(|(_, idx)| idx)
-            .max()
-            .unwrap_or(0);
-        max_pending.max(max_inline) + 1
+        self.editor.next_image_marker_id()
     }
 
     #[allow(dead_code)]
     pub fn add_pending_image(&mut self, png_bytes: Vec<u8>) -> usize {
         let id = self.next_image_marker_id();
-        self.pending_images.push(PendingImage { id, png_bytes });
+        self.editor
+            .pending_images
+            .push(PendingImage { id, png_bytes });
         id
     }
 
     pub fn begin_pending_image(&mut self, id: usize) {
-        self.inflight_image_ids.insert(id);
+        self.editor.begin_pending_image(id);
     }
 
     pub fn has_pending_image_jobs(&self) -> bool {
-        image_marker_ranges(&self.input)
-            .into_iter()
-            .any(|(_, idx)| self.inflight_image_ids.contains(&idx))
+        self.editor.has_pending_image_jobs()
     }
 
     pub fn complete_pending_image(&mut self, id: usize, png_bytes: Vec<u8>) -> bool {
-        self.inflight_image_ids.remove(&id);
-        if !image_marker_ranges(&self.input)
-            .into_iter()
-            .any(|(_, idx)| idx == id)
-        {
-            return false;
-        }
-        if self.pending_images.iter().all(|image| image.id != id) {
-            self.pending_images.push(PendingImage { id, png_bytes });
-        }
-        true
+        self.editor.complete_pending_image(id, png_bytes)
     }
 
     pub fn fail_pending_image(&mut self, id: usize) -> bool {
-        self.inflight_image_ids.remove(&id);
-        self.remove_image_marker_by_id(id)
+        self.editor.fail_pending_image(id)
     }
 
     /// Toggle expand level 0↔1 (ghost fold ↔ compact plus) with scroll anchoring.
@@ -1913,585 +1669,246 @@ impl App {
         ));
     }
 
-    /// Which line (0-indexed) the cursor is on in multi-line input.
-    pub fn cursor_line(&self) -> usize {
-        self.input[..self.cursor_pos].matches('\n').count()
-    }
-
-    /// Total number of lines in the input.
-    pub fn line_count(&self) -> usize {
-        self.input.split('\n').count()
-    }
-
     /// Navigate input history with up arrow.
     /// In multi-line mode, if cursor is not on the first line, moves cursor up instead.
     pub fn history_up(&mut self) {
-        // If multi-line and not on first line, move cursor up
-        if self.cursor_line() > 0 {
-            self.move_cursor_up_line();
-            return;
-        }
-        if self.input.is_empty()
-            && self.input_history_idx.is_none()
+        if self.editor.input.is_empty()
+            && self.editor.input_history_idx.is_none()
             && let Some((turn, _was_pending)) = self.take_last_queued_turn()
         {
             self.restore_prepared_turn(turn);
             return;
         }
-        if self.input_history.is_empty() {
-            return;
-        }
-        let idx = match self.input_history_idx {
-            None => self.input_history.len() - 1,
-            Some(0) => 0,
-            Some(i) => i - 1,
-        };
-        self.input_history_idx = Some(idx);
-        self.input = self.input_history[idx].clone();
-        self.cursor_pos = self.input.len();
+        self.editor.history_up();
     }
 
     /// Navigate input history with down arrow.
     /// In multi-line mode, if cursor is not on the last line, moves cursor down instead.
     pub fn history_down(&mut self) {
-        // If multi-line and not on last line, move cursor down
-        if self.cursor_line() < self.line_count() - 1 {
-            self.move_cursor_down_line();
-            return;
-        }
-        match self.input_history_idx {
-            None => {}
-            Some(i) if i + 1 >= self.input_history.len() => {
-                self.input_history_idx = None;
-                self.input.clear();
-                self.cursor_pos = 0;
-            }
-            Some(i) => {
-                let idx = i + 1;
-                self.input_history_idx = Some(idx);
-                self.input = self.input_history[idx].clone();
-                self.cursor_pos = self.input.len();
-            }
-        }
-    }
-
-    /// Move cursor up one line within multi-line input.
-    fn move_cursor_up_line(&mut self) {
-        let before = &self.input[..self.cursor_pos];
-        let cur_line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-        if cur_line_start == 0 {
-            return;
-        }
-        // Use display width for column preservation
-        let cur_text = &self.input[cur_line_start..self.cursor_pos];
-        let display_col = unicode_width::UnicodeWidthStr::width(cur_text);
-        // Find the previous line
-        let prev_content = &self.input[..cur_line_start - 1]; // before the \n
-        let prev_line_start = prev_content.rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let prev_line = &self.input[prev_line_start..cur_line_start - 1];
-        self.cursor_pos = byte_pos_at_display_col(prev_line, display_col) + prev_line_start;
-    }
-
-    /// Move cursor down one line within multi-line input.
-    fn move_cursor_down_line(&mut self) {
-        let before = &self.input[..self.cursor_pos];
-        let cur_line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let cur_text = &self.input[cur_line_start..self.cursor_pos];
-        let display_col = unicode_width::UnicodeWidthStr::width(cur_text);
-        // Find the next line
-        let after = &self.input[self.cursor_pos..];
-        let newline_offset = match after.find('\n') {
-            Some(i) => i,
-            None => return,
-        };
-        let next_line_start = self.cursor_pos + newline_offset + 1;
-        let next_after = &self.input[next_line_start..];
-        let next_line = match next_after.find('\n') {
-            Some(end) => &next_after[..end],
-            None => next_after,
-        };
-        self.cursor_pos = byte_pos_at_display_col(next_line, display_col) + next_line_start;
+        self.editor.history_down();
     }
 
     /// Insert a character at cursor position.
     pub fn insert_char(&mut self, c: char) {
-        self.input.insert(self.cursor_pos, c);
-        self.cursor_pos += c.len_utf8();
+        self.editor.insert_char(c);
     }
 
     /// Insert literal text at the cursor position.
     pub fn insert_text(&mut self, text: &str) {
-        self.input.insert_str(self.cursor_pos, text);
-        self.cursor_pos += text.len();
-    }
-
-    fn next_large_paste_placeholder(&mut self, char_count: usize) -> String {
-        let base = format!("[Pasted Content {char_count} chars]");
-        let next_suffix = self.large_paste_counters.entry(char_count).or_insert(0);
-        *next_suffix += 1;
-        if *next_suffix == 1 {
-            base
-        } else {
-            format!("{base} #{}", *next_suffix)
-        }
+        self.editor.insert_text(text);
     }
 
     pub fn insert_pasted_text(&mut self, text: &str) {
-        let char_count = text.chars().count();
-        if char_count > LARGE_PASTE_CHAR_THRESHOLD {
-            let placeholder = self.next_large_paste_placeholder(char_count);
-            self.pending_large_pastes.push(LargePaste {
-                placeholder: placeholder.clone(),
-                content: text.to_string(),
-            });
-            self.insert_text(&placeholder);
-        } else {
-            self.insert_text(text);
-        }
-    }
-
-    fn large_paste_range_containing(
-        &self,
-        probe_pos: usize,
-    ) -> Option<(usize, std::ops::Range<usize>)> {
-        for (idx, paste) in self.pending_large_pastes.iter().enumerate() {
-            if let Some((start, _)) = self.input.match_indices(&paste.placeholder).next() {
-                let end = start + paste.placeholder.len();
-                if probe_pos >= start && probe_pos < end {
-                    return Some((idx, start..end));
-                }
-            }
-        }
-        None
-    }
-
-    fn remove_large_paste_at_probe(&mut self, probe_pos: usize) -> bool {
-        let Some((idx, range)) = self.large_paste_range_containing(probe_pos) else {
-            return false;
-        };
-        self.input.drain(range.clone());
-        self.cursor_pos = range.start;
-        self.pending_large_pastes.remove(idx);
-        true
-    }
-
-    fn image_marker_range_containing(
-        &self,
-        probe_pos: usize,
-    ) -> Option<(usize, std::ops::Range<usize>)> {
-        image_marker_ranges(&self.input)
-            .into_iter()
-            .find(|(range, _)| probe_pos >= range.start && probe_pos < range.end)
-            .map(|(range, idx)| (idx, range))
-    }
-
-    fn image_marker_range_for_id(&self, id: usize) -> Option<std::ops::Range<usize>> {
-        image_marker_ranges(&self.input)
-            .into_iter()
-            .find_map(|(range, idx)| (idx == id).then_some(range))
-    }
-
-    fn remove_image_marker_range(
-        &mut self,
-        image_id: usize,
-        range: std::ops::Range<usize>,
-    ) -> bool {
-        let removed_len = range.end.saturating_sub(range.start);
-        self.input.drain(range.clone());
-        if self.cursor_pos > range.end {
-            self.cursor_pos = self.cursor_pos.saturating_sub(removed_len);
-        } else if self.cursor_pos > range.start {
-            self.cursor_pos = range.start;
-        }
-        self.pending_images.retain(|image| image.id != image_id);
-        self.inflight_image_ids.remove(&image_id);
-        true
-    }
-
-    fn remove_image_marker_by_id(&mut self, image_id: usize) -> bool {
-        let Some(range) = self.image_marker_range_for_id(image_id) else {
-            return false;
-        };
-        self.remove_image_marker_range(image_id, range)
-    }
-
-    fn remove_image_marker_at_probe(&mut self, probe_pos: usize) -> bool {
-        let Some((image_id, range)) = self.image_marker_range_containing(probe_pos) else {
-            return false;
-        };
-        self.remove_image_marker_range(image_id, range)
+        self.editor.insert_pasted_text(text);
     }
 
     /// Delete character before cursor.
     pub fn backspace(&mut self) {
-        if self.cursor_pos > 0 && self.remove_image_marker_at_probe(self.cursor_pos - 1) {
-            return;
-        }
-        if self.cursor_pos > 0 && self.remove_large_paste_at_probe(self.cursor_pos - 1) {
-            return;
-        }
-        if self.cursor_pos > 0 {
-            let prev = self.input[..self.cursor_pos]
-                .char_indices()
-                .next_back()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            self.input.drain(prev..self.cursor_pos);
-            self.cursor_pos = prev;
-        }
+        self.editor.backspace();
     }
 
     /// Delete character at cursor.
     pub fn delete(&mut self) {
-        if self.cursor_pos < self.input.len() && self.remove_image_marker_at_probe(self.cursor_pos)
-        {
-            return;
-        }
-        if self.cursor_pos < self.input.len() && self.remove_large_paste_at_probe(self.cursor_pos) {
-            return;
-        }
-        if self.cursor_pos < self.input.len() {
-            let next = self.input[self.cursor_pos..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| self.cursor_pos + i)
-                .unwrap_or(self.input.len());
-            self.input.drain(self.cursor_pos..next);
-        }
+        self.editor.delete();
     }
 
     pub fn move_cursor_left(&mut self) {
-        if self.cursor_pos > 0 {
-            self.cursor_pos = self.input[..self.cursor_pos]
-                .char_indices()
-                .next_back()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-        }
+        self.editor.move_cursor_left();
     }
 
     pub fn move_cursor_right(&mut self) {
-        if self.cursor_pos < self.input.len() {
-            self.cursor_pos = self.input[self.cursor_pos..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| self.cursor_pos + i)
-                .unwrap_or(self.input.len());
-        }
+        self.editor.move_cursor_right();
     }
 
     pub fn move_cursor_home(&mut self) {
-        // Go to start of current line (not start of entire input)
-        let before = &self.input[..self.cursor_pos];
-        self.cursor_pos = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        self.editor.move_cursor_home();
     }
 
     pub fn move_cursor_end(&mut self) {
-        // Go to end of current line (not end of entire input)
-        let after = &self.input[self.cursor_pos..];
-        if let Some(pos) = after.find('\n') {
-            self.cursor_pos += pos;
-        } else {
-            self.cursor_pos = self.input.len();
-        }
+        self.editor.move_cursor_end();
     }
 
     /// Load input history from $LASH_HOME/history.
     pub fn load_history(&mut self) {
-        let path = lash::lash_home().join("history");
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            self.input_history = content
-                .lines()
-                .filter(|l| !l.is_empty())
-                .map(|l| l.to_string())
-                .collect();
-        }
+        self.editor.load_history();
     }
 
     /// Save input history to $LASH_HOME/history (last 500 entries).
     pub fn save_history(&self) {
-        let dir = lash::lash_home();
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("history");
-        let start = self.input_history.len().saturating_sub(500);
-        let lines: Vec<&str> = self.input_history[start..]
-            .iter()
-            .map(|s| s.as_str())
-            .collect();
-        let _ = std::fs::write(&path, lines.join("\n"));
+        self.editor.save_history();
     }
 
     /// Update the suggestion list based on current input.
     pub fn update_suggestions(&mut self) {
-        // 1. Check slash commands at cursor
-        if let Some((_slash_pos, prefix)) = self.slash_token_at_cursor() {
-            self.suggestions = command::completions(&prefix, &self.skills);
-            self.suggestion_kind = SuggestionKind::Command;
-            if self.suggestions.is_empty() {
-                self.suggestion_idx = 0;
-            } else {
-                self.suggestion_idx = self.suggestion_idx.min(self.suggestions.len() - 1);
-            }
-            return;
-        }
-        // 2. Check for @ path token at cursor
-        if let Some((_at_pos, partial)) = self.at_token_at_cursor() {
-            self.suggestions = complete_path(&partial);
-            self.suggestion_kind = SuggestionKind::Path;
-            if self.suggestions.is_empty() {
-                self.suggestion_idx = 0;
-            } else {
-                self.suggestion_idx = self.suggestion_idx.min(self.suggestions.len() - 1);
-            }
-            return;
-        }
-        // 3. No suggestions
-        self.suggestions.clear();
-        self.suggestion_idx = 0;
-        self.suggestion_kind = SuggestionKind::None;
-    }
-
-    /// Scan backwards from cursor to find the nearest `@` token.
-    /// Returns `Some((at_byte_pos, partial_path_str))` or `None`.
-    /// The `@` must be at start of input or preceded by whitespace.
-    /// The partial is everything from after `@` to cursor (spaces end the token).
-    fn at_token_at_cursor(&self) -> Option<(usize, String)> {
-        let before = &self.input[..self.cursor_pos];
-        // Scan backwards for '@'
-        let at_byte = before.rfind('@')?;
-        // '@' must be at start or preceded by whitespace
-        if at_byte > 0 {
-            let prev_byte = self.input.as_bytes()[at_byte - 1];
-            if !prev_byte.is_ascii_whitespace() {
-                return None;
-            }
-        }
-        // Partial is everything after '@' to cursor — must have no spaces
-        let partial = &self.input[at_byte + 1..self.cursor_pos];
-        if partial.contains(' ') || partial.contains('\n') {
-            return None;
-        }
-        Some((at_byte, partial.to_string()))
-    }
-
-    /// Scan backwards from cursor to find the nearest `/` token.
-    /// Returns `Some((slash_byte_pos, prefix_including_slash))` or `None`.
-    /// The `/` must be at start of input or preceded by whitespace/newline.
-    /// The prefix is everything from `/` to cursor (no spaces allowed).
-    fn slash_token_at_cursor(&self) -> Option<(usize, String)> {
-        let before = &self.input[..self.cursor_pos];
-        let slash_byte = before.rfind('/')?;
-        // '/' must be at start or preceded by whitespace
-        if slash_byte > 0 {
-            let prev_byte = self.input.as_bytes()[slash_byte - 1];
-            if !prev_byte.is_ascii_whitespace() {
-                return None;
-            }
-        }
-        // Prefix is everything from '/' to cursor — must have no spaces
-        let prefix = &self.input[slash_byte..self.cursor_pos];
-        if prefix.contains(' ') || prefix.contains('\n') {
-            return None;
-        }
-        Some((slash_byte, prefix.to_string()))
+        self.editor.update_suggestions(&self.skills);
     }
 
     /// Whether the suggestion popup is active.
     pub fn has_suggestions(&self) -> bool {
-        !self.suggestions.is_empty()
+        self.editor.has_suggestions()
     }
 
     /// Move suggestion selection up.
     pub fn suggestion_up(&mut self) {
-        if !self.suggestions.is_empty() {
-            self.suggestion_idx = self.suggestion_idx.saturating_sub(1);
-        }
+        self.editor.suggestion_up();
     }
 
     /// Move suggestion selection down.
     pub fn suggestion_down(&mut self) {
-        if !self.suggestions.is_empty() {
-            self.suggestion_idx = (self.suggestion_idx + 1).min(self.suggestions.len() - 1);
-        }
+        self.editor.suggestion_down();
     }
 
     /// Accept the selected suggestion.
     pub fn complete_suggestion(&mut self) {
-        match self.suggestion_kind {
-            SuggestionKind::Command => {
-                if let Some((slash_pos, _prefix)) = self.slash_token_at_cursor()
-                    && let Some((cmd, _)) = self.suggestions.get(self.suggestion_idx).cloned()
-                {
-                    let needs_arg = command::completion_inserts_space(&cmd, &self.skills);
-                    let replacement = if needs_arg { format!("{} ", cmd) } else { cmd };
-                    let before = self.input[..slash_pos].to_string();
-                    let after = self.input[self.cursor_pos..].to_string();
-                    self.input = format!("{}{}{}", before, replacement, after);
-                    self.cursor_pos = slash_pos + replacement.len();
-                }
-                self.suggestions.clear();
-                self.suggestion_idx = 0;
-                self.suggestion_kind = SuggestionKind::None;
-            }
-            SuggestionKind::Path => {
-                if let Some((at_pos, _partial)) = self.at_token_at_cursor()
-                    && let Some((path, _)) = self.suggestions.get(self.suggestion_idx).cloned()
-                {
-                    let before = self.input[..at_pos].to_string();
-                    let after = self.input[self.cursor_pos..].to_string();
-                    let is_dir = path.ends_with('/');
-                    self.input = format!("{}@{}{}", before, path, after);
-                    self.cursor_pos = at_pos + 1 + path.len(); // +1 for @
-                    if is_dir {
-                        // Don't dismiss — re-trigger for deeper completion
-                        return;
-                    }
-                }
-                self.suggestions.clear();
-                self.suggestion_idx = 0;
-                self.suggestion_kind = SuggestionKind::None;
-            }
-            SuggestionKind::None => {}
-        }
+        self.editor.complete_suggestion(&self.skills);
     }
 
     /// Whether the session picker is active.
     pub fn has_session_picker(&self) -> bool {
-        !self.session_picker.is_empty()
+        matches!(&self.overlay, Some(OverlayState::SessionPicker(state)) if !state.items.is_empty())
     }
 
     /// Move session picker selection up.
     pub fn session_picker_up(&mut self) {
-        if !self.session_picker.is_empty() {
-            self.session_picker_idx = self.session_picker_idx.saturating_sub(1);
+        if let Some(OverlayState::SessionPicker(state)) = &mut self.overlay {
+            state.up();
         }
     }
 
     /// Move session picker selection down.
     pub fn session_picker_down(&mut self) {
-        if !self.session_picker.is_empty() {
-            self.session_picker_idx =
-                (self.session_picker_idx + 1).min(self.session_picker.len() - 1);
+        if let Some(OverlayState::SessionPicker(state)) = &mut self.overlay {
+            state.down();
         }
     }
 
     /// Get the selected session filename, clearing the picker.
     pub fn take_session_pick(&mut self) -> Option<String> {
-        let filename = self
-            .session_picker
-            .get(self.session_picker_idx)
-            .map(|s| s.filename.clone());
-        self.session_picker.clear();
-        self.session_picker_idx = 0;
-        filename
+        match self.overlay.take() {
+            Some(OverlayState::SessionPicker(mut state)) => {
+                state.take_selected().map(|s| s.filename)
+            }
+            other => {
+                self.overlay = other;
+                None
+            }
+        }
     }
 
     /// Dismiss the session picker without selecting.
     pub fn dismiss_session_picker(&mut self) {
-        self.session_picker.clear();
-        self.session_picker_idx = 0;
+        if matches!(self.overlay, Some(OverlayState::SessionPicker(_))) {
+            self.overlay = None;
+        }
     }
 
     /// Whether the skill picker is active.
     pub fn has_skill_picker(&self) -> bool {
-        !self.skill_picker.is_empty()
+        matches!(&self.overlay, Some(OverlayState::SkillPicker(state)) if !state.items.is_empty())
     }
 
     /// Move skill picker selection up.
     pub fn skill_picker_up(&mut self) {
-        if !self.skill_picker.is_empty() {
-            self.skill_picker_idx = self.skill_picker_idx.saturating_sub(1);
+        if let Some(OverlayState::SkillPicker(state)) = &mut self.overlay {
+            state.up();
         }
     }
 
     /// Move skill picker selection down.
     pub fn skill_picker_down(&mut self) {
-        if !self.skill_picker.is_empty() {
-            self.skill_picker_idx = (self.skill_picker_idx + 1).min(self.skill_picker.len() - 1);
+        if let Some(OverlayState::SkillPicker(state)) = &mut self.overlay {
+            state.down();
         }
     }
 
     /// Get the selected skill name, clearing the picker.
     pub fn take_skill_pick(&mut self) -> Option<String> {
-        let name = self
-            .skill_picker
-            .get(self.skill_picker_idx)
-            .map(|(n, _)| n.clone());
-        self.skill_picker.clear();
-        self.skill_picker_idx = 0;
-        name
+        match self.overlay.take() {
+            Some(OverlayState::SkillPicker(mut state)) => {
+                state.take_selected().map(|(name, _)| name)
+            }
+            other => {
+                self.overlay = other;
+                None
+            }
+        }
     }
 
     /// Dismiss the skill picker without selecting.
     pub fn dismiss_skill_picker(&mut self) {
-        self.skill_picker.clear();
-        self.skill_picker_idx = 0;
+        if matches!(self.overlay, Some(OverlayState::SkillPicker(_))) {
+            self.overlay = None;
+        }
     }
 
     // ── Prompt (ask dialog) methods ──
 
     /// Whether the prompt dialog is active.
     pub fn has_prompt(&self) -> bool {
-        self.prompt.is_some()
+        matches!(self.overlay, Some(OverlayState::Prompt(_)))
     }
 
     /// Whether the prompt is currently focused on reply editing.
     pub fn is_prompt_editing_reply(&self) -> bool {
-        self.prompt
-            .as_ref()
-            .is_some_and(PromptState::is_editing_reply)
+        match &self.overlay {
+            Some(OverlayState::Prompt(prompt)) => prompt.is_editing_reply(),
+            _ => false,
+        }
     }
 
     /// Whether the prompt is freeform-only (no options).
     pub fn is_prompt_freeform(&self) -> bool {
-        self.prompt.as_ref().is_some_and(PromptState::is_freeform)
+        match &self.overlay {
+            Some(OverlayState::Prompt(prompt)) => prompt.is_freeform(),
+            _ => false,
+        }
     }
 
     /// Move prompt selection up.
     pub fn prompt_up(&mut self) {
-        if let Some(p) = &mut self.prompt {
+        if let Some(OverlayState::Prompt(p)) = &mut self.overlay {
             p.move_up();
         }
     }
 
     /// Move prompt selection down.
     pub fn prompt_down(&mut self) {
-        if let Some(p) = &mut self.prompt {
+        if let Some(OverlayState::Prompt(p)) = &mut self.overlay {
             p.move_down();
         }
     }
 
     /// Toggle extra text editing for prompts that also have discrete options.
     pub fn prompt_toggle_extra(&mut self) {
-        if let Some(p) = &mut self.prompt {
+        if let Some(OverlayState::Prompt(p)) = &mut self.overlay {
             p.toggle_focus();
         }
     }
 
     /// Insert a character into the prompt extra text (or freeform input).
     pub fn prompt_insert_char(&mut self, c: char) {
-        if let Some(p) = &mut self.prompt {
+        if let Some(OverlayState::Prompt(p)) = &mut self.overlay {
             p.insert_char(c);
         }
     }
 
     /// Insert literal text into the prompt extra text (or freeform input).
     pub fn prompt_insert_text(&mut self, text: &str) {
-        if let Some(p) = &mut self.prompt {
+        if let Some(OverlayState::Prompt(p)) = &mut self.overlay {
             p.insert_text(text);
         }
     }
 
     /// Delete character before cursor in prompt extra text.
     pub fn prompt_backspace(&mut self) {
-        if let Some(p) = &mut self.prompt {
+        if let Some(OverlayState::Prompt(p)) = &mut self.overlay {
             p.backspace();
         }
     }
 
     /// Submit the prompt response, render it as user input, and dismiss the dialog.
     pub fn take_prompt_response(&mut self) -> Option<String> {
-        if let Some(p) = self.prompt.take() {
+        if let Some(OverlayState::Prompt(p)) = self.overlay.take() {
             let response = p.submitted_response();
             let _ = p.response_tx.send(response.clone());
             self.invalidate_height_cache();
@@ -2509,95 +1926,71 @@ impl App {
 
     /// Dismiss the prompt without selecting (Esc) — sends empty string to unblock the REPL runtime.
     pub fn dismiss_prompt(&mut self) {
-        if let Some(p) = self.prompt.take() {
+        if let Some(OverlayState::Prompt(p)) = self.overlay.take() {
             let _ = p.response_tx.send(String::new());
             self.invalidate_height_cache();
             self.scroll_to_bottom();
             self.dirty = true;
         }
     }
-}
 
-/// Complete a partial path for `@` references.
-/// Returns up to 20 entries as `(display_name, kind_label)`.
-/// Directories get a trailing `/` and are sorted first.
-fn complete_path(partial: &str) -> Vec<(String, String)> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    pub fn show_session_picker(&mut self, items: Vec<crate::session_log::SessionInfo>) {
+        self.overlay = Some(OverlayState::SessionPicker(PickerState::new(items)));
+    }
 
-    let (dir, prefix) = if partial.is_empty() {
-        (cwd.clone(), String::new())
-    } else if partial.ends_with('/') {
-        // e.g. "src/" → list contents of src/
-        let dir = if partial.starts_with('/') {
-            PathBuf::from(partial)
-        } else {
-            cwd.join(partial)
-        };
-        (dir, String::new())
-    } else {
-        // e.g. "src/ma" → parent=src/, prefix=ma
-        let path = if partial.starts_with('/') {
-            PathBuf::from(partial)
-        } else {
-            cwd.join(partial)
-        };
-        let parent = path.parent().unwrap_or(&cwd).to_path_buf();
-        let prefix = path
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_default();
-        (parent, prefix)
-    };
-
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd,
-        Err(_) => return Vec::new(),
-    };
-
-    let show_hidden = prefix.starts_with('.');
-
-    let mut dirs: Vec<(String, String)> = Vec::new();
-    let mut files: Vec<(String, String)> = Vec::new();
-
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-
-        // Skip enabled files unless prefix starts with '.'
-        if !show_hidden && name.starts_with('.') {
-            continue;
-        }
-
-        if !prefix.is_empty() && !name.starts_with(&prefix) {
-            continue;
-        }
-
-        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-
-        // Build the display path relative to the partial's directory component
-        let dir_part = if partial.is_empty() {
-            String::new()
-        } else if partial.ends_with('/') {
-            partial.to_string()
-        } else if let Some(slash) = partial.rfind('/') {
-            partial[..=slash].to_string()
-        } else {
-            String::new()
-        };
-
-        if is_dir {
-            dirs.push((format!("{}{}/", dir_part, name), "dir".to_string()));
-        } else {
-            files.push((format!("{}{}", dir_part, name), "file".to_string()));
+    pub fn session_picker_state(&self) -> Option<&PickerState<crate::session_log::SessionInfo>> {
+        match &self.overlay {
+            Some(OverlayState::SessionPicker(state)) => Some(state),
+            _ => None,
         }
     }
 
-    dirs.sort_by(|a, b| a.0.cmp(&b.0));
-    files.sort_by(|a, b| a.0.cmp(&b.0));
+    pub fn show_skill_picker(&mut self, items: Vec<(String, String)>) {
+        self.overlay = Some(OverlayState::SkillPicker(PickerState::new(items)));
+    }
 
-    let mut result = dirs;
-    result.extend(files);
-    result.truncate(20);
-    result
+    pub fn skill_picker_state(&self) -> Option<&PickerState<(String, String)>> {
+        match &self.overlay {
+            Some(OverlayState::SkillPicker(state)) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn show_prompt(&mut self, prompt: PromptState) {
+        self.overlay = Some(OverlayState::Prompt(prompt));
+    }
+
+    pub fn prompt_state(&self) -> Option<&PromptState> {
+        match &self.overlay {
+            Some(OverlayState::Prompt(prompt)) => Some(prompt),
+            _ => None,
+        }
+    }
+
+    pub fn input(&self) -> &str {
+        &self.editor.input
+    }
+
+    pub fn set_input(&mut self, input: String) {
+        self.editor.input = input;
+        self.editor.cursor_pos = self.editor.input.len();
+    }
+
+    pub fn cursor_pos(&self) -> usize {
+        self.editor.cursor_pos
+    }
+
+    pub fn suggestions(&self) -> &[(String, String)] {
+        &self.editor.suggestions
+    }
+
+    pub fn suggestion_kind(&self) -> SuggestionKind {
+        self.editor.suggestion_kind
+    }
+
+    pub fn suggestion_idx(&self) -> usize {
+        self.editor.suggestion_idx
+    }
 }
 
 /// Compute the visual height of pending streaming text.
@@ -2646,112 +2039,8 @@ pub(crate) fn render_plan_content_from_args(args: &serde_json::Value) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::replay::normalize_stream_text;
-
-    // ── wrapped_line_height ──
-
-    #[test]
-    fn wrapped_line_height_empty() {
-        // Empty line with newline has width 0 → returns 1
-        assert_eq!(wrapped_line_height("", 80), 1);
-    }
-
-    #[test]
-    fn wrapped_line_height_short() {
-        assert_eq!(wrapped_line_height("hello", 80), 1);
-    }
-
-    #[test]
-    fn wrapped_line_height_exact_width() {
-        assert_eq!(wrapped_line_height("abcd", 4), 1);
-    }
-
-    #[test]
-    fn wrapped_line_height_one_over() {
-        assert_eq!(wrapped_line_height("abcde", 4), 2);
-    }
-
-    #[test]
-    fn wrapped_line_height_zero_width() {
-        assert_eq!(wrapped_line_height("hello", 0), 1);
-    }
-
-    #[test]
-    fn wrapped_line_height_cjk() {
-        // CJK characters take 2 columns each
-        // 3 CJK chars = 6 columns, width 4 → ceil(6/4) = 2
-        assert_eq!(wrapped_line_height("\u{4e16}\u{754c}\u{597d}", 4), 2);
-    }
-
-    // ── wrapped_text_height ──
-
-    #[test]
-    fn wrapped_text_height_single_line() {
-        assert_eq!(wrapped_text_height("hello", 80, 0), 1);
-    }
-
-    #[test]
-    fn wrapped_text_height_multi_line() {
-        assert_eq!(wrapped_text_height("line1\nline2\nline3", 80, 0), 3);
-    }
-
-    #[test]
-    fn wrapped_text_height_empty() {
-        assert_eq!(wrapped_text_height("", 80, 0), 1);
-    }
-
-    #[test]
-    fn wrapped_text_height_with_prefix() {
-        // "hello" = 5 chars, width 6, prefix 2 → effective width 4 → ceil(5/4) = 2
-        assert_eq!(wrapped_text_height("hello", 6, 2), 2);
-    }
-
-    #[test]
-    fn normalize_stream_text_collapses_blank_runs() {
-        let raw = "\n\nline one\n\n\nline two\n\n";
-        assert_eq!(normalize_stream_text(raw), "line one\n\nline two");
-    }
-
-    #[test]
-    fn normalize_stream_text_handles_whitespace_only_lines() {
-        let raw = " \n\t\nhello\n   \n\t \nworld\n";
-        assert_eq!(normalize_stream_text(raw), "hello\n\nworld");
-    }
-
-    #[test]
-    fn normalize_stream_text_strips_repl_fragments() {
-        let raw = "<repl>\nproc\n</repl>\n\nok";
-        assert_eq!(normalize_stream_text(raw), "proc\n\nok");
-    }
-
-    #[test]
-    fn normalize_stream_text_strips_dangling_repl_fragments() {
-        let raw = "<repl\nhello\n</repl";
-        assert_eq!(normalize_stream_text(raw), "hello");
-    }
-
-    // ── format_tokens ──
-
-    #[test]
-    fn format_tokens_small() {
-        assert_eq!(format_tokens(0), "0");
-        assert_eq!(format_tokens(999), "999");
-    }
-
-    #[test]
-    fn format_tokens_thousands() {
-        assert_eq!(format_tokens(1000), "1.0k");
-        assert_eq!(format_tokens(1234), "1.2k");
-        assert_eq!(format_tokens(999999), "1000.0k");
-    }
-
-    #[test]
-    fn format_tokens_millions() {
-        assert_eq!(format_tokens(1_000_000), "1.0M");
-        assert_eq!(format_tokens(2_500_000), "2.5M");
-    }
-
-    // ── DisplayBlock::height ──
+    use crate::editor::LARGE_PASTE_CHAR_THRESHOLD;
+    use crate::overlay::{PromptFocus, PromptSelection};
 
     #[test]
     fn renders_plan_content_from_update_plan_args() {
@@ -3391,52 +2680,52 @@ mod tests {
     #[test]
     fn history_up_restores_last_queued_turn_before_history() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.input_history = vec!["older turn".into()];
+        app.editor.input_history = vec!["older turn".into()];
         app.queue_turn(PreparedTurn::new("queued text".into(), vec![vec![1, 2, 3]]));
 
         app.history_up();
 
-        assert_eq!(app.input, "queued text");
-        assert_eq!(app.pending_images.len(), 1);
-        assert_eq!(app.pending_images[0].id, 1);
-        assert_eq!(app.pending_images[0].png_bytes, vec![1, 2, 3]);
+        assert_eq!(app.input(), "queued text");
+        assert_eq!(app.editor.pending_images.len(), 1);
+        assert_eq!(app.editor.pending_images[0].id, 1);
+        assert_eq!(app.editor.pending_images[0].png_bytes, vec![1, 2, 3]);
         assert!(app.queued_turns.is_empty());
-        assert_eq!(app.input_history_idx, None);
+        assert_eq!(app.editor.input_history_idx, None);
     }
 
     #[test]
     fn restore_prepared_turn_clears_history_selection() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.input_history = vec!["older turn".into()];
-        app.input_history_idx = Some(0);
+        app.editor.input_history = vec!["older turn".into()];
+        app.editor.input_history_idx = Some(0);
 
         app.restore_prepared_turn(PreparedTurn::new("queued text".into(), Vec::new()));
 
-        assert_eq!(app.input_history_idx, None);
+        assert_eq!(app.editor.input_history_idx, None);
     }
 
     #[test]
     fn backspace_deletes_image_marker_atomically() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.input = "hello [Image #2] world".into();
-        app.cursor_pos = "hello [Image #2]".len();
-        app.pending_images = vec![PendingImage {
+        app.set_input("hello [Image #2] world".into());
+        app.editor.cursor_pos = "hello [Image #2]".len();
+        app.editor.pending_images = vec![PendingImage {
             id: 2,
             png_bytes: vec![1, 2, 3],
         }];
 
         app.backspace();
 
-        assert_eq!(app.input, "hello  world");
-        assert!(app.pending_images.is_empty());
-        assert_eq!(app.cursor_pos, "hello ".len());
+        assert_eq!(app.input(), "hello  world");
+        assert!(app.editor.pending_images.is_empty());
+        assert_eq!(app.cursor_pos(), "hello ".len());
     }
 
     #[test]
     fn next_image_marker_id_tracks_highest_visible_marker() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.input = "[Image #2] [Image #5]".into();
-        app.pending_images = vec![PendingImage {
+        app.set_input("[Image #2] [Image #5]".into());
+        app.editor.pending_images = vec![PendingImage {
             id: 2,
             png_bytes: vec![1, 2, 3],
         }];
@@ -3447,8 +2736,8 @@ mod tests {
     #[test]
     fn add_pending_image_uses_highest_marker_plus_one() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.input = "before [Image #4] after".into();
-        app.pending_images = vec![PendingImage {
+        app.set_input("before [Image #4] after".into());
+        app.editor.pending_images = vec![PendingImage {
             id: 2,
             png_bytes: vec![9],
         }];
@@ -3456,35 +2745,35 @@ mod tests {
         let id = app.add_pending_image(vec![1, 2, 3]);
 
         assert_eq!(id, 5);
-        assert_eq!(app.pending_images.last().map(|img| img.id), Some(5));
+        assert_eq!(app.editor.pending_images.last().map(|img| img.id), Some(5));
     }
 
     #[test]
     fn complete_pending_image_only_attaches_when_marker_still_exists() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.input = "before [Image #3] after".into();
+        app.set_input("before [Image #3] after".into());
         app.begin_pending_image(3);
 
         assert!(app.complete_pending_image(3, vec![1, 2, 3]));
-        assert_eq!(app.pending_images.len(), 1);
-        assert_eq!(app.pending_images[0].id, 3);
+        assert_eq!(app.editor.pending_images.len(), 1);
+        assert_eq!(app.editor.pending_images[0].id, 3);
 
-        app.input.clear();
+        app.editor.input.clear();
         app.begin_pending_image(4);
         assert!(!app.complete_pending_image(4, vec![9]));
-        assert!(app.pending_images.iter().all(|image| image.id != 4));
+        assert!(app.editor.pending_images.iter().all(|image| image.id != 4));
     }
 
     #[test]
     fn fail_pending_image_removes_marker_and_inflight_state() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.input = "before [Image #7] after".into();
-        app.cursor_pos = app.input.len();
+        app.set_input("before [Image #7] after".into());
+        app.editor.cursor_pos = app.input().len();
         app.begin_pending_image(7);
 
         assert!(app.fail_pending_image(7));
-        assert_eq!(app.input, "before  after");
-        assert!(!app.inflight_image_ids.contains(&7));
+        assert_eq!(app.input(), "before  after");
+        assert!(!app.editor.inflight_image_ids.contains(&7));
     }
 
     #[test]
@@ -3493,8 +2782,8 @@ mod tests {
         app.begin_pending_image(2);
         assert!(!app.has_pending_image_jobs());
 
-        app.input = "[Image #2]".into();
-        app.cursor_pos = app.input.len();
+        app.set_input("[Image #2]".into());
+        app.editor.cursor_pos = app.input().len();
         assert!(app.has_pending_image_jobs());
 
         app.backspace();
@@ -3505,7 +2794,7 @@ mod tests {
     fn take_prompt_response_renders_visible_user_block() {
         let mut app = App::new("test-model".into(), "test".into());
         let (tx, rx) = std::sync::mpsc::channel();
-        app.prompt = Some(PromptState {
+        app.show_prompt(PromptState {
             question: "Pick one".into(),
             options: vec!["red".into(), "blue".into()],
             selection: PromptSelection::Option(0),
@@ -3519,7 +2808,7 @@ mod tests {
 
         assert_eq!(response.as_deref(), Some("1. red"));
         assert_eq!(rx.recv().expect("response"), "1. red");
-        assert!(app.prompt.is_none());
+        assert!(app.prompt_state().is_none());
         assert!(app.dirty);
         assert!(matches!(
             app.blocks.last(),
@@ -3531,7 +2820,7 @@ mod tests {
     fn dismiss_prompt_marks_ui_dirty() {
         let mut app = App::new("test-model".into(), "test".into());
         let (tx, rx) = std::sync::mpsc::channel();
-        app.prompt = Some(PromptState {
+        app.show_prompt(PromptState {
             question: "Pick one".into(),
             options: vec!["red".into()],
             selection: PromptSelection::Option(0),
@@ -3544,7 +2833,7 @@ mod tests {
         app.dismiss_prompt();
 
         assert_eq!(rx.recv().expect("response"), "");
-        assert!(app.prompt.is_none());
+        assert!(app.prompt_state().is_none());
         assert!(app.dirty);
     }
 
@@ -3624,32 +2913,6 @@ mod tests {
 
         let cache = app.height_cache_snapshot().to_vec();
         assert_eq!(cache[0], SPLASH_SCROLLBACK_HEIGHT);
-    }
-
-    #[test]
-    fn display_block_error_height() {
-        let block = DisplayBlock::Error("short error".into());
-        assert_eq!(block.height(0, 80, 0), 1);
-    }
-
-    #[test]
-    fn display_block_user_input_height() {
-        // "hello" with 2-char prefix = 1 line
-        let block = DisplayBlock::UserInput("hello".into());
-        assert_eq!(block.height(0, 80, 0), 1);
-    }
-
-    #[test]
-    fn display_block_user_input_height_matches_render_prefix_width() {
-        // Eight columns of text plus the two-column marker fits exactly in width 10.
-        let block = DisplayBlock::UserInput("12345678".into());
-        assert_eq!(block.height(0, 10, 0), 1);
-    }
-
-    #[test]
-    fn display_block_splash_height() {
-        let block = DisplayBlock::Splash;
-        assert_eq!(block.height(0, 80, 24), 24);
     }
 
     #[test]
@@ -4233,13 +3496,13 @@ mod tests {
     #[test]
     fn insert_text_inserts_literal_payload_at_cursor() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.input = "startend".into();
-        app.cursor_pos = "start".len();
+        app.set_input("startend".into());
+        app.editor.cursor_pos = "start".len();
 
         app.insert_text("\nplain pasted text\n");
 
-        assert_eq!(app.input, "start\nplain pasted text\nend");
-        assert_eq!(app.cursor_pos, "start\nplain pasted text\n".len());
+        assert_eq!(app.input(), "start\nplain pasted text\nend");
+        assert_eq!(app.cursor_pos(), "start\nplain pasted text\n".len());
     }
 
     #[test]
@@ -4250,15 +3513,15 @@ mod tests {
         app.insert_pasted_text(&large);
 
         let placeholder = format!("[Pasted Content {} chars]", large.chars().count());
-        assert_eq!(app.input, placeholder);
-        assert_eq!(app.pending_large_pastes.len(), 1);
+        assert_eq!(app.input(), placeholder);
+        assert_eq!(app.editor.pending_large_pastes.len(), 1);
 
         let prepared = app.take_prepared_turn();
         assert_eq!(prepared.display_text, placeholder);
         assert_eq!(prepared.effective_text, large);
         assert_eq!(prepared.large_pastes.len(), 1);
-        assert!(app.input.is_empty());
-        assert!(app.pending_large_pastes.is_empty());
+        assert!(app.input().is_empty());
+        assert!(app.editor.pending_large_pastes.is_empty());
     }
 
     #[test]
@@ -4267,13 +3530,13 @@ mod tests {
         let large = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 2);
 
         app.insert_pasted_text(&large);
-        let placeholder = app.input.clone();
-        app.cursor_pos = placeholder.len();
+        let placeholder = app.input().to_string();
+        app.editor.cursor_pos = placeholder.len();
 
         app.backspace();
 
-        assert!(app.input.is_empty());
-        assert!(app.pending_large_pastes.is_empty());
+        assert!(app.input().is_empty());
+        assert!(app.editor.pending_large_pastes.is_empty());
     }
 
     #[test]
@@ -4285,11 +3548,11 @@ mod tests {
         app.insert_pasted_text(&large);
         app.insert_pasted_text(&large);
 
-        assert_eq!(app.input, format!("{base}{base} #2"));
-        assert_eq!(app.pending_large_pastes.len(), 2);
-        assert_eq!(app.pending_large_pastes[0].placeholder, base);
+        assert_eq!(app.input(), format!("{base}{base} #2"));
+        assert_eq!(app.editor.pending_large_pastes.len(), 2);
+        assert_eq!(app.editor.pending_large_pastes[0].placeholder, base);
         assert_eq!(
-            app.pending_large_pastes[1].placeholder,
+            app.editor.pending_large_pastes[1].placeholder,
             format!("{base} #2")
         );
     }
@@ -4323,7 +3586,7 @@ mod tests {
     #[test]
     fn prompt_insert_text_inserts_literal_payload_at_cursor() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.prompt = Some(PromptState {
+        app.show_prompt(PromptState {
             question: "Question?".into(),
             options: Vec::new(),
             selection: PromptSelection::Option(0),
@@ -4335,7 +3598,7 @@ mod tests {
 
         app.prompt_insert_text("\nplain pasted text\n");
 
-        let prompt = app.prompt.as_ref().expect("prompt");
+        let prompt = app.prompt_state().expect("prompt");
         assert_eq!(prompt.reply_text, "start\nplain pasted text\nend");
         assert_eq!(prompt.reply_cursor, "start\nplain pasted text\n".len());
     }
@@ -4343,7 +3606,7 @@ mod tests {
     #[test]
     fn prompt_toggle_extra_ignores_freeform_prompts() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.prompt = Some(PromptState {
+        app.show_prompt(PromptState {
             question: "Question?".into(),
             options: Vec::new(),
             selection: PromptSelection::Option(0),
@@ -4356,7 +3619,7 @@ mod tests {
         app.prompt_toggle_extra();
 
         assert!(
-            app.prompt.as_ref().expect("prompt").is_editing_reply(),
+            app.prompt_state().expect("prompt").is_editing_reply(),
             "freeform prompts should stay in text-entry mode"
         );
     }

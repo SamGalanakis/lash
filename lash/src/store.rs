@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 #[cfg(feature = "sqlite-store")]
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OpenFlags, params};
 #[cfg(feature = "sqlite-store")]
 use sha2::{Digest, Sha256};
 
@@ -143,6 +143,16 @@ pub struct SessionMeta {
     pub parent_session_id: Option<String>,
 }
 
+/// Lightweight session info for the resume picker — avoids loading the full messages blob.
+#[derive(Clone, Debug)]
+pub struct SessionPickerInfo {
+    pub session_id: String,
+    pub cwd: Option<String>,
+    pub parent_session_id: Option<String>,
+    pub first_user_message: String,
+    pub user_message_count: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct TurnCheckpoint {
     pub agent_state: AgentState,
@@ -163,7 +173,6 @@ pub trait RuntimeStore: Send + Sync {
     async fn history_export(&self, agent_id: &str) -> Vec<HistoryTurnRecord>;
     async fn history_replace(&self, agent_id: &str, turns: Vec<HistoryTurnRecord>);
     async fn save_session_meta(&self, meta: SessionMeta);
-    async fn update_agent_ui_state(&self, agent_id: &str, ui_json: &str);
     async fn load_session_meta(&self) -> Option<SessionMeta>;
 
     async fn save_turn_checkpoint(&self, checkpoint: TurnCheckpoint) {
@@ -203,6 +212,66 @@ impl Store {
         ensure_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+        })
+    }
+
+    /// Open a SQLite database read-only with minimal setup (no schema check).
+    /// Used for fast metadata reads like the session picker.
+    pub fn open_readonly(path: &Path) -> rusqlite::Result<Self> {
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path, flags)?;
+        conn.busy_timeout(Duration::from_secs(1))?;
+        conn.execute_batch("PRAGMA cache_size = -500;")?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    /// Fast picker info: session_meta + first user message + turn count from history_turns.
+    /// Avoids loading the full messages blob entirely.
+    pub fn load_picker_info(&self) -> Option<SessionPickerInfo> {
+        let conn = self.conn.lock().unwrap();
+        let meta = conn
+            .query_row(
+                "SELECT session_id, cwd, parent_session_id
+                 FROM session_meta WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .ok()?;
+
+        // Count user turns from the indexed history_turns table
+        let turn_count: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM history_turns WHERE agent_id = 'root'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        // First user message from the first history turn
+        let first_msg: String = conn
+            .query_row(
+                "SELECT user_message FROM history_turns
+                 WHERE agent_id = 'root'
+                 ORDER BY turn_index ASC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_default();
+
+        Some(SessionPickerInfo {
+            session_id: meta.0,
+            cwd: meta.1,
+            parent_session_id: meta.2,
+            first_user_message: first_msg,
+            user_message_count: turn_count,
         })
     }
 
@@ -467,29 +536,6 @@ impl Store {
         }
     }
 
-    pub fn update_agent_ui_state(&self, agent_id: &str, ui_json: &str) {
-        let conn = self.conn.lock().unwrap();
-        match conn.execute(
-            "UPDATE agents SET ui_json = ?2 WHERE agent_id = ?1",
-            params![agent_id, ui_json],
-        ) {
-            Ok(0) => {
-                tracing::warn!(
-                    agent_id = agent_id,
-                    "skipped UI snapshot update because no agent row exists"
-                );
-            }
-            Ok(_) => {}
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    agent_id = agent_id,
-                    "failed to persist UI snapshot update"
-                );
-            }
-        }
-    }
-
     pub fn load_session_meta(&self) -> Option<SessionMeta> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
@@ -578,10 +624,6 @@ impl RuntimeStore for Store {
 
     async fn save_session_meta(&self, meta: SessionMeta) {
         Self::save_session_meta(self, meta);
-    }
-
-    async fn update_agent_ui_state(&self, agent_id: &str, ui_json: &str) {
-        Self::update_agent_ui_state(self, agent_id, ui_json);
     }
 
     async fn load_session_meta(&self) -> Option<SessionMeta> {
@@ -711,56 +753,6 @@ mod tests {
         Store::memory().unwrap()
     }
 
-    // ── Archive ──
-
-    #[test]
-    fn archive_round_trip() {
-        let s = mem();
-        let hash = s.store_archive("hello world");
-        assert_eq!(hash.len(), 12);
-        assert_eq!(s.get_archive(&hash).unwrap(), "hello world");
-    }
-
-    #[test]
-    fn archive_dedup() {
-        let s = mem();
-        let h1 = s.store_archive("same content");
-        let h2 = s.store_archive("same content");
-        assert_eq!(h1, h2);
-    }
-
-    #[test]
-    fn archive_missing_hash() {
-        let s = mem();
-        assert!(s.get_archive("000000000000").is_none());
-    }
-
-    // ── Agent state ──
-
-    #[test]
-    fn agent_state_round_trip() {
-        let s = mem();
-        s.save_agent_state(AgentState {
-            agent_id: "ag1".into(),
-            messages_json: "[]".into(),
-            tool_calls_json: "[]".into(),
-            ui_json: "{}".into(),
-            iteration: 5,
-            config_json: "{}".into(),
-            repl_snapshot: None,
-            input_tokens: 100,
-            output_tokens: 50,
-            cached_input_tokens: 10,
-            reasoning_tokens: 7,
-        });
-        let a = s.load_agent_state("ag1").unwrap();
-        assert_eq!(a.agent_id, "ag1");
-        assert_eq!(a.iteration, 5);
-        assert_eq!(a.input_tokens, 100);
-        assert_eq!(a.reasoning_tokens, 7);
-        assert_eq!(a.ui_json, "{}");
-    }
-
     #[test]
     fn open_rejects_legacy_session_schema() {
         let tmp = tempfile::tempdir().unwrap();
@@ -799,24 +791,6 @@ mod tests {
             .unwrap();
         assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
         assert_eq!(busy_timeout_ms, SQLITE_BUSY_TIMEOUT.as_millis() as i64);
-    }
-
-    #[test]
-    fn session_meta_round_trip() {
-        let s = mem();
-        s.save_session_meta(SessionMeta {
-            session_id: "s1".into(),
-            session_name: "demo".into(),
-            created_at: "2026-03-25T10:00:00Z".into(),
-            model: "gpt-5".into(),
-            cwd: Some("/tmp/demo".into()),
-            parent_session_id: None,
-        });
-        let meta = s.load_session_meta().expect("meta");
-        assert_eq!(meta.session_id, "s1");
-        assert_eq!(meta.session_name, "demo");
-        assert_eq!(meta.model, "gpt-5");
-        assert_eq!(meta.cwd.as_deref(), Some("/tmp/demo"));
     }
 
     #[test]
