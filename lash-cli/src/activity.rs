@@ -632,7 +632,6 @@ pub fn merge_exploration_activity(target: &mut ActivityBlock, mut incoming: Acti
     };
     target_ops.extend(incoming_ops);
     target.duration_ms += incoming.duration_ms;
-    target.children.push(incoming);
     rebuild_exploration_summary(target);
     true
 }
@@ -659,7 +658,6 @@ pub fn merge_edit_activity(target: &mut ActivityBlock, incoming: ActivityBlock) 
     *total_added += incoming_added;
     *total_removed += incoming_removed;
     target.duration_ms += incoming.duration_ms;
-    target.children.push(incoming);
     target.summary = patch_summary_from_preview(files, *total_added, *total_removed);
     true
 }
@@ -668,8 +666,8 @@ fn rebuild_exploration_summary(block: &mut ActivityBlock) {
     let Some(ActivityExtra::Exploration(ops)) = block.extra.as_ref() else {
         return;
     };
-    block.summary = "EXPLORE".to_string();
-    block.detail_lines = exploration_detail_lines(ops);
+    block.summary = exploration_summary(ops);
+    block.detail_lines = ops.iter().map(exploration_step_line).collect();
 }
 
 fn semantic_tool_summary(name: &str, args: &Value) -> String {
@@ -800,49 +798,22 @@ fn exploration_block(
     block
 }
 
-fn exploration_detail_lines(ops: &[ExplorationOp]) -> Vec<String> {
-    let mut reads = Vec::new();
-    let mut searches = Vec::new();
-    let mut globs = Vec::new();
-    let mut lists = Vec::new();
-
-    for op in ops {
-        match op.kind {
-            ExplorationOpKind::Read => reads.push(op.subject.clone()),
-            ExplorationOpKind::Search => searches.push(op.subject.clone()),
-            ExplorationOpKind::Glob => globs.push(op.subject.clone()),
-            ExplorationOpKind::List => lists.push(op.subject.clone()),
-        }
+fn exploration_summary(ops: &[ExplorationOp]) -> String {
+    let count = ops.len();
+    if count == 1 {
+        "EXPLORE · 1 step".to_string()
+    } else {
+        format!("EXPLORE · {count} steps")
     }
-
-    let mut lines = Vec::new();
-    if !searches.is_empty() {
-        lines.push(format!(
-            "Search {}",
-            dedupe_preserve_order(searches).join(", ")
-        ));
-    }
-    if !reads.is_empty() {
-        lines.push(format!("Read {}", dedupe_preserve_order(reads).join(", ")));
-    }
-    if !globs.is_empty() {
-        lines.push(format!("Glob {}", dedupe_preserve_order(globs).join(", ")));
-    }
-    if !lists.is_empty() {
-        lines.push(format!("List {}", dedupe_preserve_order(lists).join(", ")));
-    }
-    lines
 }
 
-fn dedupe_preserve_order(values: Vec<String>) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for value in values {
-        if seen.insert(value.clone()) {
-            out.push(value);
-        }
+fn exploration_step_line(op: &ExplorationOp) -> String {
+    match op.kind {
+        ExplorationOpKind::Read => format!("Read {}", op.subject),
+        ExplorationOpKind::Search => format!("Search {}", op.subject),
+        ExplorationOpKind::Glob => format!("Glob {}", op.subject),
+        ExplorationOpKind::List => format!("List {}", op.subject),
     }
-    out
 }
 
 fn grep_label(args: &Value) -> String {
@@ -1615,10 +1586,10 @@ mod tests {
 
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].tool_name, "read_file");
-        assert_eq!(blocks[0].summary, "EXPLORE");
+        assert_eq!(blocks[0].summary, "EXPLORE · 1 step");
         assert_eq!(blocks[0].detail_lines, vec!["Read a.rs"]);
         assert_eq!(blocks[1].tool_name, "grep");
-        assert_eq!(blocks[1].summary, "EXPLORE");
+        assert_eq!(blocks[1].summary, "EXPLORE · 1 step");
         assert_eq!(blocks[1].detail_lines, vec!["Search \"foo\" in ."]);
         assert_ne!(blocks[0].tool_name, "batch");
         assert_ne!(blocks[1].tool_name, "batch");
@@ -1647,9 +1618,9 @@ mod tests {
 
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].tool_name, "read_file");
-        assert_eq!(blocks[0].summary, "EXPLORE");
+        assert_eq!(blocks[0].summary, "EXPLORE · 1 step");
         assert_eq!(blocks[1].tool_name, "grep");
-        assert_eq!(blocks[1].summary, "EXPLORE");
+        assert_eq!(blocks[1].summary, "EXPLORE · 1 step");
     }
 
     #[test]
@@ -1666,7 +1637,7 @@ mod tests {
             4,
         );
 
-        assert_eq!(blocks[0].summary, "EXPLORE");
+        assert_eq!(blocks[0].summary, "EXPLORE · 1 step");
         assert_eq!(blocks[0].detail_lines, vec!["Read lash-cli/src/ui.rs"]);
     }
 

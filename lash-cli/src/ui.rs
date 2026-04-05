@@ -28,7 +28,9 @@ const INPUT_HORIZONTAL_PADDING: u16 = 1;
 const PROMPT_HORIZONTAL_PADDING: u16 = 1;
 const MIN_HISTORY_HEIGHT: u16 = 3;
 const MAX_INPUT_HEIGHT: u16 = 20;
-const EXPLORATION_DETAIL_MAX_ROWS: usize = 3;
+const COMPACT_ACTIVITY_FEED_MAX_ITEMS: usize = 5;
+const COMPACT_ACTIVITY_FEED_MAX_ROWS_PER_ITEM: usize = 2;
+const COMPACT_PATCH_PREVIEW_MAX_FILES: usize = 5;
 const SCROLL_INDICATOR_HIDE_TAIL_ROWS: usize = 2;
 const SCROLL_INDICATOR_MIN_HEIGHT: usize = 2;
 
@@ -702,42 +704,78 @@ fn truncate_with_forced_ellipsis(text: &str, max_width: usize) -> String {
     out
 }
 
-fn render_exploration_detail_lines<'a>(
+fn render_activity_feed_overflow_line<'a>(
+    lines: &mut Vec<Line<'a>>,
+    prefix: &str,
+    prefix_style: Style,
+    message: String,
+) {
+    lines.push(Line::from(vec![
+        Span::styled(prefix.to_string(), prefix_style),
+        Span::styled(message, Style::default().fg(theme::ASH_TEXT)),
+    ]));
+}
+
+fn render_recent_activity_feed_lines<'a>(
     lines: &mut Vec<Line<'a>>,
     detail_lines: &'a [String],
     viewport_width: usize,
     prefix: &str,
     prefix_style: Style,
+    overflow_label: &str,
 ) {
     let prefix_width = UnicodeWidthStr::width(prefix);
     let available = viewport_width.saturating_sub(prefix_width);
     let detail_style = Style::default().fg(theme::ASH_TEXT);
+    let hidden_count = detail_lines
+        .len()
+        .saturating_sub(COMPACT_ACTIVITY_FEED_MAX_ITEMS);
+    let visible_lines = &detail_lines[hidden_count..];
 
     if available == 0 {
-        let limit = detail_lines.len().min(EXPLORATION_DETAIL_MAX_ROWS);
-        for _ in 0..limit {
+        if hidden_count > 0 {
+            render_activity_feed_overflow_line(
+                lines,
+                prefix,
+                prefix_style,
+                format!(
+                    "\u{2026} {hidden_count} earlier {overflow_label}{} hidden \u{2026}",
+                    if hidden_count == 1 { "" } else { "s" }
+                ),
+            );
+        }
+        for _ in visible_lines {
             lines.push(Line::from(Span::styled(prefix.to_string(), prefix_style)));
         }
         return;
     }
 
-    let mut rendered_rows = 0usize;
-    for (line_idx, detail) in detail_lines.iter().enumerate() {
+    if hidden_count > 0 {
+        render_activity_feed_overflow_line(
+            lines,
+            prefix,
+            prefix_style,
+            format!(
+                "\u{2026} {hidden_count} earlier {overflow_label}{} hidden \u{2026}",
+                if hidden_count == 1 { "" } else { "s" }
+            ),
+        );
+    }
+
+    for detail in visible_lines {
         let segments = if detail.is_empty() {
             vec![(0usize, 0usize)]
         } else {
             wrap_line(detail, prefix_width, prefix_width, viewport_width)
         };
 
-        for (segment_idx, &(start, end)) in segments.iter().enumerate() {
-            if rendered_rows == EXPLORATION_DETAIL_MAX_ROWS {
-                return;
-            }
-            rendered_rows += 1;
-
-            let has_more_content =
-                segment_idx + 1 < segments.len() || line_idx + 1 < detail_lines.len();
-            let is_last_visible = rendered_rows == EXPLORATION_DETAIL_MAX_ROWS && has_more_content;
+        for (segment_idx, &(start, end)) in segments
+            .iter()
+            .take(COMPACT_ACTIVITY_FEED_MAX_ROWS_PER_ITEM)
+            .enumerate()
+        {
+            let is_last_visible = segment_idx + 1 == COMPACT_ACTIVITY_FEED_MAX_ROWS_PER_ITEM
+                && segment_idx + 1 < segments.len();
             let chunk = if detail.is_empty() {
                 if is_last_visible {
                     "\u{2026}".to_string()
@@ -755,10 +793,6 @@ fn render_exploration_detail_lines<'a>(
                 spans.push(Span::styled(chunk, detail_style));
             }
             lines.push(Line::from(spans));
-
-            if is_last_visible {
-                return;
-            }
         }
     }
 }
@@ -778,7 +812,7 @@ fn render_activity_artifact<'a>(
             render_inline_diff(lines, diff, viewport_width, &format!("{}  ", indent));
         }
         ActivityArtifact::PatchPreview { files, .. } => {
-            render_patch_preview(lines, files, viewport_width, indent, true);
+            render_patch_preview(lines, files, viewport_width, indent, true, None);
         }
         ActivityArtifact::TextPreview { title, text } => {
             if let Some(title) = title {
@@ -866,8 +900,24 @@ fn render_patch_preview<'a>(
     viewport_width: usize,
     indent: &str,
     include_diffs: bool,
+    max_files: Option<usize>,
 ) {
-    for file in files.iter() {
+    let hidden_count = max_files
+        .map(|limit| files.len().saturating_sub(limit))
+        .unwrap_or(0);
+    if hidden_count > 0 {
+        render_activity_feed_overflow_line(
+            lines,
+            &format!("{indent}  "),
+            theme::patch_frame(),
+            format!(
+                "\u{2026} {hidden_count} earlier file change{} hidden \u{2026}",
+                if hidden_count == 1 { "" } else { "s" }
+            ),
+        );
+    }
+
+    for file in files.iter().skip(hidden_count) {
         let shows_diff = include_diffs && !file.diff.trim().is_empty();
         let row_prefix = format!("{indent}  ");
         render_patch_summary_line(lines, &row_prefix, file, viewport_width);
@@ -883,6 +933,7 @@ fn render_patch_artifact<'a>(
     viewport_width: usize,
     indent: &str,
     include_diffs: bool,
+    max_files: Option<usize>,
 ) {
     if files.len() == 1 {
         if include_diffs && !files[0].diff.trim().is_empty() {
@@ -896,7 +947,14 @@ fn render_patch_artifact<'a>(
         return;
     }
 
-    render_patch_preview(lines, files, viewport_width, indent, include_diffs);
+    render_patch_preview(
+        lines,
+        files,
+        viewport_width,
+        indent,
+        include_diffs,
+        max_files,
+    );
 }
 
 #[derive(Clone)]
@@ -1313,12 +1371,13 @@ fn render_activity_block_with_lane<'a>(
 
     if expand_level >= 1 && !hide_success_shell_details {
         if activity.kind == ActivityKind::Exploration {
-            render_exploration_detail_lines(
+            render_recent_activity_feed_lines(
                 lines,
                 &activity.detail_lines,
                 viewport_width,
                 detail_prefix.as_str(),
                 detail_prefix_style,
+                "exploration step",
             );
         } else {
             for detail in &activity.detail_lines {
@@ -1344,6 +1403,7 @@ fn render_activity_block_with_lane<'a>(
                 viewport_width,
                 lane.artifact_indent.as_str(),
                 true,
+                Some(COMPACT_PATCH_PREVIEW_MAX_FILES),
             );
         }
         if activity.kind == ActivityKind::Parallel {
@@ -1394,6 +1454,7 @@ fn render_activity_block_with_lane<'a>(
                         viewport_width,
                         lane.artifact_indent.as_str(),
                         true,
+                        None,
                     );
                 }
                 _ => {
@@ -4453,6 +4514,48 @@ mod tests {
     }
 
     #[test]
+    fn multi_file_patch_activity_shows_recent_files_with_overflow_count() {
+        let files = (0..7)
+            .map(|idx| PatchFilePreview {
+                path: format!("file-{idx}.rs"),
+                from_path: None,
+                status: "modified".into(),
+                added: idx + 1,
+                removed: 0,
+                diff: String::new(),
+            })
+            .collect::<Vec<_>>();
+        let activity = ActivityBlock {
+            kind: ActivityKind::Edit,
+            status: ActivityStatus::Completed,
+            tool_name: "apply_patch".into(),
+            summary: "Edited 7 files (+28 -0)".into(),
+            detail_lines: Vec::new(),
+            duration_ms: 15,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: Some(ActivityArtifact::PatchPreview {
+                files,
+                total_added: 28,
+                total_removed: 0,
+            }),
+            children: Vec::new(),
+            extra: None,
+        };
+
+        let mut lines = Vec::new();
+        render_activity_block(&activity, 1, &mut lines, 80, false);
+
+        assert_eq!(line_text(&lines[0]), "  Edited 7 files (+28 -0)");
+        assert_eq!(
+            line_text(&lines[1]),
+            "    … 2 earlier file changes hidden …"
+        );
+        assert_eq!(line_text(&lines[2]), "    Edited file-2.rs (+3 -0)");
+        assert_eq!(line_text(&lines[6]), "    Edited file-6.rs (+7 -0)");
+    }
+
+    #[test]
     fn patch_activity_full_view_renders_numbered_inline_diff_lines() {
         let activity = ActivityBlock {
             kind: ActivityKind::Edit,
@@ -4587,7 +4690,7 @@ mod tests {
             kind: ActivityKind::Exploration,
             status: ActivityStatus::Completed,
             tool_name: "read_file".into(),
-            summary: "EXPLORE".into(),
+            summary: "EXPLORE · 2 steps".into(),
             detail_lines: vec!["list .".into(), "read src/main.rs".into()],
             duration_ms: 3,
             args: serde_json::Value::Null,
@@ -4600,7 +4703,7 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 80, false);
 
-        assert_eq!(line_text(&lines[0]), "  EXPLORE");
+        assert_eq!(line_text(&lines[0]), "  EXPLORE · 2 steps");
         assert_eq!(line_text(&lines[1]), "   list .");
         assert_eq!(line_text(&lines[2]), "   read src/main.rs");
     }
@@ -4611,7 +4714,7 @@ mod tests {
             kind: ActivityKind::Exploration,
             status: ActivityStatus::Completed,
             tool_name: "read_file".into(),
-            summary: "EXPLORE".into(),
+            summary: "EXPLORE · 1 step".into(),
             detail_lines: vec!["abcdefghijklmnopqrstuvwx".into()],
             duration_ms: 3,
             args: serde_json::Value::Null,
@@ -4624,18 +4727,18 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 20, false);
 
-        assert_eq!(line_text(&lines[0]), "  EXPLORE");
+        assert_eq!(line_text(&lines[0]), "  EXPLORE · 1 step");
         assert_eq!(line_text(&lines[1]), "   abcdefghijklmnopq");
         assert_eq!(line_text(&lines[2]), "   rstuvwx");
     }
 
     #[test]
-    fn exploration_activity_caps_wrapped_details_with_ellipsis() {
+    fn exploration_activity_limits_each_recent_step_to_two_rows() {
         let activity = ActivityBlock {
             kind: ActivityKind::Exploration,
             status: ActivityStatus::Completed,
             tool_name: "read_file".into(),
-            summary: "EXPLORE".into(),
+            summary: "EXPLORE · 2 steps".into(),
             detail_lines: vec![
                 "abcdefghijklmnopqrstuvwxyz0123456789".into(),
                 "second line".into(),
@@ -4651,11 +4754,45 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 20, false);
 
-        assert_eq!(line_text(&lines[0]), "  EXPLORE");
+        assert_eq!(line_text(&lines[0]), "  EXPLORE · 2 steps");
         assert_eq!(lines.len(), 4);
         assert_eq!(line_text(&lines[1]), "   abcdefghijklmnopq");
-        assert_eq!(line_text(&lines[2]), "   rstuvwxyz01234567");
-        assert!(line_text(&lines[3]).ends_with('…'));
+        assert!(line_text(&lines[2]).ends_with('…'));
+        assert_eq!(line_text(&lines[3]), "   second line");
+    }
+
+    #[test]
+    fn exploration_activity_shows_recent_steps_with_overflow_count() {
+        let activity = ActivityBlock {
+            kind: ActivityKind::Exploration,
+            status: ActivityStatus::Completed,
+            tool_name: "grep".into(),
+            summary: "EXPLORE · 7 steps".into(),
+            detail_lines: vec![
+                "step 1".into(),
+                "step 2".into(),
+                "step 3".into(),
+                "step 4".into(),
+                "step 5".into(),
+                "step 6".into(),
+                "step 7".into(),
+            ],
+            duration_ms: 3,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: None,
+            children: Vec::new(),
+            extra: None,
+        };
+
+        let mut lines = Vec::new();
+        render_activity_block(&activity, 1, &mut lines, 40, false);
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert_eq!(rendered[0], "  EXPLORE · 7 steps");
+        assert_eq!(rendered[1], "   … 2 earlier exploration steps hidden …");
+        assert_eq!(rendered[2], "   step 3");
+        assert_eq!(rendered.last().map(String::as_str), Some("   step 7"));
     }
 
     #[test]
@@ -4664,7 +4801,7 @@ mod tests {
             kind: ActivityKind::Exploration,
             status: ActivityStatus::Completed,
             tool_name: "read_file".into(),
-            summary: "EXPLORE".into(),
+            summary: "EXPLORE · 0 steps".into(),
             detail_lines: Vec::new(),
             duration_ms: 3,
             args: serde_json::Value::Null,
@@ -4677,7 +4814,7 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 80, false);
 
-        assert_eq!(line_text(&lines[0]), "  EXPLORE");
+        assert_eq!(line_text(&lines[0]), "  EXPLORE · 0 steps");
         assert_eq!(lines.len(), 1);
     }
 
@@ -4687,7 +4824,7 @@ mod tests {
             kind: ActivityKind::Exploration,
             status: ActivityStatus::Completed,
             tool_name: "read_file".into(),
-            summary: "EXPLORE".into(),
+            summary: "EXPLORE · 2 steps".into(),
             detail_lines: vec![
                 "abcdefghijklmnopqrstuvwxyz0123456789".into(),
                 "second line".into(),
@@ -4713,7 +4850,7 @@ mod tests {
             kind: ActivityKind::Exploration,
             status: ActivityStatus::Completed,
             tool_name: "read_file".into(),
-            summary: "EXPLORE".into(),
+            summary: "EXPLORE · 1 step".into(),
             detail_lines: vec!["read src/app.rs".into()],
             duration_ms: 3,
             args: serde_json::Value::Null,
@@ -4743,7 +4880,7 @@ mod tests {
             kind: ActivityKind::Exploration,
             status: ActivityStatus::Completed,
             tool_name: "read_file".into(),
-            summary: "EXPLORE".into(),
+            summary: "EXPLORE · 1 step".into(),
             detail_lines: vec!["read src/app.rs".into()],
             duration_ms: 3,
             args: serde_json::Value::Null,
