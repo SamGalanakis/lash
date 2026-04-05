@@ -1372,7 +1372,6 @@ pub enum ExternalInvokeError {
 #[derive(Clone)]
 pub struct RuntimeServices {
     pub plugins: Arc<PluginSession>,
-    pub prompt_bridge: crate::session::PromptBridge,
     pub turn_injection_bridge: crate::session::TurnInjectionBridge,
     pub store: Option<Arc<dyn crate::store::RuntimeStore>>,
 }
@@ -1447,21 +1446,15 @@ impl SessionManager for NoopSessionManager {
 
 impl RuntimeServices {
     pub fn new(plugins: Arc<PluginSession>) -> Self {
-        Self::new_with_bridges(
-            plugins,
-            crate::session::PromptBridge::new(),
-            crate::session::TurnInjectionBridge::new(),
-        )
+        Self::new_with_bridges(plugins, crate::session::TurnInjectionBridge::new())
     }
 
     pub fn new_with_bridges(
         plugins: Arc<PluginSession>,
-        prompt_bridge: crate::session::PromptBridge,
         turn_injection_bridge: crate::session::TurnInjectionBridge,
     ) -> Self {
         Self {
             plugins,
-            prompt_bridge,
             turn_injection_bridge,
             store: None,
         }

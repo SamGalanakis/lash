@@ -1039,10 +1039,14 @@ fn render_question_panel<'a>(
 }
 
 fn prompt_title(prompt: &PromptState) -> &'static str {
-    if prompt.options.is_empty() {
+    if prompt.is_freeform() {
         " Question "
-    } else if prompt.is_editing_reply() {
-        " Question · Write Reply "
+    } else if prompt.supports_note() && prompt.is_multi() {
+        " Question · Select Replies + Note "
+    } else if prompt.supports_note() {
+        " Question · Choose Reply + Note "
+    } else if prompt.is_multi() {
+        " Question · Select Replies "
     } else {
         " Question · Choose Reply "
     }
@@ -2875,20 +2879,26 @@ fn push_wrapped_prefixed_lines(
     }
 }
 
-fn prompt_input_text(prompt: &PromptState) -> String {
+fn prompt_input_text(prompt: &PromptState) -> (String, bool) {
+    if prompt.supports_note() && !prompt.is_text_entry() && prompt.reply_text.is_empty() {
+        return ("Tab to add a note".to_string(), true);
+    }
+
     let mut display = prompt.reply_text.clone();
-    let cursor = prompt.reply_cursor.min(display.len());
-    display.insert(cursor, '\u{2588}');
-    display
+    if prompt.is_text_entry() {
+        let cursor = prompt.reply_cursor.min(display.len());
+        display.insert(cursor, '\u{2588}');
+    }
+    (display, false)
 }
 
 fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'static>> {
     let has_options = prompt.has_options();
-    let show_text_input = prompt.is_editing_reply();
+    let show_text_input = prompt.shows_text_input();
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    if !prompt.question.is_empty() {
-        let md_lines = markdown::render_markdown(&prompt.question, inner_w);
+    if !prompt.request.question.is_empty() {
+        let md_lines = markdown::render_markdown(&prompt.request.question, inner_w);
         for md_line in md_lines {
             lines.push(md_line);
         }
@@ -2899,10 +2909,16 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
     }
 
     if has_options {
-        lines.push(prompt_section_label("Choices"));
-        for (idx, opt) in prompt.options.iter().enumerate() {
-            let selected = prompt.selected_option_idx() == Some(idx);
-            let text_style = if selected {
+        lines.push(prompt_section_label(if prompt.is_multi() {
+            "Selections"
+        } else {
+            "Choices"
+        }));
+        for (idx, opt) in prompt.request.options.iter().enumerate() {
+            let active = prompt.selected_option_idx() == Some(idx);
+            let marked = prompt.option_marked(idx);
+            let highlighted = active || marked;
+            let text_style = if highlighted {
                 Style::default()
                     .fg(theme::SODIUM)
                     .bg(theme::FORM_RAISED)
@@ -2910,7 +2926,7 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
             } else {
                 Style::default().fg(theme::CHALK_DIM)
             };
-            let prefix_style = if selected {
+            let prefix_style = if highlighted {
                 Style::default().fg(theme::SODIUM).bg(theme::FORM_RAISED)
             } else {
                 text_style
@@ -2919,54 +2935,52 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
                 &mut lines,
                 &format!("{}. {}", idx + 1, opt),
                 inner_w,
-                Span::styled(if selected { " \u{203a} " } else { "   " }, prefix_style),
+                Span::styled(
+                    if prompt.is_multi() {
+                        if active {
+                            if marked { "›[x]" } else { "›[ ]" }
+                        } else if marked {
+                            " [x]"
+                        } else {
+                            " [ ]"
+                        }
+                    } else if active {
+                        " \u{203a} "
+                    } else {
+                        "   "
+                    },
+                    prefix_style,
+                ),
                 Span::styled("   ", prefix_style),
                 text_style,
             );
         }
-
-        let other_selected = prompt.selects_custom_reply();
-        let other_style = if other_selected {
-            Style::default()
-                .fg(theme::SODIUM)
-                .bg(theme::FORM_RAISED)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme::CHALK_DIM)
-        };
-        let other_prefix_style = if other_selected {
-            Style::default().fg(theme::SODIUM).bg(theme::FORM_RAISED)
-        } else {
-            other_style
-        };
-        push_wrapped_prefixed_lines(
-            &mut lines,
-            "Write my own answer",
-            inner_w,
-            Span::styled(
-                if other_selected { " \u{203a} " } else { "   " },
-                other_prefix_style,
-            ),
-            Span::styled("   ", other_prefix_style),
-            other_style,
-        );
-    }
-
-    if has_options && show_text_input {
-        lines.push(Line::from(""));
     }
 
     if show_text_input {
-        if has_options {
-            lines.push(prompt_section_label("Reply"));
+        if prompt.supports_note() {
+            lines.push(Line::from(""));
+            lines.push(prompt_section_label("Note (optional)"));
         }
+        let (input_text, is_placeholder) = prompt_input_text(prompt);
         push_wrapped_prefixed_lines(
             &mut lines,
-            &prompt_input_text(prompt),
+            &input_text,
             inner_w,
-            Span::styled(format!(" {} ", theme::PROMPT_CHAR), theme::prompt()),
+            Span::styled(
+                format!(" {} ", theme::PROMPT_CHAR),
+                if prompt.is_text_entry() {
+                    theme::prompt()
+                } else {
+                    Style::default().fg(theme::ASH)
+                },
+            ),
             Span::styled("   ", Style::default().fg(theme::ASH)),
-            Style::default().fg(theme::CHALK),
+            if is_placeholder {
+                Style::default().fg(theme::ASH)
+            } else {
+                Style::default().fg(theme::CHALK)
+            },
         );
     }
 
@@ -2975,10 +2989,18 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
     }
 
     let help_text = if has_options {
-        if show_text_input {
-            "Enter submit  Shift+Tab newline  Tab choices  Esc cancel"
+        if prompt.supports_note() {
+            if prompt.is_text_entry() {
+                "Tab choices  Enter submit  Shift+Tab newline  Esc cancel"
+            } else if prompt.is_multi() {
+                "↑↓ move  Space toggle  Tab note  Enter submit  Esc cancel"
+            } else {
+                "↑↓ choose  Tab note  Enter submit  Esc cancel"
+            }
+        } else if prompt.is_multi() {
+            "↑↓ move  Space toggle  Enter submit  Esc cancel"
         } else {
-            "↑↓ choose  Enter submit  Tab write reply  Esc cancel"
+            "↑↓ choose  Enter submit  Esc cancel"
         }
     } else {
         "Enter submit  Shift+Tab newline  Esc cancel"
@@ -3224,7 +3246,6 @@ fn selection_ordered(sel: &TextSelection) -> ((u16, usize), (u16, usize)) {
 mod tests {
     use super::*;
     use crate::app::{App, PromptState};
-    use crate::overlay::{PromptFocus, PromptSelection};
     use ratatui::{Terminal, backend::TestBackend};
 
     fn workflow_activity(summary: &str) -> DisplayBlock {
@@ -3257,18 +3278,30 @@ mod tests {
         question: &str,
         options: Vec<&str>,
         reply_text: &str,
-        editing_reply: bool,
+        multi: bool,
     ) -> PromptState {
         let has_options = !options.is_empty();
         PromptState {
-            question: question.into(),
-            options: options.into_iter().map(str::to_string).collect(),
-            selection: PromptSelection::Option(0),
-            focus: if has_options && !editing_reply {
-                PromptFocus::Selection
+            request: if !has_options {
+                lash::PromptRequest::freeform(question)
+            } else if multi {
+                lash::PromptRequest::multi(
+                    question,
+                    options.into_iter().map(str::to_string).collect(),
+                )
             } else {
-                PromptFocus::ReplyEditor
+                lash::PromptRequest::single(
+                    question,
+                    options.into_iter().map(str::to_string).collect(),
+                )
             },
+            focus: if has_options {
+                crate::overlay::PromptFocus::Options
+            } else {
+                crate::overlay::PromptFocus::Text
+            },
+            cursor: 0,
+            selected: Default::default(),
             reply_text: reply_text.into(),
             reply_cursor: reply_text.len(),
             response_tx: std::sync::mpsc::channel().0,

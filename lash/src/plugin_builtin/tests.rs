@@ -724,24 +724,78 @@ async fn plan_mode_plugin_uses_configured_blocked_tool_set() {
 
 #[tokio::test]
 async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
-    let prompt_bridge = crate::PromptBridge::new();
-    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::with_prompt_bridge(
+    struct PromptingSessionManager;
+
+    #[async_trait::async_trait]
+    impl SessionManager for PromptingSessionManager {
+        async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
+            Ok(mock_snapshot("run-session"))
+        }
+
+        async fn snapshot_session(
+            &self,
+            _session_id: &str,
+        ) -> Result<SessionSnapshot, PluginError> {
+            Ok(mock_snapshot("run-session"))
+        }
+
+        async fn tool_catalog(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<serde_json::Value>, PluginError> {
+            Ok(Vec::new())
+        }
+
+        async fn create_session(
+            &self,
+            request: SessionCreateRequest,
+        ) -> Result<SessionHandle, PluginError> {
+            let base = MockSessionManager;
+            base.create_session(request).await
+        }
+
+        async fn close_session(&self, session_id: &str) -> Result<(), PluginError> {
+            let base = MockSessionManager;
+            base.close_session(session_id).await
+        }
+
+        async fn start_turn_stream(
+            &self,
+            session_id: &str,
+            input: TurnInput,
+        ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
+            let base = MockSessionManager;
+            base.start_turn_stream(session_id, input).await
+        }
+
+        async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError> {
+            let base = MockSessionManager;
+            base.await_turn(turn_id).await
+        }
+
+        async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError> {
+            let base = MockSessionManager;
+            base.cancel_turn(turn_id).await
+        }
+
+        async fn prompt_user(
+            &self,
+            request: crate::PromptRequest,
+        ) -> Result<crate::PromptResponse, PluginError> {
+            assert!(request.question.contains(".lash/plans/run-session.md"));
+            assert!(request.allows_note());
+            Ok(crate::PromptResponse::Single {
+                selection: "Implement it".to_string(),
+                note: Some("start with the safe slice".to_string()),
+            })
+        }
+    }
+
+    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::new(
         PlanModePluginConfig::default(),
-        prompt_bridge.clone(),
     ))]);
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
-
-    let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::unbounded_channel();
-    prompt_bridge.set_sender(prompt_tx);
-    let prompt_task = tokio::spawn(async move {
-        let prompt = prompt_rx.recv().await.expect("prompt");
-        assert!(prompt.question.contains(".lash/plans/run-session.md"));
-        prompt
-            .response_tx
-            .send("Implement it".to_string())
-            .expect("response");
-    });
+    let manager: Arc<dyn SessionManager> = Arc::new(PromptingSessionManager);
 
     session
         .invoke_external(
@@ -773,7 +827,6 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             },
         )
         .await;
-    prompt_task.await.expect("prompt task");
     assert!(result.success);
     assert_eq!(
         result
@@ -787,7 +840,10 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             .result
             .get("next_turn_input")
             .and_then(|value| value.as_str())
-            .is_some_and(|value| value.contains("Execute that plan"))
+            .is_some_and(|value| {
+                value.contains("Execute that plan")
+                    && value.contains("User note: start with the safe slice")
+            })
     );
 
     let status = session

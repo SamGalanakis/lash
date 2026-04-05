@@ -1117,11 +1117,55 @@ fn ask_detail_lines(args: &Value, result: &Value) -> Vec<String> {
         lines.push(format!("{}. {}", idx + 1, option));
     }
 
-    if let Some(answer) = result.as_str().filter(|answer| !answer.trim().is_empty()) {
-        lines.push(format!("Answer · {}", inline_snippet(answer, 72)));
+    if let Some(answer) = ask_answer_summary(result) {
+        lines.push(format!("Answer · {}", inline_snippet(&answer, 72)));
+    }
+    if let Some(note) = ask_note_summary(result) {
+        lines.push(format!("Note · {}", inline_snippet(&note, 72)));
     }
 
     lines
+}
+
+fn ask_answer_summary(result: &Value) -> Option<String> {
+    if let Some(answer) = result.as_str().filter(|answer| !answer.trim().is_empty()) {
+        return Some(answer.to_string());
+    }
+
+    let kind = result.get("kind").and_then(|value| value.as_str())?;
+    match kind {
+        "text" => result
+            .get("text")
+            .and_then(|value| value.as_str())
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_string),
+        "single" => result
+            .get("selection")
+            .and_then(|value| value.as_str())
+            .filter(|selection| !selection.trim().is_empty())
+            .map(str::to_string),
+        "multi" => result
+            .get("selections")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .filter(|selection| !selection.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .filter(|joined| !joined.is_empty()),
+        _ => None,
+    }
+}
+
+fn ask_note_summary(result: &Value) -> Option<String> {
+    result
+        .get("note")
+        .and_then(|value| value.as_str())
+        .filter(|note| !note.trim().is_empty())
+        .map(str::to_string)
 }
 
 fn tool_search_summary(args: &Value) -> String {
@@ -1725,7 +1769,7 @@ mod tests {
         let ask_blocks = state.blocks_for_tool_call(
             "ask",
             json!({"question":"Which environment should I use?","options":["staging","prod"]}),
-            json!("staging"),
+            json!({"kind":"single","selection":"staging"}),
             true,
             0,
         );
@@ -1743,6 +1787,34 @@ mod tests {
                 "1. staging",
                 "2. prod",
                 "Answer · staging",
+            ]
+        );
+    }
+
+    #[test]
+    fn ask_tool_result_with_note_renders_note_line() {
+        let mut state = ActivityState::default();
+        let ask_blocks = state.blocks_for_tool_call(
+            "ask",
+            json!({"question":"Which direction should I take?","options":["minimal","full"]}),
+            json!({
+                "kind":"single",
+                "selection":"full",
+                "note":"keep the transcript path stable"
+            }),
+            true,
+            0,
+        );
+
+        assert_eq!(ask_blocks[0].summary, "Question");
+        assert_eq!(
+            ask_blocks[0].detail_lines,
+            vec![
+                "Question · Which direction should I take?",
+                "1. minimal",
+                "2. full",
+                "Answer · full",
+                "Note · keep the transcript path stable",
             ]
         );
     }

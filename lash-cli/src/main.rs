@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn autonomous_renderer_prints_missing_final_tail_after_streamed_prefix() {
         let mut renderer = AutonomousRenderer::new();
-        renderer.handle(AgentEvent::TextDelta {
+        let _ = renderer.handle(AgentEvent::TextDelta {
             content: "Inspected files.\n".to_string(),
         });
 
@@ -390,7 +390,7 @@ mod tests {
     #[test]
     fn autonomous_renderer_collects_plugin_panel_output() {
         let mut renderer = AutonomousRenderer::new();
-        renderer.handle(AgentEvent::PluginEvent {
+        let _ = renderer.handle(AgentEvent::PluginEvent {
             plugin_id: "demo".to_string(),
             event: PluginSurfaceEvent::PanelUpsert {
                 key: "panel:1".to_string(),

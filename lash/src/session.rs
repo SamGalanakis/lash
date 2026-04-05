@@ -14,55 +14,6 @@ use crate::{
 
 const REPL_SNAPSHOT_VERSION: u32 = 3;
 
-/// A prompt from the agent asking the user a question.
-/// The `response_tx` travels all the way to the TUI, which sends the answer
-/// directly back to the REPL bridge thread.
-pub struct UserPrompt {
-    pub question: String,
-    pub options: Vec<String>,
-    pub response_tx: std::sync::mpsc::Sender<String>,
-}
-
-#[derive(Clone, Default)]
-pub struct PromptBridge {
-    sender: std::sync::Arc<std::sync::Mutex<Option<UnboundedSender<UserPrompt>>>>,
-}
-
-impl PromptBridge {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn set_sender(&self, tx: UnboundedSender<UserPrompt>) {
-        *self.sender.lock().expect("prompt bridge poisoned") = Some(tx);
-    }
-
-    pub fn clear_sender(&self) {
-        *self.sender.lock().expect("prompt bridge poisoned") = None;
-    }
-
-    pub async fn prompt(&self, question: String, options: Vec<String>) -> Result<String, String> {
-        let sender = self
-            .sender
-            .lock()
-            .map_err(|_| "prompt bridge poisoned".to_string())?
-            .clone()
-            .ok_or_else(|| "ask is unavailable in this session".to_string())?;
-        let (response_tx, response_rx) = std::sync::mpsc::channel::<String>();
-        sender
-            .send(UserPrompt {
-                question,
-                options,
-                response_tx,
-            })
-            .map_err(|_| "prompt channel closed".to_string())?;
-        tokio::task::spawn_blocking(move || response_rx.recv())
-            .await
-            .map_err(|err| format!("prompt wait task failed: {err}"))?
-            .map_err(|_| "prompt response channel closed".to_string())
-    }
-}
-
 #[derive(Clone, Default)]
 pub struct TurnInjectionBridge {
     queue: std::sync::Arc<std::sync::Mutex<VecDeque<PluginMessage>>>,
@@ -242,16 +193,6 @@ impl Session {
     /// Clear the message sender (drops the sender, causing receivers to terminate).
     pub fn clear_message_sender(&mut self) {
         self.message_tx = None;
-    }
-
-    /// Set the prompt sender for forwarding user prompts during execution.
-    pub fn set_prompt_sender(&mut self, tx: UnboundedSender<UserPrompt>) {
-        self.services.prompt_bridge.set_sender(tx);
-    }
-
-    /// Clear the prompt sender.
-    pub fn clear_prompt_sender(&mut self) {
-        self.services.prompt_bridge.clear_sender();
     }
 
     /// Execute code in the persistent lashlang REPL.

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, mpsc};
@@ -489,6 +490,7 @@ impl TurnAssembler {
 #[derive(Clone)]
 pub struct RuntimeHostConfig {
     pub host_profile: HostProfile,
+    pub user_prompts_enabled: bool,
     pub base_dir: Option<PathBuf>,
     pub path_resolver: Option<Arc<dyn PathResolver>>,
     pub prompt_renderer: Arc<dyn PromptRenderer>,
@@ -502,6 +504,7 @@ impl Default for RuntimeHostConfig {
     fn default() -> Self {
         Self {
             host_profile: HostProfile::Interactive,
+            user_prompts_enabled: true,
             base_dir: None,
             path_resolver: None,
             prompt_renderer: crate::default_prompt_renderer(),
@@ -539,6 +542,7 @@ struct RuntimeSessionManager {
     current_host: RuntimeHostConfig,
     current_plugins: Arc<crate::PluginSession>,
     current_tool_catalog: Vec<serde_json::Value>,
+    current_prompt_bridge: Option<HostPromptBridge>,
     llm_factory: LlmFactory,
     current_store: Option<Arc<dyn crate::store::RuntimeStore>>,
     registry: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
@@ -558,7 +562,79 @@ impl EventSink for ChannelEventSink {
     }
 }
 
+struct PendingPrompt {
+    request: crate::PromptRequest,
+    response_tx: std::sync::mpsc::Sender<crate::PromptResponse>,
+}
+
+#[derive(Clone, Default)]
+struct HostPromptBridge {
+    sender: Arc<StdMutex<Option<tokio::sync::mpsc::UnboundedSender<PendingPrompt>>>>,
+}
+
+impl HostPromptBridge {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn set_sender(&self, tx: tokio::sync::mpsc::UnboundedSender<PendingPrompt>) {
+        *self.sender.lock().expect("prompt bridge poisoned") = Some(tx);
+    }
+
+    fn clear_sender(&self) {
+        *self.sender.lock().expect("prompt bridge poisoned") = None;
+    }
+
+    async fn prompt(
+        &self,
+        request: crate::PromptRequest,
+    ) -> Result<crate::PromptResponse, crate::PluginError> {
+        let sender = self
+            .sender
+            .lock()
+            .map_err(|_| crate::PluginError::Session("prompt bridge poisoned".to_string()))?
+            .clone()
+            .ok_or_else(|| {
+                crate::PluginError::Session("user prompts are unavailable in this session".into())
+            })?;
+        let (response_tx, response_rx) = std::sync::mpsc::channel::<crate::PromptResponse>();
+        sender
+            .send(PendingPrompt {
+                request,
+                response_tx,
+            })
+            .map_err(|_| crate::PluginError::Session("prompt channel closed".to_string()))?;
+        tokio::task::spawn_blocking(move || response_rx.recv())
+            .await
+            .map_err(|err| crate::PluginError::Session(format!("prompt wait task failed: {err}")))?
+            .map_err(|_| crate::PluginError::Session("prompt response channel closed".to_string()))
+    }
+}
+
 impl RuntimeSessionManager {
+    fn new(
+        runtime: &LashRuntime,
+        prompt_bridge: Option<HostPromptBridge>,
+    ) -> Result<Self, ExternalInvokeError> {
+        let Some(session) = runtime.session.as_ref() else {
+            return Err(ExternalInvokeError::Unknown("session_manager".to_string()));
+        };
+        Ok(Self {
+            current_agent_id: runtime.state.agent_id.clone(),
+            current_snapshot: runtime.export_state(),
+            current_policy: runtime.policy.clone(),
+            current_host: runtime.host.clone(),
+            current_plugins: Arc::clone(session.plugins()),
+            current_tool_catalog: session
+                .tool_catalog(&runtime.state.agent_id, runtime.policy.execution_mode),
+            current_prompt_bridge: prompt_bridge,
+            llm_factory: Arc::clone(&runtime.llm_factory),
+            current_store: session.history_store(),
+            registry: Arc::clone(&runtime.managed_sessions),
+            turns: Arc::clone(&runtime.managed_turns),
+        })
+    }
+
     fn build_runtime_state(
         &self,
         agent_id: String,
@@ -815,6 +891,23 @@ impl SessionManager for RuntimeSessionManager {
         managed.cancel.cancel();
         Ok(())
     }
+
+    async fn prompt_user(
+        &self,
+        request: crate::PromptRequest,
+    ) -> Result<crate::PromptResponse, crate::PluginError> {
+        if !self.current_host.user_prompts_enabled {
+            return Err(crate::PluginError::Session(
+                "user prompts are unavailable in this session".to_string(),
+            ));
+        }
+        let Some(prompt_bridge) = &self.current_prompt_bridge else {
+            return Err(crate::PluginError::Session(
+                "user prompts are unavailable in this session".to_string(),
+            ));
+        };
+        prompt_bridge.prompt(request).await
+    }
 }
 
 async fn emit_agent_events_to_sink(events: &dyn EventSink, plugin_events: Vec<AgentEvent>) {
@@ -965,22 +1058,14 @@ impl LashRuntime {
     }
 
     fn runtime_session_manager(&self) -> Result<Arc<dyn SessionManager>, ExternalInvokeError> {
-        let Some(session) = self.session.as_ref() else {
-            return Err(ExternalInvokeError::Unknown("session_manager".to_string()));
-        };
-        Ok(Arc::new(RuntimeSessionManager {
-            current_agent_id: self.state.agent_id.clone(),
-            current_snapshot: self.export_state(),
-            current_policy: self.policy.clone(),
-            current_host: self.host.clone(),
-            current_plugins: Arc::clone(session.plugins()),
-            current_tool_catalog: session
-                .tool_catalog(&self.state.agent_id, self.policy.execution_mode),
-            llm_factory: Arc::clone(&self.llm_factory),
-            current_store: session.history_store(),
-            registry: Arc::clone(&self.managed_sessions),
-            turns: Arc::clone(&self.managed_turns),
-        }))
+        self.runtime_session_manager_with_prompt_bridge(None)
+    }
+
+    fn runtime_session_manager_with_prompt_bridge(
+        &self,
+        prompt_bridge: Option<HostPromptBridge>,
+    ) -> Result<Arc<dyn SessionManager>, ExternalInvokeError> {
+        Ok(Arc::new(RuntimeSessionManager::new(self, prompt_bridge)?))
     }
 
     pub fn session_manager(&self) -> Result<Arc<dyn SessionManager>, ExternalInvokeError> {
@@ -1396,10 +1481,30 @@ impl LashRuntime {
         events: &dyn EventSink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
-        let manager = self.runtime_session_manager().map_err(|err| RuntimeError {
-            code: "plugin_session_manager".to_string(),
-            message: err.to_string(),
-        })?;
+        let prompt_bridge = HostPromptBridge::new();
+        let manager = self
+            .runtime_session_manager_with_prompt_bridge(Some(prompt_bridge.clone()))
+            .map_err(|err| RuntimeError {
+                code: "plugin_session_manager".to_string(),
+                message: err.to_string(),
+            })?;
+        let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
+        let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::unbounded_channel::<PendingPrompt>();
+        prompt_bridge.set_sender(prompt_tx);
+        let prompt_event_tx = event_tx.clone();
+        let prompt_forward = tokio::spawn(async move {
+            while let Some(prompt) = prompt_rx.recv().await {
+                if !prompt_event_tx.is_closed() {
+                    let _ = prompt_event_tx
+                        .send(AgentEvent::Prompt {
+                            request: prompt.request,
+                            response_tx: prompt.response_tx,
+                        })
+                        .await;
+                }
+            }
+        });
+        let mut assembler = TurnAssembler::default();
         let plugins = {
             let session = self
                 .session
@@ -1407,20 +1512,39 @@ impl LashRuntime {
                 .expect("lash runtime session must be available");
             Arc::clone(session.plugins())
         };
-        let prepared = plugins
-            .prepare_turn(PrepareTurnRequest {
-                session_id: self.state.agent_id.clone(),
-                state: self.export_state(),
-                messages,
-                host: Arc::clone(&manager),
-            })
-            .await
-            .map_err(|err| RuntimeError {
-                code: "plugin_prepare_turn".to_string(),
-                message: err.to_string(),
-            })?;
+        let prepare_turn = plugins.prepare_turn(PrepareTurnRequest {
+            session_id: self.state.agent_id.clone(),
+            state: self.export_state(),
+            messages,
+            host: Arc::clone(&manager),
+        });
+        tokio::pin!(prepare_turn);
+
+        let prepared = loop {
+            tokio::select! {
+                prepared = &mut prepare_turn => {
+                    break prepared.map_err(|err| RuntimeError {
+                        code: "plugin_prepare_turn".to_string(),
+                        message: err.to_string(),
+                    })?;
+                }
+                maybe_event = event_rx.recv() => {
+                    if let Some(event) = maybe_event {
+                        assembler.push(&event);
+                        events.emit(event).await;
+                    }
+                }
+            }
+        };
+        for event in &prepared.events {
+            assembler.push(event);
+        }
         emit_agent_events_to_sink(events, prepared.events).await;
         if let Some(abort) = prepared.abort {
+            prompt_bridge.clear_sender();
+            let _ = prompt_forward.await;
+            drop(event_tx);
+
             let mut state = self.state.clone();
             state.messages = prepared.messages;
             let issue = TurnIssue {
@@ -1437,7 +1561,6 @@ impl LashRuntime {
                     raw: None,
                 }),
             };
-            let mut assembler = TurnAssembler::default();
             assembler.push(&error_event);
             events.emit(error_event).await;
             assembler.push(&AgentEvent::Done);
@@ -1463,9 +1586,9 @@ impl LashRuntime {
             tool_calls: self.state.tool_calls.clone(),
             llm_factory: Arc::clone(&self.llm_factory),
             session_manager: manager,
+            prompt_bridge,
         };
         let run_offset = self.state.iteration;
-        let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
         let run_task = tokio::spawn(async move {
             let (new_messages, new_iteration) = driver
                 .run(prepared.messages, event_tx, cancel, run_offset)
@@ -1473,11 +1596,11 @@ impl LashRuntime {
             (driver, new_messages, new_iteration)
         });
 
-        let mut assembler = TurnAssembler::default();
         while let Some(event) = event_rx.recv().await {
             assembler.push(&event);
             events.emit(event).await;
         }
+        let _ = prompt_forward.await;
 
         let (driver, new_messages, new_iteration) = match run_task.await {
             Ok(v) => v,
@@ -1586,6 +1709,7 @@ struct RuntimeTurnDriver {
     tool_calls: Vec<ToolCallRecord>,
     llm_factory: LlmFactory,
     session_manager: Arc<dyn SessionManager>,
+    prompt_bridge: HostPromptBridge,
 }
 
 impl RuntimeTurnDriver {
@@ -1649,119 +1773,136 @@ impl RuntimeTurnDriver {
                 crate::agent::send_event(&event_tx, $event).await
             };
         }
-        let mut machine = match self
-            .prepare_turn_machine(messages, &event_tx, run_offset)
-            .await
-        {
-            Ok(machine) => machine,
-            Err(result) => return result,
-        };
-        let snapshot = self.durable_snapshot(machine.messages(), machine.iteration());
-        crate::agent::send_event(&event_tx, AgentEvent::DurableSnapshot { snapshot }).await;
-
-        loop {
-            let Some(effect) = machine.poll_effect() else {
-                break;
+        let result = async {
+            let mut machine = match self
+                .prepare_turn_machine(messages, &event_tx, run_offset)
+                .await
+            {
+                Ok(machine) => machine,
+                Err(result) => return result,
             };
-            match effect {
-                Effect::Emit(event) => emit!(event),
-                Effect::Done {
-                    messages,
-                    iteration,
-                } => return (messages, iteration),
-                Effect::LlmCall { id, request } => {
-                    if cancel.is_cancelled() {
-                        emit!(AgentEvent::Done);
-                        return (Vec::new(), run_offset);
-                    }
-                    let (result, text_streamed) = self
-                        .run_llm_call(&mut machine, id, request, &event_tx, &cancel)
-                        .await;
-                    machine.handle_response(Response::LlmComplete {
-                        id,
-                        result,
-                        text_streamed,
-                    });
-                    let snapshot = self.durable_snapshot(machine.messages(), machine.iteration());
-                    crate::agent::send_event(&event_tx, AgentEvent::DurableSnapshot { snapshot })
-                        .await;
-                }
-                Effect::Checkpoint { id, checkpoint } => {
-                    match self
-                        .run_checkpoint(&mut machine, checkpoint, &event_tx)
-                        .await
-                    {
-                        Ok(messages) => {
-                            machine.handle_response(Response::Checkpoint { id, messages });
-                            let snapshot =
-                                self.durable_snapshot(machine.messages(), machine.iteration());
-                            crate::agent::send_event(
-                                &event_tx,
-                                AgentEvent::DurableSnapshot { snapshot },
-                            )
+            let snapshot = self.durable_snapshot(machine.messages(), machine.iteration());
+            crate::agent::send_event(&event_tx, AgentEvent::DurableSnapshot { snapshot }).await;
+
+            loop {
+                let Some(effect) = machine.poll_effect() else {
+                    break;
+                };
+                match effect {
+                    Effect::Emit(event) => emit!(event),
+                    Effect::Done {
+                        messages,
+                        iteration,
+                    } => return (messages, iteration),
+                    Effect::LlmCall { id, request } => {
+                        if cancel.is_cancelled() {
+                            emit!(AgentEvent::Done);
+                            return (Vec::new(), run_offset);
+                        }
+                        let (result, text_streamed) = self
+                            .run_llm_call(&mut machine, id, request, &event_tx, &cancel)
                             .await;
-                        }
-                        Err(err) => {
-                            machine.fail_turn(make_error_event(
-                                "plugin",
-                                Some(&err.code),
-                                err.message,
-                                None,
-                            ));
+                        machine.handle_response(Response::LlmComplete {
+                            id,
+                            result,
+                            text_streamed,
+                        });
+                        let snapshot =
+                            self.durable_snapshot(machine.messages(), machine.iteration());
+                        crate::agent::send_event(
+                            &event_tx,
+                            AgentEvent::DurableSnapshot { snapshot },
+                        )
+                        .await;
+                    }
+                    Effect::Checkpoint { id, checkpoint } => {
+                        match self
+                            .run_checkpoint(&mut machine, checkpoint, &event_tx)
+                            .await
+                        {
+                            Ok(messages) => {
+                                machine.handle_response(Response::Checkpoint { id, messages });
+                                let snapshot =
+                                    self.durable_snapshot(machine.messages(), machine.iteration());
+                                crate::agent::send_event(
+                                    &event_tx,
+                                    AgentEvent::DurableSnapshot { snapshot },
+                                )
+                                .await;
+                            }
+                            Err(err) => {
+                                machine.fail_turn(make_error_event(
+                                    "plugin",
+                                    Some(&err.code),
+                                    err.message,
+                                    None,
+                                ));
+                            }
                         }
                     }
-                }
-                Effect::SyncExecutionSurface { id } => {
-                    let result = self
-                        .session
-                        .refresh_execution_surface()
-                        .await
-                        .map_err(|err| err.to_string());
-                    machine.handle_response(Response::ExecutionSurfaceSynced { id, result });
-                }
-                Effect::ToolCalls { id, calls } => {
-                    let results = self.run_tool_calls(calls, &event_tx).await;
-                    self.tool_calls
-                        .extend(results.iter().map(|outcome| ToolCallRecord {
-                            call_id: Some(outcome.call_id.clone()),
-                            tool: outcome.tool_name.clone(),
-                            args: outcome.args.clone(),
-                            result: outcome.raw_result.result.clone(),
-                            success: outcome.raw_result.success,
-                            duration_ms: outcome.duration_ms,
-                        }));
-                    machine.handle_response(Response::ToolResults { id, results });
-                    let snapshot = self.durable_snapshot(machine.messages(), machine.iteration());
-                    crate::agent::send_event(&event_tx, AgentEvent::DurableSnapshot { snapshot })
+                    Effect::SyncExecutionSurface { id } => {
+                        let result = self
+                            .session
+                            .refresh_execution_surface()
+                            .await
+                            .map_err(|err| err.to_string());
+                        machine.handle_response(Response::ExecutionSurfaceSynced { id, result });
+                    }
+                    Effect::ToolCalls { id, calls } => {
+                        let results = self.run_tool_calls(calls, &event_tx).await;
+                        self.tool_calls
+                            .extend(results.iter().map(|outcome| ToolCallRecord {
+                                call_id: Some(outcome.call_id.clone()),
+                                tool: outcome.tool_name.clone(),
+                                args: outcome.args.clone(),
+                                result: outcome.raw_result.result.clone(),
+                                success: outcome.raw_result.success,
+                                duration_ms: outcome.duration_ms,
+                            }));
+                        machine.handle_response(Response::ToolResults { id, results });
+                        let snapshot =
+                            self.durable_snapshot(machine.messages(), machine.iteration());
+                        crate::agent::send_event(
+                            &event_tx,
+                            AgentEvent::DurableSnapshot { snapshot },
+                        )
                         .await;
-                }
-                Effect::Sleep { id, duration } => {
-                    tokio::time::sleep(duration).await;
-                    machine.handle_response(Response::Timeout { id });
-                }
-                Effect::Log { event } => self.handle_log_event(event),
-                Effect::CancelLlm { .. } => {}
-                Effect::ExecCode { id, code } => {
-                    let result = self.run_exec_code(&code, &event_tx).await;
-                    let response = match result {
-                        Ok(output) => Response::ExecResult {
-                            id,
-                            result: Ok(output),
-                        },
-                        Err(error) => Response::ExecResult {
-                            id,
-                            result: Err(error),
-                        },
-                    };
-                    machine.handle_response(response);
-                    let snapshot = self.durable_snapshot(machine.messages(), machine.iteration());
-                    crate::agent::send_event(&event_tx, AgentEvent::DurableSnapshot { snapshot })
+                    }
+                    Effect::Sleep { id, duration } => {
+                        tokio::time::sleep(duration).await;
+                        machine.handle_response(Response::Timeout { id });
+                    }
+                    Effect::Log { event } => self.handle_log_event(event),
+                    Effect::CancelLlm { .. } => {}
+                    Effect::ExecCode { id, code } => {
+                        let result = self.run_exec_code(&code, &event_tx).await;
+                        let response = match result {
+                            Ok(output) => Response::ExecResult {
+                                id,
+                                result: Ok(output),
+                            },
+                            Err(error) => Response::ExecResult {
+                                id,
+                                result: Err(error),
+                            },
+                        };
+                        machine.handle_response(response);
+                        let snapshot =
+                            self.durable_snapshot(machine.messages(), machine.iteration());
+                        crate::agent::send_event(
+                            &event_tx,
+                            AgentEvent::DurableSnapshot { snapshot },
+                        )
                         .await;
+                    }
                 }
             }
-        }
 
-        (Vec::new(), run_offset)
+            (Vec::new(), run_offset)
+        }
+        .await;
+        self.prompt_bridge.clear_sender();
+        result
     }
 
     async fn prepare_turn_machine(
@@ -2049,9 +2190,6 @@ impl RuntimeTurnDriver {
     ) -> Result<crate::ExecResponse, String> {
         let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
         self.session.set_message_sender(msg_tx);
-        let (prompt_tx, mut prompt_rx) =
-            tokio::sync::mpsc::unbounded_channel::<crate::session::UserPrompt>();
-        self.session.set_prompt_sender(prompt_tx);
         let event_tx_clone = event_tx.clone();
         let drain_handle = tokio::spawn(async move {
             while let Some(sandbox_msg) = msg_rx.recv().await {
@@ -2065,20 +2203,6 @@ impl RuntimeTurnDriver {
                 }
             }
         });
-        let event_tx_clone = event_tx.clone();
-        let prompt_handle = tokio::spawn(async move {
-            while let Some(user_prompt) = prompt_rx.recv().await {
-                if !event_tx_clone.is_closed() {
-                    let _ = event_tx_clone
-                        .send(AgentEvent::Prompt {
-                            question: user_prompt.question,
-                            options: user_prompt.options,
-                            response_tx: user_prompt.response_tx,
-                        })
-                        .await;
-                }
-            }
-        });
         let manager = Arc::clone(&self.session_manager);
         let result = self
             .session
@@ -2086,9 +2210,7 @@ impl RuntimeTurnDriver {
             .await
             .map_err(|e| e.to_string());
         self.session.clear_message_sender();
-        self.session.clear_prompt_sender();
         let _ = drain_handle.await;
-        let _ = prompt_handle.await;
         result
     }
 
@@ -2102,9 +2224,6 @@ impl RuntimeTurnDriver {
     ) -> Result<LlmResponse, LlmCallError> {
         let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
         self.session.set_message_sender(msg_tx);
-        let (prompt_tx, mut prompt_rx) =
-            tokio::sync::mpsc::unbounded_channel::<crate::session::UserPrompt>();
-        self.session.set_prompt_sender(prompt_tx);
         let (llm_stream_tx, mut llm_stream_rx) =
             tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
         let fallback_request_body = debug_request_body(&request);
@@ -2138,15 +2257,6 @@ impl RuntimeTurnDriver {
                         let _ = event_tx.send(AgentEvent::Message {
                             text: sandbox_msg.text,
                             kind: sandbox_msg.kind,
-                        }).await;
-                    }
-                }
-                Some(user_prompt) = prompt_rx.recv() => {
-                    if !event_tx.is_closed() {
-                        let _ = event_tx.send(AgentEvent::Prompt {
-                            question: user_prompt.question,
-                            options: user_prompt.options,
-                            response_tx: user_prompt.response_tx,
                         }).await;
                     }
                 }
@@ -2283,24 +2393,12 @@ impl RuntimeTurnDriver {
         };
 
         self.session.clear_message_sender();
-        self.session.clear_prompt_sender();
         while let Ok(sandbox_msg) = msg_rx.try_recv() {
             if sandbox_msg.kind != "final" && !event_tx.is_closed() {
                 let _ = event_tx
                     .send(AgentEvent::Message {
                         text: sandbox_msg.text,
                         kind: sandbox_msg.kind,
-                    })
-                    .await;
-            }
-        }
-        while let Ok(user_prompt) = prompt_rx.try_recv() {
-            if !event_tx.is_closed() {
-                let _ = event_tx
-                    .send(AgentEvent::Prompt {
-                        question: user_prompt.question,
-                        options: user_prompt.options,
-                        response_tx: user_prompt.response_tx,
                     })
                     .await;
             }
@@ -2530,24 +2628,6 @@ impl RuntimeTurnDriver {
         pending_tools: Vec<crate::sansio::PendingToolCall>,
         event_tx: &mpsc::Sender<AgentEvent>,
     ) -> Vec<crate::sansio::CompletedToolCall> {
-        let (prompt_tx, mut prompt_rx) =
-            tokio::sync::mpsc::unbounded_channel::<crate::session::UserPrompt>();
-        self.session.set_prompt_sender(prompt_tx);
-        let event_tx_clone = event_tx.clone();
-        let prompt_forward_handle = tokio::spawn(async move {
-            while let Some(user_prompt) = prompt_rx.recv().await {
-                if !event_tx_clone.is_closed() {
-                    let _ = event_tx_clone
-                        .send(AgentEvent::Prompt {
-                            question: user_prompt.question,
-                            options: user_prompt.options,
-                            response_tx: user_prompt.response_tx,
-                        })
-                        .await;
-                }
-            }
-        });
-
         let plugins = Arc::clone(self.session.plugins());
         let manager = Arc::clone(&self.session_manager);
         let projector_manager = Arc::clone(&manager);
@@ -2645,8 +2725,6 @@ impl RuntimeTurnDriver {
                 )),
             }
         }
-        self.session.clear_prompt_sender();
-        let _ = prompt_forward_handle.await;
         outcomes.sort_by_key(|(index, _)| *index);
         outcomes.into_iter().map(|(_, outcome)| outcome).collect()
     }
@@ -3336,23 +3414,18 @@ mod tests {
     }
 
     async fn repl_runtime_with_transport(transport: MockTransport) -> LashRuntime {
-        let prompt_bridge = crate::PromptBridge::new();
         let plugins = default_tool_session(
             "root",
             ExecutionMode::Repl,
             crate::DefaultToolPluginDeps {
-                prompt_bridge: Some(prompt_bridge.clone()),
+                enable_user_prompts: true,
                 ..Default::default()
             },
         );
         let mut runtime = LashRuntime::from_state(
             repl_test_policy(),
             test_host_config(),
-            crate::RuntimeServices::new_with_bridges(
-                plugins,
-                prompt_bridge,
-                crate::TurnInjectionBridge::new(),
-            ),
+            crate::RuntimeServices::new_with_bridges(plugins, crate::TurnInjectionBridge::new()),
             AgentStateEnvelope {
                 policy: SessionPolicy {
                     execution_mode: ExecutionMode::Repl,
@@ -3371,23 +3444,18 @@ mod tests {
         transport: MockTransport,
         host: RuntimeHostConfig,
     ) -> LashRuntime {
-        let prompt_bridge = crate::PromptBridge::new();
         let plugins = default_tool_session(
             "root",
             ExecutionMode::Repl,
             crate::DefaultToolPluginDeps {
-                prompt_bridge: Some(prompt_bridge.clone()),
+                enable_user_prompts: true,
                 ..Default::default()
             },
         );
         let mut runtime = LashRuntime::from_state(
             repl_test_policy(),
             host,
-            crate::RuntimeServices::new_with_bridges(
-                plugins,
-                prompt_bridge,
-                crate::TurnInjectionBridge::new(),
-            ),
+            crate::RuntimeServices::new_with_bridges(plugins, crate::TurnInjectionBridge::new()),
             AgentStateEnvelope {
                 policy: SessionPolicy {
                     execution_mode: ExecutionMode::Repl,
@@ -3443,7 +3511,6 @@ mod tests {
             test_host_config(),
             crate::RuntimeServices::new_with_bridges(
                 plugin_session_with_tools("root", ExecutionMode::Standard, tools),
-                crate::PromptBridge::new(),
                 turn_injection_bridge,
             ),
             AgentStateEnvelope::default(),
@@ -4528,61 +4595,49 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn repl_run_exec_code_forwards_interactive_prompt_events() {
-        use tokio::time::{Duration, timeout};
-
+    async fn runtime_session_manager_forwards_user_prompts_when_available() {
         let transport = MockTransport::new(Vec::new());
-        let mut runtime = repl_runtime_with_transport(transport).await;
-        let session_manager = runtime.runtime_session_manager().expect("manager");
-        let session = runtime.session.take().expect("session");
-        let mut driver = RuntimeTurnDriver {
-            session,
-            policy: runtime.policy.clone(),
-            host: runtime.host.clone(),
-            agent_id: runtime.state.agent_id.clone(),
-            tool_calls: runtime.state.tool_calls.clone(),
-            llm_factory: runtime.llm_factory.clone(),
-            session_manager,
-        };
-        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let runtime = repl_runtime_with_transport(transport).await;
+        let prompt_bridge = HostPromptBridge::new();
+        let manager = runtime
+            .runtime_session_manager_with_prompt_bridge(Some(prompt_bridge.clone()))
+            .expect("manager");
+        let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::unbounded_channel::<PendingPrompt>();
+        prompt_bridge.set_sender(prompt_tx);
 
-        let run = tokio::spawn(async move {
-            driver
-                .run_exec_code(
-                    r#"
-                    answer = call ask { question: "Pick one", options: ["works", "done"] }
-                    observe format("selected={0}", answer.value)
-                    "#,
-                    &event_tx,
-                )
-                .await
+        let prompt_task = tokio::spawn(async move {
+            let prompt = prompt_rx.recv().await.expect("prompt");
+            assert_eq!(prompt.request.question, "Pick one");
+            assert_eq!(
+                prompt.request.options,
+                vec!["works".to_string(), "done".to_string()]
+            );
+            prompt
+                .response_tx
+                .send(crate::PromptResponse::Single {
+                    selection: "done".to_string(),
+                    note: None,
+                })
+                .expect("prompt response");
         });
 
-        let prompt = timeout(Duration::from_secs(2), event_rx.recv())
+        let answer = manager
+            .prompt_user(crate::PromptRequest::single(
+                "Pick one",
+                vec!["works".to_string(), "done".to_string()],
+            ))
             .await
-            .expect("prompt event timeout")
-            .expect("prompt event");
-        let AgentEvent::Prompt {
-            question,
-            options,
-            response_tx,
-        } = prompt
-        else {
-            panic!("expected prompt event");
-        };
-        assert_eq!(question, "Pick one");
-        assert_eq!(options, vec!["works".to_string(), "done".to_string()]);
-        response_tx
-            .send("done".to_string())
-            .expect("prompt response");
+            .expect("prompt answer");
 
-        let result = timeout(Duration::from_secs(2), run)
-            .await
-            .expect("exec result timeout")
-            .expect("join")
-            .expect("exec result");
-        assert_eq!(result.observations, vec!["selected=done".to_string()]);
-        assert_eq!(result.error, None);
+        prompt_bridge.clear_sender();
+        prompt_task.await.expect("prompt task");
+        assert_eq!(
+            answer,
+            crate::PromptResponse::Single {
+                selection: "done".to_string(),
+                note: None,
+            }
+        );
     }
 
     #[tokio::test]

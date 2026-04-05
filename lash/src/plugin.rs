@@ -333,6 +333,14 @@ pub trait SessionManager: Send + Sync {
     ) -> Result<SessionTurnHandle, PluginError>;
     async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError>;
     async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError>;
+    async fn prompt_user(
+        &self,
+        _request: crate::PromptRequest,
+    ) -> Result<crate::PromptResponse, PluginError> {
+        Err(PluginError::Session(
+            "user prompts are unavailable in this session".to_string(),
+        ))
+    }
     async fn start_turn(
         &self,
         session_id: &str,

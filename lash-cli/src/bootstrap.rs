@@ -236,6 +236,7 @@ pub(crate) async fn run(
         ..Default::default()
     };
     let host_config = RuntimeHostConfig {
+        user_prompts_enabled: !autonomous,
         prompt_renderer: default_prompt_renderer(),
         prompt_overrides,
         llm_log_path,
@@ -247,7 +248,6 @@ pub(crate) async fn run(
     let store = Arc::new(Store::open(&db_path)?);
 
     let tavily_key = lash_config.tavily_api_key().unwrap_or_default().to_string();
-    let prompt_bridge = PromptBridge::new();
     let turn_injection_bridge = TurnInjectionBridge::new();
 
     let delegate_tool_config = DelegateToolConfig {
@@ -266,7 +266,7 @@ pub(crate) async fn run(
             } else {
                 Some(tavily_key)
             },
-            prompt_bridge: (!autonomous).then_some(prompt_bridge.clone()),
+            enable_user_prompts: !autonomous,
             instruction_source: Some(Arc::clone(&instruction_source)),
         },
     );
@@ -276,10 +276,7 @@ pub(crate) async fn run(
             PromptContextPluginConfig::default(),
         )) as Arc<dyn PluginFactory>,
         Arc::new(BuiltinPlanTrackerPluginFactory),
-        Arc::new(BuiltinPlanModePluginFactory::with_prompt_bridge(
-            Default::default(),
-            prompt_bridge.clone(),
-        )),
+        Arc::new(BuiltinPlanModePluginFactory::new(Default::default())),
         Arc::new(DelegateToolsPluginFactory::new(
             session_policy.clone(),
             delegate_tool_config,
@@ -324,12 +321,8 @@ pub(crate) async fn run(
     let runtime = LashRuntime::from_state(
         session_policy.clone(),
         host_config,
-        RuntimeServices::new_with_bridges(
-            root_plugins,
-            prompt_bridge,
-            turn_injection_bridge.clone(),
-        )
-        .with_store(store.clone() as Arc<dyn RuntimeStore>),
+        RuntimeServices::new_with_bridges(root_plugins, turn_injection_bridge.clone())
+            .with_store(store.clone() as Arc<dyn RuntimeStore>),
         AgentStateEnvelope {
             agent_id: "root".to_string(),
             policy: session_policy.clone(),

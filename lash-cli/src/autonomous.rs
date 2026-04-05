@@ -95,7 +95,7 @@ impl AutonomousRenderer {
         }
     }
 
-    pub(crate) fn handle(&mut self, event: AgentEvent) {
+    pub(crate) fn handle(&mut self, event: AgentEvent) -> Result<(), String> {
         match event {
             AgentEvent::TextDelta { content } => {
                 if !content.is_empty() {
@@ -198,8 +198,11 @@ impl AutonomousRenderer {
             AgentEvent::Error { message, .. } => {
                 eprintln!("error: {message}");
             }
-            AgentEvent::Prompt { response_tx, .. } => {
-                let _ = response_tx.send(String::new());
+            AgentEvent::Prompt { request, .. } => {
+                return Err(format!(
+                    "unexpected user prompt in autonomous mode: {}",
+                    request.question
+                ));
             }
             AgentEvent::PluginEvent { plugin_id, event } => match event {
                 PluginSurfaceEvent::PanelUpsert {
@@ -235,6 +238,7 @@ impl AutonomousRenderer {
             | AgentEvent::LlmResponse { .. }
             | AgentEvent::DurableSnapshot { .. } => {}
         }
+        Ok(())
     }
 
     pub(crate) fn rendered_plugin_output(&self) -> Option<String> {
@@ -329,7 +333,12 @@ pub(crate) async fn run_autonomous(
     let mut renderer = AutonomousRenderer::new();
     let (mut runtime, result, cancel) = loop {
         tokio::select! {
-            Some(event) = event_rx.recv() => renderer.handle(event),
+            Some(event) = event_rx.recv() => {
+                if let Err(err) = renderer.handle(event) {
+                    eprintln!("error: {err}");
+                    std::process::exit(2);
+                }
+            }
             join = &mut task => {
                 match join {
                     Ok(result) => break result,

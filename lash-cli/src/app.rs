@@ -1292,11 +1292,15 @@ impl App {
             AgentEvent::Error { message, envelope } => {
                 self.close_pending_text();
                 let code = envelope.as_ref().and_then(|err| err.code.as_deref());
-                if self.manual_interrupt_requested && is_cancelled_error(&message, code) {
-                    self.manual_interrupt_requested = false;
-                    self.blocks.push(DisplayBlock::SystemMessage(
-                        manual_interrupt_message().to_string(),
-                    ));
+                if is_cancelled_error(&message, code) {
+                    let manual_interrupt_requested = self.manual_interrupt_requested;
+                    self.stop_turn();
+                    self.blocks
+                        .push(DisplayBlock::SystemMessage(if manual_interrupt_requested {
+                            manual_interrupt_message().to_string()
+                        } else {
+                            "Cancelled.".to_string()
+                        }));
                 } else {
                     self.manual_interrupt_requested = false;
                     self.set_transient_status(
@@ -2035,18 +2039,26 @@ impl App {
         matches!(self.overlay, Some(OverlayState::Prompt(_)))
     }
 
-    /// Whether the prompt is currently focused on reply editing.
-    pub fn is_prompt_editing_reply(&self) -> bool {
+    /// Whether the prompt is currently in text-entry mode.
+    pub fn is_prompt_text_entry(&self) -> bool {
         match &self.overlay {
-            Some(OverlayState::Prompt(prompt)) => prompt.is_editing_reply(),
+            Some(OverlayState::Prompt(prompt)) => prompt.is_text_entry(),
             _ => false,
         }
     }
 
-    /// Whether the prompt is freeform-only (no options).
-    pub fn is_prompt_freeform(&self) -> bool {
+    /// Whether the prompt supports an optional note field.
+    pub fn prompt_supports_note(&self) -> bool {
         match &self.overlay {
-            Some(OverlayState::Prompt(prompt)) => prompt.is_freeform(),
+            Some(OverlayState::Prompt(prompt)) => prompt.supports_note(),
+            _ => false,
+        }
+    }
+
+    /// Whether the prompt allows selecting multiple options.
+    pub fn is_prompt_multi_select(&self) -> bool {
+        match &self.overlay {
+            Some(OverlayState::Prompt(prompt)) => prompt.is_multi(),
             _ => false,
         }
     }
@@ -2065,10 +2077,17 @@ impl App {
         }
     }
 
-    /// Toggle extra text editing for prompts that also have discrete options.
-    pub fn prompt_toggle_extra(&mut self) {
+    /// Toggle the current option for multi-select prompts.
+    pub fn prompt_toggle_current_option(&mut self) {
         if let Some(OverlayState::Prompt(p)) = &mut self.overlay {
-            p.toggle_focus();
+            p.toggle_current();
+        }
+    }
+
+    /// Toggle focus between choices and the optional note field.
+    pub fn prompt_toggle_note_focus(&mut self) {
+        if let Some(OverlayState::Prompt(p)) = &mut self.overlay {
+            p.toggle_text_focus();
         }
     }
 
@@ -2097,24 +2116,25 @@ impl App {
     pub fn take_prompt_response(&mut self) -> Option<String> {
         if let Some(OverlayState::Prompt(p)) = self.overlay.take() {
             let response = p.submitted_response();
-            let _ = p.response_tx.send(response.clone());
+            let display = p.display_response(&response);
+            let _ = p.response_tx.send(response);
             self.invalidate_height_cache();
             self.scroll_to_bottom();
             self.dirty = true;
-            if !response.trim().is_empty() {
-                self.blocks.push(DisplayBlock::UserInput(response.clone()));
+            if !display.trim().is_empty() {
+                self.blocks.push(DisplayBlock::UserInput(display.clone()));
                 self.invalidate_height_cache();
                 self.keep_latest_user_block_visible();
-                return Some(response);
+                return Some(display);
             }
         }
         None
     }
 
-    /// Dismiss the prompt without selecting (Esc) — sends empty string to unblock the REPL runtime.
+    /// Dismiss the prompt without selecting (Esc).
     pub fn dismiss_prompt(&mut self) {
         if let Some(OverlayState::Prompt(p)) = self.overlay.take() {
-            let _ = p.response_tx.send(String::new());
+            let _ = p.response_tx.send(p.dismissed_response());
             self.invalidate_height_cache();
             self.scroll_to_bottom();
             self.dirty = true;
@@ -2227,7 +2247,6 @@ pub(crate) fn render_plan_content_from_args(args: &serde_json::Value) -> Option<
 mod tests {
     use super::*;
     use crate::editor::LARGE_PASTE_CHAR_THRESHOLD;
-    use crate::overlay::{PromptFocus, PromptSelection};
 
     #[test]
     fn renders_plan_content_from_update_plan_args() {
@@ -2771,6 +2790,7 @@ mod tests {
     #[test]
     fn cancelled_error_renders_as_system_message() {
         let mut app = App::new("test-model".into(), "test".into());
+        app.start_turn();
         app.note_manual_interrupt_requested();
         app.handle_agent_event(AgentEvent::Error {
             message: "LLM error: cancelled".into(),
@@ -2786,11 +2806,14 @@ mod tests {
             app.blocks.last(),
             Some(DisplayBlock::SystemMessage(msg)) if msg == "Manually interrupted."
         ));
+        assert!(!app.running);
+        assert!(app.live_turn.is_none());
     }
 
     #[test]
-    fn cancelled_error_without_manual_request_renders_as_error() {
+    fn cancelled_error_without_manual_request_still_stops_immediately() {
         let mut app = App::new("test-model".into(), "test".into());
+        app.start_turn();
         app.handle_agent_event(AgentEvent::Error {
             message: "LLM error: cancelled".into(),
             envelope: Some(lash::agent::ErrorEnvelope {
@@ -2803,8 +2826,10 @@ mod tests {
 
         assert!(matches!(
             app.blocks.last(),
-            Some(DisplayBlock::Error(msg)) if msg == "LLM error: cancelled"
+            Some(DisplayBlock::SystemMessage(msg)) if msg == "Cancelled."
         ));
+        assert!(!app.running);
+        assert!(app.live_turn.is_none());
     }
 
     #[test]
@@ -3096,10 +3121,10 @@ mod tests {
         let mut app = App::new("test-model".into(), "test".into());
         let (tx, rx) = std::sync::mpsc::channel();
         app.show_prompt(PromptState {
-            question: "Pick one".into(),
-            options: vec!["red".into(), "blue".into()],
-            selection: PromptSelection::Option(0),
-            focus: PromptFocus::Selection,
+            request: lash::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()]),
+            focus: crate::overlay::PromptFocus::Options,
+            cursor: 0,
+            selected: Default::default(),
             reply_text: String::new(),
             reply_cursor: 0,
             response_tx: tx,
@@ -3108,7 +3133,13 @@ mod tests {
         let response = app.take_prompt_response();
 
         assert_eq!(response.as_deref(), Some("1. red"));
-        assert_eq!(rx.recv().expect("response"), "1. red");
+        assert_eq!(
+            rx.recv().expect("response"),
+            lash::PromptResponse::Single {
+                selection: "red".to_string(),
+                note: None,
+            }
+        );
         assert!(app.prompt_state().is_none());
         assert!(app.dirty);
         assert!(matches!(
@@ -3122,10 +3153,10 @@ mod tests {
         let mut app = App::new("test-model".into(), "test".into());
         let (tx, rx) = std::sync::mpsc::channel();
         app.show_prompt(PromptState {
-            question: "Pick one".into(),
-            options: vec!["red".into()],
-            selection: PromptSelection::Option(0),
-            focus: PromptFocus::Selection,
+            request: lash::PromptRequest::single("Pick one", vec!["red".into()]),
+            focus: crate::overlay::PromptFocus::Options,
+            cursor: 0,
+            selected: Default::default(),
             reply_text: String::new(),
             reply_cursor: 0,
             response_tx: tx,
@@ -3133,7 +3164,13 @@ mod tests {
 
         app.dismiss_prompt();
 
-        assert_eq!(rx.recv().expect("response"), "");
+        assert_eq!(
+            rx.recv().expect("response"),
+            lash::PromptResponse::Single {
+                selection: String::new(),
+                note: None,
+            }
+        );
         assert!(app.prompt_state().is_none());
         assert!(app.dirty);
     }
@@ -3888,10 +3925,10 @@ mod tests {
     fn prompt_insert_text_inserts_literal_payload_at_cursor() {
         let mut app = App::new("test-model".into(), "test".into());
         app.show_prompt(PromptState {
-            question: "Question?".into(),
-            options: Vec::new(),
-            selection: PromptSelection::Option(0),
-            focus: PromptFocus::ReplyEditor,
+            request: lash::PromptRequest::freeform("Question?"),
+            focus: crate::overlay::PromptFocus::Text,
+            cursor: 0,
+            selected: Default::default(),
             reply_text: "startend".into(),
             reply_cursor: "start".len(),
             response_tx: std::sync::mpsc::channel().0,
@@ -3905,24 +3942,82 @@ mod tests {
     }
 
     #[test]
-    fn prompt_toggle_extra_ignores_freeform_prompts() {
+    fn prompt_toggle_current_option_ignores_freeform_prompts() {
         let mut app = App::new("test-model".into(), "test".into());
         app.show_prompt(PromptState {
-            question: "Question?".into(),
-            options: Vec::new(),
-            selection: PromptSelection::Option(0),
-            focus: PromptFocus::ReplyEditor,
+            request: lash::PromptRequest::freeform("Question?"),
+            focus: crate::overlay::PromptFocus::Text,
+            cursor: 0,
+            selected: Default::default(),
             reply_text: String::new(),
             reply_cursor: 0,
             response_tx: std::sync::mpsc::channel().0,
         });
 
-        app.prompt_toggle_extra();
+        app.prompt_toggle_current_option();
 
         assert!(
-            app.prompt_state().expect("prompt").is_editing_reply(),
+            app.prompt_state().expect("prompt").is_freeform(),
             "freeform prompts should stay in text-entry mode"
         );
+    }
+
+    #[test]
+    fn prompt_toggle_note_focus_switches_between_choices_and_note() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.show_prompt(PromptState {
+            request: lash::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()])
+                .with_optional_note(),
+            focus: crate::overlay::PromptFocus::Options,
+            cursor: 0,
+            selected: Default::default(),
+            reply_text: String::new(),
+            reply_cursor: 0,
+            response_tx: std::sync::mpsc::channel().0,
+        });
+
+        assert!(app.prompt_supports_note());
+        assert!(!app.is_prompt_text_entry());
+
+        app.prompt_toggle_note_focus();
+        assert!(app.is_prompt_text_entry());
+
+        app.prompt_toggle_note_focus();
+        assert!(!app.is_prompt_text_entry());
+    }
+
+    #[test]
+    fn take_prompt_response_renders_note_for_option_prompt() {
+        let mut app = App::new("test-model".into(), "test".into());
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.show_prompt(PromptState {
+            request: lash::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()])
+                .with_optional_note(),
+            focus: crate::overlay::PromptFocus::Text,
+            cursor: 1,
+            selected: Default::default(),
+            reply_text: "ship the blue path".into(),
+            reply_cursor: "ship the blue path".len(),
+            response_tx: tx,
+        });
+
+        let response = app.take_prompt_response();
+
+        assert_eq!(
+            response.as_deref(),
+            Some("2. blue\n\nNote: ship the blue path")
+        );
+        assert_eq!(
+            rx.recv().expect("response"),
+            lash::PromptResponse::Single {
+                selection: "blue".to_string(),
+                note: Some("ship the blue path".to_string()),
+            }
+        );
+        assert!(matches!(
+            app.blocks.last(),
+            Some(DisplayBlock::UserInput(text)) if text == "2. blue\n\nNote: ship the blue path"
+        ));
     }
 
     #[test]
