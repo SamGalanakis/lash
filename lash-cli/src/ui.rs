@@ -764,13 +764,9 @@ fn render_patch_preview<'a>(
     indent: &str,
     include_diffs: bool,
 ) {
-    for (idx, file) in files.iter().enumerate() {
+    for file in files.iter() {
         let shows_diff = include_diffs && !file.diff.trim().is_empty();
-        let row_prefix = if idx + 1 == files.len() && !shows_diff {
-            format!("{indent}╰ ")
-        } else {
-            format!("{indent}├ ")
-        };
+        let row_prefix = format!("{indent}  ");
         render_patch_summary_line(lines, &row_prefix, file, viewport_width);
         if shows_diff {
             render_patch_diff_lines(lines, &format!("{indent}│ "), &file.diff, viewport_width);
@@ -1007,28 +1003,22 @@ fn code_workflow_bridge_gutter(
     let prev = has_code_workflow_neighbor(blocks, idx, -1);
     let next = has_code_workflow_neighbor(blocks, idx, 1);
     if prev && next {
-        Some(("│ ", theme::code_scribe()))
+        Some(("  ", theme::code_scribe()))
     } else {
         None
     }
 }
 
-fn code_workflow_summary_prefix(lane: CodeWorkflowLane) -> &'static str {
-    if lane.is_first {
-        "╭─ "
-    } else if lane.is_last {
-        "╰─ "
-    } else {
-        "├─ "
-    }
+fn code_workflow_summary_prefix(_lane: CodeWorkflowLane) -> &'static str {
+    "· "
 }
 
-fn code_workflow_detail_prefix(lane: CodeWorkflowLane) -> &'static str {
-    if lane.is_last { "   " } else { "│  " }
+fn code_workflow_detail_prefix(_lane: CodeWorkflowLane) -> &'static str {
+    "  "
 }
 
-fn code_workflow_artifact_indent(lane: CodeWorkflowLane) -> &'static str {
-    if lane.is_last { "  " } else { "│ " }
+fn code_workflow_artifact_indent(_lane: CodeWorkflowLane) -> &'static str {
+    "  "
 }
 
 fn activity_uses_connected_lane(activity: &ActivityBlock, expand_level: u8) -> bool {
@@ -1065,39 +1055,31 @@ fn default_activity_lane(activity: &ActivityBlock, nested: bool, expand_level: u
     let (summary_prefix, summary_prefix_style, detail_prefix, detail_prefix_style) =
         match activity.kind {
             ActivityKind::Exploration => (
-                if connected {
-                    format!("{prefix}╭─ ")
-                } else {
-                    format!("{prefix}─ ")
-                },
+                format!("{prefix}  "),
                 Style::default()
                     .fg(theme::SODIUM)
                     .add_modifier(Modifier::BOLD),
-                format!("{prefix}│  "),
+                format!("{prefix}  "),
                 Style::default().fg(theme::SODIUM),
             ),
             ActivityKind::Delegate => (
                 if connected {
-                    format!("{prefix}├─ ")
+                    format!("{prefix}  ")
                 } else {
                     format!("{prefix}◆ ")
                 },
                 theme::delegate_marker(),
-                format!("{prefix}│  "),
+                format!("{prefix}  "),
                 theme::delegate_chrome(),
             ),
             ActivityKind::Edit => (
-                if connected {
-                    format!("{prefix}╭─ ")
-                } else {
-                    format!("{prefix}─ ")
-                },
+                format!("{prefix}  "),
                 if activity.status == ActivityStatus::Failed {
                     theme::error().add_modifier(Modifier::BOLD)
                 } else {
                     theme::edit_lane_bold()
                 },
-                format!("{prefix}│  "),
+                format!("{prefix}  "),
                 if activity.status == ActivityStatus::Failed {
                     theme::error()
                 } else {
@@ -1124,7 +1106,7 @@ fn default_activity_lane(activity: &ActivityBlock, nested: bool, expand_level: u
 
     ActivityLane {
         artifact_indent: format!("{prefix}  "),
-        parallel_child_prefix: format!("{}  └ ", prefix),
+        parallel_child_prefix: format!("{}    ", prefix),
         summary_prefix,
         summary_prefix_style,
         detail_prefix,
@@ -1149,7 +1131,7 @@ fn code_workflow_activity_lane(lane: CodeWorkflowLane, kind: &ActivityKind) -> A
         detail_prefix: code_workflow_detail_prefix(lane).to_string(),
         detail_prefix_style: detail_style,
         artifact_indent: code_workflow_artifact_indent(lane).to_string(),
-        parallel_child_prefix: format!("{}└ ", code_workflow_artifact_indent(lane)),
+        parallel_child_prefix: format!("{}  ", code_workflow_artifact_indent(lane)),
     }
 }
 
@@ -1277,7 +1259,7 @@ fn render_activity_block_with_lane<'a>(
             let children = &activity.children;
             let last_idx = children.len().saturating_sub(1);
             for (i, child) in children.iter().enumerate() {
-                let connector = if i == last_idx { "╰─ " } else { "├─ " };
+                let connector = if i == last_idx { "  " } else { "  " };
                 let connector_prefix = format!("{}{}", lane.artifact_indent, connector);
                 let child_summary = if let Some(duration_text) =
                     crate::util::format_duration_ms_if_visible(child.duration_ms)
@@ -1709,6 +1691,17 @@ fn prefix_rendered_lines(lines: &mut [Line<'_>], prefix: &str, style: Style) {
     }
 }
 
+fn assistant_lane_continues_into(block: &DisplayBlock) -> bool {
+    matches!(
+        block,
+        DisplayBlock::Activity(_)
+            | DisplayBlock::CodeBlock { .. }
+            | DisplayBlock::CodeOutput { .. }
+            | DisplayBlock::PlanContent(_)
+            | DisplayBlock::PluginPanel(_)
+    )
+}
+
 fn styled_user_input_segment<'a>(text: &'a str, seg_start: usize, seg_end: usize) -> Vec<Span<'a>> {
     let mut spans = Vec::new();
     let mut cursor = seg_start;
@@ -1807,7 +1800,12 @@ fn render_block_into<'a>(
             }
         }
         DisplayBlock::AssistantText(text) => {
-            let prefix_w = 2; // "■ " or "  " is 2 columns
+            let _connected_lane = blocks
+                .get(idx + 1)
+                .is_some_and(assistant_lane_continues_into);
+            let first_prefix = "■ ";
+            let continuation_prefix = "  ";
+            let prefix_w = UnicodeWidthStr::width(first_prefix);
             let rendered =
                 markdown::render_markdown_compact(text, viewport_width.saturating_sub(prefix_w));
             if rendered.is_empty() {
@@ -1826,7 +1824,7 @@ fn render_block_into<'a>(
             // empty lines pass through with no prefix.
             // Wrap each markdown line to content_width BEFORE adding the prefix so
             // that wrapped continuation lines also receive the indent and text stays
-            // aligned with the "■ " marker.
+            // aligned with the assistant marker or connected lane.
             let content_width = viewport_width.saturating_sub(prefix_w);
             let mut marker_placed = false;
             for line in rendered {
@@ -1840,11 +1838,12 @@ fn render_block_into<'a>(
                 for subline in wrapped {
                     if !marker_placed {
                         marker_placed = true;
-                        let mut spans = vec![Span::styled("\u{25A0} ", theme::assistant_bar())];
+                        let mut spans = vec![Span::styled(first_prefix, theme::assistant_bar())];
                         spans.extend(subline.spans);
                         lines.push(Line::from(spans));
                     } else {
-                        let mut spans = vec![Span::raw("  ")];
+                        let mut spans =
+                            vec![Span::styled(continuation_prefix, theme::assistant_bar())];
                         spans.extend(subline.spans);
                         lines.push(Line::from(spans));
                     }
@@ -3437,11 +3436,11 @@ mod tests {
         }
 
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
-        assert_eq!(rendered[0], "╭─ first command");
-        assert!(rendered.iter().any(|line| line.starts_with("│ ┌─ PLAN ")));
+        assert_eq!(rendered[0], "· first command");
+        assert!(rendered.iter().any(|line| line.starts_with("  ┌─ PLAN ")));
         assert_eq!(
             rendered.last().map(String::as_str),
-            Some("╰─ second command")
+            Some("· second command")
         );
     }
 
@@ -3627,6 +3626,36 @@ mod tests {
 
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
         assert_eq!(rendered, vec!["■ alpha beta", "  gamma", "  delta"]);
+    }
+
+    #[test]
+    fn assistant_text_connects_to_following_trace_lane() {
+        let blocks = [
+            DisplayBlock::AssistantText("Checking repo state".into()),
+            DisplayBlock::Activity(ActivityBlock {
+                kind: ActivityKind::Delegate,
+                status: ActivityStatus::Completed,
+                tool_name: "agent_result".into(),
+                summary: "delegate done · inspect queue".into(),
+                detail_lines: vec!["claude-sonnet · 3 iterations · 5 tool calls".into()],
+                duration_ms: 4200,
+                args: serde_json::Value::Null,
+                result: serde_json::Value::Null,
+                artifact: None,
+                children: Vec::new(),
+                extra: None,
+            }),
+        ];
+        let mut lines = Vec::new();
+
+        for idx in 0..blocks.len() {
+            render_block_into(&blocks, idx, 1, &mut lines, 80, 20);
+        }
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert_eq!(rendered[0], "■ Checking repo state");
+        assert_eq!(rendered[1], "  delegate done · inspect queue · 4.2s");
+        assert_eq!(rendered[2], "  claude-sonnet · 3 iterations · 5 tool calls");
     }
 
     #[test]
@@ -4176,11 +4205,11 @@ mod tests {
         // Detail rows keep the connected delegate lane.
         assert_eq!(
             line_text(&lines[0]),
-            "├─ delegate done · inspect queue · 4.2s"
+            "  delegate done · inspect queue · 4.2s"
         );
         assert_eq!(
             line_text(&lines[1]),
-            "│  claude-sonnet · 3 iterations · 5 tool calls"
+            "  claude-sonnet · 3 iterations · 5 tool calls"
         );
         assert_eq!(lines.len(), 2);
     }
@@ -4247,7 +4276,7 @@ mod tests {
             render_block(&blocks, idx, 1, &mut lines, 80, 20);
         }
 
-        assert_eq!(line_text(&lines[0]), "├─ Edited hello.txt (+2 -1)");
+        assert_eq!(line_text(&lines[0]), "· Edited hello.txt (+2 -1)");
         assert_eq!(lines.len(), 1);
     }
 
@@ -4299,7 +4328,7 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 80, false);
 
-        assert_eq!(line_text(&lines[0]), "╭─ Edited lash-cli/src/ui.rs (+3 -1)");
+        assert_eq!(line_text(&lines[0]), "  Edited lash-cli/src/ui.rs (+3 -1)");
         assert!(line_text(&lines[1]).contains("@@"));
         assert!(line_text(&lines[2]).contains("- old"));
         assert!(line_text(&lines[3]).contains("+ new"));
@@ -4345,9 +4374,9 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 80, false);
 
-        assert_eq!(line_text(&lines[0]), "╭─ Edited 2 files (+4 -1)");
-        assert_eq!(line_text(&lines[1]), "  ├ Edited a.rs (+3 -1)");
-        assert_eq!(line_text(&lines[2]), "  ╰ Added b.rs (+1 -0)");
+        assert_eq!(line_text(&lines[0]), "  Edited 2 files (+4 -1)");
+        assert_eq!(line_text(&lines[1]), "    Edited a.rs (+3 -1)");
+        assert_eq!(line_text(&lines[2]), "    Added b.rs (+1 -0)");
     }
 
     #[test]
@@ -4498,9 +4527,9 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 80, false);
 
-        assert_eq!(line_text(&lines[0]), "╭─ EXPLORE");
-        assert_eq!(line_text(&lines[1]), "│   list .");
-        assert_eq!(line_text(&lines[2]), "│   read src/main.rs");
+        assert_eq!(line_text(&lines[0]), "  EXPLORE");
+        assert_eq!(line_text(&lines[1]), "   list .");
+        assert_eq!(line_text(&lines[2]), "   read src/main.rs");
     }
 
     #[test]
@@ -4522,9 +4551,9 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 20, false);
 
-        assert_eq!(line_text(&lines[0]), "╭─ EXPLORE");
-        assert_eq!(line_text(&lines[1]), "│   abcdefghijklmnop");
-        assert_eq!(line_text(&lines[2]), "│   qrstuvwx");
+        assert_eq!(line_text(&lines[0]), "  EXPLORE");
+        assert_eq!(line_text(&lines[1]), "   abcdefghijklmnopq");
+        assert_eq!(line_text(&lines[2]), "   rstuvwx");
     }
 
     #[test]
@@ -4549,10 +4578,10 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 20, false);
 
-        assert_eq!(line_text(&lines[0]), "╭─ EXPLORE");
+        assert_eq!(line_text(&lines[0]), "  EXPLORE");
         assert_eq!(lines.len(), 4);
-        assert_eq!(line_text(&lines[1]), "│   abcdefghijklmnop");
-        assert_eq!(line_text(&lines[2]), "│   qrstuvwxyz012345");
+        assert_eq!(line_text(&lines[1]), "   abcdefghijklmnopq");
+        assert_eq!(line_text(&lines[2]), "   rstuvwxyz01234567");
         assert!(line_text(&lines[3]).ends_with('…'));
     }
 
@@ -4575,7 +4604,7 @@ mod tests {
         let mut lines = Vec::new();
         render_activity_block(&activity, 1, &mut lines, 80, false);
 
-        assert_eq!(line_text(&lines[0]), "─ EXPLORE");
+        assert_eq!(line_text(&lines[0]), "  EXPLORE");
         assert_eq!(lines.len(), 1);
     }
 

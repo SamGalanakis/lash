@@ -1205,7 +1205,7 @@ pub(crate) async fn run_app(
                         running = app.running,
                         "reconciling completed runtime turn"
                     );
-                    app.stop_turn();
+                    let persisted_ui_state = app.finish_turn_for_persistence();
 
                     let persisted_execution_mode = state.policy.execution_mode;
                     let persisted_context_strategy = state.policy.context_strategy;
@@ -1213,7 +1213,7 @@ pub(crate) async fn run_app(
                     persist_root_agent_state(
                         &store,
                         &mut state,
-                        &app.persisted_ui_state(),
+                        &persisted_ui_state,
                         &persisted_dynamic_state,
                         &provider,
                         &app.model,

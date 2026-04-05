@@ -954,12 +954,10 @@ impl TurnMachine {
             match part {
                 LlmOutputPart::Text { text } => {
                     if !text.is_empty() {
+                        append_assistant_text_part(&mut assistant_text, &text);
                         if !text_streamed {
-                            self.emit(AgentEvent::TextDelta {
-                                content: text.clone(),
-                            });
+                            self.emit(AgentEvent::TextDelta { content: text });
                         }
-                        assistant_text.push_str(&text);
                     }
                 }
                 LlmOutputPart::ToolCall {
@@ -1658,6 +1656,22 @@ fn llm_usage_is_empty(usage: &LlmUsage) -> bool {
         && usage.reasoning_tokens == 0
 }
 
+fn append_assistant_text_part(out: &mut String, next: &str) {
+    if out.is_empty() {
+        out.push_str(next);
+        return;
+    }
+
+    let prev_trailing_newlines = out.chars().rev().take_while(|ch| *ch == '\n').count();
+    let next_leading_newlines = next.chars().take_while(|ch| *ch == '\n').count();
+    let total_boundary_newlines = prev_trailing_newlines + next_leading_newlines;
+    if total_boundary_newlines < 2 {
+        out.push_str(&"\n".repeat(2 - total_boundary_newlines));
+    }
+
+    out.push_str(next);
+}
+
 // ─── Tests ───
 
 #[cfg(test)]
@@ -1835,6 +1849,62 @@ mod tests {
         let effects = drain_effects(&mut machine);
         assert!(find_done(&effects).is_some());
         assert!(machine.is_done());
+    }
+
+    #[test]
+    fn standard_multiple_text_parts_preserve_block_boundaries() {
+        let config = test_config(ExecutionMode::Standard);
+        let msgs = vec![user_message("hello")];
+        let mut machine = TurnMachine::new(config, msgs, 0);
+
+        let effects = drain_effects(&mut machine);
+        let llm_id = *find_llm_call(&effects).expect("should emit LlmCall");
+
+        machine.handle_response(Response::LlmComplete {
+            id: llm_id,
+            text_streamed: false,
+            result: Ok(LlmResponse {
+                parts: vec![
+                    LlmOutputPart::Text {
+                        text: "What’s working:".to_string(),
+                    },
+                    LlmOutputPart::Text {
+                        text: "- one\n- two".to_string(),
+                    },
+                ],
+                ..LlmResponse::default()
+            }),
+        });
+
+        let effects = drain_effects(&mut machine);
+        let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
+        assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
+        machine.handle_response(Response::Checkpoint {
+            id: checkpoint_id,
+            messages: Vec::new(),
+        });
+
+        let effects = drain_effects(&mut machine);
+        let (messages, _) = find_done(&effects).expect("done");
+        let assistant = messages
+            .iter()
+            .find(|message| message.role == MessageRole::Assistant)
+            .expect("assistant message");
+        let prose = assistant
+            .parts
+            .iter()
+            .find(|part| matches!(part.kind, PartKind::Prose))
+            .map(|part| part.content.as_str())
+            .expect("prose part");
+
+        assert_eq!(prose, "What’s working:\n\n- one\n- two");
+    }
+
+    #[test]
+    fn standard_multiple_text_parts_do_not_accumulate_extra_blank_lines() {
+        let mut combined = "Heading\n".to_string();
+        append_assistant_text_part(&mut combined, "\nBody");
+        assert_eq!(combined, "Heading\n\nBody");
     }
 
     #[test]

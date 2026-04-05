@@ -185,6 +185,7 @@ impl ActivityState {
         success: bool,
         duration_ms: u64,
     ) -> ActivityBlock {
+        let name = activity_tool_name(name);
         let status = if success {
             ActivityStatus::Completed
         } else {
@@ -614,6 +615,12 @@ impl ActivityState {
             },
         }
     }
+}
+
+fn activity_tool_name(name: &str) -> &str {
+    name.strip_prefix("functions.")
+        .or_else(|| name.strip_prefix("web."))
+        .unwrap_or(name)
 }
 
 pub fn merge_exploration_activity(target: &mut ActivityBlock, mut incoming: ActivityBlock) -> bool {
@@ -1571,6 +1578,34 @@ mod tests {
         assert_eq!(blocks[1].detail_lines, vec!["Search \"foo\" in ."]);
         assert_ne!(blocks[0].tool_name, "batch");
         assert_ne!(blocks[1].tool_name, "batch");
+    }
+
+    #[test]
+    fn batch_normalizes_namespaced_child_tool_blocks() {
+        let mut state = ActivityState::default();
+        let blocks = state.blocks_for_tool_call(
+            "batch",
+            json!({
+                "tool_calls": [
+                    {"tool": "functions.read_file", "parameters": {"path": "a.rs"}},
+                    {"tool": "functions.grep", "parameters": {"pattern": "foo", "path": "."}}
+                ]
+            }),
+            json!({
+                "results": [
+                    {"tool": "functions.read_file", "success": true, "result": "x"},
+                    {"tool": "functions.grep", "success": true, "result": "match"}
+                ]
+            }),
+            true,
+            12,
+        );
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].tool_name, "read_file");
+        assert_eq!(blocks[0].summary, "EXPLORE");
+        assert_eq!(blocks[1].tool_name, "grep");
+        assert_eq!(blocks[1].summary, "EXPLORE");
     }
 
     #[test]
