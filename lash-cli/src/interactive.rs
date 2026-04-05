@@ -1205,7 +1205,10 @@ pub(crate) async fn run_app(
                         running = app.running,
                         "reconciling completed runtime turn"
                     );
-                    let persisted_ui_state = app.finish_turn_for_persistence();
+                    let final_output = (!done.result.assistant_output.safe_text.is_empty())
+                        .then_some(done.result.assistant_output.safe_text.as_str());
+                    let persisted_ui_state =
+                        app.finish_turn_for_persistence_with_output(final_output);
 
                     let persisted_execution_mode = state.policy.execution_mode;
                     let persisted_context_strategy = state.policy.context_strategy;

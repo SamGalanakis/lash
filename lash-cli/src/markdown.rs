@@ -532,16 +532,11 @@ impl MdRenderer {
             // ── Heading ──
             Event::Start(Tag::Heading { .. }) => {
                 self.flush_line();
-                // Breathing room above headings so they don't stack against prior content
-                if !self.lines.is_empty() && !self.lines.last().is_some_and(is_blank_line) {
-                    self.blank_line();
-                }
                 self.push_style(theme::heading());
             }
             Event::End(TagEnd::Heading(_)) => {
                 self.flush_line();
                 self.pop_style();
-                self.blank_line();
             }
 
             // ── Paragraph ──
@@ -659,7 +654,6 @@ impl MdRenderer {
                     "\u{2500}".repeat(40),
                     theme::code_chrome(),
                 )));
-                self.blank_line();
             }
 
             // ── Links ──
@@ -687,8 +681,7 @@ mod tests {
     #[test]
     fn render_heading() {
         let lines = render_markdown("# Title", 80);
-        // Should have a bold styled line and a blank line
-        assert!(lines.len() >= 2);
+        assert_eq!(lines.len(), 1);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("Title"));
     }
@@ -897,5 +890,51 @@ mod tests {
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
         assert_eq!(text, vec!["a".to_string(), "".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn render_markdown_compact_keeps_heading_tight() {
+        let lines = render_markdown_compact("Intro\n\n## Heading\n\nBody", 80);
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "Intro".to_string(),
+                "".to_string(),
+                "Heading".to_string(),
+                "Body".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn render_markdown_compact_keeps_rule_tight() {
+        let lines = render_markdown_compact("Above\n\n---\n\n## Heading\n\nBelow", 80);
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+
+        let rule_idx = rendered
+            .iter()
+            .position(|line| line.contains('\u{2500}'))
+            .expect("rule line");
+        let heading_idx = rendered
+            .iter()
+            .position(|line| line == "Heading")
+            .expect("heading line");
+
+        assert_eq!(rule_idx + 1, heading_idx);
+        assert_eq!(rendered[heading_idx + 1], "Below");
+        assert!(
+            !rendered
+                .windows(2)
+                .any(|pair| pair[0].contains('\u{2500}') && pair[1].is_empty()),
+            "rule should not force a blank line after itself: {rendered:#?}"
+        );
     }
 }

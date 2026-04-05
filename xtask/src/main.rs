@@ -30,7 +30,7 @@ fn run() -> Result<(), String> {
 }
 
 fn run_build(raw_args: Vec<String>) -> Result<(), String> {
-    let cargo_args = parse_build_args(raw_args)?;
+    let cargo_args = parse_build_args(raw_args);
 
     if !has_package_selection(&cargo_args) {
         let mut cargo_args = cargo_args;
@@ -42,7 +42,7 @@ fn run_build(raw_args: Vec<String>) -> Result<(), String> {
     run_cargo_build(cargo_args)
 }
 
-fn parse_build_args(raw_args: Vec<String>) -> Result<Vec<String>, String> {
+fn parse_build_args(raw_args: Vec<String>) -> Vec<String> {
     let mut cargo_args = Vec::new();
 
     let mut i = 0usize;
@@ -56,7 +56,7 @@ fn parse_build_args(raw_args: Vec<String>) -> Result<Vec<String>, String> {
         i += 1;
     }
 
-    Ok(cargo_args)
+    cargo_args
 }
 
 fn run_cargo_build(cargo_args: Vec<String>) -> Result<(), String> {

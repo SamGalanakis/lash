@@ -15,6 +15,7 @@ use crate::app::{
     App, DisplayBlock, PreparedTurn, PromptState, SPLASH_CONTENT_HEIGHT, SPLASH_SCROLLBACK_HEIGHT,
     TextSelection, preview_text_lines,
 };
+use crate::assistant_text;
 use crate::diff::render_inline_diff;
 use crate::editor::SuggestionKind;
 use crate::input_items::image_marker_ranges;
@@ -807,10 +808,7 @@ struct ActivityLane {
 }
 
 #[derive(Clone, Copy)]
-struct CodeWorkflowLane {
-    is_first: bool,
-    is_last: bool,
-}
+struct CodeWorkflowLane;
 
 fn is_code_workflow_activity(kind: ActivityKind) -> bool {
     matches!(
@@ -984,12 +982,7 @@ fn code_workflow_lane(blocks: &[DisplayBlock], idx: usize) -> Option<CodeWorkflo
         return None;
     }
 
-    let prev = has_code_workflow_neighbor(blocks, idx, -1);
-    let next = has_code_workflow_neighbor(blocks, idx, 1);
-    Some(CodeWorkflowLane {
-        is_first: !prev,
-        is_last: !next,
-    })
+    Some(CodeWorkflowLane)
 }
 
 fn code_workflow_bridge_gutter(
@@ -1390,12 +1383,6 @@ fn push_wrapped_line(
     }
 }
 
-#[derive(Clone, Copy)]
-struct StyledGlyph {
-    ch: char,
-    style: Style,
-}
-
 fn skip_leading_whitespace(text: &str, mut idx: usize) -> usize {
     while idx < text.len() {
         let Some(ch) = text[idx..].chars().next() else {
@@ -1504,143 +1491,6 @@ fn wrap_text_ranges_wordwise(text: &str, width: usize) -> Vec<(usize, usize)> {
     wrapped
 }
 
-fn styled_line_to_glyphs(line: &Line<'_>) -> Vec<StyledGlyph> {
-    let mut glyphs = Vec::new();
-    for span in &line.spans {
-        glyphs.extend(span.content.chars().map(|ch| StyledGlyph {
-            ch,
-            style: span.style,
-        }));
-    }
-    glyphs
-}
-
-fn glyphs_to_line(glyphs: &[StyledGlyph]) -> Line<'static> {
-    let mut spans = Vec::new();
-    let mut current = String::new();
-    let mut style = None;
-
-    for glyph in glyphs {
-        if style != Some(glyph.style) && !current.is_empty() {
-            spans.push(Span::styled(
-                std::mem::take(&mut current),
-                style.take().unwrap_or_default(),
-            ));
-        }
-        style = Some(glyph.style);
-        current.push(glyph.ch);
-    }
-
-    if !current.is_empty() {
-        spans.push(Span::styled(current, style.take().unwrap_or_default()));
-    }
-
-    if spans.is_empty() {
-        Line::from("")
-    } else {
-        Line::from(spans)
-    }
-}
-
-fn trim_trailing_whitespace_glyphs(glyphs: &[StyledGlyph], start: usize, end: usize) -> usize {
-    let mut trimmed = end;
-    while trimmed > start && glyphs[trimmed - 1].ch.is_whitespace() {
-        trimmed -= 1;
-    }
-    trimmed
-}
-
-fn skip_leading_whitespace_glyphs(glyphs: &[StyledGlyph], mut idx: usize) -> usize {
-    while idx < glyphs.len() && glyphs[idx].ch.is_whitespace() {
-        idx += 1;
-    }
-    idx
-}
-
-fn wrap_rendered_lines_wordwise(lines: &[Line<'_>], width: usize) -> Vec<Line<'static>> {
-    if width == 0 {
-        return lines.iter().map(clone_line_owned).collect();
-    }
-
-    let mut wrapped = Vec::with_capacity(lines.len());
-    for line in lines {
-        if text_display::line_visible_width(line) <= width {
-            wrapped.push(clone_line_owned(line));
-            continue;
-        }
-
-        let glyphs = styled_line_to_glyphs(line);
-        if glyphs.is_empty() {
-            wrapped.push(Line::from(""));
-            continue;
-        }
-
-        let mut start = 0usize;
-        let mut continuation = false;
-        'line: while start < glyphs.len() {
-            let line_start = if continuation {
-                skip_leading_whitespace_glyphs(&glyphs, start)
-            } else {
-                start
-            };
-            if line_start >= glyphs.len() {
-                break;
-            }
-
-            let mut idx = line_start;
-            let mut row_width = 0usize;
-            let mut last_break = None;
-            let mut prev_was_whitespace = false;
-
-            while idx < glyphs.len() {
-                let is_whitespace = glyphs[idx].ch.is_whitespace();
-                let ch_width = UnicodeWidthChar::width(glyphs[idx].ch).unwrap_or(0);
-
-                if is_whitespace && !prev_was_whitespace && row_width > 0 {
-                    last_break = Some(idx);
-                }
-
-                if row_width + ch_width > width && row_width > 0 {
-                    if is_whitespace {
-                        let line_end = trim_trailing_whitespace_glyphs(&glyphs, line_start, idx);
-                        if line_end > line_start {
-                            wrapped.push(glyphs_to_line(&glyphs[line_start..line_end]));
-                            start = skip_leading_whitespace_glyphs(&glyphs, idx);
-                            continuation = true;
-                            continue 'line;
-                        }
-                    }
-                    break;
-                }
-                row_width += ch_width;
-                prev_was_whitespace = is_whitespace;
-                idx += 1;
-            }
-
-            if idx >= glyphs.len() {
-                wrapped.push(glyphs_to_line(&glyphs[line_start..]));
-                break;
-            }
-
-            if let Some(break_idx) = last_break {
-                let line_end = trim_trailing_whitespace_glyphs(&glyphs, line_start, break_idx);
-                if line_end > line_start {
-                    wrapped.push(glyphs_to_line(&glyphs[line_start..line_end]));
-                    start = skip_leading_whitespace_glyphs(&glyphs, break_idx);
-                    continuation = true;
-                    continue;
-                }
-            }
-
-            wrapped.push(glyphs_to_line(&glyphs[line_start..idx]));
-            start = idx;
-            continuation = true;
-        }
-    }
-
-    wrapped
-}
-
 fn wrap_rendered_lines(lines: &[Line<'_>], width: usize) -> Vec<Line<'static>> {
     if width == 0 {
         return lines.iter().map(clone_line_owned).collect();
@@ -1689,17 +1539,6 @@ fn prefix_rendered_lines(lines: &mut [Line<'_>], prefix: &str, style: Style) {
         line.spans
             .insert(0, Span::styled(prefix.to_string(), style));
     }
-}
-
-fn assistant_lane_continues_into(block: &DisplayBlock) -> bool {
-    matches!(
-        block,
-        DisplayBlock::Activity(_)
-            | DisplayBlock::CodeBlock { .. }
-            | DisplayBlock::CodeOutput { .. }
-            | DisplayBlock::PlanContent(_)
-            | DisplayBlock::PluginPanel(_)
-    )
 }
 
 fn styled_user_input_segment<'a>(text: &'a str, seg_start: usize, seg_end: usize) -> Vec<Span<'a>> {
@@ -1800,55 +1639,16 @@ fn render_block_into<'a>(
             }
         }
         DisplayBlock::AssistantText(text) => {
-            let _connected_lane = blocks
-                .get(idx + 1)
-                .is_some_and(assistant_lane_continues_into);
-            let first_prefix = "■ ";
-            let continuation_prefix = "  ";
-            let prefix_w = UnicodeWidthStr::width(first_prefix);
-            let rendered =
-                markdown::render_markdown_compact(text, viewport_width.saturating_sub(prefix_w));
-            if rendered.is_empty() {
-                return;
-            }
-            // Breathing line before assistant response (separates from user turn / tool blocks)
-            if idx > 0
+            let add_spacing_before = idx > 0
                 && !matches!(
                     blocks[idx - 1],
                     DisplayBlock::AssistantText(_) | DisplayBlock::Splash
-                )
-            {
-                lines.push(Line::from(""));
-            }
-            // Square marker on the first non-empty line, plain indent on others,
-            // empty lines pass through with no prefix.
-            // Wrap each markdown line to content_width BEFORE adding the prefix so
-            // that wrapped continuation lines also receive the indent and text stays
-            // aligned with the assistant marker or connected lane.
-            let content_width = viewport_width.saturating_sub(prefix_w);
-            let mut marker_placed = false;
-            for line in rendered {
-                let is_empty = line.spans.iter().all(|s| s.content.trim().is_empty());
-                if is_empty {
-                    lines.push(Line::from(""));
-                    continue;
-                }
-                let wrapped =
-                    wrap_rendered_lines_wordwise(std::slice::from_ref(&line), content_width);
-                for subline in wrapped {
-                    if !marker_placed {
-                        marker_placed = true;
-                        let mut spans = vec![Span::styled(first_prefix, theme::assistant_bar())];
-                        spans.extend(subline.spans);
-                        lines.push(Line::from(spans));
-                    } else {
-                        let mut spans =
-                            vec![Span::styled(continuation_prefix, theme::assistant_bar())];
-                        spans.extend(subline.spans);
-                        lines.push(Line::from(spans));
-                    }
-                }
-            }
+                );
+            lines.extend(assistant_text::render_assistant_text_block(
+                text,
+                viewport_width,
+                add_spacing_before,
+            ));
         }
         DisplayBlock::CodeBlock { code, continuation } => {
             let code_lane = code_workflow_lane(blocks, idx);
@@ -3626,6 +3426,31 @@ mod tests {
 
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
         assert_eq!(rendered, vec!["■ alpha beta", "  gamma", "  delta"]);
+    }
+
+    #[test]
+    fn assistant_markdown_renders_expected_visible_lines() {
+        let blocks = [DisplayBlock::AssistantText(
+            "Use this minimal set:\n\n- `code`\n- `feature`\n- `issue`\n- `decision`\n\nThat’s probably the sweet spot.".into(),
+        )];
+        let mut lines = Vec::new();
+
+        render_block_into(&blocks, 0, 1, &mut lines, 40, 20);
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert_eq!(
+            rendered,
+            vec![
+                "■ Use this minimal set:",
+                "",
+                "  code",
+                "  feature",
+                "  issue",
+                "  decision",
+                "",
+                "  That’s probably the sweet spot.",
+            ]
+        );
     }
 
     #[test]
