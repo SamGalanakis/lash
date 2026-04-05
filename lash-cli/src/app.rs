@@ -1845,7 +1845,7 @@ impl App {
     pub fn total_content_height(&mut self, width: usize, viewport_height: usize) -> usize {
         self.ensure_height_cache(width, viewport_height);
         let block_height = self.height_cache.last().copied().unwrap_or(0);
-        let streaming_height = self.streaming_output_height();
+        let streaming_height = ui::streaming_output_visual_height(self, width);
         block_height + streaming_height
     }
 
@@ -1878,7 +1878,19 @@ impl App {
                     let completed = std::mem::take(&mut self.streaming_output_partial);
                     self.push_streaming_output_line(completed);
                 }
-                '\t' => self.streaming_output_partial.push(ch),
+                '\t' => {
+                    if !self
+                        .streaming_output_partial
+                        .chars()
+                        .last()
+                        .is_some_and(char::is_whitespace)
+                    {
+                        self.streaming_output_partial.push(' ');
+                    }
+                }
+                '\u{8}' | '\u{7f}' => {
+                    self.streaming_output_partial.pop();
+                }
                 ch if ch.is_control() => {}
                 _ => self.streaming_output_partial.push(ch),
             }
@@ -2802,6 +2814,23 @@ mod tests {
         assert_eq!(
             app.streaming_output,
             vec!["warning: check this".to_string()]
+        );
+        assert!(app.streaming_output_partial.is_empty());
+    }
+
+    #[test]
+    fn tool_output_tabs_collapse_to_single_spaces_in_live_preview() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.start_turn();
+
+        app.handle_agent_event(AgentEvent::Message {
+            text: "hash\trefs/tags/v0.2.29\n".into(),
+            kind: "tool_output".into(),
+        });
+
+        assert_eq!(
+            app.streaming_output,
+            vec!["hash refs/tags/v0.2.29".to_string()]
         );
         assert!(app.streaming_output_partial.is_empty());
     }
