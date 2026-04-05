@@ -371,9 +371,14 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
 
     // scroll_offset is already clamped by the main loop before draw()
     let scroll = app.scroll_offset;
+    let block_height = app.height_cache_snapshot().last().copied().unwrap_or(0);
 
     // Find the first visible block via binary search on the height cache
-    let (first_idx, skip_lines) = find_visible_block_readonly(app, scroll, viewport_width);
+    let (first_idx, skip_lines) = if scroll >= block_height {
+        (app.blocks.len(), scroll - block_height)
+    } else {
+        find_visible_block_readonly(app, scroll, viewport_width)
+    };
 
     let mut lines: Vec<Line> = Vec::with_capacity(viewport_height + skip_lines + 20);
 
@@ -392,47 +397,9 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // Render live streaming tool output.
+    // Render live streaming tool output after history blocks.
     // Delegate output gets its own branch lane so it doesn't blend into normal shell output.
-    if app.streaming_output_height() > 0 && lines.len() < viewport_height + skip_lines {
-        let delegate_stream = app.active_delegate.is_some();
-        let mut streaming_lines = Vec::with_capacity(app.streaming_output_height());
-        if app.streaming_output_hidden > 0 {
-            streaming_lines.push(format!(
-                "… {} earlier shell lines hidden …",
-                app.streaming_output_hidden
-            ));
-        }
-        streaming_lines.extend(app.streaming_output.iter().cloned());
-        if !app.streaming_output_partial.is_empty() {
-            streaming_lines.push(app.streaming_output_partial.clone());
-        }
-        for (idx, line) in streaming_lines.iter().enumerate() {
-            let (prefix, prefix_style, content_style) = if delegate_stream {
-                let prefix = if idx == 0 {
-                    "\u{251c}\u{2500} "
-                } else {
-                    "\u{2502}  "
-                };
-                (
-                    prefix,
-                    Style::default()
-                        .fg(theme::SODIUM)
-                        .add_modifier(Modifier::BOLD),
-                    Style::default().fg(theme::CHALK_MID),
-                )
-            } else {
-                ("\u{2502} ", theme::code_chrome(), theme::code_content())
-            };
-            lines.push(Line::from(vec![
-                Span::styled(prefix, prefix_style),
-                Span::styled(line.clone(), content_style),
-            ]));
-            if lines.len() >= viewport_height + skip_lines {
-                break;
-            }
-        }
-    }
+    append_streaming_output_lines(&mut lines, app);
 
     // Use Paragraph's built-in scroll to skip visual rows correctly.
     // Manual .skip()/.take() on logical Lines is wrong because skip_lines
@@ -449,6 +416,58 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+fn append_streaming_output_lines<'a>(lines: &mut Vec<Line<'a>>, app: &App) {
+    if app.streaming_output_height() == 0 {
+        return;
+    }
+
+    let delegate_stream = app.active_delegate.is_some();
+    let mut streaming_lines = Vec::with_capacity(app.streaming_output_height());
+    if app.streaming_output_hidden > 0 {
+        streaming_lines.push(format!(
+            "… {} earlier shell lines hidden …",
+            app.streaming_output_hidden
+        ));
+    }
+    streaming_lines.extend(app.streaming_output.iter().cloned());
+    if !app.streaming_output_partial.is_empty() {
+        streaming_lines.push(app.streaming_output_partial.clone());
+    }
+
+    for (idx, line) in streaming_lines.into_iter().enumerate() {
+        let (prefix, prefix_style, content_style) = if delegate_stream {
+            let prefix = if idx == 0 {
+                "\u{251c}\u{2500} "
+            } else {
+                "\u{2502}  "
+            };
+            (
+                prefix,
+                Style::default()
+                    .fg(theme::SODIUM)
+                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme::CHALK_MID),
+            )
+        } else {
+            ("\u{2502} ", theme::code_chrome(), theme::code_content())
+        };
+        lines.push(Line::from(vec![
+            Span::styled(prefix, prefix_style),
+            Span::styled(line, content_style),
+        ]));
+    }
+}
+
+pub(crate) fn streaming_output_visual_height(app: &App, viewport_width: usize) -> usize {
+    if viewport_width == 0 || app.streaming_output_height() == 0 {
+        return 0;
+    }
+
+    let mut lines = Vec::with_capacity(app.streaming_output_height());
+    append_streaming_output_lines(&mut lines, app);
+    wrap_rendered_lines(&lines, viewport_width).len()
+}
+
 fn history_scroll_indicator(app: &App, area: Rect) -> Option<ScrollIndicator> {
     if area.width == 0 || area.height == 0 {
         return None;
@@ -456,7 +475,8 @@ fn history_scroll_indicator(app: &App, area: Rect) -> Option<ScrollIndicator> {
 
     let viewport_height = area.height as usize;
     let block_height = app.height_cache_snapshot().last().copied().unwrap_or(0);
-    let total_content_height = block_height + app.streaming_output_height();
+    let total_content_height =
+        block_height + streaming_output_visual_height(app, area.width as usize);
     let max_scroll = total_content_height.saturating_sub(viewport_height);
     if max_scroll == 0 {
         return None;
@@ -3307,6 +3327,7 @@ fn selection_ordered(sel: &TextSelection) -> ((u16, usize), (u16, usize)) {
 mod tests {
     use super::*;
     use crate::app::{App, PromptState};
+    use lash::AgentEvent;
     use ratatui::{Terminal, backend::TestBackend};
 
     fn workflow_activity(summary: &str) -> DisplayBlock {
@@ -3629,6 +3650,72 @@ mod tests {
         assert!(
             symbols.iter().all(|(_, _, fg)| *fg == theme::CHALK_DIM),
             "scroll indicator should use the pill color: {symbols:?}"
+        );
+    }
+
+    #[test]
+    fn streaming_output_visual_height_counts_wrapped_rows() {
+        let mut app = App::new("model".into(), "session".into());
+        app.running = true;
+        app.live_turn = Some(crate::app::LiveTurnState {
+            status_text: "shell".into(),
+            status_detail: None,
+            phase_started_at: std::time::Instant::now(),
+            turn_started_at: std::time::Instant::now(),
+            assistant_block_idx: None,
+            has_visible_output: false,
+            transient_until: None,
+        });
+        app.handle_agent_event(AgentEvent::Message {
+            text: "0123456789 abcdefghij klmnopqrst uvwxyz\n".into(),
+            kind: "tool_output".into(),
+        });
+
+        assert!(streaming_output_visual_height(&app, 12) > app.streaming_output_height());
+    }
+
+    #[test]
+    fn draw_history_respects_scroll_offset_with_streaming_output_only() {
+        let backend = TestBackend::new(16, 4);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut app = App::new("model".into(), "session".into());
+        app.running = true;
+        app.live_turn = Some(crate::app::LiveTurnState {
+            status_text: "shell".into(),
+            status_detail: None,
+            phase_started_at: std::time::Instant::now(),
+            turn_started_at: std::time::Instant::now(),
+            assistant_block_idx: None,
+            has_visible_output: false,
+            transient_until: None,
+        });
+        app.blocks.clear();
+        app.handle_agent_event(AgentEvent::Message {
+            text: "0123456789 abcdefghij klmnopqrst uvwxyz\n".into(),
+            kind: "tool_output".into(),
+        });
+        app.handle_agent_event(AgentEvent::Message {
+            text: "tail marker\n".into(),
+            kind: "tool_output".into(),
+        });
+
+        let width = 16usize;
+        let viewport_height = 4usize;
+        app.ensure_height_cache_pub(width, viewport_height);
+        app.scroll_offset = app
+            .total_content_height(width, viewport_height)
+            .saturating_sub(viewport_height);
+
+        terminal
+            .draw(|frame| draw_history(frame, &app, Rect::new(0, 0, 16, 4)))
+            .expect("draw history");
+
+        let rows: Vec<String> = (0..4)
+            .map(|y| buffer_row_text(terminal.backend(), y, 16))
+            .collect();
+        assert!(
+            rows.iter().any(|row| row.contains("tail marker")),
+            "tail of streaming output should remain visible: {rows:?}"
         );
     }
 
