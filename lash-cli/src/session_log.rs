@@ -31,6 +31,9 @@ pub struct LoadedSession {
     pub blocks: Vec<DisplayBlock>,
     pub last_token_usage: TokenUsage,
     pub plugin_mode_indicators: BTreeMap<String, String>,
+    pub streaming_output: Vec<String>,
+    pub streaming_output_hidden: usize,
+    pub streaming_output_partial: String,
 }
 
 pub struct SessionLogger {
@@ -236,20 +239,37 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
     let store = Store::open(&sessions_dir().join(filename))?;
     let messages = load_messages(&store)?;
     let ui_state = load_ui_state(&store).unwrap_or_default();
-    let blocks = blocks_from_messages(&messages);
+    let PersistedUiState {
+        last_response_usage,
+        plugin_mode_indicators,
+        blocks: persisted_blocks,
+        streaming_output,
+        streaming_output_hidden,
+        streaming_output_partial,
+    } = ui_state;
+    let used_persisted_blocks = !persisted_blocks.is_empty();
+    let blocks = if used_persisted_blocks {
+        persisted_blocks
+    } else {
+        blocks_from_messages(&messages)
+    };
     tracing::debug!(
         session_file = filename,
         messages = messages.len(),
         blocks = blocks.len(),
-        plugin_mode_indicators = ui_state.plugin_mode_indicators.len(),
+        plugin_mode_indicators = plugin_mode_indicators.len(),
+        used_persisted_blocks,
         "loaded persisted session snapshot"
     );
 
     Ok(LoadedSession {
         messages,
         blocks,
-        last_token_usage: ui_state.last_response_usage,
-        plugin_mode_indicators: ui_state.plugin_mode_indicators,
+        last_token_usage: last_response_usage,
+        plugin_mode_indicators,
+        streaming_output,
+        streaming_output_hidden,
+        streaming_output_partial,
     })
 }
 
@@ -375,6 +395,10 @@ mod tests {
                         "plan_mode".to_string(),
                         "plan".to_string(),
                     )]),
+                    blocks: Vec::new(),
+                    streaming_output: vec!["started git status --short".to_string()],
+                    streaming_output_hidden: 2,
+                    streaming_output_partial: "partial tool line".to_string(),
                 },
             );
 
@@ -393,6 +417,64 @@ mod tests {
                 loaded.plugin_mode_indicators.get("plan_mode"),
                 Some(&"plan".to_string())
             );
+            assert_eq!(
+                loaded.streaming_output,
+                vec!["started git status --short".to_string()]
+            );
+            assert_eq!(loaded.streaming_output_hidden, 2);
+            assert_eq!(loaded.streaming_output_partial, "partial tool line");
+        });
+    }
+
+    #[test]
+    fn load_session_prefers_persisted_ui_blocks_for_activity_transcript() {
+        with_temp_lash_home("lash-session-load-activity-blocks", || {
+            let filename = new_session_filename();
+            let path = sessions_dir().join(&filename);
+            let store = Arc::new(Store::open(&path).unwrap());
+            SessionLogger::new(
+                Arc::clone(&store),
+                filename.clone(),
+                "gpt-test",
+                Some("s-activity".into()),
+                "demo".into(),
+            )
+            .unwrap();
+            let messages = vec![
+                text_message(MessageRole::User, "m0", "inspect repo"),
+                text_message(MessageRole::Assistant, "m1", "Done"),
+            ];
+            persist_root_snapshot(
+                &store,
+                messages,
+                PersistedUiState {
+                    blocks: vec![
+                        DisplayBlock::UserInput("inspect repo".to_string()),
+                        DisplayBlock::Activity(crate::activity::ActivityBlock {
+                            kind: crate::activity::ActivityKind::ShellCommand,
+                            status: crate::activity::ActivityStatus::Completed,
+                            tool_name: "shell".to_string(),
+                            summary: "git status --short".to_string(),
+                            detail_lines: vec!["working tree clean".to_string()],
+                            duration_ms: 42,
+                            args: serde_json::json!({"command":"git status --short"}),
+                            result: serde_json::json!({"stdout":"", "stderr":""}),
+                            artifact: None,
+                            children: Vec::new(),
+                            extra: None,
+                        }),
+                        DisplayBlock::AssistantText("Done".to_string()),
+                    ],
+                    ..PersistedUiState::default()
+                },
+            );
+
+            let loaded = load_session(&filename).unwrap();
+            assert!(matches!(
+                loaded.blocks.get(1),
+                Some(DisplayBlock::Activity(activity))
+                    if activity.summary == "git status --short"
+            ));
         });
     }
 

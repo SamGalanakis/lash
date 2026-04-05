@@ -212,6 +212,14 @@ pub struct PersistedUiState {
     pub last_response_usage: TokenUsage,
     #[serde(default)]
     pub plugin_mode_indicators: BTreeMap<String, String>,
+    #[serde(default)]
+    pub blocks: Vec<DisplayBlock>,
+    #[serde(default)]
+    pub streaming_output: Vec<String>,
+    #[serde(default)]
+    pub streaming_output_hidden: usize,
+    #[serde(default)]
+    pub streaming_output_partial: String,
 }
 
 impl PersistedUiState {
@@ -219,6 +227,10 @@ impl PersistedUiState {
         Self {
             last_response_usage: app.last_response_usage.clone(),
             plugin_mode_indicators: app.plugin_mode_indicators.clone(),
+            blocks: app.blocks.clone(),
+            streaming_output: app.streaming_output.clone(),
+            streaming_output_hidden: app.streaming_output_hidden,
+            streaming_output_partial: app.streaming_output_partial.clone(),
         }
     }
 }
@@ -479,6 +491,12 @@ pub struct App {
 impl App {
     pub fn persisted_ui_state(&self) -> PersistedUiState {
         PersistedUiState::from_app(self)
+    }
+
+    pub fn finish_turn_for_persistence(&mut self) -> PersistedUiState {
+        let persisted = self.persisted_ui_state();
+        self.stop_turn();
+        persisted
     }
 
     fn ensure_live_turn(&mut self) -> &mut LiveTurnState {
@@ -1055,7 +1073,8 @@ impl App {
                         self.live_output_tokens_estimate =
                             estimate_tokens_from_char_count(self.live_output_chars_estimate);
                     }
-                    let stream_active = self.active_delegate.is_some()
+                    let stream_active = self.running
+                        || self.active_delegate.is_some()
                         || current_status.is_some_and(|status| status.contains("shell"));
                     if self.show_live_tool_output && stream_active {
                         self.push_streaming_output_text(&text);
@@ -2406,6 +2425,40 @@ mod tests {
         });
         assert!(app.active_delegate.is_none());
         assert!(app.streaming_output.is_empty());
+    }
+
+    #[test]
+    fn tool_output_renders_during_generic_running_turn() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.start_turn();
+        app.handle_agent_event(AgentEvent::Message {
+            text: "started git status --short\n".into(),
+            kind: "tool_output".into(),
+        });
+
+        assert_eq!(
+            app.streaming_output,
+            vec!["started git status --short".to_string()]
+        );
+    }
+
+    #[test]
+    fn finish_turn_for_persistence_preserves_streaming_output_snapshot() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.start_turn();
+        app.handle_agent_event(AgentEvent::Message {
+            text: "started git status --short\n".into(),
+            kind: "tool_output".into(),
+        });
+
+        let persisted = app.finish_turn_for_persistence();
+
+        assert!(!app.running);
+        assert!(app.streaming_output.is_empty());
+        assert_eq!(
+            persisted.streaming_output,
+            vec!["started git status --short".to_string()]
+        );
     }
 
     #[test]

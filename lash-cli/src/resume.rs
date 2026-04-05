@@ -99,8 +99,12 @@ pub async fn load_resumed_session(
         "restored resumed session state"
     );
     // Resumed sessions restore persisted history and durable state, but they do
-    // not reconnect to a still-running turn. Keep transient live-turn UI cleared.
+    // not reconnect to a still-running turn. Keep live-turn chrome cleared while
+    // preserving any persisted streaming output transcript.
     app.stop_turn();
+    app.streaming_output = loaded.streaming_output;
+    app.streaming_output_hidden = loaded.streaming_output_hidden;
+    app.streaming_output_partial = loaded.streaming_output_partial;
     app.invalidate_height_cache();
     app.resume_follow_output();
     Ok(())
@@ -705,7 +709,10 @@ mod tests {
                 "cached_input_tokens": 0,
                 "reasoning_tokens": 0
             },
-            "plugin_mode_indicators": {}
+            "plugin_mode_indicators": {},
+            "streaming_output": ["started git status --short"],
+            "streaming_output_hidden": 1,
+            "streaming_output_partial": "partial"
         })
         .to_string();
         let config_json = serde_json::json!({
@@ -770,6 +777,12 @@ mod tests {
 
         assert!(!app.running);
         assert!(app.live_turn.is_none());
+        assert_eq!(
+            app.streaming_output,
+            vec!["started git status --short".to_string()]
+        );
+        assert_eq!(app.streaming_output_hidden, 1);
+        assert_eq!(app.streaming_output_partial, "partial");
         assert!(app.blocks.iter().any(|block| matches!(
             block,
             DisplayBlock::SystemMessage(msg) if msg == &format!("Resumed: {}", filename)
