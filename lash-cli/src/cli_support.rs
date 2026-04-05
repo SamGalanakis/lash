@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::ROOT_SESSION_ID;
 use crate::app::{App, DisplayBlock, PersistedUiState, PreparedTurn};
+use crate::command;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ModelSelection {
@@ -30,7 +31,6 @@ pub(crate) fn controls_text() -> String {
         "  Ctrl+O             Cycle tool expansion (ghost ↔ compact)",
         "  Alt+O              Full expansion (code + stdout)",
         "  Up / Down          Input history",
-        "  Shift+Drag         Select text (terminal native)",
         "  Ctrl+C             Quit",
     ]
     .join("\n")
@@ -328,7 +328,6 @@ pub(crate) fn persist_root_agent_state(
         iteration = state.iteration,
         messages = state.messages.len(),
         tool_calls = state.tool_calls.len(),
-        blocks = ui_state.blocks.len(),
         input_tokens = state.token_usage.input_tokens,
         output_tokens = state.token_usage.output_tokens,
         cached_input_tokens = state.token_usage.cached_input_tokens,
@@ -397,7 +396,7 @@ pub(crate) fn persist_live_runtime_snapshot(
         iteration = state.iteration,
         messages = state.messages.len(),
         tool_calls = state.tool_calls.len(),
-        blocks = ui_state.blocks.len(),
+        plugin_mode_indicators = ui_state.plugin_mode_indicators.len(),
         "persisting live runtime snapshot"
     );
     persist_root_agent_state(
@@ -415,18 +414,6 @@ pub(crate) fn persist_live_runtime_snapshot(
         prompt_hash,
         None,
     );
-}
-
-pub(crate) fn persist_live_ui_state(store: &Store, ui_state: &PersistedUiState) {
-    let ui_json = serde_json::to_string(ui_state).unwrap_or_else(|_| "{}".to_string());
-    tracing::debug!(
-        blocks = ui_state.blocks.len(),
-        response_input_tokens = ui_state.last_response_usage.input_tokens,
-        response_output_tokens = ui_state.last_response_usage.output_tokens,
-        plugin_mode_indicators = ui_state.plugin_mode_indicators.len(),
-        "persisting live ui snapshot"
-    );
-    store.update_agent_ui_state(ROOT_SESSION_ID, &ui_json);
 }
 
 pub(crate) fn push_system_message(app: &mut App, msg: impl Into<String>) {
@@ -519,30 +506,29 @@ pub(crate) fn info_text(
 }
 
 pub(crate) fn help_text(skills: &SkillCatalog) -> String {
-    let mut lines = vec![
-        "Commands:".to_string(),
-        "  /clear, /new       Reset conversation".to_string(),
-        "  /fork [prompt]     Open a forked session in a new terminal".to_string(),
-        "  /version           Show lash-cli and lash-sansio versions".to_string(),
-        "  /info              Show current runtime/session info".to_string(),
-        "  /model [name]      Show or switch LLM model".to_string(),
-        "  /variant [name]    Show or switch provider-native model variant".to_string(),
-        format!(
-            "  /mode [name]       Show current execution mode; new session required to change {}",
-            execution_mode_usage()
-        ),
-        "  /provider          Switch, add, or re-authenticate providers".to_string(),
-        "  /login             Sign in or reconfigure provider".to_string(),
-        "  /logout            Remove stored credentials for active provider".to_string(),
-        "  /retry             Replay the previous turn payload".to_string(),
-        "  /resume [name]     Browse or load a previous session".to_string(),
-        "  /skills            Browse loaded skills".to_string(),
-        "  /<skill> [text]    Invoke a loaded skill directly".to_string(),
-        "  /tools ...         Inspect/edit dynamic tools".to_string(),
-        "  /reconfigure ...   Apply/status/clear pending changes".to_string(),
-        "  /help, /?          Show this help".to_string(),
-        "  /exit, /quit       Quit".to_string(),
-    ];
+    let mut lines = vec!["Commands:".to_string()];
+    for spec in command::catalog() {
+        let aliases = if spec.aliases.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", spec.aliases.join(", "))
+        };
+        let description = if spec.name == "/mode" {
+            format!(
+                "{}; new session required to change {}",
+                spec.description,
+                execution_mode_usage()
+            )
+        } else {
+            spec.description.to_string()
+        };
+        lines.push(format!(
+            "  {:<18} {}",
+            format!("{}{}", spec.usage, aliases),
+            description
+        ));
+    }
+    lines.push("  /<skill> [text]    Invoke a loaded skill directly".to_string());
 
     if !skills.is_empty() {
         lines.push(String::new());
@@ -586,7 +572,6 @@ pub(crate) fn help_text(skills: &SkillCatalog) -> String {
         "  Ctrl+Y             Copy last response to clipboard".to_string(),
         "  Ctrl+O             Cycle tool expansion (ghost ↔ compact)".to_string(),
         "  Alt+O              Full expansion (code + stdout)".to_string(),
-        "  Shift+Drag         Select text (terminal native)".to_string(),
         "  Up/Down            Input history".to_string(),
         "  Ctrl+C             Quit".to_string(),
     ]);
@@ -667,49 +652,9 @@ pub(crate) fn shell_escape_command(input: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    use rusqlite::params;
-
     use super::*;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
-    use lash::{AgentState, SessionMeta};
-
-    #[test]
-    fn persist_live_ui_state_updates_existing_agent_snapshot() {
-        let _env_guard = env_lock().blocking_lock();
-        let temp = TempDirGuard::new("lash-cli-persist-live-ui-state");
-        let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
-        let db_path = temp.path().join("session.db");
-        let store = Store::open(&db_path).expect("store");
-
-        store.save_agent_state(AgentState {
-            agent_id: ROOT_SESSION_ID.to_string(),
-            messages_json: "[]".to_string(),
-            tool_calls_json: "[]".to_string(),
-            ui_json: "{}".to_string(),
-            iteration: 0,
-            config_json: "{}".to_string(),
-            repl_snapshot: None,
-            input_tokens: 0,
-            output_tokens: 0,
-            cached_input_tokens: 0,
-            reasoning_tokens: 0,
-        });
-
-        persist_live_ui_state(
-            &store,
-            &PersistedUiState {
-                blocks: vec![DisplayBlock::SystemMessage("live".into())],
-                ..PersistedUiState::default()
-            },
-        );
-
-        let state = store.load_agent_state(ROOT_SESSION_ID).expect("root state");
-        assert!(state.ui_json.contains("\"SystemMessage\":\"live\""));
-        assert!(!state.ui_json.contains("live_turn"));
-    }
+    use lash::SessionMeta;
 
     #[test]
     fn file_backed_store_creates_wal_file() {
@@ -729,71 +674,6 @@ mod tests {
         });
 
         assert!(db_path.with_extension("db-wal").exists());
-    }
-
-    #[test]
-    fn store_waits_for_concurrent_writer_before_updating_ui_state() {
-        let _env_guard = env_lock().blocking_lock();
-        let temp = TempDirGuard::new("lash-cli-store-busy-timeout");
-        let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
-        let db_path = temp.path().join("session.db");
-        let store = Arc::new(Store::open(&db_path).expect("store"));
-
-        store.save_agent_state(AgentState {
-            agent_id: ROOT_SESSION_ID.to_string(),
-            messages_json: "[]".to_string(),
-            tool_calls_json: "[]".to_string(),
-            ui_json: "{}".to_string(),
-            iteration: 0,
-            config_json: "{}".to_string(),
-            repl_snapshot: None,
-            input_tokens: 0,
-            output_tokens: 0,
-            cached_input_tokens: 0,
-            reasoning_tokens: 0,
-        });
-
-        let lock_conn = rusqlite::Connection::open(&db_path).expect("lock connection");
-        lock_conn
-            .execute_batch("BEGIN IMMEDIATE;")
-            .expect("begin immediate");
-        lock_conn
-            .execute(
-                "UPDATE agents SET ui_json = ?1 WHERE agent_id = ?2",
-                params![r#"{"locked":true}"#, ROOT_SESSION_ID],
-            )
-            .expect("hold write lock");
-
-        let store_clone = Arc::clone(&store);
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let writer = std::thread::spawn(move || {
-            let started = Instant::now();
-            persist_live_ui_state(
-                &store_clone,
-                &PersistedUiState {
-                    blocks: vec![DisplayBlock::SystemMessage("live".into())],
-                    ..PersistedUiState::default()
-                },
-            );
-            done_tx.send(started.elapsed()).expect("send elapsed");
-        });
-
-        std::thread::sleep(Duration::from_millis(150));
-        assert!(
-            done_rx.recv_timeout(Duration::from_millis(20)).is_err(),
-            "store update should wait while another connection holds the write lock"
-        );
-
-        lock_conn.execute_batch("COMMIT;").expect("commit lock");
-
-        let waited = done_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("writer should finish after lock release");
-        writer.join().expect("writer thread");
-
-        let state = store.load_agent_state(ROOT_SESSION_ID).expect("root state");
-        assert!(state.ui_json.contains("\"SystemMessage\":\"live\""));
-        assert!(waited >= Duration::from_millis(150));
     }
 
     #[test]

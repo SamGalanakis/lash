@@ -4,11 +4,14 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
-use lash::agent::{Message, MessageRole, PartKind};
+use lash::agent::Message;
+#[cfg(test)]
+use lash::agent::{MessageRole, PartKind};
 use lash::{Store, TokenUsage};
 
-use crate::app::{DisplayBlock, PersistedUiState};
+use crate::app::{DisplayBlock, PersistedUiState, blocks_from_messages};
 
+#[derive(Clone, Debug)]
 pub struct SessionInfo {
     pub filename: String,
     pub session_id: String,
@@ -146,23 +149,6 @@ impl SessionInfo {
             None
         }
     }
-
-    fn project_match_rank(&self, current_cwd: Option<&Path>) -> u8 {
-        let Some(current_cwd) = current_cwd else {
-            return 0;
-        };
-        let Some(session_cwd) = self.cwd.as_deref() else {
-            return 0;
-        };
-
-        if session_cwd == current_cwd {
-            3
-        } else if current_cwd.starts_with(session_cwd) || session_cwd.starts_with(current_cwd) {
-            2
-        } else {
-            0
-        }
-    }
 }
 
 pub fn sessions_dir() -> PathBuf {
@@ -178,32 +164,19 @@ fn is_resumable_session_store(path: &Path) -> bool {
 }
 
 fn parse_session_info(path: &Path, filename: String, modified: SystemTime) -> Option<SessionInfo> {
-    let store = Store::open(path).ok()?;
-    let meta = store.load_session_meta()?;
-    if meta.parent_session_id.is_some() {
+    let store = Store::open_readonly(path).ok()?;
+    let info = store.load_picker_info()?;
+    if info.parent_session_id.is_some() {
         return None;
-    }
-
-    let messages = load_messages(&store).ok()?;
-    let mut message_count = 0usize;
-    let mut first_message = String::new();
-    for message in messages {
-        if message.role != MessageRole::User {
-            continue;
-        }
-        message_count += 1;
-        if first_message.is_empty() {
-            first_message = preview_message_text(&message);
-        }
     }
 
     Some(SessionInfo {
         filename,
-        session_id: meta.session_id,
-        message_count,
-        first_message,
+        session_id: info.session_id,
+        message_count: info.user_message_count,
+        first_message: info.first_user_message,
         modified,
-        cwd: meta.cwd.map(PathBuf::from),
+        cwd: info.cwd.map(PathBuf::from),
     })
 }
 
@@ -249,36 +222,32 @@ pub fn list_recent_sessions(limit: usize) -> Vec<SessionInfo> {
         return Vec::new();
     }
 
-    let current_cwd = std::env::current_dir().ok();
+    // Candidates are pre-sorted by modified time (latest first).
     let mut sessions: Vec<_> = collect_session_candidates()
         .into_iter()
         .filter_map(|(path, filename, modified)| parse_session_info(&path, filename, modified))
+        .take(limit)
         .collect();
-    sessions.sort_by(|a, b| {
-        b.project_match_rank(current_cwd.as_deref())
-            .cmp(&a.project_match_rank(current_cwd.as_deref()))
-            .then_with(|| b.modified.cmp(&a.modified))
-            .then_with(|| a.filename.cmp(&b.filename))
-    });
-    sessions.truncate(limit);
+    sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
     sessions
 }
 
 pub fn load_session(filename: &str) -> Result<LoadedSession> {
     let store = Store::open(&sessions_dir().join(filename))?;
     let messages = load_messages(&store)?;
-    let ui_state = load_ui_state(&store)?;
+    let ui_state = load_ui_state(&store).unwrap_or_default();
+    let blocks = blocks_from_messages(&messages);
     tracing::debug!(
         session_file = filename,
         messages = messages.len(),
-        blocks = ui_state.blocks.len(),
+        blocks = blocks.len(),
         plugin_mode_indicators = ui_state.plugin_mode_indicators.len(),
         "loaded persisted session snapshot"
     );
 
     Ok(LoadedSession {
         messages,
-        blocks: ui_state.blocks,
+        blocks,
         last_token_usage: ui_state.last_response_usage,
         plugin_mode_indicators: ui_state.plugin_mode_indicators,
     })
@@ -296,28 +265,6 @@ fn load_ui_state(store: &Store) -> Result<PersistedUiState> {
         .load_agent_state(crate::ROOT_SESSION_ID)
         .ok_or_else(|| anyhow::anyhow!("Missing root session snapshot"))?;
     serde_json::from_str(&state.ui_json).context("Invalid persisted UI snapshot")
-}
-
-fn preview_message_text(message: &Message) -> String {
-    message
-        .parts
-        .iter()
-        .filter_map(|part| preview_part_text(&part.kind, &part.content))
-        .collect::<Vec<_>>()
-        .join(" ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn preview_part_text(kind: &PartKind, content: &str) -> Option<String> {
-    if matches!(kind, PartKind::ToolCall | PartKind::ToolResult) {
-        return None;
-    }
-    if matches!(kind, PartKind::Image) {
-        return Some("[Image attached]".to_string());
-    }
-    (!content.trim().is_empty()).then(|| content.to_string())
 }
 
 #[cfg(test)]
@@ -349,6 +296,34 @@ mod tests {
             cached_input_tokens: 0,
             reasoning_tokens: 0,
         });
+        // Also write history_turns so the picker can find them.
+        let mut turn_index = 0i64;
+        for msg in &messages {
+            if msg.role == MessageRole::User {
+                let text = msg
+                    .parts
+                    .iter()
+                    .filter(|p| matches!(p.kind, PartKind::Text))
+                    .map(|p| p.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                store.history_upsert_turn(
+                    crate::ROOT_SESSION_ID,
+                    lash::store::HistoryTurnRecord {
+                        index: turn_index,
+                        user_message: text,
+                        prose: String::new(),
+                        code: String::new(),
+                        output: String::new(),
+                        error: None,
+                        tool_calls: Vec::new(),
+                        files_read: Vec::new(),
+                        files_written: Vec::new(),
+                    },
+                );
+                turn_index += 1;
+            }
+        }
     }
 
     fn text_message(role: MessageRole, id: &str, content: &str) -> Message {
@@ -390,10 +365,6 @@ mod tests {
                 &store,
                 messages.clone(),
                 PersistedUiState {
-                    blocks: vec![
-                        DisplayBlock::UserInput("Hi".into()),
-                        DisplayBlock::AssistantText("Hello world".into()),
-                    ],
                     last_response_usage: TokenUsage {
                         input_tokens: 12,
                         output_tokens: 7,
@@ -426,6 +397,41 @@ mod tests {
     }
 
     #[test]
+    fn load_session_rebuilds_blocks_from_messages_when_ui_snapshot_is_stale() {
+        with_temp_lash_home("lash-session-load-rebuilds-blocks", || {
+            let filename = new_session_filename();
+            let path = sessions_dir().join(&filename);
+            let store = Arc::new(Store::open(&path).unwrap());
+            SessionLogger::new(
+                Arc::clone(&store),
+                filename.clone(),
+                "gpt-test",
+                Some("s2".into()),
+                "demo".into(),
+            )
+            .unwrap();
+            let assistant = "Line one\n\n1. first\n2. second\n";
+            let messages = vec![
+                text_message(MessageRole::User, "m0", "Hi"),
+                text_message(MessageRole::Assistant, "m1", assistant),
+            ];
+            persist_root_snapshot(
+                &store,
+                messages,
+                PersistedUiState {
+                    ..PersistedUiState::default()
+                },
+            );
+
+            let loaded = load_session(&filename).unwrap();
+            assert!(matches!(
+                loaded.blocks.get(1),
+                Some(DisplayBlock::AssistantText(text)) if text == assistant.trim()
+            ));
+        });
+    }
+
+    #[test]
     fn list_recent_sessions_ignores_child_sessions() {
         with_temp_lash_home("lash-session-log-list", || {
             let parent = sessions_dir().join("parent.db");
@@ -444,7 +450,6 @@ mod tests {
                 &parent_store,
                 vec![text_message(MessageRole::User, "m0", "hello there")],
                 PersistedUiState {
-                    blocks: vec![DisplayBlock::UserInput("hello there".into())],
                     ..PersistedUiState::default()
                 },
             );
@@ -461,10 +466,7 @@ mod tests {
             persist_root_snapshot(
                 &child_store,
                 vec![text_message(MessageRole::User, "m0", "child prompt")],
-                PersistedUiState {
-                    blocks: vec![DisplayBlock::UserInput("child prompt".into())],
-                    ..PersistedUiState::default()
-                },
+                PersistedUiState::default(),
             );
 
             let sessions = list_recent_sessions(10);

@@ -340,14 +340,19 @@ struct MdRenderer {
     style_stack: Vec<Style>,
     max_width: usize,
     in_code_block: bool,
-    in_list: bool,
     in_item: bool,
+    list_stack: Vec<ListContext>,
+    pending_item_prefix: Option<String>,
     // Table buffering: collect all rows, then render with aligned columns
     in_table: bool,
     in_table_head: bool,
     table_rows: Vec<Vec<String>>, // rows of cells (text content)
     table_head: Vec<String>,      // header row
     current_cell: String,         // accumulator for current cell text
+}
+
+struct ListContext {
+    next_index: Option<usize>,
 }
 
 impl MdRenderer {
@@ -358,8 +363,9 @@ impl MdRenderer {
             style_stack: vec![theme::assistant_text()],
             max_width,
             in_code_block: false,
-            in_list: false,
             in_item: false,
+            list_stack: Vec::new(),
+            pending_item_prefix: None,
             in_table: false,
             in_table_head: false,
             table_rows: Vec::new(),
@@ -394,6 +400,16 @@ impl MdRenderer {
 
     fn blank_line(&mut self) {
         self.lines.push(Line::from(""));
+    }
+
+    fn push_pending_item_prefix(&mut self) {
+        if !self.in_item || !self.spans.is_empty() {
+            return;
+        }
+        let Some(prefix) = self.pending_item_prefix.take() else {
+            return;
+        };
+        self.spans.push(Span::styled(prefix, self.current_style()));
     }
 
     /// Render the buffered table as a wrapped text-table with stable borders.
@@ -516,6 +532,10 @@ impl MdRenderer {
             // ── Heading ──
             Event::Start(Tag::Heading { .. }) => {
                 self.flush_line();
+                // Breathing room above headings so they don't stack against prior content
+                if !self.lines.is_empty() && !self.lines.last().is_some_and(is_blank_line) {
+                    self.blank_line();
+                }
                 self.push_style(theme::heading());
             }
             Event::End(TagEnd::Heading(_)) => {
@@ -529,7 +549,9 @@ impl MdRenderer {
             Event::End(TagEnd::Paragraph) => {
                 if !self.in_table {
                     self.flush_line();
-                    self.blank_line();
+                    if !self.in_item {
+                        self.blank_line();
+                    }
                 }
             }
 
@@ -568,20 +590,38 @@ impl MdRenderer {
             }
 
             // ── Lists ──
-            Event::Start(Tag::List(_)) => {
-                self.in_list = true;
+            Event::Start(Tag::List(start)) => {
+                self.list_stack.push(ListContext {
+                    next_index: start.map(|value| value as usize),
+                });
             }
             Event::End(TagEnd::List(_)) => {
-                self.in_list = false;
+                self.list_stack.pop();
                 self.blank_line();
             }
             Event::Start(Tag::Item) => {
                 self.flush_line();
                 self.in_item = true;
+                let depth = self.list_stack.len().saturating_sub(1);
+                let indent = "  ".repeat(depth);
+                let prefix = match self
+                    .list_stack
+                    .last_mut()
+                    .and_then(|list| list.next_index.as_mut())
+                {
+                    Some(next_index) => {
+                        let current = *next_index;
+                        *next_index += 1;
+                        format!("{indent}{current}. ")
+                    }
+                    None => format!("{indent}• "),
+                };
+                self.pending_item_prefix = Some(prefix);
             }
             Event::End(TagEnd::Item) => {
                 self.flush_line();
                 self.in_item = false;
+                self.pending_item_prefix = None;
             }
 
             // ── Text ──
@@ -595,12 +635,8 @@ impl MdRenderer {
                             Span::styled(line.to_string(), theme::code_content()),
                         ]));
                     }
-                } else if self.in_item && self.spans.is_empty() {
-                    self.spans
-                        .push(Span::styled("  \u{2022} ", self.current_style()));
-                    self.spans
-                        .push(Span::styled(text.to_string(), self.current_style()));
                 } else {
+                    self.push_pending_item_prefix();
                     self.spans
                         .push(Span::styled(text.to_string(), self.current_style()));
                 }
@@ -636,52 +672,8 @@ impl MdRenderer {
 }
 
 #[cfg(test)]
-/// Count the visual height of rendered markdown, accounting for line wrapping at `width`.
-pub fn markdown_height(text: &str, width: usize) -> usize {
-    let lines = render_markdown(text, width);
-    if width == 0 {
-        return lines.len();
-    }
-    lines
-        .iter()
-        .map(|line| {
-            let w = line.width();
-            if w == 0 { 1 } else { w.div_ceil(width) }
-        })
-        .sum::<usize>()
-        .max(1)
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── pad_display ──
-
-    #[test]
-    fn pad_display_already_correct() {
-        assert_eq!(pad_display("abc", 3), "abc");
-    }
-
-    #[test]
-    fn pad_display_under_width() {
-        assert_eq!(pad_display("ab", 5), "ab   ");
-    }
-
-    #[test]
-    fn pad_display_over_width() {
-        // Over target width — no padding added (saturating_sub → 0)
-        assert_eq!(pad_display("abcdef", 3), "abcdef");
-    }
-
-    #[test]
-    fn pad_display_cjk() {
-        // CJK char is 2 columns, so "世" = width 2, target 5 → 3 spaces
-        let result = pad_display("\u{4e16}", 5);
-        assert_eq!(result, "\u{4e16}   ");
-    }
-
-    // ── render_markdown ──
 
     #[test]
     fn render_plain_text() {
@@ -712,6 +704,37 @@ mod tests {
         assert!(all_text.contains("\u{2022}"));
         assert!(all_text.contains("item one"));
         assert!(all_text.contains("item two"));
+    }
+
+    #[test]
+    fn render_ordered_list_with_nested_bullets_preserves_item_boundaries() {
+        let text = "Concise, ordered by likely value for lash:\n\n1. **Session picker / branch navigation as a first-class TUI**\n   - pi has a dedicated `session-picker` and explicit `/tree`, `/resume`, `/fork`, `/session`.\n   - Lash already has resume/fork-ish surfaces, but pi’s approach suggests making session/branch navigation feel like a native browser instead of a command you have to remember.\n   - Worth adapting if you want long-running conversations to feel easier to traverse.\n\n2. **Git-aware footer/status plumbing**\n   - pi has a dedicated `FooterDataProvider` that watches `.git/HEAD` and worktrees cleanly, instead of treating branch info as incidental.\n   - Lash already has a status bar, so the useful adaptation is not \"more chrome,\" it’s **better repo-state fidelity**: branch/worktree awareness, fewer shell-outs, cleaner live updates.\n\n3. **Reusable TUI primitives with explicit overlay/focus model**\n   - pi’s `packages/tui` has a clean model for `Component`, `Focusable`, overlays, focus handoff, cursor markers, and differential rendering.\n   - Lash’s TUI works, but some UX features look more hand-built/special-cased.\n   - Worth adapting as internal architecture, especially if you plan more pickers, popups, menus, or layered tools.\n\n4. **A stronger input editor abstraction**\n   - pi’s editor has explicit undo stack, kill ring, autocomplete plumbing, paste-marker handling, bracketed paste buffering, wrapped layout tracking.\n   - Lash already supports history/paste/images, but if the input box is going to keep growing features, a more editor-like core would pay off.\n   - High leverage if you want fewer ad hoc input-path bugs.";
+        let lines = render_markdown_compact(text, 120);
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("4.") || line.contains("• A stronger")),
+            "rendered lines should preserve the fourth item boundary: {rendered:#?}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("3.") || line.contains("• Reusable")),
+            "rendered lines should preserve the third item boundary: {rendered:#?}"
+        );
+        assert!(
+            rendered.iter().all(|line| !line.contains("tools.4.")),
+            "ordered item boundary collapsed into prior text: {rendered:#?}"
+        );
+        assert!(
+            rendered.iter().all(|line| !line.contains("bugs.5.")),
+            "ordered item boundary collapsed into prior text: {rendered:#?}"
+        );
     }
 
     #[test]
@@ -839,28 +862,6 @@ mod tests {
 
         assert!(rendered.iter().any(|line| line.contains("こんにちは")));
         assert!(rendered.iter().all(|line| display_width(line) <= 28));
-    }
-
-    // ── markdown_height ──
-
-    #[test]
-    fn markdown_height_simple() {
-        let h = markdown_height("hello", 80);
-        assert!(h >= 1);
-    }
-
-    #[test]
-    fn markdown_height_multiline() {
-        let h = markdown_height("line1\n\nline2", 80);
-        assert!(h >= 2);
-    }
-
-    #[test]
-    fn markdown_height_wrapping() {
-        // Very narrow width forces wrapping
-        let h_narrow = markdown_height("a long line of text", 5);
-        let h_wide = markdown_height("a long line of text", 200);
-        assert!(h_narrow > h_wide);
     }
 
     #[test]

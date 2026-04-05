@@ -611,7 +611,6 @@ pub async fn fork_current_session(
 #[cfg(test)]
 mod fork_tests {
     use super::*;
-    use crate::app::DisplayBlock;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
     use lash::provider::{Provider, ProviderOptions};
     use lash::store::HistoryTurnRecord;
@@ -655,11 +654,7 @@ mod fork_tests {
             agent_id: crate::ROOT_SESSION_ID.to_string(),
             messages_json: r#"[{"id":"u1","role":"user","parts":[{"id":"u1.p0","kind":"text","content":"hello","tool_call_id":null,"tool_name":null,"prune_state":"intact"}],"origin":null}]"#.to_string(),
             tool_calls_json: "[]".to_string(),
-            ui_json: serde_json::to_string(&PersistedUiState {
-                blocks: vec![DisplayBlock::UserInput("hello".into())],
-                ..PersistedUiState::default()
-            })
-            .expect("ui json"),
+            ui_json: serde_json::to_string(&PersistedUiState::default()).expect("ui json"),
             iteration: 1,
             config_json: r#"{"task_state":{"kind":"live_resume","status":"running"}}"#.to_string(),
             repl_snapshot: None,

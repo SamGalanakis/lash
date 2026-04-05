@@ -48,7 +48,7 @@ async fn persist_autonomous_runtime_state(
     let execution_mode = state.policy.execution_mode;
     let context_strategy = state.policy.context_strategy;
     let prompt_hash = latest_user_prompt_hash(&state.messages);
-    let ui_state = PersistedUiState::from_messages(&state.messages);
+    let ui_state = PersistedUiState::default();
     persist_root_agent_state(
         &persistence.store,
         &mut state,

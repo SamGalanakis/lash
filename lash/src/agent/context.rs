@@ -23,12 +23,32 @@ const PRUNE_MINIMUM_TOKENS: usize = 20_000;
 const PRUNE_PROTECT_TOKENS: usize = 40_000;
 const PRUNE_RECENT_USER_TURNS: usize = 2;
 const COMPACTION_BUFFER_TOKENS: usize = 20_000;
+const COMPACTION_KEEP_RECENT_TOKENS: usize = 20_000;
+const PRUNE_CONTEXT_THRESHOLD: f64 = 0.6;
 const COMPACTION_PLUGIN_ID: &str = "context_strategy";
 const COMPACTION_SUMMARY_TITLE: &str = "Compaction summary:";
 const COMPACTION_PROMPT: &str = "Provide a detailed summary of the conversation above so another agent can continue the work without the full history.\n\nUse this template:\n---\n## Goal\n[What is the user trying to accomplish?]\n\n## Instructions\n- [Relevant instructions or constraints]\n\n## Discoveries\n[Important findings, failures, or decisions]\n\n## Accomplished\n[What is done, what is in progress, what remains]\n\n## Relevant files / directories\n[List important files or directories]\n---";
 const PRUNE_PROTECTED_TOOLS: &[&str] = &["skill"];
 const PRUNED_IMAGE_PLACEHOLDER: &str = "[Image omitted from older context]";
 const COMPACTED_IMAGE_PLACEHOLDER: &str = "[Image omitted during compaction]";
+
+fn compaction_update_prompt(previous_summary: &str) -> String {
+    format!(
+        "A previous compaction summary exists (shown below). Update it with information from the conversation above.\n\n\
+         Rules:\n\
+         - PRESERVE all existing information from the previous summary\n\
+         - ADD new progress, decisions, and context from the new messages\n\
+         - Move items from in-progress to done where applicable\n\
+         - PRESERVE exact file paths, function names, and error messages\n\n\
+         Previous summary:\n{previous_summary}\n\n\
+         Use this template:\n---\n\
+         ## Goal\n[What is the user trying to accomplish?]\n\n\
+         ## Instructions\n- [Relevant instructions or constraints]\n\n\
+         ## Discoveries\n[Important findings, failures, or decisions]\n\n\
+         ## Accomplished\n[What is done, what is in progress, what remains]\n\n\
+         ## Relevant files / directories\n[List important files or directories]\n---"
+    )
+}
 
 #[derive(Clone)]
 pub struct ContextBuildRequest {
@@ -108,30 +128,31 @@ impl ContextBuilder for RollingContextBuilder {
 
         let tool_calls = tool_record_map(&state.tool_calls);
         hydrate_tool_result_parts(&session_id, &mut messages, &tool_calls);
-        prune_old_tool_results(&mut messages, &tool_calls);
-        prune_old_images(&mut messages);
+
+        // Only prune when context usage exceeds threshold — defer otherwise.
+        if pruning_needed(prompt_usage.as_ref(), max_context_tokens) {
+            prune_old_tool_results(&mut messages, &tool_calls);
+            prune_old_images(&mut messages);
+        }
 
         let mut prepared = PreparedContext {
             messages: messages.clone(),
             ..Default::default()
         };
 
-        if !compaction_needed(prompt_usage, max_context_tokens) {
+        if !compaction_needed(prompt_usage.as_ref(), max_context_tokens) {
             prepared.messages = messages;
             return Ok(prepared);
         }
 
         let prefix_len = leading_system_prefix_len(&messages);
-        let Some(last_user_idx) = latest_user_index(&messages) else {
-            prepared.messages = messages;
-            return Ok(prepared);
-        };
-        if last_user_idx <= prefix_len {
+        let cut_point = find_compaction_cut_point(&messages, prefix_len);
+        if cut_point <= prefix_len {
             prepared.messages = messages;
             return Ok(prepared);
         }
 
-        let prefix_messages = messages[prefix_len..last_user_idx].to_vec();
+        let prefix_messages = messages[prefix_len..cut_point].to_vec();
         let Some(summary) =
             summarize_compaction_prefix(&session_id, &state, prefix_messages, host).await?
         else {
@@ -139,7 +160,7 @@ impl ContextBuilder for RollingContextBuilder {
             return Ok(prepared);
         };
 
-        prepared.messages = apply_compaction_summary(&messages, &summary);
+        prepared.messages = apply_compaction_summary(&messages, &summary, cut_point);
         Ok(prepared)
     }
 }
@@ -496,6 +517,64 @@ fn latest_user_index(messages: &[Message]) -> Option<usize> {
         .rposition(|message| matches!(message.role, MessageRole::User))
 }
 
+/// Walk backwards from the end keeping ~`COMPACTION_KEEP_RECENT_TOKENS` worth of messages.
+/// Returns the index of the first message in the "keep" region — everything before it gets
+/// summarized.  The cut always lands on a user-message boundary so we never split a turn.
+fn find_compaction_cut_point(messages: &[Message], prefix_len: usize) -> usize {
+    // The earliest possible cut is right after the last compaction summary (if any),
+    // or right after the system prefix.
+    let start = messages[prefix_len..]
+        .iter()
+        .rposition(is_compaction_summary_message)
+        .map(|i| prefix_len + i + 1)
+        .unwrap_or(prefix_len);
+
+    let mut accumulated = 0usize;
+    for idx in (start..messages.len()).rev() {
+        for part in &messages[idx].parts {
+            accumulated += approx_token_count(&part.content);
+            if part.attachment.is_some() {
+                accumulated += 1200; // approximate image token cost
+            }
+        }
+        if accumulated >= COMPACTION_KEEP_RECENT_TOKENS && messages[idx].role == MessageRole::User {
+            return idx;
+        }
+    }
+    // Couldn't accumulate enough — fall back to latest user message.
+    latest_user_index(messages).unwrap_or(messages.len())
+}
+
+/// Only prune old tool results / images when context usage is above a threshold.
+fn pruning_needed(prompt_usage: Option<&PromptUsage>, max_context_tokens: Option<usize>) -> bool {
+    let Some(usage) = prompt_usage else {
+        return false;
+    };
+    let Some(max_context) = max_context_tokens else {
+        return false;
+    };
+    if max_context == 0 {
+        return false;
+    }
+    (usage.context_budget_tokens as f64 / max_context as f64) >= PRUNE_CONTEXT_THRESHOLD
+}
+
+/// Extract the text of a previous compaction summary from a message slice, if present.
+fn extract_previous_summary(messages: &[Message]) -> Option<String> {
+    messages.iter().rev().find_map(|m| {
+        if !is_compaction_summary_message(m) {
+            return None;
+        }
+        m.parts.first().map(|p| {
+            p.content
+                .strip_prefix(COMPACTION_SUMMARY_TITLE)
+                .unwrap_or(&p.content)
+                .trim()
+                .to_string()
+        })
+    })
+}
+
 /// Run compaction eagerly on current messages when the context window shrinks.
 pub async fn compact_messages_if_needed(
     session_id: &str,
@@ -505,26 +584,81 @@ pub async fn compact_messages_if_needed(
     max_context_tokens: Option<usize>,
     host: Arc<dyn SessionManager>,
 ) -> Result<Option<Vec<Message>>, ContextBuildError> {
-    if !compaction_needed(prompt_usage, max_context_tokens) {
+    if !compaction_needed(prompt_usage.as_ref(), max_context_tokens) {
         return Ok(None);
     }
+    compact_messages_core(session_id, state, messages, host).await
+}
+
+/// Force-compact messages regardless of threshold. Used for overflow recovery.
+pub async fn force_compact_messages(
+    session_id: &str,
+    state: &AgentStateEnvelope,
+    messages: &mut Vec<Message>,
+    max_context_tokens: Option<usize>,
+    host: Arc<dyn SessionManager>,
+) -> Result<(), ContextBuildError> {
+    strip_all_image_attachments(messages, COMPACTED_IMAGE_PLACEHOLDER);
+    let tool_calls = tool_record_map(&state.tool_calls);
+    prune_old_tool_results(messages, &tool_calls);
+    if let Some(compacted) = compact_messages_core(session_id, state, messages, host).await? {
+        *messages = compacted;
+    }
+    if let Some(max) = max_context_tokens {
+        let total: usize = messages
+            .iter()
+            .flat_map(|m| m.parts.iter())
+            .map(|p| approx_token_count(&p.content))
+            .sum();
+        if total > max.saturating_sub(COMPACTION_BUFFER_TOKENS) {
+            for msg_idx in (0..messages.len()).rev() {
+                let recent_user_turns = messages[msg_idx + 1..]
+                    .iter()
+                    .filter(|msg| msg.role == MessageRole::User)
+                    .count();
+                if recent_user_turns < PRUNE_RECENT_USER_TURNS {
+                    continue;
+                }
+                for part in &mut messages[msg_idx].parts {
+                    if matches!(part.kind, PartKind::ToolResult)
+                        && matches!(part.prune_state, crate::PruneState::Intact)
+                    {
+                        part.prune_state = crate::PruneState::Cleared;
+                        part.content.clear();
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn compact_messages_core(
+    session_id: &str,
+    state: &AgentStateEnvelope,
+    messages: &[Message],
+    host: Arc<dyn SessionManager>,
+) -> Result<Option<Vec<Message>>, ContextBuildError> {
     let prefix_len = leading_system_prefix_len(messages);
-    let Some(last_user_idx) = latest_user_index(messages) else {
-        return Ok(None);
-    };
-    if last_user_idx <= prefix_len {
+    let cut_point = find_compaction_cut_point(messages, prefix_len);
+    if cut_point <= prefix_len {
         return Ok(None);
     }
-    let prefix_messages = messages[prefix_len..last_user_idx].to_vec();
+    let prefix_messages = messages[prefix_len..cut_point].to_vec();
     let Some(summary) =
         summarize_compaction_prefix(session_id, state, prefix_messages, host).await?
     else {
         return Ok(None);
     };
-    Ok(Some(apply_compaction_summary(messages, &summary)))
+    Ok(Some(apply_compaction_summary(
+        messages, &summary, cut_point,
+    )))
 }
 
-fn compaction_needed(prompt_usage: Option<PromptUsage>, max_context_tokens: Option<usize>) -> bool {
+fn compaction_needed(
+    prompt_usage: Option<&PromptUsage>,
+    max_context_tokens: Option<usize>,
+) -> bool {
     let Some(usage) = prompt_usage else {
         return false;
     };
@@ -562,6 +696,7 @@ async fn summarize_compaction_prefix(
     snapshot.plugin_snapshot = None;
     snapshot.repl_snapshot = None;
     snapshot.last_prompt_usage = None;
+    let previous_summary = extract_previous_summary(&snapshot.messages);
     let referenced = referenced_tool_call_ids(&snapshot.messages);
     snapshot.tool_calls.retain(|record| {
         record
@@ -593,13 +728,17 @@ async fn summarize_compaction_prefix(
         })
         .await?;
 
+    // Use update prompt when a previous summary exists; fresh prompt otherwise.
+    let prompt_text = match previous_summary {
+        Some(prev) => compaction_update_prompt(&prev),
+        None => COMPACTION_PROMPT.to_string(),
+    };
+
     let turn = host
         .start_turn(
             &handle.session_id,
             TurnInput {
-                items: vec![InputItem::Text {
-                    text: COMPACTION_PROMPT.to_string(),
-                }],
+                items: vec![InputItem::Text { text: prompt_text }],
                 image_blobs: HashMap::new(),
                 mode: None,
             },
@@ -614,12 +753,9 @@ async fn summarize_compaction_prefix(
     Ok(Some(summary))
 }
 
-fn apply_compaction_summary(messages: &[Message], summary: &str) -> Vec<Message> {
+fn apply_compaction_summary(messages: &[Message], summary: &str, cut_point: usize) -> Vec<Message> {
     let prefix_len = leading_system_prefix_len(messages);
-    let Some(last_user_idx) = latest_user_index(messages) else {
-        return messages.to_vec();
-    };
-    if last_user_idx <= prefix_len {
+    if cut_point <= prefix_len || cut_point > messages.len() {
         return messages.to_vec();
     }
 
@@ -641,7 +777,7 @@ fn apply_compaction_summary(messages: &[Message], summary: &str) -> Vec<Message>
             plugin_id: COMPACTION_PLUGIN_ID.to_string(),
         }),
     });
-    out.extend_from_slice(&messages[last_user_idx..]);
+    out.extend_from_slice(&messages[cut_point..]);
     out
 }
 
@@ -868,6 +1004,7 @@ mod tests {
         messages.push(text_message("u2", MessageRole::User, "recent"));
         messages.push(text_message("u3", MessageRole::User, "latest"));
 
+        // Provide usage above PRUNE_CONTEXT_THRESHOLD (60%) to trigger pruning.
         let built = build_context(ContextBuildRequest {
             session_id: "root".to_string(),
             state: AgentStateEnvelope {
@@ -879,8 +1016,13 @@ mod tests {
                 ..Default::default()
             },
             messages,
-            prompt_usage: None,
-            max_context_tokens: None,
+            prompt_usage: Some(PromptUsage {
+                prompt_context_tokens: 130_000,
+                input_tokens: 130_000,
+                cached_input_tokens: 0,
+                context_budget_tokens: 130_000,
+            }),
+            max_context_tokens: Some(200_000),
             host: Arc::new(MockSessionManager::default()),
         })
         .await
@@ -903,6 +1045,7 @@ mod tests {
             text_message("u2", MessageRole::User, "latest"),
         ];
 
+        // Provide usage above PRUNE_CONTEXT_THRESHOLD (60%) to trigger pruning.
         let built = build_context(ContextBuildRequest {
             session_id: "root".to_string(),
             state: AgentStateEnvelope {
@@ -913,8 +1056,13 @@ mod tests {
                 ..Default::default()
             },
             messages,
-            prompt_usage: None,
-            max_context_tokens: None,
+            prompt_usage: Some(PromptUsage {
+                prompt_context_tokens: 130_000,
+                input_tokens: 130_000,
+                cached_input_tokens: 0,
+                context_budget_tokens: 130_000,
+            }),
+            max_context_tokens: Some(200_000),
             host: Arc::new(MockSessionManager::default()),
         })
         .await

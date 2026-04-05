@@ -1,36 +1,147 @@
 use lash::SkillCatalog;
 
-/// Primary commands shown in autocomplete (command, description).
-pub const COMMANDS: &[(&str, &str)] = &[
-    ("/clear", "Reset conversation"),
-    ("/controls", "Show keyboard shortcuts"),
-    ("/fork", "Open a forked session in a new terminal"),
-    ("/version", "Show lash-cli and lash-sansio versions"),
-    ("/info", "Show current session/runtime info"),
-    ("/model", "Show or switch LLM model"),
-    ("/variant", "Show or switch model variant"),
-    ("/mode", "Show current execution mode"),
-    ("/provider", "Switch, add, or re-authenticate providers"),
-    ("/login", "Sign in or reconfigure provider"),
-    ("/logout", "Remove stored credentials for active provider"),
-    ("/retry", "Replay the previous turn payload"),
-    ("/resume", "Resume a previous session"),
-    ("/skills", "Browse loaded skills"),
-    ("/tools", "Inspect or edit dynamic tools"),
-    (
-        "/reconfigure",
-        "Apply or inspect pending runtime reconfigure",
-    ),
-    ("/help", "Show commands and shortcuts"),
-    ("/exit", "Quit"),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommandSpec {
+    pub name: &'static str,
+    pub aliases: &'static [&'static str],
+    pub usage: &'static str,
+    pub description: &'static str,
+    pub takes_argument: bool,
+}
+
+/// Builtin slash-command catalog used for parse, autocomplete, and help.
+pub const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "/clear",
+        aliases: &["/new"],
+        usage: "/clear",
+        description: "Reset conversation",
+        takes_argument: false,
+    },
+    CommandSpec {
+        name: "/controls",
+        aliases: &[],
+        usage: "/controls",
+        description: "Show keyboard shortcuts",
+        takes_argument: false,
+    },
+    CommandSpec {
+        name: "/fork",
+        aliases: &[],
+        usage: "/fork [prompt]",
+        description: "Open a forked session in a new terminal",
+        takes_argument: true,
+    },
+    CommandSpec {
+        name: "/version",
+        aliases: &[],
+        usage: "/version",
+        description: "Show lash-cli and lash-sansio versions",
+        takes_argument: false,
+    },
+    CommandSpec {
+        name: "/info",
+        aliases: &[],
+        usage: "/info",
+        description: "Show current session/runtime info",
+        takes_argument: false,
+    },
+    CommandSpec {
+        name: "/model",
+        aliases: &[],
+        usage: "/model [name]",
+        description: "Show or switch LLM model",
+        takes_argument: true,
+    },
+    CommandSpec {
+        name: "/variant",
+        aliases: &[],
+        usage: "/variant [name]",
+        description: "Show or switch model variant",
+        takes_argument: true,
+    },
+    CommandSpec {
+        name: "/mode",
+        aliases: &[],
+        usage: "/mode [name]",
+        description: "Show current execution mode",
+        takes_argument: true,
+    },
+    CommandSpec {
+        name: "/provider",
+        aliases: &["/login"],
+        usage: "/provider",
+        description: "Switch, add, or re-authenticate providers",
+        takes_argument: false,
+    },
+    CommandSpec {
+        name: "/logout",
+        aliases: &[],
+        usage: "/logout",
+        description: "Remove stored credentials for active provider",
+        takes_argument: false,
+    },
+    CommandSpec {
+        name: "/retry",
+        aliases: &[],
+        usage: "/retry",
+        description: "Replay the previous turn payload",
+        takes_argument: false,
+    },
+    CommandSpec {
+        name: "/resume",
+        aliases: &["/continue"],
+        usage: "/resume [name]",
+        description: "Browse or load a previous session",
+        takes_argument: true,
+    },
+    CommandSpec {
+        name: "/skills",
+        aliases: &[],
+        usage: "/skills",
+        description: "Browse loaded skills",
+        takes_argument: false,
+    },
+    CommandSpec {
+        name: "/tools",
+        aliases: &[],
+        usage: "/tools ...",
+        description: "Inspect or edit dynamic tools",
+        takes_argument: true,
+    },
+    CommandSpec {
+        name: "/reconfigure",
+        aliases: &[],
+        usage: "/reconfigure ...",
+        description: "Apply or inspect pending runtime reconfigure",
+        takes_argument: true,
+    },
+    CommandSpec {
+        name: "/help",
+        aliases: &["/?"],
+        usage: "/help",
+        description: "Show commands and shortcuts",
+        takes_argument: false,
+    },
+    CommandSpec {
+        name: "/exit",
+        aliases: &["/quit"],
+        usage: "/exit",
+        description: "Quit",
+        takes_argument: false,
+    },
 ];
+
+pub fn catalog() -> &'static [CommandSpec] {
+    COMMANDS
+}
 
 /// Return commands matching the given prefix.
 pub fn completions(prefix: &str, skills: &SkillCatalog) -> Vec<(String, String)> {
     let mut results = COMMANDS
         .iter()
-        .filter(|(cmd, _)| cmd.starts_with(prefix))
-        .map(|(cmd, desc)| (cmd.to_string(), desc.to_string()))
+        .filter(|spec| spec.name.starts_with(prefix))
+        .map(|spec| (spec.name.to_string(), spec.description.to_string()))
         .collect::<Vec<_>>();
 
     if prefix.starts_with('/') {
@@ -52,14 +163,8 @@ pub fn completions(prefix: &str, skills: &SkillCatalog) -> Vec<(String, String)>
 
 /// Whether accepting autocomplete should append a trailing space.
 pub fn completion_inserts_space(cmd: &str, skills: &SkillCatalog) -> bool {
-    if matches!(
-        cmd,
-        "/fork" | "/model" | "/variant" | "/mode" | "/resume" | "/tools" | "/reconfigure"
-    ) {
-        return true;
-    }
-    if COMMANDS.iter().any(|(builtin, _)| *builtin == cmd) {
-        return false;
+    if let Some(spec) = COMMANDS.iter().find(|spec| spec.name == cmd) {
+        return spec.takes_argument;
     }
     slash_skill_prompt(cmd, skills).is_some()
 }
@@ -71,39 +176,22 @@ pub fn runs_out_of_band_while_running(cmd: &Command) -> bool {
 /// Slash commands recognized by the TUI.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
-    /// Reset conversation to splash screen
     Clear,
-    /// Show keyboard shortcuts
     Controls,
-    /// Fork the current session into a new terminal (optional initial prompt)
     Fork(Option<String>),
-    /// Show lash-cli and lash-sansio versions
     Version,
-    /// Show session/runtime metadata
     Info,
-    /// Show or switch LLM model
     Model(Option<String>),
-    /// Show or switch the provider-native variant for the active model
     Variant(Option<String>),
-    /// Show current execution mode or request a new-session change
     Mode(Option<String>),
-    /// Show provider status and switch instructions
     ChangeProvider,
-    /// Remove stored credentials for the active provider
     Logout,
-    /// Replay the previous turn payload
     Retry,
-    /// Show available commands and shortcuts
     Help,
-    /// Quit the application
     Exit,
-    /// Resume a previous session (optional filename)
     Resume(Option<String>),
-    /// Browse loaded skills
     Skills,
-    /// Dynamic tool commands (raw args)
     Tools(Option<String>),
-    /// Reconfigure control commands (raw args)
     Reconfigure(Option<String>),
 }
 
@@ -125,7 +213,6 @@ pub fn slash_skill_prompt(input: &str, skills: &SkillCatalog) -> Option<String> 
 }
 
 /// Try to parse a slash command from user input.
-/// Returns `None` if the input is not a recognized command.
 pub fn parse(input: &str, _skills: &SkillCatalog) -> Option<Command> {
     let trimmed = input.trim();
     if !trimmed.starts_with('/') {
@@ -192,10 +279,11 @@ mod tests {
     #[test]
     fn parses_all_primary_commands() {
         let skills = SkillCatalog::load();
-        for (cmd, _) in COMMANDS {
+        for spec in COMMANDS {
             assert!(
-                parse(cmd, &skills).is_some(),
-                "displayed command should parse: {cmd}"
+                parse(spec.name, &skills).is_some(),
+                "displayed command should parse: {}",
+                spec.name
             );
         }
     }

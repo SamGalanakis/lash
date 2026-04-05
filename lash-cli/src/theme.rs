@@ -4,7 +4,6 @@ use ratatui::style::{Color, Modifier, Style};
 pub const FORM: Color = Color::Rgb(14, 13, 11);
 pub const FORM_DEEP: Color = Color::Rgb(8, 8, 7);
 pub const FORM_RAISED: Color = Color::Rgb(20, 20, 18);
-pub const GHOST_BAR: Color = Color::Rgb(50, 40, 24);
 
 // ── Ash: structural greys ──────────────────────────────────────────
 pub const ASH: Color = Color::Rgb(42, 42, 40);
@@ -67,9 +66,9 @@ pub fn image_marker() -> Style {
     Style::default().fg(SODIUM).add_modifier(Modifier::BOLD)
 }
 
-/// Assistant ghost bar (very dim warm amber)
+/// Assistant text marker (readable warm grey)
 pub fn assistant_bar() -> Style {
-    Style::default().fg(GHOST_BAR)
+    Style::default().fg(ASH_TEXT)
 }
 
 /// Assistant prose in the history
@@ -311,4 +310,34 @@ pub fn plan_active_marker() -> Style {
 /// Pending plan-step marker.
 pub fn plan_pending_marker() -> Style {
     Style::default().fg(CHALK_DIM).add_modifier(Modifier::BOLD)
+}
+
+/// Turn separator line between conversation turns.
+pub fn turn_separator() -> Style {
+    Style::default().fg(ASH)
+}
+
+/// Edit lane chrome — lichen green for file modifications.
+pub fn edit_lane() -> Style {
+    Style::default().fg(LICHEN)
+}
+
+/// Edit lane chrome — bold lichen for summary prefix.
+pub fn edit_lane_bold() -> Style {
+    Style::default().fg(LICHEN).add_modifier(Modifier::BOLD)
+}
+
+/// Shell command lane chrome — muted chalk for mundane operations.
+pub fn shell_lane() -> Style {
+    Style::default().fg(CHALK_DIM)
+}
+
+/// Error block border.
+pub fn error_border() -> Style {
+    Style::default().fg(ERROR)
+}
+
+/// Error block title.
+pub fn error_title() -> Style {
+    Style::default().fg(ERROR).add_modifier(Modifier::BOLD)
 }

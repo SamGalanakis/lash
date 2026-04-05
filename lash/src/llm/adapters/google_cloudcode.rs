@@ -97,7 +97,7 @@ impl GoogleCloudCodeAdapter {
         req: &LlmRequest,
         attachment_parts: &[Value],
     ) -> Vec<Value> {
-        let mut out = Vec::new();
+        let mut out: Vec<Value> = Vec::new();
         for chunk in coalesce_replay_messages(&req.messages) {
             match chunk {
                 LlmReplayChunk::Message(msg) => {
@@ -113,10 +113,19 @@ impl GoogleCloudCodeAdapter {
                         attachment_parts,
                         &msg,
                     );
-                    out.push(json!({
-                        "role": role,
-                        "parts": [part],
-                    }));
+                    // Merge consecutive same-role messages into a single parts array
+                    // so text + images land in one API message.
+                    if let Some(prev) = out.last_mut()
+                        && prev.get("role").and_then(|r| r.as_str()) == Some(role)
+                        && prev.get("parts").is_some_and(|p| p.is_array())
+                    {
+                        prev["parts"].as_array_mut().unwrap().push(part);
+                    } else {
+                        out.push(json!({
+                            "role": role,
+                            "parts": [part],
+                        }));
+                    }
                 }
                 LlmReplayChunk::AssistantToolCalls { text, tool_calls } => {
                     let mut parts = Vec::new();
@@ -1183,10 +1192,11 @@ mod tests {
             })],
         );
 
-        assert_eq!(contents.len(), 2);
+        // Text + image should be merged into a single user content object
+        assert_eq!(contents.len(), 1);
         assert_eq!(contents[0]["parts"][0]["text"], "look");
         assert_eq!(
-            contents[1]["parts"][0]["fileData"]["fileUri"],
+            contents[0]["parts"][1]["fileData"]["fileUri"],
             "https://generativelanguage.googleapis.com/v1beta/files/abc"
         );
     }

@@ -699,21 +699,13 @@ mod tests {
         }];
         let messages_json = serde_json::to_string(&messages).expect("messages");
         let ui_json = serde_json::json!({
-            "blocks": [{
-                "UserInput": "hello"
-            }],
             "last_response_usage": {
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "cached_input_tokens": 0,
                 "reasoning_tokens": 0
             },
-            "plugin_mode_indicators": {},
-            "live_turn": {
-                "status_text": "thinking",
-                "status_detail": "waiting for first token",
-                "has_visible_output": false
-            }
+            "plugin_mode_indicators": {}
         })
         .to_string();
         let config_json = serde_json::json!({
