@@ -529,6 +529,35 @@ fn smart_truncate_preview_line(text: &str, max_chars: usize) -> String {
     format!("{prefix}{marker}{suffix}")
 }
 
+fn strip_ansi_escape_sequences(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if bytes[idx] == 0x1b {
+            idx += 1;
+            if idx < bytes.len() && bytes[idx] == b'[' {
+                idx += 1;
+                while idx < bytes.len() {
+                    let byte = bytes[idx];
+                    idx += 1;
+                    if (byte as char).is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if let Some(ch) = text[idx..].chars().next() {
+            out.push(ch);
+            idx += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    out
+}
+
 /// Fast, coarse token estimate used only for live UI counters while streaming.
 fn estimate_tokens_from_char_count(chars: i64) -> i64 {
     if chars <= 0 { 0 } else { (chars + 3) / 4 }
@@ -1833,19 +1862,33 @@ impl App {
     }
 
     fn push_streaming_output_text(&mut self, text: &str) {
-        for segment in text.split_inclusive('\n') {
-            let line = segment.trim_end_matches('\n').trim_end_matches('\r');
-            self.streaming_output_partial.push_str(line);
-            if segment.ends_with('\n') {
-                let completed = std::mem::take(&mut self.streaming_output_partial);
-                self.push_streaming_output_line(completed);
+        let sanitized = strip_ansi_escape_sequences(text);
+        let mut chars = sanitized.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\r' if matches!(chars.peek(), Some('\n')) => {
+                    chars.next();
+                    let completed = std::mem::take(&mut self.streaming_output_partial);
+                    self.push_streaming_output_line(completed);
+                }
+                '\r' => {
+                    self.streaming_output_partial.clear();
+                }
+                '\n' => {
+                    let completed = std::mem::take(&mut self.streaming_output_partial);
+                    self.push_streaming_output_line(completed);
+                }
+                '\t' => self.streaming_output_partial.push(ch),
+                ch if ch.is_control() => {}
+                _ => self.streaming_output_partial.push(ch),
             }
-        }
-        if self.streaming_output_partial.chars().count() > STREAMING_OUTPUT_LINE_CHAR_LIMIT {
-            self.streaming_output_partial = smart_truncate_preview_line(
-                &self.streaming_output_partial,
-                STREAMING_OUTPUT_LINE_CHAR_LIMIT,
-            );
+
+            if self.streaming_output_partial.chars().count() > STREAMING_OUTPUT_LINE_CHAR_LIMIT {
+                self.streaming_output_partial = smart_truncate_preview_line(
+                    &self.streaming_output_partial,
+                    STREAMING_OUTPUT_LINE_CHAR_LIMIT,
+                );
+            }
         }
     }
 
@@ -2707,6 +2750,60 @@ mod tests {
             app.streaming_output,
             vec!["started git status --short".to_string()]
         );
+    }
+
+    #[test]
+    fn tool_output_carriage_return_rewrites_partial_line() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.start_turn();
+
+        app.handle_agent_event(AgentEvent::Message {
+            text: "Compiling alpha".into(),
+            kind: "tool_output".into(),
+        });
+        assert_eq!(app.streaming_output_partial, "Compiling alpha");
+
+        app.handle_agent_event(AgentEvent::Message {
+            text: "\rCompiling beta".into(),
+            kind: "tool_output".into(),
+        });
+
+        assert!(app.streaming_output.is_empty());
+        assert_eq!(app.streaming_output_partial, "Compiling beta");
+    }
+
+    #[test]
+    fn tool_output_crlf_commits_current_line() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.start_turn();
+
+        app.handle_agent_event(AgentEvent::Message {
+            text: "started cargo check\r\n".into(),
+            kind: "tool_output".into(),
+        });
+
+        assert_eq!(
+            app.streaming_output,
+            vec!["started cargo check".to_string()]
+        );
+        assert!(app.streaming_output_partial.is_empty());
+    }
+
+    #[test]
+    fn tool_output_strips_ansi_escape_sequences_from_live_preview() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.start_turn();
+
+        app.handle_agent_event(AgentEvent::Message {
+            text: "\u{1b}[33mwarning\u{1b}[0m: check this\n".into(),
+            kind: "tool_output".into(),
+        });
+
+        assert_eq!(
+            app.streaming_output,
+            vec!["warning: check this".to_string()]
+        );
+        assert!(app.streaming_output_partial.is_empty());
     }
 
     #[test]
@@ -3750,19 +3847,14 @@ mod tests {
         match &app.blocks[0] {
             DisplayBlock::Activity(activity) => {
                 assert_eq!(activity.kind, ActivityKind::Exploration);
-                assert_eq!(activity.summary, "EXPLORE");
-                assert_eq!(activity.children.len(), 1);
-                assert!(
-                    activity
-                        .detail_lines
-                        .iter()
-                        .any(|line| line.contains("Search"))
-                );
-                assert!(
-                    activity
-                        .detail_lines
-                        .iter()
-                        .any(|line| line.contains("Read"))
+                assert_eq!(activity.summary, "EXPLORE · 2 steps");
+                assert!(activity.children.is_empty());
+                assert_eq!(
+                    activity.detail_lines,
+                    vec![
+                        "Search \"ctx\" in lash-cli/src".to_string(),
+                        "Read lash-cli/src/ui.rs".to_string(),
+                    ]
                 );
             }
             other => panic!(
@@ -3822,7 +3914,7 @@ mod tests {
                 assert_eq!(activity.kind, ActivityKind::Edit);
                 assert_eq!(activity.summary, "Edited 2 files (+3 -1)");
                 assert_eq!(activity.duration_ms, 12);
-                assert_eq!(activity.children.len(), 1);
+                assert!(activity.children.is_empty());
             }
             other => panic!(
                 "expected activity block, got {:?}",
