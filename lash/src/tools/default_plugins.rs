@@ -11,7 +11,7 @@ use crate::{
 pub struct DefaultToolPluginDeps {
     pub store: Option<Arc<dyn crate::store::RuntimeStore>>,
     pub tavily_api_key: Option<String>,
-    pub prompt_bridge: Option<crate::PromptBridge>,
+    pub enable_user_prompts: bool,
     pub instruction_source: Option<Arc<dyn InstructionSource>>,
 }
 
@@ -58,12 +58,11 @@ pub fn default_tool_plugin_factories(
         )),
     ];
 
-    if let Some(prompt_bridge) = deps.prompt_bridge {
+    if deps.enable_user_prompts {
         factories.push(Arc::new(StaticPluginFactory::new(
             "ask",
-            PluginSpec::new().with_tool_provider(
-                Arc::new(super::AskTool::new(prompt_bridge)) as Arc<dyn ToolProvider>
-            ),
+            PluginSpec::new()
+                .with_tool_provider(Arc::new(super::AskTool::new()) as Arc<dyn ToolProvider>),
         )));
     }
 

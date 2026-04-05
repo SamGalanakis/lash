@@ -16,7 +16,6 @@ use crate::command;
 use crate::event::AppEvent;
 use crate::fork;
 use crate::input_items::{build_items_from_editor_input, insert_inline_marker};
-use crate::overlay::{PromptFocus, PromptSelection};
 use crate::resume;
 use crate::session_log::{self, SessionLogger};
 use crate::update;
@@ -1369,7 +1368,7 @@ pub(crate) async fn run_app(
             AppEvent::Terminal(TermEvent::Paste(text)) => {
                 app.dirty = true;
 
-                if app.has_prompt() && (app.is_prompt_editing_reply() || app.is_prompt_freeform()) {
+                if app.has_prompt() && app.is_prompt_text_entry() {
                     app.prompt_insert_text(&text);
                     continue;
                 }
@@ -1636,13 +1635,17 @@ pub(crate) async fn run_app(
 
                 // ── Prompt (ask dialog) key handling ──
                 if app.has_prompt() {
-                    let editing_text = app.is_prompt_editing_reply() || app.is_prompt_freeform();
+                    let editing_text = app.is_prompt_text_entry();
                     match key.code {
+                        KeyCode::Tab if app.prompt_supports_note() => {
+                            app.prompt_toggle_note_focus();
+                        }
                         KeyCode::Up if !editing_text => app.prompt_up(),
                         KeyCode::Down if !editing_text => app.prompt_down(),
-                        KeyCode::Tab => app.prompt_toggle_extra(),
+                        KeyCode::Char(' ') if app.is_prompt_multi_select() && !editing_text => {
+                            app.prompt_toggle_current_option();
+                        }
                         KeyCode::BackTab if editing_text => app.prompt_insert_char('\n'),
-                        KeyCode::BackTab => app.prompt_toggle_extra(),
                         KeyCode::Enter => {
                             let _ = app.take_prompt_response();
                         }
@@ -2201,21 +2204,20 @@ pub(crate) async fn run_app(
                 }
                 // Intercept Prompt events — set up dialog state instead of passing to handle_agent_event
                 if let AgentEvent::Prompt {
-                    question,
-                    options,
+                    request,
                     response_tx,
                 } = event
                 {
-                    let focus = if options.is_empty() {
-                        PromptFocus::ReplyEditor
+                    let focus = if request.is_freeform() {
+                        crate::overlay::PromptFocus::Text
                     } else {
-                        PromptFocus::Selection
+                        crate::overlay::PromptFocus::Options
                     };
                     app.show_prompt(app::PromptState {
-                        question,
-                        options,
-                        selection: PromptSelection::Option(0),
+                        request,
                         focus,
+                        cursor: 0,
+                        selected: Default::default(),
                         reply_text: String::new(),
                         reply_cursor: 0,
                         response_tx,

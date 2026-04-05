@@ -11,7 +11,8 @@ use crate::plugin::{
 };
 use crate::tools::{PatchAction, inspect_patch_ops};
 use crate::{
-    PluginMessage, PromptBridge, ToolDefinition, ToolExecutionContext, ToolProvider, ToolResult,
+    PluginMessage, PromptRequest, PromptResponse, ToolDefinition, ToolExecutionContext,
+    ToolProvider, ToolResult,
 };
 
 const PLAN_MODE_BADGE_KEY: &str = "mode";
@@ -27,6 +28,16 @@ fn plan_display_path(path: &Path) -> String {
         ".".to_string()
     } else {
         rendered.replace('\\', "/")
+    }
+}
+
+fn plan_exit_next_turn_input(display: &str, note: Option<&str>) -> String {
+    if let Some(note) = note.filter(|note| !note.trim().is_empty()) {
+        format!(
+            "The plan at `{display}` is approved. Plan mode is off now. Execute that plan.\n\nUser note: {note}"
+        )
+    } else {
+        format!("The plan at `{display}` is approved. Plan mode is off now. Execute that plan.")
     }
 }
 
@@ -310,7 +321,6 @@ fn patch_allowed_for_plan_file(args: &serde_json::Value, plan_path: &Path) -> Re
 #[derive(Clone)]
 struct PlanModeTools {
     state: Arc<Mutex<PlanModeState>>,
-    prompt_bridge: PromptBridge,
 }
 
 impl PlanModeTools {
@@ -329,21 +339,30 @@ impl PlanModeTools {
                 Err(err) => return ToolResult::err(json!(err.to_string())),
             };
         let display = plan_display_path(&plan_path);
-        let question =
-            format!("Plan at {display} is ready. Start implementing it in a fresh execution turn?");
-        let answer = match self
-            .prompt_bridge
-            .prompt(
-                question,
-                vec!["Implement it".to_string(), "Keep planning".to_string()],
+        let answer = match context
+            .host
+            .prompt_user(
+                PromptRequest::single(
+                    format!(
+                        "Plan at {display} is ready. Start implementing it in a fresh execution turn?"
+                    ),
+                    vec!["Implement it".to_string(), "Keep planning".to_string()],
+                )
+                .with_optional_note(),
             )
             .await
         {
             Ok(answer) => answer,
-            Err(err) => return ToolResult::err(json!(err)),
+            Err(err) => return ToolResult::err(json!(err.to_string())),
         };
 
-        if answer != "Implement it" {
+        let (approved, note) = match &answer {
+            PromptResponse::Single { selection, note } if selection == "Implement it" => {
+                (true, note.clone())
+            }
+            _ => (false, None),
+        };
+        if !approved {
             return ToolResult::ok(json!({
                 "approved": false,
                 "plan_path": display,
@@ -361,10 +380,28 @@ impl PlanModeTools {
         ToolResult::ok(json!({
             "approved": true,
             "plan_path": display,
-            "next_turn_input": format!(
-                "The plan at `{display}` is approved. Plan mode is off now. Execute that plan."
-            ),
+            "next_turn_input": plan_exit_next_turn_input(&display, note.as_deref()),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_exit_next_turn_input;
+
+    #[test]
+    fn plan_exit_next_turn_input_appends_user_note() {
+        assert_eq!(
+            plan_exit_next_turn_input(
+                ".lash/plans/run-session.md",
+                Some("start with the safe slice"),
+            ),
+            "The plan at `.lash/plans/run-session.md` is approved. Plan mode is off now. Execute that plan.\n\nUser note: start with the safe slice"
+        );
+        assert_eq!(
+            plan_exit_next_turn_input(".lash/plans/run-session.md", Some("   ")),
+            "The plan at `.lash/plans/run-session.md` is approved. Plan mode is off now. Execute that plan."
+        );
     }
 }
 
@@ -401,11 +438,20 @@ impl ToolProvider for PlanModeTools {
             _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
         }
     }
+
+    async fn execute_streaming_with_context(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        context: &ToolExecutionContext,
+        _progress: Option<&crate::ProgressSender>,
+    ) -> ToolResult {
+        self.execute_with_context(name, args, context).await
+    }
 }
 
 pub struct PlanModePluginFactory {
     config: PlanModePluginConfig,
-    prompt_bridge: PromptBridge,
 }
 
 impl Default for PlanModePluginFactory {
@@ -416,17 +462,7 @@ impl Default for PlanModePluginFactory {
 
 impl PlanModePluginFactory {
     pub fn new(config: PlanModePluginConfig) -> Self {
-        Self {
-            config,
-            prompt_bridge: PromptBridge::new(),
-        }
-    }
-
-    pub fn with_prompt_bridge(config: PlanModePluginConfig, prompt_bridge: PromptBridge) -> Self {
-        Self {
-            config,
-            prompt_bridge,
-        }
+        Self { config }
     }
 }
 
@@ -439,7 +475,6 @@ impl PluginFactory for PlanModePluginFactory {
         Ok(Arc::new(PlanModePlugin {
             state: Arc::new(Mutex::new(PlanModeState::default())),
             config: self.config.clone(),
-            prompt_bridge: self.prompt_bridge.clone(),
         }))
     }
 }
@@ -447,7 +482,6 @@ impl PluginFactory for PlanModePluginFactory {
 struct PlanModePlugin {
     state: Arc<Mutex<PlanModeState>>,
     config: PlanModePluginConfig,
-    prompt_bridge: PromptBridge,
 }
 
 impl SessionPlugin for PlanModePlugin {
@@ -458,7 +492,6 @@ impl SessionPlugin for PlanModePlugin {
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
         reg.tools().provider(Arc::new(PlanModeTools {
             state: Arc::clone(&self.state),
-            prompt_bridge: self.prompt_bridge.clone(),
         }))?;
 
         let before_turn_state = Arc::clone(&self.state);

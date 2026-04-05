@@ -277,6 +277,16 @@ impl ToolProvider for StateStore {
             _ => self.execute(name, args).await,
         }
     }
+
+    async fn execute_streaming_with_context(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        context: &ToolExecutionContext,
+        _progress: Option<&crate::ProgressSender>,
+    ) -> ToolResult {
+        self.execute_with_context(name, args, context).await
+    }
 }
 
 #[cfg(test)]
@@ -415,6 +425,28 @@ mod tests {
             items[1].get("name").and_then(|v| v.as_str()),
             Some("read_file")
         );
+    }
+
+    #[tokio::test]
+    async fn search_tools_streaming_execution_preserves_session_context() {
+        let store = StateStore::new();
+        let context = ToolExecutionContext {
+            session_id: "root".to_string(),
+            host: Arc::new(MockSessionManager {
+                catalog: vec![
+                    json!({"name":"ask","description":"Pause and ask the user a targeted question.","enabled":true,"injected":true,"examples":[]}),
+                ],
+            }),
+        };
+
+        let result = store
+            .execute_streaming_with_context("search_tools", &json!({"query":"ask"}), &context, None)
+            .await;
+
+        assert!(result.success);
+        let items = result.result.as_array().expect("array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].get("name").and_then(|v| v.as_str()), Some("ask"));
     }
 
     #[test]
