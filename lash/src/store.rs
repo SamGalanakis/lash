@@ -837,7 +837,19 @@ mod tests {
             reasoning_tokens: 0,
         });
 
-        s.update_agent_ui_state("ag1", r#"{"blocks":["updated"]}"#);
+        s.save_agent_state(AgentState {
+            agent_id: "ag1".into(),
+            messages_json: "[]".into(),
+            tool_calls_json: "[]".into(),
+            ui_json: r#"{"blocks":["updated"]}"#.into(),
+            iteration: 0,
+            config_json: "{}".into(),
+            repl_snapshot: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+            reasoning_tokens: 0,
+        });
 
         let state = s.load_agent_state("ag1").expect("agent state");
         assert_eq!(state.ui_json, r#"{"blocks":["updated"]}"#);

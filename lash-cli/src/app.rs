@@ -423,6 +423,9 @@ pub struct App {
     pub live_turn: Option<LiveTurnState>,
     /// Raw TextDelta buffer for the active streamed assistant segment.
     pub pending_text: String,
+    /// Ignore stray late TextDelta events once the latest assistant block has
+    /// been reconciled to authoritative final text.
+    assistant_text_finalized: bool,
     /// Whether the UI needs a redraw.
     pub dirty: bool,
     /// Output-following mode for the history viewport.
@@ -493,7 +496,13 @@ impl App {
         PersistedUiState::from_app(self)
     }
 
-    pub fn finish_turn_for_persistence(&mut self) -> PersistedUiState {
+    pub fn finish_turn_for_persistence_with_output(
+        &mut self,
+        final_assistant_text: Option<&str>,
+    ) -> PersistedUiState {
+        if let Some(text) = final_assistant_text {
+            self.commit_final_assistant_text(text);
+        }
         let persisted = self.persisted_ui_state();
         self.stop_turn();
         persisted
@@ -509,6 +518,7 @@ impl App {
         self.manual_interrupt_requested = false;
         self.iteration = 0;
         self.pending_text.clear();
+        self.assistant_text_finalized = false;
         self.clear_streaming_output();
         self.active_delegate = None;
         self.live_output_chars_estimate = 0;
@@ -670,6 +680,7 @@ impl App {
             tick: 0,
             live_turn: None,
             pending_text: String::new(),
+            assistant_text_finalized: false,
             dirty: true,
             follow_mode: FollowOutputMode::Bottom,
             height_cache: Vec::new(),
@@ -822,6 +833,23 @@ impl App {
         true
     }
 
+    fn reconcile_trailing_assistant_block(&mut self, text: &str) -> bool {
+        let Some(DisplayBlock::AssistantText(existing)) = self.blocks.last_mut() else {
+            return false;
+        };
+        if text.starts_with(existing.as_str()) {
+            if *existing != text {
+                *existing = text.to_string();
+                self.invalidate_height_cache();
+            }
+            return true;
+        }
+        if existing.is_empty() || existing.starts_with(text) {
+            return true;
+        }
+        false
+    }
+
     fn close_pending_text(&mut self) {
         if let Some(turn) = self.live_turn.as_mut() {
             turn.assistant_block_idx = None;
@@ -852,6 +880,14 @@ impl App {
                 *existing = cleaned;
                 self.invalidate_height_cache();
             }
+            self.assistant_text_finalized = true;
+            self.mark_visible_output();
+            self.close_pending_text();
+            return;
+        }
+
+        if self.reconcile_trailing_assistant_block(&cleaned) {
+            self.assistant_text_finalized = true;
             self.mark_visible_output();
             self.close_pending_text();
             return;
@@ -861,6 +897,7 @@ impl App {
             self.invalidate_height_cache();
             self.mark_visible_output();
         }
+        self.assistant_text_finalized = true;
         self.close_pending_text();
     }
 
@@ -926,13 +963,14 @@ impl App {
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::TextDelta { content } => {
-                if !self.running
-                    && self.live_turn.is_none()
-                    && self.pending_text.is_empty()
-                    && self.merge_into_trailing_assistant_block(&content)
-                {
-                    self.scroll_to_bottom();
-                    return;
+                if !self.running && self.live_turn.is_none() && self.pending_text.is_empty() {
+                    if self.assistant_text_finalized {
+                        return;
+                    }
+                    if self.merge_into_trailing_assistant_block(&content) {
+                        self.scroll_to_bottom();
+                        return;
+                    }
                 }
                 self.mark_first_token_arrived();
                 self.live_output_chars_estimate += content.chars().count() as i64;
@@ -1256,6 +1294,7 @@ impl App {
         self.scroll_offset = 0;
         self.follow_mode = FollowOutputMode::Bottom;
         self.pending_text.clear();
+        self.assistant_text_finalized = false;
         self.clear_status();
         self.editor.pending_images.clear();
         self.editor.pending_large_pastes.clear();
@@ -2378,6 +2417,84 @@ mod tests {
             app.blocks.last(),
             Some(DisplayBlock::AssistantText(text)) if text == "final output"
         ));
+    }
+
+    #[test]
+    fn finish_turn_for_persistence_reconciles_authoritative_assistant_text() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.start_turn();
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: "I looked at the actual librarian prompt".into(),
+        });
+        app.stop_turn();
+
+        let persisted = app.finish_turn_for_persistence_with_output(Some(
+            "I looked at the actual librarian prompt, the graph tool constraints.\n\n## What exists now",
+        ));
+
+        let last_block = persisted
+            .blocks
+            .iter()
+            .rev()
+            .find_map(|block| match block {
+                DisplayBlock::AssistantText(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .expect("assistant block");
+        assert_eq!(
+            last_block,
+            "I looked at the actual librarian prompt, the graph tool constraints.\n\n## What exists now"
+        );
+    }
+
+    #[test]
+    fn finish_turn_for_persistence_does_not_append_shorter_authoritative_text() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.start_turn();
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: "Visible streamed text".into(),
+        });
+        app.stop_turn();
+
+        let persisted = app.finish_turn_for_persistence_with_output(Some("Visible"));
+
+        let last_block = persisted
+            .blocks
+            .iter()
+            .rev()
+            .find_map(|block| match block {
+                DisplayBlock::AssistantText(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .expect("assistant block");
+        assert_eq!(last_block, "Visible streamed text");
+    }
+
+    #[test]
+    fn late_text_deltas_after_authoritative_final_output_are_ignored() {
+        let mut app = App::new("test-model".into(), "test".into());
+        let final_text = "Use this minimal set:\n\n- `code`\n- `feature`\n- `issue`\n- `decision`\n\nThat’s probably the sweet spot.";
+        app.start_turn();
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: "Use this minimal set:\n\n- `code`\n- `feature`\n".into(),
+        });
+
+        let _persisted = app.finish_turn_for_persistence_with_output(Some(final_text));
+
+        app.handle_agent_event(AgentEvent::TextDelta {
+            content: "Yeah — **`feature` is nicer than `topic`** if you want the graph to stay product-shaped.\n\nMy take:\n\n- **`topic` is safer**".into(),
+        });
+
+        let assistant_blocks: Vec<&str> = app
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                DisplayBlock::AssistantText(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(assistant_blocks, vec![final_text]);
     }
 
     #[test]

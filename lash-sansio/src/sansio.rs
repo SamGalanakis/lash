@@ -954,9 +954,12 @@ impl TurnMachine {
             match part {
                 LlmOutputPart::Text { text } => {
                     if !text.is_empty() {
+                        let previous_len = assistant_text.len();
                         append_assistant_text_part(&mut assistant_text, &text);
                         if !text_streamed {
-                            self.emit(AgentEvent::TextDelta { content: text });
+                            self.emit(AgentEvent::TextDelta {
+                                content: assistant_text[previous_len..].to_string(),
+                            });
                         }
                     }
                 }

@@ -4467,6 +4467,57 @@ mod tests {
         assert_eq!(streamed_text, "What time is it?");
     }
 
+    #[tokio::test]
+    async fn standard_runtime_preserves_part_boundaries_when_response_is_not_streamed() {
+        let transport = MockTransport::new(vec![MockCall {
+            stream_events: vec![],
+            response: Ok(LlmResponse {
+                full_text: "Intro paragraph.\n\n## Heading".to_string(),
+                parts: vec![
+                    LlmOutputPart::Text {
+                        text: "Intro paragraph.".to_string(),
+                    },
+                    LlmOutputPart::Text {
+                        text: "## Heading".to_string(),
+                    },
+                ],
+                ..LlmResponse::default()
+            }),
+        }]);
+        let mut runtime = standard_runtime_with_transport(transport).await;
+        let sink = RecordingSink::default();
+
+        let turn = runtime
+            .stream_turn(
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "hi".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    mode: None,
+                },
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("turn");
+
+        assert_eq!(
+            turn.assistant_output.safe_text,
+            "Intro paragraph.\n\n## Heading"
+        );
+
+        let streamed_text: String = sink
+            .snapshot()
+            .into_iter()
+            .filter_map(|event| match event {
+                AgentEvent::TextDelta { content } => Some(content),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(streamed_text, "Intro paragraph.\n\n## Heading");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn repl_run_exec_code_forwards_interactive_prompt_events() {
         use tokio::time::{Duration, timeout};

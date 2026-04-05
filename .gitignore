@@ -10,7 +10,6 @@ target-bullseye/
 jobs/
 .benchmarks/
 bench/
-test.txt
 __pycache__/
 *.pyc
 .DS_Store
