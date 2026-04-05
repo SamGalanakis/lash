@@ -6,8 +6,9 @@ use lash::*;
 use sha2::{Digest, Sha256};
 
 use crate::ROOT_SESSION_ID;
-use crate::app::{App, DisplayBlock, PersistedUiState, PreparedTurn};
+use crate::app::{App, DisplayBlock, PreparedTurn, UiResumeState};
 use crate::command;
+use crate::ui_resume;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ModelSelection {
@@ -272,7 +273,7 @@ struct ReplayManifest {
 pub(crate) fn persist_root_agent_state(
     store: &Store,
     state: &mut AgentStateEnvelope,
-    ui_state: &PersistedUiState,
+    ui_state: &UiResumeState,
     dynamic_state: &DynamicStateSnapshot,
     provider: &Provider,
     configured_model: &str,
@@ -311,23 +312,24 @@ pub(crate) fn persist_root_agent_state(
         "snapshot_hash": manifest.snapshot_hash,
     });
     state.replay_manifest = Some(manifest_json.clone());
-    let config_json = serde_json::json!({
-        "manifest": manifest_json,
-        "context_strategy": context_strategy,
-        "last_prompt_usage": state.last_prompt_usage.clone(),
-        "plugin_snapshot": state.plugin_snapshot,
-        "task_state": state.task_state,
-        "dynamic_state": dynamic_state,
-    })
+    let config_json = ui_resume::with_ui_resume_state(
+        serde_json::json!({
+            "manifest": manifest_json,
+            "context_strategy": context_strategy,
+            "last_prompt_usage": state.last_prompt_usage.clone(),
+            "plugin_snapshot": state.plugin_snapshot,
+            "task_state": state.task_state,
+            "dynamic_state": dynamic_state,
+        }),
+        ui_state,
+    )
     .to_string();
-    let messages_json = serde_json::to_string(&state.messages).unwrap_or_else(|_| "[]".to_string());
-    let tool_calls_json =
-        serde_json::to_string(&state.tool_calls).unwrap_or_else(|_| "[]".to_string());
-    let ui_json = serde_json::to_string(ui_state).unwrap_or_else(|_| "{}".to_string());
     tracing::debug!(
         iteration = state.iteration,
         messages = state.messages.len(),
         tool_calls = state.tool_calls.len(),
+        plugin_panels = ui_state.plugin_panels.len(),
+        has_live_assistant_text = ui_state.live_assistant_text.is_some(),
         input_tokens = state.token_usage.input_tokens,
         output_tokens = state.token_usage.output_tokens,
         cached_input_tokens = state.token_usage.cached_input_tokens,
@@ -336,9 +338,6 @@ pub(crate) fn persist_root_agent_state(
     );
     store.save_agent_state(lash::AgentState {
         agent_id: ROOT_SESSION_ID.to_string(),
-        messages_json,
-        tool_calls_json,
-        ui_json,
         iteration: state.iteration as i64,
         config_json,
         repl_snapshot: state.repl_snapshot.clone(),
@@ -347,6 +346,9 @@ pub(crate) fn persist_root_agent_state(
         cached_input_tokens: state.token_usage.cached_input_tokens,
         reasoning_tokens: state.token_usage.reasoning_tokens,
     });
+    let transcript_keyspaces =
+        lash::semantic_transcript_keyspaces(&state.messages, &state.tool_calls);
+    store.transcript_replace_keyspaces(ROOT_SESSION_ID, &transcript_keyspaces);
 }
 
 fn persisted_plugin_snapshot(state: &lash::AgentState) -> Option<PluginSessionSnapshot> {
@@ -360,7 +362,7 @@ fn persisted_plugin_snapshot(state: &lash::AgentState) -> Option<PluginSessionSn
 pub(crate) fn persist_live_runtime_snapshot(
     store: &Store,
     snapshot: DurableTurnSnapshot,
-    ui_state: &PersistedUiState,
+    ui_state: &UiResumeState,
     dynamic_state: &DynamicStateSnapshot,
     provider: &Provider,
     configured_model: &str,
@@ -397,6 +399,7 @@ pub(crate) fn persist_live_runtime_snapshot(
         messages = state.messages.len(),
         tool_calls = state.tool_calls.len(),
         plugin_mode_indicators = ui_state.plugin_mode_indicators.len(),
+        plugin_panels = ui_state.plugin_panels.len(),
         "persisting live runtime snapshot"
     );
     persist_root_agent_state(

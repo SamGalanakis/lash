@@ -133,7 +133,9 @@ pub use skill_prompt::{
     append_skill_blocks, collect_skill_mentions, collect_skill_mentions_with_ranges,
 };
 pub use store::{
-    AgentState, HistoryTurnRecord, RuntimeStore, SessionMeta, SessionPickerInfo, TurnCheckpoint,
+    AgentState, RuntimeStore, SessionMeta, SessionPickerInfo, TranscriptEntry,
+    TranscriptEntryPayload, TranscriptKeyspace, TurnCheckpoint, group_transcript_entries,
+    semantic_transcript_keyspaces, transcript_messages, transcript_tool_calls,
 };
 #[cfg(feature = "sqlite-store")]
 pub use store::{SqliteStore, Store};

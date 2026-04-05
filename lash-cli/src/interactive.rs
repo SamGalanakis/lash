@@ -553,7 +553,7 @@ async fn handle_slash_command(
             match fork::fork_current_session(
                 runtime.as_mut(),
                 logger,
-                &app.persisted_ui_state(),
+                &app.ui_resume_state(),
                 provider,
                 &app.model,
                 app.context_window
@@ -1205,10 +1205,13 @@ pub(crate) async fn run_app(
                         running = app.running,
                         "reconciling completed runtime turn"
                     );
-                    let final_output = (!done.result.assistant_output.safe_text.is_empty())
-                        .then_some(done.result.assistant_output.safe_text.as_str());
-                    let persisted_ui_state =
-                        app.finish_turn_for_persistence_with_output(final_output);
+                    let final_output = app::latest_assistant_text_from_messages(&state.messages)
+                        .or_else(|| {
+                            (!done.result.assistant_output.safe_text.is_empty())
+                                .then(|| done.result.assistant_output.safe_text.clone())
+                        });
+                    let ui_resume_state =
+                        app.finish_turn_for_resume_with_output(final_output.as_deref());
 
                     let persisted_execution_mode = state.policy.execution_mode;
                     let persisted_context_strategy = state.policy.context_strategy;
@@ -1216,7 +1219,7 @@ pub(crate) async fn run_app(
                     persist_root_agent_state(
                         &store,
                         &mut state,
-                        &persisted_ui_state,
+                        &ui_resume_state,
                         &persisted_dynamic_state,
                         &provider,
                         &app.model,
@@ -2066,6 +2069,10 @@ pub(crate) async fn run_app(
             }
             AppEvent::Terminal(TermEvent::Mouse(mouse)) => {
                 use crossterm::event::{MouseButton, MouseEventKind};
+                // Some terminals (notably kitty) can paint transient hover/search
+                // decorations on top of the alt-screen. Repaint on any mouse event
+                // so ignored motion events do not leave visual artifacts behind.
+                app.dirty = true;
                 let ha = app.history_area;
                 let in_history = mouse.row >= ha.y
                     && mouse.row < ha.y + ha.height
@@ -2177,7 +2184,7 @@ pub(crate) async fn run_app(
                         persist_live_runtime_snapshot(
                             &store,
                             snapshot,
-                            &app.persisted_ui_state(),
+                            &app.ui_resume_state(),
                             &desired_dynamic,
                             &provider,
                             &app.model,
@@ -2230,7 +2237,6 @@ pub(crate) async fn run_app(
 
     // Save input history
     app.save_history();
-    logger.flush()?;
 
     Ok(())
 }
@@ -2604,7 +2610,7 @@ fn send_user_message(
     persist_live_runtime_snapshot(
         logger.store().as_ref(),
         pending_turn_snapshot(&persisted_state, &turn_input),
-        &app.persisted_ui_state(),
+        &app.ui_resume_state(),
         dynamic_state,
         provider,
         &app.model,

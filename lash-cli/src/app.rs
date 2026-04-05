@@ -1,8 +1,8 @@
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use lash::{
     AgentEvent, Message, MessageRole, PartKind, PluginMessage, PromptUsage, SkillCatalog,
-    TokenUsage, append_skill_blocks, collect_skill_mentions,
+    TokenUsage, ToolCallRecord, append_skill_blocks, collect_skill_mentions,
     plugin_surface_event_renders_visible_output,
 };
 
@@ -207,48 +207,123 @@ pub enum DisplayBlock {
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct PersistedUiState {
+pub struct UiResumeState {
     #[serde(default)]
     pub last_response_usage: TokenUsage,
     #[serde(default)]
     pub plugin_mode_indicators: BTreeMap<String, String>,
     #[serde(default)]
-    pub blocks: Vec<DisplayBlock>,
+    pub plugin_panels: Vec<PluginPanelBlock>,
     #[serde(default)]
     pub streaming_output: Vec<String>,
     #[serde(default)]
     pub streaming_output_hidden: usize,
     #[serde(default)]
     pub streaming_output_partial: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_assistant_text: Option<String>,
 }
 
-impl PersistedUiState {
+impl UiResumeState {
     pub fn from_app(app: &App) -> Self {
         Self {
             last_response_usage: app.last_response_usage.clone(),
             plugin_mode_indicators: app.plugin_mode_indicators.clone(),
-            blocks: app.blocks.clone(),
+            plugin_panels: app
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    DisplayBlock::PluginPanel(panel) => Some(panel.clone()),
+                    _ => None,
+                })
+                .collect(),
             streaming_output: app.streaming_output.clone(),
             streaming_output_hidden: app.streaming_output_hidden,
             streaming_output_partial: app.streaming_output_partial.clone(),
+            live_assistant_text: app
+                .live_turn
+                .as_ref()
+                .and_then(|turn| turn.assistant_block_idx)
+                .and_then(|idx| match app.blocks.get(idx) {
+                    Some(DisplayBlock::AssistantText(text)) if !text.is_empty() => {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                }),
         }
     }
 }
 
-pub(crate) fn blocks_from_messages(messages: &[Message]) -> Vec<DisplayBlock> {
+pub(crate) fn blocks_from_transcript(
+    messages: &[Message],
+    tool_calls: &[ToolCallRecord],
+) -> Vec<DisplayBlock> {
     let mut blocks = Vec::new();
+    let mut activity_state = ActivityState::default();
+    let tool_call_map = tool_calls
+        .iter()
+        .filter_map(|record| {
+            record
+                .call_id
+                .as_deref()
+                .map(|call_id| (call_id, record.clone()))
+        })
+        .collect::<HashMap<_, _>>();
     for message in messages {
-        append_message_blocks(&mut blocks, message);
+        append_transcript_blocks(&mut blocks, message, &tool_call_map, &mut activity_state);
     }
     blocks
 }
 
-fn append_message_blocks(blocks: &mut Vec<DisplayBlock>, message: &Message) {
+pub(crate) fn apply_ui_resume_state_to_blocks(
+    blocks: &mut Vec<DisplayBlock>,
+    ui_state: &UiResumeState,
+) {
+    if let Some(text) = ui_state.live_assistant_text.as_deref() {
+        let cleaned = normalize_assistant_text(text);
+        if !cleaned.is_empty() {
+            if let Some(DisplayBlock::AssistantText(existing)) = blocks.last_mut() {
+                if cleaned.starts_with(existing.as_str()) {
+                    *existing = cleaned;
+                } else {
+                    let _ = push_assistant_text_block(blocks, &cleaned);
+                }
+            } else {
+                let _ = push_assistant_text_block(blocks, &cleaned);
+            }
+        }
+    }
+
+    blocks.extend(
+        ui_state
+            .plugin_panels
+            .iter()
+            .cloned()
+            .map(DisplayBlock::PluginPanel),
+    );
+}
+
+fn append_transcript_blocks(
+    blocks: &mut Vec<DisplayBlock>,
+    message: &Message,
+    tool_calls: &HashMap<&str, ToolCallRecord>,
+    activity_state: &mut ActivityState,
+) {
     match message.role {
         MessageRole::User => {
-            let text = rendered_message_text(message);
-            if !text.is_empty() {
-                blocks.push(DisplayBlock::UserInput(text));
+            if message
+                .parts
+                .iter()
+                .any(|part| matches!(part.kind, PartKind::ToolResult))
+            {
+                for part in &message.parts {
+                    append_tool_result_blocks(blocks, part, tool_calls, activity_state);
+                }
+            } else {
+                let text = rendered_message_text(message);
+                if !text.is_empty() {
+                    blocks.push(DisplayBlock::UserInput(text));
+                }
             }
         }
         MessageRole::Assistant => {
@@ -259,6 +334,9 @@ fn append_message_blocks(blocks: &mut Vec<DisplayBlock>, message: &Message) {
                 };
                 match part.kind {
                     PartKind::Text | PartKind::Prose | PartKind::Image => prose.push(text),
+                    PartKind::ToolCall => {
+                        flush_assistant_prose(blocks, &mut prose);
+                    }
                     PartKind::Code => {
                         flush_assistant_prose(blocks, &mut prose);
                         blocks.push(DisplayBlock::CodeBlock {
@@ -277,7 +355,7 @@ fn append_message_blocks(blocks: &mut Vec<DisplayBlock>, message: &Message) {
                         flush_assistant_prose(blocks, &mut prose);
                         blocks.push(DisplayBlock::Error(text));
                     }
-                    PartKind::ToolCall | PartKind::ToolResult => {}
+                    PartKind::ToolResult => {}
                 }
             }
             flush_assistant_prose(blocks, &mut prose);
@@ -289,6 +367,66 @@ fn append_message_blocks(blocks: &mut Vec<DisplayBlock>, message: &Message) {
             }
         }
     }
+}
+
+fn append_tool_result_blocks(
+    blocks: &mut Vec<DisplayBlock>,
+    part: &lash::Part,
+    tool_calls: &HashMap<&str, ToolCallRecord>,
+    activity_state: &mut ActivityState,
+) {
+    if !matches!(part.kind, PartKind::ToolResult) {
+        return;
+    }
+
+    let Some(call_id) = part.tool_call_id.as_deref() else {
+        return;
+    };
+    let Some(record) = tool_calls.get(call_id) else {
+        return;
+    };
+
+    let plan_content = if record.success && record.tool == "update_plan" {
+        render_plan_content_from_args(&record.args)
+    } else {
+        None
+    };
+
+    for activity in activity_state.blocks_for_tool_call(
+        &record.tool,
+        record.args.clone(),
+        record.result.clone(),
+        record.success,
+        record.duration_ms,
+    ) {
+        append_activity_block(blocks, activity);
+    }
+
+    if let Some(content) = plan_content {
+        blocks.push(DisplayBlock::PlanContent(content));
+    }
+}
+
+fn append_activity_block(blocks: &mut Vec<DisplayBlock>, activity: ActivityBlock) {
+    if let Some(DisplayBlock::Activity(existing)) = blocks.last_mut()
+        && existing.kind == ActivityKind::Exploration
+        && activity.kind == ActivityKind::Exploration
+        && existing.status == ActivityStatus::Completed
+        && activity.status == ActivityStatus::Completed
+        && merge_exploration_activity(existing, activity.clone())
+    {
+        return;
+    }
+    if let Some(DisplayBlock::Activity(existing)) = blocks.last_mut()
+        && existing.kind == ActivityKind::Edit
+        && activity.kind == ActivityKind::Edit
+        && existing.status == ActivityStatus::Completed
+        && activity.status == ActivityStatus::Completed
+        && merge_edit_activity(existing, activity.clone())
+    {
+        return;
+    }
+    blocks.push(DisplayBlock::Activity(activity));
 }
 
 fn flush_assistant_prose(blocks: &mut Vec<DisplayBlock>, prose: &mut Vec<String>) {
@@ -309,6 +447,17 @@ fn rendered_message_text(message: &Message) -> String {
         .join("\n\n")
         .trim()
         .to_string()
+}
+
+pub(crate) fn latest_assistant_text_from_messages(messages: &[Message]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .find_map(|message| {
+            let text = rendered_message_text(message);
+            (!text.is_empty()).then_some(text)
+        })
 }
 
 fn rendered_part_text(kind: &PartKind, content: &str) -> Option<String> {
@@ -492,18 +641,18 @@ pub struct App {
 }
 
 impl App {
-    pub fn persisted_ui_state(&self) -> PersistedUiState {
-        PersistedUiState::from_app(self)
+    pub fn ui_resume_state(&self) -> UiResumeState {
+        UiResumeState::from_app(self)
     }
 
-    pub fn finish_turn_for_persistence_with_output(
+    pub fn finish_turn_for_resume_with_output(
         &mut self,
         final_assistant_text: Option<&str>,
-    ) -> PersistedUiState {
+    ) -> UiResumeState {
         if let Some(text) = final_assistant_text {
             self.commit_final_assistant_text(text);
         }
-        let persisted = self.persisted_ui_state();
+        let persisted = self.ui_resume_state();
         self.stop_turn();
         persisted
     }
@@ -629,27 +778,7 @@ impl App {
     }
 
     fn push_activity_block(&mut self, activity: ActivityBlock) {
-        if let Some(DisplayBlock::Activity(existing)) = self.blocks.last_mut()
-            && existing.kind == ActivityKind::Exploration
-            && activity.kind == ActivityKind::Exploration
-            && existing.status == ActivityStatus::Completed
-            && activity.status == ActivityStatus::Completed
-            && merge_exploration_activity(existing, activity.clone())
-        {
-            self.invalidate_height_cache();
-            return;
-        }
-        if let Some(DisplayBlock::Activity(existing)) = self.blocks.last_mut()
-            && existing.kind == ActivityKind::Edit
-            && activity.kind == ActivityKind::Edit
-            && existing.status == ActivityStatus::Completed
-            && activity.status == ActivityStatus::Completed
-            && merge_edit_activity(existing, activity.clone())
-        {
-            self.invalidate_height_cache();
-            return;
-        }
-        self.blocks.push(DisplayBlock::Activity(activity));
+        append_activity_block(&mut self.blocks, activity);
         self.invalidate_height_cache();
     }
 
@@ -2420,7 +2549,7 @@ mod tests {
     }
 
     #[test]
-    fn finish_turn_for_persistence_reconciles_authoritative_assistant_text() {
+    fn finish_turn_for_resume_reconciles_authoritative_assistant_text() {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
         app.handle_agent_event(AgentEvent::TextDelta {
@@ -2428,11 +2557,11 @@ mod tests {
         });
         app.stop_turn();
 
-        let persisted = app.finish_turn_for_persistence_with_output(Some(
+        let persisted = app.finish_turn_for_resume_with_output(Some(
             "I looked at the actual librarian prompt, the graph tool constraints.\n\n## What exists now",
         ));
 
-        let last_block = persisted
+        let last_block = app
             .blocks
             .iter()
             .rev()
@@ -2445,10 +2574,11 @@ mod tests {
             last_block,
             "I looked at the actual librarian prompt, the graph tool constraints.\n\n## What exists now"
         );
+        assert_eq!(persisted.live_assistant_text, None);
     }
 
     #[test]
-    fn finish_turn_for_persistence_does_not_append_shorter_authoritative_text() {
+    fn finish_turn_for_resume_does_not_append_shorter_authoritative_text() {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
         app.handle_agent_event(AgentEvent::TextDelta {
@@ -2456,9 +2586,9 @@ mod tests {
         });
         app.stop_turn();
 
-        let persisted = app.finish_turn_for_persistence_with_output(Some("Visible"));
+        let persisted = app.finish_turn_for_resume_with_output(Some("Visible"));
 
-        let last_block = persisted
+        let last_block = app
             .blocks
             .iter()
             .rev()
@@ -2468,6 +2598,7 @@ mod tests {
             })
             .expect("assistant block");
         assert_eq!(last_block, "Visible streamed text");
+        assert_eq!(persisted.live_assistant_text, None);
     }
 
     #[test]
@@ -2479,7 +2610,7 @@ mod tests {
             content: "Use this minimal set:\n\n- `code`\n- `feature`\n".into(),
         });
 
-        let _persisted = app.finish_turn_for_persistence_with_output(Some(final_text));
+        let _persisted = app.finish_turn_for_resume_with_output(Some(final_text));
 
         app.handle_agent_event(AgentEvent::TextDelta {
             content: "Yeah — **`feature` is nicer than `topic`** if you want the graph to stay product-shaped.\n\nMy take:\n\n- **`topic` is safer**".into(),
@@ -2560,7 +2691,7 @@ mod tests {
     }
 
     #[test]
-    fn finish_turn_for_persistence_preserves_streaming_output_snapshot() {
+    fn finish_turn_for_resume_preserves_streaming_output_snapshot() {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
         app.handle_agent_event(AgentEvent::Message {
@@ -2568,7 +2699,7 @@ mod tests {
             kind: "tool_output".into(),
         });
 
-        let persisted = app.finish_turn_for_persistence();
+        let persisted = app.finish_turn_for_resume_with_output(None);
 
         assert!(!app.running);
         assert!(app.streaming_output.is_empty());
@@ -2730,7 +2861,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_ui_state_omits_transient_live_turn() {
+    fn ui_resume_state_omits_transient_live_turn() {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
         app.set_status("retrying", Some("in 5s".into()), true);
@@ -2738,7 +2869,7 @@ mod tests {
             turn.has_visible_output = true;
         }
 
-        let persisted = serde_json::to_value(app.persisted_ui_state()).expect("serialize ui");
+        let persisted = serde_json::to_value(app.ui_resume_state()).expect("serialize ui");
         assert!(persisted.get("live_turn").is_none());
     }
 

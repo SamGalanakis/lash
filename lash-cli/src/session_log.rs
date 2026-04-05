@@ -3,13 +3,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+#[cfg(test)]
+use lash::ToolCallRecord;
 use lash::agent::Message;
 #[cfg(test)]
 use lash::agent::{MessageRole, PartKind};
 use lash::{Store, TokenUsage};
 
-use crate::app::{DisplayBlock, PersistedUiState, blocks_from_messages};
+#[cfg(test)]
+use crate::app::UiResumeState;
+use crate::app::{DisplayBlock, apply_ui_resume_state_to_blocks, blocks_from_transcript};
+use crate::ui_resume;
 
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
@@ -84,10 +89,6 @@ impl SessionLogger {
         })
     }
 
-    pub fn flush(&mut self) -> Result<()> {
-        Ok(())
-    }
-
     pub fn filename(&self) -> &str {
         &self.filename
     }
@@ -98,8 +99,11 @@ impl SessionLogger {
 
     pub fn clone_history_from(&mut self, source_filename: &str) -> Result<()> {
         let source = Store::open(&sessions_dir().join(source_filename))?;
-        self.store
-            .history_copy_from_store(&source, crate::ROOT_SESSION_ID, crate::ROOT_SESSION_ID);
+        self.store.transcript_copy_from_store(
+            &source,
+            crate::ROOT_SESSION_ID,
+            crate::ROOT_SESSION_ID,
+        );
         Ok(())
     }
 
@@ -237,28 +241,24 @@ pub fn list_recent_sessions(limit: usize) -> Vec<SessionInfo> {
 
 pub fn load_session(filename: &str) -> Result<LoadedSession> {
     let store = Store::open(&sessions_dir().join(filename))?;
-    let messages = load_messages(&store)?;
-    let ui_state = load_ui_state(&store).unwrap_or_default();
-    let PersistedUiState {
-        last_response_usage,
-        plugin_mode_indicators,
-        blocks: persisted_blocks,
-        streaming_output,
-        streaming_output_hidden,
-        streaming_output_partial,
-    } = ui_state;
-    let used_persisted_blocks = !persisted_blocks.is_empty();
-    let blocks = if used_persisted_blocks {
-        persisted_blocks
-    } else {
-        blocks_from_messages(&messages)
-    };
+    let transcript_entries = store.transcript_load(crate::ROOT_SESSION_ID);
+    let messages = lash::transcript_messages(&transcript_entries);
+    let tool_calls = lash::transcript_tool_calls(&transcript_entries);
+    let ui_state = ui_resume::load_ui_resume_state(&store);
+    let last_response_usage = ui_state.last_response_usage.clone();
+    let plugin_mode_indicators = ui_state.plugin_mode_indicators.clone();
+    let streaming_output = ui_state.streaming_output.clone();
+    let streaming_output_hidden = ui_state.streaming_output_hidden;
+    let streaming_output_partial = ui_state.streaming_output_partial.clone();
+    let mut blocks = blocks_from_transcript(&messages, &tool_calls);
+    apply_ui_resume_state_to_blocks(&mut blocks, &ui_state);
     tracing::debug!(
         session_file = filename,
         messages = messages.len(),
+        tool_calls = tool_calls.len(),
         blocks = blocks.len(),
         plugin_mode_indicators = plugin_mode_indicators.len(),
-        used_persisted_blocks,
+        transcript_entries = transcript_entries.len(),
         "loaded persisted session snapshot"
     );
 
@@ -271,20 +271,6 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
         streaming_output_hidden,
         streaming_output_partial,
     })
-}
-
-fn load_messages(store: &Store) -> Result<Vec<Message>> {
-    let state = store
-        .load_agent_state(crate::ROOT_SESSION_ID)
-        .ok_or_else(|| anyhow::anyhow!("Missing root session snapshot"))?;
-    serde_json::from_str(&state.messages_json).context("Invalid persisted message snapshot")
-}
-
-fn load_ui_state(store: &Store) -> Result<PersistedUiState> {
-    let state = store
-        .load_agent_state(crate::ROOT_SESSION_ID)
-        .ok_or_else(|| anyhow::anyhow!("Missing root session snapshot"))?;
-    serde_json::from_str(&state.ui_json).context("Invalid persisted UI snapshot")
 }
 
 #[cfg(test)]
@@ -300,50 +286,25 @@ mod tests {
         f();
     }
 
-    fn persist_root_snapshot(store: &Store, messages: Vec<Message>, ui_state: PersistedUiState) {
-        let messages_json = serde_json::to_string(&messages).expect("messages");
-        let ui_json = serde_json::to_string(&ui_state).expect("ui state");
+    fn persist_root_snapshot(
+        store: &Store,
+        messages: Vec<Message>,
+        tool_calls: Vec<ToolCallRecord>,
+        ui_state: UiResumeState,
+    ) {
         store.save_agent_state(lash::AgentState {
             agent_id: crate::ROOT_SESSION_ID.to_string(),
-            messages_json,
-            tool_calls_json: "[]".to_string(),
-            ui_json,
             iteration: 1,
-            config_json: "{}".to_string(),
+            config_json: ui_resume::with_ui_resume_state(serde_json::json!({}), &ui_state)
+                .to_string(),
             repl_snapshot: None,
             input_tokens: 0,
             output_tokens: 0,
             cached_input_tokens: 0,
             reasoning_tokens: 0,
         });
-        // Also write history_turns so the picker can find them.
-        let mut turn_index = 0i64;
-        for msg in &messages {
-            if msg.role == MessageRole::User {
-                let text = msg
-                    .parts
-                    .iter()
-                    .filter(|p| matches!(p.kind, PartKind::Text))
-                    .map(|p| p.content.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                store.history_upsert_turn(
-                    crate::ROOT_SESSION_ID,
-                    lash::store::HistoryTurnRecord {
-                        index: turn_index,
-                        user_message: text,
-                        prose: String::new(),
-                        code: String::new(),
-                        output: String::new(),
-                        error: None,
-                        tool_calls: Vec::new(),
-                        files_read: Vec::new(),
-                        files_written: Vec::new(),
-                    },
-                );
-                turn_index += 1;
-            }
-        }
+        let keyspaces = lash::semantic_transcript_keyspaces(&messages, &tool_calls);
+        store.transcript_replace_keyspaces(crate::ROOT_SESSION_ID, &keyspaces);
     }
 
     fn text_message(role: MessageRole, id: &str, content: &str) -> Message {
@@ -357,6 +318,23 @@ mod tests {
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
+                prune_state: lash::PruneState::Intact,
+            }],
+            origin: None,
+        }
+    }
+
+    fn tool_result_message(id: &str, call_id: &str, tool_name: &str) -> Message {
+        Message {
+            id: id.to_string(),
+            role: MessageRole::User,
+            parts: vec![lash::Part {
+                id: format!("{id}.p0"),
+                kind: PartKind::ToolResult,
+                content: String::new(),
+                attachment: None,
+                tool_call_id: Some(call_id.to_string()),
+                tool_name: Some(tool_name.to_string()),
                 prune_state: lash::PruneState::Intact,
             }],
             origin: None,
@@ -384,7 +362,8 @@ mod tests {
             persist_root_snapshot(
                 &store,
                 messages.clone(),
-                PersistedUiState {
+                Vec::new(),
+                UiResumeState {
                     last_response_usage: TokenUsage {
                         input_tokens: 12,
                         output_tokens: 7,
@@ -395,10 +374,10 @@ mod tests {
                         "plan_mode".to_string(),
                         "plan".to_string(),
                     )]),
-                    blocks: Vec::new(),
                     streaming_output: vec!["started git status --short".to_string()],
                     streaming_output_hidden: 2,
                     streaming_output_partial: "partial tool line".to_string(),
+                    ..UiResumeState::default()
                 },
             );
 
@@ -427,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn load_session_prefers_persisted_ui_blocks_for_activity_transcript() {
+    fn load_session_projects_activity_blocks_from_semantic_transcript() {
         with_temp_lash_home("lash-session-load-activity-blocks", || {
             let filename = new_session_filename();
             let path = sessions_dir().join(&filename);
@@ -442,38 +421,32 @@ mod tests {
             .unwrap();
             let messages = vec![
                 text_message(MessageRole::User, "m0", "inspect repo"),
-                text_message(MessageRole::Assistant, "m1", "Done"),
+                tool_result_message("m1", "call-shell", "exec_command"),
+                text_message(MessageRole::Assistant, "m2", "Done"),
             ];
-            persist_root_snapshot(
-                &store,
-                messages,
-                PersistedUiState {
-                    blocks: vec![
-                        DisplayBlock::UserInput("inspect repo".to_string()),
-                        DisplayBlock::Activity(crate::activity::ActivityBlock {
-                            kind: crate::activity::ActivityKind::ShellCommand,
-                            status: crate::activity::ActivityStatus::Completed,
-                            tool_name: "shell".to_string(),
-                            summary: "git status --short".to_string(),
-                            detail_lines: vec!["working tree clean".to_string()],
-                            duration_ms: 42,
-                            args: serde_json::json!({"command":"git status --short"}),
-                            result: serde_json::json!({"stdout":"", "stderr":""}),
-                            artifact: None,
-                            children: Vec::new(),
-                            extra: None,
-                        }),
-                        DisplayBlock::AssistantText("Done".to_string()),
-                    ],
-                    ..PersistedUiState::default()
-                },
-            );
+            let tool_calls = vec![ToolCallRecord {
+                call_id: Some("call-shell".to_string()),
+                tool: "exec_command".to_string(),
+                args: serde_json::json!({"cmd":"git status --short"}),
+                result: serde_json::json!({
+                    "stdout":"",
+                    "stderr":"",
+                    "exit_code":0
+                }),
+                success: true,
+                duration_ms: 42,
+            }];
+            persist_root_snapshot(&store, messages, tool_calls, UiResumeState::default());
 
             let loaded = load_session(&filename).unwrap();
             assert!(matches!(
                 loaded.blocks.get(1),
                 Some(DisplayBlock::Activity(activity))
                     if activity.summary == "git status --short"
+            ));
+            assert!(matches!(
+                loaded.blocks.get(2),
+                Some(DisplayBlock::AssistantText(text)) if text == "Done"
             ));
         });
     }
@@ -497,13 +470,7 @@ mod tests {
                 text_message(MessageRole::User, "m0", "Hi"),
                 text_message(MessageRole::Assistant, "m1", assistant),
             ];
-            persist_root_snapshot(
-                &store,
-                messages,
-                PersistedUiState {
-                    ..PersistedUiState::default()
-                },
-            );
+            persist_root_snapshot(&store, messages, Vec::new(), UiResumeState::default());
 
             let loaded = load_session(&filename).unwrap();
             assert!(matches!(
@@ -531,9 +498,8 @@ mod tests {
             persist_root_snapshot(
                 &parent_store,
                 vec![text_message(MessageRole::User, "m0", "hello there")],
-                PersistedUiState {
-                    ..PersistedUiState::default()
-                },
+                Vec::new(),
+                UiResumeState::default(),
             );
             child_store.save_session_meta(lash::SessionMeta {
                 session_id: "child".to_string(),
@@ -548,7 +514,8 @@ mod tests {
             persist_root_snapshot(
                 &child_store,
                 vec![text_message(MessageRole::User, "m0", "child prompt")],
-                PersistedUiState::default(),
+                Vec::new(),
+                UiResumeState::default(),
             );
 
             let sessions = list_recent_sessions(10);
@@ -560,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn clone_history_from_copies_history_turns() {
+    fn clone_history_from_copies_transcript_entries() {
         with_temp_lash_home("lash-session-log-clone", || {
             let source_filename = "source.db".to_string();
             let target_filename = "target.db".to_string();
@@ -576,19 +543,11 @@ mod tests {
                 "source".into(),
             )
             .unwrap();
-            source_store.history_upsert_turn(
-                crate::ROOT_SESSION_ID,
-                lash::store::HistoryTurnRecord {
-                    index: 0,
-                    user_message: "hello".into(),
-                    prose: "world".into(),
-                    code: String::new(),
-                    output: String::new(),
-                    error: None,
-                    tool_calls: Vec::new(),
-                    files_read: Vec::new(),
-                    files_written: Vec::new(),
-                },
+            persist_root_snapshot(
+                &source_store,
+                vec![text_message(MessageRole::User, "m0", "hello")],
+                Vec::new(),
+                UiResumeState::default(),
             );
 
             let mut target = SessionLogger::new(
@@ -601,10 +560,10 @@ mod tests {
             .unwrap();
             target.clone_history_from(&source_filename).unwrap();
 
-            let turns = target_store.history_export(crate::ROOT_SESSION_ID);
-            assert_eq!(turns.len(), 1);
-            assert_eq!(turns[0].user_message, "hello");
-            assert_eq!(turns[0].prose, "world");
+            let entries = target_store.transcript_load(crate::ROOT_SESSION_ID);
+            let messages = lash::transcript_messages(&entries);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].parts[0].content, "hello");
             let _ = (&mut source, &mut target);
         });
     }
