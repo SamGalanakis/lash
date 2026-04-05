@@ -143,6 +143,8 @@ pub async fn restore_agent_state(
     };
 
     if let Some(state) = resume_store.load_agent_state("root") {
+        let transcript_entries = resume_store.transcript_load("root");
+        *history = lash::transcript_messages(&transcript_entries);
         let config_value = serde_json::from_str::<serde_json::Value>(&state.config_json).ok();
         let resumed_live_snapshot = config_value
             .as_ref()
@@ -312,7 +314,7 @@ pub async fn restore_agent_state(
                 .and_then(|v| v.get("plugin_snapshot").cloned())
                 .and_then(|v| serde_json::from_value(v).ok());
             let last_prompt_usage = restored_last_prompt_usage(config_value.as_ref());
-            let tool_calls = serde_json::from_str(&state.tool_calls_json).unwrap_or_default();
+            let tool_calls = lash::transcript_tool_calls(&transcript_entries);
             app.last_prompt_usage = last_prompt_usage.clone();
             rt.set_state(AgentStateEnvelope {
                 agent_id: "root".to_string(),
@@ -342,19 +344,55 @@ pub async fn restore_agent_state(
 mod tests {
     use super::*;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
+    use crate::ui_resume;
 
     use lash::{
         MemoryModelCatalogStore, PluginHost, PluginSpecFactory, RuntimeHostConfig, RuntimeServices,
         ToolProvider,
     };
 
+    fn persist_transcript(
+        store: &Store,
+        messages: Vec<Message>,
+        ui_state: crate::app::UiResumeState,
+    ) {
+        let existing = store.load_agent_state(crate::ROOT_SESSION_ID);
+        let config = existing
+            .as_ref()
+            .and_then(|state| serde_json::from_str::<serde_json::Value>(&state.config_json).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        store.save_agent_state(lash::AgentState {
+            agent_id: crate::ROOT_SESSION_ID.to_string(),
+            iteration: existing.as_ref().map(|state| state.iteration).unwrap_or(0),
+            config_json: ui_resume::with_ui_resume_state(config, &ui_state).to_string(),
+            repl_snapshot: existing
+                .as_ref()
+                .and_then(|state| state.repl_snapshot.clone()),
+            input_tokens: existing
+                .as_ref()
+                .map(|state| state.input_tokens)
+                .unwrap_or(0),
+            output_tokens: existing
+                .as_ref()
+                .map(|state| state.output_tokens)
+                .unwrap_or(0),
+            cached_input_tokens: existing
+                .as_ref()
+                .map(|state| state.cached_input_tokens)
+                .unwrap_or(0),
+            reasoning_tokens: existing
+                .as_ref()
+                .map(|state| state.reasoning_tokens)
+                .unwrap_or(0),
+        });
+        let keyspaces = lash::semantic_transcript_keyspaces(&messages, &[]);
+        store.transcript_replace_keyspaces(crate::ROOT_SESSION_ID, &keyspaces);
+    }
+
     #[test]
     fn restored_token_usage_includes_reasoning_tokens() {
         let state = lash::store::AgentState {
             agent_id: "root".into(),
-            messages_json: "[]".into(),
-            tool_calls_json: "[]".into(),
-            ui_json: "{}".into(),
             iteration: 3,
             config_json: "{}".into(),
             repl_snapshot: None,
@@ -414,9 +452,6 @@ mod tests {
         .to_string();
         store.save_agent_state(lash::AgentState {
             agent_id: "root".to_string(),
-            messages_json: "[]".to_string(),
-            tool_calls_json: "[]".to_string(),
-            ui_json: "{}".to_string(),
             iteration: 7,
             config_json,
             repl_snapshot: None,
@@ -425,6 +460,7 @@ mod tests {
             cached_input_tokens: 80,
             reasoning_tokens: 55,
         });
+        persist_transcript(&store, Vec::new(), crate::app::UiResumeState::default());
 
         let provider = Provider::OpenAiGeneric {
             api_key: "test-key".into(),
@@ -557,9 +593,6 @@ mod tests {
         .to_string();
         store.save_agent_state(lash::AgentState {
             agent_id: "root".to_string(),
-            messages_json: "[]".to_string(),
-            tool_calls_json: "[]".to_string(),
-            ui_json: "{}".to_string(),
             iteration: 2,
             config_json,
             repl_snapshot: None,
@@ -568,6 +601,24 @@ mod tests {
             cached_input_tokens: 0,
             reasoning_tokens: 0,
         });
+        persist_transcript(
+            &store,
+            vec![Message {
+                id: "m0".into(),
+                role: MessageRole::User,
+                parts: vec![Part {
+                    id: "m0.p0".into(),
+                    kind: PartKind::Text,
+                    content: "jsonl replay message".into(),
+                    attachment: None,
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: PruneState::Intact,
+                }],
+                origin: None,
+            }],
+            crate::app::UiResumeState::default(),
+        );
 
         let provider = Provider::OpenAiGeneric {
             api_key: "test-key".into(),
@@ -701,20 +752,6 @@ mod tests {
             }],
             origin: None,
         }];
-        let messages_json = serde_json::to_string(&messages).expect("messages");
-        let ui_json = serde_json::json!({
-            "last_response_usage": {
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "cached_input_tokens": 0,
-                "reasoning_tokens": 0
-            },
-            "plugin_mode_indicators": {},
-            "streaming_output": ["started git status --short"],
-            "streaming_output_hidden": 1,
-            "streaming_output_partial": "partial"
-        })
-        .to_string();
         let config_json = serde_json::json!({
             "manifest": {
                 "execution_mode": "standard"
@@ -723,9 +760,6 @@ mod tests {
         .to_string();
         store.save_agent_state(lash::AgentState {
             agent_id: crate::ROOT_SESSION_ID.to_string(),
-            messages_json,
-            tool_calls_json: "[]".to_string(),
-            ui_json,
             iteration: 1,
             config_json,
             repl_snapshot: None,
@@ -734,6 +768,16 @@ mod tests {
             cached_input_tokens: 0,
             reasoning_tokens: 0,
         });
+        persist_transcript(
+            &store,
+            messages,
+            crate::app::UiResumeState {
+                streaming_output: vec!["started git status --short".to_string()],
+                streaming_output_hidden: 1,
+                streaming_output_partial: "partial".to_string(),
+                ..crate::app::UiResumeState::default()
+            },
+        );
 
         let provider = Provider::OpenAiGeneric {
             api_key: "test-key".into(),

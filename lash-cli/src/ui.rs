@@ -29,6 +29,15 @@ const PROMPT_HORIZONTAL_PADDING: u16 = 1;
 const MIN_HISTORY_HEIGHT: u16 = 3;
 const MAX_INPUT_HEIGHT: u16 = 20;
 const EXPLORATION_DETAIL_MAX_ROWS: usize = 3;
+const SCROLL_INDICATOR_HIDE_TAIL_ROWS: usize = 2;
+const SCROLL_INDICATOR_MIN_HEIGHT: usize = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScrollIndicator {
+    x: u16,
+    y: u16,
+    height: u16,
+}
 
 fn padded_content_width(frame_width: u16, horizontal_padding: u16) -> usize {
     frame_width.saturating_sub(horizontal_padding.saturating_mul(2)) as usize
@@ -432,6 +441,99 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
         .scroll((skip_lines as u16, 0));
 
     frame.render_widget(paragraph, area);
+
+    if let Some(indicator) = history_scroll_indicator(app, area) {
+        render_history_scroll_indicator(frame, indicator);
+    }
+}
+
+fn history_scroll_indicator(app: &App, area: Rect) -> Option<ScrollIndicator> {
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
+
+    let viewport_height = area.height as usize;
+    let block_height = app.height_cache_snapshot().last().copied().unwrap_or(0);
+    let total_content_height = block_height + app.streaming_output_height();
+    let max_scroll = total_content_height.saturating_sub(viewport_height);
+    if max_scroll == 0 {
+        return None;
+    }
+
+    let scroll_offset = app.scroll_offset.min(max_scroll);
+    if max_scroll.saturating_sub(scroll_offset) <= SCROLL_INDICATOR_HIDE_TAIL_ROWS {
+        return None;
+    }
+
+    let min_height = if viewport_height >= 4 {
+        SCROLL_INDICATOR_MIN_HEIGHT
+    } else {
+        1
+    };
+    let thumb_height = (viewport_height * viewport_height).div_ceil(total_content_height);
+    let thumb_height = thumb_height.clamp(min_height, viewport_height);
+    let max_top = viewport_height.saturating_sub(thumb_height);
+    let top = if max_top == 0 {
+        0
+    } else {
+        scroll_offset * max_top / max_scroll
+    };
+
+    Some(ScrollIndicator {
+        x: area.right().saturating_sub(1),
+        y: area.y + top as u16,
+        height: thumb_height as u16,
+    })
+}
+
+fn render_history_scroll_indicator(frame: &mut Frame, indicator: ScrollIndicator) {
+    let style = theme::scroll_indicator();
+    match indicator.height {
+        0 => {}
+        1 => {
+            if let Some(cell) = frame.buffer_mut().cell_mut((indicator.x, indicator.y)) {
+                cell.set_symbol("█");
+                cell.set_style(style);
+            }
+        }
+        2 => {
+            if let Some(cell) = frame.buffer_mut().cell_mut((indicator.x, indicator.y)) {
+                cell.set_symbol("▄");
+                cell.set_style(style);
+            }
+            if let Some(cell) = frame
+                .buffer_mut()
+                .cell_mut((indicator.x, indicator.y.saturating_add(1)))
+            {
+                cell.set_symbol("▀");
+                cell.set_style(style);
+            }
+        }
+        _ => {
+            if let Some(cell) = frame.buffer_mut().cell_mut((indicator.x, indicator.y)) {
+                cell.set_symbol("▄");
+                cell.set_style(style);
+            }
+            for row in 1..indicator.height.saturating_sub(1) {
+                if let Some(cell) = frame
+                    .buffer_mut()
+                    .cell_mut((indicator.x, indicator.y.saturating_add(row)))
+                {
+                    cell.set_symbol("█");
+                    cell.set_style(style);
+                }
+            }
+            if let Some(cell) = frame.buffer_mut().cell_mut((
+                indicator.x,
+                indicator
+                    .y
+                    .saturating_add(indicator.height.saturating_sub(1)),
+            )) {
+                cell.set_symbol("▀");
+                cell.set_style(style);
+            }
+        }
+    }
 }
 
 /// Read-only version of find_visible_block that uses the pre-computed height cache.
@@ -1250,9 +1352,8 @@ fn render_activity_block_with_lane<'a>(
         }
         if activity.kind == ActivityKind::Delegate && !activity.children.is_empty() {
             let children = &activity.children;
-            let last_idx = children.len().saturating_sub(1);
-            for (i, child) in children.iter().enumerate() {
-                let connector = if i == last_idx { "  " } else { "  " };
+            for child in children {
+                let connector = "  ";
                 let connector_prefix = format!("{}{}", lane.artifact_indent, connector);
                 let child_summary = if let Some(duration_text) =
                     crate::util::format_duration_ms_if_visible(child.duration_ms)
@@ -3358,6 +3459,86 @@ mod tests {
     }
 
     #[test]
+    fn history_scroll_indicator_hides_when_near_bottom() {
+        let mut app = App::new("model".into(), "session".into());
+        app.blocks.clear();
+        for idx in 0..18 {
+            app.blocks
+                .push(DisplayBlock::AssistantText(format!("line {idx}")));
+        }
+
+        let width = 24usize;
+        let viewport_height = 6usize;
+        app.ensure_height_cache_pub(width, viewport_height);
+        let max_scroll = app
+            .total_content_height(width, viewport_height)
+            .saturating_sub(viewport_height);
+
+        app.scroll_offset = max_scroll.saturating_sub(SCROLL_INDICATOR_HIDE_TAIL_ROWS);
+        assert!(
+            history_scroll_indicator(&app, Rect::new(0, 0, width as u16, viewport_height as u16))
+                .is_none()
+        );
+
+        app.scroll_offset = max_scroll.saturating_sub(SCROLL_INDICATOR_HIDE_TAIL_ROWS + 1);
+        let indicator =
+            history_scroll_indicator(&app, Rect::new(0, 0, width as u16, viewport_height as u16))
+                .expect("indicator");
+        assert_eq!(indicator.x, width as u16 - 1);
+        assert!(indicator.height >= 2);
+    }
+
+    #[test]
+    fn draw_history_renders_scroll_indicator_pill_on_right_edge() {
+        let backend = TestBackend::new(24, 6);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut app = App::new("model".into(), "session".into());
+        app.blocks.clear();
+        for idx in 0..18 {
+            app.blocks
+                .push(DisplayBlock::AssistantText(format!("line {idx}")));
+        }
+
+        let width = 24usize;
+        let viewport_height = 6usize;
+        app.ensure_height_cache_pub(width, viewport_height);
+        let max_scroll = app
+            .total_content_height(width, viewport_height)
+            .saturating_sub(viewport_height);
+        app.scroll_offset = max_scroll / 2;
+
+        terminal
+            .draw(|frame| draw_history(frame, &app, Rect::new(0, 0, 24, 6)))
+            .expect("draw history");
+
+        let symbols: Vec<(u16, String, ratatui::style::Color)> = (0..6u16)
+            .map(|y| {
+                let cell = terminal
+                    .backend()
+                    .buffer()
+                    .cell((23, y))
+                    .expect("indicator cell");
+                (y, cell.symbol().to_string(), cell.fg)
+            })
+            .filter(|(_, symbol, _)| matches!(symbol.as_str(), "▄" | "█" | "▀"))
+            .collect();
+
+        assert!(!symbols.is_empty(), "expected scroll indicator glyphs");
+        assert_eq!(
+            symbols.first().map(|(_, symbol, _)| symbol.as_str()),
+            Some("▄")
+        );
+        assert_eq!(
+            symbols.last().map(|(_, symbol, _)| symbol.as_str()),
+            Some("▀")
+        );
+        assert!(
+            symbols.iter().all(|(_, _, fg)| *fg == theme::CHALK_DIM),
+            "scroll indicator should use the pill color: {symbols:?}"
+        );
+    }
+
+    #[test]
     fn prompt_content_lines_wrap_long_freeform_input() {
         let prompt = prompt_state(
             "Answer the question.",
@@ -3885,6 +4066,40 @@ mod tests {
                 "history redraw left stale text in row {y}: {row:?}"
             );
         }
+    }
+
+    #[test]
+    fn full_draw_clears_stale_cell_modifiers_and_text() {
+        let backend = TestBackend::new(32, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| {
+                let cell = frame
+                    .buffer_mut()
+                    .cell_mut((20, 3))
+                    .expect("stale buffer cell");
+                cell.set_symbol("R");
+                cell.set_style(
+                    Style::default()
+                        .fg(theme::SODIUM)
+                        .add_modifier(Modifier::UNDERLINED),
+                );
+            })
+            .expect("seed stale frame");
+
+        let mut app = App::new("model".into(), "session".into());
+        app.blocks.clear();
+
+        terminal.draw(|frame| draw(frame, &app)).expect("draw app");
+
+        let cell = terminal
+            .backend()
+            .buffer()
+            .cell((20, 3))
+            .expect("redrawn cell");
+        assert_eq!(cell.symbol(), " ");
+        assert!(!cell.modifier.contains(Modifier::UNDERLINED));
     }
 
     #[test]

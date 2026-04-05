@@ -851,9 +851,6 @@ pub use tool_result_projection_builtin::{
 #[path = "plugin_builtin.rs"]
 mod builtin;
 
-#[path = "plugin_builtin/history.rs"]
-pub(crate) mod history;
-
 #[cfg(feature = "sqlite-store")]
 pub use builtin::{
     BuiltinPlanModePluginFactory, BuiltinPlanTrackerPluginFactory,

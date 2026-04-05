@@ -5,14 +5,14 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use lash::{DynamicStateSnapshot, ExecutionMode};
 
-use crate::app::PersistedUiState;
+use crate::app::UiResumeState;
 use crate::session_log::{self, SessionLogger};
 
 #[allow(clippy::too_many_arguments)]
 async fn persist_parent_root_snapshot(
     runtime: &mut lash::LashRuntime,
     store: &lash::Store,
-    ui_state: &PersistedUiState,
+    ui_state: &UiResumeState,
     dynamic_state: &DynamicStateSnapshot,
     provider: &lash::Provider,
     configured_model: &str,
@@ -546,8 +546,8 @@ pub fn spawn_in_new_terminal(exe: &Path, args: &[String]) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 pub async fn fork_current_session(
     runtime: Option<&mut lash::LashRuntime>,
-    logger: &mut SessionLogger,
-    ui_state: &PersistedUiState,
+    logger: &SessionLogger,
+    ui_state: &UiResumeState,
     provider: &lash::Provider,
     configured_model: &str,
     context_window: u64,
@@ -555,7 +555,6 @@ pub async fn fork_current_session(
     toolset_hash: &str,
     dynamic_state: &DynamicStateSnapshot,
 ) -> Result<(String, String)> {
-    logger.flush()?;
     if let Some(runtime) = runtime {
         persist_parent_root_snapshot(
             runtime,
@@ -593,9 +592,6 @@ pub async fn fork_current_session(
     child_logger.clone_history_from(logger.filename())?;
     child_store.save_agent_state(lash::AgentState {
         agent_id: crate::ROOT_SESSION_ID.to_string(),
-        messages_json: parent_state.messages_json.clone(),
-        tool_calls_json: parent_state.tool_calls_json.clone(),
-        ui_json: parent_state.ui_json.clone(),
         iteration: parent_state.iteration,
         config_json: parent_state.config_json.clone(),
         repl_snapshot: parent_state.repl_snapshot.clone(),
@@ -613,7 +609,6 @@ mod fork_tests {
     use super::*;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
     use lash::provider::{Provider, ProviderOptions};
-    use lash::store::HistoryTurnRecord;
     use std::collections::{BTreeMap, BTreeSet};
 
     fn dummy_provider() -> Provider {
@@ -642,7 +637,7 @@ mod fork_tests {
         let parent_filename = "parent.db".to_string();
         let parent_path = session_log::sessions_dir().join(&parent_filename);
         let parent_store = Arc::new(lash::Store::open(&parent_path).expect("parent store"));
-        let mut parent_logger = SessionLogger::new(
+        let parent_logger = SessionLogger::new(
             Arc::clone(&parent_store),
             parent_filename.clone(),
             "gpt-test",
@@ -652,9 +647,6 @@ mod fork_tests {
         .expect("parent logger");
         parent_store.save_agent_state(lash::AgentState {
             agent_id: crate::ROOT_SESSION_ID.to_string(),
-            messages_json: r#"[{"id":"u1","role":"user","parts":[{"id":"u1.p0","kind":"text","content":"hello","tool_call_id":null,"tool_name":null,"prune_state":"intact"}],"origin":null}]"#.to_string(),
-            tool_calls_json: "[]".to_string(),
-            ui_json: serde_json::to_string(&PersistedUiState::default()).expect("ui json"),
             iteration: 1,
             config_json: r#"{"task_state":{"kind":"live_resume","status":"running"}}"#.to_string(),
             repl_snapshot: None,
@@ -663,25 +655,27 @@ mod fork_tests {
             cached_input_tokens: 1,
             reasoning_tokens: 2,
         });
-        parent_store.history_upsert_turn(
-            crate::ROOT_SESSION_ID,
-            HistoryTurnRecord {
-                index: 0,
-                user_message: "hello".into(),
-                prose: "world".into(),
-                code: String::new(),
-                output: String::new(),
-                error: None,
-                tool_calls: Vec::new(),
-                files_read: Vec::new(),
-                files_written: Vec::new(),
-            },
-        );
+        let messages = vec![lash::Message {
+            id: "u1".to_string(),
+            role: lash::MessageRole::User,
+            parts: vec![lash::Part {
+                id: "u1.p0".to_string(),
+                kind: lash::PartKind::Text,
+                content: "hello".to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: lash::PruneState::Intact,
+            }],
+            origin: None,
+        }];
+        let keyspaces = lash::semantic_transcript_keyspaces(&messages, &[]);
+        parent_store.transcript_replace_keyspaces(crate::ROOT_SESSION_ID, &keyspaces);
 
         let (child_filename, _child_session_name) = fork_current_session(
             None,
-            &mut parent_logger,
-            &PersistedUiState::default(),
+            &parent_logger,
+            &UiResumeState::default(),
             &dummy_provider(),
             "gpt-test",
             1024,
@@ -703,14 +697,15 @@ mod fork_tests {
         let child_state = child_store
             .load_agent_state(crate::ROOT_SESSION_ID)
             .expect("child root state");
-        assert!(child_state.messages_json.contains("\"hello\""));
+        assert_eq!(child_state.iteration, 1);
         assert_eq!(
             child_state.config_json,
             r#"{"task_state":{"kind":"live_resume","status":"running"}}"#
         );
 
-        let child_turns = child_store.history_export(crate::ROOT_SESSION_ID);
-        assert_eq!(child_turns.len(), 1);
-        assert_eq!(child_turns[0].user_message, "hello");
+        let child_entries = child_store.transcript_load(crate::ROOT_SESSION_ID);
+        let child_messages = lash::transcript_messages(&child_entries);
+        assert_eq!(child_messages.len(), 1);
+        assert_eq!(child_messages[0].parts[0].content, "hello");
     }
 }

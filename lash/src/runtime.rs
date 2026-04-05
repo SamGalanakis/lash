@@ -704,7 +704,7 @@ impl SessionManager for RuntimeSessionManager {
             if let Some(source_agent) = source_agent
                 && source_agent != agent_id
             {
-                store.history_copy(source_agent, &agent_id).await;
+                store.transcript_copy(source_agent, &agent_id).await;
             }
         }
         self.registry
@@ -1541,9 +1541,10 @@ impl LashRuntime {
                 store
                     .save_turn_checkpoint(crate::store::TurnCheckpoint {
                         agent_state: persisted_agent_state(&finalized.turn.state),
-                        latest_history_turn: Some(crate::plugin::history::final_history_record(
-                            &finalized.turn,
-                        )),
+                        transcript_keyspaces: crate::store::semantic_transcript_keyspaces(
+                            &finalized.turn.state.messages,
+                            &finalized.turn.state.tool_calls,
+                        ),
                     })
                     .await;
             }
@@ -1567,10 +1568,6 @@ fn persisted_agent_state(state: &AgentStateEnvelope) -> crate::store::AgentState
     .to_string();
     crate::store::AgentState {
         agent_id: state.agent_id.clone(),
-        messages_json: serde_json::to_string(&state.messages).unwrap_or_else(|_| "[]".to_string()),
-        tool_calls_json: serde_json::to_string(&state.tool_calls)
-            .unwrap_or_else(|_| "[]".to_string()),
-        ui_json: "{}".to_string(),
         iteration: state.iteration as i64,
         config_json,
         repl_snapshot: state.repl_snapshot.clone(),
@@ -3084,7 +3081,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingStore {
-        turns: Mutex<HashMap<String, Vec<crate::store::HistoryTurnRecord>>>,
+        transcripts: Mutex<HashMap<String, Vec<crate::store::TranscriptEntry>>>,
     }
 
     #[async_trait::async_trait]
@@ -3103,19 +3100,15 @@ mod tests {
             None
         }
 
-        async fn history_upsert_turn(&self, agent_id: &str, turn: crate::store::HistoryTurnRecord) {
-            let mut turns = self.turns.lock().expect("lock store");
-            let entries = turns.entry(agent_id.to_string()).or_default();
-            if let Some(existing) = entries.iter_mut().find(|entry| entry.index == turn.index) {
-                *existing = turn;
-            } else {
-                entries.push(turn);
-                entries.sort_by_key(|entry| entry.index);
-            }
+        async fn transcript_clear(&self, agent_id: &str) {
+            self.transcripts
+                .lock()
+                .expect("lock store")
+                .remove(agent_id);
         }
 
-        async fn history_export(&self, agent_id: &str) -> Vec<crate::store::HistoryTurnRecord> {
-            self.turns
+        async fn transcript_load(&self, agent_id: &str) -> Vec<crate::store::TranscriptEntry> {
+            self.transcripts
                 .lock()
                 .expect("lock store")
                 .get(agent_id)
@@ -3123,15 +3116,31 @@ mod tests {
                 .unwrap_or_default()
         }
 
-        async fn history_replace(
+        async fn transcript_replace_keyspaces(
             &self,
             agent_id: &str,
-            turns: Vec<crate::store::HistoryTurnRecord>,
+            keyspaces: Vec<crate::store::TranscriptKeyspace>,
         ) {
-            self.turns
+            let grouped = keyspaces
+                .into_iter()
+                .flat_map(|keyspace| {
+                    keyspace
+                        .entries
+                        .into_iter()
+                        .map(move |entry| crate::store::TranscriptEntry {
+                            keyspace: keyspace.keyspace.clone(),
+                            stable_key: entry.stable_key,
+                            sort_index: entry.sort_index,
+                            message_role: entry.message_role,
+                            payload_json: entry.payload_json,
+                            search_text: entry.search_text,
+                        })
+                })
+                .collect();
+            self.transcripts
                 .lock()
                 .expect("lock store")
-                .insert(agent_id.to_string(), turns);
+                .insert(agent_id.to_string(), grouped);
         }
 
         async fn save_session_meta(&self, _meta: crate::store::SessionMeta) {}
@@ -5145,16 +5154,18 @@ mod tests {
             .await
             .expect("turn");
 
-        let items = store.history_export("root").await;
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].index, 1);
-        assert_eq!(items[0].user_message, "where did this go?");
-        assert_eq!(items[0].prose, "Stored answer");
+        let items = store.transcript_load("root").await;
+        let messages = crate::store::transcript_messages(&items);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, MessageRole::User);
+        assert_eq!(messages[0].parts[0].content, "where did this go?");
+        assert_eq!(messages[1].role, MessageRole::Assistant);
+        assert_eq!(messages[1].parts[0].content, "Stored answer");
     }
 
     #[cfg(feature = "sqlite-store")]
     #[tokio::test]
-    async fn completed_turns_are_persisted_for_history_export() {
+    async fn completed_turns_are_persisted_for_transcript_export() {
         let transport = MockTransport::new(vec![MockCall {
             stream_events: vec![LlmStreamEvent::Delta("Stored answer".to_string())],
             response: Ok(LlmResponse {
@@ -5201,11 +5212,11 @@ mod tests {
             .await
             .expect("turn");
 
-        let items = store.history_export("root");
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].index, 1);
-        assert_eq!(items[0].user_message, "where did this go?");
-        assert_eq!(items[0].prose, "Stored answer");
+        let items = store.transcript_load("root");
+        let messages = crate::store::transcript_messages(&items);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].parts[0].content, "where did this go?");
+        assert_eq!(messages[1].parts[0].content, "Stored answer");
     }
 
     #[cfg(feature = "sqlite-store")]

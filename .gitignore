@@ -4,6 +4,7 @@ target-bookworm/
 target-bullseye/
 *.pdb
 .envrc
+.direnv/
 .env
 .env.*
 !.env.example

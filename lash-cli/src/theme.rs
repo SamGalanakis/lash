@@ -160,12 +160,12 @@ pub fn status_separator() -> Style {
 
 /// Status bar and help bar background
 pub fn bar_bg() -> Style {
-    Style::default().bg(FORM_RAISED)
+    Style::reset().bg(FORM_RAISED)
 }
 
 /// Bottom turn-status strip background.
 pub fn turn_status_bar() -> Style {
-    Style::default().bg(FORM_RAISED)
+    Style::reset().bg(FORM_RAISED)
 }
 
 /// Animated LASH wordmark letters in the turn-status strip.
@@ -190,7 +190,12 @@ pub fn turn_status_elapsed() -> Style {
 
 /// History area background
 pub fn history_bg() -> Style {
-    Style::default().bg(FORM)
+    Style::reset().bg(FORM)
+}
+
+/// History scroll indicator pill.
+pub fn scroll_indicator() -> Style {
+    Style::reset().fg(CHALK_DIM).bg(FORM)
 }
 
 /// System message text (e.g. /help output)

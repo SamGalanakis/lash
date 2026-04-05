@@ -25,6 +25,7 @@ mod test_support;
 mod text_display;
 mod theme;
 mod ui;
+mod ui_resume;
 mod update;
 mod util;
 

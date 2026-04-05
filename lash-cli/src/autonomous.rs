@@ -7,7 +7,7 @@ use lash::*;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::{PersistedUiState, PreparedTurn};
+use crate::app::{PreparedTurn, UiResumeState};
 use crate::input_items::build_items_from_editor_input;
 use crate::{hash12, latest_user_prompt_hash, persist_root_agent_state};
 use crate::{plugin_surface, util};
@@ -48,7 +48,7 @@ async fn persist_autonomous_runtime_state(
     let execution_mode = state.policy.execution_mode;
     let context_strategy = state.policy.context_strategy;
     let prompt_hash = latest_user_prompt_hash(&state.messages);
-    let ui_state = PersistedUiState::default();
+    let ui_state = UiResumeState::default();
     persist_root_agent_state(
         &persistence.store,
         &mut state,
