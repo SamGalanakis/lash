@@ -1015,19 +1015,6 @@ fn prompt_section_label(text: &str) -> Line<'static> {
 }
 
 fn styled_question_chunk(chunk: &str) -> Vec<Span<'static>> {
-    if let Some(rest) = chunk.strip_prefix("Question · ") {
-        return vec![
-            Span::styled(
-                "Question",
-                Style::default()
-                    .fg(theme::SODIUM)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" · ", Style::default().fg(theme::ASH_MID)),
-            Span::styled(rest.to_string(), theme::assistant_text()),
-        ];
-    }
-
     if let Some(rest) = chunk.strip_prefix("Answer · ") {
         return vec![
             Span::styled(
@@ -3918,10 +3905,9 @@ mod tests {
             tool_name: "ask".into(),
             summary: "Question".into(),
             detail_lines: vec![
-                "Question · Which environment should I use?".into(),
+                "Which environment should I use?".into(),
                 "1. staging".into(),
                 "2. prod".into(),
-                "Answer · staging".into(),
             ],
             duration_ms: 0,
             args: serde_json::Value::Null,
@@ -3945,11 +3931,7 @@ mod tests {
                 .any(|line| line.contains("Which environment should I use?"))
         );
         assert!(rendered.iter().any(|line| line.contains("1. staging")));
-        assert!(
-            rendered
-                .iter()
-                .any(|line| line.contains("Answer · staging"))
-        );
+        assert!(!rendered.iter().any(|line| line.contains("Answer ·")));
         assert_eq!(
             rendered.last().map(String::as_str),
             Some("└──────────────────────────────────────────────┘")
