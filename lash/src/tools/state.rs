@@ -182,7 +182,9 @@ pub(crate) fn repl_state_prompt_contributions(context: &PromptContext) -> Vec<Pr
     }
 
     vec![PromptContribution::guidance(
-        "### Tool Discovery\nUse `search_tools` to inspect the additional available tools that are omitted from Available Tools for brevity. With no query, it browses the full active tool catalog; use focused queries when you know the kind of tool you need.",
+        "tool_discovery",
+        "Tool Discovery",
+        "Use `search_tools` to inspect the additional available tools that are omitted from Available Tools for brevity. With no query, it browses the full active tool catalog; use focused queries when you know the kind of tool you need.",
     )]
 }
 
@@ -300,14 +302,14 @@ mod tests {
     #[async_trait::async_trait]
     impl crate::SessionManager for MockSessionManager {
         async fn snapshot_current(&self) -> Result<crate::SessionSnapshot, crate::PluginError> {
-            Ok(crate::AgentStateEnvelope::default())
+            Ok(crate::SessionStateEnvelope::default())
         }
 
         async fn snapshot_session(
             &self,
             _session_id: &str,
         ) -> Result<crate::SessionSnapshot, crate::PluginError> {
-            Ok(crate::AgentStateEnvelope::default())
+            Ok(crate::SessionStateEnvelope::default())
         }
 
         async fn tool_catalog(
@@ -322,7 +324,7 @@ mod tests {
             request: crate::SessionCreateRequest,
         ) -> Result<crate::SessionHandle, crate::PluginError> {
             Ok(crate::SessionHandle {
-                session_id: request.agent_id.unwrap_or_else(|| "child".to_string()),
+                session_id: request.session_id.unwrap_or_else(|| "child".to_string()),
                 parent_session_id: request.parent_session_id,
                 policy: crate::SessionPolicy {
                     provider: crate::Provider::OpenAiGeneric {
@@ -371,7 +373,7 @@ mod tests {
             _turn_id: &str,
         ) -> Result<crate::AssembledTurn, crate::PluginError> {
             Ok(crate::AssembledTurn {
-                state: crate::AgentStateEnvelope::default(),
+                state: crate::SessionStateEnvelope::default(),
                 status: crate::TurnStatus::Completed,
                 assistant_output: crate::AssistantOutput {
                     safe_text: String::new(),

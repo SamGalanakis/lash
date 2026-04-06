@@ -1,6 +1,6 @@
 pub(crate) mod context;
-pub use lash_sansio::agent::message;
-pub use lash_sansio::agent::prompt;
+pub use lash_sansio::session_model::message;
+pub use lash_sansio::session_model::prompt;
 
 use tokio::sync::mpsc;
 
@@ -14,10 +14,10 @@ use crate::plugin::PromptContribution;
 use crate::provider::Provider;
 use crate::session::Session;
 
-pub use lash_sansio::agent::{
-    AgentEvent, DefaultPromptRenderer, DurableTurnSnapshot, ErrorEnvelope, LLM_MAX_RETRIES,
-    LLM_RETRY_DELAYS, Message, MessageRole, Part, PartKind, PromptOverrideMode, PromptRenderer,
-    PromptSectionName, PromptSectionOverride, PruneState, TokenUsage, TurnTerminationPolicyState,
+pub use lash_sansio::session_model::{
+    DefaultPromptRenderer, DurableTurnSnapshot, ErrorEnvelope, LLM_MAX_RETRIES, LLM_RETRY_DELAYS,
+    Message, MessageRole, Part, PartKind, PromptOverrideMode, PromptRenderer, PromptSectionName,
+    PromptSectionOverride, PruneState, SessionEvent, TokenUsage, TurnTerminationPolicyState,
     append_line_segment, build_assistant_parts, default_prompt_renderer,
     format_tool_result_content, is_malformed_assistant_output, make_error_envelope,
     make_error_event, parse_fence_line, render_prompt, render_transcript_prompt,
@@ -25,13 +25,13 @@ pub use lash_sansio::agent::{
 };
 
 /// Send an event to the channel if it's still open.
-pub(crate) async fn send_event(tx: &mpsc::Sender<AgentEvent>, event: AgentEvent) {
+pub(crate) async fn send_event(tx: &mpsc::Sender<SessionEvent>, event: SessionEvent) {
     if !tx.is_closed() {
         let _ = tx.send(event).await;
     }
 }
 
-/// Resolved session policy for a running agent/session.
+/// Resolved session policy for a running session.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionPolicy {
     pub model: String,
@@ -117,19 +117,16 @@ pub(crate) fn build_execution_preamble(
         (String::new(), 0)
     };
     let tool_specs = if matches!(mode, ExecutionMode::Standard) {
-        lash_sansio::agent::model_tool_specs(&enabled_tools)
+        lash_sansio::session_model::model_tool_specs(&enabled_tools)
     } else {
         Vec::new()
     };
     let tool_names: Vec<String> = enabled_tools.iter().map(|t| t.name.clone()).collect();
-    let can_write = tool_names.iter().any(|name| name == "apply_patch");
     let prompt = PromptContext {
         mode,
         tool_list,
         tool_names,
         omitted_tool_count,
-        can_write,
-        include_soul: true,
         contributions: Vec::new(),
     };
 

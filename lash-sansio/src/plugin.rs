@@ -25,17 +25,51 @@ impl PluginMessage {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptContribution {
     pub section: crate::PromptSectionName,
+    pub block: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(default)]
     pub priority: i32,
     pub content: String,
 }
 
 impl PromptContribution {
-    pub fn guidance(content: impl Into<String>) -> Self {
+    pub fn block(
+        section: crate::PromptSectionName,
+        block: impl Into<String>,
+        title: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        let title = title.into();
+        let title = (!title.trim().is_empty()).then_some(title);
         Self {
-            section: crate::PromptSectionName::Guidance,
+            section,
+            block: block.into(),
+            title,
             priority: 0,
             content: content.into(),
+        }
+    }
+
+    pub fn guidance(
+        block: impl Into<String>,
+        title: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            section: crate::PromptSectionName::Guidance,
+            ..Self::block(crate::PromptSectionName::Guidance, block, title, content)
+        }
+    }
+
+    pub fn environment(
+        block: impl Into<String>,
+        title: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            section: crate::PromptSectionName::Environment,
+            ..Self::block(crate::PromptSectionName::Environment, block, title, content)
         }
     }
 }

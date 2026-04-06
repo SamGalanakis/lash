@@ -292,7 +292,7 @@ mod tests {
 
         assert_eq!(lines[0], "■ Intro line.");
         assert!(lines.iter().any(|line| line == "  Heading"));
-        assert!(lines.iter().any(|line| line == ""));
+        assert!(lines.iter().any(String::is_empty));
         assert!(lines.iter().any(|line| line.contains("• item one")));
     }
 }

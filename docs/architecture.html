@@ -544,35 +544,36 @@
       <header class="hero">
         <div>
           <div class="eyebrow">lash architecture dossier</div>
-          <h1>Transcript<span class="slash">/</span>Core</h1>
+          <h1>Protocol<span class="slash">/</span>Host</h1>
           <p>
-            lash is a Rust terminal coding agent built as a layered system: a sans-IO turn machine in
-            <code>lash-sansio</code>, an async host runtime in <code>lash</code>, a full-screen TUI in
-            <code>lash-cli</code>, and a small local execution language in <code>lashlang</code>.
-            The current storage model is intentionally centralized: SQLite persists one canonical semantic
-            transcript, and the CLI derives visible history from that transcript instead of saving a second UI transcript.
+            lash is a Rust coding-agent workspace with a stricter boundary than before: <code>lash-sansio</code>
+            owns the protocol and turn machine, <code>lash</code> owns the async runtime and plugins,
+            <code>lash-ui</code> owns host-level UI extensions, <code>lash-cli</code> is one terminal host,
+            and <code>lashlang</code> provides the local REPL language. The important current rule is that
+            core emits host-neutral events and effects; slash commands, shortcuts, queued follow-up turns,
+            and terminal affordances live above that boundary.
           </p>
         </div>
         <div class="hero-meta">
           <div class="meta-card">
             <div class="micro-label">Current shape</div>
-            <strong>5 crates · 98 Rust source files</strong>
-            <span>Workspace members are <code>lash-sansio</code>, <code>lash</code>, <code>lash-cli</code>, <code>lashlang</code>, and <code>xtask</code>.</span>
+            <strong>6 crates · 106 Rust source files</strong>
+            <span>Workspace members are <code>lash-sansio</code>, <code>lash</code>, <code>lash-ui</code>, <code>lash-cli</code>, <code>lashlang</code>, and <code>xtask</code>.</span>
           </div>
           <div class="meta-card">
             <div class="micro-label">Session truth</div>
             <strong>SQLite transcript schema v3</strong>
-            <span><code>transcript_entries</code> stores only semantic rows: <code>message</code> and <code>tool_call</code>. UI history is rebuilt from those rows.</span>
+            <span><code>transcript_entries</code> stores semantic conversation state only: <code>message</code> and <code>tool_call</code>. Host/UI effects are derived, not canonical.</span>
           </div>
           <div class="meta-card">
             <div class="micro-label">Execution model</div>
-            <strong>Standard + REPL runtimes</strong>
-            <span><code>standard</code> consumes provider-native tool calls; <code>repl</code> executes <code>lashlang</code> programs locally.</span>
+            <strong>Standard default + REPL alternate</strong>
+            <span><code>standard</code> uses provider-native tool calls; <code>repl</code> executes <code>lashlang</code> programs locally through the same runtime shell.</span>
           </div>
           <div class="meta-card">
             <div class="micro-label">Hot files</div>
             <strong><code>runtime.rs</code> · <code>ui.rs</code> · <code>app.rs</code></strong>
-            <span>The largest active hotspots are <code>lash/src/runtime.rs</code> (5,349 LOC), <code>lash-cli/src/ui.rs</code> (4,755), and <code>lash-cli/src/app.rs</code> (3,985).</span>
+            <span>The largest active hotspots are <code>lash/src/runtime.rs</code> (5,404 LOC), <code>lash-cli/src/ui.rs</code> (4,994), <code>lash-cli/src/app.rs</code> (4,221), and <code>lash-cli/src/interactive.rs</code> (3,011).</span>
           </div>
         </div>
       </header>
@@ -590,42 +591,43 @@
       <section class="tab-panel active" id="tab-overview">
         <div class="section-head">
           <h2>Overview</h2>
-          <p>The current system shape, scale, and the architectural bias that matters most: policy in the turn machine, effects in the host, and transcript truth in SQLite.</p>
+          <p>The current system shape, scale, and the architectural bias that matters most: protocol in the sans-IO core, orchestration in the runtime, UI affordances in a separate host layer, and semantic transcript truth in SQLite.</p>
         </div>
 
         <div class="kpi-grid">
           <div class="kpi"><div class="kpi-label">Language</div><div class="kpi-value">Rust 2024</div><div class="kpi-note"><span>All primary crates use edition 2024.</span></div></div>
-          <div class="kpi"><div class="kpi-label">Core source</div><div class="kpi-value">65.4k LOC</div><div class="kpi-note"><span>Across <code>lash</code>, <code>lash-cli</code>, <code>lash-sansio</code>, and <code>lashlang</code>.</span></div></div>
-          <div class="kpi"><div class="kpi-label">Transcript</div><div class="kpi-value">2 keyspaces</div><div class="kpi-note"><span><code>message</code> and <code>tool_call</code> are the canonical persisted conversation surface.</span></div></div>
-          <div class="kpi"><div class="kpi-label">Core loop</div><div class="kpi-value">Sans-IO</div><div class="kpi-note"><span><code>TurnMachine</code> emits <code>Effect</code>; the host fulfills them.</span></div></div>
+          <div class="kpi"><div class="kpi-label">Core source</div><div class="kpi-value">67.3k LOC</div><div class="kpi-note"><span>Across <code>lash-sansio</code>, <code>lash</code>, <code>lash-ui</code>, <code>lash-cli</code>, <code>lashlang</code>, and <code>xtask</code>.</span></div></div>
+          <div class="kpi"><div class="kpi-label">Transcript</div><div class="kpi-value">2 keyspaces</div><div class="kpi-note"><span><code>message</code> and <code>tool_call</code> remain the canonical persisted conversation surface.</span></div></div>
+          <div class="kpi"><div class="kpi-label">Host boundary</div><div class="kpi-value">2 effect layers</div><div class="kpi-note"><span><code>Effect</code>/<code>Response</code> in <code>lash-sansio</code>; <code>UiHostEffect</code> in <code>lash-ui</code>.</span></div></div>
         </div>
 
         <div class="grid-2">
           <div class="panel">
             <h3>What lash is</h3>
             <p>
-              A terminal-first coding agent that reads and writes repositories, runs local tools, calls remote
-              model providers, tracks long-lived sessions, and exposes enough protocol structure to support plugins,
-              delegation, autonomous mode, and durable resume.
+              A layered coding-agent stack that can be embedded below the CLI. The core runtime manages providers,
+              tools, plugins, sessions, and persistence; the terminal app is only one host over that substrate.
             </p>
             <ul>
-              <li><code>lash-sansio</code> owns turn control, message types, and prompt shaping contracts.</li>
-              <li><code>lash</code> owns runtime orchestration, tool execution, plugins, providers, and persistence.</li>
-              <li><code>lash-cli</code> owns startup, interactive mode, autonomous mode, and terminal rendering.</li>
-              <li><code>lashlang</code> owns the small DSL used by REPL execution mode.</li>
+              <li><code>lash-sansio</code> owns <code>TurnMachine</code>, protocol effects, agent events, prompt types, and shared message/tool contracts.</li>
+              <li><code>lash</code> owns runtime orchestration, provider transport, tool dispatch, plugin registration, child sessions, and persistence.</li>
+              <li><code>lash-ui</code> owns UI extensions, host actions, slash-command/shortcut registration, and agent-event-to-host-effect translation.</li>
+              <li><code>lash-cli</code> owns bootstrap, full-screen terminal rendering, interactive input, autonomous mode, and the stock host implementation.</li>
+              <li><code>lashlang</code> owns the local workflow DSL used by REPL execution mode.</li>
             </ul>
           </div>
           <div class="panel">
             <h3>What changed architecturally</h3>
             <p>
-              Session persistence is now centralized around semantic transcript rows in SQLite. The store keeps a slim
-              <code>agents</code> runtime snapshot for iteration counters, token usage, plugin snapshot state, and
-              UI-only live resume hints, but it no longer stores a second transcript-shaped UI payload.
+              The recent clean cut introduced <code>lash-ui</code> so the runtime no longer needs to know about
+              slash commands, shortcuts, or TUI-owned follow-up behavior. Plan mode is the first proof case:
+              the core plugin still owns planning policy, but the terminal affordances now live above it.
             </p>
             <ul>
-              <li><code>load_session()</code> reads transcript rows, reconstructs <code>Message[]</code> and <code>ToolCallRecord[]</code>, then derives display blocks.</li>
-              <li><code>load_picker_info()</code> queries the transcript directly for first prompt and message count.</li>
-              <li><code>UiResumeState</code> is an overlay for live assistant text, plugin panels, and streaming tails, not transcript truth.</li>
+              <li><code>AgentEvent::Prompt</code> and <code>PluginSurfaceEvent</code> remain host-neutral runtime transport.</li>
+              <li><code>UiExtension</code> now maps host commands, shortcuts, and agent events into <code>UiHostEffect</code> values.</li>
+              <li><code>plan_exit</code> follow-up queueing moved out of <code>App</code> special-casing and into the plan-mode UI extension.</li>
+              <li>The SQLite transcript model from the previous refactor remains intact: semantic rows are still the only durable conversation truth.</li>
             </ul>
           </div>
         </div>
@@ -634,17 +636,19 @@
           <div class="copy">
             <div class="tag">workspace topology</div>
             <h3>Layered crate stack</h3>
-            <p>The host and UI sit on top of the same protocol core; the transcript store is shared infrastructure, not a UI-specific appendage.</p>
+            <p>The new UI host layer sits above the runtime instead of leaking UI-specific behavior into the protocol core.</p>
           </div>
           <div class="diagram-wrap">
             <div class="mermaid">
 flowchart TD
   CLI[lash-cli
-interactive app + TUI + resume]
+terminal host + ratatui + bootstrap]
+  UI[lash-ui
+UI extensions + UiHostEffect]
   CORE[lash
 runtime + providers + plugins + store]
   SANSIO[lash-sansio
-TurnMachine + Effect/Response + prompt types]
+TurnMachine + AgentEvent + PromptRequest]
   DSL[lashlang
 lexer + parser + runtime]
   DB[(SQLite store
@@ -652,11 +656,13 @@ agents + transcript_entries + session_meta)]
   XT[xtask
 workspace helper]
 
-  CLI --> CORE
+  CLI --> UI
+  UI --> CORE
   CORE --> SANSIO
   CORE --> DSL
   CORE --> DB
   CLI --> DB
+  XT -.build / release helpers.-> CLI
             </div>
           </div>
         </div>
@@ -665,7 +671,7 @@ workspace helper]
       <section class="tab-panel" id="tab-modules">
         <div class="section-head">
           <h2>Modules</h2>
-          <p>The main subsystems and the files that anchor them. These are the first places to read before changing core behavior.</p>
+          <p>The main subsystems and the files that anchor them. These are the first places to read before changing core behavior or adding another host.</p>
         </div>
 
         <div class="module-grid">
@@ -673,31 +679,37 @@ workspace helper]
             <div class="tag">crate</div>
             <h3>lash-sansio</h3>
             <span class="path">/lash-sansio/src/sansio.rs · /lash-sansio/src/agent/* · /lash-sansio/src/plugin.rs</span>
-            <p>Owns <code>TurnMachine</code>, protocol effects/responses, prompt rendering interfaces, message parts, token accounting, and shared plugin/session event types.</p>
+            <p>Owns <code>TurnMachine</code>, protocol effects/responses, prompt rendering interfaces, message parts, token accounting, <code>AgentEvent</code>, <code>PromptRequest</code>, and shared plugin/session event types.</p>
           </article>
           <article class="module">
             <div class="tag">crate</div>
             <h3>lash runtime</h3>
             <span class="path">/lash/src/runtime.rs · /lash/src/session.rs · /lash/src/provider.rs · /lash/src/tool_dispatch.rs</span>
-            <p>Wraps the turn machine in an async host. It binds providers, fulfills tool effects, manages child sessions, emits agent events, and checkpoints durable state.</p>
+            <p>Wraps the turn machine in an async host. It binds providers, fulfills tool effects, manages child sessions, emits agent events, invokes plugins, and checkpoints durable state.</p>
           </article>
           <article class="module">
-            <div class="tag">persistence</div>
-            <h3>SQLite store</h3>
-            <span class="path">/lash/src/store.rs · /lash-cli/src/session_log.rs · /lash-cli/src/cli_support.rs</span>
-            <p>Implements session metadata, runtime snapshots, canonical transcript rows, picker queries, fork copy, and resume/load projections from transcript to UI blocks.</p>
+            <div class="tag">host layer</div>
+            <h3>lash-ui</h3>
+            <span class="path">/lash-ui/src/lib.rs</span>
+            <p>Defines <code>UiExtension</code>, slash-command specs, shortcut specs, <code>UiHostEffect</code>, and the current built-in plan-mode adapter that bridges runtime state to host affordances.</p>
           </article>
           <article class="module">
             <div class="tag">plugins</div>
-            <h3>Plugin surface</h3>
-            <span class="path">/lash/src/plugin.rs · /lash/src/plugin/runtime_impl.rs · /lash-cli/src/plugin_surface.rs</span>
-            <p>Registers tool providers, prompt contributors, stream/response hooks, checkpoint hooks, tool-result projectors, and visible plugin surface events.</p>
+            <h3>Plugin system</h3>
+            <span class="path">/lash/src/plugin.rs · /lash/src/plugin/runtime_impl.rs · /lash/src/plugin_builtin/*</span>
+            <p>Registers tool providers, prompt contributors, stream/response hooks, checkpoint hooks, tool-result projectors, external ops, and visible plugin surface events.</p>
           </article>
           <article class="module">
             <div class="tag">cli</div>
             <h3>Interactive application</h3>
-            <span class="path">/lash-cli/src/app.rs · /lash-cli/src/interactive.rs · /lash-cli/src/ui.rs · /lash-cli/src/assistant_text.rs</span>
-            <p>Owns renderable history blocks, command/event routing, markdown shaping, mouse/keyboard handling, and the terminal layout that users actually operate.</p>
+            <span class="path">/lash-cli/src/app.rs · /lash-cli/src/interactive.rs · /lash-cli/src/ui.rs · /lash-cli/src/cli_support.rs</span>
+            <p>Owns renderable history blocks, event routing, markdown shaping, mouse/keyboard handling, and the terminal layout that users actually operate. It now consumes <code>lash-ui</code> instead of naming plan-mode behaviors directly.</p>
+          </article>
+          <article class="module">
+            <div class="tag">persistence</div>
+            <h3>SQLite store</h3>
+            <span class="path">/lash/src/store.rs · /lash-cli/src/session_log.rs · /lash-cli/src/ui_resume.rs</span>
+            <p>Implements session metadata, runtime snapshots, canonical transcript rows, picker queries, fork copy, and the thin live-only resume overlay used by the CLI host.</p>
           </article>
           <article class="module">
             <div class="tag">repl</div>
@@ -709,11 +721,11 @@ workspace helper]
 
         <div class="grid-3" style="margin-top:18px;">
           <div class="panel">
-            <h3>CLI-resume path</h3>
+            <h3>UI extension proof case</h3>
             <ul>
-              <li><code>session_log.rs</code> loads the canonical transcript and derives <code>DisplayBlock</code> history.</li>
-              <li><code>ui_resume.rs</code> reads and writes the small live-only overlay embedded in <code>agents.config_json</code>.</li>
-              <li><code>resume.rs</code> and <code>fork.rs</code> stitch store state back into the app/runtime.</li>
+              <li><code>plan_mode.rs</code> remains a core plugin that owns planning rules, tool gating, and plan approval.</li>
+              <li><code>lash-ui</code> owns <code>/plan</code>, <code>Shift+Tab</code>, idle indicator sync, and post-<code>plan_exit</code> queueing.</li>
+              <li>The CLI host only applies generic <code>UiHostEffect</code> values.</li>
             </ul>
           </div>
           <div class="panel">
@@ -722,14 +734,15 @@ workspace helper]
               <li><code>lash/src/runtime.rs</code> — orchestration, streaming, checkpoints, child sessions.</li>
               <li><code>lash-cli/src/ui.rs</code> — terminal rendering, overlays, scroll calculations.</li>
               <li><code>lash-cli/src/app.rs</code> — transcript projection, turn finalization, block management.</li>
+              <li><code>lash-cli/src/interactive.rs</code> — event pump, input semantics, host command dispatch.</li>
             </ul>
           </div>
           <div class="panel">
             <h3>Deliberate split</h3>
             <ul>
-              <li>The protocol core does not know about ratatui, rusqlite, or reqwest.</li>
+              <li>The protocol core does not know about slash commands, key chords, or terminal widgets.</li>
               <li>The store does not persist pre-rendered UI blocks as transcript truth.</li>
-              <li>The CLI owns presentation and live affordances, not canonical conversation semantics.</li>
+              <li><code>lash-ui</code> is host-facing policy, not durable runtime truth.</li>
             </ul>
           </div>
         </div>
@@ -738,33 +751,37 @@ workspace helper]
       <section class="tab-panel" id="tab-data-flow">
         <div class="section-head">
           <h2>Data Flow</h2>
-          <p>How session data moves now that the transcript is centralized: semantic rows go in, message/tool projections and display blocks come out.</p>
+          <p>How user input, runtime events, and host effects move through the current layered design. There are now two distinct flows: canonical transcript flow and host-affordance flow.</p>
         </div>
 
         <div class="diagram-card">
           <div class="copy">
             <div class="tag">flow</div>
-            <h3>Canonical transcript pipeline</h3>
-            <p>The storage contract is semantic. UI history is derived on load and only lightly overlaid with live resume state.</p>
+            <h3>Interactive host pipeline</h3>
+            <p>User drafts and host affordances meet in the CLI, but only semantic turns go through the canonical transcript path.</p>
           </div>
           <div class="diagram-wrap">
             <div class="mermaid">
 flowchart LR
-  U["User input or resume"] --> SL["session_log load path"]
-  DB[("SQLite store")] --> SL
-  SL --> PROJ["Rebuild messages and tool calls"]
-  PROJ --> BLOCKS["Project display blocks"]
-  UISTATE["UiResumeState overlay"] --> BLOCKS
-  BLOCKS --> TUI["Visible transcript in ui.rs"]
-  TUI --> RT["LashRuntime"]
-  RT --> TM["TurnMachine"]
-  TM -->|llm call| LLM["Provider adapters"]
-  TM -->|tool or exec| TOOLS["Tools, plugins, lashlang"]
+  USER["User input / shortcut / resume"] --> CLI["lash-cli interactive.rs"]
+  CLI --> CMD{"built-in command?"}
+  CMD -->|yes| HOST["CLI host handlers"]
+  CMD -->|no| UIR["lash-ui registry"]
+  UIR -->|/plan, Shift+Tab| EXT["UiExtension invoke_action()"]
+  EXT --> XOP["Plugin external ops\nplan_mode.status/toggle"]
+  XOP --> CORE["lash runtime + plugins"]
+  CLI -->|regular prompt| CORE
+  CORE --> TM["TurnMachine"]
+  TM --> LLM["Provider adapters"]
+  TM --> TOOLS["Tools / plugins / lashlang"]
   LLM --> TM
   TOOLS --> TM
-  TM --> SNAP["AgentStateEnvelope"]
-  SNAP --> KS["message and tool_call keyspaces"]
-  KS --> DB
+  CORE --> EVT["AgentEvent stream"]
+  EVT --> APP["App block projection"]
+  EVT --> UIR
+  UIR --> FX["UiHostEffect"]
+  FX --> CLI
+  CORE --> DB[("SQLite transcript")]
             </div>
           </div>
         </div>
@@ -784,7 +801,8 @@ flowchart LR
             <ul>
               <li><code>agents.config_json</code> carries plugin snapshot and task/runtime metadata.</li>
               <li><code>UiResumeState</code> stores only live affordances that cannot be derived from completed transcript rows.</li>
-              <li>Examples: streaming tail lines, plugin panels, and partial assistant text during an interrupted turn.</li>
+              <li><code>UiHostEffect</code> values such as mode-indicator updates, queued turns, and host messages are ephemeral host actions.</li>
+              <li>Examples: streaming tail lines, plugin panels, idle mode badges, and partial assistant text during an interrupted turn.</li>
             </ul>
           </div>
         </div>
@@ -801,13 +819,13 @@ flowchart LR
             </ol>
           </div>
           <div class="inventory">
-            <div class="tag">write path</div>
-            <h3>Persist steps</h3>
+            <div class="tag">host path</div>
+            <h3>Extension effect steps</h3>
             <ol>
-              <li>Collect current runtime state into <code>AgentStateEnvelope</code>.</li>
-              <li>Serialize runtime-only config into <code>agents.config_json</code>.</li>
-              <li>Derive canonical transcript keyspaces with <code>semantic_transcript_keyspaces()</code>.</li>
-              <li>Replace the stored keyspaces atomically for the root agent.</li>
+              <li>Build the <code>UiExtensions</code> registry at CLI startup.</li>
+              <li>Sync extension state via runtime external ops such as <code>plan_mode.status</code>.</li>
+              <li>Convert user shortcuts/commands and agent events into <code>UiHostEffect</code> values.</li>
+              <li>Apply those effects locally without changing the runtime protocol or transcript schema.</li>
             </ol>
           </div>
         </div>
@@ -816,29 +834,41 @@ flowchart LR
       <section class="tab-panel" id="tab-execution">
         <div class="section-head">
           <h2>Execution</h2>
-          <p>Operational flow inside a session: resume, turn execution, checkpoints, and the two execution modes the runtime can host.</p>
+          <p>Operational flow inside a session: startup sync, turn execution, checkpoints, and the split between runtime execution and host affordance handling.</p>
         </div>
 
         <div class="diagram-card">
           <div class="copy">
             <div class="tag">sequence</div>
-            <h3>Resume and turn lifecycle</h3>
-            <p>The runtime loop is effect-driven, but session startup and final persistence sit on either side of that loop.</p>
+            <h3>Host + runtime lifecycle</h3>
+            <p>The runtime loop is still effect-driven, but host-owned UI work now wraps it through <code>lash-ui</code>.</p>
           </div>
           <div class="diagram-wrap">
             <div class="mermaid">
 sequenceDiagram
   participant CLI as lash-cli
+  participant UI as lash-ui
   participant STORE as Store
   participant RT as LashRuntime
   participant TM as TurnMachine
   participant LLM as Provider
   participant TOOLS as Tools / Plugins / lashlang
 
+  CLI->>UI: build extensions + sync
+  UI->>RT: plan_mode.status external op
+  RT-->>UI: enabled / disabled
+  UI-->>CLI: UpsertModeIndicator
   CLI->>STORE: open session DB
   STORE-->>CLI: transcript_entries + agents + session_meta
   CLI->>CLI: blocks_from_transcript()
-  CLI->>RT: submit prompt / resume turn
+  alt host shortcut or /plan
+    CLI->>UI: invoke shortcut/command
+    UI->>RT: plan_mode.toggle external op
+    RT-->>UI: enabled / disabled
+    UI-->>CLI: host effects
+  else regular user turn
+    CLI->>RT: submit prompt / resume turn
+  end
   loop until turn completes
     RT->>TM: poll / handle response
     alt LLM effect
@@ -858,7 +888,9 @@ sequenceDiagram
     end
   end
   RT->>STORE: save final root snapshot + transcript keyspaces
-  RT-->>CLI: assembled turn + events
+  RT-->>CLI: assembled turn + AgentEvent stream
+  CLI->>UI: feed agent events
+  UI-->>CLI: queue turn / clear indicator / system message
             </div>
           </div>
         </div>
@@ -881,11 +913,11 @@ sequenceDiagram
             </ul>
           </div>
           <div class="panel">
-            <h3>Fork and delegation</h3>
+            <h3>Host-extension mode</h3>
             <ul>
-              <li>Child sessions copy semantic transcript rows from the parent store.</li>
-              <li>Runtime state is restored separately from transcript truth.</li>
-              <li>The same persistence primitives power resume, fork, and managed child-session work.</li>
+              <li>Shortcuts and slash commands can be plugin-owned without changing <code>lash-sansio</code>.</li>
+              <li>Extension sync is explicit at startup and after session resets/resumes.</li>
+              <li>Plan mode is the first built-in example; other hosts can provide different UI adapters over the same runtime.</li>
             </ul>
           </div>
         </div>
@@ -903,8 +935,8 @@ sequenceDiagram
             <h3>Finalization behavior</h3>
             <p>
               After the plugin finalize step, the runtime saves the latest semantic state again. The CLI then
-              reconciles any live assistant overlay against the finished assistant message text so completed
-              output always follows canonical messages.
+              reconciles any live assistant overlay against the finished assistant message text and applies any
+              queued host effects produced by <code>lash-ui</code> from the final event stream.
             </p>
           </div>
         </div>
@@ -913,7 +945,7 @@ sequenceDiagram
       <section class="tab-panel" id="tab-abstractions">
         <div class="section-head">
           <h2>Abstractions</h2>
-          <p>The contracts that keep the system modular: the machine/runtime boundary, the store boundary, and the plugin/tool surfaces.</p>
+          <p>The contracts that keep the system modular: the machine/runtime boundary, the store boundary, and now the explicit runtime/host boundary above that.</p>
         </div>
 
         <div class="abstraction-grid">
@@ -929,6 +961,13 @@ sequenceDiagram
             <ul>
               <li><code>LashRuntime</code>, <code>RuntimeHostConfig</code>, <code>EventSink</code>, <code>AssembledTurn</code></li>
               <li>Owns provider transport, tool dispatch, session lifecycle, and checkpoint coordination.</li>
+            </ul>
+          </div>
+          <div class="panel">
+            <h3>UI host layer</h3>
+            <ul>
+              <li><code>UiExtension</code>, <code>UiExtensions</code>, <code>UiHostEffect</code>, <code>SlashCommandSpec</code>, <code>ShortcutSpec</code></li>
+              <li>Lets a host own commands, shortcuts, queued turns, and mode indicators without changing the runtime protocol.</li>
             </ul>
           </div>
           <div class="panel">
@@ -948,22 +987,22 @@ sequenceDiagram
           <div class="panel">
             <h3>Plugins</h3>
             <ul>
-              <li><code>SessionPlugin</code>, <code>PluginFactory</code>, <code>PluginRegistrar</code>, <code>ToolResultProjectionHook</code></li>
-              <li>Hooks span prompt shaping, stream transforms, checkpoints, turn lifecycle, and tool result projection.</li>
+              <li><code>SessionPlugin</code>, <code>PluginFactory</code>, <code>PluginRegistrar</code>, <code>ExternalOpDef</code>, <code>ToolResultProjectionHook</code></li>
+              <li>Hooks span prompt shaping, stream transforms, checkpoints, turn lifecycle, external ops, and tool result projection.</li>
             </ul>
           </div>
           <div class="panel">
             <h3>CLI projection layer</h3>
             <ul>
-              <li><code>DisplayBlock</code>, <code>UiResumeState</code>, <code>blocks_from_transcript()</code>, <code>apply_ui_resume_state_to_blocks()</code></li>
-              <li>Derives the visible transcript from semantic state while keeping live-only UI data outside transcript truth.</li>
+              <li><code>DisplayBlock</code>, <code>UiResumeState</code>, <code>blocks_from_transcript()</code>, <code>apply_ui_host_effects()</code></li>
+              <li>Derives the visible transcript from semantic state while keeping live-only UI data and host actions outside transcript truth.</li>
             </ul>
           </div>
           <div class="panel">
             <h3>Prompt shaping</h3>
             <ul>
-              <li><code>PromptContext</code>, <code>PromptContribution</code>, <code>PromptSectionOverride</code>, <code>PromptRenderer</code></li>
-              <li>Keeps prompt assembly extensible without hardwiring every special case into the runtime loop.</li>
+              <li><code>PromptContext</code>, <code>PromptContribution</code>, <code>PromptSectionOverride</code>, <code>PromptRenderer</code>, <code>PromptRequest</code>, <code>PromptResponse</code></li>
+              <li>Keeps prompt assembly and user prompting extensible without hardwiring every special case into the runtime loop.</li>
             </ul>
           </div>
           <div class="panel">
@@ -979,14 +1018,14 @@ sequenceDiagram
       <section class="tab-panel" id="tab-dependencies">
         <div class="section-head">
           <h2>Dependencies</h2>
-          <p>The stack is intentionally practical: async runtime, HTTP transport, SQLite, terminal UI, and a few focused utilities rather than a framework tower.</p>
+          <p>The stack is intentionally practical: async runtime, HTTP transport, SQLite, terminal UI, and a thin host-extension layer instead of a larger application framework.</p>
         </div>
 
         <div class="diagram-card">
           <div class="copy">
             <div class="tag">ecosystem map</div>
             <h3>Dependency clusters</h3>
-            <p>Most third-party code supports one of five jobs: async orchestration, provider transport, local persistence, terminal rendering, or local execution utilities.</p>
+            <p>Most third-party code supports one of six jobs: async orchestration, provider transport, local persistence, terminal rendering, host/UI adaptation, or local execution utilities.</p>
           </div>
           <div class="diagram-wrap">
             <div class="mermaid">
@@ -1001,6 +1040,10 @@ futures-util]
 reqwest
 oauth adapters
 semver]
+  U[Host/UI extension layer
+async-trait
+serde_json
+no renderer dependency]
   S[Store + filesystem
 rusqlite
 dirs
@@ -1025,6 +1068,7 @@ uuid]
 
   W --> A
   W --> N
+  W --> U
   W --> S
   W --> T
   W --> X
@@ -1058,11 +1102,11 @@ uuid]
             </ul>
           </div>
           <div class="panel">
-            <h3>Embedding surface</h3>
+            <h3>Host extension surface</h3>
             <ul class="deps-list">
               <li><strong>lash-sansio</strong> keeps the protocol portable for non-CLI hosts.</li>
+              <li><strong>lash-ui</strong> adds no renderer dependency; it depends only on the runtime contracts plus small async/JSON helpers.</li>
               <li><strong>lashlang</strong> provides a local programmable substrate without binding the whole runtime to shell scripting.</li>
-              <li>The plugin system keeps many first-party behaviors outside the core runtime loop.</li>
             </ul>
           </div>
         </div>
@@ -1071,7 +1115,7 @@ uuid]
       <section class="tab-panel" id="tab-files">
         <div class="section-head">
           <h2>Files</h2>
-          <p>The file map for everyday maintenance. These paths cover the current transcript model, runtime loop, and the terminal UI surfaces where most bugs cluster.</p>
+          <p>The file map for everyday maintenance. These paths cover the current runtime protocol, the new UI host layer, transcript persistence, and the terminal surfaces where most bugs cluster.</p>
         </div>
 
         <div class="files-grid">
@@ -1086,6 +1130,7 @@ uuid]
                 <tr><td><strong>/lash/src/runtime.rs</strong></td><td>Main orchestration loop, effect fulfillment, checkpoints, provider/tool execution, child-session management.</td></tr>
                 <tr><td><strong>/lash/src/store.rs</strong></td><td>SQLite schema, transcript keyspaces, picker queries, agent snapshots, schema versioning, copy/replace helpers.</td></tr>
                 <tr><td><strong>/lash/src/plugin.rs</strong></td><td>Plugin traits, registrar surface, hook registration, prompt/output/turn extension points.</td></tr>
+                <tr><td><strong>/lash/src/plugin_builtin/plan_mode.rs</strong></td><td>Core plan-mode policy: tool gating, prompt guidance, plan approval, and runtime-facing external ops.</td></tr>
                 <tr><td><strong>/lash/src/tool_dispatch.rs</strong></td><td>Bridges tool requests from the runtime into provider, plugin, and built-in execution paths.</td></tr>
                 <tr><td><strong>/lash-sansio/src/sansio.rs</strong></td><td>The protocol core: effects, responses, streaming state, retries, tool/result handling, done transitions.</td></tr>
               </tbody>
@@ -1093,18 +1138,18 @@ uuid]
           </div>
 
           <div class="file-table">
-            <div class="tag">cli projection</div>
-            <h3>TUI and session resume</h3>
+            <div class="tag">host + tui</div>
+            <h3>Host affordances and rendering</h3>
             <table>
               <thead>
                 <tr><th>Path</th><th>Why it matters</th></tr>
               </thead>
               <tbody>
+                <tr><td><strong>/lash-ui/src/lib.rs</strong></td><td>UI extension contracts, current plan-mode adapter, slash-command/shortcut registry, and host-effect translation.</td></tr>
+                <tr><td><strong>/lash-cli/src/interactive.rs</strong></td><td>Interactive loop, input submission, UI-extension dispatch, turn completion, resume reconciliation, keyboard/mouse behavior.</td></tr>
+                <tr><td><strong>/lash-cli/src/cli_support.rs</strong></td><td>Help/controls rendering, host-effect application, persistence helpers, and top-level CLI support glue.</td></tr>
                 <tr><td><strong>/lash-cli/src/app.rs</strong></td><td><code>DisplayBlock</code> model, transcript-to-UI projection, live turn state, UI resume helpers, turn finalization.</td></tr>
-                <tr><td><strong>/lash-cli/src/interactive.rs</strong></td><td>Interactive loop, input submission, turn completion, resume reconciliation, keyboard/mouse behavior.</td></tr>
                 <tr><td><strong>/lash-cli/src/ui.rs</strong></td><td>Ratatui rendering, panes, scroll state, overlays, markdown rendering, transcript painting, visual artifacts.</td></tr>
-                <tr><td><strong>/lash-cli/src/session_log.rs</strong></td><td>Session discovery, picker info, load/resume from canonical transcript rows, top-level session logger.</td></tr>
-                <tr><td><strong>/lash-cli/src/ui_resume.rs</strong></td><td>Centralizes the live-only resume state embedded in <code>agents.config_json</code>.</td></tr>
               </tbody>
             </table>
           </div>
@@ -1112,29 +1157,29 @@ uuid]
 
         <div class="grid-2" style="margin-top:18px;">
           <div class="inventory">
-            <div class="tag">repl surface</div>
-            <h3>Local execution files</h3>
+            <div class="tag">resume + transcript</div>
+            <h3>Persistence-facing files</h3>
             <ul class="files-list">
+              <li><strong>/lash-cli/src/session_log.rs</strong> — session discovery, picker info, load/resume from canonical transcript rows.</li>
+              <li><strong>/lash-cli/src/ui_resume.rs</strong> — live-only resume state embedded in <code>agents.config_json</code>.</li>
               <li><strong>/lashlang/src/runtime.rs</strong> — evaluator, state snapshots, tool-host callbacks, profiling.</li>
-              <li><strong>/lashlang/src/parser.rs</strong> — source-to-AST conversion for REPL mode.</li>
-              <li><strong>/lashlang/src/lexer.rs</strong> — tokenization and span tracking.</li>
             </ul>
           </div>
           <div class="inventory">
             <div class="tag">orientation</div>
             <h3>Read in this order</h3>
             <ol>
-              <li><code>lash/src/lib.rs</code> and <code>lash-cli/src/main.rs</code> for module map and entrypoints.</li>
+              <li><code>lash/src/lib.rs</code>, <code>lash-ui/src/lib.rs</code>, and <code>lash-cli/src/main.rs</code> for the module map and the new layer boundary.</li>
               <li><code>lash/src/runtime.rs</code> and <code>lash-sansio/src/sansio.rs</code> for the turn contract.</li>
-              <li><code>lash/src/store.rs</code>, <code>lash-cli/src/session_log.rs</code>, and <code>lash-cli/src/app.rs</code> for transcript + UI projection behavior.</li>
-              <li><code>lash-cli/src/ui.rs</code> only after you understand the block model and state flow.</li>
+              <li><code>lash/src/plugin.rs</code> plus <code>lash/src/plugin_builtin/plan_mode.rs</code> for plugin/runtime policy.</li>
+              <li><code>lash-cli/src/interactive.rs</code>, <code>lash-cli/src/app.rs</code>, and <code>lash-cli/src/ui.rs</code> only after you understand the block model and host-effect flow.</li>
             </ol>
           </div>
         </div>
 
         <p class="footer-note">
-          Current architectural rule of thumb: if a piece of data affects conversation meaning, it belongs in the semantic transcript.
-          If it only helps the CLI resume a live-but-not-final visual affordance, it belongs in <code>UiResumeState</code>.
+          Current rule of thumb: if a piece of data affects conversation meaning, it belongs in the semantic transcript.
+          If it is host transport, command wiring, or a visual affordance, it belongs in <code>lash-ui</code> or the concrete host, not in the protocol core.
         </p>
       </section>
     </div>

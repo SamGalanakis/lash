@@ -183,6 +183,11 @@ pub fn turn_status_state() -> Style {
     Style::default().fg(CHALK).add_modifier(Modifier::BOLD)
 }
 
+/// Paused/waiting state label in the bottom turn-status strip.
+pub fn turn_status_paused() -> Style {
+    Style::default().fg(LICHEN).add_modifier(Modifier::BOLD)
+}
+
 /// Elapsed turn time in the bottom turn-status strip.
 pub fn turn_status_elapsed() -> Style {
     Style::default().fg(CHALK_DIM)

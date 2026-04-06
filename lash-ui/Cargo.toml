@@ -1,0 +1,10 @@
+[package]
+name = "lash-ui"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+lash = { path = "../lash", default-features = false, features = ["full"] }
+async-trait = "0.1"
+serde_json = "1"

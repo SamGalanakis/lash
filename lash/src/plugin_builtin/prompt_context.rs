@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
+use chrono::Utc;
+
 use crate::PromptContribution;
-use crate::agent::PromptSectionName;
 use crate::instructions::InstructionSource;
 use crate::plugin::{PluginError, PluginFactory, PluginRegistrar, PluginSessionContext};
 
@@ -73,19 +74,19 @@ impl crate::SessionPlugin for PromptContextPlugin {
                 let mut contributions = Vec::new();
                 let base_context = build_prompt_environment_context();
                 if config.include_environment && !base_context.trim().is_empty() {
-                    contributions.push(PromptContribution {
-                        section: PromptSectionName::Environment,
-                        priority: 0,
-                        content: base_context,
-                    });
+                    contributions.push(PromptContribution::environment(
+                        "runtime_context",
+                        "Runtime Context",
+                        base_context,
+                    ));
                 }
                 let project_instructions = instruction_source.system_instructions();
                 if config.include_project_instructions && !project_instructions.trim().is_empty() {
-                    contributions.push(PromptContribution {
-                        section: PromptSectionName::Guidance,
-                        priority: 0,
-                        content: format!("### Project Instructions\n{}", project_instructions),
-                    });
+                    contributions.push(PromptContribution::guidance(
+                        "project_instructions",
+                        "Project Instructions",
+                        project_instructions,
+                    ));
                 }
                 Ok(contributions)
             })
@@ -96,6 +97,8 @@ impl crate::SessionPlugin for PromptContextPlugin {
 
 fn build_prompt_environment_context() -> String {
     let mut parts = Vec::new();
+    let now = Utc::now();
+    parts.push(format!("Current date (UTC): {}", now.format("%Y-%m-%d")));
 
     if let Ok(cwd) = std::env::current_dir() {
         parts.push(format!("Working directory: {}", cwd.display()));
@@ -103,27 +106,7 @@ fn build_prompt_environment_context() -> String {
         if cwd.join(".git").exists() {
             parts.push("Git repository: yes".to_string());
         }
-
-        if let Ok(entries) = std::fs::read_dir(&cwd) {
-            let mut names: Vec<String> = entries
-                .filter_map(|entry| entry.ok())
-                .map(|entry| {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if entry.file_type().map(|ty| ty.is_dir()).unwrap_or(false) {
-                        format!("{name}/")
-                    } else {
-                        name
-                    }
-                })
-                .filter(|name| !name.starts_with('.'))
-                .collect();
-            names.sort();
-            if !names.is_empty() {
-                parts.push(format!("Top-level entries: {}", names.join(", ")));
-            }
-        }
     }
 
-    parts.push("REPL third-party packages: none".to_string());
     parts.join("\n")
 }

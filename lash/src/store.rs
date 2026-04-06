@@ -26,8 +26,8 @@ CREATE TABLE IF NOT EXISTS archive (
     content TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS agents (
-    agent_id              TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS session_state (
+    singleton             INTEGER PRIMARY KEY CHECK (singleton = 1),
     iteration             INTEGER NOT NULL DEFAULT 0,
     config_json           TEXT NOT NULL DEFAULT '{}',
     repl_snapshot         BLOB,
@@ -37,20 +37,25 @@ CREATE TABLE IF NOT EXISTS agents (
     reasoning_tokens      INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS live_session_snapshot (
+    singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
+    snapshot_json  TEXT NOT NULL DEFAULT '{}',
+    repl_snapshot  BLOB
+);
+
 CREATE TABLE IF NOT EXISTS transcript_entries (
-    agent_id       TEXT NOT NULL,
     keyspace       TEXT NOT NULL,
     stable_key     TEXT NOT NULL,
     sort_index     INTEGER NOT NULL DEFAULT 0,
     message_role   TEXT,
     payload_json   TEXT NOT NULL,
     search_text    TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (agent_id, keyspace, stable_key)
+    PRIMARY KEY (keyspace, stable_key)
 );
-CREATE INDEX IF NOT EXISTS idx_transcript_entries_agent_keyspace_sort
-ON transcript_entries(agent_id, keyspace, sort_index, stable_key);
+CREATE INDEX IF NOT EXISTS idx_transcript_entries_keyspace_sort
+ON transcript_entries(keyspace, sort_index, stable_key);
 CREATE INDEX IF NOT EXISTS idx_transcript_entries_picker
-ON transcript_entries(agent_id, keyspace, message_role, sort_index);
+ON transcript_entries(keyspace, message_role, sort_index);
 
 CREATE TABLE IF NOT EXISTS session_meta (
     singleton        INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -64,7 +69,7 @@ CREATE TABLE IF NOT EXISTS session_meta (
 ";
 
 #[cfg(feature = "sqlite-store")]
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 5;
 
 #[cfg(feature = "sqlite-store")]
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -95,10 +100,9 @@ fn apply_pragmas(conn: &Connection, backing: StoreBacking) -> rusqlite::Result<(
     Ok(())
 }
 
-/// Persisted agent runtime state for snapshot/resume.
+/// Persisted session runtime state for snapshot/resume.
 #[derive(Clone, Debug)]
-pub struct AgentState {
-    pub agent_id: String,
+pub struct SessionState {
     pub iteration: i64,
     pub config_json: String,
     pub repl_snapshot: Option<Vec<u8>>,
@@ -106,6 +110,12 @@ pub struct AgentState {
     pub output_tokens: i64,
     pub cached_input_tokens: i64,
     pub reasoning_tokens: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct LiveSessionSnapshot {
+    pub snapshot_json: String,
+    pub repl_snapshot: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -186,7 +196,7 @@ pub struct SessionPickerInfo {
 
 #[derive(Clone, Debug)]
 pub struct TurnCheckpoint {
-    pub agent_state: AgentState,
+    pub session_state: SessionState,
     pub transcript_keyspaces: Vec<TranscriptKeyspace>,
 }
 
@@ -198,48 +208,37 @@ pub const TRANSCRIPT_KEYSPACE_TOOL_CALLS: &str = "tool_call";
 pub trait RuntimeStore: Send + Sync {
     async fn store_archive(&self, content: &str) -> String;
     async fn get_archive(&self, hash: &str) -> Option<String>;
-    async fn save_agent_state(&self, state: AgentState);
-    async fn load_agent_state(&self, agent_id: &str) -> Option<AgentState>;
-    async fn transcript_clear(&self, agent_id: &str);
-    async fn transcript_load(&self, agent_id: &str) -> Vec<TranscriptEntry>;
-    async fn transcript_replace_keyspaces(
-        &self,
-        agent_id: &str,
-        keyspaces: Vec<TranscriptKeyspace>,
-    );
+    async fn save_session_state(&self, state: SessionState);
+    async fn load_session_state(&self) -> Option<SessionState>;
+    async fn save_live_session_snapshot(&self, snapshot: LiveSessionSnapshot);
+    async fn load_live_session_snapshot(&self) -> Option<LiveSessionSnapshot>;
+    async fn clear_live_session_snapshot(&self);
+    async fn transcript_clear(&self);
+    async fn transcript_load(&self) -> Vec<TranscriptEntry>;
+    async fn transcript_replace_keyspaces(&self, keyspaces: Vec<TranscriptKeyspace>);
     async fn save_session_meta(&self, meta: SessionMeta);
     async fn load_session_meta(&self) -> Option<SessionMeta>;
 
     async fn save_turn_checkpoint(&self, checkpoint: TurnCheckpoint) {
         let TurnCheckpoint {
-            agent_state,
+            session_state,
             transcript_keyspaces,
         } = checkpoint;
-        let agent_id = agent_state.agent_id.clone();
-        self.save_agent_state(agent_state).await;
-        self.transcript_replace_keyspaces(&agent_id, transcript_keyspaces)
+        self.save_session_state(session_state).await;
+        self.transcript_replace_keyspaces(transcript_keyspaces)
+            .await;
+        self.clear_live_session_snapshot().await;
+    }
+
+    async fn transcript_replace_all(&self, entries: Vec<TranscriptEntry>) {
+        self.transcript_clear().await;
+        self.transcript_replace_keyspaces(group_transcript_entries(entries))
             .await;
     }
 
-    async fn transcript_replace_all(&self, agent_id: &str, entries: Vec<TranscriptEntry>) {
-        self.transcript_clear(agent_id).await;
-        self.transcript_replace_keyspaces(agent_id, group_transcript_entries(entries))
-            .await;
-    }
-
-    async fn transcript_copy(&self, source_agent_id: &str, target_agent_id: &str) {
-        let entries = self.transcript_load(source_agent_id).await;
-        self.transcript_replace_all(target_agent_id, entries).await;
-    }
-
-    async fn transcript_copy_from_store(
-        &self,
-        source: &(dyn RuntimeStore + '_),
-        source_agent_id: &str,
-        target_agent_id: &str,
-    ) {
-        let entries = source.transcript_load(source_agent_id).await;
-        self.transcript_replace_all(target_agent_id, entries).await;
+    async fn transcript_copy_from_store(&self, source: &(dyn RuntimeStore + '_)) {
+        let entries = source.transcript_load().await;
+        self.transcript_replace_all(entries).await;
     }
 }
 
@@ -388,8 +387,7 @@ impl Store {
         let turn_count: usize = conn
             .query_row(
                 "SELECT COUNT(*) FROM transcript_entries
-                 WHERE agent_id = 'root'
-                   AND keyspace = 'message'
+                 WHERE keyspace = 'message'
                    AND message_role = 'user'",
                 [],
                 |row| row.get(0),
@@ -399,8 +397,7 @@ impl Store {
         let first_msg: String = conn
             .query_row(
                 "SELECT search_text FROM transcript_entries
-                 WHERE agent_id = 'root'
-                   AND keyspace = 'message'
+                 WHERE keyspace = 'message'
                    AND message_role = 'user'
                  ORDER BY sort_index ASC, stable_key ASC
                  LIMIT 1",
@@ -453,16 +450,15 @@ impl Store {
         .ok()
     }
 
-    /// Save or update an agent's runtime state in the store.
-    pub fn save_agent_state(&self, state: AgentState) {
+    /// Save or update the session runtime state in the store.
+    pub fn save_session_state(&self, state: SessionState) {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT OR REPLACE INTO agents (
-                agent_id, iteration, config_json, repl_snapshot,
+            "INSERT OR REPLACE INTO session_state (
+                singleton, iteration, config_json, repl_snapshot,
                 input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
-                state.agent_id,
                 state.iteration,
                 state.config_json,
                 state.repl_snapshot,
@@ -475,55 +471,81 @@ impl Store {
         .unwrap();
     }
 
-    /// Load an agent's runtime state by ID.
-    pub fn load_agent_state(&self, agent_id: &str) -> Option<AgentState> {
+    /// Load the persisted session runtime state.
+    pub fn load_session_state(&self) -> Option<SessionState> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT agent_id, iteration, config_json, repl_snapshot, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
-             FROM agents WHERE agent_id = ?1",
-            params![agent_id],
+            "SELECT iteration, config_json, repl_snapshot, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
+             FROM session_state WHERE singleton = 1",
+            [],
             |row| {
-                Ok(AgentState {
-                    agent_id: row.get(0)?,
-                    iteration: row.get(1)?,
-                    config_json: row.get(2)?,
-                    repl_snapshot: row.get(3)?,
-                    input_tokens: row.get(4)?,
-                    output_tokens: row.get(5)?,
-                    cached_input_tokens: row.get(6)?,
-                    reasoning_tokens: row.get(7)?,
+                Ok(SessionState {
+                    iteration: row.get(0)?,
+                    config_json: row.get(1)?,
+                    repl_snapshot: row.get(2)?,
+                    input_tokens: row.get(3)?,
+                    output_tokens: row.get(4)?,
+                    cached_input_tokens: row.get(5)?,
+                    reasoning_tokens: row.get(6)?,
                 })
             },
         )
         .ok()
     }
 
-    pub fn transcript_clear(&self, agent_id: &str) {
+    pub fn save_live_session_snapshot(&self, snapshot: LiveSessionSnapshot) {
         let conn = self.conn.lock().unwrap();
-        if let Err(err) = conn.execute(
-            "DELETE FROM transcript_entries WHERE agent_id = ?1",
-            params![agent_id],
-        ) {
-            tracing::warn!(
-                error = %err,
-                agent_id = agent_id,
-                "failed to clear transcript rows"
-            );
+        conn.execute(
+            "INSERT OR REPLACE INTO live_session_snapshot (
+                singleton, snapshot_json, repl_snapshot
+             ) VALUES (1, ?1, ?2)",
+            params![snapshot.snapshot_json, snapshot.repl_snapshot],
+        )
+        .unwrap();
+    }
+
+    pub fn load_live_session_snapshot(&self) -> Option<LiveSessionSnapshot> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT snapshot_json, repl_snapshot
+             FROM live_session_snapshot WHERE singleton = 1",
+            [],
+            |row| {
+                Ok(LiveSessionSnapshot {
+                    snapshot_json: row.get(0)?,
+                    repl_snapshot: row.get(1)?,
+                })
+            },
+        )
+        .ok()
+    }
+
+    pub fn clear_live_session_snapshot(&self) {
+        let conn = self.conn.lock().unwrap();
+        if let Err(err) = conn.execute("DELETE FROM live_session_snapshot WHERE singleton = 1", [])
+        {
+            tracing::warn!(error = %err, "failed to clear live session snapshot");
         }
     }
 
-    pub fn transcript_load(&self, agent_id: &str) -> Vec<TranscriptEntry> {
+    pub fn transcript_clear(&self) {
+        let conn = self.conn.lock().unwrap();
+        if let Err(err) = conn.execute("DELETE FROM transcript_entries", []) {
+            tracing::warn!(error = %err, "failed to clear transcript rows");
+        }
+    }
+
+    pub fn transcript_load(&self) -> Vec<TranscriptEntry> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = match conn.prepare(
             "SELECT keyspace, stable_key, sort_index, message_role, payload_json, search_text
              FROM transcript_entries
-             WHERE agent_id = ?1
              ORDER BY keyspace, sort_index, stable_key",
         ) {
             Ok(stmt) => stmt,
             Err(_) => return Vec::new(),
         };
-        let rows = match stmt.query_map(params![agent_id], |row| {
+        let rows = match stmt.query_map([], |row| {
             Ok(TranscriptEntry {
                 keyspace: row.get(0)?,
                 stable_key: row.get(1)?,
@@ -540,16 +562,12 @@ impl Store {
         rows.filter_map(|row| row.ok()).collect()
     }
 
-    pub fn transcript_replace_keyspaces(&self, agent_id: &str, keyspaces: &[TranscriptKeyspace]) {
+    pub fn transcript_replace_keyspaces(&self, keyspaces: &[TranscriptKeyspace]) {
         let mut conn = self.conn.lock().unwrap();
         let tx = match conn.transaction() {
             Ok(tx) => tx,
             Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    agent_id = agent_id,
-                    "failed to open transcript transaction"
-                );
+                tracing::warn!(error = %err, "failed to open transcript transaction");
                 return;
             }
         };
@@ -557,12 +575,11 @@ impl Store {
         for keyspace in keyspaces {
             if let Err(err) = tx.execute(
                 "DELETE FROM transcript_entries
-                 WHERE agent_id = ?1 AND keyspace = ?2",
-                params![agent_id, keyspace.keyspace],
+                 WHERE keyspace = ?1",
+                params![keyspace.keyspace],
             ) {
                 tracing::warn!(
                     error = %err,
-                    agent_id = agent_id,
                     keyspace = keyspace.keyspace,
                     "failed to clear transcript keyspace"
                 );
@@ -572,10 +589,9 @@ impl Store {
             for entry in &keyspace.entries {
                 if let Err(err) = tx.execute(
                     "INSERT INTO transcript_entries (
-                        agent_id, keyspace, stable_key, sort_index, message_role, payload_json, search_text
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        keyspace, stable_key, sort_index, message_role, payload_json, search_text
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     params![
-                        agent_id,
                         keyspace.keyspace,
                         entry.stable_key,
                         entry.sort_index,
@@ -586,7 +602,6 @@ impl Store {
                 ) {
                     tracing::warn!(
                         error = %err,
-                        agent_id = agent_id,
                         keyspace = keyspace.keyspace,
                         stable_key = entry.stable_key,
                         "failed to persist transcript entry"
@@ -596,29 +611,14 @@ impl Store {
         }
 
         if let Err(err) = tx.commit() {
-            tracing::warn!(
-                error = %err,
-                agent_id = agent_id,
-                "failed to commit transcript transaction"
-            );
+            tracing::warn!(error = %err, "failed to commit transcript transaction");
         }
     }
 
-    pub fn transcript_copy(&self, source_agent_id: &str, target_agent_id: &str) {
-        let entries = self.transcript_load(source_agent_id);
-        self.transcript_clear(target_agent_id);
-        self.transcript_replace_keyspaces(target_agent_id, &group_transcript_entries(entries));
-    }
-
-    pub fn transcript_copy_from_store(
-        &self,
-        source: &Store,
-        source_agent_id: &str,
-        target_agent_id: &str,
-    ) {
-        let entries = source.transcript_load(source_agent_id);
-        self.transcript_clear(target_agent_id);
-        self.transcript_replace_keyspaces(target_agent_id, &group_transcript_entries(entries));
+    pub fn transcript_copy_from_store(&self, source: &Store) {
+        let entries = source.transcript_load();
+        self.transcript_clear();
+        self.transcript_replace_keyspaces(&group_transcript_entries(entries));
     }
 
     pub fn save_session_meta(&self, meta: SessionMeta) {
@@ -676,28 +676,36 @@ impl RuntimeStore for Store {
         Self::get_archive(self, hash)
     }
 
-    async fn save_agent_state(&self, state: AgentState) {
-        Self::save_agent_state(self, state);
+    async fn save_session_state(&self, state: SessionState) {
+        Self::save_session_state(self, state);
     }
 
-    async fn load_agent_state(&self, agent_id: &str) -> Option<AgentState> {
-        Self::load_agent_state(self, agent_id)
+    async fn load_session_state(&self) -> Option<SessionState> {
+        Self::load_session_state(self)
     }
 
-    async fn transcript_clear(&self, agent_id: &str) {
-        Self::transcript_clear(self, agent_id);
+    async fn save_live_session_snapshot(&self, snapshot: LiveSessionSnapshot) {
+        Self::save_live_session_snapshot(self, snapshot);
     }
 
-    async fn transcript_load(&self, agent_id: &str) -> Vec<TranscriptEntry> {
-        Self::transcript_load(self, agent_id)
+    async fn load_live_session_snapshot(&self) -> Option<LiveSessionSnapshot> {
+        Self::load_live_session_snapshot(self)
     }
 
-    async fn transcript_replace_keyspaces(
-        &self,
-        agent_id: &str,
-        keyspaces: Vec<TranscriptKeyspace>,
-    ) {
-        Self::transcript_replace_keyspaces(self, agent_id, &keyspaces);
+    async fn clear_live_session_snapshot(&self) {
+        Self::clear_live_session_snapshot(self);
+    }
+
+    async fn transcript_clear(&self) {
+        Self::transcript_clear(self);
+    }
+
+    async fn transcript_load(&self) -> Vec<TranscriptEntry> {
+        Self::transcript_load(self)
+    }
+
+    async fn transcript_replace_keyspaces(&self, keyspaces: Vec<TranscriptKeyspace>) {
+        Self::transcript_replace_keyspaces(self, &keyspaces);
     }
 
     async fn save_session_meta(&self, meta: SessionMeta) {
@@ -816,24 +824,21 @@ mod tests {
     #[test]
     fn transcript_copy_from_store_round_trip() {
         let source = mem();
-        source.transcript_replace_keyspaces(
-            "root",
-            &[TranscriptKeyspace::new(
-                "message",
-                vec![
-                    TranscriptEntryPayload::new("0", 0, r#"{"text":"hello"}"#.to_string())
-                        .with_message_role(Some("user".to_string()))
-                        .with_search_text("hello"),
-                    TranscriptEntryPayload::new("1", 1, r#"{"text":"world"}"#.to_string())
-                        .with_message_role(Some("assistant".to_string())),
-                ],
-            )],
-        );
+        source.transcript_replace_keyspaces(&[TranscriptKeyspace::new(
+            "message",
+            vec![
+                TranscriptEntryPayload::new("0", 0, r#"{"text":"hello"}"#.to_string())
+                    .with_message_role(Some("user".to_string()))
+                    .with_search_text("hello"),
+                TranscriptEntryPayload::new("1", 1, r#"{"text":"world"}"#.to_string())
+                    .with_message_role(Some("assistant".to_string())),
+            ],
+        )]);
 
         let target = mem();
-        target.transcript_copy_from_store(&source, "root", "root-copy");
+        target.transcript_copy_from_store(&source);
 
-        let entries = target.transcript_load("root-copy");
+        let entries = target.transcript_load();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].payload_json, r#"{"text":"hello"}"#);
         assert_eq!(entries[1].payload_json, r#"{"text":"world"}"#);
@@ -842,40 +847,33 @@ mod tests {
     #[test]
     fn transcript_replace_keyspace_rewrites_existing_rows() {
         let store = mem();
-        store.transcript_replace_keyspaces(
-            "root",
-            &[TranscriptKeyspace::new(
-                "runtime_state",
-                vec![TranscriptEntryPayload::new(
-                    "state",
-                    0,
-                    r#"{"blocks":["old"]}"#.to_string(),
-                )],
+        store.transcript_replace_keyspaces(&[TranscriptKeyspace::new(
+            "runtime_state",
+            vec![TranscriptEntryPayload::new(
+                "state",
+                0,
+                r#"{"blocks":["old"]}"#.to_string(),
             )],
-        );
+        )]);
 
-        store.transcript_replace_keyspaces(
-            "root",
-            &[TranscriptKeyspace::new(
-                "runtime_state",
-                vec![TranscriptEntryPayload::new(
-                    "state",
-                    0,
-                    r#"{"blocks":["updated"]}"#.to_string(),
-                )],
+        store.transcript_replace_keyspaces(&[TranscriptKeyspace::new(
+            "runtime_state",
+            vec![TranscriptEntryPayload::new(
+                "state",
+                0,
+                r#"{"blocks":["updated"]}"#.to_string(),
             )],
-        );
+        )]);
 
-        let entries = store.transcript_load("root");
+        let entries = store.transcript_load();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].payload_json, r#"{"blocks":["updated"]}"#);
     }
 
     #[test]
-    fn save_agent_state_rewrites_existing_snapshot() {
+    fn save_session_state_rewrites_existing_snapshot() {
         let store = mem();
-        store.save_agent_state(AgentState {
-            agent_id: "ag1".into(),
+        store.save_session_state(SessionState {
             iteration: 0,
             config_json: "{}".into(),
             repl_snapshot: None,
@@ -885,8 +883,7 @@ mod tests {
             reasoning_tokens: 0,
         });
 
-        store.save_agent_state(AgentState {
-            agent_id: "ag1".into(),
+        store.save_session_state(SessionState {
             iteration: 7,
             config_json: r#"{"mode":"updated"}"#.into(),
             repl_snapshot: None,
@@ -896,10 +893,30 @@ mod tests {
             reasoning_tokens: 0,
         });
 
-        let state = store.load_agent_state("ag1").expect("agent state");
+        let state = store.load_session_state().expect("session state");
         assert_eq!(state.iteration, 7);
         assert_eq!(state.config_json, r#"{"mode":"updated"}"#);
         assert_eq!(state.input_tokens, 5);
+    }
+
+    #[test]
+    fn live_session_snapshot_rewrites_and_clears() {
+        let store = mem();
+        store.save_live_session_snapshot(LiveSessionSnapshot {
+            snapshot_json: r#"{"iteration":1}"#.into(),
+            repl_snapshot: Some(vec![1, 2, 3]),
+        });
+        store.save_live_session_snapshot(LiveSessionSnapshot {
+            snapshot_json: r#"{"iteration":2}"#.into(),
+            repl_snapshot: None,
+        });
+
+        let snapshot = store.load_live_session_snapshot().expect("live snapshot");
+        assert_eq!(snapshot.snapshot_json, r#"{"iteration":2}"#);
+        assert_eq!(snapshot.repl_snapshot, None);
+
+        store.clear_live_session_snapshot();
+        assert!(store.load_live_session_snapshot().is_none());
     }
 
     #[test]
@@ -913,22 +930,19 @@ mod tests {
             cwd: Some("/tmp/demo".to_string()),
             parent_session_id: None,
         });
-        store.transcript_replace_keyspaces(
-            "root",
-            &[TranscriptKeyspace::new(
-                "message",
-                vec![
-                    TranscriptEntryPayload::new("0", 0, r#"{"id":"u0"}"#.to_string())
-                        .with_message_role(Some("user".to_string()))
-                        .with_search_text("hello there"),
-                    TranscriptEntryPayload::new("1", 1, r#"{"id":"a0"}"#.to_string())
-                        .with_message_role(Some("assistant".to_string())),
-                    TranscriptEntryPayload::new("2", 2, r#"{"id":"u1"}"#.to_string())
-                        .with_message_role(Some("user".to_string()))
-                        .with_search_text("follow up"),
-                ],
-            )],
-        );
+        store.transcript_replace_keyspaces(&[TranscriptKeyspace::new(
+            "message",
+            vec![
+                TranscriptEntryPayload::new("0", 0, r#"{"id":"u0"}"#.to_string())
+                    .with_message_role(Some("user".to_string()))
+                    .with_search_text("hello there"),
+                TranscriptEntryPayload::new("1", 1, r#"{"id":"a0"}"#.to_string())
+                    .with_message_role(Some("assistant".to_string())),
+                TranscriptEntryPayload::new("2", 2, r#"{"id":"u1"}"#.to_string())
+                    .with_message_role(Some("user".to_string()))
+                    .with_search_text("follow up"),
+            ],
+        )]);
 
         let info = store.load_picker_info().expect("picker info");
         assert_eq!(info.session_id, "s1");

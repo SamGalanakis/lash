@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
-use lash::agent::{Message, MessageRole};
 use lash::provider::Provider;
+use lash::session_model::{Message, MessageRole};
 use lash::*;
+use lash_ui::{UiContext, UiExtensions, UiHostEffect};
 use sha2::{Digest, Sha256};
 
 use crate::ROOT_SESSION_ID;
 use crate::app::{App, DisplayBlock, PreparedTurn, UiResumeState};
 use crate::command;
+use crate::resume_snapshot;
 use crate::ui_resume;
 
 #[derive(Debug, Clone)]
@@ -15,26 +17,48 @@ pub(crate) struct ModelSelection {
     pub(crate) model: String,
 }
 
-pub(crate) fn controls_text() -> String {
-    [
-        "Controls:",
-        "  Esc                Cancel agent (while running)",
-        "  Enter              Submit; inject at next checkpoint while running",
-        "  Tab                Queue next turn; submit plain draft when idle",
-        "  Up (empty draft)   Edit last queued turn",
-        "  Shift+Tab          Toggle persistent plan mode",
-        "  Ctrl+U / Ctrl+D    Scroll half-page up / down",
-        "  PgUp / PgDn        Scroll page up / down",
-        "  Shift+Enter        Insert newline",
-        "  Ctrl+V             Paste image as inline [Image #n]",
-        "  Ctrl+Shift+V       Paste text only",
-        "  Ctrl+Y             Copy last response to clipboard",
-        "  Ctrl+O             Cycle tool expansion (ghost ↔ compact)",
-        "  Alt+O              Full expansion (code + stdout)",
-        "  Up / Down          Input history",
-        "  Ctrl+C             Quit",
-    ]
-    .join("\n")
+pub(crate) fn controls_text(ui_extensions: &UiExtensions) -> String {
+    let mut lines = vec!["Controls:".to_string()];
+    lines.extend(render_shortcut_lines(ui_extensions, true));
+    lines.join("\n")
+}
+
+fn render_shortcut_lines(ui_extensions: &UiExtensions, spaced_history_arrows: bool) -> Vec<String> {
+    let history_arrows = if spaced_history_arrows {
+        "  Up / Down          Input history"
+    } else {
+        "  Up/Down            Input history"
+    };
+
+    let mut lines = vec![
+        "  Esc                Cancel session (while running)".to_string(),
+        "  Enter              Submit; inject at next checkpoint while running".to_string(),
+        "  Tab                Queue next turn; submit plain draft when idle".to_string(),
+        "  Up (empty draft)   Edit last queued turn".to_string(),
+    ];
+
+    for shortcut in ui_extensions.shortcut_specs() {
+        lines.push(format!(
+            "  {:<18} {}",
+            shortcut.chord.display(),
+            shortcut.description
+        ));
+    }
+
+    lines.extend([
+        "  Ctrl+U / Ctrl+D    Scroll half-page up / down".to_string(),
+        "  PgUp / PgDn        Scroll page up / down".to_string(),
+        "  Shift+Enter        Insert newline".to_string(),
+        "  Ctrl+V             Paste image as inline [Image #n]".to_string(),
+        "  Ctrl+Shift+V       Paste text only".to_string(),
+        "  Ctrl+Y             Copy last response to clipboard".to_string(),
+        "  Ctrl+O             Cycle tool expansion (ghost ↔ compact)".to_string(),
+        "  Alt+O              Full expansion (code + stdout)".to_string(),
+        history_arrows.to_string(),
+        "  Ctrl+C             Quit".to_string(),
+    ]);
+
+    lines
 }
 
 pub(crate) fn models_dev_catalog() -> Result<Arc<CachedModelCatalog>, String> {
@@ -270,11 +294,7 @@ struct ReplayManifest {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn persist_root_agent_state(
-    store: &Store,
-    state: &mut AgentStateEnvelope,
-    ui_state: &UiResumeState,
-    dynamic_state: &DynamicStateSnapshot,
+fn build_replay_manifest_json(
     provider: &Provider,
     configured_model: &str,
     context_window: u64,
@@ -284,7 +304,7 @@ pub(crate) fn persist_root_agent_state(
     toolset_hash: &str,
     prompt_hash: Option<String>,
     snapshot_hash: Option<String>,
-) {
+) -> serde_json::Value {
     let manifest = ReplayManifest {
         version: 3,
         saved_at: chrono::Utc::now().to_rfc3339(),
@@ -297,7 +317,7 @@ pub(crate) fn persist_root_agent_state(
         prompt_hash,
         snapshot_hash,
     };
-    let manifest_json = serde_json::json!({
+    serde_json::json!({
         "version": manifest.version,
         "saved_at": manifest.saved_at,
         "provider": manifest.provider,
@@ -310,7 +330,36 @@ pub(crate) fn persist_root_agent_state(
         "toolset_hash": manifest.toolset_hash,
         "prompt_hash": manifest.prompt_hash,
         "snapshot_hash": manifest.snapshot_hash,
-    });
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn persist_root_session_state(
+    store: &Store,
+    state: &mut SessionStateEnvelope,
+    ui_state: &UiResumeState,
+    dynamic_state: &DynamicStateSnapshot,
+    provider: &Provider,
+    configured_model: &str,
+    context_window: u64,
+    execution_mode: ExecutionMode,
+    context_strategy: ContextStrategy,
+    model_variant: Option<&str>,
+    toolset_hash: &str,
+    prompt_hash: Option<String>,
+    snapshot_hash: Option<String>,
+) {
+    let manifest_json = build_replay_manifest_json(
+        provider,
+        configured_model,
+        context_window,
+        execution_mode,
+        context_strategy,
+        model_variant,
+        toolset_hash,
+        prompt_hash,
+        snapshot_hash,
+    );
     state.replay_manifest = Some(manifest_json.clone());
     let config_json = ui_resume::with_ui_resume_state(
         serde_json::json!({
@@ -334,10 +383,9 @@ pub(crate) fn persist_root_agent_state(
         output_tokens = state.token_usage.output_tokens,
         cached_input_tokens = state.token_usage.cached_input_tokens,
         reasoning_tokens = state.token_usage.reasoning_tokens,
-        "persisting root agent state"
+        "persisting root session state"
     );
-    store.save_agent_state(lash::AgentState {
-        agent_id: ROOT_SESSION_ID.to_string(),
+    store.save_session_state(lash::SessionState {
         iteration: state.iteration as i64,
         config_json,
         repl_snapshot: state.repl_snapshot.clone(),
@@ -348,10 +396,11 @@ pub(crate) fn persist_root_agent_state(
     });
     let transcript_keyspaces =
         lash::semantic_transcript_keyspaces(&state.messages, &state.tool_calls);
-    store.transcript_replace_keyspaces(ROOT_SESSION_ID, &transcript_keyspaces);
+    store.transcript_replace_keyspaces(&transcript_keyspaces);
+    store.clear_live_session_snapshot();
 }
 
-fn persisted_plugin_snapshot(state: &lash::AgentState) -> Option<PluginSessionSnapshot> {
+fn persisted_plugin_snapshot(state: &lash::SessionState) -> Option<PluginSessionSnapshot> {
     serde_json::from_str::<serde_json::Value>(&state.config_json)
         .ok()
         .and_then(|config| config.get("plugin_snapshot").cloned())
@@ -374,9 +423,8 @@ pub(crate) fn persist_live_runtime_snapshot(
     token_usage: TokenUsage,
     last_prompt_usage: Option<PromptUsage>,
 ) {
-    let existing = store.load_agent_state(ROOT_SESSION_ID);
-    let mut state = AgentStateEnvelope {
-        agent_id: ROOT_SESSION_ID.to_string(),
+    let existing = store.load_session_state();
+    let mut state = SessionStateEnvelope {
         messages: snapshot.messages,
         tool_calls: snapshot.tool_calls,
         iteration: snapshot.iteration,
@@ -394,19 +442,7 @@ pub(crate) fn persist_live_runtime_snapshot(
         ..Default::default()
     };
     let prompt_hash = latest_user_prompt_hash(&state.messages);
-    tracing::debug!(
-        iteration = state.iteration,
-        messages = state.messages.len(),
-        tool_calls = state.tool_calls.len(),
-        plugin_mode_indicators = ui_state.plugin_mode_indicators.len(),
-        plugin_panels = ui_state.plugin_panels.len(),
-        "persisting live runtime snapshot"
-    );
-    persist_root_agent_state(
-        store,
-        &mut state,
-        ui_state,
-        dynamic_state,
+    let manifest_json = build_replay_manifest_json(
         provider,
         configured_model,
         context_window,
@@ -417,6 +453,20 @@ pub(crate) fn persist_live_runtime_snapshot(
         prompt_hash,
         None,
     );
+    state.replay_manifest = Some(manifest_json);
+    tracing::debug!(
+        iteration = state.iteration,
+        messages = state.messages.len(),
+        tool_calls = state.tool_calls.len(),
+        plugin_mode_indicators = ui_state.plugin_mode_indicators.len(),
+        plugin_panels = ui_state.plugin_panels.len(),
+        "persisting live runtime snapshot"
+    );
+    if let Err(err) =
+        resume_snapshot::save_live_resume_snapshot(store, &state, ui_state, dynamic_state)
+    {
+        tracing::warn!(error = %err, "failed to persist live runtime snapshot");
+    }
 }
 
 pub(crate) fn push_system_message(app: &mut App, msg: impl Into<String>) {
@@ -508,7 +558,7 @@ pub(crate) fn info_text(
     )
 }
 
-pub(crate) fn help_text(skills: &SkillCatalog) -> String {
+pub(crate) fn help_text(skills: &SkillCatalog, ui_extensions: &UiExtensions) -> String {
     let mut lines = vec!["Commands:".to_string()];
     for spec in command::catalog() {
         let aliases = if spec.aliases.is_empty() {
@@ -529,6 +579,18 @@ pub(crate) fn help_text(skills: &SkillCatalog) -> String {
             "  {:<18} {}",
             format!("{}{}", spec.usage, aliases),
             description
+        ));
+    }
+    for spec in ui_extensions.command_specs() {
+        let aliases = if spec.aliases.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", spec.aliases.join(", "))
+        };
+        lines.push(format!(
+            "  {:<18} {}",
+            format!("{}{}", spec.usage, aliases),
+            spec.description
         ));
     }
     lines.push("  /<skill> [text]    Invoke a loaded skill directly".to_string());
@@ -559,25 +621,9 @@ pub(crate) fn help_text(skills: &SkillCatalog) -> String {
         "  /reconfigure status|apply|clear".to_string(),
     ]);
 
-    lines.extend([
-        String::new(),
-        "Shortcuts:".to_string(),
-        "  Esc                Cancel agent (while running)".to_string(),
-        "  Enter              Submit; inject at next checkpoint while running".to_string(),
-        "  Tab                Queue next turn; submit plain draft when idle".to_string(),
-        "  Up (empty draft)   Edit last queued turn".to_string(),
-        "  Shift+Tab          Toggle persistent plan mode".to_string(),
-        "  Ctrl+U / Ctrl+D    Scroll half-page up / down".to_string(),
-        "  PgUp / PgDn        Scroll page up / down".to_string(),
-        "  Shift+Enter        Insert newline".to_string(),
-        "  Ctrl+V             Paste image as inline [Image #n]".to_string(),
-        "  Ctrl+Shift+V       Paste text only".to_string(),
-        "  Ctrl+Y             Copy last response to clipboard".to_string(),
-        "  Ctrl+O             Cycle tool expansion (ghost ↔ compact)".to_string(),
-        "  Alt+O              Full expansion (code + stdout)".to_string(),
-        "  Up/Down            Input history".to_string(),
-        "  Ctrl+C             Quit".to_string(),
-    ]);
+    lines.push(String::new());
+    lines.push("Shortcuts:".to_string());
+    lines.extend(render_shortcut_lines(ui_extensions, false));
 
     lines.join(
         "
@@ -585,57 +631,40 @@ pub(crate) fn help_text(skills: &SkillCatalog) -> String {
     )
 }
 
-fn plan_mode_enabled_from_result(result: ToolResult) -> Result<bool, String> {
-    if !result.success {
-        return Err(result.result.to_string());
+pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<UiHostEffect>) {
+    for effect in effects {
+        match effect {
+            UiHostEffect::PushSystemMessage(message) => push_system_message(app, message),
+            UiHostEffect::UpsertModeIndicator { key, label } => {
+                app.upsert_mode_indicator(key, label);
+            }
+            UiHostEffect::ClearModeIndicator { key } => {
+                app.clear_mode_indicator(&key);
+            }
+            UiHostEffect::QueueTurn { input } => {
+                app.queue_turn(PreparedTurn::prepare(input, Vec::new(), &app.skills));
+                app.dirty = true;
+            }
+        }
     }
-    result
-        .result
-        .get("enabled")
-        .and_then(|value| value.as_bool())
-        .ok_or_else(|| "plan mode API response missing `enabled`".to_string())
 }
 
-async fn plan_mode_status(
-    plugin_host: &PluginHost,
-    session_manager: Arc<dyn SessionManager>,
-) -> Result<bool, String> {
-    let result = plugin_host
-        .invoke_external_for_session(
-            ROOT_SESSION_ID,
-            "plan_mode.status",
-            serde_json::json!({}),
-            session_manager,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-    plan_mode_enabled_from_result(result)
-}
-
-pub(crate) async fn plan_mode_toggle(
-    plugin_host: &PluginHost,
-    session_manager: Arc<dyn SessionManager>,
-) -> Result<bool, String> {
-    let result = plugin_host
-        .invoke_external_for_session(
-            ROOT_SESSION_ID,
-            "plan_mode.toggle",
-            serde_json::json!({}),
-            session_manager,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-    plan_mode_enabled_from_result(result)
-}
-
-pub(crate) async fn sync_plan_mode(
+pub(crate) async fn sync_ui_extensions(
     app: &mut App,
+    ui_extensions: &UiExtensions,
     plugin_host: &PluginHost,
     session_manager: Arc<dyn SessionManager>,
 ) {
-    match plan_mode_status(plugin_host, session_manager).await {
-        Ok(enabled) => app.set_plan_mode_enabled(enabled),
-        Err(err) => push_system_message(app, format!("Failed to read plan mode: {}", err)),
+    match ui_extensions
+        .sync_all(UiContext {
+            plugin_host,
+            session_id: ROOT_SESSION_ID,
+            session_manager,
+        })
+        .await
+    {
+        Ok(effects) => apply_ui_host_effects(app, effects),
+        Err(err) => push_system_message(app, format!("Failed to sync UI extensions: {err}")),
     }
 }
 

@@ -60,7 +60,7 @@ pub struct DurableTurnSnapshot {
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type")]
-pub enum AgentEvent {
+pub enum SessionEvent {
     #[serde(rename = "text_delta")]
     TextDelta { content: String },
     #[serde(rename = "tool_call")]
@@ -223,7 +223,9 @@ pub enum PromptSelectionMode {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PromptResponse {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     Single {
         selection: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -320,9 +322,9 @@ pub fn make_error_event(
     code: Option<&str>,
     user_message: impl Into<String>,
     raw: Option<String>,
-) -> AgentEvent {
+) -> SessionEvent {
     let user_message = user_message.into();
-    AgentEvent::Error {
+    SessionEvent::Error {
         message: user_message.clone(),
         envelope: Some(make_error_envelope(kind, code, user_message, raw)),
     }

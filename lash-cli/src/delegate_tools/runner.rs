@@ -5,7 +5,7 @@ use serde_json::json;
 use tokio::sync::Notify;
 
 use lash::{
-    AgentEvent, InputItem, ProgressSender, SandboxMessage, ToolExecutionContext, ToolResult,
+    InputItem, ProgressSender, SandboxMessage, SessionEvent, ToolExecutionContext, ToolResult,
     TurnInput,
 };
 
@@ -56,10 +56,14 @@ impl DelegateTools {
             .and_then(|value| value.as_str())
             .map(str::to_string);
 
-        let agent_id = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
         let session = match context
             .host
-            .create_session(self.build_create_request(agent_id, context.session_id.clone(), &tier))
+            .create_session(self.build_create_request(
+                session_id,
+                context.session_id.clone(),
+                &tier,
+            ))
             .await
         {
             Ok(session) => session,
@@ -131,16 +135,16 @@ impl DelegateTools {
 
             while let Some(event) = turn.events.recv().await {
                 match event {
-                    AgentEvent::TextDelta { content } => {
+                    SessionEvent::TextDelta { content } => {
                         current_prose.push_str(&content);
                         buffer_clone.lock().unwrap().push_str(&content);
                     }
-                    AgentEvent::Message { text, kind } => {
+                    SessionEvent::Message { text, kind } => {
                         if kind == "final" {
                             final_message = Some(text);
                         }
                     }
-                    AgentEvent::CodeBlock { .. } => {
+                    SessionEvent::CodeBlock { .. } => {
                         let trimmed = current_prose.trim().to_string();
                         if !trimmed.is_empty() {
                             context_chunks_clone.lock().unwrap().push(trimmed);

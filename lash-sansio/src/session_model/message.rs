@@ -247,7 +247,7 @@ pub fn render_transcript_prompt(msgs: &[Message]) -> RenderedPrompt {
 
     let mut text = String::new();
     text.push_str(
-        "History:\nThis is a chronological transcript. `Assistant` refers to Lash, and you are continuing as the same agent.\n\n",
+        "History:\nThis is a chronological transcript. `Assistant` refers to Lash, and you are continuing the same session.\n\n",
     );
     for (idx, turn) in turns.iter().enumerate() {
         text.push_str(&format!("=== Turn {} ===\n", idx + 1));

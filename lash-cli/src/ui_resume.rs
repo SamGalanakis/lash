@@ -1,6 +1,5 @@
 use lash::Store;
 
-use crate::ROOT_SESSION_ID;
 use crate::app::UiResumeState;
 
 pub(crate) const UI_RESUME_STATE_KEY: &str = "ui_resume_state";
@@ -22,7 +21,7 @@ pub(crate) fn with_ui_resume_state(
 
 pub(crate) fn load_ui_resume_state(store: &Store) -> UiResumeState {
     store
-        .load_agent_state(ROOT_SESSION_ID)
+        .load_session_state()
         .and_then(|state| serde_json::from_str::<serde_json::Value>(&state.config_json).ok())
         .and_then(|config| {
             config

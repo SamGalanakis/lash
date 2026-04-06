@@ -379,7 +379,7 @@ impl SessionPlugin for DelegateToolsPlugin {
     fn session_ready(&self, ctx: SessionReadyContext) -> Result<(), PluginError> {
         let session = ctx
             .host
-            .session(&ctx.agent_id)
+            .session(&ctx.session_id)
             .map_err(|err| PluginError::Session(err.to_string()))?;
         self.provider.bind(session);
         Ok(())
@@ -407,14 +407,14 @@ mod tests {
     #[async_trait::async_trait]
     impl lash::SessionManager for MockSessionManager {
         async fn snapshot_current(&self) -> Result<lash::SessionSnapshot, lash::PluginError> {
-            Ok(lash::AgentStateEnvelope::default())
+            Ok(lash::SessionStateEnvelope::default())
         }
 
         async fn snapshot_session(
             &self,
             _session_id: &str,
         ) -> Result<lash::SessionSnapshot, lash::PluginError> {
-            Ok(lash::AgentStateEnvelope::default())
+            Ok(lash::SessionStateEnvelope::default())
         }
 
         async fn tool_catalog(
@@ -465,12 +465,12 @@ mod tests {
             let (tx, rx) = tokio::sync::mpsc::channel(4);
             tokio::spawn(async move {
                 let _ = tx
-                    .send(lash::AgentEvent::TextDelta {
+                    .send(lash::SessionEvent::TextDelta {
                         content: "delegate".to_string(),
                     })
                     .await;
                 let _ = tx
-                    .send(lash::AgentEvent::Message {
+                    .send(lash::SessionEvent::Message {
                         text: "delegate result".to_string(),
                         kind: "final".to_string(),
                     })
@@ -507,8 +507,8 @@ mod tests {
                 .iter()
                 .any(|id| id == turn_id);
             Ok(lash::AssembledTurn {
-                state: lash::AgentStateEnvelope {
-                    agent_id: "child-session".to_string(),
+                state: lash::SessionStateEnvelope {
+                    session_id: "child-session".to_string(),
                     policy: lash::SessionPolicy {
                         session_id: Some("child-session".to_string()),
                         execution_mode: lash::ExecutionMode::Standard,
