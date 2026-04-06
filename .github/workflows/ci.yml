@@ -152,6 +152,9 @@ jobs:
       - name: Update workspace version files
         run: python3 scripts/release_version.py set "${{ steps.version.outputs.version }}"
 
+      - name: Validate locked workspace after release bump
+        run: cargo metadata --format-version 1 --locked >/dev/null
+
       - name: Commit release version
         id: commit
         run: |
@@ -179,6 +182,7 @@ jobs:
 
           cd "$sync_dir"
           python3 scripts/release_version.py set "${{ steps.version.outputs.version }}"
+          cargo metadata --format-version 1 --locked >/dev/null
           if git diff --quiet -- Cargo.toml Cargo.lock; then
             echo "origin/staging already has version ${{ steps.version.outputs.version }}."
             exit 0

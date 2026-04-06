@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 import subprocess
@@ -9,7 +10,6 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CARGO_TOML = ROOT / "Cargo.toml"
 CARGO_LOCK = ROOT / "Cargo.lock"
-WORKSPACE_PACKAGES = ("lash-sansio", "lash", "lash-cli", "lashlang", "xtask")
 VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
 
@@ -117,6 +117,7 @@ def update_workspace_version(version: str) -> None:
 
 
 def update_lockfile_versions(version: str) -> None:
+    workspace_packages = read_workspace_package_names()
     lines = CARGO_LOCK.read_text().splitlines()
     current_name: str | None = None
     updated_lines: list[str] = []
@@ -127,12 +128,37 @@ def update_lockfile_versions(version: str) -> None:
         elif stripped.startswith('name = "'):
             current_name = stripped[len('name = "') : -1]
         elif (
-            current_name in WORKSPACE_PACKAGES
+            current_name in workspace_packages
             and stripped.startswith('version = "')
         ):
             line = f'version = "{version}"'
         updated_lines.append(line)
     CARGO_LOCK.write_text("\n".join(updated_lines) + "\n")
+
+
+def read_workspace_package_names() -> set[str]:
+    result = subprocess.run(
+        [
+            "cargo",
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--manifest-path",
+            str(CARGO_TOML),
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    metadata = json.loads(result.stdout)
+    workspace_members = set(metadata["workspace_members"])
+    return {
+        package["name"]
+        for package in metadata["packages"]
+        if package["id"] in workspace_members
+    }
 
 
 if __name__ == "__main__":
