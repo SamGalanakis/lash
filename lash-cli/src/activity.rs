@@ -1705,11 +1705,7 @@ mod tests {
         assert_eq!(ask_blocks[0].summary, "Question");
         assert_eq!(
             ask_blocks[0].detail_lines,
-            vec![
-                "Question · Which environment should I use?",
-                "1. staging",
-                "2. prod",
-            ]
+            vec!["Which environment should I use?", "1. staging", "2. prod",]
         );
     }
 
