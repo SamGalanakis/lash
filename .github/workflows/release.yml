@@ -18,9 +18,26 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  validate-release-ref:
+    name: Validate release ref
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate locked workspace metadata
+        run: cargo metadata --format-version 1 --locked >/dev/null
+
   build-release-assets:
     name: Build (${{ matrix.asset_name }})
     runs-on: ${{ matrix.os }}
+    needs: validate-release-ref
 
     strategy:
       fail-fast: false
