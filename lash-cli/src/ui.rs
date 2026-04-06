@@ -1002,16 +1002,23 @@ fn is_code_workflow_activity(kind: ActivityKind) -> bool {
     )
 }
 
-fn prompt_section_label(text: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(" ", Style::default()),
-        Span::styled(
-            text.to_string(),
-            Style::default()
-                .fg(theme::SODIUM)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ])
+fn prompt_section_label(text: &str, inner_w: usize) -> Line<'static> {
+    let label_width = UnicodeWidthStr::width(text);
+    let fill_width = inner_w.saturating_sub(label_width + 2);
+    let mut spans = vec![Span::styled(
+        text.to_string(),
+        Style::default()
+            .fg(theme::SODIUM)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if fill_width > 0 {
+        spans.push(Span::styled(" ", Style::default().fg(theme::ASH)));
+        spans.push(Span::styled(
+            "─".repeat(fill_width),
+            Style::default().fg(theme::ASH),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn styled_question_chunk(chunk: &str) -> Vec<Span<'static>> {
@@ -1103,18 +1110,8 @@ fn render_question_panel<'a>(
     )));
 }
 
-fn prompt_title(prompt: &PromptState) -> &'static str {
-    if prompt.is_freeform() {
-        " Question "
-    } else if prompt.supports_note() && prompt.is_multi() {
-        " Question · Select Replies + Note "
-    } else if prompt.supports_note() {
-        " Question · Choose Reply + Note "
-    } else if prompt.is_multi() {
-        " Question · Select Replies "
-    } else {
-        " Question · Choose Reply "
-    }
+fn prompt_title(_prompt: &PromptState) -> &'static str {
+    " Question "
 }
 
 fn is_code_workflow_block(block: &DisplayBlock) -> bool {
@@ -2279,6 +2276,8 @@ fn draw_turn_status(frame: &mut Frame, app: &App, area: Rect) {
     let brand = animated_lash_word(turn.turn_started_at.elapsed());
     let (label, label_style) = if turn.status_text == "error" {
         ("Error", theme::error().add_modifier(Modifier::BOLD))
+    } else if app.has_prompt() {
+        ("Paused", theme::turn_status_paused())
     } else {
         ("Working", theme::turn_status_state())
     };
@@ -2949,7 +2948,7 @@ fn push_wrapped_prefixed_lines(
 
 fn prompt_input_text(prompt: &PromptState) -> (String, bool) {
     if prompt.supports_note() && !prompt.is_text_entry() && prompt.reply_text.is_empty() {
-        return ("Tab to add a note".to_string(), true);
+        return ("Add an optional note".to_string(), true);
     }
 
     let mut display = prompt.reply_text.clone();
@@ -2958,6 +2957,83 @@ fn prompt_input_text(prompt: &PromptState) -> (String, bool) {
         display.insert(cursor, '\u{2588}');
     }
     (display, false)
+}
+
+fn prompt_option_has_embedded_index(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        let digits = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+        return digits > 0 && rest[digits..].starts_with(']');
+    }
+
+    let digits = trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    digits > 0 && matches!(trimmed[digits..].chars().next(), Some('.') | Some(')'))
+}
+
+fn prompt_option_text(idx: usize, option: &str) -> String {
+    if prompt_option_has_embedded_index(option) {
+        option.to_string()
+    } else {
+        format!("{}. {option}", idx + 1)
+    }
+}
+
+fn prompt_help_items(prompt: &PromptState) -> Vec<(&'static str, &'static str)> {
+    if prompt.has_options() {
+        if prompt.supports_note() {
+            if prompt.is_text_entry() {
+                vec![
+                    ("tab", "choices"),
+                    ("enter", "submit"),
+                    ("shift+tab", "newline"),
+                    ("esc", "cancel"),
+                ]
+            } else if prompt.is_multi() {
+                vec![
+                    ("↑↓", "move"),
+                    ("space", "toggle"),
+                    ("tab", "note"),
+                    ("enter", "submit"),
+                    ("esc", "cancel"),
+                ]
+            } else {
+                vec![
+                    ("↑↓", "choose"),
+                    ("tab", "note"),
+                    ("enter", "submit"),
+                    ("esc", "cancel"),
+                ]
+            }
+        } else if prompt.is_multi() {
+            vec![
+                ("↑↓", "move"),
+                ("space", "toggle"),
+                ("enter", "submit"),
+                ("esc", "cancel"),
+            ]
+        } else {
+            vec![("↑↓", "choose"), ("enter", "submit"), ("esc", "cancel")]
+        }
+    } else {
+        vec![
+            ("enter", "submit"),
+            ("shift+tab", "newline"),
+            ("esc", "cancel"),
+        ]
+    }
+}
+
+fn prompt_help_line(prompt: &PromptState) -> Line<'static> {
+    let items = prompt_help_items(prompt);
+    let mut spans = Vec::new();
+    for (idx, (key, desc)) in items.into_iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::styled(" · ", Style::default().fg(theme::ASH)));
+        }
+        spans.push(Span::styled(key.to_string(), theme::help_key()));
+        spans.push(Span::styled(format!(" {desc}"), theme::help_desc()));
+    }
+    Line::from(spans)
 }
 
 fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'static>> {
@@ -2977,49 +3053,58 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
     }
 
     if has_options {
-        lines.push(prompt_section_label(if prompt.is_multi() {
-            "Selections"
-        } else {
-            "Choices"
-        }));
+        lines.push(prompt_section_label(
+            if prompt.is_multi() {
+                "Selections"
+            } else {
+                "Choices"
+            },
+            inner_w,
+        ));
         for (idx, opt) in prompt.request.options.iter().enumerate() {
             let active = prompt.selected_option_idx() == Some(idx);
             let marked = prompt.option_marked(idx);
-            let highlighted = active || marked;
-            let text_style = if highlighted {
+            let text_style = if active {
+                Style::default().fg(theme::CHALK).bg(theme::FORM_RAISED)
+            } else if marked {
+                Style::default().fg(theme::CHALK_MID)
+            } else {
+                Style::default().fg(theme::CHALK_DIM)
+            };
+            let prefix_style = if active {
                 Style::default()
                     .fg(theme::SODIUM)
                     .bg(theme::FORM_RAISED)
                     .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme::CHALK_DIM)
-            };
-            let prefix_style = if highlighted {
-                Style::default().fg(theme::SODIUM).bg(theme::FORM_RAISED)
+            } else if marked {
+                Style::default()
+                    .fg(theme::LICHEN)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 text_style
             };
+            let option_text = prompt_option_text(idx, opt);
             push_wrapped_prefixed_lines(
                 &mut lines,
-                &format!("{}. {}", idx + 1, opt),
+                &option_text,
                 inner_w,
                 Span::styled(
                     if prompt.is_multi() {
                         if active {
-                            if marked { "›[x]" } else { "›[ ]" }
+                            if marked { "› [x]" } else { "› [ ]" }
                         } else if marked {
-                            " [x]"
+                            "  [x]"
                         } else {
-                            " [ ]"
+                            "  [ ]"
                         }
                     } else if active {
-                        " \u{203a} "
+                        "› "
                     } else {
-                        "   "
+                        "  "
                     },
                     prefix_style,
                 ),
-                Span::styled("   ", prefix_style),
+                Span::styled(if prompt.is_multi() { "     " } else { "  " }, prefix_style),
                 text_style,
             );
         }
@@ -3028,7 +3113,7 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
     if show_text_input {
         if prompt.supports_note() {
             lines.push(Line::from(""));
-            lines.push(prompt_section_label("Note (optional)"));
+            lines.push(prompt_section_label("Note", inner_w));
         }
         let (input_text, is_placeholder) = prompt_input_text(prompt);
         push_wrapped_prefixed_lines(
@@ -3056,36 +3141,12 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
         lines.push(Line::from(""));
     }
 
-    let help_text = if has_options {
-        if prompt.supports_note() {
-            if prompt.is_text_entry() {
-                "Tab choices  Enter submit  Shift+Tab newline  Esc cancel"
-            } else if prompt.is_multi() {
-                "↑↓ move  Space toggle  Tab note  Enter submit  Esc cancel"
-            } else {
-                "↑↓ choose  Tab note  Enter submit  Esc cancel"
-            }
-        } else if prompt.is_multi() {
-            "↑↓ move  Space toggle  Enter submit  Esc cancel"
-        } else {
-            "↑↓ choose  Enter submit  Esc cancel"
-        }
-    } else {
-        "Enter submit  Shift+Tab newline  Esc cancel"
-    };
-    push_wrapped_prefixed_lines(
-        &mut lines,
-        help_text,
-        inner_w,
-        Span::styled(" ", Style::default().fg(theme::ASH)),
-        Span::styled(" ", Style::default().fg(theme::ASH)),
-        Style::default().fg(theme::ASH),
-    );
+    lines.push(prompt_help_line(prompt));
 
     lines
 }
 
-/// Draw the agent prompt inline in the input area (replaces normal input).
+/// Draw the session prompt inline in the input area (replaces normal input).
 fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
     let prompt = match app.prompt_state() {
         Some(p) => p,
@@ -3314,7 +3375,7 @@ fn selection_ordered(sel: &TextSelection) -> ((u16, usize), (u16, usize)) {
 mod tests {
     use super::*;
     use crate::app::{App, PromptState};
-    use lash::AgentEvent;
+    use lash::SessionEvent;
     use ratatui::{Terminal, backend::TestBackend};
 
     fn workflow_activity(summary: &str) -> DisplayBlock {
@@ -3653,7 +3714,7 @@ mod tests {
             has_visible_output: false,
             transient_until: None,
         });
-        app.handle_agent_event(AgentEvent::Message {
+        app.handle_session_event(SessionEvent::Message {
             text: "0123456789 abcdefghij klmnopqrst uvwxyz\n".into(),
             kind: "tool_output".into(),
         });
@@ -3677,11 +3738,11 @@ mod tests {
             transient_until: None,
         });
         app.blocks.clear();
-        app.handle_agent_event(AgentEvent::Message {
+        app.handle_session_event(SessionEvent::Message {
             text: "0123456789 abcdefghij klmnopqrst uvwxyz\n".into(),
             kind: "tool_output".into(),
         });
-        app.handle_agent_event(AgentEvent::Message {
+        app.handle_session_event(SessionEvent::Message {
             text: "tail marker\n".into(),
             kind: "tool_output".into(),
         });
@@ -3725,6 +3786,61 @@ mod tests {
         assert!(normalized.contains("alpha"));
         assert!(normalized.contains("theta"));
         assert!(normalized.contains("omega"));
+    }
+
+    #[test]
+    fn prompt_content_lines_use_cleaner_option_and_help_layout() {
+        let mut prompt = prompt_state(
+            "Pick the best direction.",
+            vec!["minimal", "full"],
+            "",
+            false,
+        );
+        prompt.request.allow_note = true;
+
+        let rendered = prompt_content_lines(&prompt, 48)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| line.contains("Choices")));
+        assert!(rendered.iter().any(|line| line.contains("1. minimal")));
+        assert!(rendered.iter().any(|line| line.contains("2. full")));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("Add an optional note"))
+        );
+        assert!(
+            rendered.iter().any(|line| line.contains("↑↓")
+                && line.contains("choose")
+                && line.contains("enter")),
+            "expected segmented help line: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn prompt_content_lines_do_not_double_number_pre_numbered_options() {
+        let prompt = prompt_state(
+            "Review hotspots",
+            vec![
+                "[1]. Shared contract god file",
+                "[2]. Backend orchestration clusters",
+            ],
+            "",
+            true,
+        );
+
+        let rendered = prompt_content_lines(&prompt, 72)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("[1]. Shared contract god file"));
+        assert!(rendered.contains("[2]. Backend orchestration clusters"));
+        assert!(!rendered.contains("1. [1]. Shared contract god file"));
+        assert!(!rendered.contains("2. [2]. Backend orchestration clusters"));
     }
 
     #[test]
@@ -4035,6 +4151,33 @@ mod tests {
         assert!(row.contains("Error"));
         assert!(!row.contains("Working"));
         assert!(!row.contains("provider timeout"));
+    }
+
+    #[test]
+    fn turn_status_footer_shows_paused_while_prompt_is_open() {
+        let backend = TestBackend::new(48, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut app = App::new("model".into(), "session".into());
+        app.live_turn = Some(crate::app::LiveTurnState {
+            status_text: "thinking".into(),
+            status_detail: Some("waiting".into()),
+            phase_started_at: std::time::Instant::now(),
+            turn_started_at: std::time::Instant::now(),
+            assistant_block_idx: None,
+            has_visible_output: false,
+            transient_until: None,
+        });
+        app.show_prompt(prompt_state("Question?", vec!["yes", "no"], "", false));
+
+        terminal
+            .draw(|frame| draw_turn_status(frame, &app, frame.area()))
+            .expect("draw footer");
+
+        let row = buffer_row_text(terminal.backend(), 0, 48);
+        assert!(row.contains("Paused"), "expected paused footer: {row:?}");
+        assert!(!row.contains("Working"));
+        assert!(!row.contains("thinking"));
+        assert!(!row.contains("waiting"));
     }
 
     #[test]

@@ -3,9 +3,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
-use lash::agent::{Message, MessageRole, Part, PartKind, PruneState};
 use lash::provider::{LashConfig, ProviderKind};
+use lash::session_model::{Message, MessageRole, Part, PartKind, PruneState};
 use lash::*;
+use lash_ui::{
+    KeyChord as UiKeyChord, KeyCode as UiKeyCode, KeyModifiers as UiKeyModifiers,
+    UiCommandInvocation, UiContext, UiExtensions,
+};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 use tokio::task;
@@ -21,13 +25,13 @@ use crate::session_log::{self, SessionLogger};
 use crate::update;
 use crate::{Args, setup, ui};
 use crate::{
-    cleanup_terminal, configure_terminal_ui, controls_text, ensure_supported_execution_mode,
-    execution_mode_label, execution_mode_usage, hash12, help_text, info_text,
-    latest_user_prompt_hash, normalize_prepared_turn_for_dispatch, parse_execution_mode,
-    parse_model_selection, persist_live_runtime_snapshot, persist_root_agent_state,
-    plan_mode_toggle, push_system_message, resolve_model_selection, resolve_model_variant,
-    shell_escape_command, sync_plan_mode, turn_has_visible_output, validate_model_selection,
-    variant_lines, version_text,
+    apply_ui_host_effects, cleanup_terminal, configure_terminal_ui, controls_text,
+    ensure_supported_execution_mode, execution_mode_label, execution_mode_usage, hash12, help_text,
+    info_text, latest_user_prompt_hash, normalize_prepared_turn_for_dispatch, parse_execution_mode,
+    parse_model_selection, persist_live_runtime_snapshot, persist_root_session_state,
+    push_system_message, resolve_model_selection, resolve_model_variant, shell_escape_command,
+    sync_ui_extensions, turn_has_visible_output, validate_model_selection, variant_lines,
+    version_text,
 };
 
 /// Returned by the spawned runtime task so we can reclaim ownership.
@@ -51,11 +55,153 @@ struct AppEventSink {
 
 #[async_trait::async_trait]
 impl EventSink for AppEventSink {
-    async fn emit(&self, event: AgentEvent) {
-        let _ = self.tx.send(AppEvent::Agent {
+    async fn emit(&self, event: SessionEvent) {
+        let _ = self.tx.send(AppEvent::Session {
             stream_id: self.stream_id,
             event,
         });
+    }
+}
+
+#[derive(Clone)]
+enum ParsedSlashCommand {
+    Builtin(command::Command),
+    Ui(UiCommandInvocation),
+}
+
+fn parse_slash_command(
+    input: &str,
+    skills: &SkillCatalog,
+    ui_extensions: &UiExtensions,
+) -> Option<ParsedSlashCommand> {
+    command::parse(input, skills)
+        .map(ParsedSlashCommand::Builtin)
+        .or_else(|| {
+            ui_extensions
+                .parse_command(input)
+                .map(ParsedSlashCommand::Ui)
+        })
+}
+
+fn slash_command_runs_out_of_band_while_running(cmd: &ParsedSlashCommand) -> bool {
+    match cmd {
+        ParsedSlashCommand::Builtin(command) => command::runs_out_of_band_while_running(command),
+        ParsedSlashCommand::Ui(command) => command.allow_while_running(),
+    }
+}
+
+fn key_chord_from_event(key: crossterm::event::KeyEvent) -> Option<UiKeyChord> {
+    let code = match key.code {
+        KeyCode::Tab | KeyCode::BackTab => UiKeyCode::Tab,
+        KeyCode::Enter => UiKeyCode::Enter,
+        KeyCode::Esc => UiKeyCode::Esc,
+        KeyCode::Up => UiKeyCode::Up,
+        KeyCode::Down => UiKeyCode::Down,
+        KeyCode::PageUp => UiKeyCode::PageUp,
+        KeyCode::PageDown => UiKeyCode::PageDown,
+        KeyCode::Char(ch) => UiKeyCode::Char(ch),
+        _ => return None,
+    };
+    Some(UiKeyChord {
+        code,
+        modifiers: UiKeyModifiers {
+            shift: key.modifiers.contains(KeyModifiers::SHIFT)
+                || matches!(key.code, KeyCode::BackTab),
+            control: key.modifiers.contains(KeyModifiers::CONTROL),
+            alt: key.modifiers.contains(KeyModifiers::ALT),
+        },
+    })
+}
+
+async fn handle_ui_command(
+    invocation: UiCommandInvocation,
+    app: &mut App,
+    ui_extensions: &UiExtensions,
+    plugin_host: &PluginHost,
+    session_manager: &Arc<dyn SessionManager>,
+) {
+    match ui_extensions
+        .invoke_command(
+            &invocation,
+            UiContext {
+                plugin_host,
+                session_id: crate::ROOT_SESSION_ID,
+                session_manager: Arc::clone(session_manager),
+            },
+        )
+        .await
+    {
+        Ok(effects) => apply_ui_host_effects(app, effects),
+        Err(err) => push_system_message(app, err),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_parsed_slash_command(
+    command: ParsedSlashCommand,
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    logger: &mut SessionLogger,
+    args: &Args,
+    paused: &Arc<AtomicBool>,
+    plugin_host: &PluginHost,
+    ui_extensions: &UiExtensions,
+    dynamic_tools: &Arc<DynamicToolProvider>,
+    runtime: &mut Option<LashRuntime>,
+    history: &mut Vec<Message>,
+    turn_counter: &mut usize,
+    last_turn: &mut Option<TurnReplayPayload>,
+    runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
+    cancel_token: &mut Option<CancellationToken>,
+    active_stream_id: &mut u64,
+    provider: &mut Provider,
+    current_model_variant: &mut Option<String>,
+    current_execution_mode: &mut ExecutionMode,
+    current_context_strategy: &mut ContextStrategy,
+    session_manager: &mut Arc<dyn SessionManager>,
+    desired_dynamic: &mut DynamicStateSnapshot,
+    pending_reconfigure: &mut bool,
+    model_catalog: &CachedModelCatalog,
+    toolset_hash: &mut String,
+    app_tx: &mpsc::UnboundedSender<AppEvent>,
+    pending_clear_after_return: &mut bool,
+) -> anyhow::Result<bool> {
+    match command {
+        ParsedSlashCommand::Builtin(command) => {
+            handle_slash_command(
+                command,
+                terminal,
+                app,
+                logger,
+                args,
+                paused,
+                plugin_host,
+                dynamic_tools,
+                runtime,
+                history,
+                turn_counter,
+                last_turn,
+                runtime_return_rx,
+                cancel_token,
+                active_stream_id,
+                provider,
+                current_model_variant,
+                current_execution_mode,
+                current_context_strategy,
+                session_manager,
+                desired_dynamic,
+                pending_reconfigure,
+                model_catalog,
+                toolset_hash,
+                app_tx,
+                pending_clear_after_return,
+            )
+            .await
+        }
+        ParsedSlashCommand::Ui(command) => {
+            handle_ui_command(command, app, ui_extensions, plugin_host, session_manager).await;
+            Ok(false)
+        }
     }
 }
 
@@ -100,8 +246,8 @@ async fn handle_slash_command(
             *active_stream_id = active_stream_id.wrapping_add(1);
             if let Some(rt) = runtime.as_mut() {
                 let _ = rt.reset_session().await;
-                rt.set_state(AgentStateEnvelope {
-                    agent_id: "root".to_string(),
+                rt.set_state(SessionStateEnvelope {
+                    session_id: "root".to_string(),
                     policy: SessionPolicy {
                         execution_mode: *current_execution_mode,
                         context_strategy: *current_context_strategy,
@@ -124,7 +270,14 @@ async fn handle_slash_command(
                         format!("Failed to refresh session manager: {}", err),
                     ),
                 }
-                sync_plan_mode(app, plugin_host, Arc::clone(session_manager)).await;
+                let ui_extensions = app.ui_extensions_handle();
+                sync_ui_extensions(
+                    app,
+                    ui_extensions.as_ref(),
+                    plugin_host,
+                    Arc::clone(session_manager),
+                )
+                .await;
                 *pending_clear_after_return = false;
             } else {
                 // Runtime is still being reclaimed from a just-finished turn; clear state as soon
@@ -545,7 +698,7 @@ async fn handle_slash_command(
             }
         }
         command::Command::Controls => {
-            push_system_message(app, controls_text());
+            push_system_message(app, controls_text(app.ui_extensions()));
         }
         command::Command::Fork(prompt) => {
             let current_dynamic_state = dynamic_tools.export_state();
@@ -598,7 +751,7 @@ async fn handle_slash_command(
             }
         }
         command::Command::Help => {
-            let help = help_text(&app.skills);
+            let help = help_text(&app.skills, app.ui_extensions());
             push_system_message(app, help);
         }
         command::Command::Resume(name) => {
@@ -630,7 +783,14 @@ async fn handle_slash_command(
                                 ),
                             }
                         }
-                        sync_plan_mode(app, plugin_host, Arc::clone(session_manager)).await;
+                        let ui_extensions = app.ui_extensions_handle();
+                        sync_ui_extensions(
+                            app,
+                            ui_extensions.as_ref(),
+                            plugin_host,
+                            Arc::clone(session_manager),
+                        )
+                        .await;
                         *toolset_hash = hash12(
                             &serde_json::to_vec(&dynamic_tools.definitions())
                                 .unwrap_or_else(|_| b"[]".to_vec()),
@@ -906,6 +1066,11 @@ pub(crate) async fn run_app(
     startup_system_message: Option<String>,
 ) -> anyhow::Result<()> {
     let mut app = App::new(model, session_name);
+    let ui_extensions = Arc::new(
+        UiExtensions::builtin()
+            .map_err(|err| anyhow::anyhow!("failed to build UI extensions: {err}"))?,
+    );
+    app.set_ui_extensions(Arc::clone(&ui_extensions));
     app.context_window = Some(initial_context_window);
     app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
     let mut current_model_variant = initial_model_variant.or_else(|| {
@@ -929,7 +1094,7 @@ pub(crate) async fn run_app(
     let mut desired_dynamic = dynamic_tools.export_state();
     let mut pending_reconfigure = false;
 
-    // Cancellation token for interrupting a running agent
+    // Cancellation token for interrupting a running session
     let mut cancel_token: Option<CancellationToken> = None;
 
     // Unified event channel
@@ -1002,7 +1167,13 @@ pub(crate) async fn run_app(
     let mut active_stream_id: u64 = 0;
     let mut pending_clear_after_return = false;
 
-    sync_plan_mode(&mut app, &plugin_host, Arc::clone(&session_manager)).await;
+    sync_ui_extensions(
+        &mut app,
+        ui_extensions.as_ref(),
+        &plugin_host,
+        Arc::clone(&session_manager),
+    )
+    .await;
     if let Some(message) = startup_system_message {
         push_system_message(&mut app, message);
     }
@@ -1035,7 +1206,13 @@ pub(crate) async fn run_app(
                     ),
                 }
             }
-            sync_plan_mode(&mut app, &plugin_host, Arc::clone(&session_manager)).await;
+            sync_ui_extensions(
+                &mut app,
+                ui_extensions.as_ref(),
+                &plugin_host,
+                Arc::clone(&session_manager),
+            )
+            .await;
             toolset_hash = hash12(
                 &serde_json::to_vec(&dynamic_tools.definitions())
                     .unwrap_or_else(|_| b"[]".to_vec()),
@@ -1112,13 +1289,13 @@ pub(crate) async fn run_app(
                     if done.stream_id != active_stream_id || pending_clear_after_return {
                         if let Some(rt) = runtime.as_mut() {
                             let _ = rt.reset_session().await;
-                            rt.set_state(AgentStateEnvelope::default());
+                            rt.set_state(SessionStateEnvelope::default());
                         }
                         history.clear();
                         turn_counter = 0;
                         app.token_usage = TokenUsage::default();
                         app.stop_turn();
-                        app.set_plan_mode_enabled(false);
+                        app.clear_mode_indicators();
                         app.set_model_variant(current_model_variant.clone());
                         runtime_return_rx = None;
                         cancel_token = None;
@@ -1215,7 +1392,7 @@ pub(crate) async fn run_app(
                     let persisted_execution_mode = state.policy.execution_mode;
                     let persisted_context_strategy = state.policy.context_strategy;
                     let persisted_dynamic_state = dynamic_tools.export_state();
-                    persist_root_agent_state(
+                    persist_root_session_state(
                         &store,
                         &mut state,
                         &ui_resume_state,
@@ -1246,8 +1423,12 @@ pub(crate) async fn run_app(
 
                     if let Some((queued, was_pending)) = app.take_next_queued_turn() {
                         let queued = normalize_prepared_turn_for_dispatch(queued, &app.skills);
-                        if let Some(cmd) = command::parse(&queued.display_text, &app.skills) {
-                            if handle_slash_command(
+                        if let Some(cmd) = parse_slash_command(
+                            &queued.display_text,
+                            &app.skills,
+                            ui_extensions.as_ref(),
+                        ) {
+                            if handle_parsed_slash_command(
                                 cmd,
                                 &mut terminal,
                                 &mut app,
@@ -1255,6 +1436,7 @@ pub(crate) async fn run_app(
                                 args,
                                 &paused,
                                 &plugin_host,
+                                ui_extensions.as_ref(),
                                 &dynamic_tools,
                                 &mut runtime,
                                 &mut history,
@@ -1512,7 +1694,7 @@ pub(crate) async fn run_app(
                     } else if app.has_session_picker() {
                         app.dismiss_session_picker();
                     } else if app.running {
-                        // Interrupt running agent
+                        // Interrupt running session
                         app.note_manual_interrupt_requested();
                         if let Some(token) = cancel_token.take() {
                             token.cancel();
@@ -1609,8 +1791,9 @@ pub(crate) async fn run_app(
                                                 ),
                                             }
                                         }
-                                        sync_plan_mode(
+                                        sync_ui_extensions(
                                             &mut app,
+                                            ui_extensions.as_ref(),
                                             &plugin_host,
                                             Arc::clone(&session_manager),
                                         )
@@ -1660,26 +1843,27 @@ pub(crate) async fn run_app(
                     continue;
                 }
 
-                match key.code {
-                    KeyCode::BackTab => {
-                        match plan_mode_toggle(&plugin_host, Arc::clone(&session_manager)).await {
-                            Ok(enabled) => {
-                                app.set_plan_mode_enabled(enabled);
-                                push_system_message(
-                                    &mut app,
-                                    if enabled {
-                                        "Plan mode enabled."
-                                    } else {
-                                        "Plan mode disabled."
-                                    },
-                                );
-                            }
-                            Err(err) => push_system_message(
-                                &mut app,
-                                format!("Failed to toggle plan mode: {}", err),
-                            ),
-                        }
+                if let Some(chord) = key_chord_from_event(key)
+                    && let Some(shortcut) = ui_extensions.shortcut_for(chord)
+                {
+                    match ui_extensions
+                        .invoke_shortcut(
+                            &shortcut,
+                            UiContext {
+                                plugin_host: &plugin_host,
+                                session_id: crate::ROOT_SESSION_ID,
+                                session_manager: Arc::clone(&session_manager),
+                            },
+                        )
+                        .await
+                    {
+                        Ok(effects) => apply_ui_host_effects(&mut app, effects),
+                        Err(err) => push_system_message(&mut app, err),
                     }
+                    continue;
+                }
+
+                match key.code {
                     // Tab: complete selected suggestion
                     KeyCode::Tab if app.has_suggestions() => {
                         app.complete_suggestion();
@@ -1699,7 +1883,11 @@ pub(crate) async fn run_app(
                             );
                             continue;
                         }
-                        let parsed_command = command::parse(&queued.display_text, &app.skills);
+                        let parsed_command = parse_slash_command(
+                            &queued.display_text,
+                            &app.skills,
+                            ui_extensions.as_ref(),
+                        );
                         let is_host_slash_command = parsed_command.is_some();
                         if queued.is_empty()
                             || shell_escape_command(&queued.display_text).is_some()
@@ -1710,9 +1898,9 @@ pub(crate) async fn run_app(
                         }
                         if app.running {
                             if let Some(cmd) = parsed_command
-                                && command::runs_out_of_band_while_running(&cmd)
+                                && slash_command_runs_out_of_band_while_running(&cmd)
                             {
-                                if handle_slash_command(
+                                if handle_parsed_slash_command(
                                     cmd,
                                     &mut terminal,
                                     &mut app,
@@ -1720,6 +1908,7 @@ pub(crate) async fn run_app(
                                     args,
                                     &paused,
                                     &plugin_host,
+                                    ui_extensions.as_ref(),
                                     &dynamic_tools,
                                     &mut runtime,
                                     &mut history,
@@ -1820,14 +2009,18 @@ pub(crate) async fn run_app(
                             continue;
                         }
 
-                        let parsed_command = command::parse(&queued.display_text, &app.skills);
+                        let parsed_command = parse_slash_command(
+                            &queued.display_text,
+                            &app.skills,
+                            ui_extensions.as_ref(),
+                        );
                         let is_host_slash_command = parsed_command.is_some();
 
                         if app.running {
                             if let Some(cmd) = parsed_command
-                                && command::runs_out_of_band_while_running(&cmd)
+                                && slash_command_runs_out_of_band_while_running(&cmd)
                             {
-                                if handle_slash_command(
+                                if handle_parsed_slash_command(
                                     cmd,
                                     &mut terminal,
                                     &mut app,
@@ -1835,6 +2028,7 @@ pub(crate) async fn run_app(
                                     args,
                                     &paused,
                                     &plugin_host,
+                                    ui_extensions.as_ref(),
                                     &dynamic_tools,
                                     &mut runtime,
                                     &mut history,
@@ -1959,8 +2153,12 @@ pub(crate) async fn run_app(
                         }
 
                         // Try slash command
-                        if let Some(cmd) = command::parse(&queued.display_text, &app.skills) {
-                            if handle_slash_command(
+                        if let Some(cmd) = parse_slash_command(
+                            &queued.display_text,
+                            &app.skills,
+                            ui_extensions.as_ref(),
+                        ) {
+                            if handle_parsed_slash_command(
                                 cmd,
                                 &mut terminal,
                                 &mut app,
@@ -1968,6 +2166,7 @@ pub(crate) async fn run_app(
                                 args,
                                 &paused,
                                 &plugin_host,
+                                ui_extensions.as_ref(),
                                 &dynamic_tools,
                                 &mut runtime,
                                 &mut history,
@@ -2000,7 +2199,7 @@ pub(crate) async fn run_app(
                             break;
                         }
 
-                        // Regular user message — send to agent
+                        // Regular user message — send to the active session
                         if let Err(e) = apply_pending_reconfigure(
                             &dynamic_tools,
                             &mut desired_dynamic,
@@ -2175,12 +2374,12 @@ pub(crate) async fn run_app(
             AppEvent::Tick => {
                 app.on_tick();
             }
-            AppEvent::Agent { stream_id, event } => {
+            AppEvent::Session { stream_id, event } => {
                 if stream_id != active_stream_id {
                     continue;
                 }
                 app.dirty = true;
-                if let AgentEvent::DurableSnapshot { snapshot } = event {
+                if let SessionEvent::DurableSnapshot { snapshot } = event {
                     if runtime_return_rx.is_some()
                         && let Some(context_window) = app.context_window
                     {
@@ -2202,8 +2401,8 @@ pub(crate) async fn run_app(
                     }
                     continue;
                 }
-                // Intercept Prompt events — set up dialog state instead of passing to handle_agent_event
-                if let AgentEvent::Prompt {
+                // Intercept Prompt events — set up dialog state instead of passing to handle_session_event
+                if let SessionEvent::Prompt {
                     request,
                     response_tx,
                 } = event
@@ -2223,8 +2422,10 @@ pub(crate) async fn run_app(
                         response_tx,
                     });
                 } else {
-                    let is_done = matches!(&event, AgentEvent::Done);
-                    app.handle_agent_event(event);
+                    let ui_effects = ui_extensions.effects_for_session_event(&event);
+                    let is_done = matches!(&event, SessionEvent::Done);
+                    app.handle_session_event(event);
+                    apply_ui_host_effects(&mut app, ui_effects);
                     if is_done && !app.focused {
                         notify_done();
                     }
@@ -2310,9 +2511,9 @@ fn append_turn_input_message(messages: &mut Vec<Message>, turn_input: &TurnInput
                     id: format!("{}.p{}", user_id, user_parts.len()),
                     kind: PartKind::Image,
                     content: String::new(),
-                    attachment: Some(lash::agent::message::PartAttachment {
+                    attachment: Some(lash::session_model::message::PartAttachment {
                         mime: "image/png".to_string(),
-                        url: lash::agent::message::data_url_for_bytes("image/png", bytes),
+                        url: lash::session_model::message::data_url_for_bytes("image/png", bytes),
                         filename: None,
                     }),
                     tool_call_id: None,
@@ -2344,7 +2545,7 @@ fn append_turn_input_message(messages: &mut Vec<Message>, turn_input: &TurnInput
 }
 
 fn pending_turn_snapshot(
-    state: &AgentStateEnvelope,
+    state: &SessionStateEnvelope,
     turn_input: &TurnInput,
 ) -> DurableTurnSnapshot {
     let mut messages = state.messages.clone();
@@ -2411,9 +2612,9 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     id: String::new(),
                     kind: PartKind::Image,
                     content: String::new(),
-                    attachment: Some(lash::agent::message::PartAttachment {
+                    attachment: Some(lash::session_model::message::PartAttachment {
                         mime: "image/png".to_string(),
-                        url: lash::agent::message::data_url_for_bytes("image/png", bytes),
+                        url: lash::session_model::message::data_url_for_bytes("image/png", bytes),
                         filename: None,
                     }),
                     tool_call_id: None,
@@ -2680,7 +2881,7 @@ fn send_user_message(
     });
 }
 
-/// Send a desktop notification that the agent finished.
+/// Send a desktop notification that the session finished.
 fn notify_done() {
     // Ensure the icon exists in $LASH_HOME
     let icon_path = lash::lash_home().join("icon.svg");

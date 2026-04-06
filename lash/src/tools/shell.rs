@@ -31,9 +31,18 @@ struct ShellProcess {
 }
 
 pub(crate) fn shell_prompt_contributions() -> Vec<PromptContribution> {
-    vec![PromptContribution::guidance(
-        "### Command Execution\nUse `exec_command` for one-shot commands and for starting long-lived processes. If it returns `session_id`, continue that same process with `write_stdin`; otherwise the command already exited. For services or background daemons, prefer startup patterns that survive after the tool call returns, then verify readiness from a fresh command before concluding.\n\n### Git Safety\nDo not revert user changes you did not make. Avoid destructive git commands unless explicitly requested.",
-    )]
+    vec![
+        PromptContribution::guidance(
+            "command_execution",
+            "Command Execution",
+            "Use `exec_command` for one-shot commands and for starting long-lived processes. If it returns `session_id`, continue that same process with `write_stdin`; otherwise the command already exited. For services or background daemons, prefer startup patterns that survive after the tool call returns, then verify readiness from a fresh command before concluding.",
+        ),
+        PromptContribution::guidance(
+            "git_safety",
+            "Git Safety",
+            "Do not revert user changes you did not make. Avoid destructive git commands unless explicitly requested.",
+        ),
+    ]
 }
 
 #[derive(Clone)]

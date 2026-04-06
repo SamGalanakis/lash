@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
-use lash::agent::{Message, MessageRole, Part, PartKind, PruneState};
+use lash::session_model::{Message, MessageRole, Part, PartKind, PruneState};
 use lash::{
-    AgentStateEnvelope, CachedModelCatalog, ContextStrategy, DynamicStateSnapshot,
-    DynamicToolProvider, ExecutionMode, LashRuntime, PromptUsage, Provider, Store, TokenUsage,
+    CachedModelCatalog, ContextStrategy, DynamicStateSnapshot, DynamicToolProvider, ExecutionMode,
+    LashRuntime, PromptUsage, Provider, SessionStateEnvelope, Store, TokenUsage,
 };
 
-use crate::app::{App, DisplayBlock};
+use crate::app::{App, DisplayBlock, apply_ui_resume_state_to_blocks, blocks_from_transcript};
+use crate::resume_snapshot;
 use crate::session_log;
 
 fn push_history_system_message(history: &mut Vec<Message>, content: String) {
@@ -31,7 +32,7 @@ fn repl_reset_message() -> String {
     "Session resumed. Your REPL environment was reset — re-import modules and recreate any state you need.".to_string()
 }
 
-fn restored_token_usage(state: &lash::store::AgentState) -> Option<TokenUsage> {
+fn restored_token_usage(state: &lash::store::SessionState) -> Option<TokenUsage> {
     let usage = TokenUsage {
         input_tokens: state.input_tokens,
         output_tokens: state.output_tokens,
@@ -77,7 +78,7 @@ pub async fn load_resumed_session(
         "Resumed: {}",
         filename
     )));
-    restore_agent_state(
+    restore_session_state(
         filename,
         history,
         runtime,
@@ -111,7 +112,7 @@ pub async fn load_resumed_session(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn restore_agent_state(
+pub async fn restore_session_state(
     session_filename: &str,
     history: &mut Vec<Message>,
     runtime: &mut Option<LashRuntime>,
@@ -142,8 +143,160 @@ pub async fn restore_agent_state(
         }
     };
 
-    if let Some(state) = resume_store.load_agent_state("root") {
-        let transcript_entries = resume_store.transcript_load("root");
+    if let Some(live) = resume_snapshot::load_live_resume_snapshot(&resume_store) {
+        *history = live.state.messages.clone();
+        app.blocks = blocks_from_transcript(&live.state.messages, &live.state.tool_calls);
+        apply_ui_resume_state_to_blocks(&mut app.blocks, &live.ui_state);
+        app.last_response_usage = live.ui_state.last_response_usage.clone();
+        app.plugin_mode_indicators = live.ui_state.plugin_mode_indicators.clone();
+        app.streaming_output = live.ui_state.streaming_output.clone();
+        app.streaming_output_hidden = live.ui_state.streaming_output_hidden;
+        app.streaming_output_partial = live.ui_state.streaming_output_partial.clone();
+        app.invalidate_height_cache();
+        app.blocks.push(DisplayBlock::SystemMessage(
+            "Interrupted runtime state restored from a live snapshot.".to_string(),
+        ));
+
+        let _ = dynamic_tools.apply_state(live.dynamic_state.clone());
+        *desired_dynamic = dynamic_tools.export_state();
+
+        *turn_counter = live.state.iteration;
+        app.token_usage = live.state.token_usage.clone();
+        app.last_prompt_usage = live.state.last_prompt_usage.clone();
+
+        let replay_manifest = live.state.replay_manifest.clone();
+        if let Some(restored_model) = replay_manifest
+            .as_ref()
+            .and_then(|m| m.get("configured_model"))
+            .and_then(|m| m.as_str())
+            .filter(|model| !model.is_empty())
+        {
+            provider
+                .validate_model_name(restored_model)
+                .map_err(|err| {
+                    format!(
+                        "Cannot resume session with model `{}`: {}",
+                        restored_model, err
+                    )
+                })?;
+            let restored_context_window = replay_manifest
+                .as_ref()
+                .and_then(|m| m.get("context_window"))
+                .and_then(|m| m.as_u64())
+                .or_else(|| {
+                    let snapshot = model_catalog.snapshot();
+                    provider
+                        .resolve_model_spec(restored_model, &snapshot)
+                        .ok()
+                        .map(|spec| spec.context_window())
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "Cannot resume session with model `{}`: no context-window entry was saved and the supplied model catalog does not contain it.",
+                        restored_model
+                    )
+                })?;
+            app.model = restored_model.to_string();
+            app.context_window = Some(restored_context_window);
+            app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
+            if let Some(rt) = runtime.as_mut() {
+                rt.update_session_config(
+                    None,
+                    Some(app.model.clone()),
+                    None,
+                    Some(restored_context_window as usize),
+                    None,
+                )
+                .await;
+            }
+        }
+
+        *current_model_variant = replay_manifest
+            .as_ref()
+            .and_then(|m| m.get("model_variant").or_else(|| m.get("reasoning_effort")))
+            .and_then(|m| m.as_str())
+            .map(str::to_string)
+            .or_else(|| {
+                provider
+                    .default_model_variant(&app.model)
+                    .map(str::to_string)
+            });
+        app.set_model_variant(current_model_variant.clone());
+
+        let requested_execution_mode = replay_manifest
+            .as_ref()
+            .and_then(|m| m.get("execution_mode"))
+            .and_then(|m| m.as_str())
+            .map(str::to_string)
+            .and_then(|raw| crate::parse_execution_mode(&raw).ok());
+        let restored_execution_mode = requested_execution_mode
+            .and_then(|mode| crate::ensure_supported_execution_mode(mode).ok())
+            .unwrap_or(live.state.policy.execution_mode);
+        let restored_context_strategy = live.state.policy.context_strategy;
+        *execution_mode = restored_execution_mode;
+        *context_strategy = restored_context_strategy;
+        if matches!(requested_execution_mode, Some(ExecutionMode::Repl))
+            && !lash::execution_mode_supported(ExecutionMode::Repl)
+        {
+            app.blocks.push(DisplayBlock::SystemMessage(
+                "This build does not support REPL mode; resuming in `standard`.".to_string(),
+            ));
+        }
+
+        if matches!(restored_execution_mode, ExecutionMode::Repl) {
+            if let Some(ref repl_snapshot) = live.state.repl_snapshot {
+                if let Some(rt) = runtime.as_mut() {
+                    rt.update_session_config(
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(restored_context_strategy),
+                    )
+                    .await;
+                    match rt.restore_repl(repl_snapshot).await {
+                        Ok(()) => {
+                            app.blocks.push(DisplayBlock::SystemMessage(
+                                "REPL state restored from snapshot.".to_string(),
+                            ));
+                        }
+                        Err(e) => {
+                            push_history_system_message(
+                                history,
+                                format!(
+                                    "Session resumed but REPL restore failed ({}). Re-import modules and recreate any state you need.",
+                                    e
+                                ),
+                            );
+                        }
+                    }
+                }
+            } else {
+                push_history_system_message(history, repl_reset_message());
+            }
+        }
+
+        if let Some(rt) = runtime.as_mut() {
+            rt.update_session_config(
+                None,
+                None,
+                Some(current_model_variant.clone()),
+                None,
+                Some(restored_context_strategy),
+            )
+            .await;
+            let _ = rt.refresh_session_execution_surface().await;
+            let mut restored_state = live.state.clone();
+            restored_state.policy.execution_mode = restored_execution_mode;
+            restored_state.policy.context_strategy = restored_context_strategy;
+            restored_state.task_state = None;
+            rt.set_state(restored_state);
+        }
+        return Ok(());
+    }
+
+    if let Some(state) = resume_store.load_session_state() {
+        let transcript_entries = resume_store.transcript_load();
         *history = lash::transcript_messages(&transcript_entries);
         let config_value = serde_json::from_str::<serde_json::Value>(&state.config_json).ok();
         let resumed_live_snapshot = config_value
@@ -316,8 +469,8 @@ pub async fn restore_agent_state(
             let last_prompt_usage = restored_last_prompt_usage(config_value.as_ref());
             let tool_calls = lash::transcript_tool_calls(&transcript_entries);
             app.last_prompt_usage = last_prompt_usage.clone();
-            rt.set_state(AgentStateEnvelope {
-                agent_id: "root".to_string(),
+            rt.set_state(SessionStateEnvelope {
+                session_id: crate::ROOT_SESSION_ID.to_string(),
                 policy: lash::SessionPolicy {
                     execution_mode: restored_execution_mode,
                     context_strategy: restored_context_strategy,
@@ -356,13 +509,12 @@ mod tests {
         messages: Vec<Message>,
         ui_state: crate::app::UiResumeState,
     ) {
-        let existing = store.load_agent_state(crate::ROOT_SESSION_ID);
+        let existing = store.load_session_state();
         let config = existing
             .as_ref()
             .and_then(|state| serde_json::from_str::<serde_json::Value>(&state.config_json).ok())
             .unwrap_or_else(|| serde_json::json!({}));
-        store.save_agent_state(lash::AgentState {
-            agent_id: crate::ROOT_SESSION_ID.to_string(),
+        store.save_session_state(lash::SessionState {
             iteration: existing.as_ref().map(|state| state.iteration).unwrap_or(0),
             config_json: ui_resume::with_ui_resume_state(config, &ui_state).to_string(),
             repl_snapshot: existing
@@ -386,13 +538,12 @@ mod tests {
                 .unwrap_or(0),
         });
         let keyspaces = lash::semantic_transcript_keyspaces(&messages, &[]);
-        store.transcript_replace_keyspaces(crate::ROOT_SESSION_ID, &keyspaces);
+        store.transcript_replace_keyspaces(&keyspaces);
     }
 
     #[test]
     fn restored_token_usage_includes_reasoning_tokens() {
-        let state = lash::store::AgentState {
-            agent_id: "root".into(),
+        let state = lash::store::SessionState {
             iteration: 3,
             config_json: "{}".into(),
             repl_snapshot: None,
@@ -427,7 +578,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_agent_state_restores_persisted_usage_into_app_and_runtime() {
+    async fn restore_session_state_restores_persisted_usage_into_app_and_runtime() {
         let _env_guard = env_lock().lock().await;
         let temp = TempDirGuard::new("lash-resume-usage");
         let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
@@ -450,8 +601,7 @@ mod tests {
             }
         })
         .to_string();
-        store.save_agent_state(lash::AgentState {
-            agent_id: "root".to_string(),
+        store.save_session_state(lash::SessionState {
             iteration: 7,
             config_json,
             repl_snapshot: None,
@@ -506,7 +656,7 @@ mod tests {
             },
             RuntimeHostConfig::default(),
             runtime_services,
-            AgentStateEnvelope::default(),
+            SessionStateEnvelope::default(),
         )
         .await
         .expect("runtime");
@@ -519,7 +669,7 @@ mod tests {
         let mut context_strategy = lash::default_context_strategy();
         let mut current_model_variant = None;
 
-        restore_agent_state(
+        restore_session_state(
             "resume-usage.db",
             &mut history,
             &mut runtime,
@@ -569,7 +719,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_agent_state_keeps_loaded_history_for_interrupted_turns() {
+    async fn restore_session_state_keeps_loaded_history_for_interrupted_turns() {
         let _env_guard = env_lock().lock().await;
         let temp = TempDirGuard::new("lash-resume-live-snapshot");
         let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
@@ -578,38 +728,63 @@ mod tests {
 
         let db_path = sessions_dir.join("resume-live.db");
         let store = Store::open(&db_path).expect("store");
-        let config_json = serde_json::json!({
-            "manifest": {
-                "execution_mode": "standard"
+        let live_messages = vec![Message {
+            id: "m0".into(),
+            role: MessageRole::User,
+            parts: vec![Part {
+                id: "m0.p0".into(),
+                kind: PartKind::Text,
+                content: "live snapshot message".into(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: PruneState::Intact,
+            }],
+            origin: None,
+        }];
+        crate::resume_snapshot::save_live_resume_snapshot(
+            &store,
+            &SessionStateEnvelope {
+                session_id: crate::ROOT_SESSION_ID.to_string(),
+                policy: lash::SessionPolicy {
+                    execution_mode: ExecutionMode::Standard,
+                    context_strategy: lash::ContextStrategy::RollingContext,
+                    ..lash::SessionPolicy::default()
+                },
+                messages: live_messages.clone(),
+                tool_calls: Vec::new(),
+                iteration: 2,
+                token_usage: TokenUsage::default(),
+                last_prompt_usage: None,
+                task_state: Some(serde_json::json!({
+                    "kind": "live_resume",
+                    "status": "running"
+                })),
+                replay_manifest: Some(serde_json::json!({
+                    "configured_model": "gpt-5",
+                    "context_window": 200000,
+                    "execution_mode": "standard"
+                })),
+                plugin_snapshot: None,
+                repl_snapshot: None,
             },
-            "context_strategy": {
-                "type": "rolling_context"
+            &crate::app::UiResumeState::default(),
+            &DynamicStateSnapshot {
+                base_generation: 0,
+                tools: std::collections::BTreeMap::new(),
+                enabled_tools: std::collections::BTreeSet::new(),
             },
-            "task_state": {
-                "kind": "live_resume",
-                "status": "running"
-            }
-        })
-        .to_string();
-        store.save_agent_state(lash::AgentState {
-            agent_id: "root".to_string(),
-            iteration: 2,
-            config_json,
-            repl_snapshot: None,
-            input_tokens: 0,
-            output_tokens: 0,
-            cached_input_tokens: 0,
-            reasoning_tokens: 0,
-        });
+        )
+        .expect("live snapshot");
         persist_transcript(
             &store,
             vec![Message {
-                id: "m0".into(),
+                id: "old".into(),
                 role: MessageRole::User,
                 parts: vec![Part {
-                    id: "m0.p0".into(),
+                    id: "old.p0".into(),
                     kind: PartKind::Text,
-                    content: "jsonl replay message".into(),
+                    content: "canonical transcript message".into(),
                     attachment: None,
                     tool_call_id: None,
                     tool_name: None,
@@ -664,7 +839,7 @@ mod tests {
             },
             RuntimeHostConfig::default(),
             runtime_services,
-            AgentStateEnvelope::default(),
+            SessionStateEnvelope::default(),
         )
         .await
         .expect("runtime");
@@ -676,7 +851,7 @@ mod tests {
             parts: vec![Part {
                 id: "m0.p0".into(),
                 kind: PartKind::Text,
-                content: "jsonl replay message".into(),
+                content: "canonical transcript message".into(),
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
@@ -690,7 +865,7 @@ mod tests {
         let mut context_strategy = lash::default_context_strategy();
         let mut current_model_variant = None;
 
-        restore_agent_state(
+        restore_session_state(
             "resume-live.db",
             &mut history,
             &mut runtime,
@@ -710,7 +885,7 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].role, MessageRole::User);
         assert_eq!(history[0].parts.len(), 1);
-        assert_eq!(history[0].parts[0].content, "jsonl replay message");
+        assert_eq!(history[0].parts[0].content, "live snapshot message");
         let restored_runtime = runtime.expect("runtime");
         let restored_messages = restored_runtime.export_state().messages;
         assert_eq!(restored_messages.len(), 1);
@@ -718,7 +893,7 @@ mod tests {
         assert_eq!(restored_messages[0].parts.len(), 1);
         assert_eq!(
             restored_messages[0].parts[0].content,
-            "jsonl replay message"
+            "live snapshot message"
         );
         assert!(app.blocks.iter().any(|block| matches!(
             block,
@@ -758,8 +933,7 @@ mod tests {
             }
         })
         .to_string();
-        store.save_agent_state(lash::AgentState {
-            agent_id: crate::ROOT_SESSION_ID.to_string(),
+        store.save_session_state(lash::SessionState {
             iteration: 1,
             config_json,
             repl_snapshot: None,

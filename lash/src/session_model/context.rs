@@ -6,15 +6,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
-use crate::agent::format_tool_result_content;
 use crate::plugin::{
     PluginError, PromptContribution, SessionContextSurface, SessionCreateRequest, SessionManager,
     SessionPluginMode, SessionStartPoint,
 };
+use crate::session_model::format_tool_result_content;
 use crate::{
-    AgentStateEnvelope, ContextStrategy, ExecutionMode, InputItem, Message, MessageOrigin,
-    MessageRole, Part, PartKind, PromptUsage, ToolCallRecord, ToolProvider, TurnInput,
-    lash_cache_dir,
+    ContextStrategy, ExecutionMode, InputItem, Message, MessageOrigin, MessageRole, Part, PartKind,
+    PromptUsage, SessionStateEnvelope, ToolCallRecord, ToolProvider, TurnInput, lash_cache_dir,
 };
 
 const TOOL_RESULT_MAX_LINES: usize = 2_000;
@@ -27,7 +26,7 @@ const COMPACTION_KEEP_RECENT_TOKENS: usize = 20_000;
 const PRUNE_CONTEXT_THRESHOLD: f64 = 0.6;
 const COMPACTION_PLUGIN_ID: &str = "context_strategy";
 const COMPACTION_SUMMARY_TITLE: &str = "Compaction summary:";
-const COMPACTION_PROMPT: &str = "Provide a detailed summary of the conversation above so another agent can continue the work without the full history.\n\nUse this template:\n---\n## Goal\n[What is the user trying to accomplish?]\n\n## Instructions\n- [Relevant instructions or constraints]\n\n## Discoveries\n[Important findings, failures, or decisions]\n\n## Accomplished\n[What is done, what is in progress, what remains]\n\n## Relevant files / directories\n[List important files or directories]\n---";
+const COMPACTION_PROMPT: &str = "Provide a detailed summary of the conversation above so a later session can continue the work without the full history.\n\nUse this template:\n---\n## Goal\n[What is the user trying to accomplish?]\n\n## Instructions\n- [Relevant instructions or constraints]\n\n## Discoveries\n[Important findings, failures, or decisions]\n\n## Accomplished\n[What is done, what is in progress, what remains]\n\n## Relevant files / directories\n[List important files or directories]\n---";
 const PRUNE_PROTECTED_TOOLS: &[&str] = &["skill"];
 const PRUNED_IMAGE_PLACEHOLDER: &str = "[Image omitted from older context]";
 const COMPACTED_IMAGE_PLACEHOLDER: &str = "[Image omitted during compaction]";
@@ -53,7 +52,7 @@ fn compaction_update_prompt(previous_summary: &str) -> String {
 #[derive(Clone)]
 pub struct ContextBuildRequest {
     pub session_id: String,
-    pub state: AgentStateEnvelope,
+    pub state: SessionStateEnvelope,
     pub messages: Vec<Message>,
     pub prompt_usage: Option<PromptUsage>,
     pub max_context_tokens: Option<usize>,
@@ -578,7 +577,7 @@ fn extract_previous_summary(messages: &[Message]) -> Option<String> {
 /// Run compaction eagerly on current messages when the context window shrinks.
 pub async fn compact_messages_if_needed(
     session_id: &str,
-    state: &AgentStateEnvelope,
+    state: &SessionStateEnvelope,
     messages: &[Message],
     prompt_usage: Option<PromptUsage>,
     max_context_tokens: Option<usize>,
@@ -593,7 +592,7 @@ pub async fn compact_messages_if_needed(
 /// Force-compact messages regardless of threshold. Used for overflow recovery.
 pub async fn force_compact_messages(
     session_id: &str,
-    state: &AgentStateEnvelope,
+    state: &SessionStateEnvelope,
     messages: &mut Vec<Message>,
     max_context_tokens: Option<usize>,
     host: Arc<dyn SessionManager>,
@@ -635,7 +634,7 @@ pub async fn force_compact_messages(
 
 async fn compact_messages_core(
     session_id: &str,
-    state: &AgentStateEnvelope,
+    state: &SessionStateEnvelope,
     messages: &[Message],
     host: Arc<dyn SessionManager>,
 ) -> Result<Option<Vec<Message>>, ContextBuildError> {
@@ -679,7 +678,7 @@ fn referenced_tool_call_ids(messages: &[Message]) -> HashSet<String> {
 
 async fn summarize_compaction_prefix(
     session_id: &str,
-    state: &AgentStateEnvelope,
+    state: &SessionStateEnvelope,
     prefix_messages: Vec<Message>,
     host: Arc<dyn SessionManager>,
 ) -> Result<Option<String>, ContextBuildError> {
@@ -712,7 +711,7 @@ async fn summarize_compaction_prefix(
     policy.max_turns = Some(1);
     let handle = host
         .create_session(SessionCreateRequest {
-            agent_id: Some(compaction_session_id),
+            session_id: Some(compaction_session_id),
             parent_session_id: Some(session_id.to_string()),
             start: SessionStartPoint::Snapshot {
                 snapshot: Box::new(snapshot),
@@ -819,9 +818,9 @@ mod tests {
                 id: format!("{id}.p0"),
                 kind: PartKind::Image,
                 content: String::new(),
-                attachment: Some(crate::agent::message::PartAttachment {
+                attachment: Some(crate::session_model::message::PartAttachment {
                     mime: "image/png".to_string(),
-                    url: crate::agent::message::data_url_for_bytes("image/png", bytes),
+                    url: crate::session_model::message::data_url_for_bytes("image/png", bytes),
                     filename: None,
                 }),
                 tool_call_id: None,
@@ -864,8 +863,8 @@ mod tests {
 
     fn empty_turn(session_id: &str, summary: &str) -> crate::AssembledTurn {
         crate::AssembledTurn {
-            state: AgentStateEnvelope {
-                agent_id: session_id.to_string(),
+            state: SessionStateEnvelope {
+                session_id: session_id.to_string(),
                 policy: SessionPolicy {
                     execution_mode: ExecutionMode::Standard,
                     context_strategy: ContextStrategy::RollingContext,
@@ -901,14 +900,14 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionManager for MockSessionManager {
         async fn snapshot_current(&self) -> Result<crate::plugin::SessionSnapshot, PluginError> {
-            Ok(AgentStateEnvelope::default())
+            Ok(SessionStateEnvelope::default())
         }
 
         async fn snapshot_session(
             &self,
             _session_id: &str,
         ) -> Result<crate::plugin::SessionSnapshot, PluginError> {
-            Ok(AgentStateEnvelope::default())
+            Ok(SessionStateEnvelope::default())
         }
 
         async fn tool_catalog(
@@ -927,7 +926,7 @@ mod tests {
         ) -> Result<SessionHandle, PluginError> {
             self.created.lock().await.push(request.clone());
             Ok(SessionHandle {
-                session_id: request.agent_id.unwrap_or_else(|| "child".to_string()),
+                session_id: request.session_id.unwrap_or_else(|| "child".to_string()),
                 parent_session_id: request.parent_session_id,
                 policy: SessionPolicy {
                     model: "mock-model".to_string(),
@@ -1007,7 +1006,7 @@ mod tests {
         // Provide usage above PRUNE_CONTEXT_THRESHOLD (60%) to trigger pruning.
         let built = build_context(ContextBuildRequest {
             session_id: "root".to_string(),
-            state: AgentStateEnvelope {
+            state: SessionStateEnvelope {
                 policy: SessionPolicy {
                     context_strategy: ContextStrategy::RollingContext,
                     ..Default::default()
@@ -1048,7 +1047,7 @@ mod tests {
         // Provide usage above PRUNE_CONTEXT_THRESHOLD (60%) to trigger pruning.
         let built = build_context(ContextBuildRequest {
             session_id: "root".to_string(),
-            state: AgentStateEnvelope {
+            state: SessionStateEnvelope {
                 policy: SessionPolicy {
                     context_strategy: ContextStrategy::RollingContext,
                     ..Default::default()
@@ -1080,8 +1079,8 @@ mod tests {
         let manager = Arc::new(MockSessionManager::default());
         let built = build_context(ContextBuildRequest {
             session_id: "root".to_string(),
-            state: AgentStateEnvelope {
-                agent_id: "root".to_string(),
+            state: SessionStateEnvelope {
+                session_id: "root".to_string(),
                 policy: SessionPolicy {
                     execution_mode: ExecutionMode::Standard,
                     context_strategy: ContextStrategy::RollingContext,

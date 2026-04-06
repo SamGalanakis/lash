@@ -8,7 +8,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::embedded::{LashlangRequest, LashlangResponse, LashlangRuntime};
 use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call};
 use crate::{
-    AgentEvent, ExecResponse, PluginMessage, PromptContribution, RuntimeServices, SandboxMessage,
+    ExecResponse, PluginMessage, PromptContribution, RuntimeServices, SandboxMessage, SessionEvent,
     SessionManager, ToolCallRecord, ToolImage, ToolProvider,
 };
 
@@ -57,8 +57,9 @@ pub enum SessionError {
 }
 
 pub struct Session {
-    agent_id: String,
+    session_id: String,
     repl_runtime: Option<LashlangRuntime>,
+    last_repl_tools_json: Option<String>,
     services: RuntimeServices,
     include_base_tools: bool,
     context_tools: Vec<Arc<dyn ToolProvider>>,
@@ -72,14 +73,15 @@ pub struct Session {
 impl Session {
     pub async fn new(
         services: RuntimeServices,
-        agent_id: &str,
+        session_id: &str,
         execution_mode: crate::ExecutionMode,
     ) -> Result<Self, SessionError> {
         let scratch_dir = tempfile::TempDir::new()?;
 
         let mut session = Self {
-            agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
             repl_runtime: None,
+            last_repl_tools_json: None,
             services,
             include_base_tools: true,
             context_tools: Vec::new(),
@@ -93,7 +95,7 @@ impl Session {
         if matches!(execution_mode, crate::ExecutionMode::Repl) {
             let runtime = LashlangRuntime::start()?;
             session.repl_runtime = Some(runtime);
-            session.initialize_execution_surface(agent_id).await?;
+            session.initialize_execution_surface(session_id).await?;
         }
 
         Ok(session)
@@ -181,6 +183,11 @@ impl Session {
         crate::tools::project_tool_catalog(self.execution_surface(session_id, mode).enabled_tools())
     }
 
+    fn repl_tools_json(&self, session_id: &str) -> String {
+        serde_json::to_string(&self.tool_catalog(session_id, crate::ExecutionMode::Repl))
+            .unwrap_or_else(|_| "[]".to_string())
+    }
+
     pub fn turn_injection_bridge(&self) -> &TurnInjectionBridge {
         &self.services.turn_injection_bridge
     }
@@ -200,7 +207,7 @@ impl Session {
         &mut self,
         session_id: &str,
         host: Arc<dyn SessionManager>,
-        event_tx: &tokio::sync::mpsc::Sender<AgentEvent>,
+        event_tx: &tokio::sync::mpsc::Sender<SessionEvent>,
         code: &str,
     ) -> Result<ExecResponse, SessionError> {
         self.tool_calls.clear();
@@ -377,6 +384,7 @@ impl Session {
             }
         }
 
+        self.last_repl_tools_json = None;
         Ok(())
     }
 
@@ -387,12 +395,13 @@ impl Session {
             return Ok(());
         }
 
-        let tools_json =
-            serde_json::to_string(&self.tool_catalog(&self.agent_id, crate::ExecutionMode::Repl))
-                .unwrap_or_else(|_| "[]".to_string());
+        let tools_json = self.repl_tools_json(&self.session_id);
+        if self.last_repl_tools_json.as_deref() == Some(tools_json.as_str()) {
+            return Ok(());
+        }
         let generation = self.tools().dynamic_generation().unwrap_or(0);
         self.runtime()?.send(LashlangRequest::Reconfigure {
-            tools_json,
+            tools_json: tools_json.clone(),
             generation,
         })?;
 
@@ -410,6 +419,7 @@ impl Session {
                     if let Some(err) = error {
                         return Err(SessionError::Protocol(format!("reconfigure failed: {err}")));
                     }
+                    self.last_repl_tools_json = Some(tools_json.clone());
                     break;
                 }
                 _ => continue,
@@ -419,17 +429,18 @@ impl Session {
         Ok(())
     }
 
-    async fn initialize_execution_surface(&mut self, agent_id: &str) -> Result<(), SessionError> {
-        let tools_json =
-            serde_json::to_string(&self.tool_catalog(agent_id, crate::ExecutionMode::Repl))
-                .unwrap_or_else(|_| "[]".to_string());
+    async fn initialize_execution_surface(&mut self, session_id: &str) -> Result<(), SessionError> {
+        let tools_json = self.repl_tools_json(session_id);
         self.runtime()?.send(LashlangRequest::Init {
-            tools_json,
-            agent_id: agent_id.to_string(),
+            tools_json: tools_json.clone(),
+            session_id: session_id.to_string(),
         })?;
 
         match self.runtime()?.recv()? {
-            LashlangResponse::Ready => Ok(()),
+            LashlangResponse::Ready => {
+                self.last_repl_tools_json = Some(tools_json);
+                Ok(())
+            }
             other => Err(SessionError::Protocol(format!(
                 "expected ready, got: {:?}",
                 std::mem::discriminant(&other)

@@ -18,6 +18,7 @@ mod plugin_surface;
 mod prompt_overrides;
 mod repo_status;
 mod resume;
+mod resume_snapshot;
 mod session_log;
 mod setup;
 #[cfg(test)]
@@ -69,11 +70,13 @@ fn autonomous_prompt_overrides() -> Vec<PromptSectionOverride> {
     vec![
         PromptSectionOverride {
             section: PromptSectionName::Intro,
+            block: None,
             mode: PromptOverrideMode::Prepend,
-            content: "You are an autonomous AI coding agent running without a human in the loop.\nComplete the task end-to-end without asking for user input.".to_string(),
+            content: "You are an autonomous AI coding assistant running without a human in the loop.\nComplete the task end-to-end without asking for user input.".to_string(),
         },
         PromptSectionOverride {
             section: PromptSectionName::Execution,
+            block: None,
             mode: PromptOverrideMode::Append,
             content: "- No user is available during this run. Do not rely on `ask`; make the best reasonable decision from local context and continue.".to_string(),
         },
@@ -147,32 +150,32 @@ struct Args {
     #[arg(short = 'p', long = "print")]
     print_prompt: Option<String>,
 
-    /// Replace a prompt section: --prompt-replace section=text
-    #[arg(long = "prompt-replace", value_name = "SECTION=TEXT")]
+    /// Replace a prompt target: --prompt-replace section[.block]=text
+    #[arg(long = "prompt-replace", value_name = "TARGET=TEXT")]
     prompt_replace: Vec<String>,
 
-    /// Replace a prompt section from file: --prompt-replace-file section=path
-    #[arg(long = "prompt-replace-file", value_name = "SECTION=PATH")]
+    /// Replace a prompt target from file: --prompt-replace-file section[.block]=path
+    #[arg(long = "prompt-replace-file", value_name = "TARGET=PATH")]
     prompt_replace_file: Vec<String>,
 
-    /// Prepend text to a prompt section: --prompt-prepend section=text
-    #[arg(long = "prompt-prepend", value_name = "SECTION=TEXT")]
+    /// Prepend text to a prompt target: --prompt-prepend section[.block]=text
+    #[arg(long = "prompt-prepend", value_name = "TARGET=TEXT")]
     prompt_prepend: Vec<String>,
 
-    /// Prepend text to a prompt section from file: --prompt-prepend-file section=path
-    #[arg(long = "prompt-prepend-file", value_name = "SECTION=PATH")]
+    /// Prepend text to a prompt target from file: --prompt-prepend-file section[.block]=path
+    #[arg(long = "prompt-prepend-file", value_name = "TARGET=PATH")]
     prompt_prepend_file: Vec<String>,
 
-    /// Append text to a prompt section: --prompt-append section=text
-    #[arg(long = "prompt-append", value_name = "SECTION=TEXT")]
+    /// Append text to a prompt target: --prompt-append section[.block]=text
+    #[arg(long = "prompt-append", value_name = "TARGET=TEXT")]
     prompt_append: Vec<String>,
 
-    /// Append text to a prompt section from file: --prompt-append-file section=path
-    #[arg(long = "prompt-append-file", value_name = "SECTION=PATH")]
+    /// Append text to a prompt target from file: --prompt-append-file section[.block]=path
+    #[arg(long = "prompt-append-file", value_name = "TARGET=PATH")]
     prompt_append_file: Vec<String>,
 
-    /// Disable a prompt section entirely.
-    #[arg(long = "prompt-disable", value_name = "SECTION")]
+    /// Disable a prompt target entirely.
+    #[arg(long = "prompt-disable", value_name = "TARGET")]
     prompt_disable: Vec<String>,
 }
 
@@ -253,7 +256,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use lash::agent::MessageRole;
+    use lash::session_model::MessageRole;
 
     use crate::app::App;
 
@@ -365,8 +368,10 @@ mod tests {
 
     #[test]
     fn controls_text_mentions_alt_up_queue_edit_binding() {
-        let controls = controls_text();
+        let ui_extensions = lash_ui::UiExtensions::builtin().expect("ui extensions");
+        let controls = controls_text(&ui_extensions);
         assert!(controls.contains("Up (empty draft)   Edit last queued turn"));
+        assert!(controls.contains("Shift+Tab          Toggle persistent plan mode"));
         assert!(!controls.contains("Backspace          Restore last next-turn draft"));
         assert!(!controls.contains("Shift+Drag"));
         assert!(!controls.contains("F6"));
@@ -375,7 +380,7 @@ mod tests {
     #[test]
     fn autonomous_renderer_prints_missing_final_tail_after_streamed_prefix() {
         let mut renderer = AutonomousRenderer::new();
-        let _ = renderer.handle(AgentEvent::TextDelta {
+        let _ = renderer.handle(SessionEvent::TextDelta {
             content: "Inspected files.\n".to_string(),
         });
 
@@ -390,7 +395,7 @@ mod tests {
     #[test]
     fn autonomous_renderer_collects_plugin_panel_output() {
         let mut renderer = AutonomousRenderer::new();
-        let _ = renderer.handle(AgentEvent::PluginEvent {
+        let _ = renderer.handle(SessionEvent::PluginEvent {
             plugin_id: "demo".to_string(),
             event: PluginSurfaceEvent::PanelUpsert {
                 key: "panel:1".to_string(),
@@ -408,7 +413,7 @@ mod tests {
     #[test]
     fn turn_has_visible_output_accepts_plugin_rendered_turns() {
         let turn = AssembledTurn {
-            state: AgentStateEnvelope::default(),
+            state: SessionStateEnvelope::default(),
             status: TurnStatus::Completed,
             assistant_output: AssistantOutput {
                 safe_text: String::new(),

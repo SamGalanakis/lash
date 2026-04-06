@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use lash::{
-    AgentEvent, Message, MessageRole, PartKind, PluginMessage, PromptUsage, SkillCatalog,
+    Message, MessageRole, PartKind, PluginMessage, PromptUsage, SessionEvent, SkillCatalog,
     TokenUsage, ToolCallRecord, append_skill_blocks, collect_skill_mentions,
     plugin_surface_event_renders_visible_output,
 };
+use lash_ui::UiExtensions;
 
 use ratatui::layout::Rect;
 
@@ -610,6 +612,8 @@ pub struct App {
     pub follow_mode: FollowOutputMode,
     /// Cumulative height prefix sums for each block (used for O(1) total height and O(log n) lookup).
     height_cache: Vec<usize>,
+    /// Earliest block index whose cached height is stale.
+    height_cache_dirty_from: usize,
     /// Terminal width the height cache was computed for.
     height_cache_width: usize,
     /// Viewport height the height cache was computed for (needed for Splash centering).
@@ -655,6 +659,8 @@ pub struct App {
     pub repo_status: Option<RepoStatus>,
     /// Active plugin-owned mode indicators rendered in the input chrome.
     pub plugin_mode_indicators: BTreeMap<String, String>,
+    /// UI extension registry used for slash-command completion and host actions.
+    ui_extensions: Arc<UiExtensions>,
     /// Current working directory with ~ substitution.
     pub cwd: String,
     /// Active delegate child session: (name, task description, started_at).
@@ -808,12 +814,14 @@ impl App {
 
     fn push_activity_block(&mut self, activity: ActivityBlock) {
         append_activity_block(&mut self.blocks, activity);
-        self.invalidate_height_cache();
+        if !self.blocks.is_empty() {
+            self.invalidate_height_cache_from(self.blocks.len() - 1);
+        }
     }
 
     fn push_plan_content(&mut self, content: String) {
         self.blocks.push(DisplayBlock::PlanContent(content));
-        self.invalidate_height_cache();
+        self.invalidate_height_cache_from(self.blocks.len() - 1);
     }
 
     pub fn new(model: String, session_name: String) -> Self {
@@ -842,6 +850,7 @@ impl App {
             dirty: true,
             follow_mode: FollowOutputMode::Bottom,
             height_cache: Vec::new(),
+            height_cache_dirty_from: 0,
             height_cache_width: 0,
             height_cache_vh: 0,
             editor: EditorState::default(),
@@ -873,6 +882,7 @@ impl App {
                 .ok()
                 .and_then(|cwd| crate::repo_status::detect_repo_status(&cwd)),
             plugin_mode_indicators: BTreeMap::new(),
+            ui_extensions: Arc::new(UiExtensions::default()),
             cwd,
             active_delegate: None,
             activity_state: ActivityState::default(),
@@ -913,7 +923,22 @@ impl App {
 
     /// Mark the height cache as stale so it will be recomputed on next access.
     pub fn invalidate_height_cache(&mut self) {
-        self.height_cache.clear();
+        self.height_cache_dirty_from = 0;
+    }
+
+    fn invalidate_height_cache_from(&mut self, idx: usize) {
+        if self.blocks.is_empty() {
+            self.height_cache.clear();
+            self.height_cache_dirty_from = 0;
+            return;
+        }
+        if self.height_cache.is_empty() {
+            self.height_cache_dirty_from = 0;
+            return;
+        }
+        self.height_cache_dirty_from = self
+            .height_cache_dirty_from
+            .min(idx.min(self.blocks.len().saturating_sub(1)));
     }
 
     /// Remove the empty-state splash once real conversation content is present.
@@ -957,7 +982,7 @@ impl App {
         {
             if *text != cleaned {
                 *text = cleaned;
-                self.invalidate_height_cache();
+                self.invalidate_height_cache_from(idx);
             }
             self.mark_visible_output();
             return;
@@ -968,7 +993,7 @@ impl App {
             turn.assistant_block_idx = Some(self.blocks.len() - 1);
         }
         self.mark_visible_output();
-        self.invalidate_height_cache();
+        self.invalidate_height_cache_from(self.blocks.len() - 1);
     }
 
     fn merge_into_trailing_assistant_block(&mut self, text: &str) -> bool {
@@ -986,7 +1011,8 @@ impl App {
         }
         if *existing != cleaned {
             *existing = cleaned;
-            self.invalidate_height_cache();
+            let idx = self.blocks.len().saturating_sub(1);
+            self.invalidate_height_cache_from(idx);
         }
         true
     }
@@ -998,7 +1024,8 @@ impl App {
         if text.starts_with(existing.as_str()) {
             if *existing != text {
                 *existing = text.to_string();
-                self.invalidate_height_cache();
+                let idx = self.blocks.len().saturating_sub(1);
+                self.invalidate_height_cache_from(idx);
             }
             return true;
         }
@@ -1032,11 +1059,11 @@ impl App {
             if cleaned.starts_with(existing.as_str()) {
                 if *existing != cleaned {
                     *existing = cleaned;
-                    self.invalidate_height_cache();
+                    self.invalidate_height_cache_from(idx);
                 }
             } else if existing.is_empty() {
                 *existing = cleaned;
-                self.invalidate_height_cache();
+                self.invalidate_height_cache_from(idx);
             }
             self.assistant_text_finalized = true;
             self.mark_visible_output();
@@ -1052,7 +1079,7 @@ impl App {
         }
 
         if push_assistant_text_block(&mut self.blocks, &cleaned) {
-            self.invalidate_height_cache();
+            self.invalidate_height_cache_from(self.blocks.len() - 1);
             self.mark_visible_output();
         }
         self.assistant_text_finalized = true;
@@ -1090,37 +1117,19 @@ impl App {
         }
     }
 
-    fn queue_plan_exit_follow_up(&mut self, result: &serde_json::Value, success: bool) {
-        if !success {
-            return;
-        }
-        let Some(next_turn_input) = result
-            .get("next_turn_input")
-            .and_then(|value| value.as_str())
-            .filter(|value| !value.trim().is_empty())
-        else {
-            return;
-        };
-        self.queue_turn(PreparedTurn::prepare(
-            next_turn_input.to_string(),
-            Vec::new(),
-            &self.skills,
-        ));
-    }
-
     pub fn push_prepared_user_input(&mut self, turn: &PreparedTurn) {
         let history_text = turn.history_text();
         if history_text.is_empty() {
             return;
         }
         self.blocks.push(DisplayBlock::UserInput(history_text));
-        self.invalidate_height_cache();
+        self.invalidate_height_cache_from(self.blocks.len() - 1);
     }
 
-    /// Process an agent event, updating display blocks.
-    pub fn handle_agent_event(&mut self, event: AgentEvent) {
+    /// Process a session event, updating display blocks.
+    pub fn handle_session_event(&mut self, event: SessionEvent) {
         match event {
-            AgentEvent::TextDelta { content } => {
+            SessionEvent::TextDelta { content } => {
                 if !self.running && self.live_turn.is_none() && self.pending_text.is_empty() {
                     if self.assistant_text_finalized {
                         return;
@@ -1138,7 +1147,7 @@ impl App {
                 self.sync_pending_text_block();
                 self.scroll_to_bottom();
             }
-            AgentEvent::CodeBlock { code } => {
+            SessionEvent::CodeBlock { code } => {
                 self.set_status("writing code", None, true);
                 self.close_pending_text();
                 let trimmed = code.trim_matches('\n');
@@ -1148,12 +1157,12 @@ impl App {
                         code: trimmed.to_string(),
                         continuation,
                     });
-                    self.invalidate_height_cache();
+                    self.invalidate_height_cache_from(self.blocks.len() - 1);
                     self.mark_visible_output();
                 }
                 self.scroll_to_bottom();
             }
-            AgentEvent::ToolCall {
+            SessionEvent::ToolCall {
                 name,
                 args,
                 result,
@@ -1163,9 +1172,6 @@ impl App {
             } => {
                 self.close_pending_text();
                 self.clear_streaming_output();
-                if name == "plan_exit" {
-                    self.queue_plan_exit_follow_up(&result, success);
-                }
                 if matches!(name.as_str(), "agent_result" | "agent_kill") {
                     self.active_delegate = None;
                 }
@@ -1198,19 +1204,19 @@ impl App {
                 }
                 self.scroll_to_bottom();
             }
-            AgentEvent::CodeOutput { output, error } => {
+            SessionEvent::CodeOutput { output, error } => {
                 let error = error.filter(|value| !value.trim().is_empty());
                 if error.is_some() {
                     self.set_status("execution failed", None, true);
                 }
                 if error.is_some() || !output.is_empty() {
                     self.blocks.push(DisplayBlock::CodeOutput { output, error });
-                    self.invalidate_height_cache();
+                    self.invalidate_height_cache_from(self.blocks.len() - 1);
                     self.mark_visible_output();
                 }
                 self.scroll_to_bottom();
             }
-            AgentEvent::Message { text, kind } => {
+            SessionEvent::Message { text, kind } => {
                 if kind == "delegate_start" {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
                         let model = v
@@ -1284,7 +1290,7 @@ impl App {
                     // Unknown message kinds are intentionally dropped.
                 }
             }
-            AgentEvent::LlmRequest { iteration, .. } => {
+            SessionEvent::LlmRequest { iteration, .. } => {
                 self.close_pending_text();
                 self.iteration = iteration + 1;
                 self.set_status("thinking", Some("waiting for first token".into()), true);
@@ -1292,7 +1298,7 @@ impl App {
                 self.live_output_tokens_estimate = 0;
                 self.keep_latest_user_block_visible();
             }
-            AgentEvent::RetryStatus {
+            SessionEvent::RetryStatus {
                 wait_seconds,
                 attempt,
                 max_attempts,
@@ -1313,12 +1319,12 @@ impl App {
                 );
                 self.scroll_to_bottom();
             }
-            AgentEvent::Done => {
+            SessionEvent::Done => {
                 self.close_pending_text();
                 self.stop_turn();
                 self.scroll_to_bottom();
             }
-            AgentEvent::Error { message, envelope } => {
+            SessionEvent::Error { message, envelope } => {
                 self.close_pending_text();
                 let code = envelope.as_ref().and_then(|err| err.code.as_deref());
                 if is_cancelled_error(&message, code) {
@@ -1338,12 +1344,12 @@ impl App {
                         std::time::Duration::from_secs(8),
                     );
                     self.blocks.push(DisplayBlock::Error(message));
+                    self.invalidate_height_cache_from(self.blocks.len() - 1);
                 }
-                self.invalidate_height_cache();
                 self.mark_visible_output();
                 self.scroll_to_bottom();
             }
-            AgentEvent::TokenUsage {
+            SessionEvent::TokenUsage {
                 usage, cumulative, ..
             } => {
                 let should_clear_live_estimate = usage.output_tokens > 0
@@ -1356,7 +1362,7 @@ impl App {
                     self.live_output_tokens_estimate = 0;
                 }
             }
-            AgentEvent::PluginEvent { plugin_id, event } => {
+            SessionEvent::PluginEvent { plugin_id, event } => {
                 let renders_visible_output = plugin_surface_event_renders_visible_output(&event);
                 let mutation = plugin_surface::apply_surface_event(
                     &mut self.blocks,
@@ -1375,12 +1381,12 @@ impl App {
                     self.dirty = true;
                 }
             }
-            AgentEvent::InjectedMessagesCommitted { messages, .. } => {
+            SessionEvent::InjectedMessagesCommitted { messages, .. } => {
                 self.commit_injected_messages(&messages);
             }
-            AgentEvent::DurableSnapshot { .. } => {}
-            AgentEvent::LlmResponse { .. } => {}
-            AgentEvent::Prompt { .. } => {
+            SessionEvent::DurableSnapshot { .. } => {}
+            SessionEvent::LlmResponse { .. } => {}
+            SessionEvent::Prompt { .. } => {
                 // Handled by the main event loop, not here
             }
         }
@@ -1435,13 +1441,26 @@ impl App {
         false
     }
 
-    pub fn set_plan_mode_enabled(&mut self, enabled: bool) {
-        let key = plugin_surface::surface_key("plan_mode", "mode");
-        if enabled {
-            self.plugin_mode_indicators.insert(key, "plan".to_string());
-        } else {
-            self.plugin_mode_indicators.remove(&key);
+    pub fn set_ui_extensions(&mut self, ui_extensions: Arc<UiExtensions>) {
+        self.ui_extensions = ui_extensions;
+    }
+
+    pub fn upsert_mode_indicator(&mut self, key: impl Into<String>, label: impl Into<String>) {
+        self.plugin_mode_indicators.insert(key.into(), label.into());
+        self.dirty = true;
+    }
+
+    pub fn clear_mode_indicator(&mut self, key: &str) {
+        if self.plugin_mode_indicators.remove(key).is_some() {
+            self.dirty = true;
         }
+    }
+
+    pub fn clear_mode_indicators(&mut self) {
+        if self.plugin_mode_indicators.is_empty() {
+            return;
+        }
+        self.plugin_mode_indicators.clear();
         self.dirty = true;
     }
 
@@ -1471,13 +1490,14 @@ impl App {
         self.live_output_chars_estimate = 0;
         self.live_output_tokens_estimate = 0;
         self.model_variant = None;
-        self.plugin_mode_indicators.clear();
+        self.clear_mode_indicators();
         self.invalidate_height_cache();
     }
 
     pub fn restore_prepared_turn(&mut self, turn: PreparedTurn) {
         self.editor
             .restore_turn(turn.display_text, turn.images, turn.large_pastes);
+        self.update_suggestions();
     }
 
     pub fn next_image_marker_id(&self) -> usize {
@@ -1818,19 +1838,38 @@ impl App {
 
     /// Ensure the height cache prefix sums are up to date for the given dimensions.
     fn ensure_height_cache(&mut self, width: usize, viewport_height: usize) {
+        let dimensions_changed =
+            self.height_cache_width != width || self.height_cache_vh != viewport_height;
+        if dimensions_changed {
+            self.height_cache.clear();
+            self.height_cache_dirty_from = 0;
+        }
         if !self.height_cache.is_empty()
-            && self.height_cache_width == width
-            && self.height_cache_vh == viewport_height
+            && !dimensions_changed
+            && self.height_cache_dirty_from >= self.blocks.len()
         {
             return;
         }
         self.height_cache_width = width;
         self.height_cache_vh = viewport_height;
-        self.height_cache.clear();
-        self.height_cache.reserve(self.blocks.len());
-        let mut cumulative: usize = 0;
-        for (i, block) in self.blocks.iter().enumerate() {
-            let _ = block;
+
+        let target_len = self.blocks.len();
+        if self.height_cache.len() > target_len {
+            self.height_cache.truncate(target_len);
+        }
+        let dirty_from = self.height_cache_dirty_from.min(target_len);
+        if dirty_from == 0 {
+            self.height_cache.clear();
+            self.height_cache.reserve(target_len);
+        } else {
+            self.height_cache.truncate(dirty_from);
+        }
+        let mut cumulative = if dirty_from == 0 {
+            0
+        } else {
+            self.height_cache[dirty_from - 1]
+        };
+        for i in dirty_from..target_len {
             cumulative += ui::rendered_block_height(
                 &self.blocks,
                 i,
@@ -1840,6 +1879,7 @@ impl App {
             );
             self.height_cache.push(cumulative);
         }
+        self.height_cache_dirty_from = target_len;
     }
 
     pub fn total_content_height(&mut self, width: usize, viewport_height: usize) -> usize {
@@ -1986,7 +2026,8 @@ impl App {
 
     /// Update the suggestion list based on current input.
     pub fn update_suggestions(&mut self) {
-        self.editor.update_suggestions(&self.skills);
+        self.editor
+            .update_suggestions(&self.skills, self.ui_extensions.as_ref());
     }
 
     /// Whether the suggestion popup is active.
@@ -2006,7 +2047,16 @@ impl App {
 
     /// Accept the selected suggestion.
     pub fn complete_suggestion(&mut self) {
-        self.editor.complete_suggestion(&self.skills);
+        self.editor
+            .complete_suggestion(&self.skills, self.ui_extensions.as_ref());
+    }
+
+    pub fn ui_extensions(&self) -> &UiExtensions {
+        self.ui_extensions.as_ref()
+    }
+
+    pub fn ui_extensions_handle(&self) -> Arc<UiExtensions> {
+        Arc::clone(&self.ui_extensions)
     }
 
     /// Whether the session picker is active.
@@ -2344,13 +2394,13 @@ mod tests {
     #[test]
     fn text_delta_accumulates_raw() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "\n\nfirst\n".into(),
         });
         // Raw accumulation — no normalization until flush
         assert_eq!(app.pending_text, "\n\nfirst\n");
 
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "\n\n\nsecond\n".into(),
         });
         assert_eq!(app.pending_text, "\n\nfirst\n\n\n\nsecond\n");
@@ -2359,10 +2409,10 @@ mod tests {
     #[test]
     fn text_delta_code_fence_preserved() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "text\n\n```python\n".into(),
         });
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "# comment\n".into(),
         });
         // The newline between ```python and # comment must be preserved
@@ -2374,7 +2424,7 @@ mod tests {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
 
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "Draft answer".into(),
         });
 
@@ -2391,14 +2441,26 @@ mod tests {
     }
 
     #[test]
+    fn ui_extension_commands_appear_in_editor_suggestions() {
+        let mut app = App::new("test-model".into(), "test".into());
+        let ui_extensions = lash_ui::UiExtensions::builtin().expect("ui extensions");
+        app.set_ui_extensions(std::sync::Arc::new(ui_extensions));
+        app.set_input("/pl".into());
+
+        app.update_suggestions();
+
+        assert!(app.suggestions().iter().any(|(name, _)| name == "/plan"));
+    }
+
+    #[test]
     fn final_message_never_replaces_visible_streamed_text_with_shorter_text() {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "Visible streamed text".into(),
         });
 
-        app.handle_agent_event(AgentEvent::Message {
+        app.handle_session_event(SessionEvent::Message {
             text: "Visible".into(),
             kind: "final".into(),
         });
@@ -2412,16 +2474,16 @@ mod tests {
     #[test]
     fn text_delta_updates_live_token_estimate() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.handle_agent_event(AgentEvent::LlmRequest {
+        app.handle_session_event(SessionEvent::LlmRequest {
             iteration: 0,
             message_count: 0,
             tool_list: String::new(),
         });
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "abcd".into(),
         });
         assert_eq!(app.live_output_tokens_estimate, 1);
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "efgh".into(),
         });
         assert_eq!(app.live_output_tokens_estimate, 2);
@@ -2431,19 +2493,19 @@ mod tests {
     fn late_text_deltas_after_stop_turn_extend_last_assistant_block() {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "I".into(),
         });
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "’m".into(),
         });
 
         app.stop_turn();
 
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: " an".into(),
         });
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: " AI".into(),
         });
 
@@ -2462,12 +2524,12 @@ mod tests {
     #[test]
     fn first_text_delta_clears_waiting_for_first_token_status() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.handle_agent_event(AgentEvent::LlmRequest {
+        app.handle_session_event(SessionEvent::LlmRequest {
             iteration: 0,
             message_count: 0,
             tool_list: String::new(),
         });
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "hello".into(),
         });
         assert_eq!(
@@ -2485,7 +2547,7 @@ mod tests {
     #[test]
     fn llm_request_sets_waiting_for_first_token_status() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.handle_agent_event(AgentEvent::LlmRequest {
+        app.handle_session_event(SessionEvent::LlmRequest {
             iteration: 0,
             message_count: 0,
             tool_list: String::new(),
@@ -2505,10 +2567,10 @@ mod tests {
     #[test]
     fn llm_request_flushes_intermediate_stream_text() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "Let me continue testing.".into(),
         });
-        app.handle_agent_event(AgentEvent::ToolCall {
+        app.handle_session_event(SessionEvent::ToolCall {
             call_id: Some("tc1".into()),
             name: "read_file".into(),
             args: serde_json::json!({"path":"src/main.rs"}),
@@ -2516,7 +2578,7 @@ mod tests {
             success: true,
             duration_ms: 1,
         });
-        app.handle_agent_event(AgentEvent::LlmRequest {
+        app.handle_session_event(SessionEvent::LlmRequest {
             iteration: 1,
             message_count: 0,
             tool_list: String::new(),
@@ -2533,10 +2595,10 @@ mod tests {
         let mut app = App::new("test-model".into(), "test".into());
         app.blocks.clear();
 
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "I’m checking the rendering path first.".into(),
         });
-        app.handle_agent_event(AgentEvent::ToolCall {
+        app.handle_session_event(SessionEvent::ToolCall {
             call_id: Some("tc2".into()),
             name: "read_file".into(),
             args: serde_json::json!({"path":"lash-cli/src/app.rs"}),
@@ -2557,11 +2619,11 @@ mod tests {
     #[test]
     fn token_usage_resets_live_token_estimate() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "abcdefgh".into(),
         });
         assert!(app.live_output_tokens_estimate > 0);
-        app.handle_agent_event(AgentEvent::TokenUsage {
+        app.handle_session_event(SessionEvent::TokenUsage {
             iteration: 0,
             usage: TokenUsage {
                 input_tokens: 10,
@@ -2584,12 +2646,12 @@ mod tests {
     #[test]
     fn input_only_streamed_usage_keeps_live_output_estimate() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "abcdefgh".into(),
         });
         let live_estimate = app.live_output_tokens_estimate;
         assert!(live_estimate > 0);
-        app.handle_agent_event(AgentEvent::TokenUsage {
+        app.handle_session_event(SessionEvent::TokenUsage {
             iteration: 0,
             usage: TokenUsage {
                 input_tokens: 10,
@@ -2612,7 +2674,7 @@ mod tests {
     #[test]
     fn final_message_event_is_rendered() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.handle_agent_event(AgentEvent::Message {
+        app.handle_session_event(SessionEvent::Message {
             text: "final output".into(),
             kind: "final".into(),
         });
@@ -2626,7 +2688,7 @@ mod tests {
     fn finish_turn_for_resume_reconciles_authoritative_assistant_text() {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "I looked at the actual librarian prompt".into(),
         });
         app.stop_turn();
@@ -2655,7 +2717,7 @@ mod tests {
     fn finish_turn_for_resume_does_not_append_shorter_authoritative_text() {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "Visible streamed text".into(),
         });
         app.stop_turn();
@@ -2680,13 +2742,13 @@ mod tests {
         let mut app = App::new("test-model".into(), "test".into());
         let final_text = "Use this minimal set:\n\n- `code`\n- `feature`\n- `issue`\n- `decision`\n\nThat’s probably the sweet spot.";
         app.start_turn();
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "Use this minimal set:\n\n- `code`\n- `feature`\n".into(),
         });
 
         let _persisted = app.finish_turn_for_resume_with_output(Some(final_text));
 
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "Yeah — **`feature` is nicer than `topic`** if you want the graph to stay product-shaped.\n\nMy take:\n\n- **`topic` is safer**".into(),
         });
 
@@ -2705,7 +2767,7 @@ mod tests {
     #[test]
     fn delegate_start_enables_streaming_output_until_agent_result_arrives() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.handle_agent_event(AgentEvent::Message {
+        app.handle_session_event(SessionEvent::Message {
             text: serde_json::json!({
                 "name":"delegate",
                 "task":"inspect queue rendering",
@@ -2727,13 +2789,13 @@ mod tests {
             Some("inspect queue rendering · gpt-5.4 (high)")
         );
 
-        app.handle_agent_event(AgentEvent::Message {
+        app.handle_session_event(SessionEvent::Message {
             text: "delegate stream\n".into(),
             kind: "tool_output".into(),
         });
         assert_eq!(app.streaming_output, vec!["delegate stream".to_string()]);
 
-        app.handle_agent_event(AgentEvent::ToolCall {
+        app.handle_session_event(SessionEvent::ToolCall {
             call_id: Some("tc-delegate".into()),
             name: "agent_result".into(),
             args: serde_json::json!({"id":"child-1"}),
@@ -2753,7 +2815,7 @@ mod tests {
     fn tool_output_renders_during_generic_running_turn() {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
-        app.handle_agent_event(AgentEvent::Message {
+        app.handle_session_event(SessionEvent::Message {
             text: "started git status --short\n".into(),
             kind: "tool_output".into(),
         });
@@ -2769,13 +2831,13 @@ mod tests {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
 
-        app.handle_agent_event(AgentEvent::Message {
+        app.handle_session_event(SessionEvent::Message {
             text: "Compiling alpha".into(),
             kind: "tool_output".into(),
         });
         assert_eq!(app.streaming_output_partial, "Compiling alpha");
 
-        app.handle_agent_event(AgentEvent::Message {
+        app.handle_session_event(SessionEvent::Message {
             text: "\rCompiling beta".into(),
             kind: "tool_output".into(),
         });
@@ -2789,7 +2851,7 @@ mod tests {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
 
-        app.handle_agent_event(AgentEvent::Message {
+        app.handle_session_event(SessionEvent::Message {
             text: "started cargo check\r\n".into(),
             kind: "tool_output".into(),
         });
@@ -2806,7 +2868,7 @@ mod tests {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
 
-        app.handle_agent_event(AgentEvent::Message {
+        app.handle_session_event(SessionEvent::Message {
             text: "\u{1b}[33mwarning\u{1b}[0m: check this\n".into(),
             kind: "tool_output".into(),
         });
@@ -2823,7 +2885,7 @@ mod tests {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
 
-        app.handle_agent_event(AgentEvent::Message {
+        app.handle_session_event(SessionEvent::Message {
             text: "hash\trefs/tags/v0.2.29\n".into(),
             kind: "tool_output".into(),
         });
@@ -2839,7 +2901,7 @@ mod tests {
     fn finish_turn_for_resume_preserves_streaming_output_snapshot() {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
-        app.handle_agent_event(AgentEvent::Message {
+        app.handle_session_event(SessionEvent::Message {
             text: "started git status --short\n".into(),
             kind: "tool_output".into(),
         });
@@ -2858,7 +2920,7 @@ mod tests {
     fn plugin_panel_events_upsert_and_clear_blocks() {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
-        app.handle_agent_event(AgentEvent::PluginEvent {
+        app.handle_session_event(SessionEvent::PluginEvent {
             plugin_id: "demo".into(),
             event: lash::PluginSurfaceEvent::PanelUpsert {
                 key: "panel:1".into(),
@@ -2876,7 +2938,7 @@ mod tests {
                 .is_some_and(|turn| turn.has_visible_output)
         );
 
-        app.handle_agent_event(AgentEvent::PluginEvent {
+        app.handle_session_event(SessionEvent::PluginEvent {
             plugin_id: "demo".into(),
             event: lash::PluginSurfaceEvent::PanelClear {
                 key: "panel:1".into(),
@@ -2892,7 +2954,10 @@ mod tests {
     #[test]
     fn plan_exit_tool_queues_fresh_follow_up_turn() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.handle_agent_event(AgentEvent::ToolCall {
+        let ui_extensions = lash_ui::UiExtensions::builtin().expect("builtin ui extensions");
+        crate::apply_ui_host_effects(
+            &mut app,
+            ui_extensions.effects_for_session_event(&SessionEvent::ToolCall {
             call_id: Some("tc-plan-exit".into()),
             name: "plan_exit".into(),
             args: serde_json::json!({}),
@@ -2903,7 +2968,8 @@ mod tests {
             }),
             success: true,
             duration_ms: 5,
-        });
+            }),
+        );
 
         let (queued, was_pending) = app.take_next_queued_turn().expect("queued turn");
         assert!(!was_pending);
@@ -2918,9 +2984,9 @@ mod tests {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
         app.note_manual_interrupt_requested();
-        app.handle_agent_event(AgentEvent::Error {
+        app.handle_session_event(SessionEvent::Error {
             message: "LLM error: cancelled".into(),
-            envelope: Some(lash::agent::ErrorEnvelope {
+            envelope: Some(lash::session_model::ErrorEnvelope {
                 kind: "llm_provider".into(),
                 code: Some("cancelled".into()),
                 user_message: "LLM error: cancelled".into(),
@@ -2940,9 +3006,9 @@ mod tests {
     fn cancelled_error_without_manual_request_still_stops_immediately() {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
-        app.handle_agent_event(AgentEvent::Error {
+        app.handle_session_event(SessionEvent::Error {
             message: "LLM error: cancelled".into(),
-            envelope: Some(lash::agent::ErrorEnvelope {
+            envelope: Some(lash::session_model::ErrorEnvelope {
                 kind: "llm_provider".into(),
                 code: Some("cancelled".into()),
                 user_message: "LLM error: cancelled".into(),
@@ -2961,21 +3027,21 @@ mod tests {
     #[test]
     fn non_manual_error_sets_transient_status() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.handle_agent_event(AgentEvent::LlmRequest {
+        app.handle_session_event(SessionEvent::LlmRequest {
             iteration: 0,
             message_count: 0,
             tool_list: String::new(),
         });
-        app.handle_agent_event(AgentEvent::Error {
+        app.handle_session_event(SessionEvent::Error {
             message: "LLM error: Claude request failed with 500".into(),
-            envelope: Some(lash::agent::ErrorEnvelope {
+            envelope: Some(lash::session_model::ErrorEnvelope {
                 kind: "llm_provider".into(),
                 code: Some("http_500".into()),
                 user_message: "LLM error: Claude request failed with 500".into(),
                 raw: None,
             }),
         });
-        app.handle_agent_event(AgentEvent::Done);
+        app.handle_session_event(SessionEvent::Done);
 
         assert_eq!(
             app.live_turn.as_ref().map(|turn| turn.status_text.as_str()),
@@ -2992,16 +3058,16 @@ mod tests {
     #[test]
     fn transient_status_expires_on_tick() {
         let mut app = App::new("test-model".into(), "test".into());
-        app.handle_agent_event(AgentEvent::LlmRequest {
+        app.handle_session_event(SessionEvent::LlmRequest {
             iteration: 0,
             message_count: 0,
             tool_list: String::new(),
         });
-        app.handle_agent_event(AgentEvent::Error {
+        app.handle_session_event(SessionEvent::Error {
             message: "runtime error".into(),
             envelope: None,
         });
-        app.handle_agent_event(AgentEvent::Done);
+        app.handle_session_event(SessionEvent::Done);
 
         if let Some(turn) = app.live_turn.as_mut() {
             turn.transient_until =
@@ -3067,7 +3133,7 @@ mod tests {
         app.queue_pending_steer(turn.clone());
         app.preview_queued_turn(&turn, true);
 
-        app.handle_agent_event(AgentEvent::InjectedMessagesCommitted {
+        app.handle_session_event(SessionEvent::InjectedMessagesCommitted {
             messages: vec![PluginMessage::text(MessageRole::User, "follow up")],
             checkpoint: lash::CheckpointKind::AfterWork,
         });
@@ -3087,7 +3153,7 @@ mod tests {
         app.queue_pending_steer(turn.clone());
         app.preview_queued_turn(&turn, true);
 
-        app.handle_agent_event(AgentEvent::InjectedMessagesCommitted {
+        app.handle_session_event(SessionEvent::InjectedMessagesCommitted {
             messages: vec![PluginMessage::text(
                 MessageRole::User,
                 "/localref lash for context if needed\n\n<skill>\n<name>localref</name>\nbody\n</skill>",
@@ -3704,7 +3770,7 @@ mod tests {
         app.start_turn();
         app.follow_mode = FollowOutputMode::Contextual;
 
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: (0..20)
                 .map(|idx| format!("line {idx}"))
                 .collect::<Vec<_>>()
@@ -3744,7 +3810,7 @@ mod tests {
         app.follow_mode = FollowOutputMode::Paused;
         app.scroll_offset = 3;
 
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: "streamed output".into(),
         });
 
@@ -3760,7 +3826,7 @@ mod tests {
         app.start_turn();
         app.follow_mode = FollowOutputMode::Contextual;
 
-        app.handle_agent_event(AgentEvent::TextDelta {
+        app.handle_session_event(SessionEvent::TextDelta {
             content: (0..20)
                 .map(|idx| format!("line {idx}"))
                 .collect::<Vec<_>>()
@@ -3829,11 +3895,11 @@ mod tests {
         app.scroll_offset = block3_start;
         app.follow_mode = FollowOutputMode::Paused;
 
-        // Invalidate cache (simulates agent event arriving between frames)
+        // Invalidate cache (simulates a session event arriving between frames)
         app.invalidate_height_cache();
         assert!(
-            app.height_cache_snapshot().is_empty(),
-            "cache should be empty"
+            app.height_cache_dirty_from == 0,
+            "cache should be marked fully dirty"
         );
 
         // Cycle - should still anchor correctly despite stale cache
@@ -3855,7 +3921,7 @@ mod tests {
         let mut app = App::new("test-model".into(), "test".into());
         app.blocks.clear();
 
-        app.handle_agent_event(AgentEvent::ToolCall {
+        app.handle_session_event(SessionEvent::ToolCall {
             call_id: Some("tc3".into()),
             name: "grep".into(),
             args: serde_json::json!({"pattern": "ctx", "path": "lash-cli/src"}),
@@ -3863,7 +3929,7 @@ mod tests {
             success: true,
             duration_ms: 10,
         });
-        app.handle_agent_event(AgentEvent::ToolCall {
+        app.handle_session_event(SessionEvent::ToolCall {
             call_id: Some("tc4".into()),
             name: "read_file".into(),
             args: serde_json::json!({"path": "lash-cli/src/ui.rs"}),
@@ -3898,7 +3964,7 @@ mod tests {
         let mut app = App::new("test-model".into(), "test".into());
         app.blocks.clear();
 
-        app.handle_agent_event(AgentEvent::ToolCall {
+        app.handle_session_event(SessionEvent::ToolCall {
             call_id: Some("tc5".into()),
             name: "apply_patch".into(),
             args: serde_json::json!({}),
@@ -3917,7 +3983,7 @@ mod tests {
             success: true,
             duration_ms: 7,
         });
-        app.handle_agent_event(AgentEvent::ToolCall {
+        app.handle_session_event(SessionEvent::ToolCall {
             call_id: Some("tc6".into()),
             name: "apply_patch".into(),
             args: serde_json::json!({}),
@@ -4150,7 +4216,7 @@ mod tests {
         let payload = (0..60)
             .map(|idx| format!("line-{idx}\n"))
             .collect::<String>();
-        app.handle_agent_event(AgentEvent::Message {
+        app.handle_session_event(SessionEvent::Message {
             text: payload,
             kind: "tool_output".into(),
         });

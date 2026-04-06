@@ -36,7 +36,7 @@ async fn persist_parent_root_snapshot(
     };
     state.task_state = None;
     let prompt_hash = crate::latest_user_prompt_hash(&state.messages);
-    crate::persist_root_agent_state(
+    crate::persist_root_session_state(
         store,
         &mut state,
         ui_state,
@@ -569,12 +569,10 @@ pub async fn fork_current_session(
         )
         .await?;
     }
-    let parent_state = logger
-        .store()
-        .load_agent_state(crate::ROOT_SESSION_ID)
-        .ok_or_else(|| {
-            anyhow!("No persisted snapshot available to fork yet. Try again in a moment.")
-        })?;
+    let parent_state = logger.store().load_session_state().ok_or_else(|| {
+        anyhow!("No persisted snapshot available to fork yet. Try again in a moment.")
+    })?;
+    let parent_live_snapshot = logger.store().load_live_session_snapshot();
 
     let sessions_dir = session_log::sessions_dir();
     let child_session_name = crate::generate_session_name(&sessions_dir);
@@ -590,8 +588,7 @@ pub async fn fork_current_session(
     )?;
     child_logger.mark_as_child_of(&logger.session_id)?;
     child_logger.clone_history_from(logger.filename())?;
-    child_store.save_agent_state(lash::AgentState {
-        agent_id: crate::ROOT_SESSION_ID.to_string(),
+    child_store.save_session_state(lash::SessionState {
         iteration: parent_state.iteration,
         config_json: parent_state.config_json.clone(),
         repl_snapshot: parent_state.repl_snapshot.clone(),
@@ -600,6 +597,9 @@ pub async fn fork_current_session(
         cached_input_tokens: parent_state.cached_input_tokens,
         reasoning_tokens: parent_state.reasoning_tokens,
     });
+    if let Some(snapshot) = parent_live_snapshot {
+        child_store.save_live_session_snapshot(snapshot);
+    }
 
     Ok((child_filename, child_session_name))
 }
@@ -645,8 +645,7 @@ mod fork_tests {
             "parent".into(),
         )
         .expect("parent logger");
-        parent_store.save_agent_state(lash::AgentState {
-            agent_id: crate::ROOT_SESSION_ID.to_string(),
+        parent_store.save_session_state(lash::SessionState {
             iteration: 1,
             config_json: r#"{"task_state":{"kind":"live_resume","status":"running"}}"#.to_string(),
             repl_snapshot: None,
@@ -655,6 +654,32 @@ mod fork_tests {
             cached_input_tokens: 1,
             reasoning_tokens: 2,
         });
+        crate::resume_snapshot::save_live_resume_snapshot(
+            &parent_store,
+            &lash::SessionStateEnvelope {
+                session_id: crate::ROOT_SESSION_ID.to_string(),
+                policy: lash::SessionPolicy {
+                    execution_mode: lash::ExecutionMode::Standard,
+                    context_strategy: lash::ContextStrategy::RollingContext,
+                    ..lash::SessionPolicy::default()
+                },
+                messages: Vec::new(),
+                tool_calls: Vec::new(),
+                iteration: 1,
+                token_usage: lash::TokenUsage::default(),
+                last_prompt_usage: None,
+                task_state: Some(serde_json::json!({
+                    "kind": "live_resume",
+                    "status": "running"
+                })),
+                replay_manifest: None,
+                plugin_snapshot: None,
+                repl_snapshot: None,
+            },
+            &UiResumeState::default(),
+            &empty_dynamic_state(),
+        )
+        .expect("live snapshot");
         let messages = vec![lash::Message {
             id: "u1".to_string(),
             role: lash::MessageRole::User,
@@ -670,7 +695,7 @@ mod fork_tests {
             origin: None,
         }];
         let keyspaces = lash::semantic_transcript_keyspaces(&messages, &[]);
-        parent_store.transcript_replace_keyspaces(crate::ROOT_SESSION_ID, &keyspaces);
+        parent_store.transcript_replace_keyspaces(&keyspaces);
 
         let (child_filename, _child_session_name) = fork_current_session(
             None,
@@ -694,16 +719,15 @@ mod fork_tests {
             Some("parent-session")
         );
 
-        let child_state = child_store
-            .load_agent_state(crate::ROOT_SESSION_ID)
-            .expect("child root state");
+        let child_state = child_store.load_session_state().expect("child root state");
         assert_eq!(child_state.iteration, 1);
         assert_eq!(
             child_state.config_json,
             r#"{"task_state":{"kind":"live_resume","status":"running"}}"#
         );
+        assert!(child_store.load_live_session_snapshot().is_some());
 
-        let child_entries = child_store.transcript_load(crate::ROOT_SESSION_ID);
+        let child_entries = child_store.transcript_load();
         let child_messages = lash::transcript_messages(&child_entries);
         assert_eq!(child_messages.len(), 1);
         assert_eq!(child_messages[0].parts[0].content, "hello");

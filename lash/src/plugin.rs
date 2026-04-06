@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::llm::types::LlmResponse;
 use crate::runtime::AssembledTurn;
 use crate::{
-    AgentStateEnvelope, ExecutionMode, MessageRole, SessionPolicy, ToolDefinition, ToolProvider,
+    ExecutionMode, MessageRole, SessionPolicy, SessionStateEnvelope, ToolDefinition, ToolProvider,
     ToolResult, TurnInput,
 };
 use serde::{Deserialize, Serialize};
@@ -16,11 +16,11 @@ pub use lash_sansio::{CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptC
 
 pub type PluginFuture<T> = Pin<Box<dyn Future<Output = Result<T, PluginError>> + Send>>;
 pub type TurnCommittedHook = Arc<dyn Fn(AssembledTurn) -> PluginFuture<()> + Send + Sync>;
-pub type SessionRestoredHook = Arc<dyn Fn(AgentStateEnvelope) -> PluginFuture<()> + Send + Sync>;
+pub type SessionRestoredHook = Arc<dyn Fn(SessionStateEnvelope) -> PluginFuture<()> + Send + Sync>;
 pub type SessionConfigChangedHook =
     Arc<dyn Fn(SessionConfigChangedContext) -> PluginFuture<()> + Send + Sync>;
 pub type SessionConfigMutator = Arc<
-    dyn Fn(SessionConfigChangedContext, AgentStateEnvelope) -> PluginFuture<AgentStateEnvelope>
+    dyn Fn(SessionConfigChangedContext, SessionStateEnvelope) -> PluginFuture<SessionStateEnvelope>
         + Send
         + Sync,
 >;
@@ -73,10 +73,10 @@ pub struct SessionTurnHandle {
     pub turn_id: String,
     pub session_id: String,
     pub policy: SessionPolicy,
-    pub events: mpsc::Receiver<crate::AgentEvent>,
+    pub events: mpsc::Receiver<crate::SessionEvent>,
 }
 
-pub type SessionSnapshot = AgentStateEnvelope;
+pub type SessionSnapshot = SessionStateEnvelope;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -134,7 +134,7 @@ impl std::fmt::Debug for SessionContextSurface {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionCreateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<String>,
+    pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
     pub start: SessionStartPoint,
@@ -214,14 +214,14 @@ pub struct PluginAbort {
 #[derive(Clone, Debug, Default)]
 pub struct TurnPreparation {
     pub messages: Vec<crate::Message>,
-    pub events: Vec<crate::AgentEvent>,
+    pub events: Vec<crate::SessionEvent>,
     pub abort: Option<PluginAbort>,
 }
 
 #[derive(Clone)]
 pub struct PrepareTurnRequest {
     pub session_id: String,
-    pub state: AgentStateEnvelope,
+    pub state: SessionStateEnvelope,
     pub messages: Vec<crate::Message>,
     pub host: Arc<dyn SessionManager>,
 }
@@ -229,25 +229,25 @@ pub struct PrepareTurnRequest {
 #[derive(Clone, Debug, Default)]
 pub struct CheckpointApplication {
     pub messages: Vec<PluginMessage>,
-    pub events: Vec<crate::AgentEvent>,
+    pub events: Vec<crate::SessionEvent>,
     pub abort: Option<PluginAbort>,
 }
 
 #[derive(Clone, Debug)]
 pub struct TurnFinalization {
     pub turn: AssembledTurn,
-    pub events: Vec<crate::AgentEvent>,
+    pub events: Vec<crate::SessionEvent>,
 }
 
 pub(crate) async fn emit_plugin_surface_events(
-    event_tx: &mpsc::Sender<crate::AgentEvent>,
+    event_tx: &mpsc::Sender<crate::SessionEvent>,
     plugin_id: &str,
     events: Vec<PluginSurfaceEvent>,
 ) {
     for event in events {
-        crate::agent::send_event(
+        crate::session_model::send_event(
             event_tx,
-            crate::AgentEvent::PluginEvent {
+            crate::SessionEvent::PluginEvent {
                 plugin_id: plugin_id.to_string(),
                 event,
             },
@@ -679,13 +679,13 @@ impl PluginSpec {
 
 #[derive(Clone, Debug)]
 pub struct PluginSessionContext {
-    pub agent_id: String,
+    pub session_id: String,
     pub execution_mode: ExecutionMode,
 }
 
 #[derive(Clone)]
 pub struct SessionReadyContext {
-    pub agent_id: String,
+    pub session_id: String,
     pub execution_mode: ExecutionMode,
     pub host: PluginHost,
 }
@@ -871,7 +871,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        AgentStateEnvelope, ExecutionMode, PromptSectionName, ToolDefinition, ToolParam, TurnInput,
+        ExecutionMode, PromptSectionName, SessionStateEnvelope, ToolDefinition, ToolParam,
+        TurnInput,
     };
 
     struct MockToolProvider;
@@ -906,13 +907,13 @@ mod tests {
 
         fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
             Ok(Arc::new(MockPlugin {
-                agent_id: ctx.agent_id.clone(),
+                session_id: ctx.session_id.clone(),
             }))
         }
     }
 
     struct MockPlugin {
-        agent_id: String,
+        session_id: String,
     }
 
     struct MockSessionManager;
@@ -920,14 +921,14 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionManager for MockSessionManager {
         async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
-            Ok(AgentStateEnvelope::default())
+            Ok(SessionStateEnvelope::default())
         }
 
         async fn snapshot_session(
             &self,
             _session_id: &str,
         ) -> Result<SessionSnapshot, PluginError> {
-            Ok(AgentStateEnvelope::default())
+            Ok(SessionStateEnvelope::default())
         }
 
         async fn tool_catalog(
@@ -942,7 +943,7 @@ mod tests {
             request: SessionCreateRequest,
         ) -> Result<SessionHandle, PluginError> {
             Ok(SessionHandle {
-                session_id: request.agent_id.unwrap_or_else(|| "child".to_string()),
+                session_id: request.session_id.unwrap_or_else(|| "child".to_string()),
                 parent_session_id: request.parent_session_id,
                 policy: SessionPolicy {
                     provider: crate::Provider::OpenAiGeneric {
@@ -993,8 +994,8 @@ mod tests {
         async fn await_turn(&self, session_turn_id: &str) -> Result<AssembledTurn, PluginError> {
             let session_id = session_turn_id.trim_end_matches("-turn");
             Ok(AssembledTurn {
-                state: AgentStateEnvelope {
-                    agent_id: session_id.to_string(),
+                state: SessionStateEnvelope {
+                    session_id: session_id.to_string(),
                     policy: SessionPolicy {
                         execution_mode: ExecutionMode::Standard,
                         context_strategy: crate::default_context_strategy(),
@@ -1039,18 +1040,22 @@ mod tests {
                     Ok(vec![
                         PromptContribution {
                             section: PromptSectionName::Guidance,
+                            block: "plugin_prompt".to_string(),
+                            title: Some("Plugin Prompt".to_string()),
                             priority: 0,
-                            content: "## Plugin Prompt".to_string(),
+                            content: "Structured plugin prompt".to_string(),
                         },
                         PromptContribution {
                             section: PromptSectionName::Guidance,
+                            block: "dynamic_note".to_string(),
+                            title: Some("Dynamic Note".to_string()),
                             priority: 1,
                             content: "dynamic note".to_string(),
                         },
                     ])
                 })
             }));
-            let agent_id = self.agent_id.clone();
+            let session_id = self.session_id.clone();
             reg.external().op(
                 ExternalOpDef {
                     name: "mock.echo".to_string(),
@@ -1061,11 +1066,11 @@ mod tests {
                     output_schema: json!({}),
                 },
                 Arc::new(move |ctx, args| {
-                    let agent_id = agent_id.clone();
+                    let session_id = session_id.clone();
                     Box::pin(async move {
                         ToolResult::ok(json!({
                             "session_id": ctx.session_id,
-                            "plugin_agent_id": agent_id,
+                            "plugin_session_id": session_id,
                             "args": args,
                         }))
                     })
@@ -1081,7 +1086,7 @@ mod tests {
             Ok(PluginSnapshotMeta {
                 plugin_id: self.id().to_string(),
                 plugin_version: self.version().to_string(),
-                state: Some(json!({"agent_id": self.agent_id})),
+                state: Some(json!({"session_id": self.session_id})),
             })
         }
     }
@@ -1096,7 +1101,7 @@ mod tests {
                 session_id: "root".to_string(),
                 host: Arc::new(MockSessionManager),
                 prompt: crate::PromptContext::default(),
-                state: AgentStateEnvelope::default(),
+                state: SessionStateEnvelope::default(),
             })
             .await
             .expect("prompt contributions");
@@ -1105,11 +1110,15 @@ mod tests {
             vec![
                 PromptContribution {
                     section: PromptSectionName::Guidance,
+                    block: "plugin_prompt".to_string(),
+                    title: Some("Plugin Prompt".to_string()),
                     priority: 0,
-                    content: "## Plugin Prompt".to_string(),
+                    content: "Structured plugin prompt".to_string(),
                 },
                 PromptContribution {
                     section: PromptSectionName::Guidance,
+                    block: "dynamic_note".to_string(),
+                    title: Some("Dynamic Note".to_string()),
                     priority: 1,
                     content: "dynamic note".to_string(),
                 },
@@ -1160,7 +1169,7 @@ mod tests {
         assert_eq!(
             result
                 .result
-                .get("plugin_agent_id")
+                .get("plugin_session_id")
                 .and_then(|v| v.as_str()),
             Some("root")
         );
@@ -1171,7 +1180,7 @@ mod tests {
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
         let root = host.build_standard_session("root", None).expect("root");
         let child = root
-            .fork_for_agent("child", ExecutionMode::Standard)
+            .fork_for_session("child", ExecutionMode::Standard)
             .expect("child");
 
         let result = host
@@ -1191,7 +1200,7 @@ mod tests {
         assert_eq!(
             result
                 .result
-                .get("plugin_agent_id")
+                .get("plugin_session_id")
                 .and_then(|v| v.as_str()),
             Some("child")
         );
@@ -1234,7 +1243,7 @@ mod tests {
         ))]);
         let services =
             RuntimeServices::new(host.build_standard_session("root", None).expect("session"));
-        assert_eq!(services.plugins.agent_id(), "root");
+        assert_eq!(services.plugins.session_id(), "root");
         assert!(
             services
                 .plugins

@@ -5,24 +5,24 @@ use serde_json::json;
 use super::plan_mode::{PlanModePluginConfig, PlanModePluginFactory};
 use super::plan_tracker::PlanTrackerPluginFactory;
 use super::*;
-use crate::agent::PromptSectionName;
 use crate::instructions::InstructionSource;
 use crate::plugin::{
     PluginDirective, PluginError, PromptHookContext, ToolCallHookContext, ToolSurfaceContext,
 };
+use crate::session_model::PromptSectionName;
 use crate::tools::StateToolsPluginFactory;
 use crate::{
-    AgentStateEnvelope, AssembledTurn, AssistantOutput, DoneReason, ExecutionMode, MessageRole,
-    OutputState, PluginHost, SessionCreateRequest, SessionHandle, SessionManager, SessionPolicy,
-    SessionSnapshot, TokenUsage, ToolDefinition, TurnHookContext, TurnInput, TurnResultHookContext,
-    TurnStatus,
+    AssembledTurn, AssistantOutput, DoneReason, ExecutionMode, MessageRole, OutputState,
+    PluginHost, SessionCreateRequest, SessionHandle, SessionManager, SessionPolicy,
+    SessionSnapshot, SessionStateEnvelope, TokenUsage, ToolDefinition, TurnHookContext, TurnInput,
+    TurnResultHookContext, TurnStatus,
 };
 
 struct MockSessionManager;
 
 fn mock_snapshot(run_session_id: &str) -> SessionSnapshot {
-    AgentStateEnvelope {
-        agent_id: "root".to_string(),
+    SessionStateEnvelope {
+        session_id: "root".to_string(),
         policy: SessionPolicy {
             execution_mode: ExecutionMode::Standard,
             context_strategy: crate::ContextStrategy::RollingContext,
@@ -67,7 +67,7 @@ impl SessionManager for MockSessionManager {
         request: SessionCreateRequest,
     ) -> Result<SessionHandle, PluginError> {
         Ok(SessionHandle {
-            session_id: request.agent_id.unwrap_or_else(|| "child".to_string()),
+            session_id: request.session_id.unwrap_or_else(|| "child".to_string()),
             parent_session_id: request.parent_session_id,
             policy: crate::SessionPolicy {
                 provider: crate::Provider::OpenAiGeneric {
@@ -123,8 +123,8 @@ impl SessionManager for MockSessionManager {
 
 fn empty_turn(session_id: &str) -> AssembledTurn {
     AssembledTurn {
-        state: AgentStateEnvelope {
-            agent_id: session_id.to_string(),
+        state: SessionStateEnvelope {
+            session_id: session_id.to_string(),
             policy: SessionPolicy {
                 execution_mode: ExecutionMode::Standard,
                 context_strategy: crate::ContextStrategy::RollingContext,
@@ -167,7 +167,7 @@ async fn prompt_context_plugin_contributes_environment_and_project_instruction_s
             session_id: "root".to_string(),
             host: Arc::new(MockSessionManager),
             prompt: crate::PromptContext::default(),
-            state: AgentStateEnvelope::default(),
+            state: SessionStateEnvelope::default(),
         })
         .await
         .expect("prompt contributions");
@@ -177,8 +177,14 @@ async fn prompt_context_plugin_contributes_environment_and_project_instruction_s
             && contribution.content.contains("Working directory:")
     }));
     assert!(contributions.iter().any(|contribution| {
+        contribution.section == PromptSectionName::Environment
+            && contribution.content.contains("Current date (UTC):")
+    }));
+    assert!(contributions.iter().any(|contribution| {
         contribution.section == PromptSectionName::Guidance
-            && contribution.content == "### Project Instructions\nRepo rules"
+            && contribution.block == "project_instructions"
+            && contribution.title.as_deref() == Some("Project Instructions")
+            && contribution.content == "Repo rules"
     }));
 }
 

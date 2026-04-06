@@ -1,23 +1,23 @@
-pub mod agent;
 pub mod llm;
 pub mod plugin;
 pub mod sansio;
 pub mod session;
+pub mod session_model;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub use agent::message::MessageOrigin;
-pub use agent::{
-    AgentEvent, DefaultPromptRenderer, DurableTurnSnapshot, ErrorEnvelope, Message, MessageRole,
-    Part, PartKind, PromptOverrideMode, PromptRenderer, PromptRequest, PromptResponse,
-    PromptSectionName, PromptSectionOverride, PromptSelectionMode, PruneState, TokenUsage,
-    default_prompt_renderer,
-};
 pub use plugin::{CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptContribution};
 pub use sansio::{Effect, EffectId, LlmCallError, Response, TurnMachine, TurnMachineConfig};
 pub use session::ExecResponse;
+pub use session_model::message::MessageOrigin;
+pub use session_model::{
+    DefaultPromptRenderer, DurableTurnSnapshot, ErrorEnvelope, Message, MessageRole, Part,
+    PartKind, PromptOverrideMode, PromptRenderer, PromptRequest, PromptResponse, PromptSectionName,
+    PromptSectionOverride, PromptSelectionMode, PruneState, SessionEvent, TokenUsage,
+    default_prompt_renderer,
+};
 
-/// Execution backend for agent turns.
+/// Execution backend for session turns.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
@@ -387,8 +387,6 @@ pub struct PromptContext {
     pub tool_list: String,
     pub tool_names: Vec<String>,
     pub omitted_tool_count: usize,
-    pub can_write: bool,
-    pub include_soul: bool,
     pub contributions: Vec<PromptContribution>,
 }
 

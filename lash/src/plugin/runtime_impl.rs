@@ -5,7 +5,7 @@ use std::sync::{Mutex as StdMutex, Weak};
 use tokio::task::JoinSet;
 
 use super::*;
-use crate::{AgentEvent, Message, MessageOrigin, Part, PartKind, PruneState};
+use crate::{Message, MessageOrigin, Part, PartKind, PruneState, SessionEvent};
 
 #[derive(Clone)]
 struct RegisteredHook<T> {
@@ -139,9 +139,9 @@ fn plugin_message_to_message(
             id: String::new(),
             kind: PartKind::Image,
             content: String::new(),
-            attachment: Some(lash_sansio::agent::message::PartAttachment {
+            attachment: Some(lash_sansio::session_model::message::PartAttachment {
                 mime: "image/png".to_string(),
-                url: lash_sansio::agent::message::data_url_for_bytes("image/png", bytes),
+                url: lash_sansio::session_model::message::data_url_for_bytes("image/png", bytes),
                 filename: None,
             }),
             tool_call_id: None,
@@ -193,10 +193,10 @@ fn normalize_message_ids(messages: &mut [Message]) {
     }
 }
 
-fn plugin_surface_events(plugin_id: &str, events: Vec<PluginSurfaceEvent>) -> Vec<AgentEvent> {
+fn plugin_surface_events(plugin_id: &str, events: Vec<PluginSurfaceEvent>) -> Vec<SessionEvent> {
     events
         .into_iter()
-        .map(|event| AgentEvent::PluginEvent {
+        .map(|event| SessionEvent::PluginEvent {
             plugin_id: plugin_id.to_string(),
             event,
         })
@@ -561,28 +561,28 @@ impl PluginHost {
 
     pub fn build_standard_session(
         &self,
-        agent_id: impl Into<String>,
+        session_id: impl Into<String>,
         snapshot: Option<&PluginSessionSnapshot>,
     ) -> Result<Arc<PluginSession>, PluginError> {
-        self.build_session(agent_id, ExecutionMode::Standard, snapshot)
+        self.build_session(session_id, ExecutionMode::Standard, snapshot)
     }
 
     pub fn build_repl_session(
         &self,
-        agent_id: impl Into<String>,
+        session_id: impl Into<String>,
         snapshot: Option<&PluginSessionSnapshot>,
     ) -> Result<Arc<PluginSession>, PluginError> {
-        self.build_session(agent_id, ExecutionMode::Repl, snapshot)
+        self.build_session(session_id, ExecutionMode::Repl, snapshot)
     }
 
     pub fn build_session(
         &self,
-        agent_id: impl Into<String>,
+        session_id: impl Into<String>,
         execution_mode: ExecutionMode,
         snapshot: Option<&PluginSessionSnapshot>,
     ) -> Result<Arc<PluginSession>, PluginError> {
         self.build_session_with_surface(
-            agent_id,
+            session_id,
             execution_mode,
             snapshot,
             ToolSurfaceContribution::default(),
@@ -592,17 +592,17 @@ impl PluginHost {
 
     pub fn build_session_with_surface(
         &self,
-        agent_id: impl Into<String>,
+        session_id: impl Into<String>,
         execution_mode: ExecutionMode,
         snapshot: Option<&PluginSessionSnapshot>,
         tool_surface_overlay: ToolSurfaceContribution,
         tool_snapshot: Option<crate::DynamicStateSnapshot>,
     ) -> Result<Arc<PluginSession>, PluginError> {
         let ctx = PluginSessionContext {
-            agent_id: agent_id.into(),
+            session_id: session_id.into(),
             execution_mode,
         };
-        let session_id = ctx.agent_id.clone();
+        let session_id = ctx.session_id.clone();
         let mut plugins = Vec::new();
         let mut reg = PluginRegistrar::new();
         for factory in self.factories() {
@@ -650,7 +650,7 @@ impl PluginHost {
 
         let session = Arc::new(PluginSession {
             host: self.clone(),
-            agent_id: ctx.agent_id,
+            session_id: ctx.session_id,
             execution_mode,
             plugins,
             tools,
@@ -674,7 +674,7 @@ impl PluginHost {
         });
         self.register_session(&session_id, &session)?;
         let ready = SessionReadyContext {
-            agent_id: session.agent_id.clone(),
+            session_id: session.session_id.clone(),
             execution_mode,
             host: self.clone(),
         };
@@ -752,7 +752,7 @@ impl PluginHost {
 
 pub struct PluginSession {
     host: PluginHost,
-    agent_id: String,
+    session_id: String,
     execution_mode: ExecutionMode,
     plugins: Vec<Arc<dyn SessionPlugin>>,
     tools: Arc<dyn ToolProvider>,
@@ -777,8 +777,8 @@ pub struct PluginSession {
 }
 
 impl PluginSession {
-    pub fn agent_id(&self) -> &str {
-        &self.agent_id
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 
     pub fn execution_mode(&self) -> ExecutionMode {
@@ -1147,7 +1147,7 @@ impl PluginSession {
         }
     }
 
-    pub async fn on_session_restored(&self, state: &AgentStateEnvelope) {
+    pub async fn on_session_restored(&self, state: &SessionStateEnvelope) {
         let mut tasks = JoinSet::new();
         for hook in &self.session_restored_hooks {
             let hook = Arc::clone(hook);
@@ -1184,8 +1184,8 @@ impl PluginSession {
     pub async fn mutate_session_config(
         &self,
         ctx: SessionConfigChangedContext,
-        mut state: AgentStateEnvelope,
-    ) -> AgentStateEnvelope {
+        mut state: SessionStateEnvelope,
+    ) -> SessionStateEnvelope {
         for hook in &self.session_config_mutators {
             match hook(ctx.clone(), state.clone()).await {
                 Ok(next_state) => state = next_state,
@@ -1200,7 +1200,7 @@ impl PluginSession {
         mut turn: AssembledTurn,
         host: Arc<dyn SessionManager>,
     ) -> Result<TurnFinalization, PluginError> {
-        let session_id = turn.state.agent_id.clone();
+        let session_id = turn.state.session_id.clone();
         let directives = self
             .after_turn(TurnResultHookContext {
                 session_id: session_id.clone(),
@@ -1283,14 +1283,14 @@ impl PluginSession {
         Ok(())
     }
 
-    pub fn fork_for_agent(
+    pub fn fork_for_session(
         &self,
-        agent_id: impl Into<String>,
+        session_id: impl Into<String>,
         execution_mode: ExecutionMode,
     ) -> Result<Arc<PluginSession>, PluginError> {
         let snapshot = self.snapshot()?;
         self.host.build_session_with_surface(
-            agent_id,
+            session_id,
             execution_mode,
             Some(&snapshot),
             self.tool_surface_overlay.clone(),
@@ -1298,15 +1298,15 @@ impl PluginSession {
         )
     }
 
-    pub fn fork_for_agent_with_tool_surface(
+    pub fn fork_for_session_with_tool_surface(
         &self,
-        agent_id: impl Into<String>,
+        session_id: impl Into<String>,
         execution_mode: ExecutionMode,
         tool_surface_overlay: ToolSurfaceContribution,
     ) -> Result<Arc<PluginSession>, PluginError> {
         let snapshot = self.snapshot()?;
         self.host.build_session_with_surface(
-            agent_id,
+            session_id,
             execution_mode,
             Some(&snapshot),
             tool_surface_overlay,
@@ -1327,8 +1327,8 @@ impl PluginSession {
         };
 
         let effective_session = session_id.or_else(|| {
-            if default_to_current_session && !self.agent_id.is_empty() {
-                Some(self.agent_id.clone())
+            if default_to_current_session && !self.session_id.is_empty() {
+                Some(self.session_id.clone())
             } else {
                 None
             }

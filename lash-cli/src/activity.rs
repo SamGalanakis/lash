@@ -93,13 +93,13 @@ pub struct ActivityBlock {
 #[derive(Default, Clone, Debug)]
 pub struct ActivityState {
     shell_handles: HashMap<String, String>,
-    agent_handles: HashMap<String, String>,
+    delegate_handles: HashMap<String, String>,
 }
 
 impl ActivityState {
     pub fn reset(&mut self) {
         self.shell_handles.clear();
-        self.agent_handles.clear();
+        self.delegate_handles.clear();
     }
 
     pub fn blocks_for_tool_call(
@@ -417,7 +417,7 @@ impl ActivityState {
                     .unwrap_or("delegate task")
                     .to_string();
                 if success && let Some(id) = tool_result_handle_id(&result) {
-                    self.agent_handles.insert(id.to_string(), task.clone());
+                    self.delegate_handles.insert(id.to_string(), task.clone());
                 }
                 let mut detail_lines = Vec::new();
                 if success {
@@ -463,7 +463,7 @@ impl ActivityState {
                     .and_then(|value| value.get("task"))
                     .and_then(|value| value.as_str())
                     .map(str::to_string)
-                    .or_else(|| self.agent_handles.remove(&handle_id))
+                    .or_else(|| self.delegate_handles.remove(&handle_id))
                     .unwrap_or_else(|| handle_id.clone());
 
                 let delegate_status = delegate_activity_status(success, child_status);
@@ -544,7 +544,10 @@ impl ActivityState {
             }
             "agent_kill" => {
                 let handle_id = tool_arg_str(&args, "id").unwrap_or_default().to_string();
-                let task = self.agent_handles.remove(&handle_id).unwrap_or(handle_id);
+                let task = self
+                    .delegate_handles
+                    .remove(&handle_id)
+                    .unwrap_or(handle_id);
                 ActivityBlock {
                     kind: ActivityKind::Delegate,
                     status,

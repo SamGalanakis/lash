@@ -8,11 +8,6 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{
-    AgentEvent, DurableTurnSnapshot, Message, MessageRole, Part, PartKind, PruneState,
-    SessionPolicy, TokenUsage, build_execution_preamble, context::build_context,
-    finalize_prompt_context, make_error_event, transport_stream_events,
-};
 use crate::llm::factory::adapter_for;
 use crate::llm::transport::LlmTransport;
 use crate::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
@@ -23,6 +18,11 @@ use crate::plugin::{
 };
 use crate::provider::Provider;
 use crate::sansio::{Effect, LlmCallError, Response, TurnMachine, TurnMachineConfig};
+use crate::session_model::{
+    DurableTurnSnapshot, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
+    SessionPolicy, TokenUsage, build_execution_preamble, context::build_context,
+    finalize_prompt_context, make_error_event, transport_stream_events,
+};
 use crate::strip_repl_fragments;
 use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call};
 use crate::{
@@ -76,8 +76,8 @@ pub struct PromptUsage {
 
 /// Serializable host-owned session envelope.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct AgentStateEnvelope {
-    pub agent_id: String,
+pub struct SessionStateEnvelope {
+    pub session_id: String,
     #[serde(default)]
     pub policy: SessionPolicy,
     #[serde(default)]
@@ -111,10 +111,10 @@ struct ReplStreamCutover<'a> {
     fallback_request_body: &'a str,
 }
 
-impl Default for AgentStateEnvelope {
+impl Default for SessionStateEnvelope {
     fn default() -> Self {
         Self {
-            agent_id: "root".to_string(),
+            session_id: "root".to_string(),
             policy: SessionPolicy::default(),
             messages: Vec::new(),
             tool_calls: Vec::new(),
@@ -200,7 +200,7 @@ pub struct TurnIssue {
 /// `execution`, while REPL-only detail is exposed through `code_outputs`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AssembledTurn {
-    pub state: AgentStateEnvelope,
+    pub state: SessionStateEnvelope,
     pub status: TurnStatus,
     pub assistant_output: AssistantOutput,
     #[serde(default)]
@@ -283,10 +283,10 @@ impl Default for TerminationPolicy {
 }
 
 /// Host event sink for low-level streaming runtime events.
-/// `AgentEvent` is intentionally mode-specific and should be treated as preview/progress data.
+/// `SessionEvent` is intentionally mode-specific and should be treated as preview/progress data.
 #[async_trait::async_trait]
 pub trait EventSink: Send + Sync {
-    async fn emit(&self, event: AgentEvent);
+    async fn emit(&self, event: SessionEvent);
 }
 
 /// No-op sink useful for callers that only care about final state.
@@ -294,10 +294,24 @@ pub struct NoopEventSink;
 
 #[async_trait::async_trait]
 impl EventSink for NoopEventSink {
-    async fn emit(&self, _event: AgentEvent) {}
+    async fn emit(&self, _event: SessionEvent) {}
 }
 
 type LlmFactory = Arc<dyn Fn(&Provider) -> Box<dyn LlmTransport> + Send + Sync>;
+
+#[derive(Clone)]
+pub struct SessionStoreCreateRequest {
+    pub session_id: String,
+    pub parent_session_id: Option<String>,
+    pub policy: SessionPolicy,
+}
+
+pub trait SessionStoreFactory: Send + Sync {
+    fn create_store(
+        &self,
+        request: &SessionStoreCreateRequest,
+    ) -> Result<Arc<dyn crate::store::RuntimeStore>, String>;
+}
 
 fn default_llm_factory() -> LlmFactory {
     Arc::new(|provider| adapter_for(provider))
@@ -348,12 +362,12 @@ struct TurnAssembler {
 }
 
 impl TurnAssembler {
-    fn push(&mut self, event: &AgentEvent) {
+    fn push(&mut self, event: &SessionEvent) {
         match event {
-            AgentEvent::TextDelta { content } => {
+            SessionEvent::TextDelta { content } => {
                 self.text_deltas.push_str(content);
             }
-            AgentEvent::ToolCall {
+            SessionEvent::ToolCall {
                 call_id,
                 name,
                 args,
@@ -373,7 +387,7 @@ impl TurnAssembler {
                     self.saw_tool_failure = true;
                 }
             }
-            AgentEvent::CodeOutput { output, error } => {
+            SessionEvent::CodeOutput { output, error } => {
                 if error.is_some() {
                     self.saw_tool_failure = true;
                 }
@@ -382,16 +396,16 @@ impl TurnAssembler {
                     error: error.clone(),
                 });
             }
-            AgentEvent::Message { text, kind } if kind == "final" => {
+            SessionEvent::Message { text, kind } if kind == "final" => {
                 self.final_message = Some(text.clone());
             }
-            AgentEvent::TokenUsage {
+            SessionEvent::TokenUsage {
                 usage, cumulative, ..
             } => {
                 self.token_usage = cumulative.clone();
                 self.last_llm_usage = Some(usage.clone());
             }
-            AgentEvent::Error { message, envelope } => {
+            SessionEvent::Error { message, envelope } => {
                 let (kind, code) = if let Some(envelope) = envelope {
                     (envelope.kind.clone(), envelope.code.clone())
                 } else {
@@ -403,10 +417,10 @@ impl TurnAssembler {
                     message: message.clone(),
                 });
             }
-            AgentEvent::Done => {
+            SessionEvent::Done => {
                 self.saw_done = true;
             }
-            AgentEvent::PluginEvent { event, .. } => {
+            SessionEvent::PluginEvent { event, .. } => {
                 if plugin_surface_event_renders_visible_output(event) {
                     self.has_plugin_visible_output = true;
                 }
@@ -417,7 +431,7 @@ impl TurnAssembler {
 
     fn finish(
         self,
-        state: AgentStateEnvelope,
+        state: SessionStateEnvelope,
         interrupted: bool,
         force_runtime_error: Option<TurnIssue>,
         sanitizer: &SanitizerPolicy,
@@ -486,13 +500,14 @@ impl TurnAssembler {
     }
 }
 
-/// Host-owned runtime knobs that are not part of the agent/session contract.
+/// Host-owned runtime knobs that are not part of the session contract.
 #[derive(Clone)]
 pub struct RuntimeHostConfig {
     pub host_profile: HostProfile,
     pub user_prompts_enabled: bool,
     pub base_dir: Option<PathBuf>,
     pub path_resolver: Option<Arc<dyn PathResolver>>,
+    pub session_store_factory: Option<Arc<dyn SessionStoreFactory>>,
     pub prompt_renderer: Arc<dyn PromptRenderer>,
     pub prompt_overrides: Vec<PromptSectionOverride>,
     pub llm_log_path: Option<PathBuf>,
@@ -507,6 +522,7 @@ impl Default for RuntimeHostConfig {
             user_prompts_enabled: true,
             base_dir: None,
             path_resolver: None,
+            session_store_factory: None,
             prompt_renderer: crate::default_prompt_renderer(),
             prompt_overrides: Vec::new(),
             llm_log_path: None,
@@ -521,7 +537,7 @@ pub struct LashRuntime {
     session: Option<Session>,
     policy: SessionPolicy,
     host: RuntimeHostConfig,
-    state: AgentStateEnvelope,
+    state: SessionStateEnvelope,
     llm_factory: LlmFactory,
     managed_sessions: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
     managed_turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
@@ -536,7 +552,7 @@ struct ManagedSessionTurn {
 
 #[derive(Clone)]
 struct RuntimeSessionManager {
-    current_agent_id: String,
+    current_session_id: String,
     current_snapshot: SessionSnapshot,
     current_policy: SessionPolicy,
     current_host: RuntimeHostConfig,
@@ -544,18 +560,17 @@ struct RuntimeSessionManager {
     current_tool_catalog: Vec<serde_json::Value>,
     current_prompt_bridge: Option<HostPromptBridge>,
     llm_factory: LlmFactory,
-    current_store: Option<Arc<dyn crate::store::RuntimeStore>>,
     registry: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
     turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
 }
 
 struct ChannelEventSink {
-    tx: mpsc::Sender<AgentEvent>,
+    tx: mpsc::Sender<SessionEvent>,
 }
 
 #[async_trait::async_trait]
 impl EventSink for ChannelEventSink {
-    async fn emit(&self, event: AgentEvent) {
+    async fn emit(&self, event: SessionEvent) {
         if !self.tx.is_closed() {
             let _ = self.tx.send(event).await;
         }
@@ -620,16 +635,15 @@ impl RuntimeSessionManager {
             return Err(ExternalInvokeError::Unknown("session_manager".to_string()));
         };
         Ok(Self {
-            current_agent_id: runtime.state.agent_id.clone(),
+            current_session_id: runtime.state.session_id.clone(),
             current_snapshot: runtime.export_state(),
             current_policy: runtime.policy.clone(),
             current_host: runtime.host.clone(),
             current_plugins: Arc::clone(session.plugins()),
             current_tool_catalog: session
-                .tool_catalog(&runtime.state.agent_id, runtime.policy.execution_mode),
+                .tool_catalog(&runtime.state.session_id, runtime.policy.execution_mode),
             current_prompt_bridge: prompt_bridge,
             llm_factory: Arc::clone(&runtime.llm_factory),
-            current_store: session.history_store(),
             registry: Arc::clone(&runtime.managed_sessions),
             turns: Arc::clone(&runtime.managed_turns),
         })
@@ -637,12 +651,12 @@ impl RuntimeSessionManager {
 
     fn build_runtime_state(
         &self,
-        agent_id: String,
+        session_id: String,
         request: &SessionCreateRequest,
         mut base: SessionSnapshot,
         policy: &SessionPolicy,
     ) -> SessionSnapshot {
-        base.agent_id = agent_id;
+        base.session_id = session_id;
         base.policy = policy.clone();
         let existing_messages = base.messages.clone();
         let appended = request
@@ -659,7 +673,7 @@ impl RuntimeSessionManager {
         &self,
         session_id: &str,
     ) -> Result<SessionSnapshot, crate::PluginError> {
-        if session_id == self.current_agent_id {
+        if session_id == self.current_session_id {
             return Ok(self.current_snapshot.clone());
         }
         let runtime = {
@@ -675,7 +689,7 @@ impl RuntimeSessionManager {
         &self,
         session_id: &str,
     ) -> Result<Vec<serde_json::Value>, crate::PluginError> {
-        if session_id == self.current_agent_id {
+        if session_id == self.current_session_id {
             if let Some(runtime) = self.registry.lock().await.get(session_id).cloned() {
                 let runtime = runtime.lock().await;
                 return Ok(runtime.active_tool_catalog());
@@ -716,14 +730,14 @@ impl SessionManager for RuntimeSessionManager {
         &self,
         request: SessionCreateRequest,
     ) -> Result<SessionHandle, crate::PluginError> {
-        let agent_id = request
-            .agent_id
+        let session_id = request
+            .session_id
             .clone()
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let snapshot = match &request.start {
             SessionStartPoint::Empty => SessionSnapshot {
-                agent_id: agent_id.clone(),
+                session_id: session_id.clone(),
                 ..Default::default()
             },
             SessionStartPoint::CurrentSession => self.current_snapshot.clone(),
@@ -740,21 +754,33 @@ impl SessionManager for RuntimeSessionManager {
                 _ => snapshot.policy.clone(),
             });
         if request.parent_session_id.is_some() {
-            policy.session_id = Some(agent_id.clone());
+            policy.session_id = Some(session_id.clone());
         }
-        let state = self.build_runtime_state(agent_id.clone(), &request, snapshot, &policy);
+        let state = self.build_runtime_state(session_id.clone(), &request, snapshot, &policy);
         let plugins = match request.plugin_mode {
             crate::SessionPluginMode::Fresh => self
                 .current_plugins
                 .host()
-                .build_session(&agent_id, policy.execution_mode, None)
+                .build_session(&session_id, policy.execution_mode, None)
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?,
             crate::SessionPluginMode::InheritCurrent => self
                 .current_plugins
-                .fork_for_agent(&agent_id, policy.execution_mode)
+                .fork_for_session(&session_id, policy.execution_mode)
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?,
         };
-        let services = match &self.current_store {
+        let session_store = match &self.current_host.session_store_factory {
+            Some(factory) => Some(
+                factory
+                    .create_store(&SessionStoreCreateRequest {
+                        session_id: session_id.clone(),
+                        parent_session_id: request.parent_session_id.clone(),
+                        policy: policy.clone(),
+                    })
+                    .map_err(crate::PluginError::Session)?,
+            ),
+            None => None,
+        };
+        let services = match &session_store {
             Some(store) => RuntimeServices::new(plugins).with_store(Arc::clone(store)),
             None => RuntimeServices::new(plugins),
         };
@@ -770,32 +796,30 @@ impl SessionManager for RuntimeSessionManager {
                 request.context_surface.include_base_tools,
             );
         }
-        if let Some(store) = &self.current_store {
-            let source_agent = match &request.start {
-                SessionStartPoint::CurrentSession => Some(self.current_agent_id.as_str()),
-                SessionStartPoint::ExistingSession { session_id } => Some(session_id.as_str()),
-                SessionStartPoint::Snapshot { snapshot } => Some(snapshot.agent_id.as_str()),
-                SessionStartPoint::Empty => None,
-            };
-            if let Some(source_agent) = source_agent
-                && source_agent != agent_id
-            {
-                store.transcript_copy(source_agent, &agent_id).await;
-            }
+        if let Some(store) = &session_store {
+            store
+                .save_turn_checkpoint(crate::store::TurnCheckpoint {
+                    session_state: persisted_session_state(&runtime.state),
+                    transcript_keyspaces: crate::store::semantic_transcript_keyspaces(
+                        &runtime.state.messages,
+                        &runtime.state.tool_calls,
+                    ),
+                })
+                .await;
         }
         self.registry
             .lock()
             .await
-            .insert(agent_id.clone(), Arc::new(Mutex::new(runtime)));
+            .insert(session_id.clone(), Arc::new(Mutex::new(runtime)));
         Ok(SessionHandle {
-            session_id: agent_id,
+            session_id,
             parent_session_id: request.parent_session_id,
             policy,
         })
     }
 
     async fn close_session(&self, session_id: &str) -> Result<(), crate::PluginError> {
-        if session_id == self.current_agent_id {
+        if session_id == self.current_session_id {
             return Err(crate::PluginError::Session(
                 "cannot close the current session".to_string(),
             ));
@@ -843,7 +867,7 @@ impl SessionManager for RuntimeSessionManager {
         };
         let turn_id = uuid::Uuid::new_v4().to_string();
         let cancel = CancellationToken::new();
-        let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(100);
+        let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(100);
         let runtime_clone = Arc::clone(&runtime);
         let cancel_clone = cancel.clone();
         let task = tokio::spawn(async move {
@@ -910,15 +934,18 @@ impl SessionManager for RuntimeSessionManager {
     }
 }
 
-async fn emit_agent_events_to_sink(events: &dyn EventSink, plugin_events: Vec<AgentEvent>) {
+async fn emit_session_events_to_sink(events: &dyn EventSink, plugin_events: Vec<SessionEvent>) {
     for event in plugin_events {
         events.emit(event).await;
     }
 }
 
-async fn emit_agent_events(event_tx: &mpsc::Sender<AgentEvent>, plugin_events: Vec<AgentEvent>) {
+async fn emit_session_events(
+    event_tx: &mpsc::Sender<SessionEvent>,
+    plugin_events: Vec<SessionEvent>,
+) {
     for event in plugin_events {
-        crate::agent::send_event(event_tx, event).await;
+        crate::session_model::send_event(event_tx, event).await;
     }
 }
 
@@ -949,9 +976,9 @@ fn plugin_message_to_message(
             id: String::new(),
             kind: PartKind::Image,
             content: String::new(),
-            attachment: Some(crate::agent::message::PartAttachment {
+            attachment: Some(crate::session_model::message::PartAttachment {
                 mime: "image/png".to_string(),
-                url: crate::agent::message::data_url_for_bytes("image/png", bytes),
+                url: crate::session_model::message::data_url_for_bytes("image/png", bytes),
                 filename: None,
             }),
             tool_call_id: None,
@@ -994,7 +1021,7 @@ impl LashRuntime {
     fn active_tool_catalog(&self) -> Vec<serde_json::Value> {
         self.session
             .as_ref()
-            .map(|session| session.tool_catalog(&self.state.agent_id, self.policy.execution_mode))
+            .map(|session| session.tool_catalog(&self.state.session_id, self.policy.execution_mode))
             .unwrap_or_default()
     }
 
@@ -1003,15 +1030,15 @@ impl LashRuntime {
         policy: SessionPolicy,
         mut host: RuntimeHostConfig,
         services: RuntimeServices,
-        mut state: AgentStateEnvelope,
+        mut state: SessionStateEnvelope,
     ) -> Result<Self, SessionError> {
         host.base_dir = Some(
             host.base_dir
                 .clone()
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
         );
-        if state.agent_id.is_empty() {
-            state.agent_id = "root".to_string();
+        if state.session_id.is_empty() {
+            state.session_id = "root".to_string();
         }
         if state.policy == SessionPolicy::default() {
             state.policy = policy.clone();
@@ -1023,7 +1050,7 @@ impl LashRuntime {
             ));
         }
         let mut session =
-            Session::new(services, &state.agent_id, state.policy.execution_mode).await?;
+            Session::new(services, &state.session_id, state.policy.execution_mode).await?;
         if let Some(snapshot) = state.plugin_snapshot.clone() {
             session
                 .plugins()
@@ -1049,7 +1076,7 @@ impl LashRuntime {
     }
 
     /// Export current host-owned state envelope.
-    pub fn export_state(&self) -> AgentStateEnvelope {
+    pub fn export_state(&self) -> SessionStateEnvelope {
         let mut state = self.state.clone();
         if let Some(session) = self.session.as_ref() {
             state.plugin_snapshot = session.plugins().snapshot().ok();
@@ -1090,7 +1117,7 @@ impl LashRuntime {
         session
             .plugins()
             .on_session_config_changed(SessionConfigChangedContext {
-                session_id: self.state.agent_id.clone(),
+                session_id: self.state.session_id.clone(),
                 previous,
                 current,
                 host,
@@ -1113,7 +1140,7 @@ impl LashRuntime {
             .plugins()
             .mutate_session_config(
                 SessionConfigChangedContext {
-                    session_id: self.state.agent_id.clone(),
+                    session_id: self.state.session_id.clone(),
                     previous,
                     current,
                     host,
@@ -1124,7 +1151,7 @@ impl LashRuntime {
     }
 
     /// Replace the host-owned state envelope.
-    pub fn set_state(&mut self, state: AgentStateEnvelope) {
+    pub fn set_state(&mut self, state: SessionStateEnvelope) {
         if let Some(session) = self.session.as_ref() {
             let snapshot = state.plugin_snapshot.clone().unwrap_or_default();
             if let Err(err) = session.plugins().restore(&snapshot) {
@@ -1200,8 +1227,8 @@ impl LashRuntime {
         let old_max = previous.max_context_tokens;
         if (new_max < old_max || (new_max.is_some() && old_max.is_none()))
             && let Ok(manager) = self.runtime_session_manager()
-            && let Ok(Some(compacted)) = crate::agent::context::compact_messages_if_needed(
-                &self.state.agent_id,
+            && let Ok(Some(compacted)) = crate::session_model::context::compact_messages_if_needed(
+                &self.state.session_id,
                 &self.state,
                 &self.state.messages,
                 self.state.last_prompt_usage.clone(),
@@ -1226,7 +1253,7 @@ impl LashRuntime {
         session.refresh_execution_surface().await
     }
 
-    /// Reset the REPL session on the underlying agent.
+    /// Reset the REPL session on the underlying session runtime.
     pub async fn reset_session(&mut self) -> Result<(), SessionError> {
         let Some(session) = self.session.as_mut() else {
             return Err(SessionError::Protocol(
@@ -1300,10 +1327,10 @@ impl LashRuntime {
             // Force-compact: strip images, prune, summarize.
             if let Ok(manager) = self.runtime_session_manager() {
                 let max = self.policy.max_context_tokens;
-                let agent_id = self.state.agent_id.clone();
+                let session_id = self.state.session_id.clone();
                 let state_snapshot = self.state.clone();
-                let _ = crate::agent::context::force_compact_messages(
-                    &agent_id,
+                let _ = crate::session_model::context::force_compact_messages(
+                    &session_id,
                     &state_snapshot,
                     &mut self.state.messages,
                     max,
@@ -1331,9 +1358,9 @@ impl LashRuntime {
             Err(e) => {
                 self.state.last_prompt_usage = None;
                 let mut assembler = TurnAssembler::default();
-                let error_event = AgentEvent::Error {
+                let error_event = SessionEvent::Error {
                     message: e.clone(),
-                    envelope: Some(crate::agent::ErrorEnvelope {
+                    envelope: Some(crate::session_model::ErrorEnvelope {
                         kind: "input_validation".to_string(),
                         code: Some("invalid_turn_input".to_string()),
                         user_message: e,
@@ -1342,8 +1369,8 @@ impl LashRuntime {
                 };
                 assembler.push(&error_event);
                 events.emit(error_event).await;
-                assembler.push(&AgentEvent::Done);
-                events.emit(AgentEvent::Done).await;
+                assembler.push(&SessionEvent::Done);
+                events.emit(SessionEvent::Done).await;
                 return Ok(assembler.finish(
                     self.state.clone(),
                     false,
@@ -1402,9 +1429,12 @@ impl LashRuntime {
                         id: format!("{}.p{}", user_id, user_parts.len()),
                         kind: PartKind::Image,
                         content: String::new(),
-                        attachment: Some(crate::agent::message::PartAttachment {
+                        attachment: Some(crate::session_model::message::PartAttachment {
                             mime: "image/png".to_string(),
-                            url: crate::agent::message::data_url_for_bytes("image/png", &bytes),
+                            url: crate::session_model::message::data_url_for_bytes(
+                                "image/png",
+                                &bytes,
+                            ),
                             filename: None,
                         }),
                         tool_call_id: None,
@@ -1436,8 +1466,8 @@ impl LashRuntime {
             code: "plugin_session_manager".to_string(),
             message: err.to_string(),
         })?;
-        let prepared_context = build_context(crate::agent::context::ContextBuildRequest {
-            session_id: self.state.agent_id.clone(),
+        let prepared_context = build_context(crate::session_model::context::ContextBuildRequest {
+            session_id: self.state.session_id.clone(),
             state: self.export_state(),
             messages,
             prompt_usage: previous_prompt_usage.clone(),
@@ -1488,7 +1518,7 @@ impl LashRuntime {
                 code: "plugin_session_manager".to_string(),
                 message: err.to_string(),
             })?;
-        let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
+        let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(100);
         let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::unbounded_channel::<PendingPrompt>();
         prompt_bridge.set_sender(prompt_tx);
         let prompt_event_tx = event_tx.clone();
@@ -1496,7 +1526,7 @@ impl LashRuntime {
             while let Some(prompt) = prompt_rx.recv().await {
                 if !prompt_event_tx.is_closed() {
                     let _ = prompt_event_tx
-                        .send(AgentEvent::Prompt {
+                        .send(SessionEvent::Prompt {
                             request: prompt.request,
                             response_tx: prompt.response_tx,
                         })
@@ -1513,7 +1543,7 @@ impl LashRuntime {
             Arc::clone(session.plugins())
         };
         let prepare_turn = plugins.prepare_turn(PrepareTurnRequest {
-            session_id: self.state.agent_id.clone(),
+            session_id: self.state.session_id.clone(),
             state: self.export_state(),
             messages,
             host: Arc::clone(&manager),
@@ -1539,7 +1569,7 @@ impl LashRuntime {
         for event in &prepared.events {
             assembler.push(event);
         }
-        emit_agent_events_to_sink(events, prepared.events).await;
+        emit_session_events_to_sink(events, prepared.events).await;
         if let Some(abort) = prepared.abort {
             prompt_bridge.clear_sender();
             let _ = prompt_forward.await;
@@ -1552,9 +1582,9 @@ impl LashRuntime {
                 code: Some(abort.code),
                 message: abort.message.clone(),
             };
-            let error_event = AgentEvent::Error {
+            let error_event = SessionEvent::Error {
                 message: abort.message,
-                envelope: Some(crate::agent::ErrorEnvelope {
+                envelope: Some(crate::session_model::ErrorEnvelope {
                     kind: "plugin".to_string(),
                     code: issue.code.clone(),
                     user_message: issue.message.clone(),
@@ -1563,8 +1593,8 @@ impl LashRuntime {
             };
             assembler.push(&error_event);
             events.emit(error_event).await;
-            assembler.push(&AgentEvent::Done);
-            events.emit(AgentEvent::Done).await;
+            assembler.push(&SessionEvent::Done);
+            events.emit(SessionEvent::Done).await;
             return Ok(assembler.finish(
                 state,
                 cancel.is_cancelled(),
@@ -1582,7 +1612,7 @@ impl LashRuntime {
             session,
             policy: self.policy.clone(),
             host: self.host.clone(),
-            agent_id: self.state.agent_id.clone(),
+            session_id: self.state.session_id.clone(),
             tool_calls: self.state.tool_calls.clone(),
             llm_factory: Arc::clone(&self.llm_factory),
             session_manager: manager,
@@ -1663,7 +1693,7 @@ impl LashRuntime {
             {
                 store
                     .save_turn_checkpoint(crate::store::TurnCheckpoint {
-                        agent_state: persisted_agent_state(&finalized.turn.state),
+                        session_state: persisted_session_state(&finalized.turn.state),
                         transcript_keyspaces: crate::store::semantic_transcript_keyspaces(
                             &finalized.turn.state.messages,
                             &finalized.turn.state.tool_calls,
@@ -1671,7 +1701,7 @@ impl LashRuntime {
                     })
                     .await;
             }
-            emit_agent_events_to_sink(events, finalized.events).await;
+            emit_session_events_to_sink(events, finalized.events).await;
             self.state = finalized.turn.state.clone();
             Ok(finalized.turn)
         } else {
@@ -1681,7 +1711,7 @@ impl LashRuntime {
     }
 }
 
-fn persisted_agent_state(state: &AgentStateEnvelope) -> crate::store::AgentState {
+fn persisted_session_state(state: &SessionStateEnvelope) -> crate::store::SessionState {
     let config_json = serde_json::json!({
         "last_prompt_usage": state.last_prompt_usage,
         "task_state": state.task_state,
@@ -1689,8 +1719,7 @@ fn persisted_agent_state(state: &AgentStateEnvelope) -> crate::store::AgentState
         "plugin_snapshot": state.plugin_snapshot,
     })
     .to_string();
-    crate::store::AgentState {
-        agent_id: state.agent_id.clone(),
+    crate::store::SessionState {
         iteration: state.iteration as i64,
         config_json,
         repl_snapshot: state.repl_snapshot.clone(),
@@ -1705,7 +1734,7 @@ struct RuntimeTurnDriver {
     session: Session,
     policy: SessionPolicy,
     host: RuntimeHostConfig,
-    agent_id: String,
+    session_id: String,
     tool_calls: Vec<ToolCallRecord>,
     llm_factory: LlmFactory,
     session_manager: Arc<dyn SessionManager>,
@@ -1727,7 +1756,7 @@ impl RuntimeTurnDriver {
 
     async fn finalize_repl_llm_task(
         &mut self,
-        event_tx: &mpsc::Sender<AgentEvent>,
+        event_tx: &mpsc::Sender<SessionEvent>,
         llm_task: &mut JoinHandle<(
             Result<LlmResponse, crate::llm::transport::LlmTransportError>,
             Provider,
@@ -1764,13 +1793,13 @@ impl RuntimeTurnDriver {
     async fn run(
         &mut self,
         messages: Vec<Message>,
-        event_tx: mpsc::Sender<AgentEvent>,
+        event_tx: mpsc::Sender<SessionEvent>,
         cancel: CancellationToken,
         run_offset: usize,
     ) -> (Vec<Message>, usize) {
         macro_rules! emit {
             ($event:expr) => {
-                crate::agent::send_event(&event_tx, $event).await
+                crate::session_model::send_event(&event_tx, $event).await
             };
         }
         let result = async {
@@ -1782,7 +1811,8 @@ impl RuntimeTurnDriver {
                 Err(result) => return result,
             };
             let snapshot = self.durable_snapshot(machine.messages(), machine.iteration());
-            crate::agent::send_event(&event_tx, AgentEvent::DurableSnapshot { snapshot }).await;
+            crate::session_model::send_event(&event_tx, SessionEvent::DurableSnapshot { snapshot })
+                .await;
 
             loop {
                 let Some(effect) = machine.poll_effect() else {
@@ -1796,7 +1826,7 @@ impl RuntimeTurnDriver {
                     } => return (messages, iteration),
                     Effect::LlmCall { id, request } => {
                         if cancel.is_cancelled() {
-                            emit!(AgentEvent::Done);
+                            emit!(SessionEvent::Done);
                             return (Vec::new(), run_offset);
                         }
                         let (result, text_streamed) = self
@@ -1809,9 +1839,9 @@ impl RuntimeTurnDriver {
                         });
                         let snapshot =
                             self.durable_snapshot(machine.messages(), machine.iteration());
-                        crate::agent::send_event(
+                        crate::session_model::send_event(
                             &event_tx,
-                            AgentEvent::DurableSnapshot { snapshot },
+                            SessionEvent::DurableSnapshot { snapshot },
                         )
                         .await;
                     }
@@ -1824,9 +1854,9 @@ impl RuntimeTurnDriver {
                                 machine.handle_response(Response::Checkpoint { id, messages });
                                 let snapshot =
                                     self.durable_snapshot(machine.messages(), machine.iteration());
-                                crate::agent::send_event(
+                                crate::session_model::send_event(
                                     &event_tx,
-                                    AgentEvent::DurableSnapshot { snapshot },
+                                    SessionEvent::DurableSnapshot { snapshot },
                                 )
                                 .await;
                             }
@@ -1862,9 +1892,9 @@ impl RuntimeTurnDriver {
                         machine.handle_response(Response::ToolResults { id, results });
                         let snapshot =
                             self.durable_snapshot(machine.messages(), machine.iteration());
-                        crate::agent::send_event(
+                        crate::session_model::send_event(
                             &event_tx,
-                            AgentEvent::DurableSnapshot { snapshot },
+                            SessionEvent::DurableSnapshot { snapshot },
                         )
                         .await;
                     }
@@ -1889,9 +1919,9 @@ impl RuntimeTurnDriver {
                         machine.handle_response(response);
                         let snapshot =
                             self.durable_snapshot(machine.messages(), machine.iteration());
-                        crate::agent::send_event(
+                        crate::session_model::send_event(
                             &event_tx,
-                            AgentEvent::DurableSnapshot { snapshot },
+                            SessionEvent::DurableSnapshot { snapshot },
                         )
                         .await;
                     }
@@ -1908,12 +1938,12 @@ impl RuntimeTurnDriver {
     async fn prepare_turn_machine(
         &mut self,
         messages: Vec<Message>,
-        event_tx: &mpsc::Sender<AgentEvent>,
+        event_tx: &mpsc::Sender<SessionEvent>,
         run_offset: usize,
     ) -> Result<TurnMachine, (Vec<Message>, usize)> {
         macro_rules! emit {
             ($event:expr) => {
-                crate::agent::send_event(event_tx, $event).await
+                crate::session_model::send_event(event_tx, $event).await
             };
         }
 
@@ -1923,14 +1953,14 @@ impl RuntimeTurnDriver {
             Ok(model) => model,
             Err(event) => {
                 emit!(event);
-                emit!(AgentEvent::Done);
+                emit!(SessionEvent::Done);
                 return Err((messages, run_offset));
             }
         };
         let mut preamble =
             build_execution_preamble(&self.session, &session_policy, execution_mode, model);
-        let prompt_state = AgentStateEnvelope {
-            agent_id: self.agent_id.clone(),
+        let prompt_state = SessionStateEnvelope {
+            session_id: self.session_id.clone(),
             policy: session_policy.clone(),
             messages: messages.clone(),
             tool_calls: self.tool_calls.clone(),
@@ -1941,7 +1971,7 @@ impl RuntimeTurnDriver {
             .session
             .plugins()
             .collect_prompt_contributions(PromptHookContext {
-                session_id: self.agent_id.clone(),
+                session_id: self.session_id.clone(),
                 host: Arc::clone(&self.session_manager),
                 prompt: preamble.prompt.clone(),
                 state: prompt_state,
@@ -1956,7 +1986,7 @@ impl RuntimeTurnDriver {
                     err.to_string(),
                     Some(err.to_string()),
                 ));
-                emit!(AgentEvent::Done);
+                emit!(SessionEvent::Done);
                 return Err((messages, run_offset));
             }
         };
@@ -1973,7 +2003,7 @@ impl RuntimeTurnDriver {
         machine: &mut TurnMachine,
         effect_id: crate::sansio::EffectId,
         request: LlmRequest,
-        event_tx: &mpsc::Sender<AgentEvent>,
+        event_tx: &mpsc::Sender<SessionEvent>,
         cancel: &CancellationToken,
     ) -> (Result<LlmResponse, LlmCallError>, bool) {
         match self.policy.execution_mode {
@@ -1995,9 +2025,9 @@ impl RuntimeTurnDriver {
         &self,
         messages: &[Message],
         iteration: usize,
-    ) -> AgentStateEnvelope {
-        AgentStateEnvelope {
-            agent_id: self.agent_id.clone(),
+    ) -> SessionStateEnvelope {
+        SessionStateEnvelope {
+            session_id: self.session_id.clone(),
             policy: self.policy.clone(),
             messages: messages.to_vec(),
             tool_calls: self.tool_calls.clone(),
@@ -2015,7 +2045,7 @@ impl RuntimeTurnDriver {
         &mut self,
         machine: &mut TurnMachine,
         checkpoint: CheckpointKind,
-        event_tx: &mpsc::Sender<AgentEvent>,
+        event_tx: &mpsc::Sender<SessionEvent>,
     ) -> Result<Vec<PluginMessage>, RuntimeError> {
         let mut committed = self
             .session
@@ -2028,7 +2058,7 @@ impl RuntimeTurnDriver {
         let plugins = Arc::clone(self.session.plugins());
         let applied = plugins
             .apply_checkpoint(CheckpointHookContext {
-                session_id: self.agent_id.clone(),
+                session_id: self.session_id.clone(),
                 checkpoint,
                 state: self.checkpoint_state_snapshot(machine.messages(), machine.iteration()),
                 host: Arc::clone(&self.session_manager),
@@ -2039,7 +2069,7 @@ impl RuntimeTurnDriver {
                 message: err.to_string(),
             })?;
         committed.extend(applied.messages);
-        emit_agent_events(event_tx, applied.events).await;
+        emit_session_events(event_tx, applied.events).await;
         if let Some(abort) = applied.abort {
             return Err(RuntimeError {
                 code: abort.code,
@@ -2048,9 +2078,9 @@ impl RuntimeTurnDriver {
         }
 
         if !committed.is_empty() {
-            crate::agent::send_event(
+            crate::session_model::send_event(
                 event_tx,
-                AgentEvent::InjectedMessagesCommitted {
+                SessionEvent::InjectedMessagesCommitted {
                     messages: committed.clone(),
                     checkpoint,
                 },
@@ -2061,7 +2091,10 @@ impl RuntimeTurnDriver {
         Ok(committed)
     }
 
-    async fn prepare_provider(&mut self, policy: &mut SessionPolicy) -> Result<String, AgentEvent> {
+    async fn prepare_provider(
+        &mut self,
+        policy: &mut SessionPolicy,
+    ) -> Result<String, SessionEvent> {
         match policy.provider.ensure_fresh().await {
             Ok(true) => {
                 let _ = crate::provider::save_provider(&policy.provider);
@@ -2106,14 +2139,14 @@ impl RuntimeTurnDriver {
 
     async fn transform_assistant_stream_chunk(
         &mut self,
-        event_tx: &mpsc::Sender<AgentEvent>,
+        event_tx: &mpsc::Sender<SessionEvent>,
         chunk: String,
     ) -> Result<String, LlmCallError> {
         let original = chunk.clone();
         let transforms = self
             .session
             .plugins()
-            .transform_assistant_stream(&self.agent_id, chunk, Arc::clone(&self.session_manager))
+            .transform_assistant_stream(&self.session_id, chunk, Arc::clone(&self.session_manager))
             .await
             .map_err(|err| LlmCallError {
                 message: err.to_string(),
@@ -2135,7 +2168,7 @@ impl RuntimeTurnDriver {
 
     async fn transform_assistant_response(
         &mut self,
-        event_tx: &mpsc::Sender<AgentEvent>,
+        event_tx: &mpsc::Sender<SessionEvent>,
         response: LlmResponse,
     ) -> Result<LlmResponse, LlmCallError> {
         let original = response.clone();
@@ -2143,7 +2176,7 @@ impl RuntimeTurnDriver {
             .session
             .plugins()
             .transform_assistant_response(
-                &self.agent_id,
+                &self.session_id,
                 response,
                 Arc::clone(&self.session_manager),
             )
@@ -2164,7 +2197,7 @@ impl RuntimeTurnDriver {
 
     fn machine_config(
         &self,
-        preamble: crate::agent::ExecutionPreamble,
+        preamble: crate::session_model::ExecutionPreamble,
         execution_mode: ExecutionMode,
     ) -> TurnMachineConfig {
         TurnMachineConfig {
@@ -2173,12 +2206,12 @@ impl RuntimeTurnDriver {
             model: preamble.model,
             max_turns: self.policy.max_turns,
             model_variant: self.policy.model_variant.clone(),
-            session_id: self.policy.session_id.clone(),
+            run_session_id: self.policy.session_id.clone(),
             tool_specs: preamble.tool_specs,
             prompt: preamble.prompt,
             prompt_renderer: Arc::clone(&self.host.prompt_renderer),
             prompt_overrides: self.host.prompt_overrides.clone(),
-            agent_id: self.agent_id.clone(),
+            session_id: self.session_id.clone(),
             emit_llm_debug_log: self.host.llm_log_path.is_some(),
         }
     }
@@ -2186,7 +2219,7 @@ impl RuntimeTurnDriver {
     async fn run_exec_code(
         &mut self,
         code: &str,
-        event_tx: &mpsc::Sender<AgentEvent>,
+        event_tx: &mpsc::Sender<SessionEvent>,
     ) -> Result<crate::ExecResponse, String> {
         let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
         self.session.set_message_sender(msg_tx);
@@ -2195,7 +2228,7 @@ impl RuntimeTurnDriver {
             while let Some(sandbox_msg) = msg_rx.recv().await {
                 if sandbox_msg.kind != "final" && !event_tx_clone.is_closed() {
                     let _ = event_tx_clone
-                        .send(AgentEvent::Message {
+                        .send(SessionEvent::Message {
                             text: sandbox_msg.text,
                             kind: sandbox_msg.kind,
                         })
@@ -2206,7 +2239,7 @@ impl RuntimeTurnDriver {
         let manager = Arc::clone(&self.session_manager);
         let result = self
             .session
-            .run_code(&self.agent_id, manager, event_tx, code)
+            .run_code(&self.session_id, manager, event_tx, code)
             .await
             .map_err(|e| e.to_string());
         self.session.clear_message_sender();
@@ -2219,7 +2252,7 @@ impl RuntimeTurnDriver {
         machine: &mut TurnMachine,
         effect_id: crate::sansio::EffectId,
         request: LlmRequest,
-        event_tx: &mpsc::Sender<AgentEvent>,
+        event_tx: &mpsc::Sender<SessionEvent>,
         cancel: &CancellationToken,
     ) -> Result<LlmResponse, LlmCallError> {
         let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
@@ -2254,7 +2287,7 @@ impl RuntimeTurnDriver {
                 }
                 Some(sandbox_msg) = msg_rx.recv() => {
                     if sandbox_msg.kind != "final" && !event_tx.is_closed() {
-                        let _ = event_tx.send(AgentEvent::Message {
+                        let _ = event_tx.send(SessionEvent::Message {
                             text: sandbox_msg.text,
                             kind: sandbox_msg.kind,
                         }).await;
@@ -2396,7 +2429,7 @@ impl RuntimeTurnDriver {
         while let Ok(sandbox_msg) = msg_rx.try_recv() {
             if sandbox_msg.kind != "final" && !event_tx.is_closed() {
                 let _ = event_tx
-                    .send(AgentEvent::Message {
+                    .send(SessionEvent::Message {
                         text: sandbox_msg.text,
                         kind: sandbox_msg.kind,
                     })
@@ -2409,7 +2442,7 @@ impl RuntimeTurnDriver {
     async fn finish_repl_stream_cutover(
         &mut self,
         machine: &mut TurnMachine,
-        event_tx: &mpsc::Sender<AgentEvent>,
+        event_tx: &mpsc::Sender<SessionEvent>,
         cutover: &mut ReplStreamCutover<'_>,
     ) -> Result<LlmResponse, LlmCallError> {
         while let Ok(stream_event) = cutover.llm_stream_rx.try_recv() {
@@ -2532,7 +2565,7 @@ impl RuntimeTurnDriver {
     async fn run_standard_llm_call(
         &mut self,
         request: LlmRequest,
-        event_tx: &mpsc::Sender<AgentEvent>,
+        event_tx: &mpsc::Sender<SessionEvent>,
         cancel: &CancellationToken,
     ) -> (Result<LlmResponse, LlmCallError>, bool) {
         let (llm_stream_tx, mut llm_stream_rx) =
@@ -2626,7 +2659,7 @@ impl RuntimeTurnDriver {
     async fn run_tool_calls(
         &mut self,
         pending_tools: Vec<crate::sansio::PendingToolCall>,
-        event_tx: &mpsc::Sender<AgentEvent>,
+        event_tx: &mpsc::Sender<SessionEvent>,
     ) -> Vec<crate::sansio::CompletedToolCall> {
         let plugins = Arc::clone(self.session.plugins());
         let manager = Arc::clone(&self.session_manager);
@@ -2636,9 +2669,9 @@ impl RuntimeTurnDriver {
             tools: self.session.tools(),
             surface: self
                 .session
-                .execution_surface(&self.agent_id, self.policy.execution_mode),
+                .execution_surface(&self.session_id, self.policy.execution_mode),
             host: Arc::clone(&manager),
-            session_id: self.agent_id.clone(),
+            session_id: self.session_id.clone(),
             execution_mode: self.policy.execution_mode,
             event_tx: event_tx.clone(),
             turn_injection_bridge: self.session.turn_injection_bridge().clone(),
@@ -2660,7 +2693,7 @@ impl RuntimeTurnDriver {
                     while let Some(sandbox_msg) = progress_rx.recv().await {
                         if sandbox_msg.kind != "final" {
                             let _ = progress_event_tx
-                                .send(AgentEvent::Message {
+                                .send(SessionEvent::Message {
                                     text: sandbox_msg.text,
                                     kind: sandbox_msg.kind,
                                 })
@@ -2736,7 +2769,7 @@ impl RuntimeTurnDriver {
 
         match event {
             crate::sansio::LogEvent::LlmDebug {
-                agent_id,
+                session_id,
                 iteration,
                 usage,
                 request_body,
@@ -2746,7 +2779,7 @@ impl RuntimeTurnDriver {
                 let mut entry = serde_json::json!({
                     "turn": iteration,
                     "ts": chrono::Utc::now().to_rfc3339(),
-                    "agent_id": agent_id,
+                    "session_id": session_id,
                     "request": request_body,
                     "response": response_text,
                     "usage": {
@@ -2782,7 +2815,7 @@ impl RuntimeTurnDriver {
 
     async fn forward_standard_stream_event(
         &mut self,
-        event_tx: &mpsc::Sender<AgentEvent>,
+        event_tx: &mpsc::Sender<SessionEvent>,
         stream_event: LlmStreamEvent,
         text_streamed: &mut bool,
         streamed_usage: &mut LlmUsage,
@@ -2795,9 +2828,9 @@ impl RuntimeTurnDriver {
                         .transform_assistant_stream_chunk(event_tx, delta)
                         .await?;
                     if !delta.is_empty() {
-                        crate::agent::send_event(
+                        crate::session_model::send_event(
                             event_tx,
-                            AgentEvent::TextDelta { content: delta },
+                            SessionEvent::TextDelta { content: delta },
                         )
                         .await;
                     }
@@ -2810,8 +2843,11 @@ impl RuntimeTurnDriver {
                         .transform_assistant_stream_chunk(event_tx, text)
                         .await?;
                     if !text.is_empty() {
-                        crate::agent::send_event(event_tx, AgentEvent::TextDelta { content: text })
-                            .await;
+                        crate::session_model::send_event(
+                            event_tx,
+                            SessionEvent::TextDelta { content: text },
+                        )
+                        .await;
                     }
                 }
             }
@@ -2823,7 +2859,7 @@ impl RuntimeTurnDriver {
 
     async fn drain_standard_stream_queue(
         &mut self,
-        event_tx: &mpsc::Sender<AgentEvent>,
+        event_tx: &mpsc::Sender<SessionEvent>,
         llm_stream_rx: &mut tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,
         text_streamed: &mut bool,
         streamed_usage: &mut LlmUsage,
@@ -2904,7 +2940,7 @@ fn debug_request_body(req: &LlmRequest) -> String {
 
 #[cfg(test)]
 async fn drain_standard_stream_queue(
-    event_tx: &mpsc::Sender<AgentEvent>,
+    event_tx: &mpsc::Sender<SessionEvent>,
     llm_stream_rx: &mut tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,
     text_streamed: &mut bool,
     streamed_usage: &mut LlmUsage,
@@ -2914,15 +2950,21 @@ async fn drain_standard_stream_queue(
             LlmStreamEvent::Delta(delta) => {
                 if !delta.is_empty() {
                     *text_streamed = true;
-                    crate::agent::send_event(event_tx, AgentEvent::TextDelta { content: delta })
-                        .await;
+                    crate::session_model::send_event(
+                        event_tx,
+                        SessionEvent::TextDelta { content: delta },
+                    )
+                    .await;
                 }
             }
             LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
                 if !text.is_empty() {
                     *text_streamed = true;
-                    crate::agent::send_event(event_tx, AgentEvent::TextDelta { content: text })
-                        .await;
+                    crate::session_model::send_event(
+                        event_tx,
+                        SessionEvent::TextDelta { content: text },
+                    )
+                    .await;
                 }
             }
             LlmStreamEvent::Part(LlmOutputPart::ToolCall { .. }) => {}
@@ -3117,8 +3159,8 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
-    fn default_state() -> AgentStateEnvelope {
-        AgentStateEnvelope::default()
+    fn default_state() -> SessionStateEnvelope {
+        SessionStateEnvelope::default()
     }
 
     #[cfg(feature = "sqlite-store")]
@@ -3141,25 +3183,25 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct RecordingSink {
-        events: Arc<Mutex<Vec<AgentEvent>>>,
+        events: Arc<Mutex<Vec<SessionEvent>>>,
     }
 
     #[async_trait::async_trait]
     impl EventSink for RecordingSink {
-        async fn emit(&self, event: AgentEvent) {
+        async fn emit(&self, event: SessionEvent) {
             self.events.lock().expect("lock sink").push(event);
         }
     }
 
     impl RecordingSink {
-        fn snapshot(&self) -> Vec<AgentEvent> {
+        fn snapshot(&self) -> Vec<SessionEvent> {
             self.events.lock().expect("lock sink").clone()
         }
     }
 
     #[derive(Default)]
     struct RecordingStore {
-        transcripts: Mutex<HashMap<String, Vec<crate::store::TranscriptEntry>>>,
+        transcript: Mutex<Vec<crate::store::TranscriptEntry>>,
     }
 
     #[async_trait::async_trait]
@@ -3172,31 +3214,30 @@ mod tests {
             None
         }
 
-        async fn save_agent_state(&self, _state: crate::store::AgentState) {}
+        async fn save_session_state(&self, _state: crate::store::SessionState) {}
 
-        async fn load_agent_state(&self, _agent_id: &str) -> Option<crate::store::AgentState> {
+        async fn load_session_state(&self) -> Option<crate::store::SessionState> {
             None
         }
 
-        async fn transcript_clear(&self, agent_id: &str) {
-            self.transcripts
-                .lock()
-                .expect("lock store")
-                .remove(agent_id);
+        async fn save_live_session_snapshot(&self, _snapshot: crate::store::LiveSessionSnapshot) {}
+
+        async fn load_live_session_snapshot(&self) -> Option<crate::store::LiveSessionSnapshot> {
+            None
         }
 
-        async fn transcript_load(&self, agent_id: &str) -> Vec<crate::store::TranscriptEntry> {
-            self.transcripts
-                .lock()
-                .expect("lock store")
-                .get(agent_id)
-                .cloned()
-                .unwrap_or_default()
+        async fn clear_live_session_snapshot(&self) {}
+
+        async fn transcript_clear(&self) {
+            self.transcript.lock().expect("lock store").clear();
+        }
+
+        async fn transcript_load(&self) -> Vec<crate::store::TranscriptEntry> {
+            self.transcript.lock().expect("lock store").clone()
         }
 
         async fn transcript_replace_keyspaces(
             &self,
-            agent_id: &str,
             keyspaces: Vec<crate::store::TranscriptKeyspace>,
         ) {
             let grouped = keyspaces
@@ -3215,10 +3256,7 @@ mod tests {
                         })
                 })
                 .collect();
-            self.transcripts
-                .lock()
-                .expect("lock store")
-                .insert(agent_id.to_string(), grouped);
+            *self.transcript.lock().expect("lock store") = grouped;
         }
 
         async fn save_session_meta(&self, _meta: crate::store::SessionMeta) {}
@@ -3311,8 +3349,44 @@ mod tests {
         host
     }
 
+    #[cfg(feature = "sqlite-store")]
+    #[derive(Clone, Default)]
+    struct RecordingSessionStoreFactory {
+        stores: Arc<StdMutex<Vec<Arc<crate::store::Store>>>>,
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    impl RecordingSessionStoreFactory {
+        fn stores(&self) -> Vec<Arc<crate::store::Store>> {
+            self.stores.lock().expect("store factory").clone()
+        }
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    impl SessionStoreFactory for RecordingSessionStoreFactory {
+        fn create_store(
+            &self,
+            request: &SessionStoreCreateRequest,
+        ) -> Result<Arc<dyn crate::store::RuntimeStore>, String> {
+            let store = Arc::new(crate::store::Store::memory().map_err(|err| err.to_string())?);
+            store.save_session_meta(crate::SessionMeta {
+                session_id: request.session_id.clone(),
+                session_name: request.session_id.clone(),
+                created_at: "2026-04-06T00:00:00Z".to_string(),
+                model: request.policy.model.clone(),
+                cwd: None,
+                parent_session_id: request.parent_session_id.clone(),
+            });
+            self.stores
+                .lock()
+                .expect("store factory")
+                .push(Arc::clone(&store));
+            Ok(store as Arc<dyn crate::store::RuntimeStore>)
+        }
+    }
+
     fn plugin_session_with_tools(
-        agent_id: &str,
+        session_id: &str,
         mode: ExecutionMode,
         tools: Arc<dyn crate::ToolProvider>,
     ) -> Arc<crate::PluginSession> {
@@ -3321,17 +3395,17 @@ mod tests {
             crate::PluginSpec::new().with_tool_provider(Arc::clone(&tools)),
         );
         crate::PluginHost::new(vec![Arc::new(tool_factory)])
-            .build_session(agent_id, mode, None)
+            .build_session(session_id, mode, None)
             .expect("plugins")
     }
 
     fn default_tool_session(
-        agent_id: &str,
+        session_id: &str,
         mode: ExecutionMode,
         deps: crate::DefaultToolPluginDeps,
     ) -> Arc<crate::PluginSession> {
         crate::PluginHost::new(crate::default_tool_plugin_factories(mode, deps))
-            .build_session(agent_id, mode, None)
+            .build_session(session_id, mode, None)
             .expect("plugins")
     }
 
@@ -3358,7 +3432,7 @@ mod tests {
                 ExecutionMode::Standard,
                 tools,
             )),
-            AgentStateEnvelope::default(),
+            SessionStateEnvelope::default(),
         )
         .await
         .expect("runtime");
@@ -3387,7 +3461,7 @@ mod tests {
                 ExecutionMode::Standard,
                 tools,
             )),
-            AgentStateEnvelope::default(),
+            SessionStateEnvelope::default(),
         )
         .await;
         match result {
@@ -3426,12 +3500,12 @@ mod tests {
             repl_test_policy(),
             test_host_config(),
             crate::RuntimeServices::new_with_bridges(plugins, crate::TurnInjectionBridge::new()),
-            AgentStateEnvelope {
+            SessionStateEnvelope {
                 policy: SessionPolicy {
                     execution_mode: ExecutionMode::Repl,
                     ..Default::default()
                 },
-                ..AgentStateEnvelope::default()
+                ..SessionStateEnvelope::default()
             },
         )
         .await
@@ -3456,12 +3530,12 @@ mod tests {
             repl_test_policy(),
             host,
             crate::RuntimeServices::new_with_bridges(plugins, crate::TurnInjectionBridge::new()),
-            AgentStateEnvelope {
+            SessionStateEnvelope {
                 policy: SessionPolicy {
                     execution_mode: ExecutionMode::Repl,
                     ..Default::default()
                 },
-                ..AgentStateEnvelope::default()
+                ..SessionStateEnvelope::default()
             },
         )
         .await
@@ -3480,12 +3554,12 @@ mod tests {
                 ExecutionMode::Repl,
                 crate::DefaultToolPluginDeps::default(),
             )),
-            AgentStateEnvelope {
+            SessionStateEnvelope {
                 policy: SessionPolicy {
                     execution_mode: ExecutionMode::Repl,
                     ..Default::default()
                 },
-                ..AgentStateEnvelope::default()
+                ..SessionStateEnvelope::default()
             },
         )
         .await
@@ -3513,7 +3587,7 @@ mod tests {
                 plugin_session_with_tools("root", ExecutionMode::Standard, tools),
                 turn_injection_bridge,
             ),
-            AgentStateEnvelope::default(),
+            SessionStateEnvelope::default(),
         )
         .await
         .expect("runtime");
@@ -3590,13 +3664,28 @@ mod tests {
         plugins: Vec<Arc<dyn crate::PluginFactory>>,
         transport: MockTransport,
     ) -> LashRuntime {
-        runtime_with_plugins_and_tools(plugins, Arc::new(EmptyTools), transport).await
+        runtime_with_plugins_and_tools_and_host(
+            plugins,
+            Arc::new(EmptyTools),
+            transport,
+            test_host_config(),
+        )
+        .await
     }
 
     async fn runtime_with_plugins_and_tools(
         plugins: Vec<Arc<dyn crate::PluginFactory>>,
         tools: Arc<dyn crate::ToolProvider>,
         transport: MockTransport,
+    ) -> LashRuntime {
+        runtime_with_plugins_and_tools_and_host(plugins, tools, transport, test_host_config()).await
+    }
+
+    async fn runtime_with_plugins_and_tools_and_host(
+        plugins: Vec<Arc<dyn crate::PluginFactory>>,
+        tools: Arc<dyn crate::ToolProvider>,
+        transport: MockTransport,
+        host: RuntimeHostConfig,
     ) -> LashRuntime {
         let mut factories = plugins;
         let tools = Arc::clone(&tools);
@@ -3610,9 +3699,9 @@ mod tests {
             .expect("plugins");
         let mut runtime = LashRuntime::from_state(
             standard_test_policy(),
-            test_host_config(),
+            host,
             crate::RuntimeServices::new(plugin_session),
-            AgentStateEnvelope::default(),
+            SessionStateEnvelope::default(),
         )
         .await
         .expect("runtime");
@@ -3901,9 +3990,12 @@ mod tests {
                         id: String::new(),
                         kind: crate::PartKind::Image,
                         content: String::new(),
-                        attachment: Some(crate::agent::message::PartAttachment {
+                        attachment: Some(crate::session_model::message::PartAttachment {
                             mime: "image/png".to_string(),
-                            url: crate::agent::message::data_url_for_bytes("image/png", &[9, 8, 7]),
+                            url: crate::session_model::message::data_url_for_bytes(
+                                "image/png",
+                                &[9, 8, 7],
+                            ),
                             filename: None,
                         }),
                         tool_call_id: None,
@@ -4069,7 +4161,7 @@ mod tests {
                                     let handle = ctx
                                         .host
                                         .create_session(crate::SessionCreateRequest {
-                                            agent_id: Some("branched".to_string()),
+                                            session_id: Some("branched".to_string()),
                                             parent_session_id: None,
                                             start: crate::SessionStartPoint::CurrentSession,
                                             policy: None,
@@ -4175,7 +4267,7 @@ mod tests {
         let manager = runtime.session_manager().expect("session manager");
         let handle = manager
             .create_session(crate::SessionCreateRequest {
-                agent_id: Some("child".to_string()),
+                session_id: Some("child".to_string()),
                 parent_session_id: None,
                 start: crate::SessionStartPoint::Empty,
                 policy: None,
@@ -4203,10 +4295,10 @@ mod tests {
         while let Some(event) = turn.events.recv().await {
             if matches!(
                 event,
-                AgentEvent::TextDelta { .. }
-                    | AgentEvent::Message { .. }
-                    | AgentEvent::TokenUsage { .. }
-                    | AgentEvent::Done
+                SessionEvent::TextDelta { .. }
+                    | SessionEvent::Message { .. }
+                    | SessionEvent::TokenUsage { .. }
+                    | SessionEvent::Done
             ) {
                 saw_stream_event = true;
             }
@@ -4218,7 +4310,64 @@ mod tests {
         assert_eq!(turn.session_id, "child");
         assert_eq!(turn.policy.model, "mock-model");
         assert!(saw_stream_event);
-        assert_eq!(assembled.state.agent_id, "child");
+        assert_eq!(assembled.state.session_id, "child");
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    #[tokio::test]
+    async fn session_manager_persists_child_sessions_in_separate_store() {
+        let factory = RecordingSessionStoreFactory::default();
+        let mut host = test_host_config();
+        host.session_store_factory = Some(Arc::new(factory.clone()));
+        let mut runtime = runtime_with_plugins_and_tools_and_host(
+            Vec::new(),
+            Arc::new(EmptyTools),
+            MockTransport::new(Vec::new()),
+            host,
+        )
+        .await;
+        runtime.state.messages.push(Message {
+            id: "u1".to_string(),
+            role: MessageRole::User,
+            parts: vec![Part {
+                id: "u1.p0".to_string(),
+                kind: PartKind::Text,
+                content: "parent hello".to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: PruneState::Intact,
+            }],
+            origin: None,
+        });
+        runtime.state.iteration = 3;
+
+        let manager = runtime.session_manager().expect("session manager");
+        let handle = manager
+            .create_session(crate::SessionCreateRequest {
+                session_id: Some("child-store".to_string()),
+                parent_session_id: Some("root".to_string()),
+                start: crate::SessionStartPoint::CurrentSession,
+                policy: None,
+                plugin_mode: crate::SessionPluginMode::InheritCurrent,
+                initial_messages: Vec::new(),
+                context_surface: crate::SessionContextSurface::default(),
+            })
+            .await
+            .expect("child session");
+
+        assert_eq!(handle.session_id, "child-store");
+        let stores = factory.stores();
+        assert_eq!(stores.len(), 1);
+        let persisted = stores[0].load_session_state().expect("session state");
+        assert_eq!(persisted.iteration, 3);
+        let meta = stores[0].load_session_meta().expect("session meta");
+        assert_eq!(meta.session_id, "child-store");
+        assert_eq!(meta.parent_session_id.as_deref(), Some("root"));
+        let entries = stores[0].transcript_load();
+        let messages = crate::transcript_messages(&entries);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].parts[0].content, "parent hello");
     }
 
     struct MemoryProbeTool;
@@ -4250,7 +4399,7 @@ mod tests {
         let manager = runtime.session_manager().expect("session manager");
         let handle = manager
             .create_session(crate::SessionCreateRequest {
-                agent_id: Some("memory-child".to_string()),
+                session_id: Some("memory-child".to_string()),
                 parent_session_id: None,
                 start: crate::SessionStartPoint::Empty,
                 policy: None,
@@ -4259,7 +4408,11 @@ mod tests {
                 context_surface: crate::SessionContextSurface {
                     include_base_tools: false,
                     tool_providers: vec![Arc::new(MemoryProbeTool)],
-                    prompt_contributions: vec![crate::PromptContribution::guidance("memory child")],
+                    prompt_contributions: vec![crate::PromptContribution::guidance(
+                        "memory_context",
+                        "Memory Context",
+                        "memory child",
+                    )],
                 },
             })
             .await
@@ -4279,14 +4432,14 @@ mod tests {
     #[test]
     fn assembler_prefers_final_message() {
         let mut assembler = TurnAssembler::default();
-        assembler.push(&AgentEvent::TextDelta {
+        assembler.push(&SessionEvent::TextDelta {
             content: "stream".to_string(),
         });
-        assembler.push(&AgentEvent::Message {
+        assembler.push(&SessionEvent::Message {
             text: "final".to_string(),
             kind: "final".to_string(),
         });
-        assembler.push(&AgentEvent::Done);
+        assembler.push(&SessionEvent::Done);
         let out = assembler.finish(
             default_state(),
             false,
@@ -4305,7 +4458,7 @@ mod tests {
     #[test]
     fn assembler_marks_tool_failure() {
         let mut assembler = TurnAssembler::default();
-        assembler.push(&AgentEvent::ToolCall {
+        assembler.push(&SessionEvent::ToolCall {
             call_id: Some("tc1".to_string()),
             name: "x".to_string(),
             args: serde_json::json!({}),
@@ -4313,11 +4466,11 @@ mod tests {
             success: false,
             duration_ms: 1,
         });
-        assembler.push(&AgentEvent::Error {
+        assembler.push(&SessionEvent::Error {
             message: "tool failed".to_string(),
             envelope: None,
         });
-        assembler.push(&AgentEvent::Done);
+        assembler.push(&SessionEvent::Done);
         let out = assembler.finish(
             default_state(),
             false,
@@ -4333,7 +4486,7 @@ mod tests {
     #[test]
     fn assembler_marks_missing_done_as_failure() {
         let mut assembler = TurnAssembler::default();
-        assembler.push(&AgentEvent::TextDelta {
+        assembler.push(&SessionEvent::TextDelta {
             content: "partial".to_string(),
         });
         let out = assembler.finish(
@@ -4365,7 +4518,7 @@ mod tests {
             origin: None,
         });
         let mut assembler = TurnAssembler::default();
-        assembler.push(&AgentEvent::Done);
+        assembler.push(&SessionEvent::Done);
         let out = assembler.finish(
             state,
             false,
@@ -4380,7 +4533,7 @@ mod tests {
     #[test]
     fn assembler_tracks_plugin_panel_output() {
         let mut assembler = TurnAssembler::default();
-        assembler.push(&AgentEvent::PluginEvent {
+        assembler.push(&SessionEvent::PluginEvent {
             plugin_id: "demo".to_string(),
             event: crate::PluginSurfaceEvent::PanelUpsert {
                 key: "panel:1".to_string(),
@@ -4388,7 +4541,7 @@ mod tests {
                 content: "1. Inspect\n2. Patch".to_string(),
             },
         });
-        assembler.push(&AgentEvent::Done);
+        assembler.push(&SessionEvent::Done);
         let out = assembler.finish(
             default_state(),
             false,
@@ -4536,7 +4689,7 @@ mod tests {
             .snapshot()
             .into_iter()
             .filter_map(|event| match event {
-                AgentEvent::TextDelta { content } => Some(content),
+                SessionEvent::TextDelta { content } => Some(content),
                 _ => None,
             })
             .collect();
@@ -4587,7 +4740,7 @@ mod tests {
             .snapshot()
             .into_iter()
             .filter_map(|event| match event {
-                AgentEvent::TextDelta { content } => Some(content),
+                SessionEvent::TextDelta { content } => Some(content),
                 _ => None,
             })
             .collect();
@@ -4909,13 +5062,13 @@ mod tests {
             test_host_config(),
             crate::RuntimeServices::new(Arc::clone(&plugins))
                 .with_store(store.clone() as Arc<dyn crate::store::RuntimeStore>),
-            AgentStateEnvelope::default(),
+            SessionStateEnvelope::default(),
         )
         .await
         .expect("runtime");
         runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
-        runtime.set_state(AgentStateEnvelope {
-            agent_id: "root".to_string(),
+        runtime.set_state(SessionStateEnvelope {
+            session_id: "root".to_string(),
             policy: SessionPolicy {
                 execution_mode: ExecutionMode::Standard,
                 context_strategy: crate::ContextStrategy::RollingContext,
@@ -4939,7 +5092,7 @@ mod tests {
                 cached_input_tokens: 0,
                 context_budget_tokens: 70,
             }),
-            ..AgentStateEnvelope::default()
+            ..SessionStateEnvelope::default()
         });
         runtime.policy.max_context_tokens = Some(100);
         runtime.state.policy.max_context_tokens = Some(100);
@@ -5138,7 +5291,7 @@ mod tests {
             .snapshot()
             .into_iter()
             .filter_map(|event| match event {
-                AgentEvent::DurableSnapshot { snapshot } => Some(snapshot),
+                SessionEvent::DurableSnapshot { snapshot } => Some(snapshot),
                 _ => None,
             })
             .collect();
@@ -5189,7 +5342,7 @@ mod tests {
             test_host_config(),
             crate::RuntimeServices::new(Arc::clone(&plugins))
                 .with_store(store.clone() as Arc<dyn crate::store::RuntimeStore>),
-            AgentStateEnvelope::default(),
+            SessionStateEnvelope::default(),
         )
         .await
         .expect("runtime");
@@ -5209,7 +5362,7 @@ mod tests {
             .await
             .expect("turn");
 
-        let items = store.transcript_load("root").await;
+        let items = store.transcript_load().await;
         let messages = crate::store::transcript_messages(&items);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, MessageRole::User);
@@ -5247,7 +5400,7 @@ mod tests {
             test_host_config(),
             crate::RuntimeServices::new(Arc::clone(&plugins))
                 .with_store(store.clone() as Arc<dyn crate::store::RuntimeStore>),
-            AgentStateEnvelope::default(),
+            SessionStateEnvelope::default(),
         )
         .await
         .expect("runtime");
@@ -5267,7 +5420,7 @@ mod tests {
             .await
             .expect("turn");
 
-        let items = store.transcript_load("root");
+        let items = store.transcript_load();
         let messages = crate::store::transcript_messages(&items);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].parts[0].content, "where did this go?");
@@ -5308,8 +5461,8 @@ mod tests {
             test_host_config(),
             crate::RuntimeServices::new(Arc::clone(&plugins))
                 .with_store(store.clone() as Arc<dyn crate::store::RuntimeStore>),
-            AgentStateEnvelope {
-                agent_id: "root".to_string(),
+            SessionStateEnvelope {
+                session_id: "root".to_string(),
                 policy: SessionPolicy {
                     execution_mode: ExecutionMode::Standard,
                     context_strategy: crate::ContextStrategy::RollingContext,
@@ -5333,7 +5486,7 @@ mod tests {
                     cached_input_tokens: 0,
                     context_budget_tokens: 70_000,
                 }),
-                ..AgentStateEnvelope::default()
+                ..SessionStateEnvelope::default()
             },
         )
         .await
@@ -5393,7 +5546,7 @@ mod tests {
 
         let mut streamed_text = String::new();
         while let Some(event) = event_rx.recv().await {
-            if let AgentEvent::TextDelta { content } = event {
+            if let SessionEvent::TextDelta { content } = event {
                 streamed_text.push_str(&content);
             }
         }

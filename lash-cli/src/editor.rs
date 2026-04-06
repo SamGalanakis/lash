@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use lash::SkillCatalog;
+use lash_ui::UiExtensions;
 
 use crate::command;
 use crate::input_items::image_marker_ranges;
@@ -106,7 +107,9 @@ impl EditorState {
         self.pending_images = images;
         self.inflight_image_ids.clear();
         self.pending_large_pastes = large_pastes;
-        self.update_suggestions(&SkillCatalog::load());
+        self.suggestions.clear();
+        self.suggestion_idx = 0;
+        self.suggestion_kind = SuggestionKind::None;
     }
 
     pub fn cursor_line(&self) -> usize {
@@ -389,9 +392,18 @@ impl EditorState {
         let _ = std::fs::write(&path, lines.join("\n"));
     }
 
-    pub fn update_suggestions(&mut self, skills: &SkillCatalog) {
+    pub fn update_suggestions(&mut self, skills: &SkillCatalog, ui_extensions: &UiExtensions) {
         if let Some((_slash_pos, prefix)) = self.slash_token_at_cursor() {
             self.suggestions = command::completions(&prefix, skills);
+            for completion in ui_extensions.completions(&prefix) {
+                if !self
+                    .suggestions
+                    .iter()
+                    .any(|(existing, _)| existing == &completion.0)
+                {
+                    self.suggestions.push(completion);
+                }
+            }
             self.suggestion_kind = SuggestionKind::Command;
             if self.suggestions.is_empty() {
                 self.suggestion_idx = 0;
@@ -463,13 +475,15 @@ impl EditorState {
         }
     }
 
-    pub fn complete_suggestion(&mut self, skills: &SkillCatalog) {
+    pub fn complete_suggestion(&mut self, skills: &SkillCatalog, ui_extensions: &UiExtensions) {
         match self.suggestion_kind {
             SuggestionKind::Command => {
                 if let Some((slash_pos, _prefix)) = self.slash_token_at_cursor()
                     && let Some((cmd, _)) = self.suggestions.get(self.suggestion_idx).cloned()
                 {
-                    let needs_arg = command::completion_inserts_space(&cmd, skills);
+                    let needs_arg = ui_extensions
+                        .command_takes_argument(&cmd)
+                        .unwrap_or_else(|| command::completion_inserts_space(&cmd, skills));
                     let replacement = if needs_arg { format!("{} ", cmd) } else { cmd };
                     let before = self.input[..slash_pos].to_string();
                     let after = self.input[self.cursor_pos..].to_string();

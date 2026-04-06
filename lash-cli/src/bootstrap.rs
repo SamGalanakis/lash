@@ -6,7 +6,7 @@ use lash::*;
 use crate::autonomous::{AutonomousPersistenceContext, run_autonomous};
 use crate::delegate_tools::{DelegateToolConfig, DelegateToolsPluginFactory};
 use crate::interactive::{generate_session_name, run_app};
-use crate::session_log::{self, SessionLogger};
+use crate::session_log::{self, DbSessionStoreFactory, SessionLogger};
 use crate::{Args, setup};
 use crate::{
     autonomous_prompt_overrides, cleanup_terminal, configure_terminal_ui,
@@ -237,6 +237,7 @@ pub(crate) async fn run(
     };
     let host_config = RuntimeHostConfig {
         user_prompts_enabled: !autonomous,
+        session_store_factory: Some(Arc::new(DbSessionStoreFactory::new(sessions_dir.clone()))),
         prompt_renderer: default_prompt_renderer(),
         prompt_overrides,
         llm_log_path,
@@ -323,15 +324,15 @@ pub(crate) async fn run(
         host_config,
         RuntimeServices::new_with_bridges(root_plugins, turn_injection_bridge.clone())
             .with_store(store.clone() as Arc<dyn RuntimeStore>),
-        AgentStateEnvelope {
-            agent_id: "root".to_string(),
+        SessionStateEnvelope {
+            session_id: "root".to_string(),
             policy: session_policy.clone(),
-            ..AgentStateEnvelope::default()
+            ..SessionStateEnvelope::default()
         },
     )
     .await?;
 
-    // ── Autonomous preset: skip TUI, run agent, print response to stdout ──
+    // ── Autonomous preset: skip TUI, run session, print response to stdout ──
     if let Some(prompt) = args.print_prompt {
         return run_autonomous(
             runtime,

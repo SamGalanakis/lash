@@ -1,4 +1,4 @@
-//! Sans-IO state machine for agent turns.
+//! Sans-IO state machine for session turns.
 //!
 //! `TurnMachine` encapsulates all protocol logic for both Standard and REPL
 //! execution modes. The host event loop drives the machine by calling
@@ -9,16 +9,16 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::agent::exec::ExecAccumulator;
-use crate::agent::message::{MessageOrigin, PartAttachment, data_url_for_bytes};
-use crate::agent::{
-    AgentEvent, LLM_MAX_RETRIES, LLM_RETRY_DELAYS, Message, MessageRole, Part, PartKind,
-    PromptSectionOverride, PruneState, TokenUsage, TurnTerminationPolicyState,
-    build_assistant_parts, format_tool_result_content, is_malformed_assistant_output,
-    make_error_envelope, make_error_event, parse_fence_line, render_prompt, truncate_raw_error,
-};
 use crate::llm::types::{
     LlmAttachment, LlmOutputPart, LlmRequest, LlmResponse, LlmToolChoice, LlmToolSpec, LlmUsage,
+};
+use crate::session_model::exec::ExecAccumulator;
+use crate::session_model::message::{MessageOrigin, PartAttachment, data_url_for_bytes};
+use crate::session_model::{
+    LLM_MAX_RETRIES, LLM_RETRY_DELAYS, Message, MessageRole, Part, PartKind, PromptSectionOverride,
+    PruneState, SessionEvent, TokenUsage, TurnTerminationPolicyState, build_assistant_parts,
+    format_tool_result_content, is_malformed_assistant_output, make_error_envelope,
+    make_error_event, parse_fence_line, render_prompt, truncate_raw_error,
 };
 use crate::{CheckpointKind, ExecutionMode, PluginMessage, ToolCallRecord, ToolResult};
 
@@ -48,7 +48,7 @@ pub struct CompletedToolCall {
 #[derive(Clone, Debug)]
 pub enum LogEvent {
     LlmDebug {
-        agent_id: String,
+        session_id: String,
         iteration: usize,
         usage: TokenUsage,
         request_body: Option<String>,
@@ -85,7 +85,7 @@ pub enum Effect {
     /// Host-implemented fire-and-forget logging.
     Log { event: LogEvent },
     /// Fire-and-forget event (no response needed).
-    Emit(AgentEvent),
+    Emit(SessionEvent),
     /// Turn is done.
     Done {
         messages: Vec<Message>,
@@ -143,12 +143,12 @@ pub struct TurnMachineConfig {
     pub model: String,
     pub max_turns: Option<usize>,
     pub model_variant: Option<String>,
-    pub session_id: Option<String>,
+    pub run_session_id: Option<String>,
     pub tool_specs: Vec<LlmToolSpec>,
     pub prompt: crate::PromptContext,
     pub prompt_renderer: std::sync::Arc<dyn crate::PromptRenderer>,
     pub prompt_overrides: Vec<PromptSectionOverride>,
-    pub agent_id: String,
+    pub session_id: String,
     pub emit_llm_debug_log: bool,
 }
 
@@ -257,7 +257,7 @@ enum MachineState {
     Finished,
 }
 
-/// Sans-IO state machine for a single agent run (multi-turn).
+/// Sans-IO state machine for a single session run (multi-turn).
 pub struct TurnMachine {
     config: TurnMachineConfig,
     state: MachineState,
@@ -307,17 +307,17 @@ impl TurnMachine {
         id
     }
 
-    fn emit(&mut self, event: AgentEvent) {
+    fn emit(&mut self, event: SessionEvent) {
         self.pending_effects.push_back(Effect::Emit(event));
     }
 
-    pub fn fail_turn(&mut self, event: AgentEvent) {
+    pub fn fail_turn(&mut self, event: SessionEvent) {
         self.emit(event);
         self.finish();
     }
 
     fn finish(&mut self) {
-        self.emit(AgentEvent::Done);
+        self.emit(SessionEvent::Done);
         let msgs = std::mem::take(&mut self.messages);
         let iteration = self.iteration;
         self.state = MachineState::Finished;
@@ -403,7 +403,7 @@ impl TurnMachine {
                 LlmToolChoice::None
             },
             model_variant: self.config.model_variant.clone(),
-            session_id: self.config.session_id.clone(),
+            session_id: self.config.run_session_id.clone(),
             output_spec: None,
             stream_events: None,
         };
@@ -416,7 +416,7 @@ impl TurnMachine {
         retry_attempt: usize,
         fence: Option<FenceState>,
     ) {
-        self.emit(AgentEvent::LlmRequest {
+        self.emit(SessionEvent::LlmRequest {
             iteration: self.iteration,
             message_count: self.messages.len(),
             tool_list: self.config.prompt.tool_list.clone(),
@@ -484,14 +484,14 @@ impl TurnMachine {
             );
 
             if !parsed.prose_delta.is_empty() {
-                queued_effects.push(Effect::Emit(AgentEvent::TextDelta {
+                queued_effects.push(Effect::Emit(SessionEvent::TextDelta {
                     content: format!("{}\n", parsed.prose_delta),
                 }));
             }
 
             for code in parsed.codes_to_execute {
                 fence.code_parts.push(code.clone());
-                queued_effects.push(Effect::Emit(AgentEvent::CodeBlock { code: code.clone() }));
+                queued_effects.push(Effect::Emit(SessionEvent::CodeBlock { code: code.clone() }));
 
                 if !fence.acc.had_failure {
                     fence.code_executed = true;
@@ -558,7 +558,7 @@ impl TurnMachine {
         };
         let mut cumulative = self.cumulative_usage.clone();
         cumulative.add(&usage);
-        self.emit(AgentEvent::TokenUsage {
+        self.emit(SessionEvent::TokenUsage {
             iteration: self.iteration,
             usage: usage.clone(),
             cumulative,
@@ -829,7 +829,7 @@ impl TurnMachine {
     ) {
         let delay = LLM_RETRY_DELAYS[retry_attempt];
         let reason = error.message.clone();
-        self.emit(AgentEvent::RetryStatus {
+        self.emit(SessionEvent::RetryStatus {
             wait_seconds: delay.as_secs(),
             attempt: retry_attempt + 2,
             max_attempts: LLM_MAX_RETRIES + 1,
@@ -906,7 +906,7 @@ impl TurnMachine {
             token_usage_from_llm_usage(&llm_response.usage)
         };
         self.cumulative_usage.add(&usage);
-        self.emit(AgentEvent::TokenUsage {
+        self.emit(SessionEvent::TokenUsage {
             iteration: self.iteration,
             usage: usage.clone(),
             cumulative: self.cumulative_usage.clone(),
@@ -915,7 +915,7 @@ impl TurnMachine {
             let response_parts = self.llm_response_debug_parts(llm_response);
             self.pending_effects.push_back(Effect::Log {
                 event: LogEvent::LlmDebug {
-                    agent_id: self.config.agent_id.clone(),
+                    session_id: self.config.session_id.clone(),
                     iteration: self.iteration,
                     usage,
                     request_body: llm_response.request_body.clone(),
@@ -957,7 +957,7 @@ impl TurnMachine {
                         let previous_len = assistant_text.len();
                         append_assistant_text_part(&mut assistant_text, &text);
                         if !text_streamed {
-                            self.emit(AgentEvent::TextDelta {
+                            self.emit(SessionEvent::TextDelta {
                                 content: assistant_text[previous_len..].to_string(),
                             });
                         }
@@ -972,7 +972,7 @@ impl TurnMachine {
                 }
             }
         }
-        self.emit(AgentEvent::LlmResponse {
+        self.emit(SessionEvent::LlmResponse {
             iteration: self.iteration,
             content: assistant_text.clone(),
             duration_ms: 0, // Host can provide timing via response
@@ -1079,7 +1079,7 @@ impl TurnMachine {
         }
 
         for outcome in &completed {
-            self.emit(AgentEvent::ToolCall {
+            self.emit(SessionEvent::ToolCall {
                 call_id: Some(outcome.call_id.clone()),
                 name: outcome.tool_name.clone(),
                 args: outcome.args.clone(),
@@ -1200,7 +1200,7 @@ impl TurnMachine {
     ) {
         // If we already executed code mid-stream, go to processing
         if fence.code_executed {
-            self.emit(AgentEvent::LlmResponse {
+            self.emit(SessionEvent::LlmResponse {
                 iteration: self.iteration,
                 content: fence.response.clone(),
                 duration_ms: 0,
@@ -1235,18 +1235,18 @@ impl TurnMachine {
                     );
 
                     if !parsed.prose_delta.is_empty() {
-                        self.emit(AgentEvent::TextDelta {
+                        self.emit(SessionEvent::TextDelta {
                             content: format!("{}\n", parsed.prose_delta),
                         });
                     }
 
                     if let Some(code) = parsed.codes_to_execute.into_iter().next() {
                         fence.code_parts.push(code.clone());
-                        self.emit(AgentEvent::CodeBlock { code: code.clone() });
+                        self.emit(SessionEvent::CodeBlock { code: code.clone() });
                         fence.code_executed = true;
 
                         let exec_id = self.next_id();
-                        self.emit(AgentEvent::LlmResponse {
+                        self.emit(SessionEvent::LlmResponse {
                             iteration: self.iteration,
                             content: fence.response.clone(),
                             duration_ms: 0,
@@ -1265,7 +1265,7 @@ impl TurnMachine {
             }
 
             if fence.code_executed {
-                self.emit(AgentEvent::LlmResponse {
+                self.emit(SessionEvent::LlmResponse {
                     iteration: self.iteration,
                     content: fence.response.clone(),
                     duration_ms: 0,
@@ -1282,7 +1282,7 @@ impl TurnMachine {
             }
         }
 
-        self.emit(AgentEvent::LlmResponse {
+        self.emit(SessionEvent::LlmResponse {
             iteration: self.iteration,
             content: if fence.response.is_empty() {
                 llm_response.full_text.clone()
@@ -1303,13 +1303,13 @@ impl TurnMachine {
                 &mut fence.prose_parts,
             );
             if !parsed.prose_delta.is_empty() {
-                self.emit(AgentEvent::TextDelta {
+                self.emit(SessionEvent::TextDelta {
                     content: parsed.prose_delta,
                 });
             }
             if let Some(code) = parsed.codes_to_execute.into_iter().next() {
                 fence.code_parts.push(code.clone());
-                self.emit(AgentEvent::CodeBlock { code: code.clone() });
+                self.emit(SessionEvent::CodeBlock { code: code.clone() });
                 fence.code_executed = true;
 
                 let exec_id = self.next_id();
@@ -1326,7 +1326,7 @@ impl TurnMachine {
         if fence.in_code_fence && !fence.current_code.trim().is_empty() {
             let code = fence.current_code.clone();
             fence.code_parts.push(code.clone());
-            self.emit(AgentEvent::CodeBlock { code: code.clone() });
+            self.emit(SessionEvent::CodeBlock { code: code.clone() });
             fence.current_code.clear();
             fence.code_executed = true;
 
@@ -1397,7 +1397,7 @@ impl TurnMachine {
         match result {
             Ok(r) => {
                 for tc in &r.tool_calls {
-                    self.emit(AgentEvent::ToolCall {
+                    self.emit(SessionEvent::ToolCall {
                         call_id: None,
                         name: tc.tool.clone(),
                         args: tc.args.clone(),
@@ -1407,7 +1407,7 @@ impl TurnMachine {
                     });
                 }
                 if !r.output.is_empty() || r.error.is_some() {
-                    self.emit(AgentEvent::CodeOutput {
+                    self.emit(SessionEvent::CodeOutput {
                         output: r.output.clone(),
                         error: r.error.clone(),
                     });
@@ -1437,7 +1437,7 @@ impl TurnMachine {
                 }
             }
             Err(e) => {
-                self.emit(AgentEvent::CodeOutput {
+                self.emit(SessionEvent::CodeOutput {
                     output: String::new(),
                     error: Some(e.clone()),
                 });
@@ -1680,7 +1680,7 @@ fn append_assistant_text_part(out: &mut String, next: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{Message, MessageRole, Part, PartKind, PruneState};
+    use crate::session_model::{Message, MessageRole, Part, PartKind, PruneState};
 
     fn test_config(mode: ExecutionMode) -> TurnMachineConfig {
         TurnMachineConfig {
@@ -1689,16 +1689,15 @@ mod tests {
             model: "test-model".to_string(),
             max_turns: None,
             model_variant: None,
-            session_id: None,
+            run_session_id: None,
             tool_specs: Vec::new(),
             prompt: crate::PromptContext {
                 mode,
-                include_soul: false,
                 ..crate::PromptContext::default()
             },
             prompt_renderer: crate::default_prompt_renderer(),
             prompt_overrides: Vec::new(),
-            agent_id: "test".to_string(),
+            session_id: "test".to_string(),
             emit_llm_debug_log: false,
         }
     }
@@ -1760,7 +1759,7 @@ mod tests {
 
     fn find_retry_status(effects: &[Effect]) -> Option<(u64, usize, usize, String)> {
         effects.iter().find_map(|e| match e {
-            Effect::Emit(AgentEvent::RetryStatus {
+            Effect::Emit(SessionEvent::RetryStatus {
                 wait_seconds,
                 attempt,
                 max_attempts,
@@ -1771,9 +1770,9 @@ mod tests {
         })
     }
 
-    fn find_retry_envelope(effects: &[Effect]) -> Option<crate::agent::ErrorEnvelope> {
+    fn find_retry_envelope(effects: &[Effect]) -> Option<crate::session_model::ErrorEnvelope> {
         effects.iter().find_map(|e| match e {
-            Effect::Emit(AgentEvent::RetryStatus {
+            Effect::Emit(SessionEvent::RetryStatus {
                 envelope: Some(envelope),
                 ..
             }) => Some(envelope.clone()),
@@ -1783,7 +1782,7 @@ mod tests {
 
     fn has_error_event(effects: &[Effect], needle: &str) -> bool {
         effects.iter().any(|e| match e {
-            Effect::Emit(AgentEvent::Error { message, .. }) => message.contains(needle),
+            Effect::Emit(SessionEvent::Error { message, .. }) => message.contains(needle),
             _ => false,
         })
     }
@@ -1797,7 +1796,7 @@ mod tests {
 
     fn find_token_usage(effects: &[Effect]) -> Option<TokenUsage> {
         effects.iter().find_map(|e| match e {
-            Effect::Emit(AgentEvent::TokenUsage { usage, .. }) => Some(usage.clone()),
+            Effect::Emit(SessionEvent::TokenUsage { usage, .. }) => Some(usage.clone()),
             _ => None,
         })
     }
@@ -2132,7 +2131,7 @@ mod tests {
         let tool_event = effects
             .iter()
             .find_map(|e| match e {
-                Effect::Emit(AgentEvent::ToolCall { args, .. }) => Some(args.clone()),
+                Effect::Emit(SessionEvent::ToolCall { args, .. }) => Some(args.clone()),
                 _ => None,
             })
             .expect("should emit ToolCall event");
@@ -2286,7 +2285,7 @@ mod tests {
         let effects = drain_effects(&mut machine);
         let has_error = effects
             .iter()
-            .any(|e| matches!(e, Effect::Emit(AgentEvent::Error { .. })));
+            .any(|e| matches!(e, Effect::Emit(SessionEvent::Error { .. })));
         assert!(has_error);
         assert!(find_done(&effects).is_some());
     }
@@ -2876,7 +2875,7 @@ mod tests {
         assert!(
             !effects
                 .iter()
-                .any(|effect| matches!(effect, Effect::Emit(AgentEvent::CodeOutput { .. })))
+                .any(|effect| matches!(effect, Effect::Emit(SessionEvent::CodeOutput { .. })))
         );
         let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
         assert_eq!(checkpoint, CheckpointKind::AfterWork);

@@ -10,7 +10,7 @@ use crate::plugin::{
 };
 use crate::tools::{NativeTool, find_native_tool};
 use crate::{
-    AgentEvent, ExecutionMode, ProgressSender, ToolCallRecord, ToolExecutionContext, ToolImage,
+    ExecutionMode, ProgressSender, SessionEvent, ToolCallRecord, ToolExecutionContext, ToolImage,
     ToolProvider, ToolResult, TurnInjectionBridge,
 };
 
@@ -22,7 +22,7 @@ pub(crate) struct ToolDispatchContext {
     pub host: Arc<dyn SessionManager>,
     pub session_id: String,
     pub execution_mode: ExecutionMode,
-    pub event_tx: mpsc::Sender<AgentEvent>,
+    pub event_tx: mpsc::Sender<SessionEvent>,
     pub turn_injection_bridge: TurnInjectionBridge,
 }
 
@@ -395,7 +395,7 @@ mod tests {
     use crate::plugin::{
         PluginError, PluginHost, SessionHandle, SessionSnapshot, StaticPluginFactory,
     };
-    use crate::{AgentStateEnvelope, ExecutionMode, SessionPolicy, ToolProvider, TurnInput};
+    use crate::{ExecutionMode, SessionPolicy, SessionStateEnvelope, ToolProvider, TurnInput};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Barrier;
@@ -584,8 +584,8 @@ mod tests {
     }
 
     fn dummy_snapshot() -> SessionSnapshot {
-        AgentStateEnvelope {
-            agent_id: "root".to_string(),
+        SessionStateEnvelope {
+            session_id: "root".to_string(),
             policy: SessionPolicy {
                 execution_mode: ExecutionMode::Standard,
                 context_strategy: crate::default_context_strategy(),

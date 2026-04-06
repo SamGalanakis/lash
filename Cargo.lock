@@ -1474,6 +1474,7 @@ dependencies = [
  "crossterm",
  "image",
  "lash",
+ "lash-ui",
  "pulldown-cmark",
  "rand",
  "ratatui",
@@ -1497,6 +1498,15 @@ version = "0.2.31"
 dependencies = [
  "base64",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "lash-ui"
+version = "0.2.31"
+dependencies = [
+ "async-trait",
+ "lash",
  "serde_json",
 ]
 

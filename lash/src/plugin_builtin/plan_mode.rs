@@ -53,12 +53,12 @@ fn resolve_plan_path(run_session_id: &str) -> Result<PathBuf, String> {
         .join(format!("{run_session_id}.md")))
 }
 
-fn effective_run_session_id(state: &crate::AgentStateEnvelope) -> &str {
+fn effective_run_session_id(state: &crate::SessionStateEnvelope) -> &str {
     state
         .policy
         .session_id
         .as_deref()
-        .unwrap_or(&state.agent_id)
+        .unwrap_or(&state.session_id)
 }
 
 fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
@@ -238,7 +238,7 @@ impl PlanModeState {
 
     fn ensure_plan_path_from_state(
         &mut self,
-        state: &crate::AgentStateEnvelope,
+        state: &crate::SessionStateEnvelope,
     ) -> Result<PathBuf, PluginError> {
         if let Some(path) = self.plan_path() {
             return Ok(path);
@@ -382,26 +382,6 @@ impl PlanModeTools {
             "plan_path": display,
             "next_turn_input": plan_exit_next_turn_input(&display, note.as_deref()),
         }))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::plan_exit_next_turn_input;
-
-    #[test]
-    fn plan_exit_next_turn_input_appends_user_note() {
-        assert_eq!(
-            plan_exit_next_turn_input(
-                ".lash/plans/run-session.md",
-                Some("start with the safe slice"),
-            ),
-            "The plan at `.lash/plans/run-session.md` is approved. Plan mode is off now. Execute that plan.\n\nUser note: start with the safe slice"
-        );
-        assert_eq!(
-            plan_exit_next_turn_input(".lash/plans/run-session.md", Some("   ")),
-            "The plan at `.lash/plans/run-session.md` is approved. Plan mode is off now. Execute that plan."
-        );
     }
 }
 
@@ -789,5 +769,25 @@ impl SessionPlugin for PlanModePlugin {
             .map_err(|_| PluginError::Snapshot("plan mode state poisoned".to_string()))?
             .restore_snapshot(snapshot);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_exit_next_turn_input;
+
+    #[test]
+    fn plan_exit_next_turn_input_appends_user_note() {
+        assert_eq!(
+            plan_exit_next_turn_input(
+                ".lash/plans/run-session.md",
+                Some("start with the safe slice"),
+            ),
+            "The plan at `.lash/plans/run-session.md` is approved. Plan mode is off now. Execute that plan.\n\nUser note: start with the safe slice"
+        );
+        assert_eq!(
+            plan_exit_next_turn_input(".lash/plans/run-session.md", Some("   ")),
+            "The plan at `.lash/plans/run-session.md` is approved. Plan mode is off now. Execute that plan."
+        );
     }
 }

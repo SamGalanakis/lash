@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 lash = { path = "../lash", default-features = false, features = ["full"] }
+lash-ui = { path = "../lash-ui" }
 ratatui = "0.29"
 crossterm = "0.28"
 tokio = { version = "1", features = ["full"] }

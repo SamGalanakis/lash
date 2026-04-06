@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::app::{PreparedTurn, UiResumeState};
 use crate::input_items::build_items_from_editor_input;
-use crate::{hash12, latest_user_prompt_hash, persist_root_agent_state};
+use crate::{hash12, latest_user_prompt_hash, persist_root_session_state};
 use crate::{plugin_surface, util};
 
 pub(crate) struct AutonomousPersistenceContext {
@@ -25,7 +25,7 @@ pub(crate) struct AutonomousPersistenceContext {
 async fn persist_autonomous_runtime_state(
     runtime: &mut LashRuntime,
     persistence: &AutonomousPersistenceContext,
-    mut state: AgentStateEnvelope,
+    mut state: SessionStateEnvelope,
 ) {
     let snapshot_hash = if matches!(state.policy.execution_mode, ExecutionMode::Repl) {
         match runtime.snapshot_repl().await {
@@ -49,7 +49,7 @@ async fn persist_autonomous_runtime_state(
     let context_strategy = state.policy.context_strategy;
     let prompt_hash = latest_user_prompt_hash(&state.messages);
     let ui_state = UiResumeState::default();
-    persist_root_agent_state(
+    persist_root_session_state(
         &persistence.store,
         &mut state,
         &ui_state,
@@ -68,12 +68,12 @@ async fn persist_autonomous_runtime_state(
 }
 
 struct AutonomousChannelSink {
-    tx: mpsc::Sender<AgentEvent>,
+    tx: mpsc::Sender<SessionEvent>,
 }
 
 #[async_trait::async_trait]
 impl EventSink for AutonomousChannelSink {
-    async fn emit(&self, event: AgentEvent) {
+    async fn emit(&self, event: SessionEvent) {
         let _ = self.tx.send(event).await;
     }
 }
@@ -95,9 +95,9 @@ impl AutonomousRenderer {
         }
     }
 
-    pub(crate) fn handle(&mut self, event: AgentEvent) -> Result<(), String> {
+    pub(crate) fn handle(&mut self, event: SessionEvent) -> Result<(), String> {
         match event {
-            AgentEvent::TextDelta { content } => {
+            SessionEvent::TextDelta { content } => {
                 if !content.is_empty() {
                     self.streamed_text = true;
                     self.wrote_stdout = true;
@@ -106,14 +106,14 @@ impl AutonomousRenderer {
                     let _ = io::stdout().flush();
                 }
             }
-            AgentEvent::CodeBlock { code } => {
+            SessionEvent::CodeBlock { code } => {
                 if !code.trim().is_empty() {
                     eprintln!("[code]");
                     eprintln!("{code}");
                     eprintln!("[/code]");
                 }
             }
-            AgentEvent::ToolCall {
+            SessionEvent::ToolCall {
                 name,
                 success,
                 duration_ms,
@@ -126,7 +126,7 @@ impl AutonomousRenderer {
                     eprintln!("[tool] {name} · {status}");
                 }
             }
-            AgentEvent::CodeOutput { output, error } => {
+            SessionEvent::CodeOutput { output, error } => {
                 if !output.trim().is_empty() {
                     eprintln!("{output}");
                 }
@@ -134,7 +134,7 @@ impl AutonomousRenderer {
                     eprintln!("{error}");
                 }
             }
-            AgentEvent::Message { text, kind } => match kind.as_str() {
+            SessionEvent::Message { text, kind } => match kind.as_str() {
                 "tool_output" | "final" => {
                     if !text.trim().is_empty() {
                         if kind == "final" {
@@ -180,10 +180,10 @@ impl AutonomousRenderer {
                 }
                 _ => {}
             },
-            AgentEvent::LlmRequest { iteration, .. } => {
+            SessionEvent::LlmRequest { iteration, .. } => {
                 eprintln!("[thinking] turn {}", iteration + 1);
             }
-            AgentEvent::RetryStatus {
+            SessionEvent::RetryStatus {
                 wait_seconds,
                 attempt,
                 max_attempts,
@@ -195,16 +195,16 @@ impl AutonomousRenderer {
                     wait_seconds, attempt, max_attempts, reason
                 );
             }
-            AgentEvent::Error { message, .. } => {
+            SessionEvent::Error { message, .. } => {
                 eprintln!("error: {message}");
             }
-            AgentEvent::Prompt { request, .. } => {
+            SessionEvent::Prompt { request, .. } => {
                 return Err(format!(
                     "unexpected user prompt in autonomous mode: {}",
                     request.question
                 ));
             }
-            AgentEvent::PluginEvent { plugin_id, event } => match event {
+            SessionEvent::PluginEvent { plugin_id, event } => match event {
                 PluginSurfaceEvent::PanelUpsert {
                     key,
                     title,
@@ -232,11 +232,11 @@ impl AutonomousRenderer {
                 | PluginSurfaceEvent::ModeIndicatorClear { .. }
                 | PluginSurfaceEvent::Custom { .. } => {}
             },
-            AgentEvent::Done
-            | AgentEvent::TokenUsage { .. }
-            | AgentEvent::InjectedMessagesCommitted { .. }
-            | AgentEvent::LlmResponse { .. }
-            | AgentEvent::DurableSnapshot { .. } => {}
+            SessionEvent::Done
+            | SessionEvent::TokenUsage { .. }
+            | SessionEvent::InjectedMessagesCommitted { .. }
+            | SessionEvent::LlmResponse { .. }
+            | SessionEvent::DurableSnapshot { .. } => {}
         }
         Ok(())
     }
@@ -292,7 +292,7 @@ impl AutonomousRenderer {
     }
 }
 
-/// Run the agent autonomously: send prompt, consume events, print final response to stdout.
+/// Run the session autonomously: send prompt, consume events, print final response to stdout.
 pub(crate) async fn run_autonomous(
     mut runtime: LashRuntime,
     prompt: String,
@@ -313,7 +313,7 @@ pub(crate) async fn run_autonomous(
             }
         });
     }
-    let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
+    let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(100);
     let mut task = tokio::spawn(async move {
         let sink = AutonomousChannelSink { tx: event_tx };
         let result = runtime

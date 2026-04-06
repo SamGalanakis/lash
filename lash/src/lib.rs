@@ -1,4 +1,3 @@
-pub mod agent;
 pub mod direct;
 pub mod dynamic;
 pub mod embedded;
@@ -14,6 +13,7 @@ pub mod runtime;
 #[cfg(feature = "sqlite-store")]
 mod search;
 pub mod session;
+pub mod session_model;
 pub mod skill_catalog;
 pub mod skill_prompt;
 pub mod store;
@@ -75,7 +75,6 @@ pub fn default_skill_dirs() -> Vec<PathBuf> {
 }
 
 // Re-exports
-pub use agent::SessionPolicy;
 pub use direct::{
     DirectJsonSchema, DirectLlmClient, DirectLlmError, DirectMessage, DirectOutputSpec, DirectPart,
     DirectRequest, DirectRole,
@@ -87,12 +86,12 @@ pub use dynamic::{
 pub use instructions::InstructionLoaderConfig;
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
 pub use lash_sansio::{
-    AgentEvent, CheckpointKind, ContextStrategy, DefaultPromptRenderer, DurableTurnSnapshot,
-    Effect, EffectId, ErrorEnvelope, ExecResponse, ExecutionMode, LlmCallError, Message,
-    MessageOrigin, MessageRole, Part, PartKind, PluginMessage, PluginSurfaceEvent, PromptContext,
-    PromptContribution, PromptOverrideMode, PromptRenderer, PromptRequest, PromptResponse,
-    PromptSectionName, PromptSectionOverride, PromptSelectionMode, PruneState, Response,
-    TokenUsage, ToolCallRecord, ToolDefinition, ToolImage, ToolParam, ToolResult, TurnMachine,
+    CheckpointKind, ContextStrategy, DefaultPromptRenderer, DurableTurnSnapshot, Effect, EffectId,
+    ErrorEnvelope, ExecResponse, ExecutionMode, LlmCallError, Message, MessageOrigin, MessageRole,
+    Part, PartKind, PluginMessage, PluginSurfaceEvent, PromptContext, PromptContribution,
+    PromptOverrideMode, PromptRenderer, PromptRequest, PromptResponse, PromptSectionName,
+    PromptSectionOverride, PromptSelectionMode, PruneState, Response, SessionEvent, TokenUsage,
+    ToolCallRecord, ToolDefinition, ToolImage, ToolParam, ToolResult, TurnMachine,
     TurnMachineConfig, default_context_strategy, default_execution_mode, default_prompt_renderer,
     execution_mode_supported,
 };
@@ -123,18 +122,20 @@ pub use plugin::{
 };
 pub use provider::{LashConfig, Provider, ProviderOptions, RequestTimeout};
 pub use runtime::{
-    AgentStateEnvelope, AssembledTurn, AssistantOutput, CodeOutputRecord, DoneReason, EventSink,
-    ExecutionSummary, HostProfile, InputItem, LashRuntime, NoopEventSink, OutputState,
-    PathResolver, PromptUsage, RunMode, RuntimeError, RuntimeHostConfig, SanitizerPolicy,
-    TerminationPolicy, TurnInput, TurnIssue, TurnStatus,
+    AssembledTurn, AssistantOutput, CodeOutputRecord, DoneReason, EventSink, ExecutionSummary,
+    HostProfile, InputItem, LashRuntime, NoopEventSink, OutputState, PathResolver, PromptUsage,
+    RunMode, RuntimeError, RuntimeHostConfig, SanitizerPolicy, SessionStateEnvelope,
+    SessionStoreCreateRequest, SessionStoreFactory, TerminationPolicy, TurnInput, TurnIssue,
+    TurnStatus,
 };
 pub use session::{Session, SessionError, TurnInjectionBridge};
+pub use session_model::SessionPolicy;
 pub use skill_catalog::{LoadedSkill, SkillCatalog};
 pub use skill_prompt::{
     append_skill_blocks, collect_skill_mentions, collect_skill_mentions_with_ranges,
 };
 pub use store::{
-    AgentState, RuntimeStore, SessionMeta, SessionPickerInfo, TranscriptEntry,
+    RuntimeStore, SessionMeta, SessionPickerInfo, SessionState, TranscriptEntry,
     TranscriptEntryPayload, TranscriptKeyspace, TurnCheckpoint, group_transcript_entries,
     semantic_transcript_keyspaces, transcript_messages, transcript_tool_calls,
 };

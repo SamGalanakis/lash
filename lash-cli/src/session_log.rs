@@ -6,14 +6,15 @@ use std::time::SystemTime;
 use anyhow::Result;
 #[cfg(test)]
 use lash::ToolCallRecord;
-use lash::agent::Message;
+use lash::session_model::Message;
 #[cfg(test)]
-use lash::agent::{MessageRole, PartKind};
+use lash::session_model::{MessageRole, PartKind};
 use lash::{Store, TokenUsage};
 
 #[cfg(test)]
 use crate::app::UiResumeState;
 use crate::app::{DisplayBlock, apply_ui_resume_state_to_blocks, blocks_from_transcript};
+use crate::resume_snapshot;
 use crate::ui_resume;
 
 #[derive(Clone, Debug)]
@@ -45,6 +46,48 @@ pub struct SessionLogger {
     store: Arc<Store>,
     pub session_id: String,
     filename: String,
+}
+
+#[derive(Clone)]
+pub struct DbSessionStoreFactory {
+    sessions_dir: PathBuf,
+}
+
+impl DbSessionStoreFactory {
+    pub fn new(sessions_dir: PathBuf) -> Self {
+        Self { sessions_dir }
+    }
+
+    fn next_path(&self) -> Result<PathBuf, String> {
+        std::fs::create_dir_all(&self.sessions_dir).map_err(|err| err.to_string())?;
+        let filename = format!(
+            "{}-{}.db",
+            chrono::Local::now().format("%Y%m%d_%H%M%S"),
+            &uuid::Uuid::new_v4().to_string()[..8]
+        );
+        Ok(self.sessions_dir.join(filename))
+    }
+}
+
+impl lash::SessionStoreFactory for DbSessionStoreFactory {
+    fn create_store(
+        &self,
+        request: &lash::SessionStoreCreateRequest,
+    ) -> Result<Arc<dyn lash::RuntimeStore>, String> {
+        let path = self.next_path()?;
+        let store = Arc::new(Store::open(&path).map_err(|err| err.to_string())?);
+        store.save_session_meta(lash::SessionMeta {
+            session_id: request.session_id.clone(),
+            session_name: request.session_id.clone(),
+            created_at: chrono::Local::now().to_rfc3339(),
+            model: request.policy.model.clone(),
+            cwd: std::env::current_dir()
+                .ok()
+                .and_then(|path| path.to_str().map(str::to_string)),
+            parent_session_id: request.parent_session_id.clone(),
+        });
+        Ok(store as Arc<dyn lash::RuntimeStore>)
+    }
 }
 
 impl SessionLogger {
@@ -99,11 +142,7 @@ impl SessionLogger {
 
     pub fn clone_history_from(&mut self, source_filename: &str) -> Result<()> {
         let source = Store::open(&sessions_dir().join(source_filename))?;
-        self.store.transcript_copy_from_store(
-            &source,
-            crate::ROOT_SESSION_ID,
-            crate::ROOT_SESSION_ID,
-        );
+        self.store.transcript_copy_from_store(&source);
         Ok(())
     }
 
@@ -241,7 +280,21 @@ pub fn list_recent_sessions(limit: usize) -> Vec<SessionInfo> {
 
 pub fn load_session(filename: &str) -> Result<LoadedSession> {
     let store = Store::open(&sessions_dir().join(filename))?;
-    let transcript_entries = store.transcript_load(crate::ROOT_SESSION_ID);
+    if let Some(live) = resume_snapshot::load_live_resume_snapshot(&store) {
+        let messages = live.state.messages.clone();
+        let mut blocks = blocks_from_transcript(&live.state.messages, &live.state.tool_calls);
+        apply_ui_resume_state_to_blocks(&mut blocks, &live.ui_state);
+        return Ok(LoadedSession {
+            messages,
+            blocks,
+            last_token_usage: live.ui_state.last_response_usage.clone(),
+            plugin_mode_indicators: live.ui_state.plugin_mode_indicators.clone(),
+            streaming_output: live.ui_state.streaming_output.clone(),
+            streaming_output_hidden: live.ui_state.streaming_output_hidden,
+            streaming_output_partial: live.ui_state.streaming_output_partial.clone(),
+        });
+    }
+    let transcript_entries = store.transcript_load();
     let messages = lash::transcript_messages(&transcript_entries);
     let tool_calls = lash::transcript_tool_calls(&transcript_entries);
     let ui_state = ui_resume::load_ui_resume_state(&store);
@@ -292,8 +345,7 @@ mod tests {
         tool_calls: Vec<ToolCallRecord>,
         ui_state: UiResumeState,
     ) {
-        store.save_agent_state(lash::AgentState {
-            agent_id: crate::ROOT_SESSION_ID.to_string(),
+        store.save_session_state(lash::SessionState {
             iteration: 1,
             config_json: ui_resume::with_ui_resume_state(serde_json::json!({}), &ui_state)
                 .to_string(),
@@ -304,7 +356,7 @@ mod tests {
             reasoning_tokens: 0,
         });
         let keyspaces = lash::semantic_transcript_keyspaces(&messages, &tool_calls);
-        store.transcript_replace_keyspaces(crate::ROOT_SESSION_ID, &keyspaces);
+        store.transcript_replace_keyspaces(&keyspaces);
     }
 
     fn text_message(role: MessageRole, id: &str, content: &str) -> Message {
@@ -560,7 +612,7 @@ mod tests {
             .unwrap();
             target.clone_history_from(&source_filename).unwrap();
 
-            let entries = target_store.transcript_load(crate::ROOT_SESSION_ID);
+            let entries = target_store.transcript_load();
             let messages = lash::transcript_messages(&entries);
             assert_eq!(messages.len(), 1);
             assert_eq!(messages[0].parts[0].content, "hello");

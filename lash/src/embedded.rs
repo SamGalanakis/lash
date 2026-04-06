@@ -13,7 +13,7 @@ use serde_json::Value;
 pub enum LashlangRequest {
     Init {
         tools_json: String,
-        agent_id: String,
+        session_id: String,
     },
     Exec {
         id: String,
@@ -127,12 +127,12 @@ impl Drop for LashlangRuntime {
 
 #[derive(Clone, Debug, Default)]
 struct RuntimeConfig {
-    agent_id: String,
+    session_id: String,
 }
 
 impl RuntimeConfig {
-    fn apply(&mut self, _tools_json: &str, agent_id: String) {
-        self.agent_id = agent_id;
+    fn apply(&mut self, _tools_json: &str, session_id: String) {
+        self.session_id = session_id;
     }
 }
 
@@ -160,9 +160,9 @@ fn runtime_thread_main(
         match request {
             LashlangRequest::Init {
                 tools_json,
-                agent_id,
+                session_id,
             } => {
-                state.config.apply(&tools_json, agent_id);
+                state.config.apply(&tools_json, session_id);
                 let _ = response_tx.send(LashlangResponse::Ready);
             }
             LashlangRequest::Exec { id, code } => {
@@ -205,7 +205,7 @@ fn runtime_thread_main(
             } => {
                 state
                     .config
-                    .apply(&tools_json, state.config.agent_id.clone());
+                    .apply(&tools_json, state.config.session_id.clone());
                 let _ = response_tx.send(LashlangResponse::ReconfigureResult {
                     generation,
                     error: None,
@@ -235,7 +235,7 @@ fn execute_code(
     let observations = Mutex::new(Vec::new());
     let host = HostBridge {
         response_tx,
-        agent_id: state.config.agent_id.clone(),
+        session_id: state.config.session_id.clone(),
         observations: &observations,
     };
 
@@ -267,7 +267,7 @@ fn execute_code(
 
 struct HostBridge<'a> {
     response_tx: &'a std_mpsc::Sender<LashlangResponse>,
-    agent_id: String,
+    session_id: String,
     observations: &'a Mutex<Vec<String>>,
 }
 
@@ -275,8 +275,8 @@ impl ToolHost for HostBridge<'_> {
     fn call(&self, name: &str, args: &FlowRecord) -> Result<FlowValue, ToolHostError> {
         let mut payload = flow_to_json_value(&FlowValue::Record(Arc::new(args.clone())));
         if let Some(obj) = payload.as_object_mut() {
-            obj.entry("__agent_id__".to_string())
-                .or_insert_with(|| Value::String(self.agent_id.clone()));
+            obj.entry("__session_id__".to_string())
+                .or_insert_with(|| Value::String(self.session_id.clone()));
         }
 
         let result_rx = send_tool_call(self.response_tx, name, payload)?;
