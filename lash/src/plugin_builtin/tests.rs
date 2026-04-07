@@ -1,6 +1,8 @@
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 use serde_json::json;
+use tokio::sync::Mutex;
 
 use super::plan_mode::{PlanModePluginConfig, PlanModePluginFactory};
 use super::plan_tracker::PlanTrackerPluginFactory;
@@ -36,6 +38,59 @@ fn mock_snapshot(run_session_id: &str) -> SessionSnapshot {
 struct StaticInstructionSource {
     text: String,
     read_text: String,
+}
+
+fn plan_mode_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct CurrentDirGuard {
+    original: PathBuf,
+}
+
+impl CurrentDirGuard {
+    fn set(path: &Path) -> Self {
+        let original = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(path).expect("set current dir");
+        Self { original }
+    }
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        std::env::set_current_dir(&self.original).expect("restore current dir");
+    }
+}
+
+fn plan_file_path(root: &Path, run_session_id: &str) -> PathBuf {
+    root.join(crate::legacy_repo_local_lash_dir())
+        .join("plans")
+        .join(format!("{run_session_id}.md"))
+}
+
+fn ready_plan_markdown() -> &'static str {
+    r#"# Plan
+
+## Goal
+- Update the plan-mode behavior cleanly.
+
+## Steps
+- Tighten the allowlist.
+- Validate the plan before handoff.
+- Execute the implementation turn after approval.
+
+## Files
+- lash/src/plugin_builtin/plan_mode.rs
+- lash-ui/src/lib.rs
+
+## Risks
+- Status/panel sync could drift if toggle handling is incomplete.
+
+## Verification
+- cargo test -p lash --lib
+- cargo test -p lash-ui
+"#
 }
 
 impl InstructionSource for StaticInstructionSource {
@@ -334,6 +389,9 @@ async fn plan_tracker_plugin_registers_update_plan_and_restores_state() {
 
 #[tokio::test]
 async fn plan_mode_plugin_toggle_and_status_round_trip() {
+    let _guard = plan_mode_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _cwd = CurrentDirGuard::set(temp.path());
     let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
     let session = host.build_standard_session("root", None).expect("session");
     let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
@@ -369,6 +427,21 @@ async fn plan_mode_plugin_toggle_and_status_round_trip() {
         enabled.result.get("enabled").and_then(|v| v.as_bool()),
         Some(true)
     );
+    assert_eq!(
+        enabled
+            .result
+            .get("plan_path")
+            .and_then(|value| value.as_str()),
+        Some(".lash/plans/run-session.md")
+    );
+    assert_eq!(
+        enabled
+            .result
+            .get("ready")
+            .and_then(|value| value.as_bool()),
+        Some(false)
+    );
+    assert!(plan_file_path(temp.path(), "run-session").is_file());
 
     let snapshot = session.snapshot().expect("snapshot");
     let restored = host
@@ -407,6 +480,9 @@ async fn plan_mode_plugin_toggle_and_status_round_trip() {
 
 #[tokio::test]
 async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
+    let _guard = plan_mode_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _cwd = CurrentDirGuard::set(temp.path());
     let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
     let session = host.build_standard_session("root", None).expect("session");
     let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
@@ -435,7 +511,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         PluginDirective::EnqueueMessages { messages }
             if messages.iter().any(|message|
                 message.role == MessageRole::System
-                    && message.content.contains("Plan Mode")
+                    && message.content.contains("Plan mode is active.")
                     && message.content.contains(".lash/plans/run-session.md")
                     && message.content.contains("plan_exit()"))
     )));
@@ -451,8 +527,21 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     ))
             )
     }));
+    assert!(before_turn.iter().any(|emitted| {
+        emitted.plugin_id == "plan_mode"
+            && matches!(
+                &emitted.value,
+                PluginDirective::EmitEvents { events }
+                    if events.iter().any(|event| matches!(
+                        event,
+                        crate::plugin::PluginSurfaceEvent::PanelUpsert { title, .. }
+                            if title == "PLAN"
+                    ))
+            )
+    }));
+    assert!(plan_file_path(temp.path(), "run-session").is_file());
 
-    let allowed_exec = session
+    let blocked_exec = session
         .before_tool_call(ToolCallHookContext {
             session_id: "root".to_string(),
             tool_name: "exec_command".to_string(),
@@ -461,7 +550,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         })
         .await
         .expect("before_tool_call");
-    assert!(!allowed_exec.is_empty());
+    assert!(!blocked_exec.is_empty());
 
     let allowed = session
         .before_tool_call(ToolCallHookContext {
@@ -513,6 +602,17 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     output_schema_override: None,
                 },
                 ToolDefinition {
+                    name: "search_web".to_string(),
+                    description: "Search the web".to_string(),
+                    params: vec![],
+                    returns: "list".to_string(),
+                    examples: vec![],
+                    enabled: true,
+                    injected: true,
+                    input_schema_override: None,
+                    output_schema_override: None,
+                },
+                ToolDefinition {
                     name: "apply_patch".to_string(),
                     description: "Apply patches".to_string(),
                     params: vec![],
@@ -543,6 +643,13 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             .iter()
             .find(|tool| tool.name == "update_plan")
             .is_some_and(|tool| !tool.enabled && !tool.injected)
+    );
+    assert!(
+        surface
+            .tools
+            .iter()
+            .find(|tool| tool.name == "search_web")
+            .is_some_and(|tool| tool.enabled && tool.injected)
     );
     assert!(
         surface
@@ -586,6 +693,19 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         .await
         .expect("before_tool_call");
     assert!(read_allowed.is_empty());
+
+    let web_allowed = session
+        .before_tool_call(ToolCallHookContext {
+            session_id: "root".to_string(),
+            tool_name: "search_web".to_string(),
+            args: json!({
+                "query":"surrealdb datetime best practices"
+            }),
+            host: Arc::clone(&manager),
+        })
+        .await
+        .expect("before_tool_call");
+    assert!(web_allowed.is_empty());
 
     let plan_patch_allowed = session
         .before_tool_call(ToolCallHookContext {
@@ -667,9 +787,12 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
 }
 
 #[tokio::test]
-async fn plan_mode_plugin_uses_configured_blocked_tool_set() {
+async fn plan_mode_plugin_uses_configured_allowlist() {
+    let _guard = plan_mode_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _cwd = CurrentDirGuard::set(temp.path());
     let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::new(
-        PlanModePluginConfig::default().with_blocked_tools(["apply_patch", "read_file"]),
+        PlanModePluginConfig::default().with_allowed_tools(["apply_patch", "read_file"]),
     ))]);
     let session = host.build_standard_session("root", None).expect("session");
     let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
@@ -685,7 +808,7 @@ async fn plan_mode_plugin_uses_configured_blocked_tool_set() {
         .await
         .expect("enable");
 
-    let blocked = session
+    let allowed = session
         .before_tool_call(ToolCallHookContext {
             session_id: "root".to_string(),
             tool_name: "read_file".to_string(),
@@ -694,12 +817,9 @@ async fn plan_mode_plugin_uses_configured_blocked_tool_set() {
         })
         .await
         .expect("before_tool_call");
-    assert!(blocked.iter().any(|emitted| matches!(
-        &emitted.value,
-        PluginDirective::AbortTurn { code, .. } if code == "plan_mode_tool_blocked"
-    )));
+    assert!(allowed.is_empty());
 
-    let allowed = session
+    let blocked = session
         .before_tool_call(ToolCallHookContext {
             session_id: "root".to_string(),
             tool_name: "update_plan".to_string(),
@@ -710,8 +830,12 @@ async fn plan_mode_plugin_uses_configured_blocked_tool_set() {
         })
         .await
         .expect("before_tool_call");
-    assert!(allowed.is_empty());
-    let apply_patch_blocked = session
+    assert!(blocked.iter().any(|emitted| matches!(
+        &emitted.value,
+        PluginDirective::AbortTurn { code, .. } if code == "plan_mode_tool_blocked"
+    )));
+
+    let apply_patch_allowed = session
         .before_tool_call(ToolCallHookContext {
             session_id: "root".to_string(),
             tool_name: "apply_patch".to_string(),
@@ -722,10 +846,7 @@ async fn plan_mode_plugin_uses_configured_blocked_tool_set() {
         })
         .await
         .expect("before_tool_call");
-    assert!(apply_patch_blocked.iter().any(|emitted| matches!(
-        &emitted.value,
-        PluginDirective::AbortTurn { code, .. } if code == "plan_mode_tool_blocked"
-    )));
+    assert!(apply_patch_allowed.is_empty());
 }
 
 #[tokio::test]
@@ -797,6 +918,21 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
         }
     }
 
+    let _guard = plan_mode_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _cwd = CurrentDirGuard::set(temp.path());
+    std::fs::create_dir_all(
+        plan_file_path(temp.path(), "run-session")
+            .parent()
+            .expect("parent"),
+    )
+    .expect("plan dir");
+    std::fs::write(
+        plan_file_path(temp.path(), "run-session"),
+        ready_plan_markdown(),
+    )
+    .expect("write plan");
+
     let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::new(
         PlanModePluginConfig::default(),
     ))]);
@@ -847,7 +983,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             .get("next_turn_input")
             .and_then(|value| value.as_str())
             .is_some_and(|value| {
-                value.contains("Execute that plan")
+                value.contains("Execute the plan in `.lash/plans/run-session.md`.")
                     && value.contains("User note: start with the safe slice")
             })
     );
@@ -866,7 +1002,50 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
 }
 
 #[tokio::test]
+async fn plan_mode_tool_exit_requires_ready_plan() {
+    let _guard = plan_mode_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _cwd = CurrentDirGuard::set(temp.path());
+    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
+    let session = host.build_standard_session("root", None).expect("session");
+    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
+
+    session
+        .invoke_external(
+            "plan_mode.enable",
+            json!({}),
+            None,
+            true,
+            Arc::clone(&manager),
+        )
+        .await
+        .expect("enable");
+
+    let result = session
+        .tools()
+        .execute_with_context(
+            "plan_exit",
+            &json!({}),
+            &crate::ToolExecutionContext {
+                session_id: "root".to_string(),
+                host: Arc::clone(&manager),
+            },
+        )
+        .await;
+    assert!(!result.success);
+    assert!(
+        result
+            .result
+            .as_str()
+            .is_some_and(|value| value.contains("Fill in: Goal (fill in), Steps (fill in), Files (fill in), Risks (fill in), Verification (fill in)."))
+    );
+}
+
+#[tokio::test]
 async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
+    let _guard = plan_mode_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _cwd = CurrentDirGuard::set(temp.path());
     let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
     let session = host.build_standard_session("root", None).expect("session");
     let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);

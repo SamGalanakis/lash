@@ -96,9 +96,26 @@ pub struct ShortcutSpec {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UiHostEffect {
     PushSystemMessage(String),
-    UpsertModeIndicator { key: String, label: String },
-    ClearModeIndicator { key: String },
-    QueueTurn { input: String },
+    UpsertModeIndicator {
+        key: String,
+        label: String,
+    },
+    ClearModeIndicator {
+        key: String,
+    },
+    UpsertPanel {
+        plugin_id: String,
+        key: String,
+        title: String,
+        content: String,
+    },
+    ClearPanel {
+        plugin_id: String,
+        key: String,
+    },
+    QueueTurn {
+        input: String,
+    },
 }
 
 pub struct UiContext<'a> {
@@ -340,18 +357,40 @@ fn surface_key(plugin_id: &str, key: &str) -> String {
     format!("{plugin_id}:{key}")
 }
 
-fn bool_from_result(result: ToolResult, op_name: &str) -> Result<bool, String> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PlanModeStatus {
+    enabled: bool,
+    panel_title: Option<String>,
+    panel_content: Option<String>,
+}
+
+fn plan_mode_status_from_result(
+    result: ToolResult,
+    op_name: &str,
+) -> Result<PlanModeStatus, String> {
     if !result.success {
         return Err(format!("{op_name} failed: {}", result.result));
     }
-    result
-        .result
-        .get("enabled")
-        .and_then(|value| value.as_bool())
-        .ok_or_else(|| format!("{op_name} response missing `enabled`"))
+    Ok(PlanModeStatus {
+        enabled: result
+            .result
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .ok_or_else(|| format!("{op_name} response missing `enabled`"))?,
+        panel_title: result
+            .result
+            .get("panel_title")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        panel_content: result
+            .result
+            .get("panel_content")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+    })
 }
 
-async fn plan_mode_enabled(ctx: UiContext<'_>, op_name: &str) -> Result<bool, String> {
+async fn plan_mode_status(ctx: UiContext<'_>, op_name: &str) -> Result<PlanModeStatus, String> {
     let result = ctx
         .plugin_host
         .invoke_external_for_session(
@@ -362,19 +401,37 @@ async fn plan_mode_enabled(ctx: UiContext<'_>, op_name: &str) -> Result<bool, St
         )
         .await
         .map_err(|err| err.to_string())?;
-    bool_from_result(result, op_name)
+    plan_mode_status_from_result(result, op_name)
 }
 
-fn plan_mode_indicator_effects(enabled: bool) -> Vec<UiHostEffect> {
+fn plan_mode_effects(status: &PlanModeStatus) -> Vec<UiHostEffect> {
     let key = surface_key("plan_mode", "mode");
-    if enabled {
+    let mut effects = if status.enabled {
         vec![UiHostEffect::UpsertModeIndicator {
             key,
             label: "plan".to_string(),
         }]
     } else {
         vec![UiHostEffect::ClearModeIndicator { key }]
+    };
+    let panel_key = "panel".to_string();
+    match (
+        status.enabled,
+        status.panel_title.as_deref(),
+        status.panel_content.as_deref(),
+    ) {
+        (true, Some(title), Some(content)) => effects.push(UiHostEffect::UpsertPanel {
+            plugin_id: "plan_mode".to_string(),
+            key: panel_key,
+            title: title.to_string(),
+            content: content.to_string(),
+        }),
+        _ => effects.push(UiHostEffect::ClearPanel {
+            plugin_id: "plan_mode".to_string(),
+            key: panel_key,
+        }),
     }
+    effects
 }
 
 struct PlanModeUiExtension;
@@ -410,10 +467,10 @@ impl UiExtension for PlanModeUiExtension {
     }
 
     async fn sync(&self, ctx: UiContext<'_>) -> Result<Vec<UiHostEffect>, String> {
-        let enabled = plan_mode_enabled(ctx, "plan_mode.status")
+        let status = plan_mode_status(ctx, "plan_mode.status")
             .await
             .map_err(|err| format!("failed to sync plan mode: {err}"))?;
-        Ok(plan_mode_indicator_effects(enabled))
+        Ok(plan_mode_effects(&status))
     }
 
     async fn invoke_action(
@@ -424,11 +481,11 @@ impl UiExtension for PlanModeUiExtension {
     ) -> Result<Vec<UiHostEffect>, String> {
         match action {
             "toggle" => {
-                let enabled = plan_mode_enabled(ctx, "plan_mode.toggle")
+                let status = plan_mode_status(ctx, "plan_mode.toggle")
                     .await
                     .map_err(|err| format!("failed to toggle plan mode: {err}"))?;
-                let mut effects = plan_mode_indicator_effects(enabled);
-                effects.push(UiHostEffect::PushSystemMessage(if enabled {
+                let mut effects = plan_mode_effects(&status);
+                effects.push(UiHostEffect::PushSystemMessage(if status.enabled {
                     "Plan mode enabled.".to_string()
                 } else {
                     "Plan mode disabled.".to_string()
@@ -465,6 +522,10 @@ impl UiExtension for PlanModeUiExtension {
                 UiHostEffect::ClearModeIndicator {
                     key: surface_key("plan_mode", "mode"),
                 },
+                UiHostEffect::ClearPanel {
+                    plugin_id: "plan_mode".to_string(),
+                    key: "panel".to_string(),
+                },
                 UiHostEffect::QueueTurn {
                     input: input.to_string(),
                 },
@@ -494,6 +555,49 @@ mod tests {
                 "/plan".to_string(),
                 "Toggle persistent plan mode".to_string()
             )]
+        );
+    }
+
+    #[test]
+    fn plan_mode_effects_show_panel_when_enabled() {
+        assert_eq!(
+            plan_mode_effects(&PlanModeStatus {
+                enabled: true,
+                panel_title: Some("PLAN".to_string()),
+                panel_content: Some("- Path: `.lash/plans/root.md`".to_string()),
+            }),
+            vec![
+                UiHostEffect::UpsertModeIndicator {
+                    key: "plan_mode:mode".to_string(),
+                    label: "plan".to_string(),
+                },
+                UiHostEffect::UpsertPanel {
+                    plugin_id: "plan_mode".to_string(),
+                    key: "panel".to_string(),
+                    title: "PLAN".to_string(),
+                    content: "- Path: `.lash/plans/root.md`".to_string(),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_mode_effects_clear_panel_when_disabled() {
+        assert_eq!(
+            plan_mode_effects(&PlanModeStatus {
+                enabled: false,
+                panel_title: Some("PLAN".to_string()),
+                panel_content: Some("stale".to_string()),
+            }),
+            vec![
+                UiHostEffect::ClearModeIndicator {
+                    key: "plan_mode:mode".to_string(),
+                },
+                UiHostEffect::ClearPanel {
+                    plugin_id: "plan_mode".to_string(),
+                    key: "panel".to_string(),
+                }
+            ]
         );
     }
 
@@ -548,6 +652,10 @@ mod tests {
             vec![
                 UiHostEffect::ClearModeIndicator {
                     key: "plan_mode:mode".to_string()
+                },
+                UiHostEffect::ClearPanel {
+                    plugin_id: "plan_mode".to_string(),
+                    key: "panel".to_string()
                 },
                 UiHostEffect::QueueTurn {
                     input: "Execute the approved plan.".to_string()

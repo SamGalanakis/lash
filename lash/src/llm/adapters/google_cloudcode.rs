@@ -155,7 +155,7 @@ impl GoogleCloudCodeAdapter {
                                 "functionResponse": {
                                     "id": msg.tool_call_id.clone().unwrap_or_default(),
                                     "name": msg.tool_name.clone().unwrap_or_else(|| "tool".to_string()),
-                                    "response": { "content": msg.content }
+                                    "response": { "output": msg.content }
                                 }
                             })
                         })
@@ -190,6 +190,18 @@ impl GoogleCloudCodeAdapter {
                 Self::attachment_part_for_index(attachment_parts, idx)
             }
             _ => json!({ "text": msg.content.clone() }),
+        }
+    }
+
+    fn uses_legacy_tool_parameters(model: &str) -> bool {
+        model.starts_with("claude-")
+    }
+
+    fn google_tool_choice(choice: &crate::llm::types::LlmToolChoice) -> &'static str {
+        match choice {
+            crate::llm::types::LlmToolChoice::Auto => "AUTO",
+            crate::llm::types::LlmToolChoice::None => "NONE",
+            crate::llm::types::LlmToolChoice::Required => "ANY",
         }
     }
 
@@ -662,19 +674,22 @@ impl GoogleCloudCodeAdapter {
         if let Some(system_instruction) = Self::system_instruction(req) {
             request["request"]["systemInstruction"] = system_instruction;
         }
+        if let Some(session_id) = req.session_id.as_deref() {
+            request["request"]["sessionId"] = json!(session_id);
+        }
         if let Some(variant) = req.model_variant.as_deref()
             && let Some(config) =
                 crate::model_variant::request_config(provider, &req.model, variant)
         {
             match config {
                 VariantRequestConfig::GoogleThinkingLevel { level } => {
-                    request["request"]["thinkingConfig"] = json!({
+                    request["request"]["generationConfig"]["thinkingConfig"] = json!({
                         "includeThoughts": true,
                         "thinkingLevel": level,
                     });
                 }
                 VariantRequestConfig::GoogleThinkingBudget { budget_tokens } => {
-                    request["request"]["thinkingConfig"] = json!({
+                    request["request"]["generationConfig"]["thinkingConfig"] = json!({
                         "includeThoughts": true,
                         "thinkingBudget": budget_tokens,
                     });
@@ -683,17 +698,30 @@ impl GoogleCloudCodeAdapter {
             }
         }
         if !req.tools.is_empty() {
+            let use_legacy_parameters = Self::uses_legacy_tool_parameters(&req.model);
             request["request"]["tools"] = json!([{
                 "functionDeclarations": req
                     .tools
                     .iter()
-                    .map(|tool| json!({
-                        "name": tool.name.clone(),
-                        "description": tool.description.clone(),
-                        "parameters": tool.input_schema.clone(),
-                    }))
+                    .map(|tool| {
+                        let mut declaration = json!({
+                            "name": tool.name.clone(),
+                            "description": tool.description.clone(),
+                        });
+                        if use_legacy_parameters {
+                            declaration["parameters"] = tool.input_schema.clone();
+                        } else {
+                            declaration["parametersJsonSchema"] = tool.input_schema.clone();
+                        }
+                        declaration
+                    })
                     .collect::<Vec<_>>()
             }]);
+            request["request"]["toolConfig"] = json!({
+                "functionCallingConfig": {
+                    "mode": Self::google_tool_choice(&req.tool_choice),
+                }
+            });
         }
         if let Some(output_spec) = &req.output_spec {
             request["request"]["generationConfig"]["responseMimeType"] = json!("application/json");
@@ -1063,6 +1091,10 @@ mod tests {
         assert_eq!(contents[1]["role"], "model");
         assert_eq!(contents[1]["parts"][0]["functionCall"]["name"], "read_file");
         assert_eq!(contents[2]["parts"][0]["functionResponse"]["id"], "call_1");
+        assert_eq!(
+            contents[2]["parts"][0]["functionResponse"]["response"]["output"],
+            "ok"
+        );
     }
 
     #[test]
@@ -1286,5 +1318,146 @@ mod tests {
             request["request"]["generationConfig"]["responseSchema"]["type"],
             "OBJECT"
         );
+    }
+
+    #[test]
+    fn build_request_uses_google_tool_config_and_json_schema_tools_for_gemini() {
+        let provider = Provider::GoogleOAuth {
+            access_token: "tok".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: u64::MAX,
+            project_id: Some("proj".to_string()),
+            options: crate::provider::ProviderOptions::default(),
+        };
+        let req = LlmRequest {
+            model: "gemini-3.1-pro-preview".to_string(),
+            messages: vec![message(LlmRole::User, "text", "hi")],
+            attachments: vec![],
+            tools: vec![crate::llm::types::LlmToolSpec {
+                name: "find".to_string(),
+                description: "Locate code".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"}
+                    }
+                }),
+                output_schema: serde_json::Value::Null,
+            }],
+            tool_choice: crate::llm::types::LlmToolChoice::Required,
+            model_variant: None,
+            session_id: None,
+            output_spec: None,
+            stream_events: None,
+        };
+
+        let request = GoogleCloudCodeAdapter::build_request(
+            &provider,
+            &req,
+            GoogleCloudCodeAdapter::build_contents(&req),
+            Some("proj"),
+        );
+
+        assert_eq!(
+            request["request"]["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"]["type"],
+            "object"
+        );
+        assert!(
+            request["request"]["tools"][0]["functionDeclarations"][0]
+                .get("parameters")
+                .is_none()
+        );
+        assert_eq!(
+            request["request"]["toolConfig"]["functionCallingConfig"]["mode"],
+            "ANY"
+        );
+    }
+
+    #[test]
+    fn build_request_uses_legacy_tool_parameters_for_claude_models() {
+        let provider = Provider::GoogleOAuth {
+            access_token: "tok".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: u64::MAX,
+            project_id: Some("proj".to_string()),
+            options: crate::provider::ProviderOptions::default(),
+        };
+        let req = LlmRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            messages: vec![message(LlmRole::User, "text", "hi")],
+            attachments: vec![],
+            tools: vec![crate::llm::types::LlmToolSpec {
+                name: "find".to_string(),
+                description: "Locate code".to_string(),
+                input_schema: json!({"type": "object"}),
+                output_schema: serde_json::Value::Null,
+            }],
+            tool_choice: crate::llm::types::LlmToolChoice::None,
+            model_variant: None,
+            session_id: None,
+            output_spec: None,
+            stream_events: None,
+        };
+
+        let request = GoogleCloudCodeAdapter::build_request(
+            &provider,
+            &req,
+            GoogleCloudCodeAdapter::build_contents(&req),
+            Some("proj"),
+        );
+
+        assert_eq!(
+            request["request"]["tools"][0]["functionDeclarations"][0]["parameters"]["type"],
+            "object"
+        );
+        assert!(
+            request["request"]["tools"][0]["functionDeclarations"][0]
+                .get("parametersJsonSchema")
+                .is_none()
+        );
+        assert_eq!(
+            request["request"]["toolConfig"]["functionCallingConfig"]["mode"],
+            "NONE"
+        );
+    }
+
+    #[test]
+    fn build_request_places_session_and_thinking_config_in_generation_config() {
+        let provider = Provider::GoogleOAuth {
+            access_token: "tok".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: u64::MAX,
+            project_id: Some("proj".to_string()),
+            options: crate::provider::ProviderOptions::default(),
+        };
+        let req = LlmRequest {
+            model: "gemini-3.1-pro-preview".to_string(),
+            messages: vec![message(LlmRole::User, "text", "hi")],
+            attachments: vec![],
+            tools: vec![],
+            tool_choice: crate::llm::types::LlmToolChoice::Auto,
+            model_variant: Some("medium".to_string()),
+            session_id: Some("sess-123".to_string()),
+            output_spec: None,
+            stream_events: None,
+        };
+
+        let request = GoogleCloudCodeAdapter::build_request(
+            &provider,
+            &req,
+            GoogleCloudCodeAdapter::build_contents(&req),
+            Some("proj"),
+        );
+
+        assert_eq!(request["request"]["sessionId"], "sess-123");
+        assert_eq!(
+            request["request"]["generationConfig"]["thinkingConfig"]["includeThoughts"],
+            true
+        );
+        assert_eq!(
+            request["request"]["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "medium"
+        );
+        assert!(request["request"].get("thinkingConfig").is_none());
     }
 }

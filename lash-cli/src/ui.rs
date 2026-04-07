@@ -31,6 +31,7 @@ const MAX_INPUT_HEIGHT: u16 = 20;
 const COMPACT_ACTIVITY_FEED_MAX_ITEMS: usize = 5;
 const COMPACT_ACTIVITY_FEED_MAX_ROWS_PER_ITEM: usize = 2;
 const COMPACT_PATCH_PREVIEW_MAX_FILES: usize = 5;
+const STREAMING_OUTPUT_OVERLAY_MAX_ROWS: usize = 4;
 const SCROLL_INDICATOR_HIDE_TAIL_ROWS: usize = 2;
 const SCROLL_INDICATOR_MIN_HEIGHT: usize = 2;
 
@@ -397,10 +398,6 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // Render live streaming tool output after history blocks.
-    // Delegate output gets its own branch lane so it doesn't blend into normal shell output.
-    append_streaming_output_lines(&mut lines, app);
-
     // Use Paragraph's built-in scroll to skip visual rows correctly.
     // Manual .skip()/.take() on logical Lines is wrong because skip_lines
     // is in visual-row space (from the height cache) but Lines can wrap.
@@ -410,6 +407,8 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
         .scroll((skip_lines as u16, 0));
 
     frame.render_widget(paragraph, area);
+
+    draw_streaming_output_overlay(frame, app, area);
 
     if let Some(indicator) = history_scroll_indicator(app, area) {
         render_history_scroll_indicator(frame, indicator);
@@ -458,14 +457,75 @@ fn append_streaming_output_lines<'a>(lines: &mut Vec<Line<'a>>, app: &App) {
     }
 }
 
-pub(crate) fn streaming_output_visual_height(app: &App, viewport_width: usize) -> usize {
-    if viewport_width == 0 || app.streaming_output_height() == 0 {
-        return 0;
+fn draw_streaming_output_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
     }
 
-    let mut lines = Vec::with_capacity(app.streaming_output_height());
-    append_streaming_output_lines(&mut lines, app);
-    wrap_rendered_lines(&lines, viewport_width).len()
+    let overlay_lines = streaming_output_overlay_lines(app, area.width as usize);
+    if overlay_lines.is_empty() {
+        return;
+    }
+
+    let overlay_height = overlay_lines.len().min(area.height as usize) as u16;
+    let overlay_area = Rect::new(
+        area.x,
+        area.bottom().saturating_sub(overlay_height),
+        area.width,
+        overlay_height,
+    );
+
+    frame.render_widget(Block::default().style(theme::history_bg()), overlay_area);
+    frame.render_widget(
+        Paragraph::new(overlay_lines)
+            .style(theme::history_bg())
+            .block(Block::default().borders(Borders::NONE)),
+        overlay_area,
+    );
+}
+
+fn streaming_output_overlay_lines(app: &App, viewport_width: usize) -> Vec<Line<'static>> {
+    if viewport_width == 0 || app.streaming_output_height() == 0 {
+        return Vec::new();
+    }
+
+    let mut logical_lines = Vec::with_capacity(app.streaming_output_height());
+    append_streaming_output_lines(&mut logical_lines, app);
+    let wrapped = wrap_rendered_lines(&logical_lines, viewport_width);
+    if wrapped.len() <= STREAMING_OUTPUT_OVERLAY_MAX_ROWS {
+        return wrapped;
+    }
+
+    let visible_tail = STREAMING_OUTPUT_OVERLAY_MAX_ROWS.saturating_sub(1);
+    let hidden_rows = wrapped.len().saturating_sub(visible_tail);
+    let delegate_stream = app.active_delegate.is_some();
+    let (prefix, prefix_style, content_style) = if delegate_stream {
+        (
+            "\u{251c}\u{2500} ",
+            Style::default()
+                .fg(theme::SODIUM)
+                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::CHALK_MID),
+        )
+    } else {
+        ("\u{2502} ", theme::code_chrome(), theme::code_content())
+    };
+
+    let mut overlay = Vec::with_capacity(STREAMING_OUTPUT_OVERLAY_MAX_ROWS);
+    overlay.push(Line::from(vec![
+        Span::styled(prefix.to_string(), prefix_style),
+        Span::styled(
+            format!("… {} earlier live rows hidden …", hidden_rows),
+            content_style,
+        ),
+    ]));
+    overlay.extend(wrapped.into_iter().skip(hidden_rows).take(visible_tail));
+    overlay
+}
+
+#[cfg(test)]
+pub(crate) fn streaming_output_visual_height(app: &App, viewport_width: usize) -> usize {
+    streaming_output_overlay_lines(app, viewport_width).len()
 }
 
 fn history_scroll_indicator(app: &App, area: Rect) -> Option<ScrollIndicator> {
@@ -475,8 +535,7 @@ fn history_scroll_indicator(app: &App, area: Rect) -> Option<ScrollIndicator> {
 
     let viewport_height = area.height as usize;
     let block_height = app.height_cache_snapshot().last().copied().unwrap_or(0);
-    let total_content_height =
-        block_height + streaming_output_visual_height(app, area.width as usize);
+    let total_content_height = block_height;
     let max_scroll = total_content_height.saturating_sub(viewport_height);
     if max_scroll == 0 {
         return None;
@@ -3719,11 +3778,13 @@ mod tests {
             kind: "tool_output".into(),
         });
 
-        assert!(streaming_output_visual_height(&app, 12) > app.streaming_output_height());
+        let overlay_height = streaming_output_visual_height(&app, 12);
+        assert!(overlay_height > 1);
+        assert!(overlay_height <= STREAMING_OUTPUT_OVERLAY_MAX_ROWS);
     }
 
     #[test]
-    fn draw_history_respects_scroll_offset_with_streaming_output_only() {
+    fn draw_history_renders_streaming_output_overlay_without_scrollback() {
         let backend = TestBackend::new(16, 4);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut app = App::new("model".into(), "session".into());
@@ -3747,12 +3808,8 @@ mod tests {
             kind: "tool_output".into(),
         });
 
-        let width = 16usize;
-        let viewport_height = 4usize;
-        app.ensure_height_cache_pub(width, viewport_height);
-        app.scroll_offset = app
-            .total_content_height(width, viewport_height)
-            .saturating_sub(viewport_height);
+        app.ensure_height_cache_pub(16, 4);
+        app.scroll_offset = 0;
 
         terminal
             .draw(|frame| draw_history(frame, &app, Rect::new(0, 0, 16, 4)))
@@ -3763,7 +3820,7 @@ mod tests {
             .collect();
         assert!(
             rows.iter().any(|row| row.contains("tail marker")),
-            "tail of streaming output should remain visible: {rows:?}"
+            "tail of streaming output should be visible in overlay: {rows:?}"
         );
     }
 

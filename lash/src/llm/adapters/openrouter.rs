@@ -168,6 +168,55 @@ impl OpenAiGenericAdapter {
         out
     }
 
+    fn has_tool_history(messages: &[LlmMessage]) -> bool {
+        messages.iter().any(|msg| {
+            msg.kind == "tool_result"
+                || (matches!(msg.role, LlmRole::Assistant) && msg.kind == "tool_call")
+        })
+    }
+
+    fn maybe_add_openrouter_anthropic_cache_control(
+        messages: &mut [Value],
+        model: &str,
+        base_url: &str,
+    ) {
+        if !Self::supports_prompt_cache_key(base_url) || !model.starts_with("anthropic/") {
+            return;
+        }
+
+        for message in messages.iter_mut().rev() {
+            let role = message.get("role").and_then(|value| value.as_str());
+            if !matches!(role, Some("user" | "assistant")) {
+                continue;
+            }
+
+            let Some(content) = message.get_mut("content") else {
+                continue;
+            };
+
+            if let Some(text) = content.as_str() {
+                *content = json!([{
+                    "type": "text",
+                    "text": text,
+                    "cache_control": { "type": "ephemeral" }
+                }]);
+                return;
+            }
+
+            let Some(parts) = content.as_array_mut() else {
+                continue;
+            };
+
+            for part in parts.iter_mut().rev() {
+                if part.get("type").and_then(|value| value.as_str()) != Some("text") {
+                    continue;
+                }
+                part["cache_control"] = json!({ "type": "ephemeral" });
+                return;
+            }
+        }
+    }
+
     fn supports_prompt_cache_key(base_url: &str) -> bool {
         let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
         normalized.contains("openrouter.ai")
@@ -190,7 +239,8 @@ impl OpenAiGenericAdapter {
             }
         };
 
-        let messages = self.build_messages(req);
+        let mut messages = self.build_messages(req);
+        Self::maybe_add_openrouter_anthropic_cache_control(&mut messages, &req.model, &base_url);
 
         let mut body = json!({
             "model": req.model,
@@ -232,6 +282,10 @@ impl OpenAiGenericAdapter {
                 crate::llm::types::LlmToolChoice::None => json!("none"),
                 crate::llm::types::LlmToolChoice::Required => json!("required"),
             };
+        } else if Self::has_tool_history(&req.messages) {
+            // Anthropic-compatible backends can require an explicit tools field
+            // when replay history already contains tool calls/results.
+            body["tools"] = json!([]);
         }
         if let Some(output_spec) = &req.output_spec {
             body["response_format"] = match output_spec {
@@ -901,6 +955,48 @@ mod tests {
     }
 
     #[test]
+    fn build_request_body_keeps_tools_field_for_tool_history_without_current_tools() {
+        let adapter = OpenAiGenericAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
+        let provider = Provider::OpenAiGeneric {
+            api_key: "tok".to_string(),
+            base_url: "https://example.com/v1".to_string(),
+            options: crate::provider::ProviderOptions::default(),
+        };
+        let req = req(vec![
+            LlmMessage {
+                role: LlmRole::User,
+                content: "question".to_string(),
+                kind: "text".to_string(),
+                image_idx: -1,
+                tool_call_id: None,
+                tool_name: None,
+            },
+            LlmMessage {
+                role: LlmRole::Assistant,
+                content: "{\"path\":\"README.md\"}".to_string(),
+                kind: "tool_call".to_string(),
+                image_idx: -1,
+                tool_call_id: Some("call_1".to_string()),
+                tool_name: Some("read_file".to_string()),
+            },
+            LlmMessage {
+                role: LlmRole::User,
+                content: "done".to_string(),
+                kind: "tool_result".to_string(),
+                image_idx: -1,
+                tool_call_id: Some("call_1".to_string()),
+                tool_name: Some("read_file".to_string()),
+            },
+        ]);
+
+        let (body, _) = adapter
+            .build_request_body(&provider, &req, false)
+            .expect("request body");
+
+        assert_eq!(body["tools"], json!([]));
+    }
+
+    #[test]
     fn build_request_body_omits_prompt_cache_key_for_non_openrouter() {
         let adapter = OpenAiGenericAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
         let provider = Provider::OpenAiGeneric {
@@ -934,6 +1030,35 @@ mod tests {
             .build_request_body(&provider, &req, false)
             .expect("request body");
         assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn build_request_body_adds_cache_control_for_openrouter_anthropic_models() {
+        let adapter = OpenAiGenericAdapter::new(crate::llm::timeouts::LlmTimeouts::default());
+        let provider = Provider::OpenAiGeneric {
+            api_key: "tok".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            options: crate::provider::ProviderOptions::default(),
+        };
+        let mut req = req(vec![LlmMessage {
+            role: LlmRole::User,
+            content: "hi".to_string(),
+            kind: "text".to_string(),
+            image_idx: -1,
+            tool_call_id: None,
+            tool_name: None,
+        }]);
+        req.model = "anthropic/claude-sonnet-4.6".to_string();
+
+        let (body, _) = adapter
+            .build_request_body(&provider, &req, false)
+            .expect("request body");
+
+        assert_eq!(body["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
     }
 
     #[test]
