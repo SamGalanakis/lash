@@ -98,11 +98,6 @@ impl PromptState {
         };
     }
 
-    pub fn insert_char(&mut self, c: char) {
-        self.reply_text.insert(self.reply_cursor, c);
-        self.reply_cursor += c.len_utf8();
-    }
-
     pub fn insert_text(&mut self, text: &str) {
         self.reply_text.insert_str(self.reply_cursor, text);
         self.reply_cursor += text.len();

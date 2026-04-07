@@ -8,6 +8,7 @@ mod grep;
 mod ls;
 mod read_file;
 mod shell;
+mod showcase_snippet;
 #[cfg(feature = "sqlite-store")]
 mod state;
 mod update_plan;
@@ -25,6 +26,7 @@ pub use grep::Grep;
 pub use ls::Ls;
 pub use read_file::{ReadFile, ReadFilePluginFactory};
 pub use shell::StandardShell;
+pub use showcase_snippet::ShowcaseSnippet;
 #[cfg(feature = "sqlite-store")]
 pub use state::{StateStore, StateToolsPluginFactory};
 pub use update_plan::UpdatePlanTool;

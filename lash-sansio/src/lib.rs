@@ -12,9 +12,9 @@ pub use session::ExecResponse;
 pub use session_model::message::MessageOrigin;
 pub use session_model::{
     DefaultPromptRenderer, DurableTurnSnapshot, ErrorEnvelope, Message, MessageRole, Part,
-    PartKind, PromptOverrideMode, PromptRenderer, PromptRequest, PromptResponse, PromptSectionName,
-    PromptSectionOverride, PromptSelectionMode, PruneState, SessionEvent, TokenUsage,
-    default_prompt_renderer, messages_are_live_resume_safe,
+    PartKind, PromptOverrideMode, PromptPanel, PromptRenderer, PromptRequest, PromptResponse,
+    PromptSectionName, PromptSectionOverride, PromptSelectionMode, PruneState, SessionEvent,
+    TokenUsage, default_prompt_renderer, messages_are_live_resume_safe,
 };
 
 /// Execution backend for session turns.

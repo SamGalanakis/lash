@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use lash::provider::{LashConfig, Provider};
 use lash::*;
+use lash_tui::Terminal;
 
 use crate::autonomous::{AutonomousPersistenceContext, run_autonomous};
 use crate::delegate_tools::{DelegateToolConfig, DelegateToolsPluginFactory};
@@ -9,10 +10,10 @@ use crate::interactive::{generate_session_name, run_app};
 use crate::session_log::{self, DbSessionStoreFactory, SessionLogger};
 use crate::{Args, setup};
 use crate::{
-    autonomous_prompt_overrides, cleanup_terminal, configure_terminal_ui,
-    ensure_supported_execution_mode, hash12, info_text, info_text_unconfigured, models_dev_catalog,
-    parse_context_strategy, parse_execution_mode, parse_model_selection, resolve_context_strategy,
-    resolve_model_selection, resolve_model_variant, validate_model_selection,
+    autonomous_prompt_overrides, cleanup_terminal, ensure_supported_execution_mode, hash12,
+    info_text, info_text_unconfigured, models_dev_catalog, parse_context_strategy,
+    parse_execution_mode, parse_model_selection, resolve_context_strategy, resolve_model_selection,
+    resolve_model_variant, validate_model_selection,
 };
 
 pub(crate) async fn run(
@@ -375,11 +376,9 @@ pub(crate) async fn run(
     }));
 
     // Initialize terminal
-    let terminal = ratatui::init();
+    let terminal = Terminal::enter()?;
 
-    configure_terminal_ui()?;
-
-    let result = run_app(
+    run_app(
         terminal,
         runtime,
         plugin_host,
@@ -398,18 +397,5 @@ pub(crate) async fn run(
         execution_mode,
         startup_system_message,
     )
-    .await;
-
-    // Disable focus change tracking
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableFocusChange);
-
-    // Pop kitty keyboard protocol
-    let _ = crossterm::execute!(
-        std::io::stdout(),
-        crossterm::event::PopKeyboardEnhancementFlags
-    );
-
-    cleanup_terminal();
-
-    result
+    .await
 }

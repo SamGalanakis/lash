@@ -64,6 +64,12 @@ pub fn default_tool_plugin_factories(
             PluginSpec::new()
                 .with_tool_provider(Arc::new(super::AskTool::new()) as Arc<dyn ToolProvider>),
         )));
+        factories.push(Arc::new(StaticPluginFactory::new(
+            "showcase_snippet",
+            PluginSpec::new().with_tool_provider(
+                Arc::new(super::ShowcaseSnippet::new()) as Arc<dyn ToolProvider>
+            ),
+        )));
     }
 
     #[cfg(feature = "sqlite-store")]
@@ -186,5 +192,27 @@ impl ToolProvider for CompositeToolProvider {
             }
             None => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interactive_default_tools_include_showcase_snippet() {
+        let factories = default_tool_plugin_factories(
+            crate::ExecutionMode::Standard,
+            DefaultToolPluginDeps {
+                enable_user_prompts: true,
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            factories
+                .iter()
+                .any(|factory| factory.id() == "showcase_snippet")
+        );
     }
 }

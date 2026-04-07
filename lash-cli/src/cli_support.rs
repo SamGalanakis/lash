@@ -111,7 +111,7 @@ fn render_shortcut_lines(ui_extensions: &UiExtensions, spaced_history_arrows: bo
         "  Shift+Enter        Insert newline".to_string(),
         "  Ctrl+V             Paste image as inline [Image #n]".to_string(),
         "  Ctrl+Shift+V       Paste text only".to_string(),
-        "  Ctrl+Y             Copy last response to clipboard".to_string(),
+        "  Ctrl+Shift+C / Y   Copy selection or last response".to_string(),
         "  Ctrl+O             Cycle tool expansion (ghost ↔ compact)".to_string(),
         "  Alt+O              Full expansion (code + stdout)".to_string(),
         history_arrows.to_string(),
@@ -537,6 +537,7 @@ pub(crate) fn push_system_message(app: &mut App, msg: impl Into<String>) {
     if duplicate {
         return;
     }
+    crate::ui_trace::record_system_message_aux(&msg);
     app.blocks.push(DisplayBlock::SystemMessage(msg));
     app.invalidate_height_cache();
     app.scroll_to_bottom();

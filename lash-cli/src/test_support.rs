@@ -1,6 +1,20 @@
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::OnceLock;
+
+use lash::{PromptRequest, PromptResponse, SessionEvent};
+use lash_tui::ScreenSnapshot;
+use lash_ui::UiExtensions;
 use tokio::sync::Mutex;
+
+use crate::app::{App, PreparedTurn, PromptState};
+use crate::overlay::PromptFocus;
+use crate::ui_action::{UiAction, UiActionContext, apply_ui_action};
+use crate::ui_trace::{
+    UiTraceOp, assert_snapshot_text, read_ui_trace_fixture, render_screen_snapshot,
+};
+use crate::{apply_ui_host_effects, render};
 
 pub(crate) fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -53,5 +67,532 @@ impl TempDirGuard {
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+pub(crate) struct UiHarness {
+    pub app: App,
+    pub width: u16,
+    pub height: u16,
+    ui_extensions: Arc<UiExtensions>,
+}
+
+impl UiHarness {
+    pub(crate) fn new(width: u16, height: u16) -> Self {
+        let ui_extensions = Arc::new(UiExtensions::builtin().expect("builtin ui extensions"));
+        let mut app = App::new("gpt-5.4".to_string(), "test-session".to_string());
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("lash-cli crate should live under repo root")
+            .to_path_buf();
+        app.cwd = repo_root.display().to_string();
+        app.repo_status = crate::repo_status::detect_repo_status(&repo_root);
+        app.set_ui_extensions(Arc::clone(&ui_extensions));
+        Self {
+            app,
+            width,
+            height,
+            ui_extensions,
+        }
+    }
+
+    pub(crate) fn start_turn(&mut self) -> &mut Self {
+        self.app.start_turn();
+        self
+    }
+
+    pub(crate) fn user_turn(&mut self, text: impl Into<String>) -> PreparedTurn {
+        let turn = PreparedTurn::new(text.into(), Vec::new());
+        self.app.push_prepared_user_input(&turn);
+        turn
+    }
+
+    pub(crate) fn queue_turn(&mut self, text: impl Into<String>) -> PreparedTurn {
+        let turn = PreparedTurn::new(text.into(), Vec::new());
+        self.app.queue_turn(turn.clone());
+        turn
+    }
+
+    pub(crate) fn dispatch_event(&mut self, event: SessionEvent) -> &mut Self {
+        match event {
+            SessionEvent::Prompt {
+                request,
+                response_tx,
+            } => {
+                let focus = if request.is_freeform() {
+                    PromptFocus::Text
+                } else {
+                    PromptFocus::Options
+                };
+                self.app.show_prompt(PromptState {
+                    request,
+                    focus,
+                    cursor: 0,
+                    selected: Default::default(),
+                    reply_text: String::new(),
+                    reply_cursor: 0,
+                    response_tx,
+                });
+            }
+            other => {
+                let effects = self.ui_extensions.effects_for_session_event(&other);
+                self.app.handle_session_event(other);
+                apply_ui_host_effects(&mut self.app, effects);
+            }
+        }
+        self
+    }
+
+    pub(crate) fn emit_prompt(
+        &mut self,
+        request: PromptRequest,
+    ) -> std::sync::mpsc::Receiver<PromptResponse> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.dispatch_event(SessionEvent::Prompt {
+            request,
+            response_tx: tx,
+        });
+        rx
+    }
+
+    pub(crate) fn take_prompt_response(&mut self) -> Option<String> {
+        self.app.take_prompt_response()
+    }
+
+    pub(crate) fn render(&mut self) -> ScreenSnapshot {
+        render_screen_snapshot(&mut self.app, self.width, self.height)
+    }
+
+    pub(crate) fn render_text(&mut self) -> String {
+        self.render().visible_lines_trimmed().join("\n")
+    }
+}
+
+#[cfg(test)]
+fn ui_trace_fixtures_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("testdata")
+        .join("ui")
+}
+
+#[cfg(test)]
+fn run_ui_trace_fixture(path: &Path) {
+    let fixture = read_ui_trace_fixture(path);
+    let mut harness = UiHarness::new(fixture.width, fixture.height);
+    let trace_dir = path.parent().expect("trace fixture parent");
+    let mut _last_prompt_rx: Option<std::sync::mpsc::Receiver<PromptResponse>> = None;
+    let action_context = UiActionContext {
+        viewport_width: fixture.width as usize,
+        viewport_height: fixture.height as usize,
+    };
+
+    for op in fixture.ops {
+        match op {
+            UiTraceOp::StartTurn => {
+                harness.start_turn();
+            }
+            UiTraceOp::UserTurn { text } => {
+                harness.app.set_input(text);
+                let turn = harness.app.take_prepared_turn();
+                harness.app.push_prepared_user_input(&turn);
+            }
+            UiTraceOp::QueueTurn { text } => {
+                harness.app.set_input(text);
+                let turn = harness.app.take_prepared_turn();
+                harness.app.queue_turn(turn);
+            }
+            UiTraceOp::QueuePendingSteer { text } => {
+                harness.app.set_input(text);
+                let turn = harness.app.take_prepared_turn();
+                harness.app.queue_pending_steer(turn);
+            }
+            UiTraceOp::SlashCommand { text } => {
+                harness.app.set_input(text);
+                let _ = harness.app.take_prepared_turn();
+            }
+            UiTraceOp::SystemMessage { text } => {
+                harness
+                    .app
+                    .blocks
+                    .push(crate::app::DisplayBlock::SystemMessage(text));
+                harness.app.invalidate_height_cache();
+                harness.app.scroll_to_bottom();
+            }
+            UiTraceOp::InputInsertText { text } => {
+                apply_ui_action(
+                    &mut harness.app,
+                    UiAction::InputInsertText(text),
+                    action_context,
+                );
+            }
+            UiTraceOp::InputBackspace => {
+                apply_ui_action(&mut harness.app, UiAction::InputBackspace, action_context);
+            }
+            UiTraceOp::InputDelete => {
+                apply_ui_action(&mut harness.app, UiAction::InputDelete, action_context);
+            }
+            UiTraceOp::MoveCursorLeft => {
+                apply_ui_action(&mut harness.app, UiAction::MoveCursorLeft, action_context);
+            }
+            UiTraceOp::MoveCursorRight => {
+                apply_ui_action(&mut harness.app, UiAction::MoveCursorRight, action_context);
+            }
+            UiTraceOp::MoveCursorHome => {
+                apply_ui_action(&mut harness.app, UiAction::MoveCursorHome, action_context);
+            }
+            UiTraceOp::MoveCursorEnd => {
+                apply_ui_action(&mut harness.app, UiAction::MoveCursorEnd, action_context);
+            }
+            UiTraceOp::HistoryUp => {
+                apply_ui_action(&mut harness.app, UiAction::HistoryUp, action_context);
+            }
+            UiTraceOp::HistoryDown => {
+                apply_ui_action(&mut harness.app, UiAction::HistoryDown, action_context);
+            }
+            UiTraceOp::SuggestionUp => {
+                apply_ui_action(&mut harness.app, UiAction::SuggestionUp, action_context);
+            }
+            UiTraceOp::SuggestionDown => {
+                apply_ui_action(&mut harness.app, UiAction::SuggestionDown, action_context);
+            }
+            UiTraceOp::SuggestionComplete => {
+                apply_ui_action(
+                    &mut harness.app,
+                    UiAction::SuggestionComplete,
+                    action_context,
+                );
+            }
+            UiTraceOp::EmitPrompt { request } => {
+                _last_prompt_rx = Some(harness.emit_prompt(request.into_request()));
+            }
+            UiTraceOp::PromptUp => {
+                apply_ui_action(&mut harness.app, UiAction::PromptUp, action_context);
+            }
+            UiTraceOp::PromptDown => {
+                apply_ui_action(&mut harness.app, UiAction::PromptDown, action_context);
+            }
+            UiTraceOp::PromptToggleCurrentOption => {
+                apply_ui_action(
+                    &mut harness.app,
+                    UiAction::PromptToggleCurrentOption,
+                    action_context,
+                );
+            }
+            UiTraceOp::PromptToggleNoteFocus => {
+                apply_ui_action(
+                    &mut harness.app,
+                    UiAction::PromptToggleNoteFocus,
+                    action_context,
+                );
+            }
+            UiTraceOp::PromptInsertText { text } => {
+                apply_ui_action(
+                    &mut harness.app,
+                    UiAction::PromptInsertText(text),
+                    action_context,
+                );
+            }
+            UiTraceOp::PromptBackspace => {
+                apply_ui_action(&mut harness.app, UiAction::PromptBackspace, action_context);
+            }
+            UiTraceOp::PromptDismiss => {
+                apply_ui_action(&mut harness.app, UiAction::DismissPrompt, action_context);
+            }
+            UiTraceOp::SubmitPrompt => {
+                let _ = apply_ui_action(&mut harness.app, UiAction::SubmitPrompt, action_context);
+            }
+            UiTraceOp::ScrollUp { amount } => {
+                apply_ui_action(&mut harness.app, UiAction::ScrollUp(amount), action_context);
+            }
+            UiTraceOp::ScrollDown { amount } => {
+                let action_context = UiActionContext {
+                    viewport_width: fixture.width as usize,
+                    viewport_height: render::history_viewport_height(
+                        &harness.app,
+                        harness.width,
+                        harness.height,
+                    ),
+                };
+                apply_ui_action(
+                    &mut harness.app,
+                    UiAction::ScrollDown(amount),
+                    action_context,
+                );
+            }
+            UiTraceOp::Event { event } => {
+                harness.dispatch_event(event.into_event());
+            }
+            UiTraceOp::Render { snapshot } => {
+                let actual = harness.render_text();
+                let snapshot_path = trace_dir.join(snapshot);
+                assert_snapshot_text(&snapshot_path, &actual);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lash::{PluginSurfaceEvent, SessionEvent};
+    use serde_json::json;
+
+    fn line_index_containing(lines: &[String], needle: &str) -> Option<usize> {
+        lines.iter().position(|line| line.contains(needle))
+    }
+
+    #[test]
+    fn ui_trace_fixtures_match_snapshots() {
+        let dir = ui_trace_fixtures_dir();
+        let mut fixtures = fs::read_dir(&dir)
+            .unwrap_or_else(|err| {
+                panic!("failed to read ui trace directory {}: {err}", dir.display())
+            })
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+            .collect::<Vec<_>>();
+        fixtures.sort();
+        assert!(
+            !fixtures.is_empty(),
+            "expected at least one ui trace fixture in {}",
+            dir.display()
+        );
+        for fixture in fixtures {
+            run_ui_trace_fixture(&fixture);
+        }
+    }
+
+    #[test]
+    fn ui_harness_renders_streamed_turn_end_to_end() {
+        let mut harness = UiHarness::new(50, 14);
+        harness.user_turn("write a poem");
+        harness.start_turn();
+        harness.dispatch_event(SessionEvent::LlmRequest {
+            iteration: 0,
+            message_count: 1,
+            tool_list: "read_file, shell".to_string(),
+        });
+        harness.dispatch_event(SessionEvent::TextDelta {
+            content: "A short line.\nAnother line.".to_string(),
+        });
+
+        let screen = harness.render();
+        let lines = screen.non_empty_visible_lines();
+        assert!(lines.iter().any(|line| line.contains("write a poem")));
+        assert!(lines.iter().any(|line| line.contains("A short line.")));
+        assert!(lines.iter().any(|line| line.contains("Another line.")));
+    }
+
+    #[test]
+    fn ui_harness_intercepts_prompt_and_renders_overlay() {
+        let mut harness = UiHarness::new(60, 16);
+        let rx = harness.emit_prompt(
+            PromptRequest::single("Pick one", vec!["Alpha".into(), "Beta".into()])
+                .with_optional_note(),
+        );
+        harness.app.prompt_down();
+        harness.app.prompt_toggle_note_focus();
+        harness.app.prompt_insert_text("because");
+
+        let screen = harness.render();
+        let lines = screen.non_empty_visible_lines();
+        assert!(harness.app.has_prompt());
+        assert!(lines.iter().any(|line| line.contains("because")));
+
+        let display = harness.take_prompt_response().expect("prompt display");
+        assert!(display.contains("2. Beta"));
+        let response = rx.recv().expect("prompt response");
+        assert_eq!(
+            response,
+            PromptResponse::Single {
+                selection: "Beta".to_string(),
+                note: Some("because".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn ui_harness_renders_inline_ask_panel_end_to_end() {
+        let mut harness = UiHarness::new(68, 20);
+        harness.user_turn("ask me");
+        harness.dispatch_event(SessionEvent::ToolCall {
+            call_id: Some("call-1".into()),
+            name: "ask".into(),
+            args: json!({
+                "question": "Pick one",
+                "options": ["Alpha", "Beta", "Gamma"],
+            }),
+            result: json!({
+                "kind": "single",
+                "selection": "Beta",
+                "note": "because",
+            }),
+            success: true,
+            duration_ms: 12,
+        });
+
+        let screen = harness.render();
+        let lines = screen.non_empty_visible_lines();
+        assert!(lines.iter().any(|line| line.contains("QUESTION")));
+        assert!(lines.iter().any(|line| line.contains("Pick one")));
+        assert!(lines.iter().any(|line| line.contains("◉ 2. Beta")));
+        assert!(lines.iter().any(|line| line.contains("Note · because")));
+    }
+
+    #[test]
+    fn ui_harness_renders_queue_preview_sections_end_to_end() {
+        let mut harness = UiHarness::new(72, 18);
+        harness
+            .app
+            .queue_pending_steer(PreparedTurn::new("after tool do this".into(), Vec::new()));
+        harness.queue_turn("queued follow-up one");
+        harness.queue_turn("queued follow-up two");
+        harness.queue_turn("queued follow-up three");
+
+        let screen = harness.render();
+        let lines = screen.non_empty_visible_lines();
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("after next tool/result"))
+        );
+        assert!(lines.iter().any(|line| line.contains("after tool do this")));
+        assert!(lines.iter().any(|line| line.contains("next full turn · 3")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("queued follow-up one"))
+        );
+        assert!(lines.iter().any(|line| line.contains("+1 more")));
+    }
+
+    #[test]
+    fn ui_harness_renders_plugin_panel_and_mode_indicator_end_to_end() {
+        let mut harness = UiHarness::new(72, 20);
+        harness.dispatch_event(SessionEvent::PluginEvent {
+            plugin_id: "plan_mode".into(),
+            event: PluginSurfaceEvent::ModeIndicatorUpsert {
+                key: "status".into(),
+                label: "PLAN".into(),
+            },
+        });
+        harness.dispatch_event(SessionEvent::PluginEvent {
+            plugin_id: "plan_mode".into(),
+            event: PluginSurfaceEvent::PanelUpsert {
+                key: "board".into(),
+                title: "TASK BOARD".into(),
+                content: "- First\n- Second".into(),
+            },
+        });
+
+        let screen = harness.render();
+        let lines = screen.visible_lines_trimmed();
+
+        assert!(lines.iter().any(|line| line.contains("TASK BOARD")));
+        assert!(lines.iter().any(|line| line.contains("First")));
+        assert!(lines.iter().any(|line| line.contains("Second")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("PLAN · test-session"))
+        );
+    }
+
+    #[test]
+    fn ui_harness_scroll_and_follow_behaves_end_to_end() {
+        let mut harness = UiHarness::new(36, 12);
+        harness.user_turn("write lines");
+        harness.start_turn();
+        harness.dispatch_event(SessionEvent::LlmRequest {
+            iteration: 0,
+            message_count: 1,
+            tool_list: "read_file".into(),
+        });
+        harness.dispatch_event(SessionEvent::TextDelta {
+            content: (0..10)
+                .map(|idx| format!("line {idx}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        });
+        harness.render();
+        harness.dispatch_event(SessionEvent::TextDelta {
+            content: (10..18)
+                .map(|idx| format!("\nline {idx}"))
+                .collect::<String>(),
+        });
+
+        let followed = harness.render().visible_lines_trimmed();
+        assert!(followed.iter().any(|line| line.contains("line 17")));
+        assert!(
+            !followed.iter().any(|line| line.contains("line 0")),
+            "tail-follow should keep the newest streamed text visible"
+        );
+
+        harness.app.scroll_up(4);
+        let scrolled = harness.render().visible_lines_trimmed();
+        assert!(
+            !scrolled.iter().any(|line| line.contains("line 17")),
+            "manual scroll should pause tail-follow"
+        );
+        let anchored_line = scrolled
+            .iter()
+            .find(|line| line.contains("line "))
+            .cloned()
+            .expect("older visible line after scrolling");
+
+        harness.dispatch_event(SessionEvent::TextDelta {
+            content: "\nline 18\nline 19".into(),
+        });
+        let paused = harness.render().visible_lines_trimmed();
+        assert!(paused.iter().any(|line| line == &anchored_line));
+        assert!(!paused.iter().any(|line| line.contains("line 19")));
+
+        let viewport_height =
+            render::history_viewport_height(&harness.app, harness.width, harness.height);
+        harness
+            .app
+            .scroll_down(usize::MAX / 2, viewport_height, harness.width as usize);
+        let resumed = harness.render().visible_lines_trimmed();
+        assert!(resumed.iter().any(|line| line.contains("line 19")));
+    }
+
+    #[test]
+    fn ui_harness_first_visible_output_keeps_context_before_switching_to_tail_follow() {
+        let mut harness = UiHarness::new(44, 12);
+        harness.user_turn("write a very long answer please");
+        harness.start_turn();
+        harness.dispatch_event(SessionEvent::LlmRequest {
+            iteration: 0,
+            message_count: 1,
+            tool_list: String::new(),
+        });
+
+        let before = harness.render().visible_lines_trimmed();
+        assert!(
+            before
+                .iter()
+                .any(|line| line.contains("write a very long answer please"))
+        );
+
+        harness.dispatch_event(SessionEvent::TextDelta {
+            content: "first line\nsecond line\nthird line\nfourth line\nfifth line\nsixth line"
+                .into(),
+        });
+        let first_output = harness.render().visible_lines_trimmed();
+        let prompt_idx = line_index_containing(&first_output, "write a very long answer please")
+            .expect("prompt line");
+        let first_idx =
+            line_index_containing(&first_output, "first line").expect("first output line");
+        assert!(
+            prompt_idx < first_idx,
+            "prompt context should stay visible above first output"
+        );
+
+        harness.dispatch_event(SessionEvent::TextDelta {
+            content: "\nseventh line\neighth line\nninth line\ntenth line".into(),
+        });
+        let tailed = harness.render().visible_lines_trimmed();
+        assert!(tailed.iter().any(|line| line.contains("tenth line")));
     }
 }

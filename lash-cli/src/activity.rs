@@ -64,6 +64,7 @@ pub enum ActivityArtifact {
         title: String,
         items: Vec<String>,
     },
+    SnippetPreview(SnippetPreviewArtifact),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -85,6 +86,25 @@ pub struct QuestionPanelOption {
 pub enum QuestionPanelSelectionMode {
     Single,
     Multi,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnippetRenderMode {
+    Markdown,
+    Code,
+    Text,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SnippetPreviewArtifact {
+    pub title: Option<String>,
+    pub path: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub content: String,
+    pub render_mode: SnippetRenderMode,
+    pub language: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -606,6 +626,24 @@ impl ActivityState {
                     result,
                 }
             }
+            "showcase_snippet" => {
+                let artifact = snippet_preview_artifact(&result);
+                let summary =
+                    snippet_summary(&result).unwrap_or_else(|| semantic_tool_summary(name, &args));
+                ActivityBlock {
+                    kind: ActivityKind::GenericTool,
+                    status,
+                    tool_name: name.to_string(),
+                    summary,
+                    detail_lines: Vec::new(),
+                    duration_ms,
+                    args,
+                    result,
+                    artifact,
+                    children: Vec::new(),
+                    extra: None,
+                }
+            }
             // update_plan is filtered out in blocks_for_tool_call; this branch
             // is unreachable but kept as a guard.
             "update_plan" => ActivityBlock {
@@ -748,6 +786,19 @@ fn semantic_tool_summary(name: &str, args: &Value) -> String {
             .unwrap_or_else(|| "delegate task".to_string()),
         "agent_result" => "delegate done".to_string(),
         "agent_kill" => "delegate stopped".to_string(),
+        "showcase_snippet" => tool_arg_str(args, "path")
+            .map(|path| {
+                let start = args
+                    .get("start_line")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(1);
+                let end = args
+                    .get("end_line")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(start);
+                format!("showcase {}:{}-{}", compact_path_display(path), start, end)
+            })
+            .unwrap_or_else(|| "showcase snippet".to_string()),
         _ => name.replace('_', " "),
     }
 }
@@ -1023,6 +1074,46 @@ fn text_preview_artifact(title: Option<&str>, result: &Value) -> Option<Activity
         title: title.map(str::to_string),
         text,
     })
+}
+
+fn snippet_preview_artifact(result: &Value) -> Option<ActivityArtifact> {
+    let path = result.get("path").and_then(|value| value.as_str())?;
+    let start_line = result.get("start_line").and_then(|value| value.as_u64())? as usize;
+    let end_line = result.get("end_line").and_then(|value| value.as_u64())? as usize;
+    let content = result.get("content").and_then(|value| value.as_str())?;
+    let render_mode = match result.get("render_mode").and_then(|value| value.as_str()) {
+        Some("markdown") => SnippetRenderMode::Markdown,
+        Some("code") => SnippetRenderMode::Code,
+        _ => SnippetRenderMode::Text,
+    };
+    Some(ActivityArtifact::SnippetPreview(SnippetPreviewArtifact {
+        title: result
+            .get("title")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        path: path.to_string(),
+        start_line,
+        end_line,
+        content: content.to_string(),
+        render_mode,
+        language: result
+            .get("language")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+    }))
+}
+
+fn snippet_summary(result: &Value) -> Option<String> {
+    let path = result.get("path").and_then(|value| value.as_str())?;
+    let start_line = result.get("start_line").and_then(|value| value.as_u64())?;
+    let end_line = result.get("end_line").and_then(|value| value.as_u64())?;
+    Some(format!(
+        "showcase {}:{}-{}",
+        compact_path_display(path),
+        start_line,
+        end_line
+    ))
 }
 
 fn tool_result_handle_id(result: &Value) -> Option<&str> {
@@ -1535,18 +1626,21 @@ mod tests {
                 "added": 3,
                 "removed": 1,
                 "files": [{
-                    "path": "lash-cli/src/ui.rs",
+                    "path": "lash-cli/src/render/mod.rs",
                     "status": "modified",
                     "added": 3,
                     "removed": 1,
-                    "diff": "--- a/lash-cli/src/ui.rs\n+++ b/lash-cli/src/ui.rs\n@@\n-old\n+new"
+                    "diff": "--- a/lash-cli/src/render/mod.rs\n+++ b/lash-cli/src/render/mod.rs\n@@\n-old\n+new"
                 }]
             }),
             true,
             18,
         );
 
-        assert_eq!(blocks[0].summary, "Edited lash-cli/src/ui.rs (+3 -1)");
+        assert_eq!(
+            blocks[0].summary,
+            "Edited lash-cli/src/render/mod.rs (+3 -1)"
+        );
         assert!(matches!(
             blocks[0].artifact,
             Some(ActivityArtifact::PatchPreview {
@@ -1748,7 +1842,7 @@ mod tests {
         let mut state = ActivityState::default();
         let path = std::env::current_dir()
             .expect("cwd")
-            .join("lash-cli/src/ui.rs");
+            .join("lash-cli/src/render/mod.rs");
         let blocks = state.blocks_for_tool_call(
             "read_file",
             json!({ "path": path }),
@@ -1758,7 +1852,10 @@ mod tests {
         );
 
         assert_eq!(blocks[0].summary, "EXPLORE · 1 step");
-        assert_eq!(blocks[0].detail_lines, vec!["Read lash-cli/src/ui.rs"]);
+        assert_eq!(
+            blocks[0].detail_lines,
+            vec!["Read lash-cli/src/render/mod.rs"]
+        );
     }
 
     #[test]
@@ -1766,7 +1863,7 @@ mod tests {
         let mut state = ActivityState::default();
         let path = std::env::current_dir()
             .expect("cwd")
-            .join("lash-cli/src/ui.rs");
+            .join("lash-cli/src/render/mod.rs");
         let blocks = state.blocks_for_tool_call(
             "grep",
             json!({ "pattern": "render_activity_block", "path": path }),
@@ -1777,8 +1874,47 @@ mod tests {
 
         assert_eq!(
             blocks[0].detail_lines,
-            vec!["Search \"render_activity_block\" in lash-cli/src/ui.rs"]
+            vec!["Search \"render_activity_block\" in lash-cli/src/render/mod.rs"]
         );
+    }
+
+    #[test]
+    fn showcase_snippet_builds_snippet_preview_artifact() {
+        let mut state = ActivityState::default();
+        let blocks = state.blocks_for_tool_call(
+            "showcase_snippet",
+            json!({
+                "path": "lash-cli/src/render/mod.rs",
+                "start_line": 12,
+                "end_line": 14
+            }),
+            json!({
+                "path": "lash-cli/src/render/mod.rs",
+                "start_line": 12,
+                "end_line": 14,
+                "title": "Queue preview",
+                "content": "fn one() {}\nfn two() {}",
+                "render_mode": "code",
+                "language": "rs"
+            }),
+            true,
+            5,
+        );
+
+        assert_eq!(
+            blocks[0].summary,
+            "showcase lash-cli/src/render/mod.rs:12-14"
+        );
+        assert!(matches!(
+            blocks[0].artifact,
+            Some(ActivityArtifact::SnippetPreview(SnippetPreviewArtifact {
+                title: Some(ref title),
+                start_line: 12,
+                end_line: 14,
+                render_mode: SnippetRenderMode::Code,
+                ..
+            })) if title == "Queue preview"
+        ));
     }
 
     #[test]
@@ -1912,13 +2048,13 @@ mod tests {
         let mut state = ActivityState::default();
         let blocks = state.blocks_for_tool_call(
             "search_web",
-            json!({ "query": "ratatui queue preview" }),
+            json!({ "query": "terminal queue preview" }),
             json!({
-                "answer": "Queue preview rendering is discussed in the ratatui docs.",
+                "answer": "Queue preview rendering is discussed in the terminal docs.",
                 "results": [
                     {
-                        "title": "Ratatui queue preview guide",
-                        "url": "https://ratatui.rs/guide/queue-preview",
+                        "title": "Terminal queue preview guide",
+                        "url": "https://example.com/guide/queue-preview",
                         "content": "..."
                     }
                 ]
@@ -1930,13 +2066,13 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert_eq!(
             blocks[0].summary,
-            "searched web for \"ratatui queue preview\""
+            "searched web for \"terminal queue preview\""
         );
         assert_eq!(
             blocks[0].detail_lines,
             vec![
-                "Answer Queue preview rendering is discussed in the ratatui docs.".to_string(),
-                "Ratatui queue preview guide · ratatui.rs/guide/queue-preview".to_string()
+                "Answer Queue preview rendering is discussed in the terminal docs.".to_string(),
+                "Terminal queue preview guide · example.com/guide/queue-preview".to_string()
             ]
         );
     }

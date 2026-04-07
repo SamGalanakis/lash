@@ -123,12 +123,78 @@ jobs:
           name: ${{ matrix.asset_name }}
           path: dist/${{ matrix.asset_name }}
 
+  ui-perf:
+    name: UI Perf
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Run synthetic UI performance benchmark
+        run: |
+          python3 scripts/profile_ui.py --build --release --runs 5 --warmups 1 --out .benchmarks/ui-perf/ci.json
+
+      - name: Publish UI performance summary
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report = json.loads(Path(".benchmarks/ui-perf/ci.json").read_text())
+          summary = report["summary"]
+
+          def metric(name, unit="ms"):
+              item = summary[name]
+              return (
+                  f"- `{name}`: min `{item['min']}{unit}`, "
+                  f"median `{item['median']}{unit}`, max `{item['max']}{unit}`, "
+                  f"mean `{item['mean']}{unit}`"
+              )
+
+          lines = [
+              "## UI Perf",
+              "",
+              f"- viewport: `{report['width']}x{report['height']}`",
+              f"- turns: `{report['turn_count']}`",
+              f"- measured runs: `{report['runs']}`",
+              metric("build_case_ms"),
+              metric("initial_render_ms"),
+              metric("height_cache_rebuild_ms"),
+              metric("scroll_render_avg_ms"),
+              metric("scroll_render_max_ms"),
+              metric("selection_render_avg_ms"),
+              metric("selection_render_max_ms"),
+          ]
+          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text("\n".join(lines) + "\n")
+          PY
+
+      - name: Upload UI performance artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-perf
+          path: .benchmarks/ui-perf/ci.json
+
   prepare-release:
     name: Prepare release
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[skip ci]')
     needs:
       - test
       - build-release-assets
+      - ui-perf
     runs-on: ubuntu-latest
     concurrency:
       group: lash-release-main

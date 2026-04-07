@@ -1,0 +1,10 @@
+[package]
+name = "lash-tui"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+crossterm = "0.28"
+unicode-width = "0.2"

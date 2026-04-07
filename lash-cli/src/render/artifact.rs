@@ -1,0 +1,549 @@
+use super::*;
+
+pub(super) fn render_question_panel_artifact(
+    panel: &QuestionPanelArtifact,
+    lines: &mut Vec<Line<'static>>,
+    viewport_width: usize,
+) {
+    render_bordered_styled_block(
+        "QUESTION",
+        &question_panel_lines(panel),
+        lines,
+        viewport_width,
+        Style::default().fg(theme::ASH),
+        Style::default()
+            .fg(theme::SODIUM)
+            .add_modifier(Modifier::Bold),
+        styled_question_chunk,
+    );
+}
+
+pub(super) fn render_snippet_preview(
+    preview: &SnippetPreviewArtifact,
+    lines: &mut Vec<Line<'static>>,
+    viewport_width: usize,
+) {
+    let title = preview.title.as_deref().unwrap_or("SNIPPET");
+    lines.push(prompt::prompt_section_label(title, viewport_width));
+    push_wrapped_styled_chunks(
+        lines,
+        &snippet_meta_line(preview),
+        viewport_width,
+        |chunk| styled_snippet_chunk(chunk, theme::assistant_text(), preview.language.as_deref()),
+    );
+    lines.push(Line::from(""));
+    match preview.render_mode {
+        SnippetRenderMode::Markdown => {
+            if !preview.content.trim().is_empty() {
+                lines.extend(markdown::render_markdown_compact(
+                    &preview.content,
+                    viewport_width,
+                ));
+            }
+        }
+        SnippetRenderMode::Code => {
+            render_line_numbered_snippet_block(
+                preview,
+                lines,
+                viewport_width,
+                theme::code_content(),
+            );
+        }
+        SnippetRenderMode::Text => {
+            render_line_numbered_snippet_block(
+                preview,
+                lines,
+                viewport_width,
+                theme::system_output(),
+            );
+        }
+    }
+}
+
+pub(super) fn render_plan_block(
+    content: &str,
+    lines: &mut Vec<Line<'static>>,
+    viewport_width: usize,
+) {
+    let content_lines = content.lines().map(str::to_string).collect::<Vec<_>>();
+    render_bordered_styled_block(
+        "PLAN",
+        &content_lines,
+        lines,
+        viewport_width,
+        Style::default().fg(theme::ASH),
+        Style::default()
+            .fg(theme::SODIUM)
+            .add_modifier(Modifier::Bold),
+        styled_plan_chunk,
+    );
+}
+
+pub(super) fn render_section_panel_block(
+    title_text: &str,
+    content: &str,
+    lines: &mut Vec<Line<'static>>,
+    viewport_width: usize,
+) {
+    lines.push(prompt::prompt_section_label(title_text, viewport_width));
+    if !content.trim().is_empty() {
+        lines.push(Line::from(""));
+        lines.extend(markdown::render_markdown(content, viewport_width));
+    }
+}
+
+#[cfg(test)]
+pub(super) fn styled_snippet_chunk_for_test(
+    chunk: &str,
+    content_style: Style,
+    language: Option<&str>,
+) -> Vec<Span<'static>> {
+    styled_snippet_chunk(chunk, content_style, language)
+}
+
+fn question_panel_lines(panel: &QuestionPanelArtifact) -> Vec<String> {
+    let mut lines = panel.prompt_lines.clone();
+    for (idx, option) in panel.options.iter().enumerate() {
+        let marker = match panel.selection_mode {
+            Some(QuestionPanelSelectionMode::Multi) => {
+                if option.selected {
+                    "☑"
+                } else {
+                    "☐"
+                }
+            }
+            _ => {
+                if option.selected {
+                    "◉"
+                } else {
+                    "○"
+                }
+            }
+        };
+        lines.push(format!("{marker} {}. {}", idx + 1, option.label));
+    }
+    if let Some(answer) = panel.answer.as_deref().filter(|value| !value.is_empty()) {
+        lines.push(format!("Answer · {answer}"));
+    }
+    if let Some(note) = panel.note.as_deref().filter(|value| !value.is_empty()) {
+        lines.push(format!("Note · {note}"));
+    }
+    lines
+}
+
+fn styled_question_chunk(chunk: &str) -> Vec<Span<'static>> {
+    if let Some(rest) = chunk.strip_prefix("Answer · ") {
+        return vec![
+            Span::styled(
+                "Answer",
+                Style::default()
+                    .fg(theme::LICHEN)
+                    .add_modifier(Modifier::Bold),
+            ),
+            Span::styled(" · ", Style::default().fg(theme::ASH_MID)),
+            Span::styled(rest.to_string(), theme::assistant_text()),
+        ];
+    }
+    if let Some(rest) = chunk.strip_prefix("Note · ") {
+        return vec![
+            Span::styled(
+                "Note",
+                Style::default()
+                    .fg(theme::LICHEN)
+                    .add_modifier(Modifier::Bold),
+            ),
+            Span::styled(" · ", Style::default().fg(theme::ASH_MID)),
+            Span::styled(rest.to_string(), theme::assistant_text()),
+        ];
+    }
+    for (marker, selected) in [("◉ ", true), ("○ ", false), ("☑ ", true), ("☐ ", false)] {
+        if let Some(rest) = chunk.strip_prefix(marker) {
+            let marker_style = if selected {
+                Style::default()
+                    .fg(theme::LICHEN)
+                    .add_modifier(Modifier::Bold)
+            } else {
+                Style::default().fg(theme::ASH_MID)
+            };
+            let text_style = if selected {
+                theme::assistant_text().add_modifier(Modifier::Bold)
+            } else {
+                theme::assistant_text()
+            };
+            return vec![
+                Span::styled(marker.to_string(), marker_style),
+                Span::styled(rest.to_string(), text_style),
+            ];
+        }
+    }
+    if let Some((num, rest)) = chunk.split_once(". ")
+        && num.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return vec![
+            Span::styled(
+                format!("{num}."),
+                Style::default()
+                    .fg(theme::SODIUM)
+                    .add_modifier(Modifier::Bold),
+            ),
+            Span::raw(" "),
+            Span::styled(rest.to_string(), theme::assistant_text()),
+        ];
+    }
+    vec![Span::styled(chunk.to_string(), theme::assistant_text())]
+}
+
+fn styled_plan_chunk(chunk: &str) -> Vec<Span<'static>> {
+    if let Some(rest) = chunk.strip_prefix("✓ ") {
+        return vec![
+            Span::styled("✓", theme::plan_done_marker()),
+            Span::raw(" "),
+            Span::styled(rest.to_string(), theme::assistant_text()),
+        ];
+    }
+    if let Some(rest) = chunk.strip_prefix("▸ ") {
+        return vec![
+            Span::styled("▸", theme::plan_active_marker()),
+            Span::raw(" "),
+            Span::styled(rest.to_string(), theme::assistant_text()),
+        ];
+    }
+    if let Some(rest) = chunk.strip_prefix("○ ") {
+        return vec![
+            Span::styled("○", theme::plan_pending_marker()),
+            Span::raw(" "),
+            Span::styled(rest.to_string(), theme::assistant_text()),
+        ];
+    }
+    vec![Span::styled(chunk.to_string(), theme::assistant_text())]
+}
+
+fn render_line_numbered_snippet_block(
+    preview: &SnippetPreviewArtifact,
+    lines: &mut Vec<Line<'static>>,
+    viewport_width: usize,
+    text_style: Style,
+) {
+    let line_number_width = preview.end_line.to_string().len().max(2);
+    if preview.content.is_empty() {
+        push_wrapped_styled_chunks(
+            lines,
+            &format!(
+                "{:>width$} │ ",
+                preview.start_line,
+                width = line_number_width
+            ),
+            viewport_width,
+            |chunk| styled_snippet_chunk(chunk, text_style, preview.language.as_deref()),
+        );
+    } else {
+        for (offset, line) in preview.content.lines().enumerate() {
+            push_wrapped_styled_chunks(
+                lines,
+                &format!(
+                    "{:>width$} │ {}",
+                    preview.start_line + offset,
+                    line,
+                    width = line_number_width
+                ),
+                viewport_width,
+                |chunk| styled_snippet_chunk(chunk, text_style, preview.language.as_deref()),
+            );
+        }
+    }
+}
+
+fn push_wrapped_styled_chunks<F>(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    viewport_width: usize,
+    mut style_chunk: F,
+) where
+    F: FnMut(&str) -> Vec<Span<'static>>,
+{
+    let segments = if text.is_empty() {
+        vec![(0usize, 0usize)]
+    } else {
+        text_layout::wrap_text_ranges_wordwise(text, viewport_width.max(1))
+    };
+    for (start, end) in segments {
+        let chunk = if text.is_empty() {
+            String::new()
+        } else {
+            text[start..end].to_string()
+        };
+        lines.push(Line::from(style_chunk(&chunk)));
+    }
+}
+
+fn snippet_meta_line(preview: &SnippetPreviewArtifact) -> String {
+    let mut line = format!(
+        "File · {}:{}-{}",
+        preview.path, preview.start_line, preview.end_line
+    );
+    if let Some(language) = preview.language.as_deref() {
+        line.push_str(" · ");
+        line.push_str(language);
+    }
+    line
+}
+
+fn styled_snippet_chunk(
+    chunk: &str,
+    content_style: Style,
+    language: Option<&str>,
+) -> Vec<Span<'static>> {
+    if let Some(rest) = chunk.strip_prefix("File · ") {
+        return vec![
+            Span::styled("File", theme::code_header()),
+            Span::styled(" · ", Style::default().fg(theme::ASH_MID)),
+            Span::styled(rest.to_string(), theme::assistant_text()),
+        ];
+    }
+    if let Some((prefix, rest)) = chunk.split_once("│")
+        && prefix.trim().chars().all(|ch| ch.is_ascii_digit())
+    {
+        let mut spans = vec![
+            Span::styled(prefix.to_string(), theme::code_chrome()),
+            Span::styled("│", theme::code_chrome()),
+        ];
+        if language.is_some() && content_style == theme::code_content() {
+            spans.extend(highlight_code_snippet(rest, language));
+        } else {
+            spans.push(Span::styled(rest.to_string(), content_style));
+        }
+        return spans;
+    }
+    vec![Span::styled(chunk.to_string(), content_style)]
+}
+
+fn highlight_code_snippet(text: &str, language: Option<&str>) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut cursor = 0usize;
+
+    while cursor < text.len() {
+        if comment_marker_at(text, cursor, language).is_some() {
+            push_styled_chunk(&mut spans, &text[cursor..], theme::code_comment());
+            break;
+        }
+
+        let ch = text[cursor..]
+            .chars()
+            .next()
+            .expect("slice should start on char boundary");
+        let next = cursor + ch.len_utf8();
+
+        if matches!(ch, '"' | '\'' | '`') {
+            let end = string_end(text, cursor, ch);
+            push_styled_chunk(&mut spans, &text[cursor..end], theme::code_string());
+            cursor = end;
+            continue;
+        }
+
+        if ch.is_ascii_alphabetic() || ch == '_' {
+            let end = identifier_end(text, cursor);
+            let word = &text[cursor..end];
+            let style = if is_code_keyword(word, language) {
+                theme::code_keyword()
+            } else {
+                theme::code_content()
+            };
+            push_styled_chunk(&mut spans, word, style);
+            cursor = end;
+            continue;
+        }
+
+        push_styled_chunk(&mut spans, &text[cursor..next], theme::code_content());
+        cursor = next;
+    }
+
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), theme::code_content()));
+    }
+    spans
+}
+
+fn push_styled_chunk(spans: &mut Vec<Span<'static>>, text: &str, style: Style) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(last) = spans.last_mut()
+        && last.style == style
+    {
+        last.content.to_mut().push_str(text);
+        return;
+    }
+    spans.push(Span::styled(text.to_string(), style));
+}
+
+fn comment_marker_at(text: &str, idx: usize, language: Option<&str>) -> Option<&'static str> {
+    let markers = match language.unwrap_or_default() {
+        "py" | "sh" | "bash" | "zsh" | "fish" | "yaml" | "toml" | "rb" | "nix" => &["#"][..],
+        "sql" => &["--"][..],
+        "html" => &["<!--"][..],
+        _ => &["//", "#"][..],
+    };
+    markers
+        .iter()
+        .copied()
+        .find(|marker| text[idx..].starts_with(marker))
+}
+
+fn string_end(text: &str, start: usize, quote: char) -> usize {
+    let mut escaped = false;
+    let mut idx = start + quote.len_utf8();
+    while idx < text.len() {
+        let ch = text[idx..]
+            .chars()
+            .next()
+            .expect("slice should start on char boundary");
+        idx += ch.len_utf8();
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote != '`' {
+            escaped = true;
+            continue;
+        }
+        if ch == quote {
+            break;
+        }
+    }
+    idx
+}
+
+fn identifier_end(text: &str, start: usize) -> usize {
+    let mut idx = start;
+    while idx < text.len() {
+        let ch = text[idx..]
+            .chars()
+            .next()
+            .expect("slice should start on char boundary");
+        if !(ch.is_ascii_alphanumeric() || ch == '_') {
+            break;
+        }
+        idx += ch.len_utf8();
+    }
+    idx
+}
+
+fn is_code_keyword(word: &str, language: Option<&str>) -> bool {
+    let word = word.trim();
+    if word.is_empty() {
+        return false;
+    }
+    match language.unwrap_or_default() {
+        "py" => matches!(
+            word,
+            "def"
+                | "class"
+                | "import"
+                | "from"
+                | "return"
+                | "if"
+                | "elif"
+                | "else"
+                | "for"
+                | "while"
+                | "try"
+                | "except"
+                | "with"
+                | "as"
+                | "async"
+                | "await"
+                | "pass"
+                | "yield"
+                | "True"
+                | "False"
+                | "None"
+                | "in"
+                | "is"
+        ),
+        "sh" | "bash" | "zsh" | "fish" => matches!(
+            word,
+            "if" | "then"
+                | "else"
+                | "fi"
+                | "for"
+                | "do"
+                | "done"
+                | "case"
+                | "esac"
+                | "function"
+                | "in"
+                | "while"
+        ),
+        "sql" => matches!(
+            word.to_ascii_uppercase().as_str(),
+            "SELECT"
+                | "FROM"
+                | "WHERE"
+                | "JOIN"
+                | "LEFT"
+                | "RIGHT"
+                | "INNER"
+                | "OUTER"
+                | "INSERT"
+                | "UPDATE"
+                | "DELETE"
+                | "CREATE"
+                | "ALTER"
+                | "DROP"
+                | "GROUP"
+                | "ORDER"
+                | "BY"
+                | "LIMIT"
+                | "AND"
+                | "OR"
+                | "NOT"
+                | "AS"
+        ),
+        _ => matches!(
+            word,
+            "fn" | "let"
+                | "mut"
+                | "pub"
+                | "impl"
+                | "struct"
+                | "enum"
+                | "trait"
+                | "async"
+                | "await"
+                | "if"
+                | "else"
+                | "match"
+                | "for"
+                | "while"
+                | "loop"
+                | "return"
+                | "use"
+                | "mod"
+                | "const"
+                | "static"
+                | "class"
+                | "interface"
+                | "function"
+                | "def"
+                | "import"
+                | "export"
+                | "package"
+                | "new"
+                | "try"
+                | "catch"
+                | "throw"
+                | "throws"
+                | "null"
+                | "true"
+                | "false"
+                | "self"
+                | "super"
+                | "this"
+                | "where"
+                | "type"
+                | "extends"
+                | "implements"
+                | "yield"
+        ),
+    }
+}

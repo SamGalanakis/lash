@@ -1,0 +1,20 @@
+ lash · gpt-5.4
+                                        ██
+                     ──────────────────────────────
+
+
+TASK BOARD ────────────────────────────────────────────────────────────
+
+• First
+• Second
+
+◆ after next tool/result
+  ↳ after tool do this
+
+◇ next full turn · 3
+  ↳ queued follow-up one
+  ↳ queued follow-up two
+    +1 more
+────────────────────────────────────────────────────────────────────────
+ ❯
+───────────────────────────────────PLAN · test-session · lash · staging─

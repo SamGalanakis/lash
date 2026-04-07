@@ -1,4 +1,4 @@
-use ratatui::text::{Line, Span};
+use lash_tui::{Span, Style};
 use unicode_width::UnicodeWidthStr;
 
 /// Insert zero-width non-joiners between common programming-ligature trigger runs.
@@ -30,16 +30,9 @@ pub fn visible_width(text: &str) -> usize {
     UnicodeWidthStr::width(strip_invisible_shaping_controls(text).as_str())
 }
 
-pub fn line_visible_width(line: &Line<'_>) -> usize {
-    line.spans
-        .iter()
-        .map(|span| visible_width(span.content.as_ref()))
-        .sum()
-}
-
 pub fn sanitize_span<'a>(
     content: impl Into<std::borrow::Cow<'a, str>>,
-    style: ratatui::style::Style,
+    style: Style,
 ) -> Span<'static> {
     Span::styled(neutralize_ligatures(content.into().as_ref()), style)
 }

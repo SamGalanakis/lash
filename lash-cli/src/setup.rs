@@ -1,19 +1,13 @@
 use std::collections::BTreeSet;
+use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use lash::oauth;
 use lash::provider::{LashConfig, Provider, ProviderKind};
-use ratatui::{
-    Frame,
-    layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Paragraph},
-};
+use lash_tui::{Frame, Line, Modifier, Rect, Span, Style, Terminal};
+use unicode_width::UnicodeWidthStr;
 
 use crate::theme;
-
-// ── State machine ───────────────────────────────────────────────────
 
 enum SetupStep {
     SelectProvider {
@@ -31,7 +25,7 @@ enum SetupStep {
     CodexDeviceAuth {
         user_code: String,
         device_auth_id: String,
-        interval: u64,
+        interval_secs: u64,
         error: Option<String>,
         copy_status: Option<String>,
     },
@@ -62,106 +56,108 @@ struct SetupApp {
 
 impl SetupApp {
     fn new(existing: Option<&LashConfig>) -> Self {
+        let active_kind = existing.map(LashConfig::active_provider_kind);
+        let selected = active_kind
+            .and_then(|kind| {
+                ProviderKind::ALL
+                    .iter()
+                    .position(|candidate| *candidate == kind)
+            })
+            .unwrap_or(0);
         Self {
-            step: SetupStep::SelectProvider { selected: 0 },
+            step: SetupStep::SelectProvider { selected },
             tick: 0,
             saved_kinds: existing
                 .map(|cfg| cfg.provider_kinds().into_iter().collect())
                 .unwrap_or_default(),
-            active_kind: existing.map(LashConfig::active_provider_kind),
+            active_kind,
         }
     }
 }
 
-// ── Public entry point ──────────────────────────────────────────────
-
 pub async fn run_setup_with_existing(existing: Option<&LashConfig>) -> anyhow::Result<LashConfig> {
-    // Enter alternate screen + raw mode
-    let mut terminal = ratatui::init();
-    crossterm::execute!(
-        std::io::stdout(),
-        crossterm::style::Print("\x1b]11;rgb:0e/0d/0b\x1b\\")
-    )?;
-
+    let mut terminal = Terminal::enter()?;
     let result = run_setup_inner(&mut terminal, existing).await;
-
-    // Restore terminal
-    crossterm::execute!(std::io::stdout(), crossterm::style::Print("\x1b]111\x1b\\"))?;
-    ratatui::restore();
-
+    terminal.restore();
     result
 }
 
 async fn run_setup_inner(
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut Terminal,
     existing: Option<&LashConfig>,
 ) -> anyhow::Result<LashConfig> {
     let existing_config = existing.cloned();
     let mut app = SetupApp::new(existing_config.as_ref());
     let mut provider: Option<Provider> = None;
-    let mut tavily_key: Option<String> =
-        existing.and_then(|c| c.tavily_api_key().map(str::to_string));
-    let existing_agent_models = existing.and_then(|c| c.agent_models.clone());
+    let mut tavily_key = existing.and_then(|cfg| cfg.tavily_api_key().map(str::to_string));
+    let existing_agent_models = existing.and_then(|cfg| cfg.agent_models.clone());
 
     loop {
         terminal.draw(|frame| draw_setup(frame, &app))?;
 
         if matches!(app.step, SetupStep::Done) {
-            // Show "Authenticated!" briefly
-            terminal.draw(|frame| draw_setup(frame, &app))?;
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            tokio::time::sleep(Duration::from_millis(350)).await;
             break;
         }
 
-        // For CodexDeviceAuth: poll with timeout then poll the device auth endpoint
-        if let SetupStep::CodexDeviceAuth {
-            device_auth_id,
-            user_code,
-            interval,
-            error,
-            copy_status,
-        } = &mut app.step
-        {
-            let poll_secs = *interval;
-            let poll_timeout = std::time::Duration::from_secs(poll_secs);
+        if matches!(app.step, SetupStep::CodexDeviceAuth { .. }) {
+            let interval_secs = match &app.step {
+                SetupStep::CodexDeviceAuth { interval_secs, .. } => *interval_secs,
+                _ => 1,
+            };
 
-            if event::poll(poll_timeout)? {
-                let ev = event::read()?;
-                if let Event::Key(key) = ev {
+            if event::poll(Duration::from_secs(interval_secs))? {
+                let event = event::read()?;
+                if let Event::Key(key) = event {
+                    if key.kind == KeyEventKind::Release {
+                        continue;
+                    }
                     if key.modifiers.contains(KeyModifiers::CONTROL)
                         && key.code == KeyCode::Char('c')
                     {
                         anyhow::bail!("Setup cancelled");
                     }
-                    if key.code == KeyCode::Esc {
-                        app.step = SetupStep::SelectProvider { selected: 0 };
-                        continue;
-                    }
-                    if key.code == KeyCode::Char('c') && !user_code.is_empty() {
-                        match copy_to_clipboard(user_code) {
-                            Ok(()) => {
-                                *copy_status = Some("Copied code to clipboard.".into());
+                    if let SetupStep::CodexDeviceAuth {
+                        user_code,
+                        error,
+                        copy_status,
+                        ..
+                    } = &mut app.step
+                    {
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.step = SetupStep::SelectProvider { selected: 0 };
                             }
-                            Err(copy_err) => {
-                                *error = Some(copy_err);
+                            KeyCode::Char('c') if !user_code.is_empty() => {
+                                *copy_status = None;
+                                match copy_to_clipboard(user_code) {
+                                    Ok(()) => {
+                                        *copy_status = Some("Copied code to clipboard.".into())
+                                    }
+                                    Err(err) => *error = Some(err),
+                                }
+                                app.tick += 1;
                             }
+                            _ => {}
                         }
-                        app.tick += 1;
-                        continue;
                     }
                 }
-                // Tick for spinner
                 app.tick += 1;
                 continue;
             }
 
-            // Timeout expired — poll the device auth endpoint
             app.tick += 1;
-            let did = device_auth_id.clone();
-            let uc = user_code.clone();
-            match oauth::codex_poll_device_auth(&did, &uc).await {
+            let (device_auth_id, user_code) = match &app.step {
+                SetupStep::CodexDeviceAuth {
+                    device_auth_id,
+                    user_code,
+                    ..
+                } => (device_auth_id.clone(), user_code.clone()),
+                _ => unreachable!(),
+            };
+
+            match oauth::codex_poll_device_auth(&device_auth_id, &user_code).await {
                 Ok(Some((auth_code, code_verifier))) => {
-                    // Exchange for tokens
                     match oauth::codex_exchange_code(&auth_code, &code_verifier).await {
                         Ok(tokens) => {
                             provider = Some(Provider::Codex {
@@ -180,26 +176,28 @@ async fn run_setup_inner(
                                 }
                             };
                         }
-                        Err(e) => {
-                            *error = Some(format!("{}", e));
+                        Err(err) => {
+                            if let SetupStep::CodexDeviceAuth { error, .. } = &mut app.step {
+                                *error = Some(err.to_string());
+                            }
                         }
                     }
                 }
-                Ok(None) => {
-                    // Still pending, continue polling
-                }
-                Err(e) => {
-                    *error = Some(format!("{}", e));
+                Ok(None) => {}
+                Err(err) => {
+                    if let SetupStep::CodexDeviceAuth { error, .. } = &mut app.step {
+                        *error = Some(err.to_string());
+                    }
                 }
             }
             continue;
         }
 
-        // Block until a key event (non-Codex steps)
-        let ev = event::read()?;
-        let Event::Key(key) = ev else { continue };
-
-        // Ctrl+C always quits
+        let event = event::read()?;
+        let Event::Key(key) = event else { continue };
+        if key.kind == KeyEventKind::Release {
+            continue;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             anyhow::bail!("Setup cancelled");
         }
@@ -221,18 +219,24 @@ async fn run_setup_inner(
                     {
                         provider = Some(saved);
                         app.active_kind = Some(kind);
-                        app.step = SetupStep::Done;
+                        app.step = if tavily_key.is_some() {
+                            SetupStep::Done
+                        } else {
+                            SetupStep::InputTavily {
+                                input: String::new(),
+                                cursor: 0,
+                            }
+                        };
                     } else {
-                        start_provider_flow(&mut app, kind).await;
+                        start_provider_flow(&mut app, kind, existing_config.as_ref()).await;
                     }
                 }
                 KeyCode::Char('r') => {
                     let kind = ProviderKind::ALL[*selected];
-                    start_provider_flow(&mut app, kind).await;
+                    start_provider_flow(&mut app, kind, existing_config.as_ref()).await;
                 }
                 _ => {}
             },
-
             SetupStep::InputCredential {
                 input,
                 cursor,
@@ -245,42 +249,10 @@ async fn run_setup_inner(
                 KeyCode::Esc => {
                     app.step = SetupStep::SelectProvider { selected: 0 };
                 }
-                KeyCode::Char(c) => {
-                    input.insert(*cursor, c);
-                    *cursor += c.len_utf8();
-                    *error = None;
-                }
-                KeyCode::Backspace => {
-                    if *cursor > 0 {
-                        let prev = input[..*cursor]
-                            .char_indices()
-                            .last()
-                            .map(|(i, _)| i)
-                            .unwrap_or(0);
-                        input.drain(prev..*cursor);
-                        *cursor = prev;
-                    }
-                }
-                KeyCode::Left => {
-                    if *cursor > 0 {
-                        *cursor = input[..*cursor]
-                            .char_indices()
-                            .last()
-                            .map(|(i, _)| i)
-                            .unwrap_or(0);
-                    }
-                }
-                KeyCode::Right => {
-                    if *cursor < input.len() {
-                        *cursor += input[*cursor..]
-                            .chars()
-                            .next()
-                            .map(|c| c.len_utf8())
-                            .unwrap_or(0);
-                    }
-                }
+                KeyCode::Backspace => delete_left(input, cursor),
+                KeyCode::Left => move_left(input, cursor),
+                KeyCode::Right => move_right(input, cursor),
                 KeyCode::Tab if *mode == CredentialMode::OpenAiGenericKey => {
-                    // Skip API key entirely
                     app.step = SetupStep::InputBaseUrl {
                         api_key: String::new(),
                         input: String::new(),
@@ -288,65 +260,62 @@ async fn run_setup_inner(
                     };
                 }
                 KeyCode::Enter => {
-                    let val = input.trim().to_string();
+                    let value = input.trim().to_string();
                     match mode {
                         CredentialMode::OpenAiGenericKey => {
-                            // API key may be empty (some endpoints don't need auth)
                             app.step = SetupStep::InputBaseUrl {
-                                api_key: val,
-                                input: String::new(),
-                                cursor: 0,
+                                api_key: value,
+                                input: existing_openai_base_url(existing_config.as_ref()),
+                                cursor: existing_openai_base_url(existing_config.as_ref()).len(),
                             };
                         }
                         CredentialMode::GoogleOAuth => {
-                            if val.is_empty() {
-                                *error = Some("Cannot be empty".into());
-                            } else {
-                                let Some(v) = verifier.take() else {
-                                    *error =
-                                        Some("Missing auth state; press Esc and retry.".into());
-                                    continue;
-                                };
-                                match oauth::google_exchange_code(&val, &v).await {
-                                    Ok(tokens) => {
-                                        provider = Some(Provider::GoogleOAuth {
-                                            access_token: tokens.access_token,
-                                            refresh_token: tokens.refresh_token,
-                                            expires_at: tokens.expires_at,
-                                            project_id: std::env::var("GOOGLE_CLOUD_PROJECT")
-                                                .ok()
-                                                .or_else(|| {
-                                                    std::env::var("GOOGLE_CLOUD_PROJECT_ID").ok()
-                                                }),
-                                            options: lash::provider::ProviderOptions::default(),
-                                        });
-                                        app.step = if tavily_key.is_some() {
-                                            SetupStep::Done
-                                        } else {
-                                            SetupStep::InputTavily {
-                                                input: String::new(),
-                                                cursor: 0,
-                                            }
-                                        };
-                                    }
-                                    Err(e) => {
-                                        *error = Some(format!("{}", e));
-                                        let (new_v, challenge) = oauth::generate_pkce();
-                                        match oauth::google_authorize_url(&challenge) {
-                                            Ok(url) => {
-                                                persist_oauth_url(&url);
-                                                *browser_error = open_browser(&url)
-                                                    .err()
-                                                    .map(|err| err.to_string());
-                                                *auth_url = Some(url);
-                                                *verifier = Some(new_v);
-                                            }
-                                            Err(auth_err) => {
-                                                *error = Some(format!("{}", auth_err));
-                                                *auth_url = None;
-                                                *browser_error = None;
-                                                *verifier = Some(new_v);
-                                            }
+                            if value.is_empty() {
+                                *error = Some("Authorization code cannot be empty.".into());
+                                continue;
+                            }
+                            let Some(verifier_value) = verifier.take() else {
+                                *error = Some("OAuth state expired. Press Esc and retry.".into());
+                                continue;
+                            };
+                            match oauth::google_exchange_code(&value, &verifier_value).await {
+                                Ok(tokens) => {
+                                    provider = Some(Provider::GoogleOAuth {
+                                        access_token: tokens.access_token,
+                                        refresh_token: tokens.refresh_token,
+                                        expires_at: tokens.expires_at,
+                                        project_id: std::env::var("GOOGLE_CLOUD_PROJECT")
+                                            .ok()
+                                            .or_else(|| {
+                                                std::env::var("GOOGLE_CLOUD_PROJECT_ID").ok()
+                                            }),
+                                        options: lash::provider::ProviderOptions::default(),
+                                    });
+                                    app.step = if tavily_key.is_some() {
+                                        SetupStep::Done
+                                    } else {
+                                        SetupStep::InputTavily {
+                                            input: String::new(),
+                                            cursor: 0,
+                                        }
+                                    };
+                                }
+                                Err(err) => {
+                                    *error = Some(err.to_string());
+                                    let (new_verifier, challenge) = oauth::generate_pkce();
+                                    match oauth::google_authorize_url(&challenge) {
+                                        Ok(url) => {
+                                            persist_oauth_url(&url);
+                                            *browser_error =
+                                                open_browser(&url).err().map(|e| e.to_string());
+                                            *auth_url = Some(url);
+                                            *verifier = Some(new_verifier);
+                                        }
+                                        Err(auth_err) => {
+                                            *auth_url = None;
+                                            *browser_error = None;
+                                            *verifier = Some(new_verifier);
+                                            *error = Some(auth_err.to_string());
                                         }
                                     }
                                 }
@@ -354,14 +323,13 @@ async fn run_setup_inner(
                         }
                     }
                 }
+                KeyCode::Char(ch) => {
+                    input.insert(*cursor, ch);
+                    *cursor += ch.len_utf8();
+                    *error = None;
+                }
                 _ => {}
             },
-
-            SetupStep::CodexDeviceAuth { .. } => {
-                // Handled by polling loop above; this branch is unreachable
-                unreachable!();
-            }
-
             SetupStep::InputBaseUrl {
                 api_key,
                 input,
@@ -370,43 +338,12 @@ async fn run_setup_inner(
                 KeyCode::Esc => {
                     app.step = SetupStep::SelectProvider { selected: 0 };
                 }
-                KeyCode::Char(c) => {
-                    input.insert(*cursor, c);
-                    *cursor += c.len_utf8();
-                }
-                KeyCode::Backspace => {
-                    if *cursor > 0 {
-                        let prev = input[..*cursor]
-                            .char_indices()
-                            .last()
-                            .map(|(i, _)| i)
-                            .unwrap_or(0);
-                        input.drain(prev..*cursor);
-                        *cursor = prev;
-                    }
-                }
-                KeyCode::Left => {
-                    if *cursor > 0 {
-                        *cursor = input[..*cursor]
-                            .char_indices()
-                            .last()
-                            .map(|(i, _)| i)
-                            .unwrap_or(0);
-                    }
-                }
-                KeyCode::Right => {
-                    if *cursor < input.len() {
-                        *cursor += input[*cursor..]
-                            .chars()
-                            .next()
-                            .map(|c| c.len_utf8())
-                            .unwrap_or(0);
-                    }
-                }
+                KeyCode::Backspace => delete_left(input, cursor),
+                KeyCode::Left => move_left(input, cursor),
+                KeyCode::Right => move_right(input, cursor),
                 KeyCode::Enter => {
                     let base_url = input.trim().to_string();
                     if base_url.is_empty() {
-                        // Base URL is required — there is no default
                         continue;
                     }
                     provider = Some(Provider::OpenAiGeneric {
@@ -423,68 +360,36 @@ async fn run_setup_inner(
                         }
                     };
                 }
+                KeyCode::Char(ch) => {
+                    input.insert(*cursor, ch);
+                    *cursor += ch.len_utf8();
+                }
                 _ => {}
             },
-
             SetupStep::InputTavily { input, cursor } => match key.code {
                 KeyCode::Esc => {
-                    // Skip tavily
                     tavily_key = None;
                     app.step = SetupStep::Done;
                 }
-                KeyCode::Char(c) => {
-                    input.insert(*cursor, c);
-                    *cursor += c.len_utf8();
-                }
-                KeyCode::Backspace => {
-                    if *cursor > 0 {
-                        let prev = input[..*cursor]
-                            .char_indices()
-                            .last()
-                            .map(|(i, _)| i)
-                            .unwrap_or(0);
-                        input.drain(prev..*cursor);
-                        *cursor = prev;
-                    }
-                }
-                KeyCode::Left => {
-                    if *cursor > 0 {
-                        *cursor = input[..*cursor]
-                            .char_indices()
-                            .last()
-                            .map(|(i, _)| i)
-                            .unwrap_or(0);
-                    }
-                }
-                KeyCode::Right => {
-                    if *cursor < input.len() {
-                        *cursor += input[*cursor..]
-                            .chars()
-                            .next()
-                            .map(|c| c.len_utf8())
-                            .unwrap_or(0);
-                    }
-                }
+                KeyCode::Backspace => delete_left(input, cursor),
+                KeyCode::Left => move_left(input, cursor),
+                KeyCode::Right => move_right(input, cursor),
                 KeyCode::Enter => {
-                    let val = input.trim().to_string();
-                    tavily_key = if val.is_empty() { None } else { Some(val) };
+                    let value = input.trim().to_string();
+                    tavily_key = if value.is_empty() { None } else { Some(value) };
                     app.step = SetupStep::Done;
+                }
+                KeyCode::Char(ch) => {
+                    input.insert(*cursor, ch);
+                    *cursor += ch.len_utf8();
                 }
                 _ => {}
             },
-
-            SetupStep::Done => {}
-        }
-
-        if matches!(app.step, SetupStep::Done) {
-            // Show "Authenticated!" briefly
-            terminal.draw(|frame| draw_setup(frame, &app))?;
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            break;
+            SetupStep::CodexDeviceAuth { .. } | SetupStep::Done => {}
         }
     }
 
-    let provider = provider.expect("provider must be set before Done");
+    let provider = provider.expect("provider must be selected before setup finishes");
     let mut config = existing_config.unwrap_or_else(|| LashConfig::new(provider.clone()));
     config.upsert_provider(provider.clone());
     config
@@ -495,25 +400,29 @@ async fn run_setup_inner(
     Ok(config)
 }
 
-async fn start_provider_flow(app: &mut SetupApp, kind: ProviderKind) {
+async fn start_provider_flow(
+    app: &mut SetupApp,
+    kind: ProviderKind,
+    existing: Option<&LashConfig>,
+) {
     match kind {
         ProviderKind::Codex => match oauth::codex_request_device_code().await {
-            Ok(dc) => {
+            Ok(device) => {
                 let _ = open_browser(oauth::CODEX_DEVICE_VERIFY_URL);
                 app.step = SetupStep::CodexDeviceAuth {
-                    user_code: dc.user_code,
-                    device_auth_id: dc.device_auth_id,
-                    interval: dc.interval,
+                    user_code: device.user_code,
+                    device_auth_id: device.device_auth_id,
+                    interval_secs: device.interval,
                     error: None,
                     copy_status: None,
                 };
             }
-            Err(e) => {
+            Err(err) => {
                 app.step = SetupStep::CodexDeviceAuth {
                     user_code: String::new(),
                     device_auth_id: String::new(),
-                    interval: 5,
-                    error: Some(format!("{}", e)),
+                    interval_secs: 5,
+                    error: Some(err.to_string()),
                     copy_status: None,
                 };
             }
@@ -523,7 +432,7 @@ async fn start_provider_flow(app: &mut SetupApp, kind: ProviderKind) {
             match oauth::google_authorize_url(&challenge) {
                 Ok(url) => {
                     persist_oauth_url(&url);
-                    let browser_error = open_browser(&url).err().map(|e| e.to_string());
+                    let browser_error = open_browser(&url).err().map(|err| err.to_string());
                     app.step = SetupStep::InputCredential {
                         input: String::new(),
                         cursor: 0,
@@ -534,11 +443,11 @@ async fn start_provider_flow(app: &mut SetupApp, kind: ProviderKind) {
                         mode: CredentialMode::GoogleOAuth,
                     };
                 }
-                Err(e) => {
+                Err(err) => {
                     app.step = SetupStep::InputCredential {
                         input: String::new(),
                         cursor: 0,
-                        error: Some(format!("{}", e)),
+                        error: Some(err.to_string()),
                         verifier: Some(verifier),
                         auth_url: None,
                         browser_error: None,
@@ -548,9 +457,10 @@ async fn start_provider_flow(app: &mut SetupApp, kind: ProviderKind) {
             }
         }
         ProviderKind::OpenAiGeneric => {
+            let existing_key = existing_openai_key(existing);
             app.step = SetupStep::InputCredential {
-                input: String::new(),
-                cursor: 0,
+                input: existing_key.clone(),
+                cursor: existing_key.len(),
                 error: None,
                 verifier: None,
                 auth_url: None,
@@ -561,65 +471,85 @@ async fn start_provider_flow(app: &mut SetupApp, kind: ProviderKind) {
     }
 }
 
-// ── Rendering ───────────────────────────────────────────────────────
+fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
+    let area = frame.area();
+    frame.clear(Style::default().bg(theme::FORM));
+    if area.width < 24 || area.height < 10 {
+        frame.write_text(
+            2,
+            2,
+            "Enlarge the terminal to continue setup.",
+            Style::default().fg(theme::CHALK_DIM),
+            area.width.saturating_sub(4),
+        );
+        return;
+    }
 
-fn draw_setup(frame: &mut Frame, app: &SetupApp) {
-    // Full background
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme::FORM)),
-        frame.area(),
+    draw_header(frame, area);
+    let panel = centered_rect(
+        area,
+        area.width.saturating_sub(12).min(86),
+        area.height.saturating_sub(8).min(24),
+    );
+    frame.draw_box(
+        panel,
+        Style::default().fg(theme::ASH_LIGHT),
+        Some(Style::default().bg(theme::FORM_DEEP)),
     );
 
-    let logo_height = 8; // 5 logo + 1 trailing slash + 1 scribe + 1 tagline
-
-    let step_height: u16 = match &app.step {
-        SetupStep::SelectProvider { .. } => 10, // blank + label + blank + 4 options + blank + help + pad
-        SetupStep::InputCredential { error, mode, .. } => match mode {
-            CredentialMode::OpenAiGenericKey => {
-                if error.is_some() {
-                    10
-                } else {
-                    8
-                }
-            }
-            CredentialMode::GoogleOAuth => {
-                if error.is_some() {
-                    12
-                } else {
-                    11
-                }
-            }
-        },
-        SetupStep::CodexDeviceAuth {
-            error, copy_status, ..
-        } => match (error.is_some(), copy_status.is_some()) {
-            (true, true) => 11,
-            (true, false) | (false, true) => 10,
-            (false, false) => 9,
-        },
-        SetupStep::InputBaseUrl { .. } => 8,
-        SetupStep::InputTavily { .. } => 7,
-        SetupStep::Done => 4,
-    };
-
-    let chunks = Layout::vertical([
-        Constraint::Min(0),              // top spacer
-        Constraint::Length(logo_height), // logo
-        Constraint::Length(step_height), // step content
-        Constraint::Min(0),              // bottom spacer
-    ])
-    .split(frame.area());
-
-    draw_logo(frame, chunks[1]);
-
     match &app.step {
-        SetupStep::SelectProvider { selected } => draw_provider_select(
-            frame,
-            chunks[2],
-            *selected,
-            &app.saved_kinds,
-            app.active_kind,
-        ),
+        SetupStep::SelectProvider { selected } => {
+            draw_panel_title(frame, panel, "Provider Setup");
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled("Select a provider. ", Style::default().fg(theme::CHALK)),
+                    Span::styled("Enter", theme::help_key()),
+                    Span::styled(
+                        " uses a saved login when one exists; ",
+                        Style::default().fg(theme::CHALK_DIM),
+                    ),
+                    Span::styled("r", theme::help_key()),
+                    Span::styled(" forces re-auth.", Style::default().fg(theme::CHALK_DIM)),
+                ]),
+                Line::from(""),
+            ];
+
+            for (idx, kind) in ProviderKind::ALL.iter().enumerate() {
+                let selected_marker = if *selected == idx { "▸" } else { " " };
+                let name_style = if *selected == idx {
+                    Style::default()
+                        .fg(theme::CHALK)
+                        .add_modifier(Modifier::Bold)
+                } else {
+                    Style::default().fg(theme::CHALK_DIM)
+                };
+                let mut meta = kind.setup_description().to_string();
+                if app.active_kind == Some(*kind) {
+                    meta.push_str(" · active");
+                } else if app.saved_kinds.contains(kind) {
+                    meta.push_str(" · saved");
+                }
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{selected_marker} "),
+                        Style::default()
+                            .fg(theme::SODIUM)
+                            .add_modifier(Modifier::Bold),
+                    ),
+                    Span::styled(format!("{:<22}", kind.setup_name()), name_style),
+                    Span::styled(meta, Style::default().fg(theme::ASH_TEXT)),
+                ]));
+            }
+
+            lines.push(Line::from(""));
+            lines.push(help_line(&[
+                ("↑↓", "move"),
+                ("enter", "select"),
+                ("r", "re-auth"),
+                ("ctrl+c", "quit"),
+            ]));
+            draw_lines(frame, inner_panel(panel), &lines);
+        }
         SetupStep::InputCredential {
             input,
             cursor,
@@ -628,575 +558,404 @@ fn draw_setup(frame: &mut Frame, app: &SetupApp) {
             browser_error,
             mode,
             ..
-        } => draw_credential_input(
-            frame,
-            chunks[2],
-            input,
-            *cursor,
-            error.as_deref(),
-            *mode,
-            auth_url.as_deref(),
-            browser_error.as_deref(),
-        ),
+        } => {
+            let (title, body, label, help) = match mode {
+                CredentialMode::GoogleOAuth => (
+                    "Google OAuth",
+                    google_auth_body(auth_url.as_deref(), browser_error.as_deref()),
+                    "Paste code or callback URL",
+                    vec![("enter", "submit"), ("esc", "back"), ("ctrl+c", "quit")],
+                ),
+                CredentialMode::OpenAiGenericKey => (
+                    "OpenAI-Compatible",
+                    vec!["Paste an API key, or press Tab to skip if your endpoint does not require one.".to_string()],
+                    "API key",
+                    vec![("enter", "next"), ("tab", "skip"), ("esc", "back"), ("ctrl+c", "quit")],
+                ),
+            };
+            draw_input_panel(
+                frame,
+                panel,
+                title,
+                &body,
+                label,
+                input,
+                *cursor,
+                error.as_deref(),
+                &help,
+            );
+        }
         SetupStep::CodexDeviceAuth {
             user_code,
             error,
             copy_status,
             ..
-        } => draw_codex_device_auth(
-            frame,
-            chunks[2],
-            user_code,
-            error.as_deref(),
-            copy_status.as_deref(),
-            app.tick,
-        ),
+        } => {
+            draw_panel_title(frame, panel, "Codex OAuth");
+            let spinner = ["╱", "│", "╲", "─"][(app.tick as usize / 2) % 4];
+            let mut lines = vec![
+                Line::from("Open the device login page and approve this machine."),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("URL: ", Style::default().fg(theme::ASH_TEXT)),
+                    Span::styled(
+                        "auth.openai.com/codex/device",
+                        Style::default().fg(theme::CHALK),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("Code: ", Style::default().fg(theme::ASH_TEXT)),
+                    Span::styled(
+                        user_code.to_string(),
+                        Style::default()
+                            .fg(theme::SODIUM)
+                            .add_modifier(Modifier::Bold),
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(spinner.to_string(), Style::default().fg(theme::SODIUM)),
+                    Span::styled(
+                        " Waiting for authorization…",
+                        Style::default().fg(theme::CHALK_DIM),
+                    ),
+                ]),
+            ];
+            if let Some(status) = copy_status {
+                lines.push(Line::from(Span::styled(
+                    status.to_string(),
+                    Style::default().fg(theme::LICHEN),
+                )));
+            }
+            if let Some(error) = error {
+                lines.push(Line::from(Span::styled(
+                    error.to_string(),
+                    Style::default().fg(theme::ERROR),
+                )));
+            }
+            lines.push(Line::from(""));
+            lines.push(help_line(&[
+                ("c", "copy code"),
+                ("esc", "back"),
+                ("ctrl+c", "quit"),
+            ]));
+            draw_lines(frame, inner_panel(panel), &lines);
+        }
         SetupStep::InputBaseUrl { input, cursor, .. } => {
-            draw_base_url_input(frame, chunks[2], input, *cursor)
+            draw_input_panel(
+                frame,
+                panel,
+                "OpenAI-Compatible",
+                &[
+                    "Enter the API base URL for your endpoint.".to_string(),
+                    "Example: https://api.openai.com/v1".to_string(),
+                ],
+                "Base URL",
+                input,
+                *cursor,
+                None,
+                &[("enter", "save"), ("esc", "back"), ("ctrl+c", "quit")],
+            );
         }
         SetupStep::InputTavily { input, cursor } => {
-            draw_tavily_input(frame, chunks[2], input, *cursor)
+            draw_input_panel(
+                frame,
+                panel,
+                "Optional Web Search",
+                &["Add a Tavily API key now, or press Esc to skip.".to_string()],
+                "Tavily API key (optional)",
+                input,
+                *cursor,
+                None,
+                &[("enter", "save"), ("esc", "skip"), ("ctrl+c", "quit")],
+            );
         }
-        SetupStep::Done => draw_done(frame, chunks[2]),
-    }
-}
-
-fn draw_logo(frame: &mut Frame, area: Rect) {
-    let chalk = Style::default().fg(theme::CHALK);
-    let sodium = Style::default().fg(theme::SODIUM);
-
-    let content_width = 30;
-    let cx = (area.width as usize).saturating_sub(content_width) / 2;
-    let pad = " ".repeat(cx);
-
-    let logo: &[(&str, &str)] = &[
-        ("██       ████   ██████  ", "  ██"),
-        ("██      ██  ██  ██     ", "█  ██"),
-        ("██      ██████  ██████", "██████"),
-        ("██      ██  ██      █", " ██  ██"),
-        ("██████  ██  ██  ████", "  ██  ██"),
-    ];
-
-    let mut lines: Vec<Line> = Vec::new();
-    for &(before, after) in logo {
-        lines.push(Line::from(vec![
-            Span::styled(format!("{}{}", pad, before), chalk),
-            Span::styled("██", sodium),
-            Span::styled(after, chalk),
-        ]));
-    }
-    // Trailing slash
-    lines.push(Line::from(Span::styled(
-        format!("{}                   ██", pad),
-        sodium,
-    )));
-    // Scribe line
-    lines.push(Line::from(vec![
-        Span::styled(format!("{}──────────", pad), sodium),
-        Span::styled("──────────", Style::default().fg(theme::ASH_MID)),
-        Span::styled("──────────", Style::default().fg(theme::ASH)),
-    ]));
-    // Tagline (27 chars — center independently)
-    let tagline = "A G E N T  \u{b7}  R U N T I M E";
-    let tagline_pad = " ".repeat((area.width as usize).saturating_sub(tagline.len()) / 2);
-    lines.push(Line::from(Span::styled(
-        format!("{}{}", tagline_pad, tagline),
-        Style::default().fg(theme::ASH_TEXT),
-    )));
-
-    let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::FORM));
-    frame.render_widget(paragraph, area);
-}
-
-fn draw_provider_select(
-    frame: &mut Frame,
-    area: Rect,
-    selected: usize,
-    saved_kinds: &BTreeSet<ProviderKind>,
-    active_kind: Option<ProviderKind>,
-) {
-    let cx = center_pad(area.width as usize, 46);
-    let pad = " ".repeat(cx);
-
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        format!("{}Select provider:", pad),
-        Style::default().fg(theme::ASH_TEXT),
-    )));
-    lines.push(Line::from(""));
-
-    for (i, kind) in ProviderKind::ALL.iter().enumerate() {
-        let name = kind.setup_name();
-        let mut desc = kind.setup_description().to_string();
-        if active_kind == Some(*kind) {
-            desc.push_str("  [active]");
-        } else if saved_kinds.contains(kind) {
-            desc.push_str("  [saved]");
-        }
-        if i == selected {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{}\u{25b8} ", pad),
-                    Style::default().fg(theme::SODIUM),
-                ),
-                Span::styled(
-                    format!("{:<20}", name),
+        SetupStep::Done => {
+            draw_panel_title(frame, panel, "Ready");
+            let lines = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Authenticated.",
                     Style::default()
-                        .fg(theme::CHALK)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(desc, Style::default().fg(theme::CHALK_DIM)),
-            ]));
-        } else {
-            lines.push(Line::from(vec![
-                Span::styled(format!("{}  ", pad), Style::default()),
-                Span::styled(
-                    format!("{:<20}", name),
-                    Style::default().fg(theme::ASH_TEXT),
-                ),
-                Span::styled(desc, Style::default().fg(theme::ASH_MID)),
-            ]));
+                        .fg(theme::LICHEN)
+                        .add_modifier(Modifier::Bold),
+                )),
+            ];
+            draw_lines(frame, inner_panel(panel), &lines);
         }
     }
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(""));
-    // Help bar
-    lines.push(Line::from(vec![
-        Span::styled(format!("{}\u{2191}\u{2193}", pad), theme::help_key()),
-        Span::styled(" navigate  ", theme::help_desc()),
-        Span::styled("enter", theme::help_key()),
-        Span::styled(" switch/auth  ", theme::help_desc()),
-        Span::styled("r", theme::help_key()),
-        Span::styled(" re-auth", theme::help_desc()),
-    ]));
-
-    let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::FORM));
-    frame.render_widget(paragraph, area);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_credential_input(
-    frame: &mut Frame,
-    area: Rect,
+fn draw_header(frame: &mut Frame<'_>, area: Rect) {
+    frame.write_text(
+        3,
+        1,
+        "lash",
+        Style::default()
+            .fg(theme::SODIUM)
+            .add_modifier(Modifier::Bold),
+        area.width.saturating_sub(6),
+    );
+    frame.write_text(
+        8,
+        1,
+        "provider setup",
+        Style::default().fg(theme::CHALK_DIM),
+        area.width.saturating_sub(11),
+    );
+}
+
+fn draw_panel_title(frame: &mut Frame<'_>, panel: Rect, title: &str) {
+    frame.write_text(
+        panel.x + 2,
+        panel.y,
+        &format!(" {title} "),
+        Style::default()
+            .fg(theme::SODIUM)
+            .add_modifier(Modifier::Bold),
+        panel.width.saturating_sub(4),
+    );
+}
+
+fn draw_input_panel(
+    frame: &mut Frame<'_>,
+    panel: Rect,
+    title: &str,
+    body: &[String],
+    label: &str,
     input: &str,
     cursor: usize,
     error: Option<&str>,
-    mode: CredentialMode,
-    auth_url: Option<&str>,
-    browser_error: Option<&str>,
+    help: &[(&str, &str)],
 ) {
-    let box_width = 42usize;
-    let cx = center_pad(area.width as usize, box_width);
-    let pad = " ".repeat(cx);
-    let inner_w = box_width.saturating_sub(4); // inside border + prompt char
+    draw_panel_title(frame, panel, title);
+    let content = inner_panel(panel);
+    let mut y = content.y;
 
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(""));
-    let oauth_url_hint = oauth_url_display();
-
-    match mode {
-        CredentialMode::GoogleOAuth => {
-            lines.push(Line::from(Span::styled(
-                format!("{}Google sign-in", pad),
-                Style::default().fg(theme::ASH_TEXT),
-            )));
-            if let Some(url) = auth_url {
-                if browser_error.is_some() {
-                    lines.push(Line::from(Span::styled(
-                        format!("{}Browser didn't open. Use manual URL.", pad),
-                        Style::default().fg(theme::ERROR),
-                    )));
-                } else {
-                    lines.push(Line::from(Span::styled(
-                        format!("{}Tried opening browser automatically.", pad),
-                        Style::default().fg(theme::ASH_TEXT),
-                    )));
-                }
-                lines.push(Line::from(Span::styled(
-                    format!("{}Paste code or callback URL.", pad),
-                    Style::default().fg(theme::ASH_TEXT),
-                )));
-                let _ = url;
-                lines.push(Line::from(Span::styled(
-                    format!("{}Manual URL: {}", pad, oauth_url_hint),
-                    Style::default().fg(theme::ASH_TEXT),
-                )));
-                lines.push(Line::from(""));
+    for line in body {
+        for wrapped in wrap_plain_text(line, content.width as usize) {
+            frame.write_text(
+                content.x,
+                y,
+                &wrapped,
+                Style::default().fg(theme::CHALK_DIM),
+                content.width,
+            );
+            y += 1;
+            if y >= content.bottom() {
+                return;
             }
         }
-        CredentialMode::OpenAiGenericKey => {
-            lines.push(Line::from(Span::styled(
-                format!("{}API key (enter to skip if not needed):", pad),
-                Style::default().fg(theme::ASH_TEXT),
-            )));
-            lines.push(Line::from(""));
+    }
+
+    if !body.is_empty() {
+        y += 1;
+    }
+
+    frame.write_text(
+        content.x,
+        y,
+        label,
+        Style::default().fg(theme::CHALK),
+        content.width,
+    );
+    y += 1;
+
+    let field = Rect::new(content.x, y, content.width, 3);
+    frame.draw_box(
+        field,
+        Style::default().fg(theme::ASH),
+        Some(Style::default().bg(theme::FORM)),
+    );
+    let inner_width = field.width.saturating_sub(4) as usize;
+    let visible = visible_slice(input, inner_width, cursor);
+    frame.write_text(
+        field.x + 2,
+        field.y + 1,
+        visible,
+        Style::default().fg(theme::CHALK),
+        field.width.saturating_sub(4),
+    );
+    let vis_start = visible_start(input, inner_width, cursor);
+    let cursor_char = input[..cursor].chars().count().saturating_sub(vis_start);
+    frame.set_cursor_position((field.x + 2 + cursor_char as u16, field.y + 1));
+    y = field.bottom();
+
+    if let Some(error) = error {
+        y += 1;
+        for wrapped in wrap_plain_text(error, content.width as usize) {
+            frame.write_text(
+                content.x,
+                y,
+                &wrapped,
+                Style::default().fg(theme::ERROR),
+                content.width,
+            );
+            y += 1;
+            if y >= content.bottom() {
+                return;
+            }
         }
     }
 
-    // Label
-    let label = match mode {
-        CredentialMode::OpenAiGenericKey => "API key",
-        CredentialMode::GoogleOAuth => "Authorization code",
-    };
-
-    // Input box
-    let input_row = area.y + lines.len() as u16 + 1;
-
-    let top_border = format!(
-        "{}\u{256d} {} {}\u{256e}",
-        pad,
-        label,
-        "\u{2500}".repeat(box_width.saturating_sub(label.len() + 4)),
-    );
-    lines.push(Line::from(Span::styled(
-        top_border,
-        Style::default().fg(theme::ASH),
-    )));
-
-    // Input line: │ / text____│
-    let display_text = visible_slice(input, inner_w, cursor);
-    let text_pad = inner_w.saturating_sub(display_text.chars().count());
-    lines.push(Line::from(vec![
-        Span::styled(format!("{}\u{2502} ", pad), Style::default().fg(theme::ASH)),
-        Span::styled(
-            format!("{} ", theme::PROMPT_CHAR),
-            Style::default().fg(theme::SODIUM),
-        ),
-        Span::styled(
-            display_text.to_string(),
-            Style::default().fg(theme::CHALK_MID),
-        ),
-        Span::styled(
-            format!("{}\u{2502}", " ".repeat(text_pad)),
-            Style::default().fg(theme::ASH),
-        ),
-    ]));
-
-    let bottom_border = format!(
-        "{}\u{2570}{}\u{256f}",
-        pad,
-        "\u{2500}".repeat(box_width.saturating_sub(2)),
-    );
-    lines.push(Line::from(Span::styled(
-        bottom_border,
-        Style::default().fg(theme::ASH),
-    )));
-
-    // Error message if any
-    if let Some(err) = error {
-        lines.push(Line::from(Span::styled(
-            format!("{}  {}", pad, err),
-            Style::default().fg(theme::ERROR),
-        )));
+    if y + 2 <= content.bottom() {
+        frame.write_line(
+            content.x,
+            content.bottom().saturating_sub(1),
+            &help_line(help),
+            content.width,
+        );
     }
+}
 
-    lines.push(Line::from(""));
-    // Help bar
-    let mut help_spans = vec![
-        Span::styled(format!("{}enter", pad), theme::help_key()),
-        Span::styled(" submit  ", theme::help_desc()),
+fn draw_lines(frame: &mut Frame<'_>, area: Rect, lines: &[Line<'static>]) {
+    for (idx, line) in lines.iter().enumerate().take(area.height as usize) {
+        frame.write_line(area.x, area.y + idx as u16, line, area.width);
+    }
+}
+
+fn google_auth_body(auth_url: Option<&str>, browser_error: Option<&str>) -> Vec<String> {
+    let mut body = vec![
+        "Authorize Lash in your browser, then paste the returned code or full callback URL here."
+            .to_string(),
+        format!("Manual URL is also written to {}.", oauth_url_display()),
     ];
-    if mode == CredentialMode::OpenAiGenericKey {
-        help_spans.push(Span::styled("tab", theme::help_key()));
-        help_spans.push(Span::styled(" skip  ", theme::help_desc()));
+    if auth_url.is_some() {
+        if browser_error.is_some() {
+            body.push("Browser open failed. Use the saved manual URL instead.".to_string());
+        } else {
+            body.push("A browser launch was attempted automatically.".to_string());
+        }
     }
-    help_spans.push(Span::styled("esc", theme::help_key()));
-    help_spans.push(Span::styled(" back", theme::help_desc()));
-    lines.push(Line::from(help_spans));
-
-    let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::FORM));
-    frame.render_widget(paragraph, area);
-
-    // Position cursor inside the input box
-    let cursor_chars = input[..cursor].chars().count();
-    let vis_start = visible_start(input, inner_w, cursor);
-    let cursor_offset = cursor_chars.saturating_sub(vis_start);
-    let cursor_x = (cx + 4 + cursor_offset) as u16; // pad + "│ / " = 4
-    let cursor_y = input_row;
-    if cursor_x < area.x + area.width && cursor_y < area.y + area.height {
-        frame.set_cursor_position((area.x + cursor_x, cursor_y));
-    }
+    body
 }
 
-fn draw_codex_device_auth(
-    frame: &mut Frame,
-    area: Rect,
-    user_code: &str,
-    error: Option<&str>,
-    copy_status: Option<&str>,
-    tick: u64,
-) {
-    let cx = center_pad(area.width as usize, 40);
-    let pad = " ".repeat(cx);
-
-    let spinner_chars = ["\u{2572}", "\u{2502}", "\u{2571}", "\u{2500}"];
-    let spinner = spinner_chars[(tick as usize / 2) % spinner_chars.len()];
-
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        format!("{}Authenticating with Codex...", pad),
-        Style::default().fg(theme::ASH_TEXT),
-    )));
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!("{}Visit: ", pad),
-            Style::default().fg(theme::ASH_TEXT),
-        ),
-        Span::styled(
-            "auth.openai.com/codex/device",
-            Style::default().fg(theme::CHALK_MID),
-        ),
-    ]));
-
-    if !user_code.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{}Enter code: ", pad),
-                Style::default().fg(theme::ASH_TEXT),
-            ),
-            Span::styled(
-                user_code,
-                Style::default()
-                    .fg(theme::SODIUM)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  [", Style::default().fg(theme::ASH_MID)),
-            Span::styled("c", theme::help_key()),
-            Span::styled(" copy]", Style::default().fg(theme::ASH_MID)),
-        ]));
+fn help_line(items: &[(&str, &str)]) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (idx, (key, desc)) in items.iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::styled("   ", Style::default().fg(theme::ASH)));
+        }
+        spans.push(Span::styled((*key).to_string(), theme::help_key()));
+        spans.push(Span::styled(format!(" {}", desc), theme::help_desc()));
     }
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!("{}{}", pad, spinner),
-            Style::default().fg(theme::SODIUM),
-        ),
-        Span::styled(
-            "\u{2500} Waiting for authorization...",
-            Style::default().fg(theme::ASH_MID),
-        ),
-    ]));
-
-    if let Some(status) = copy_status {
-        lines.push(Line::from(Span::styled(
-            format!("{}  {}", pad, status),
-            Style::default().fg(theme::LICHEN),
-        )));
-    }
-
-    if let Some(err) = error {
-        lines.push(Line::from(Span::styled(
-            format!("{}  {}", pad, err),
-            Style::default().fg(theme::ERROR),
-        )));
-    }
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(format!("{}c", pad), theme::help_key()),
-        Span::styled(" copy code  ", theme::help_desc()),
-        Span::styled("esc", theme::help_key()),
-        Span::styled(" back", theme::help_desc()),
-    ]));
-
-    let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::FORM));
-    frame.render_widget(paragraph, area);
+    Line::from(spans)
 }
 
-fn draw_base_url_input(frame: &mut Frame, area: Rect, input: &str, cursor: usize) {
-    let box_width = 52usize;
-    let cx = center_pad(area.width as usize, box_width);
-    let pad = " ".repeat(cx);
-    let inner_w = box_width.saturating_sub(4);
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
 
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        format!("{}Base URL (required):", pad),
-        Style::default().fg(theme::ASH_TEXT),
-    )));
-    lines.push(Line::from(""));
+fn inner_panel(panel: Rect) -> Rect {
+    Rect::new(
+        panel.x + 2,
+        panel.y + 2,
+        panel.width.saturating_sub(4),
+        panel.height.saturating_sub(4),
+    )
+}
 
-    let label = "Base URL";
-    let top_border = format!(
-        "{}\u{256d} {} {}\u{256e}",
-        pad,
-        label,
-        "\u{2500}".repeat(box_width.saturating_sub(label.len() + 4)),
-    );
-    lines.push(Line::from(Span::styled(
-        top_border,
-        Style::default().fg(theme::ASH),
-    )));
-
-    let display_text = visible_slice(input, inner_w, cursor);
-    let text_pad = inner_w.saturating_sub(display_text.chars().count());
-    lines.push(Line::from(vec![
-        Span::styled(format!("{}\u{2502} ", pad), Style::default().fg(theme::ASH)),
-        Span::styled(
-            format!("{} ", theme::PROMPT_CHAR),
-            Style::default().fg(theme::SODIUM),
-        ),
-        Span::styled(
-            display_text.to_string(),
-            Style::default().fg(theme::CHALK_MID),
-        ),
-        Span::styled(
-            format!("{}\u{2502}", " ".repeat(text_pad)),
-            Style::default().fg(theme::ASH),
-        ),
-    ]));
-
-    let bottom_border = format!(
-        "{}\u{2570}{}\u{256f}",
-        pad,
-        "\u{2500}".repeat(box_width.saturating_sub(2)),
-    );
-    lines.push(Line::from(Span::styled(
-        bottom_border,
-        Style::default().fg(theme::ASH),
-    )));
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(format!("{}enter", pad), theme::help_key()),
-        Span::styled(" submit  ", theme::help_desc()),
-        Span::styled("esc", theme::help_key()),
-        Span::styled(" back", theme::help_desc()),
-    ]));
-
-    let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::FORM));
-    frame.render_widget(paragraph, area);
-
-    // Position cursor
-    let cursor_chars = input[..cursor].chars().count();
-    let vis_start = visible_start(input, inner_w, cursor);
-    let cursor_offset = cursor_chars.saturating_sub(vis_start);
-    let cursor_x = (cx + 4 + cursor_offset) as u16;
-    let cursor_y = area.y + 4; // input line is 5th line (index 4)
-    if cursor_x < area.x + area.width && cursor_y < area.y + area.height {
-        frame.set_cursor_position((area.x + cursor_x, cursor_y));
+fn wrap_plain_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
     }
-}
-
-fn draw_tavily_input(frame: &mut Frame, area: Rect, input: &str, cursor: usize) {
-    let box_width = 42usize;
-    let cx = center_pad(area.width as usize, box_width);
-    let pad = " ".repeat(cx);
-    let inner_w = box_width.saturating_sub(4);
-
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(""));
-
-    // Label + input box
-    let label = "Tavily API key (optional)";
-    let top_border = format!(
-        "{}\u{256d} {} {}\u{256e}",
-        pad,
-        label,
-        "\u{2500}".repeat(box_width.saturating_sub(label.len() + 4)),
-    );
-    lines.push(Line::from(Span::styled(
-        top_border,
-        Style::default().fg(theme::ASH),
-    )));
-
-    let display_text = visible_slice(input, inner_w, cursor);
-    let text_pad = inner_w.saturating_sub(display_text.chars().count());
-    lines.push(Line::from(vec![
-        Span::styled(format!("{}\u{2502} ", pad), Style::default().fg(theme::ASH)),
-        Span::styled(
-            format!("{} ", theme::PROMPT_CHAR),
-            Style::default().fg(theme::SODIUM),
-        ),
-        Span::styled(
-            display_text.to_string(),
-            Style::default().fg(theme::CHALK_MID),
-        ),
-        Span::styled(
-            format!("{}\u{2502}", " ".repeat(text_pad)),
-            Style::default().fg(theme::ASH),
-        ),
-    ]));
-
-    let bottom_border = format!(
-        "{}\u{2570}{}\u{256f}",
-        pad,
-        "\u{2500}".repeat(box_width.saturating_sub(2)),
-    );
-    lines.push(Line::from(Span::styled(
-        bottom_border,
-        Style::default().fg(theme::ASH),
-    )));
-
-    lines.push(Line::from(""));
-    // Help bar
-    lines.push(Line::from(vec![
-        Span::styled(format!("{}enter", pad), theme::help_key()),
-        Span::styled(" submit  ", theme::help_desc()),
-        Span::styled("esc", theme::help_key()),
-        Span::styled(" skip", theme::help_desc()),
-    ]));
-
-    let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::FORM));
-    frame.render_widget(paragraph, area);
-
-    // Position cursor
-    let cursor_chars = input[..cursor].chars().count();
-    let vis_start = visible_start(input, inner_w, cursor);
-    let cursor_offset = cursor_chars.saturating_sub(vis_start);
-    let cursor_x = (cx + 4 + cursor_offset) as u16;
-    let cursor_y = area.y + 2; // input line is 3rd line (index 2)
-    if cursor_x < area.x + area.width && cursor_y < area.y + area.height {
-        frame.set_cursor_position((area.x + cursor_x, cursor_y));
+    if text.is_empty() {
+        return vec![String::new()];
     }
+
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let candidate = if current.is_empty() {
+            word.to_string()
+        } else {
+            format!("{current} {word}")
+        };
+        if UnicodeWidthStr::width(candidate.as_str()) <= width {
+            current = candidate;
+            continue;
+        }
+        if !current.is_empty() {
+            out.push(current);
+        }
+        if UnicodeWidthStr::width(word) <= width {
+            current = word.to_string();
+        } else {
+            let mut chunk = String::new();
+            for ch in word.chars() {
+                let candidate = format!("{chunk}{ch}");
+                if UnicodeWidthStr::width(candidate.as_str()) > width && !chunk.is_empty() {
+                    out.push(chunk);
+                    chunk = ch.to_string();
+                } else {
+                    chunk.push(ch);
+                }
+            }
+            current = chunk;
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
 }
 
-fn draw_done(frame: &mut Frame, area: Rect) {
-    let cx = center_pad(area.width as usize, 20);
-    let pad = " ".repeat(cx);
-
-    let lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            format!("{}Authenticated!", pad),
-            Style::default()
-                .fg(theme::LICHEN)
-                .add_modifier(Modifier::BOLD),
-        )),
-    ];
-
-    let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::FORM));
-    frame.render_widget(paragraph, area);
+fn delete_left(input: &mut String, cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+    let previous = input[..*cursor]
+        .char_indices()
+        .last()
+        .map(|(idx, _)| idx)
+        .unwrap_or(0);
+    input.drain(previous..*cursor);
+    *cursor = previous;
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────
-
-fn center_pad(viewport_width: usize, content_width: usize) -> usize {
-    viewport_width.saturating_sub(content_width) / 2
+fn move_left(input: &str, cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+    *cursor = input[..*cursor]
+        .char_indices()
+        .last()
+        .map(|(idx, _)| idx)
+        .unwrap_or(0);
 }
 
-/// Return the visible portion of text that fits in `width` chars around the cursor.
+fn move_right(input: &str, cursor: &mut usize) {
+    if *cursor >= input.len() {
+        return;
+    }
+    *cursor += input[*cursor..]
+        .chars()
+        .next()
+        .map(|ch| ch.len_utf8())
+        .unwrap_or(0);
+}
+
 fn visible_slice(input: &str, width: usize, cursor_byte: usize) -> &str {
     if width == 0 {
         return "";
     }
-    let chars: Vec<(usize, char)> = input.char_indices().collect();
-    let total = chars.len();
+    let total = input.chars().count();
     if total <= width {
         return input;
     }
+    let chars: Vec<(usize, char)> = input.char_indices().collect();
     let cursor_char = input[..cursor_byte].chars().count();
-    let start = if cursor_char > width.saturating_sub(1) {
-        cursor_char - width + 1
-    } else {
-        0
-    };
+    let start = cursor_char
+        .saturating_sub(width)
+        .min(total.saturating_sub(width));
     let end = (start + width).min(total);
     let byte_start = chars[start].0;
     let byte_end = if end < total {
@@ -1207,22 +966,38 @@ fn visible_slice(input: &str, width: usize, cursor_byte: usize) -> &str {
     &input[byte_start..byte_end]
 }
 
-/// Return the char index of the first visible character.
 fn visible_start(input: &str, width: usize, cursor_byte: usize) -> usize {
     let total = input.chars().count();
     if total <= width {
         return 0;
     }
     let cursor_char = input[..cursor_byte].chars().count();
-    if cursor_char > width.saturating_sub(1) {
-        cursor_char - width + 1
-    } else {
-        0
-    }
+    cursor_char
+        .saturating_sub(width)
+        .min(total.saturating_sub(width))
+}
+
+fn existing_openai_base_url(existing: Option<&LashConfig>) -> String {
+    existing
+        .and_then(|cfg| cfg.provider(ProviderKind::OpenAiGeneric))
+        .and_then(|provider| match provider {
+            Provider::OpenAiGeneric { base_url, .. } => Some(base_url.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn existing_openai_key(existing: Option<&LashConfig>) -> String {
+    existing
+        .and_then(|cfg| cfg.provider(ProviderKind::OpenAiGeneric))
+        .and_then(|provider| match provider {
+            Provider::OpenAiGeneric { api_key, .. } => Some(api_key.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 fn open_browser(url: &str) -> std::io::Result<()> {
-    // Try common openers
     #[cfg(target_os = "linux")]
     {
         std::process::Command::new("xdg-open")
@@ -1262,20 +1037,19 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 }
 
 fn oauth_url_path() -> std::path::PathBuf {
-    let mut p = std::env::var_os("HOME")
+    let mut path = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    p.push(".lash");
-    p.push("oauth-url.txt");
-    p
+    path.push(".lash");
+    path.push("oauth-url.txt");
+    path
 }
 
 fn oauth_url_display() -> String {
     if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
         let full = oauth_url_path();
-        if let Ok(rel) = full.strip_prefix(&home) {
-            let rel_str = rel.display().to_string();
-            return format!("~/{rel_str}");
+        if let Ok(relative) = full.strip_prefix(&home) {
+            return format!("~/{}", relative.display());
         }
     }
     oauth_url_path().display().to_string()
@@ -1287,4 +1061,22 @@ fn persist_oauth_url(url: &str) {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(path, url);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wraps_text_without_dropping_words() {
+        let lines = wrap_plain_text("alpha beta gamma delta", 10);
+        assert!(!lines.is_empty());
+        assert_eq!(lines.join(" "), "alpha beta gamma delta");
+    }
+
+    #[test]
+    fn visible_slice_tracks_cursor_tail() {
+        let input = "abcdefghijklmnopqrstuvwxyz";
+        assert_eq!(visible_slice(input, 6, input.len()), "uvwxyz");
+    }
 }

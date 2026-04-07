@@ -911,6 +911,9 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
         ) -> Result<crate::PromptResponse, PluginError> {
             assert!(request.question.contains(".lash/plans/run-session.md"));
             assert!(request.allows_note());
+            let panel = request.panel.expect("plan review panel");
+            assert_eq!(panel.title, "PLAN");
+            assert_eq!(panel.markdown, ready_plan_markdown());
             Ok(crate::PromptResponse::Single {
                 selection: "Exit plan mode".to_string(),
                 note: Some("start with the safe slice".to_string()),

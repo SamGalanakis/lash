@@ -1,11 +1,8 @@
 use lash::strip_repl_fragments;
-use ratatui::{
-    style::Style,
-    text::{Line, Span},
-};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use lash_tui::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
-use crate::{app::DisplayBlock, markdown, text_display, theme};
+use crate::{app::DisplayBlock, markdown, text_layout, theme};
 
 pub fn normalize_assistant_text(text: &str) -> String {
     let sanitized = strip_repl_fragments(text);
@@ -53,12 +50,6 @@ pub fn push_assistant_text_block(blocks: &mut Vec<DisplayBlock>, text: &str) -> 
     true
 }
 
-#[derive(Clone, Copy)]
-struct StyledGlyph {
-    ch: char,
-    style: Style,
-}
-
 pub fn render_assistant_text_block(
     text: &str,
     viewport_width: usize,
@@ -86,7 +77,11 @@ pub fn render_assistant_text_block(
             continue;
         }
 
-        for subline in wrap_rendered_lines_wordwise(std::slice::from_ref(&line), content_width) {
+        for subline in text_layout::wrap_styled_line_with_prefix(
+            &line,
+            content_width,
+            assistant_continuation_prefix,
+        ) {
             let prefix = if marker_placed {
                 continuation_prefix
             } else {
@@ -122,7 +117,7 @@ pub fn render_live_assistant_text_block(text: &str, viewport_width: usize) -> Ve
             continue;
         }
 
-        let wrapped = wrap_plain_text_ranges_wordwise(line, content_width);
+        let wrapped = text_layout::wrap_text_ranges_wordwise(line, content_width);
         for (seg_start, seg_end) in wrapped {
             let prefix = if marker_placed {
                 continuation_prefix
@@ -143,255 +138,36 @@ pub fn render_live_assistant_text_block(text: &str, viewport_width: usize) -> Ve
     lines
 }
 
-fn clone_line_owned(line: &Line<'_>) -> Line<'static> {
-    let spans = line
-        .spans
-        .iter()
-        .map(|span| Span::styled(span.content.to_string(), span.style))
-        .collect::<Vec<_>>();
-    Line::from(spans)
-}
+fn assistant_continuation_prefix(line: &Line<'static>) -> Vec<Span<'static>> {
+    let text = text_layout::line_text(line);
+    let default_style = text_layout::continuation_prefix_style_from_line(line);
 
-fn styled_line_to_glyphs(line: &Line<'_>) -> Vec<StyledGlyph> {
-    let mut glyphs = Vec::new();
-    for span in &line.spans {
-        glyphs.extend(span.content.chars().map(|ch| StyledGlyph {
-            ch,
-            style: span.style,
-        }));
-    }
-    glyphs
-}
-
-fn glyphs_to_line(glyphs: &[StyledGlyph]) -> Line<'static> {
-    let mut spans = Vec::new();
-    let mut current = String::new();
-    let mut style = None;
-
-    for glyph in glyphs {
-        if style != Some(glyph.style) && !current.is_empty() {
-            spans.push(Span::styled(
-                std::mem::take(&mut current),
-                style.take().unwrap_or_default(),
-            ));
-        }
-        style = Some(glyph.style);
-        current.push(glyph.ch);
+    if text.starts_with("│ ") {
+        let style = line
+            .spans
+            .first()
+            .map(|span| span.style)
+            .unwrap_or(default_style);
+        return vec![Span::styled("│ ".to_string(), style)];
     }
 
-    if !current.is_empty() {
-        spans.push(Span::styled(current, style.take().unwrap_or_default()));
+    let leading_ws_chars = text.chars().take_while(|ch| ch.is_whitespace()).count();
+    let leading_ws = " ".repeat(leading_ws_chars);
+    let trimmed = text.trim_start();
+
+    if trimmed.starts_with("• ") {
+        return vec![Span::styled(format!("{leading_ws}  "), default_style)];
     }
 
-    if spans.is_empty() {
-        Line::from("")
-    } else {
-        Line::from(spans)
-    }
-}
-
-fn trim_trailing_whitespace_glyphs(glyphs: &[StyledGlyph], start: usize, end: usize) -> usize {
-    let mut trimmed = end;
-    while trimmed > start && glyphs[trimmed - 1].ch.is_whitespace() {
-        trimmed -= 1;
-    }
-    trimmed
-}
-
-fn skip_leading_whitespace_glyphs(glyphs: &[StyledGlyph], mut idx: usize) -> usize {
-    while idx < glyphs.len() && glyphs[idx].ch.is_whitespace() {
-        idx += 1;
-    }
-    idx
-}
-
-fn trim_trailing_whitespace_plain(text: &str, start: usize, end: usize) -> usize {
-    let mut trimmed = end;
-    while trimmed > start {
-        let Some(ch) = text[..trimmed].chars().next_back() else {
-            break;
-        };
-        if !ch.is_whitespace() {
-            break;
-        }
-        trimmed -= ch.len_utf8();
-    }
-    trimmed
-}
-
-fn skip_leading_whitespace_plain(text: &str, mut idx: usize) -> usize {
-    while idx < text.len() {
-        let Some(ch) = text[idx..].chars().next() else {
-            break;
-        };
-        if !ch.is_whitespace() {
-            break;
-        }
-        idx += ch.len_utf8();
-    }
-    idx
-}
-
-fn wrap_plain_text_ranges_wordwise(text: &str, width: usize) -> Vec<(usize, usize)> {
-    if width == 0 || text.is_empty() {
-        return vec![(0, text.len())];
+    let digits = trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digits > 0 && trimmed[digits..].starts_with(". ") {
+        return vec![Span::styled(
+            format!("{leading_ws}{}", " ".repeat(digits + 2)),
+            default_style,
+        )];
     }
 
-    let mut wrapped = Vec::new();
-    let mut start = 0usize;
-    let mut continuation = false;
-
-    'line: while start < text.len() {
-        let line_start = if continuation {
-            skip_leading_whitespace_plain(text, start)
-        } else {
-            start
-        };
-        if line_start >= text.len() {
-            break;
-        }
-
-        let mut idx = line_start;
-        let mut row_width = 0usize;
-        let mut last_break = None;
-        let mut prev_was_whitespace = false;
-
-        while idx < text.len() {
-            let ch = text[idx..]
-                .chars()
-                .next()
-                .expect("slice should start on a char boundary");
-            let next_idx = idx + ch.len_utf8();
-            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-            let is_whitespace = ch.is_whitespace();
-
-            if is_whitespace && !prev_was_whitespace && row_width > 0 {
-                last_break = Some(idx);
-            }
-
-            if row_width + ch_width > width && row_width > 0 {
-                if is_whitespace {
-                    let line_end = trim_trailing_whitespace_plain(text, line_start, idx);
-                    if line_end > line_start {
-                        wrapped.push((line_start, line_end));
-                        start = skip_leading_whitespace_plain(text, idx);
-                        continuation = true;
-                        continue 'line;
-                    }
-                }
-                break;
-            }
-
-            row_width += ch_width;
-            prev_was_whitespace = is_whitespace;
-            idx = next_idx;
-        }
-
-        if idx >= text.len() {
-            wrapped.push((line_start, text.len()));
-            break;
-        }
-
-        if let Some(break_idx) = last_break {
-            let line_end = trim_trailing_whitespace_plain(text, line_start, break_idx);
-            if line_end > line_start {
-                wrapped.push((line_start, line_end));
-                start = skip_leading_whitespace_plain(text, break_idx);
-                continuation = true;
-                continue;
-            }
-        }
-
-        wrapped.push((line_start, idx));
-        start = idx;
-        continuation = true;
-    }
-
-    wrapped
-}
-
-fn wrap_rendered_lines_wordwise(lines: &[Line<'_>], width: usize) -> Vec<Line<'static>> {
-    if width == 0 {
-        return lines.iter().map(clone_line_owned).collect();
-    }
-
-    let mut wrapped = Vec::with_capacity(lines.len());
-    for line in lines {
-        if text_display::line_visible_width(line) <= width {
-            wrapped.push(clone_line_owned(line));
-            continue;
-        }
-
-        let glyphs = styled_line_to_glyphs(line);
-        if glyphs.is_empty() {
-            wrapped.push(Line::from(""));
-            continue;
-        }
-
-        let mut start = 0usize;
-        let mut continuation = false;
-        'line: while start < glyphs.len() {
-            let line_start = if continuation {
-                skip_leading_whitespace_glyphs(&glyphs, start)
-            } else {
-                start
-            };
-            if line_start >= glyphs.len() {
-                break;
-            }
-
-            let mut idx = line_start;
-            let mut row_width = 0usize;
-            let mut last_break = None;
-            let mut prev_was_whitespace = false;
-
-            while idx < glyphs.len() {
-                let is_whitespace = glyphs[idx].ch.is_whitespace();
-                let ch_width = UnicodeWidthChar::width(glyphs[idx].ch).unwrap_or(0);
-
-                if is_whitespace && !prev_was_whitespace && row_width > 0 {
-                    last_break = Some(idx);
-                }
-
-                if row_width + ch_width > width && row_width > 0 {
-                    if is_whitespace {
-                        let line_end = trim_trailing_whitespace_glyphs(&glyphs, line_start, idx);
-                        if line_end > line_start {
-                            wrapped.push(glyphs_to_line(&glyphs[line_start..line_end]));
-                            start = skip_leading_whitespace_glyphs(&glyphs, idx);
-                            continuation = true;
-                            continue 'line;
-                        }
-                    }
-                    break;
-                }
-                row_width += ch_width;
-                prev_was_whitespace = is_whitespace;
-                idx += 1;
-            }
-
-            if idx >= glyphs.len() {
-                wrapped.push(glyphs_to_line(&glyphs[line_start..]));
-                break;
-            }
-
-            if let Some(break_idx) = last_break {
-                let line_end = trim_trailing_whitespace_glyphs(&glyphs, line_start, break_idx);
-                if line_end > line_start {
-                    wrapped.push(glyphs_to_line(&glyphs[line_start..line_end]));
-                    start = skip_leading_whitespace_glyphs(&glyphs, break_idx);
-                    continuation = true;
-                    continue;
-                }
-            }
-
-            wrapped.push(glyphs_to_line(&glyphs[line_start..idx]));
-            start = idx;
-            continuation = true;
-        }
-    }
-
-    wrapped
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -440,5 +216,24 @@ mod tests {
         assert!(lines.iter().any(|line| line == "  Heading"));
         assert!(lines.iter().any(String::is_empty));
         assert!(lines.iter().any(|line| line.contains("• item one")));
+    }
+
+    #[test]
+    fn render_assistant_text_block_preserves_bullet_continuation_indent() {
+        let text = "- Complete a full spring-cleaning pass in two phases: first remove dead or stale things, then simplify what remains.";
+        let rendered = render_assistant_text_block(text, 44, false);
+        let lines: Vec<String> = rendered
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+
+        assert!(lines.len() >= 2);
+        assert!(lines[0].starts_with("■ • "));
+        assert!(lines[1].starts_with("    "));
     }
 }
