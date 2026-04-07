@@ -1,11 +1,8 @@
+use lash_tui::{Line, Modifier, Span, Style};
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
-use ratatui::{
-    style::{Modifier, Style},
-    text::{Line, Span},
-};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::theme;
+use crate::{text_layout, theme};
 
 /// Pad a string with trailing spaces to reach a target display width.
 fn pad_display(s: &str, target: usize) -> String {
@@ -286,7 +283,7 @@ fn fit_table_column_widths(widths: &[usize], max_width: usize, column_gap: usize
     fit_column_widths_balanced(widths, target_content_width)
 }
 
-/// Parse markdown text and return styled ratatui Lines.
+/// Parse markdown text and return styled terminal lines.
 /// `max_width` constrains table rendering so borders are never wider than the viewport.
 pub fn render_markdown(text: &str, max_width: usize) -> Vec<Line<'static>> {
     let mut renderer = MdRenderer::new(max_width);
@@ -296,7 +293,7 @@ pub fn render_markdown(text: &str, max_width: usize) -> Vec<Line<'static>> {
         renderer.process(event);
     }
     renderer.flush_line();
-    renderer.lines
+    wrap_rendered_lines(renderer.lines, max_width)
 }
 
 fn is_blank_line(line: &Line<'_>) -> bool {
@@ -353,6 +350,62 @@ struct MdRenderer {
 
 struct ListContext {
     next_index: Option<usize>,
+}
+
+fn wrap_rendered_lines(lines: Vec<Line<'static>>, max_width: usize) -> Vec<Line<'static>> {
+    if max_width == 0 {
+        return lines;
+    }
+
+    let mut wrapped = Vec::with_capacity(lines.len());
+    for line in lines {
+        if line.width() <= max_width || is_blank_line(&line) {
+            wrapped.push(line);
+        } else {
+            wrapped.extend(text_layout::wrap_styled_line_with_prefix(
+                &line,
+                max_width,
+                markdown_continuation_prefix,
+            ));
+        }
+    }
+    wrapped
+}
+
+fn markdown_continuation_prefix(line: &Line<'static>) -> Vec<Span<'static>> {
+    let text = text_layout::line_text(line);
+    let default_style = line
+        .spans
+        .first()
+        .map(|span| span.style)
+        .unwrap_or_else(theme::assistant_text);
+
+    if text.starts_with("│ ") {
+        let style = line
+            .spans
+            .first()
+            .map(|span| span.style)
+            .unwrap_or(default_style);
+        return vec![Span::styled("│ ".to_string(), style)];
+    }
+
+    let leading_ws_chars = text.chars().take_while(|ch| ch.is_whitespace()).count();
+    let leading_ws = " ".repeat(leading_ws_chars);
+    let trimmed = text.trim_start();
+
+    if trimmed.starts_with("• ") {
+        return vec![Span::styled(format!("{leading_ws}  "), default_style)];
+    }
+
+    let digits = trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digits > 0 && trimmed[digits..].starts_with(". ") {
+        return vec![Span::styled(
+            format!("{leading_ws}{}", " ".repeat(digits + 2)),
+            default_style,
+        )];
+    }
+
+    Vec::new()
 }
 
 impl MdRenderer {
@@ -444,7 +497,7 @@ impl MdRenderer {
 
         let header_style = Style::default()
             .fg(theme::SODIUM)
-            .add_modifier(Modifier::BOLD);
+            .add_modifier(Modifier::Bold);
         let rule_style = Style::default().fg(theme::ASH_MID);
         let cell_style = theme::assistant_text();
         let gap = " ".repeat(column_gap);
@@ -553,14 +606,14 @@ impl MdRenderer {
             // ── Inline formatting ──
             Event::Start(Tag::Strong) => {
                 let base = self.current_style();
-                self.push_style(base.add_modifier(Modifier::BOLD));
+                self.push_style(base.add_modifier(Modifier::Bold));
             }
             Event::End(TagEnd::Strong) => {
                 self.pop_style();
             }
             Event::Start(Tag::Emphasis) => {
                 let base = self.current_style();
-                self.push_style(base.add_modifier(Modifier::ITALIC));
+                self.push_style(base.add_modifier(Modifier::Italic));
             }
             Event::End(TagEnd::Emphasis) => {
                 self.pop_style();

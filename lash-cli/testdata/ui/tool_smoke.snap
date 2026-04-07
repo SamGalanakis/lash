@@ -1,0 +1,62 @@
+ lash · gpt-5.4
+    • sent input with write_stdin
+    • got echoed output
+    • closed stdin cleanly
+
+  • Delegation worked:
+    • spawned a child agent
+    • it inspected the temp dir
+    • returned a structured result
+
+  • Parallel wrappers worked:
+  batch successfully ran multiple independent calls
+  multi_tool_use.parallel also succeeded
+
+  • Web tools worked:
+    • web search returned successfully
+    • URL fetch from https://example.com/ returned successfully
+
+  Minor caveats
+
+  • The ask tool necessarily pauses for an answer; for this self-test I used
+    it in a harmless way and proceeded.
+  batch reports success compactly; if you need the detailed payload from each
+  call, separate direct calls can be easier to inspect.
+  • I did not test agent_kill because it’s a cancellation path rather than a
+    normal success path, and there was no need to interrupt a running child.
+
+  Bottom line
+
+  • Yes: the tools work well overall.
+  • The local file, shell, edit, orchestration, delegation, and web flows all
+    behaved as expected in this test.
+
+  If you want, I can do a second pass that specifically stress-tests edge
+  cases like failures, timeouts, and cancellation behavior.
+lash-cli: 0.2.34
+lash-sansio: 0.2.34
+provider: OpenAI Codex OAuth (codex)
+configured model: gpt-5.4
+resolved model: gpt-5.4
+execution mode: standard
+variant: high
+context window: 1050000
+context strategy: rolling_context
+tools: 15 (hash aa5f4bd82cbb)
+cwd: ~/code/lash
+session: ashen-harbor
+
+───────────────────────────────────────────────────────────────────────────────
+● /
+Cancelled.
+
+───────────────────────────────────────────────────────────────────────────────
+● hmm
+Cancelled.
+
+───────────────────────────────────────────────────────────────────────────────
+● hmmmm
+Cancelled.
+───────────────────────────────────────────────────────────────────────────────
+ ❯
+─────────────────────────────────────────────────test-session · lash · staging─

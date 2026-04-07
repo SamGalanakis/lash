@@ -16,22 +16,26 @@ mod markdown;
 mod overlay;
 mod plugin_surface;
 mod prompt_overrides;
+mod render;
 mod repo_status;
 mod resume;
 mod resume_snapshot;
+mod scratch_tui;
 mod session_log;
 mod setup;
 #[cfg(test)]
 mod test_support;
 mod text_display;
+mod text_layout;
 mod theme;
-mod ui;
+mod ui_action;
+mod ui_perf;
 mod ui_resume;
+mod ui_trace;
 mod update;
 mod util;
 
 use clap::Parser;
-use crossterm::cursor::SetCursorStyle;
 use lash::*;
 
 #[cfg(test)]
@@ -118,6 +122,14 @@ struct Args {
     #[arg(long)]
     debug: bool,
 
+    /// Record the live TUI session as a replayable UI trace JSON plus final .snap
+    #[arg(long, value_name = "TRACE.json")]
+    debug_ui_trace: Option<std::path::PathBuf>,
+
+    /// When recording a UI trace, also capture numbered checkpoint snapshots every N ms
+    #[arg(long, value_name = "MS")]
+    debug_ui_trace_interval_ms: Option<u64>,
+
     /// Resume an existing session file on startup
     #[arg(long, value_name = "SESSION.db")]
     resume: Option<String>,
@@ -150,6 +162,22 @@ struct Args {
     #[arg(short = 'p', long = "print")]
     print_prompt: Option<String>,
 
+    /// Run the synthetic non-provider UI performance benchmark and exit
+    #[arg(long, hide = true)]
+    ui_perf_benchmark: bool,
+
+    /// Write the UI benchmark JSON report to this file
+    #[arg(long, hide = true, value_name = "OUT.json")]
+    ui_perf_out: Option<std::path::PathBuf>,
+
+    /// Number of measured runs for the UI benchmark
+    #[arg(long, hide = true, default_value_t = 5)]
+    ui_perf_runs: usize,
+
+    /// Number of warmup runs for the UI benchmark
+    #[arg(long, hide = true, default_value_t = 1)]
+    ui_perf_warmups: usize,
+
     /// Replace a prompt target: --prompt-replace section[.block]=text
     #[arg(long = "prompt-replace", value_name = "TARGET=TEXT")]
     prompt_replace: Vec<String>,
@@ -180,43 +208,29 @@ struct Args {
 }
 
 fn cleanup_terminal() {
-    // Pop kitty keyboard protocol, restore background color and cursor style
+    let _ = crossterm::terminal::disable_raw_mode();
     let _ = crossterm::execute!(
         std::io::stdout(),
-        crossterm::event::PopKeyboardEnhancementFlags
+        crossterm::cursor::Show,
+        crossterm::event::PopKeyboardEnhancementFlags,
+        crossterm::event::DisableMouseCapture,
+        crossterm::event::DisableBracketedPaste,
+        crossterm::event::DisableFocusChange,
+        crossterm::terminal::LeaveAlternateScreen
     );
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
-    let _ = crossterm::execute!(
-        std::io::stdout(),
-        crossterm::style::Print("\x1b]111\x1b\\"),
-        SetCursorStyle::DefaultUserShape
-    );
-    ratatui::restore();
-}
-
-fn configure_terminal_ui() -> anyhow::Result<()> {
-    crossterm::execute!(
-        std::io::stdout(),
-        crossterm::style::Print("\x1b]11;rgb:0e/0d/0b\x1b\\"),
-        SetCursorStyle::SteadyBar
-    )?;
-    let _ = crossterm::execute!(
-        std::io::stdout(),
-        crossterm::event::PushKeyboardEnhancementFlags(
-            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-        )
-    );
-    // Bracketed paste tells the terminal we can accept paste payloads as literal text.
-    crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
-    crossterm::execute!(std::io::stdout(), crossterm::event::EnableFocusChange)?;
-    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
-    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if args.ui_perf_benchmark {
+        return ui_perf::run_cli(
+            args.ui_perf_out,
+            args.ui_perf_runs,
+            args.ui_perf_warmups,
+            APP_VERSION,
+        );
+    }
     // Set up file-based structured tracing (JSON logs at $LASH_HOME/lash.log)
     {
         let log_dir = lash::lash_home();
@@ -372,6 +386,7 @@ mod tests {
         let controls = controls_text(&ui_extensions);
         assert!(controls.contains("Up (empty draft)   Edit last queued turn"));
         assert!(controls.contains(crate::queued_turn_edit_binding().display()));
+        assert!(controls.contains("Ctrl+Shift+C / Y   Copy selection or last response"));
         assert!(controls.contains("Shift+Tab          Toggle plan mode"));
         assert!(!controls.contains("Backspace          Restore last next-turn draft"));
         assert!(!controls.contains("Shift+Drag"));

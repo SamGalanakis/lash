@@ -89,11 +89,11 @@ pub use lash_sansio::{
     CheckpointKind, ContextStrategy, DefaultPromptRenderer, DurableTurnSnapshot, Effect, EffectId,
     ErrorEnvelope, ExecResponse, ExecutionMode, LlmCallError, Message, MessageOrigin, MessageRole,
     Part, PartKind, PluginMessage, PluginSurfaceEvent, PromptContext, PromptContribution,
-    PromptOverrideMode, PromptRenderer, PromptRequest, PromptResponse, PromptSectionName,
-    PromptSectionOverride, PromptSelectionMode, PruneState, Response, SessionEvent, TokenUsage,
-    ToolCallRecord, ToolDefinition, ToolImage, ToolParam, ToolResult, TurnMachine,
-    TurnMachineConfig, default_context_strategy, default_execution_mode, default_prompt_renderer,
-    execution_mode_supported, messages_are_live_resume_safe,
+    PromptOverrideMode, PromptPanel, PromptRenderer, PromptRequest, PromptResponse,
+    PromptSectionName, PromptSectionOverride, PromptSelectionMode, PruneState, Response,
+    SessionEvent, TokenUsage, ToolCallRecord, ToolDefinition, ToolImage, ToolParam, ToolResult,
+    TurnMachine, TurnMachineConfig, default_context_strategy, default_execution_mode,
+    default_prompt_renderer, execution_mode_supported, messages_are_live_resume_safe,
 };
 pub use mcp::{McpError, McpServerConfig, McpToolExecutionAdapter, attach_mcp_servers};
 pub use model_info::{

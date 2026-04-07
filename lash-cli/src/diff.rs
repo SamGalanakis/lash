@@ -1,7 +1,4 @@
-use ratatui::{
-    style::Style,
-    text::{Line, Span},
-};
+use lash_tui::{Line, Span, Style};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme;

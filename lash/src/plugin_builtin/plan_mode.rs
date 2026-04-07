@@ -49,6 +49,7 @@ fn default_allowed_tools() -> BTreeSet<String> {
         "read_file",
         "search_tools",
         "search_web",
+        "showcase_snippet",
         "apply_patch",
         "plan_exit",
     ]
@@ -169,16 +170,6 @@ fn line_has_substance(line: &str) -> bool {
     normalized.chars().any(|ch| ch.is_alphanumeric())
 }
 
-fn section_preview(lines: &[String], limit: usize) -> Vec<String> {
-    lines
-        .iter()
-        .map(|line| strip_list_prefix(line).trim())
-        .filter(|line| line_has_substance(line))
-        .take(limit)
-        .map(str::to_string)
-        .collect()
-}
-
 fn parse_plan_sections(content: &str) -> std::collections::BTreeMap<&'static str, Vec<String>> {
     let mut sections = std::collections::BTreeMap::<&'static str, Vec<String>>::new();
     let mut current = None;
@@ -203,14 +194,10 @@ fn parse_plan_sections(content: &str) -> std::collections::BTreeMap<&'static str
 #[derive(Clone, Debug, Default)]
 struct PlanReport {
     display_path: String,
-    exists: bool,
     ready: bool,
+    content: Option<String>,
     missing_sections: Vec<&'static str>,
     incomplete_sections: Vec<&'static str>,
-    steps_preview: Vec<String>,
-    files_preview: Vec<String>,
-    risks_preview: Vec<String>,
-    verification_preview: Vec<String>,
 }
 
 impl PlanReport {
@@ -229,50 +216,7 @@ impl PlanReport {
     }
 
     fn panel_content(&self) -> String {
-        let mut lines = vec![
-            format!("- Path: `{}`", self.display_path),
-            format!(
-                "- Status: {}",
-                if self.ready { "Ready" } else { "Needs work" }
-            ),
-        ];
-
-        if !self.exists {
-            lines.push("- File: missing".to_string());
-            return lines.join("\n");
-        }
-
-        let needs = self.needs_items();
-        if !needs.is_empty() {
-            lines.push(format!("- Needs: {}", needs.join(", ")));
-        }
-
-        if !self.steps_preview.is_empty() {
-            lines.push(String::new());
-            lines.push("### Steps".to_string());
-            lines.extend(self.steps_preview.iter().map(|item| format!("- {item}")));
-        }
-        if !self.files_preview.is_empty() {
-            lines.push(String::new());
-            lines.push("### Files".to_string());
-            lines.extend(self.files_preview.iter().map(|item| format!("- {item}")));
-        }
-        if !self.verification_preview.is_empty() {
-            lines.push(String::new());
-            lines.push("### Verification".to_string());
-            lines.extend(
-                self.verification_preview
-                    .iter()
-                    .map(|item| format!("- {item}")),
-            );
-        }
-        if !self.risks_preview.is_empty() {
-            lines.push(String::new());
-            lines.push("### Risks".to_string());
-            lines.extend(self.risks_preview.iter().map(|item| format!("- {item}")));
-        }
-
-        lines.join("\n")
+        format!("Entered plan mode.\n\n`{}`", self.display_path)
     }
 
     fn blocking_message(&self) -> String {
@@ -294,7 +238,6 @@ fn read_plan_report(path: &Path) -> Result<PlanReport, String> {
     if !plan_file_exists(path) {
         return Ok(PlanReport {
             display_path,
-            exists: false,
             ready: false,
             missing_sections: REQUIRED_PLAN_SECTIONS.to_vec(),
             ..Default::default()
@@ -310,7 +253,7 @@ fn read_plan_report(path: &Path) -> Result<PlanReport, String> {
     let sections = parse_plan_sections(&content);
     let mut report = PlanReport {
         display_path,
-        exists: true,
+        content: Some(content.clone()),
         ..Default::default()
     };
 
@@ -324,18 +267,6 @@ fn read_plan_report(path: &Path) -> Result<PlanReport, String> {
         }
     }
 
-    report.steps_preview = sections
-        .get("Steps")
-        .map_or_else(Vec::new, |lines| section_preview(lines, 4));
-    report.files_preview = sections
-        .get("Files")
-        .map_or_else(Vec::new, |lines| section_preview(lines, 4));
-    report.risks_preview = sections
-        .get("Risks")
-        .map_or_else(Vec::new, |lines| section_preview(lines, 2));
-    report.verification_preview = sections
-        .get("Verification")
-        .map_or_else(Vec::new, |lines| section_preview(lines, 3));
     report.ready = report.missing_sections.is_empty() && report.incomplete_sections.is_empty();
 
     Ok(report)
@@ -360,7 +291,7 @@ fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
     PluginMessage::text(
         crate::MessageRole::System,
         format!(
-            "Plan mode: work in `{display}` only. Use read/search/list, web, and `ask(...)` as needed. Call `plan_exit()` when ready."
+            "Plan mode: work in `{display}` only. Use read/search/list, web, `ask(...)`, and `showcase_snippet(...)` as needed. Call `plan_exit()` when ready."
         ),
     )
 }
@@ -368,10 +299,10 @@ fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
 fn plan_mode_tool_note(plan_path: Option<&Path>) -> String {
     match plan_path {
         Some(path) => format!(
-            "Plan mode tools: read/search/list, web search/fetch, `ask`, `apply_patch` for `{}`, `plan_exit()`.",
+            "Plan mode tools: read/search/list, web search/fetch, `ask`, `showcase_snippet`, `apply_patch` for `{}`, `plan_exit()`.",
             plan_display_path(path)
         ),
-        None => "Plan mode tools: read/search/list, web search/fetch, `ask`, plan-file `apply_patch`, `plan_exit()`.".to_string(),
+        None => "Plan mode tools: read/search/list, web search/fetch, `ask`, `showcase_snippet`, plan-file `apply_patch`, `plan_exit()`.".to_string(),
     }
 }
 
@@ -623,6 +554,10 @@ impl PlanModeTools {
                 PromptRequest::single(
                     format!("Plan `{}` is ready. Exit plan mode?", report.display_path),
                     vec!["Exit plan mode".to_string(), "Keep planning".to_string()],
+                )
+                .with_markdown_panel(
+                    "PLAN",
+                    report.content.as_deref().unwrap_or(&report.panel_content()),
                 )
                 .with_optional_note(),
             )

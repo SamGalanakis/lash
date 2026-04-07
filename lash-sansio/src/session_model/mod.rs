@@ -144,6 +144,8 @@ pub enum SessionEvent {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PromptRequest {
     pub question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel: Option<PromptPanel>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<String>,
     #[serde(default)]
@@ -152,10 +154,17 @@ pub struct PromptRequest {
     pub allow_note: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PromptPanel {
+    pub title: String,
+    pub markdown: String,
+}
+
 impl PromptRequest {
     pub fn freeform(question: impl Into<String>) -> Self {
         Self {
             question: question.into(),
+            panel: None,
             options: Vec::new(),
             selection_mode: PromptSelectionMode::Single,
             allow_note: false,
@@ -165,6 +174,7 @@ impl PromptRequest {
     pub fn single(question: impl Into<String>, options: Vec<String>) -> Self {
         Self {
             question: question.into(),
+            panel: None,
             options,
             selection_mode: PromptSelectionMode::Single,
             allow_note: false,
@@ -174,6 +184,7 @@ impl PromptRequest {
     pub fn multi(question: impl Into<String>, options: Vec<String>) -> Self {
         Self {
             question: question.into(),
+            panel: None,
             options,
             selection_mode: PromptSelectionMode::Multi,
             allow_note: false,
@@ -182,6 +193,18 @@ impl PromptRequest {
 
     pub fn with_optional_note(mut self) -> Self {
         self.allow_note = !self.is_freeform();
+        self
+    }
+
+    pub fn with_markdown_panel(
+        mut self,
+        title: impl Into<String>,
+        markdown: impl Into<String>,
+    ) -> Self {
+        self.panel = Some(PromptPanel {
+            title: title.into(),
+            markdown: markdown.into(),
+        });
         self
     }
 
