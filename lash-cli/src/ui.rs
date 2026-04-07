@@ -9,7 +9,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::activity::{
     ActivityArtifact, ActivityBlock, ActivityKind, ActivityStatus, PatchFilePreview,
-    patch_file_subject, patch_status_title,
+    QuestionPanelArtifact, QuestionPanelSelectionMode, patch_file_subject, patch_status_title,
 };
 use crate::app::{
     App, DisplayBlock, PreparedTurn, PromptState, SPLASH_CONTENT_HEIGHT, SPLASH_SCROLLBACK_HEIGHT,
@@ -398,6 +398,15 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
+    if lines.len() < viewport_height + skip_lines
+        && let Some(live_lines) = app.live_assistant_lines_snapshot()
+    {
+        if app.live_assistant_leading_padding() > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.extend(live_lines.iter().cloned());
+    }
+
     // Use Paragraph's built-in scroll to skip visual rows correctly.
     // Manual .skip()/.take() on logical Lines is wrong because skip_lines
     // is in visual-row space (from the height cache) but Lines can wrap.
@@ -731,33 +740,23 @@ fn push_wrapped_prefixed<'a>(
         lines.push(Line::from(Span::styled(prefix, style)));
         return;
     }
-    let mut first = true;
-    let mut start = 0usize;
-    let mut col = 0usize;
-    for (idx, ch) in text.char_indices() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if col + w > available && col > 0 {
-            let shown_prefix = if first {
-                prefix.clone()
-            } else {
-                continuation.clone()
-            };
-            lines.push(Line::from(vec![
-                Span::styled(shown_prefix, style),
-                text_display::sanitize_span(text[start..idx].to_string(), style),
-            ]));
-            first = false;
-            start = idx;
-            col = w;
+    let segments = if text.is_empty() {
+        vec![(0usize, 0usize)]
+    } else {
+        wrap_text_ranges_wordwise(text, available)
+    };
+
+    for (segment_idx, &(start, end)) in segments.iter().enumerate() {
+        let shown_prefix = if segment_idx == 0 {
+            prefix.clone()
         } else {
-            col += w;
-        }
+            continuation.clone()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(shown_prefix, style),
+            text_display::sanitize_span(text[start..end].to_string(), style),
+        ]));
     }
-    let shown_prefix = if first { prefix } else { continuation };
-    lines.push(Line::from(vec![
-        Span::styled(shown_prefix, style),
-        text_display::sanitize_span(text[start..].to_string(), style),
-    ]));
 }
 
 fn truncate_with_forced_ellipsis(text: &str, max_width: usize) -> String {
@@ -845,7 +844,7 @@ fn render_recent_activity_feed_lines<'a>(
         let segments = if detail.is_empty() {
             vec![(0usize, 0usize)]
         } else {
-            wrap_line(detail, prefix_width, prefix_width, viewport_width)
+            wrap_text_ranges_wordwise(detail, available)
         };
 
         for (segment_idx, &(start, end)) in segments
@@ -883,6 +882,7 @@ fn render_activity_artifact<'a>(
     indent: &str,
 ) {
     match artifact {
+        ActivityArtifact::QuestionPanel(_) => {}
         ActivityArtifact::DiffPreview { title, diff } => {
             lines.push(Line::from(vec![
                 Span::styled(indent.to_string(), theme::code_chrome()),
@@ -1094,6 +1094,52 @@ fn styled_question_chunk(chunk: &str) -> Vec<Span<'static>> {
         ];
     }
 
+    if let Some(rest) = chunk.strip_prefix("Note · ") {
+        return vec![
+            Span::styled(
+                "Note",
+                Style::default()
+                    .fg(theme::LICHEN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" · ", Style::default().fg(theme::ASH_MID)),
+            Span::styled(rest.to_string(), theme::assistant_text()),
+        ];
+    }
+
+    for (marker, selected) in [("◉ ", true), ("○ ", false), ("☑ ", true), ("☐ ", false)] {
+        if let Some(rest) = chunk.strip_prefix(marker) {
+            let marker_style = if selected {
+                Style::default()
+                    .fg(theme::LICHEN)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::ASH_MID)
+            };
+            let text_style = if selected {
+                theme::assistant_text().add_modifier(Modifier::BOLD)
+            } else {
+                theme::assistant_text()
+            };
+
+            if let Some((num, option_rest)) = rest.split_once(". ")
+                && num.chars().all(|ch| ch.is_ascii_digit())
+            {
+                return vec![
+                    Span::styled(marker.to_string(), marker_style),
+                    Span::styled(format!("{num}."), marker_style),
+                    Span::raw(" "),
+                    Span::styled(option_rest.to_string(), text_style),
+                ];
+            }
+
+            return vec![
+                Span::styled(marker.to_string(), marker_style),
+                Span::styled(rest.to_string(), text_style),
+            ];
+        }
+    }
+
     if let Some((num, rest)) = chunk.split_once(". ")
         && num.chars().all(|ch| ch.is_ascii_digit())
     {
@@ -1110,6 +1156,39 @@ fn styled_question_chunk(chunk: &str) -> Vec<Span<'static>> {
     }
 
     vec![Span::styled(chunk.to_string(), theme::assistant_text())]
+}
+
+fn question_panel_lines(panel: &QuestionPanelArtifact) -> Vec<String> {
+    let mut lines = panel.prompt_lines.clone();
+
+    for (idx, option) in panel.options.iter().enumerate() {
+        let marker = match panel.selection_mode {
+            Some(QuestionPanelSelectionMode::Multi) => {
+                if option.selected {
+                    "☑"
+                } else {
+                    "☐"
+                }
+            }
+            _ => {
+                if option.selected {
+                    "◉"
+                } else {
+                    "○"
+                }
+            }
+        };
+        lines.push(format!("{marker} {}. {}", idx + 1, option.label));
+    }
+
+    if let Some(answer) = panel.answer.as_deref().filter(|value| !value.is_empty()) {
+        lines.push(format!("Answer · {answer}"));
+    }
+    if let Some(note) = panel.note.as_deref().filter(|value| !value.is_empty()) {
+        lines.push(format!("Note · {note}"));
+    }
+
+    lines
 }
 
 fn render_question_panel<'a>(
@@ -1167,6 +1246,15 @@ fn render_question_panel<'a>(
         format!("└{}┘", "─".repeat(bottom_fill)),
         Style::default().fg(theme::ASH),
     )));
+}
+
+fn render_question_panel_artifact<'a>(
+    panel: &QuestionPanelArtifact,
+    lines: &mut Vec<Line<'a>>,
+    viewport_width: usize,
+) {
+    let detail_lines = question_panel_lines(panel);
+    render_question_panel(&detail_lines, lines, viewport_width);
 }
 
 fn prompt_title(_prompt: &PromptState) -> &'static str {
@@ -1362,8 +1450,10 @@ fn render_activity_block_with_lane<'a>(
     viewport_width: usize,
     lane: ActivityLane,
 ) {
-    if activity.kind == ActivityKind::Ask && expand_level >= 1 {
-        render_question_panel(&activity.detail_lines, lines, viewport_width);
+    if expand_level >= 1
+        && let Some(ActivityArtifact::QuestionPanel(panel)) = activity.artifact.as_ref()
+    {
+        render_question_panel_artifact(panel, lines, viewport_width);
         return;
     }
 
@@ -2333,17 +2423,38 @@ fn draw_turn_status(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Block::default().style(theme::turn_status_bar()), area);
 
     let brand = animated_lash_word(turn.turn_started_at.elapsed());
-    let (label, label_style) = if turn.status_text == "error" {
-        ("Error", theme::error().add_modifier(Modifier::BOLD))
+    let (label, label_style, detail) = if turn.status_text == "error" {
+        ("Error", theme::error().add_modifier(Modifier::BOLD), None)
     } else if app.has_prompt() {
-        ("Paused", theme::turn_status_paused())
+        ("Paused", theme::turn_status_paused(), None)
+    } else if turn.status_text == "thinking" {
+        (
+            "Thinking",
+            theme::turn_status_state(),
+            turn.status_detail.as_deref(),
+        )
+    } else if turn.status_text == "responding" {
+        ("Responding", theme::turn_status_state(), None)
+    } else if turn.status_text == "retrying" {
+        (
+            "Retrying",
+            theme::turn_status_state(),
+            turn.status_detail.as_deref(),
+        )
     } else {
-        ("Working", theme::turn_status_state())
+        ("Working", theme::turn_status_state(), None)
     };
     let mut spans = Vec::new();
     spans.extend(brand);
     spans.push(Span::raw("  "));
     spans.push(Span::styled(label, label_style));
+    if let Some(detail) = detail.filter(|detail| !detail.is_empty()) {
+        spans.push(Span::raw(" · "));
+        spans.push(Span::styled(
+            detail.to_string(),
+            theme::turn_status_elapsed(),
+        ));
+    }
     if let Some(elapsed_text) = crate::util::format_duration_ms_if_visible(
         turn.turn_started_at.elapsed().as_millis() as u64,
     ) {
@@ -3578,8 +3689,8 @@ mod tests {
             status_detail: None,
             phase_started_at: std::time::Instant::now(),
             turn_started_at: std::time::Instant::now(),
-            assistant_block_idx: None,
             has_visible_output: false,
+            output_start_anchor_pending: false,
             transient_until: None,
         });
 
@@ -3652,6 +3763,7 @@ mod tests {
         app.follow_mode = crate::app::FollowOutputMode::Contextual;
         if let Some(turn) = app.live_turn.as_mut() {
             turn.has_visible_output = true;
+            turn.output_start_anchor_pending = true;
         }
 
         terminal
@@ -3769,8 +3881,8 @@ mod tests {
             status_detail: None,
             phase_started_at: std::time::Instant::now(),
             turn_started_at: std::time::Instant::now(),
-            assistant_block_idx: None,
             has_visible_output: false,
+            output_start_anchor_pending: false,
             transient_until: None,
         });
         app.handle_session_event(SessionEvent::Message {
@@ -3794,8 +3906,8 @@ mod tests {
             status_detail: None,
             phase_started_at: std::time::Instant::now(),
             turn_started_at: std::time::Instant::now(),
-            assistant_block_idx: None,
             has_visible_output: false,
+            output_start_anchor_pending: false,
             transient_until: None,
         });
         app.blocks.clear();
@@ -4085,7 +4197,22 @@ mod tests {
             duration_ms: 0,
             args: serde_json::Value::Null,
             result: serde_json::Value::Null,
-            artifact: None,
+            artifact: Some(ActivityArtifact::QuestionPanel(QuestionPanelArtifact {
+                prompt_lines: vec!["Which environment should I use?".into()],
+                options: vec![
+                    crate::activity::QuestionPanelOption {
+                        label: "staging".into(),
+                        selected: false,
+                    },
+                    crate::activity::QuestionPanelOption {
+                        label: "prod".into(),
+                        selected: true,
+                    },
+                ],
+                selection_mode: Some(QuestionPanelSelectionMode::Single),
+                answer: None,
+                note: Some("ship production after smoke checks".into()),
+            })),
             children: Vec::new(),
             extra: None,
         };
@@ -4103,8 +4230,13 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("Which environment should I use?"))
         );
-        assert!(rendered.iter().any(|line| line.contains("1. staging")));
-        assert!(!rendered.iter().any(|line| line.contains("Answer ·")));
+        assert!(rendered.iter().any(|line| line.contains("○ 1. staging")));
+        assert!(rendered.iter().any(|line| line.contains("◉ 2. prod")));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("Note · ship production"))
+        );
         assert_eq!(
             rendered.last().map(String::as_str),
             Some("└──────────────────────────────────────────────┘")
@@ -4159,7 +4291,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_status_footer_only_renders_working_line() {
+    fn turn_status_footer_shows_thinking_detail() {
         let backend = TestBackend::new(48, 1);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut app = App::new("model".into(), "session".into());
@@ -4168,8 +4300,8 @@ mod tests {
             status_detail: Some("waiting".into()),
             phase_started_at: std::time::Instant::now(),
             turn_started_at: std::time::Instant::now(),
-            assistant_block_idx: None,
             has_visible_output: false,
+            output_start_anchor_pending: false,
             transient_until: None,
         });
 
@@ -4180,9 +4312,8 @@ mod tests {
         let backend = terminal.backend();
         let row = buffer_row_text(backend, 0, 48);
 
-        assert!(row.contains("Working"));
-        assert!(!row.contains("thinking"));
-        assert!(!row.contains("waiting"));
+        assert!(row.contains("Thinking"));
+        assert!(row.contains("waiting"));
     }
 
     #[test]
@@ -4195,8 +4326,8 @@ mod tests {
             status_detail: Some("provider timeout".into()),
             phase_started_at: std::time::Instant::now(),
             turn_started_at: std::time::Instant::now(),
-            assistant_block_idx: None,
             has_visible_output: false,
+            output_start_anchor_pending: false,
             transient_until: None,
         });
 
@@ -4220,8 +4351,8 @@ mod tests {
             status_detail: Some("waiting".into()),
             phase_started_at: std::time::Instant::now(),
             turn_started_at: std::time::Instant::now(),
-            assistant_block_idx: None,
             has_visible_output: false,
+            output_start_anchor_pending: false,
             transient_until: None,
         });
         app.show_prompt(prompt_state("Question?", vec!["yes", "no"], "", false));
@@ -4247,8 +4378,8 @@ mod tests {
             status_detail: None,
             phase_started_at: std::time::Instant::now() - std::time::Duration::from_secs(2),
             turn_started_at: std::time::Instant::now() - std::time::Duration::from_secs(2),
-            assistant_block_idx: None,
             has_visible_output: false,
+            output_start_anchor_pending: false,
             transient_until: None,
         });
 
@@ -4257,7 +4388,7 @@ mod tests {
             .expect("draw footer");
 
         let row = buffer_row_text(terminal.backend(), 0, 48);
-        assert!(row.contains("Working"));
+        assert!(row.contains("Thinking"));
         assert!(row.contains("2.0s"));
     }
 
@@ -5002,6 +5133,31 @@ mod tests {
     }
 
     #[test]
+    fn exploration_activity_wraps_detail_lines_without_orphan_character_row() {
+        let activity = ActivityBlock {
+            kind: ActivityKind::Exploration,
+            status: ActivityStatus::Completed,
+            tool_name: "grep".into(),
+            summary: "EXPLORE · 1 step".into(),
+            detail_lines: vec!["alpha beta gamma 1.0s".into()],
+            duration_ms: 3,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: None,
+            children: Vec::new(),
+            extra: None,
+        };
+
+        let mut lines = Vec::new();
+        render_activity_block(&activity, 1, &mut lines, 23, false);
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert_eq!(rendered[0], "  EXPLORE · 1 step");
+        assert_eq!(rendered[1], "   alpha beta gamma");
+        assert_eq!(rendered[2], "   1.0s");
+    }
+
+    #[test]
     fn exploration_activity_limits_each_recent_step_to_two_rows() {
         let activity = ActivityBlock {
             kind: ActivityKind::Exploration,
@@ -5173,6 +5329,45 @@ mod tests {
         );
         assert!(rendered.iter().any(|line| line.contains("line-0")));
         assert!(rendered.iter().any(|line| line.contains("line-15")));
+    }
+
+    #[test]
+    fn text_preview_wraps_without_orphan_character_row() {
+        let activity = ActivityBlock {
+            kind: ActivityKind::ShellCommand,
+            status: ActivityStatus::Completed,
+            tool_name: "exec_command".into(),
+            summary: "command".into(),
+            detail_lines: Vec::new(),
+            duration_ms: 3,
+            args: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            artifact: Some(ActivityArtifact::TextPreview {
+                title: Some("preview".into()),
+                text: "alpha beta gamma 1.0s".into(),
+            }),
+            children: Vec::new(),
+            extra: None,
+        };
+
+        let mut lines = Vec::new();
+        render_activity_block(&activity, 2, &mut lines, 22, false);
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.ends_with("alpha beta gamma")),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered.iter().any(|line| line.ends_with("1.0s")),
+            "{rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|line| line.ends_with(" s")),
+            "{rendered:?}"
+        );
     }
 
     #[test]

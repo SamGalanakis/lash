@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
 use crate::plugin::{
+    DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES, DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES,
     PluginError, PromptContribution, SessionContextSurface, SessionCreateRequest, SessionManager,
     SessionPluginMode, SessionStartPoint,
 };
@@ -16,8 +17,8 @@ use crate::{
     PromptUsage, SessionStateEnvelope, ToolCallRecord, ToolProvider, TurnInput, lash_cache_dir,
 };
 
-const TOOL_RESULT_MAX_LINES: usize = 2_000;
-const TOOL_RESULT_MAX_BYTES: usize = 50 * 1024;
+const TOOL_RESULT_MAX_LINES: usize = DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES;
+const TOOL_RESULT_MAX_BYTES: usize = DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES;
 const PRUNE_MINIMUM_TOKENS: usize = 20_000;
 const PRUNE_PROTECT_TOKENS: usize = 40_000;
 const PRUNE_RECENT_USER_TURNS: usize = 2;
@@ -270,7 +271,7 @@ fn truncate_tool_result_preview(
             "The tool call succeeded but the output was truncated. Full output saved to: {}\nUse `read_file` with `offset`/`limit` or `grep` to inspect specific sections instead of reading the whole file at once.",
             path.display()
         ),
-        None => "Full tool result retained in session state.".to_string(),
+        None => "The tool output was truncated. No separate full-output file was written for this result.".to_string(),
     };
     match direction {
         TruncationDirection::Head => {
@@ -971,12 +972,19 @@ mod tests {
 
     #[tokio::test]
     async fn rolling_context_builder_clears_old_tool_outputs() {
-        let tool_calls = (0..12)
+        let tool_calls = (0..18)
             .map(|idx| ToolCallRecord {
                 call_id: Some(format!("call-{idx}")),
                 tool: "exec_command".to_string(),
                 args: json!({"cmd": format!("echo {idx}")}),
-                result: json!(format!("{}\n{}", "line".repeat(12_000), idx)),
+                result: json!(format!(
+                    "{}\n{}",
+                    (0..600)
+                        .map(|_| "line".repeat(64))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    idx
+                )),
                 success: true,
                 duration_ms: 1,
             })

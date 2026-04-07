@@ -511,7 +511,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         PluginDirective::EnqueueMessages { messages }
             if messages.iter().any(|message|
                 message.role == MessageRole::System
-                    && message.content.contains("Plan mode is active.")
+                    && message.content.contains("Plan mode:")
                     && message.content.contains(".lash/plans/run-session.md")
                     && message.content.contains("plan_exit()"))
     )));
@@ -912,7 +912,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             assert!(request.question.contains(".lash/plans/run-session.md"));
             assert!(request.allows_note());
             Ok(crate::PromptResponse::Single {
-                selection: "Implement it".to_string(),
+                selection: "Exit plan mode".to_string(),
                 note: Some("start with the safe slice".to_string()),
             })
         }
@@ -1037,7 +1037,7 @@ async fn plan_mode_tool_exit_requires_ready_plan() {
         result
             .result
             .as_str()
-            .is_some_and(|value| value.contains("Fill in: Goal (fill in), Steps (fill in), Files (fill in), Risks (fill in), Verification (fill in)."))
+            .is_some_and(|value| value.contains("Need: Goal (fill in), Steps (fill in), Files (fill in), Risks (fill in), Verification (fill in)."))
     );
 }
 

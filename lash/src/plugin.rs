@@ -396,6 +396,7 @@ pub struct ToolResultHookContext {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolResultProjectionHook {
+    BeforeState,
     BeforeModel,
     BeforeHistory,
 }
@@ -403,6 +404,7 @@ pub enum ToolResultProjectionHook {
 impl ToolResultProjectionHook {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::BeforeState => "before_state",
             Self::BeforeModel => "before_model",
             Self::BeforeHistory => "before_history",
         }
@@ -854,6 +856,9 @@ pub use tool_result_projection_builtin::{
     BuiltinToolResultProjectionPluginFactory, ToolResultProjectionMode,
     ToolResultProjectionPluginConfig,
 };
+pub(crate) use tool_result_projection_builtin::{
+    DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES, DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES,
+};
 
 #[cfg(feature = "sqlite-store")]
 #[path = "plugin_builtin.rs"]
@@ -1294,6 +1299,27 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_state_tool_result_projectors_are_rejected() {
+        let host = PluginHost::new(vec![
+            Arc::new(ProjectorPluginFactory {
+                plugin_id: "projector-a",
+                hook: ToolResultProjectionHook::BeforeState,
+            }),
+            Arc::new(ProjectorPluginFactory {
+                plugin_id: "projector-b",
+                hook: ToolResultProjectionHook::BeforeState,
+            }),
+        ]);
+        let err = match host.build_standard_session("root", None) {
+            Ok(_) => panic!("duplicate projector"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("duplicate tool result projector"));
+        assert!(err.to_string().contains("projector-a"));
+        assert!(err.to_string().contains("projector-b"));
+    }
+
+    #[test]
     fn duplicate_model_tool_result_projectors_are_rejected() {
         let host = PluginHost::new(vec![
             Arc::new(ProjectorPluginFactory {
@@ -1338,6 +1364,10 @@ mod tests {
     #[test]
     fn different_tool_result_projector_hooks_can_coexist() {
         let host = PluginHost::new(vec![
+            Arc::new(ProjectorPluginFactory {
+                plugin_id: "projector-state",
+                hook: ToolResultProjectionHook::BeforeState,
+            }),
             Arc::new(ProjectorPluginFactory {
                 plugin_id: "projector-model",
                 hook: ToolResultProjectionHook::BeforeModel,

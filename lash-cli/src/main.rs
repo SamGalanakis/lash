@@ -371,7 +371,8 @@ mod tests {
         let ui_extensions = lash_ui::UiExtensions::builtin().expect("ui extensions");
         let controls = controls_text(&ui_extensions);
         assert!(controls.contains("Up (empty draft)   Edit last queued turn"));
-        assert!(controls.contains("Shift+Tab          Toggle persistent plan mode"));
+        assert!(controls.contains(crate::queued_turn_edit_binding().display()));
+        assert!(controls.contains("Shift+Tab          Toggle plan mode"));
         assert!(!controls.contains("Backspace          Restore last next-turn draft"));
         assert!(!controls.contains("Shift+Drag"));
         assert!(!controls.contains("F6"));

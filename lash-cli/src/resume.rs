@@ -6,7 +6,7 @@ use lash::{
     LashRuntime, PromptUsage, Provider, SessionStateEnvelope, Store, TokenUsage,
 };
 
-use crate::app::{App, DisplayBlock, apply_ui_resume_state_to_blocks, blocks_from_transcript};
+use crate::app::{App, DisplayBlock, projected_blocks_from_state};
 use crate::resume_snapshot;
 use crate::session_log;
 
@@ -145,8 +145,11 @@ pub async fn restore_session_state(
 
     if let Some(live) = resume_snapshot::load_live_resume_snapshot(&resume_store) {
         *history = live.state.messages.clone();
-        app.blocks = blocks_from_transcript(&live.state.messages, &live.state.tool_calls);
-        apply_ui_resume_state_to_blocks(&mut app.blocks, &live.ui_state);
+        app.blocks = projected_blocks_from_state(
+            &live.state.messages,
+            &live.state.tool_calls,
+            &live.ui_state,
+        );
         app.last_response_usage = live.ui_state.last_response_usage.clone();
         app.plugin_mode_indicators = live.ui_state.plugin_mode_indicators.clone();
         app.streaming_output = live.ui_state.streaming_output.clone();

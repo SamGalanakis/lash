@@ -13,7 +13,7 @@ use lash::{Store, TokenUsage};
 
 #[cfg(test)]
 use crate::app::UiResumeState;
-use crate::app::{DisplayBlock, apply_ui_resume_state_to_blocks, blocks_from_transcript};
+use crate::app::{DisplayBlock, projected_blocks_from_state};
 use crate::resume_snapshot;
 use crate::ui_resume;
 
@@ -282,8 +282,11 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
     let store = Store::open(&sessions_dir().join(filename))?;
     if let Some(live) = resume_snapshot::load_live_resume_snapshot(&store) {
         let messages = live.state.messages.clone();
-        let mut blocks = blocks_from_transcript(&live.state.messages, &live.state.tool_calls);
-        apply_ui_resume_state_to_blocks(&mut blocks, &live.ui_state);
+        let blocks = projected_blocks_from_state(
+            &live.state.messages,
+            &live.state.tool_calls,
+            &live.ui_state,
+        );
         return Ok(LoadedSession {
             messages,
             blocks,
@@ -303,8 +306,7 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
     let streaming_output = ui_state.streaming_output.clone();
     let streaming_output_hidden = ui_state.streaming_output_hidden;
     let streaming_output_partial = ui_state.streaming_output_partial.clone();
-    let mut blocks = blocks_from_transcript(&messages, &tool_calls);
-    apply_ui_resume_state_to_blocks(&mut blocks, &ui_state);
+    let blocks = projected_blocks_from_state(&messages, &tool_calls, &ui_state);
     tracing::debug!(
         session_file = filename,
         messages = messages.len(),

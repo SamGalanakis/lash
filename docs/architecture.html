@@ -724,7 +724,7 @@ workspace helper]
             <h3>UI extension proof case</h3>
             <ul>
               <li><code>plan_mode.rs</code> remains a core plugin that owns planning rules, tool gating, and plan approval.</li>
-              <li><code>lash-ui</code> owns <code>/plan</code>, <code>Shift+Tab</code>, idle indicator sync, and post-<code>plan_exit</code> queueing.</li>
+              <li><code>lash-ui</code> owns <code>/plan</code>, <code>Shift+Tab</code>, idle indicator sync, and plan-mode surface cleanup after <code>plan_exit</code>.</li>
               <li>The CLI host only applies generic <code>UiHostEffect</code> values.</li>
             </ul>
           </div>

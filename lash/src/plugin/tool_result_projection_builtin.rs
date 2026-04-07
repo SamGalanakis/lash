@@ -12,7 +12,8 @@ use crate::plugin::{
 };
 
 const APPROX_BYTES_PER_TOKEN: usize = 4;
-const DEFAULT_MAX_LINES: usize = 2_000;
+pub const DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES: usize = 16 * 1024;
+pub const DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES: usize = 400;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,8 +34,8 @@ impl Default for ToolResultProjectionPluginConfig {
     fn default() -> Self {
         Self {
             mode: ToolResultProjectionMode::Bytes,
-            limit: 50 * 1024,
-            max_lines: DEFAULT_MAX_LINES,
+            limit: DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES,
+            max_lines: DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES,
         }
     }
 }
@@ -83,6 +84,7 @@ impl SessionPlugin for ToolResultProjectionPlugin {
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
+        register_projector(reg, ToolResultProjectionHook::BeforeState, &self.config)?;
         register_projector(reg, ToolResultProjectionHook::BeforeModel, &self.config)?;
         register_projector(reg, ToolResultProjectionHook::BeforeHistory, &self.config)?;
         Ok(())
@@ -109,8 +111,9 @@ fn project_tool_result(
     ctx: ToolResultProjectionContext,
 ) -> ToolResult {
     let result = match ctx.hook {
+        ToolResultProjectionHook::BeforeState => project_stateful_value(config, &ctx),
         ToolResultProjectionHook::BeforeModel => project_model_value(config, &ctx),
-        ToolResultProjectionHook::BeforeHistory => project_history_value(config, &ctx),
+        ToolResultProjectionHook::BeforeHistory => project_stateful_value(config, &ctx),
     };
     ToolResult {
         success: ctx.result.success,
@@ -138,7 +141,7 @@ fn project_model_value(
     ))
 }
 
-fn project_history_value(
+fn project_stateful_value(
     config: &ToolResultProjectionPluginConfig,
     ctx: &ToolResultProjectionContext,
 ) -> serde_json::Value {
@@ -498,7 +501,7 @@ mod tests {
         let config = ToolResultProjectionPluginConfig {
             mode: ToolResultProjectionMode::Tokens,
             limit: 5,
-            max_lines: DEFAULT_MAX_LINES,
+            max_lines: DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES,
         };
         let got = project_text(
             "this is an example of a long output that should be truncated",
@@ -549,11 +552,42 @@ mod tests {
     }
 
     #[test]
+    fn state_projection_preserves_shape() {
+        let config = ToolResultProjectionPluginConfig {
+            limit: 512,
+            ..ToolResultProjectionPluginConfig::default()
+        };
+        let projected = project_tool_result(
+            &config,
+            ToolResultProjectionContext {
+                hook: ToolResultProjectionHook::BeforeState,
+                session_id: "root".to_string(),
+                tool_name: "exec_command".to_string(),
+                args: json!({}),
+                result: ToolResult::ok(json!({
+                    "output": "x".repeat(20_000),
+                    "nested": { "stderr": "y".repeat(20_000) }
+                })),
+                duration_ms: 1,
+                host: Arc::new(NoopSessionManager),
+            },
+        );
+        assert!(projected.result.is_object());
+        let output = projected
+            .result
+            .get("output")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        assert!(output.contains("bytes truncated"));
+        assert!(output.contains("Full output saved to:"));
+    }
+
+    #[test]
     fn model_projection_can_collapse_large_structured_payload_to_string() {
         let config = ToolResultProjectionPluginConfig {
             mode: ToolResultProjectionMode::Bytes,
             limit: 40,
-            max_lines: DEFAULT_MAX_LINES,
+            max_lines: DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES,
         };
         let projected = project_tool_result(
             &config,

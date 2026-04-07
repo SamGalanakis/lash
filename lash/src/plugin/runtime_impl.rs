@@ -1239,6 +1239,25 @@ impl PluginSession {
             tool_call.result = projected.result;
             tool_call.success = projected.success;
         }
+        for tool_call in &mut committed_turn.state.tool_calls {
+            let projected = self
+                .project_tool_result(ToolResultProjectionContext {
+                    hook: ToolResultProjectionHook::BeforeHistory,
+                    session_id: session_id.clone(),
+                    tool_name: tool_call.tool.clone(),
+                    args: tool_call.args.clone(),
+                    result: ToolResult {
+                        success: tool_call.success,
+                        result: tool_call.result.clone(),
+                        images: Vec::new(),
+                    },
+                    duration_ms: tool_call.duration_ms,
+                    host: Arc::clone(&host),
+                })
+                .await?;
+            tool_call.result = projected.result;
+            tool_call.success = projected.success;
+        }
         self.on_turn_committed(&committed_turn).await;
         turn.state.plugin_snapshot = self.snapshot().ok();
 

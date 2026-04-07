@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lash::provider::Provider;
 use lash::session_model::{Message, MessageRole};
 use lash::*;
@@ -15,6 +16,61 @@ use crate::ui_resume;
 #[derive(Debug, Clone)]
 pub(crate) struct ModelSelection {
     pub(crate) model: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QueuedTurnEditBinding {
+    AltUp,
+    ShiftLeft,
+}
+
+impl QueuedTurnEditBinding {
+    pub(crate) fn display(self) -> &'static str {
+        match self {
+            Self::AltUp => "Alt+Up",
+            Self::ShiftLeft => "Shift+Left",
+        }
+    }
+
+    pub(crate) fn matches(self, key: KeyEvent) -> bool {
+        match self {
+            Self::AltUp => key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Up,
+            Self::ShiftLeft => {
+                key.modifiers.contains(KeyModifiers::SHIFT) && key.code == KeyCode::Left
+            }
+        }
+    }
+}
+
+fn queued_turn_edit_binding_from_hints(
+    term_program: Option<&str>,
+    inside_tmux: bool,
+    inside_vscode: bool,
+) -> QueuedTurnEditBinding {
+    if inside_tmux {
+        return QueuedTurnEditBinding::ShiftLeft;
+    }
+
+    match term_program.map(|value| value.to_ascii_lowercase()) {
+        Some(value)
+            if matches!(
+                value.as_str(),
+                "apple_terminal" | "warpterminal" | "warp" | "vscode"
+            ) =>
+        {
+            QueuedTurnEditBinding::ShiftLeft
+        }
+        _ if inside_vscode => QueuedTurnEditBinding::ShiftLeft,
+        _ => QueuedTurnEditBinding::AltUp,
+    }
+}
+
+pub(crate) fn queued_turn_edit_binding() -> QueuedTurnEditBinding {
+    queued_turn_edit_binding_from_hints(
+        std::env::var("TERM_PROGRAM").ok().as_deref(),
+        std::env::var_os("TMUX").is_some(),
+        std::env::var_os("VSCODE_INJECTION").is_some(),
+    )
 }
 
 pub(crate) fn controls_text(ui_extensions: &UiExtensions) -> String {
@@ -35,6 +91,10 @@ fn render_shortcut_lines(ui_extensions: &UiExtensions, spaced_history_arrows: bo
         "  Enter              Submit; inject at next checkpoint while running".to_string(),
         "  Tab                Queue next turn; submit plain draft when idle".to_string(),
         "  Up (empty draft)   Edit last queued turn".to_string(),
+        format!(
+            "  {:<18} Edit last queued turn",
+            queued_turn_edit_binding().display()
+        ),
     ];
 
     for shortcut in ui_extensions.shortcut_specs() {
@@ -378,7 +438,6 @@ pub(crate) fn persist_root_session_state(
         messages = state.messages.len(),
         tool_calls = state.tool_calls.len(),
         plugin_panels = ui_state.plugin_panels.len(),
-        has_live_assistant_text = ui_state.live_assistant_text.is_some(),
         input_tokens = state.token_usage.input_tokens,
         output_tokens = state.token_usage.output_tokens,
         cached_input_tokens = state.token_usage.cached_input_tokens,
@@ -742,5 +801,35 @@ mod tests {
 
         unsafe { std::env::set_var("LASH_LOG", "warn") };
         assert_eq!(effective_lash_log_filter(true), "debug");
+    }
+
+    #[test]
+    fn queued_turn_edit_binding_defaults_to_alt_up() {
+        assert_eq!(
+            queued_turn_edit_binding_from_hints(None, false, false),
+            QueuedTurnEditBinding::AltUp
+        );
+        assert_eq!(
+            queued_turn_edit_binding_from_hints(Some("ghostty"), false, false),
+            QueuedTurnEditBinding::AltUp
+        );
+    }
+
+    #[test]
+    fn queued_turn_edit_binding_falls_back_when_alt_up_is_unreliable() {
+        for term_program in ["Apple_Terminal", "WarpTerminal", "warp", "vscode"] {
+            assert_eq!(
+                queued_turn_edit_binding_from_hints(Some(term_program), false, false),
+                QueuedTurnEditBinding::ShiftLeft
+            );
+        }
+        assert_eq!(
+            queued_turn_edit_binding_from_hints(None, true, false),
+            QueuedTurnEditBinding::ShiftLeft
+        );
+        assert_eq!(
+            queued_turn_edit_binding_from_hints(None, false, true),
+            QueuedTurnEditBinding::ShiftLeft
+        );
     }
 }
