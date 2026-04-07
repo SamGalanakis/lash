@@ -440,7 +440,7 @@ const PLAN_MODE_COMMANDS: &[SlashCommandSpec] = &[SlashCommandSpec {
     name: "/plan",
     aliases: &[],
     usage: "/plan",
-    description: "Toggle persistent plan mode",
+    description: "Toggle plan mode",
     takes_argument: false,
     allow_while_running: true,
     action: "toggle",
@@ -448,7 +448,7 @@ const PLAN_MODE_COMMANDS: &[SlashCommandSpec] = &[SlashCommandSpec {
 
 const PLAN_MODE_SHORTCUTS: &[ShortcutSpec] = &[ShortcutSpec {
     chord: KeyChord::SHIFT_TAB,
-    description: "Toggle persistent plan mode",
+    description: "Toggle plan mode",
     action: "toggle",
 }];
 
@@ -486,9 +486,9 @@ impl UiExtension for PlanModeUiExtension {
                     .map_err(|err| format!("failed to toggle plan mode: {err}"))?;
                 let mut effects = plan_mode_effects(&status);
                 effects.push(UiHostEffect::PushSystemMessage(if status.enabled {
-                    "Plan mode enabled.".to_string()
+                    "Plan mode on.".to_string()
                 } else {
-                    "Plan mode disabled.".to_string()
+                    "Plan mode off.".to_string()
                 }));
                 Ok(effects)
             }
@@ -513,12 +513,8 @@ impl UiExtension for PlanModeUiExtension {
             .get("approved")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
-        let next_turn_input = result
-            .get("next_turn_input")
-            .and_then(|value| value.as_str())
-            .filter(|value| !value.trim().is_empty());
-        match (approved, next_turn_input) {
-            (true, Some(input)) => vec![
+        if approved {
+            vec![
                 UiHostEffect::ClearModeIndicator {
                     key: surface_key("plan_mode", "mode"),
                 },
@@ -526,11 +522,9 @@ impl UiExtension for PlanModeUiExtension {
                     plugin_id: "plan_mode".to_string(),
                     key: "panel".to_string(),
                 },
-                UiHostEffect::QueueTurn {
-                    input: input.to_string(),
-                },
-            ],
-            _ => Vec::new(),
+            ]
+        } else {
+            Vec::new()
         }
     }
 }
@@ -551,10 +545,7 @@ mod tests {
         assert!(extensions.shortcut_for(KeyChord::SHIFT_TAB).is_some());
         assert_eq!(
             extensions.completions("/pl"),
-            vec![(
-                "/plan".to_string(),
-                "Toggle persistent plan mode".to_string()
-            )]
+            vec![("/plan".to_string(), "Toggle plan mode".to_string())]
         );
     }
 
@@ -632,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_exit_event_queues_follow_up_turn() {
+    fn plan_exit_event_clears_plan_ui_without_queueing_turn() {
         let extensions = UiExtensions::builtin().expect("builtin extensions");
 
         let effects = extensions.effects_for_session_event(&SessionEvent::ToolCall {
@@ -656,9 +647,6 @@ mod tests {
                 UiHostEffect::ClearPanel {
                     plugin_id: "plan_mode".to_string(),
                     key: "panel".to_string()
-                },
-                UiHostEffect::QueueTurn {
-                    input: "Execute the approved plan.".to_string()
                 }
             ]
         );

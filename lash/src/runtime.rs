@@ -116,6 +116,91 @@ struct StandardStreamFallback {
     parts: Vec<LlmOutputPart>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct LlmStreamDebugState {
+    started_at: std::time::Instant,
+    sequence: u64,
+    summary: LlmStreamSummary,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct LlmStreamSummary {
+    first_visible_token_latency_ms: Option<u64>,
+    last_visible_chunk_latency_ms: Option<u64>,
+    text_delta_count: u64,
+    visible_chunk_count: u64,
+    total_visible_chars: u64,
+    max_visible_chunk_chars: u64,
+}
+
+impl LlmStreamDebugState {
+    fn new() -> Self {
+        Self {
+            started_at: std::time::Instant::now(),
+            sequence: 0,
+            summary: LlmStreamSummary::default(),
+        }
+    }
+
+    fn next_sequence(&mut self) -> u64 {
+        let sequence = self.sequence;
+        self.sequence += 1;
+        sequence
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.started_at.elapsed().as_millis() as u64
+    }
+}
+
+impl LlmStreamSummary {
+    fn record_text_chunk(&mut self, visible_text: Option<&str>, elapsed_ms: u64) {
+        self.text_delta_count += 1;
+
+        let visible_chars = visible_text
+            .map(|text| text.chars().count() as u64)
+            .unwrap_or(0);
+        if visible_chars == 0 {
+            return;
+        }
+
+        if self.first_visible_token_latency_ms.is_none() {
+            self.first_visible_token_latency_ms = Some(elapsed_ms);
+        }
+        self.last_visible_chunk_latency_ms = Some(elapsed_ms);
+        self.visible_chunk_count += 1;
+        self.total_visible_chars += visible_chars;
+        self.max_visible_chunk_chars = self.max_visible_chunk_chars.max(visible_chars);
+    }
+
+    fn to_json(self) -> serde_json::Value {
+        let avg_visible_chunk_chars = if self.visible_chunk_count == 0 {
+            None
+        } else {
+            Some(self.total_visible_chars as f64 / self.visible_chunk_count as f64)
+        };
+        let stream_duration_ms = match (
+            self.first_visible_token_latency_ms,
+            self.last_visible_chunk_latency_ms,
+        ) {
+            (Some(first), Some(last)) => Some(last.saturating_sub(first)),
+            _ => None,
+        };
+        serde_json::json!({
+            "first_visible_token_latency_ms": self.first_visible_token_latency_ms,
+            "stream_duration_ms": stream_duration_ms,
+            "text_delta_count": self.text_delta_count,
+            "visible_chunk_count": self.visible_chunk_count,
+            "avg_visible_chunk_chars": avg_visible_chunk_chars,
+            "max_visible_chunk_chars": if self.visible_chunk_count == 0 {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::from(self.max_visible_chunk_chars)
+            },
+        })
+    }
+}
+
 impl StandardStreamFallback {
     fn push_text(&mut self, piece: String) {
         if piece.is_empty() {
@@ -1677,6 +1762,7 @@ impl LashRuntime {
             host: self.host.clone(),
             session_id: self.state.session_id.clone(),
             tool_calls: self.state.tool_calls.clone(),
+            llm_stream_summaries: HashMap::new(),
             llm_factory: Arc::clone(&self.llm_factory),
             session_manager: manager,
             prompt_bridge,
@@ -1799,6 +1885,7 @@ struct RuntimeTurnDriver {
     host: RuntimeHostConfig,
     session_id: String,
     tool_calls: Vec<ToolCallRecord>,
+    llm_stream_summaries: HashMap<usize, LlmStreamSummary>,
     llm_factory: LlmFactory,
     session_manager: Arc<dyn SessionManager>,
     prompt_bridge: HostPromptBridge,
@@ -1892,8 +1979,9 @@ impl RuntimeTurnDriver {
                             emit!(SessionEvent::Done);
                             return (Vec::new(), run_offset);
                         }
+                        let iteration = machine.iteration();
                         let (result, text_streamed) = self
-                            .run_llm_call(&mut machine, id, request, &event_tx, &cancel)
+                            .run_llm_call(&mut machine, id, request, iteration, &event_tx, &cancel)
                             .await;
                         machine.handle_response(Response::LlmComplete {
                             id,
@@ -1948,8 +2036,8 @@ impl RuntimeTurnDriver {
                                 call_id: Some(outcome.call_id.clone()),
                                 tool: outcome.tool_name.clone(),
                                 args: outcome.args.clone(),
-                                result: outcome.raw_result.result.clone(),
-                                success: outcome.raw_result.success,
+                                result: outcome.state_result.result.clone(),
+                                success: outcome.state_result.success,
                                 duration_ms: outcome.duration_ms,
                             }));
                         machine.handle_response(Response::ToolResults { id, results });
@@ -2066,14 +2154,18 @@ impl RuntimeTurnDriver {
         machine: &mut TurnMachine,
         effect_id: crate::sansio::EffectId,
         request: LlmRequest,
+        iteration: usize,
         event_tx: &mpsc::Sender<SessionEvent>,
         cancel: &CancellationToken,
     ) -> (Result<LlmResponse, LlmCallError>, bool) {
         match self.policy.execution_mode {
-            ExecutionMode::Standard => self.run_standard_llm_call(request, event_tx, cancel).await,
+            ExecutionMode::Standard => {
+                self.run_standard_llm_call(request, iteration, event_tx, cancel)
+                    .await
+            }
             ExecutionMode::Repl => {
                 let result = self
-                    .run_repl_llm_call(machine, effect_id, request, event_tx, cancel)
+                    .run_repl_llm_call(machine, effect_id, request, iteration, event_tx, cancel)
                     .await;
                 (result, false)
             }
@@ -2315,6 +2407,7 @@ impl RuntimeTurnDriver {
         machine: &mut TurnMachine,
         effect_id: crate::sansio::EffectId,
         request: LlmRequest,
+        iteration: usize,
         event_tx: &mpsc::Sender<SessionEvent>,
         cancel: &CancellationToken,
     ) -> Result<LlmResponse, LlmCallError> {
@@ -2336,6 +2429,7 @@ impl RuntimeTurnDriver {
             (result, call_provider)
         });
         let mut streamed_usage = LlmUsage::default();
+        let mut debug = LlmStreamDebugState::new();
 
         let result = loop {
             tokio::select! {
@@ -2359,10 +2453,21 @@ impl RuntimeTurnDriver {
                 Some(stream_event) = llm_stream_rx.recv() => {
                     match stream_event {
                         LlmStreamEvent::Delta(delta) => {
+                            let raw_delta = delta.clone();
                             let delta = match self.transform_assistant_stream_chunk(event_tx, delta).await {
                                 Ok(delta) => delta,
                                 Err(err) => break Err(err),
                             };
+                            self.log_llm_stream_event(
+                                &self.session_id,
+                                iteration,
+                                &mut debug,
+                                "delta",
+                                Some(&raw_delta),
+                                Some(&delta),
+                                None,
+                                None,
+                            );
                             if !machine.handle_llm_delta(effect_id, &delta) {
                                 let mut cutover = ReplStreamCutover {
                                     effect_id,
@@ -2377,10 +2482,21 @@ impl RuntimeTurnDriver {
                             }
                         }
                         LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
+                            let raw_text = text.clone();
                             let text = match self.transform_assistant_stream_chunk(event_tx, text).await {
                                 Ok(text) => text,
                                 Err(err) => break Err(err),
                             };
+                            self.log_llm_stream_event(
+                                &self.session_id,
+                                iteration,
+                                &mut debug,
+                                "text_part",
+                                Some(&raw_text),
+                                Some(&text),
+                                None,
+                                None,
+                            );
                             if !machine.handle_llm_delta(effect_id, &text) {
                                 let mut cutover = ReplStreamCutover {
                                     effect_id,
@@ -2394,8 +2510,33 @@ impl RuntimeTurnDriver {
                                     .await;
                             }
                         }
-                        LlmStreamEvent::Part(LlmOutputPart::ToolCall { .. }) => {}
+                        LlmStreamEvent::Part(LlmOutputPart::ToolCall {
+                            call_id,
+                            tool_name,
+                            input_json,
+                        }) => {
+                            self.log_llm_stream_event(
+                                &self.session_id,
+                                iteration,
+                                &mut debug,
+                                "tool_call_part",
+                                None,
+                                None,
+                                None,
+                                Some((&call_id, &tool_name, &input_json)),
+                            );
+                        }
                         LlmStreamEvent::Usage(usage) => {
+                            self.log_llm_stream_event(
+                                &self.session_id,
+                                iteration,
+                                &mut debug,
+                                "usage",
+                                None,
+                                None,
+                                Some(&usage),
+                                None,
+                            );
                             streamed_usage = usage.clone();
                             machine.handle_llm_usage(effect_id, &usage);
                         }
@@ -2417,6 +2558,7 @@ impl RuntimeTurnDriver {
                     while let Ok(stream_event) = llm_stream_rx.try_recv() {
                         match stream_event {
                             LlmStreamEvent::Delta(delta) => {
+                                let raw_delta = delta.clone();
                                 let delta = match self.transform_assistant_stream_chunk(event_tx, delta).await {
                                     Ok(delta) => delta,
                                     Err(err) => {
@@ -2424,6 +2566,16 @@ impl RuntimeTurnDriver {
                                         break;
                                     }
                                 };
+                                self.log_llm_stream_event(
+                                    &self.session_id,
+                                    iteration,
+                                    &mut debug,
+                                    "delta",
+                                    Some(&raw_delta),
+                                    Some(&delta),
+                                    None,
+                                    None,
+                                );
                                 if !machine.handle_llm_delta(effect_id, &delta) {
                                     completed_from_stream = Some(LlmResponse {
                                         usage: streamed_usage.clone(),
@@ -2434,6 +2586,7 @@ impl RuntimeTurnDriver {
                                 }
                             }
                             LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
+                                let raw_text = text.clone();
                                 let text = match self.transform_assistant_stream_chunk(event_tx, text).await {
                                     Ok(text) => text,
                                     Err(err) => {
@@ -2441,6 +2594,16 @@ impl RuntimeTurnDriver {
                                         break;
                                     }
                                 };
+                                self.log_llm_stream_event(
+                                    &self.session_id,
+                                    iteration,
+                                    &mut debug,
+                                    "text_part",
+                                    Some(&raw_text),
+                                    Some(&text),
+                                    None,
+                                    None,
+                                );
                                 if !machine.handle_llm_delta(effect_id, &text) {
                                     completed_from_stream = Some(LlmResponse {
                                         usage: streamed_usage.clone(),
@@ -2450,8 +2613,33 @@ impl RuntimeTurnDriver {
                                     break;
                                 }
                             }
-                            LlmStreamEvent::Part(LlmOutputPart::ToolCall { .. }) => {}
+                            LlmStreamEvent::Part(LlmOutputPart::ToolCall {
+                                call_id,
+                                tool_name,
+                                input_json,
+                            }) => {
+                                self.log_llm_stream_event(
+                                    &self.session_id,
+                                    iteration,
+                                    &mut debug,
+                                    "tool_call_part",
+                                    None,
+                                    None,
+                                    None,
+                                    Some((&call_id, &tool_name, &input_json)),
+                                );
+                            }
                             LlmStreamEvent::Usage(usage) => {
+                                self.log_llm_stream_event(
+                                    &self.session_id,
+                                    iteration,
+                                    &mut debug,
+                                    "usage",
+                                    None,
+                                    None,
+                                    Some(&usage),
+                                    None,
+                                );
                                 streamed_usage = usage.clone();
                                 machine.handle_llm_usage(effect_id, &usage);
                             }
@@ -2499,6 +2687,7 @@ impl RuntimeTurnDriver {
                     .await;
             }
         }
+        self.llm_stream_summaries.insert(iteration, debug.summary);
         result
     }
 
@@ -2628,6 +2817,7 @@ impl RuntimeTurnDriver {
     async fn run_standard_llm_call(
         &mut self,
         request: LlmRequest,
+        iteration: usize,
         event_tx: &mpsc::Sender<SessionEvent>,
         cancel: &CancellationToken,
     ) -> (Result<LlmResponse, LlmCallError>, bool) {
@@ -2650,6 +2840,7 @@ impl RuntimeTurnDriver {
         let mut text_streamed = false;
         let mut streamed_usage = LlmUsage::default();
         let mut streamed_output = StandardStreamFallback::default();
+        let mut debug = LlmStreamDebugState::new();
         let result = loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -2669,6 +2860,8 @@ impl RuntimeTurnDriver {
                             &mut text_streamed,
                             &mut streamed_usage,
                             &mut streamed_output,
+                            &mut debug,
+                            iteration,
                         )
                         .await
                     {
@@ -2693,6 +2886,8 @@ impl RuntimeTurnDriver {
                             &mut text_streamed,
                             &mut streamed_usage,
                             &mut streamed_output,
+                            &mut debug,
+                            iteration,
                         )
                         .await
                     {
@@ -2724,6 +2919,7 @@ impl RuntimeTurnDriver {
             }
         };
 
+        self.llm_stream_summaries.insert(iteration, debug.summary);
         (result, text_streamed)
     }
 
@@ -2781,6 +2977,21 @@ impl RuntimeTurnDriver {
                     result: outcome.record.result,
                     images: outcome.images,
                 };
+                let state_result = match plugins
+                    .project_tool_result(ToolResultProjectionContext {
+                        hook: ToolResultProjectionHook::BeforeState,
+                        session_id: dispatch.session_id.clone(),
+                        tool_name: outcome.record.tool.clone(),
+                        args: outcome.record.args.clone(),
+                        result: raw_result.clone(),
+                        duration_ms: outcome.record.duration_ms,
+                        host: Arc::clone(&projector_manager),
+                    })
+                    .await
+                {
+                    Ok(projected) => projected,
+                    Err(err) => crate::ToolResult::err_fmt(err.to_string()),
+                };
                 let model_result = match plugins
                     .project_tool_result(ToolResultProjectionContext {
                         hook: ToolResultProjectionHook::BeforeModel,
@@ -2802,7 +3013,7 @@ impl RuntimeTurnDriver {
                         call_id,
                         tool_name: outcome.record.tool,
                         args: outcome.record.args,
-                        raw_result,
+                        state_result,
                         model_result,
                         duration_ms: outcome.record.duration_ms,
                     },
@@ -2820,7 +3031,9 @@ impl RuntimeTurnDriver {
                         call_id: uuid::Uuid::new_v4().to_string(),
                         tool_name: "unknown".to_string(),
                         args: serde_json::json!({}),
-                        raw_result: crate::ToolResult::err_fmt(format!("tool task panicked: {e}")),
+                        state_result: crate::ToolResult::err_fmt(format!(
+                            "tool task panicked: {e}"
+                        )),
                         model_result: crate::ToolResult::err_fmt(format!(
                             "tool task panicked: {e}"
                         )),
@@ -2833,7 +3046,7 @@ impl RuntimeTurnDriver {
         outcomes.into_iter().map(|(_, outcome)| outcome).collect()
     }
 
-    fn handle_log_event(&self, event: crate::sansio::LogEvent) {
+    fn handle_log_event(&mut self, event: crate::sansio::LogEvent) {
         let Some(path) = &self.host.llm_log_path else {
             return;
         };
@@ -2847,6 +3060,7 @@ impl RuntimeTurnDriver {
                 response_text,
                 response_parts,
             } => {
+                let stream_summary = self.llm_stream_summaries.remove(&iteration);
                 let mut entry = serde_json::json!({
                     "turn": iteration,
                     "ts": chrono::Utc::now().to_rfc3339(),
@@ -2864,6 +3078,11 @@ impl RuntimeTurnDriver {
                     && let Some(object) = entry.as_object_mut()
                 {
                     object.insert("response_parts".to_string(), parts);
+                }
+                if let Some(summary) = stream_summary
+                    && let Some(object) = entry.as_object_mut()
+                {
+                    object.insert("stream_summary".to_string(), summary.to_json());
                 }
                 match std::fs::OpenOptions::new()
                     .create(true)
@@ -2884,6 +3103,117 @@ impl RuntimeTurnDriver {
         }
     }
 
+    fn append_llm_debug_entry(&self, entry: serde_json::Value) {
+        let Some(path) = &self.host.llm_log_path else {
+            return;
+        };
+
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                if let Err(err) = writeln!(file, "{}", entry) {
+                    tracing::warn!(
+                        error = %err,
+                        path = %path.display(),
+                        "failed to append llm debug log"
+                    );
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %path.display(),
+                    "failed to open llm debug log"
+                );
+            }
+        }
+    }
+
+    fn log_llm_stream_event(
+        &self,
+        session_id: &str,
+        iteration: usize,
+        debug: &mut LlmStreamDebugState,
+        event_type: &str,
+        raw_text: Option<&str>,
+        visible_text: Option<&str>,
+        usage: Option<&LlmUsage>,
+        tool_call: Option<(&str, &str, &str)>,
+    ) {
+        if self.host.llm_log_path.is_none() {
+            return;
+        }
+
+        let elapsed_ms = debug.elapsed_ms();
+        if matches!(event_type, "delta" | "text_part") {
+            debug.summary.record_text_chunk(visible_text, elapsed_ms);
+        }
+
+        let mut entry = serde_json::json!({
+            "kind": "stream_event",
+            "turn": iteration,
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "session_id": session_id,
+            "sequence": debug.next_sequence(),
+            "elapsed_ms": elapsed_ms,
+            "event": event_type,
+        });
+
+        if let Some(object) = entry.as_object_mut() {
+            if let Some(text) = raw_text {
+                object.insert(
+                    "raw_text".to_string(),
+                    serde_json::Value::String(text.to_string()),
+                );
+                object.insert(
+                    "raw_chars".to_string(),
+                    serde_json::Value::from(text.chars().count() as u64),
+                );
+            }
+            if let Some(text) = visible_text {
+                object.insert(
+                    "visible_text".to_string(),
+                    serde_json::Value::String(text.to_string()),
+                );
+                object.insert(
+                    "visible_chars".to_string(),
+                    serde_json::Value::from(text.chars().count() as u64),
+                );
+            }
+            if let Some(usage) = usage {
+                object.insert(
+                    "usage".to_string(),
+                    serde_json::json!({
+                        "input_tokens": usage.input_tokens,
+                        "output_tokens": usage.output_tokens,
+                        "cached_input_tokens": usage.cached_input_tokens,
+                        "reasoning_tokens": usage.reasoning_tokens,
+                    }),
+                );
+            }
+            if let Some((call_id, tool_name, input_json)) = tool_call {
+                object.insert(
+                    "call_id".to_string(),
+                    serde_json::Value::String(call_id.to_string()),
+                );
+                object.insert(
+                    "tool_name".to_string(),
+                    serde_json::Value::String(tool_name.to_string()),
+                );
+                object.insert(
+                    "input_json".to_string(),
+                    serde_json::Value::String(input_json.to_string()),
+                );
+            }
+        }
+
+        self.append_llm_debug_entry(entry);
+    }
+
     async fn forward_standard_stream_event(
         &mut self,
         event_tx: &mpsc::Sender<SessionEvent>,
@@ -2891,14 +3221,27 @@ impl RuntimeTurnDriver {
         text_streamed: &mut bool,
         streamed_usage: &mut LlmUsage,
         streamed_output: &mut StandardStreamFallback,
+        debug: &mut LlmStreamDebugState,
+        iteration: usize,
     ) -> Result<(), LlmCallError> {
         match stream_event {
             LlmStreamEvent::Delta(delta) => {
                 if !delta.is_empty() {
                     *text_streamed = true;
+                    let raw_delta = delta.clone();
                     let delta = self
                         .transform_assistant_stream_chunk(event_tx, delta)
                         .await?;
+                    self.log_llm_stream_event(
+                        &self.session_id,
+                        iteration,
+                        debug,
+                        "delta",
+                        Some(&raw_delta),
+                        Some(&delta),
+                        None,
+                        None,
+                    );
                     if !delta.is_empty() {
                         streamed_output.push_text(delta.clone());
                         crate::session_model::send_event(
@@ -2912,9 +3255,20 @@ impl RuntimeTurnDriver {
             LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
                 if !text.is_empty() {
                     *text_streamed = true;
+                    let raw_text = text.clone();
                     let text = self
                         .transform_assistant_stream_chunk(event_tx, text)
                         .await?;
+                    self.log_llm_stream_event(
+                        &self.session_id,
+                        iteration,
+                        debug,
+                        "text_part",
+                        Some(&raw_text),
+                        Some(&text),
+                        None,
+                        None,
+                    );
                     if !text.is_empty() {
                         streamed_output.push_text(text.clone());
                         crate::session_model::send_event(
@@ -2930,9 +3284,31 @@ impl RuntimeTurnDriver {
                 tool_name,
                 input_json,
             }) => {
+                self.log_llm_stream_event(
+                    &self.session_id,
+                    iteration,
+                    debug,
+                    "tool_call_part",
+                    None,
+                    None,
+                    None,
+                    Some((&call_id, &tool_name, &input_json)),
+                );
                 streamed_output.push_tool_call(call_id, tool_name, input_json);
             }
-            LlmStreamEvent::Usage(usage) => *streamed_usage = usage,
+            LlmStreamEvent::Usage(usage) => {
+                self.log_llm_stream_event(
+                    &self.session_id,
+                    iteration,
+                    debug,
+                    "usage",
+                    None,
+                    None,
+                    Some(&usage),
+                    None,
+                );
+                *streamed_usage = usage;
+            }
         }
         Ok(())
     }
@@ -2944,6 +3320,8 @@ impl RuntimeTurnDriver {
         text_streamed: &mut bool,
         streamed_usage: &mut LlmUsage,
         streamed_output: &mut StandardStreamFallback,
+        debug: &mut LlmStreamDebugState,
+        iteration: usize,
     ) -> Result<(), LlmCallError> {
         while let Ok(stream_event) = llm_stream_rx.try_recv() {
             self.forward_standard_stream_event(
@@ -2952,6 +3330,8 @@ impl RuntimeTurnDriver {
                 text_streamed,
                 streamed_usage,
                 streamed_output,
+                debug,
+                iteration,
             )
             .await?;
         }
@@ -3519,6 +3899,27 @@ mod tests {
         let mut runtime = LashRuntime::from_state(
             standard_test_policy(),
             test_host_config(),
+            crate::RuntimeServices::new(plugin_session_with_tools(
+                "root",
+                ExecutionMode::Standard,
+                tools,
+            )),
+            SessionStateEnvelope::default(),
+        )
+        .await
+        .expect("runtime");
+        runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
+        runtime
+    }
+
+    async fn standard_runtime_with_transport_and_host(
+        transport: MockTransport,
+        host: RuntimeHostConfig,
+    ) -> LashRuntime {
+        let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
+        let mut runtime = LashRuntime::from_state(
+            standard_test_policy(),
+            host,
             crate::RuntimeServices::new(plugin_session_with_tools(
                 "root",
                 ExecutionMode::Standard,
@@ -5206,6 +5607,134 @@ mod tests {
         assert_eq!(turn.token_usage.cached_input_tokens, 1);
     }
 
+    #[tokio::test]
+    async fn standard_runtime_debug_log_records_stream_event_entries() {
+        let transport = MockTransport::new(vec![MockCall {
+            stream_events: vec![
+                LlmStreamEvent::Delta("Hello ".to_string()),
+                LlmStreamEvent::Part(LlmOutputPart::Text {
+                    text: "world".to_string(),
+                }),
+                LlmStreamEvent::Usage(LlmUsage {
+                    input_tokens: 10,
+                    output_tokens: 2,
+                    cached_input_tokens: 0,
+                    reasoning_tokens: 0,
+                }),
+            ],
+            response: Ok(LlmResponse {
+                full_text: "Hello world".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "Hello world".to_string(),
+                }],
+                ..LlmResponse::default()
+            }),
+        }]);
+        let log_path = std::env::temp_dir().join(format!(
+            "lash-standard-debug-log-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let mut runtime = standard_runtime_with_transport_and_host(
+            transport,
+            test_host_config_with_llm_log_path(log_path.clone()),
+        )
+        .await;
+
+        let turn = runtime
+            .run_turn_assembled(
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "hello".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    mode: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("turn");
+
+        assert_eq!(turn.status, TurnStatus::Completed);
+
+        let logged = std::fs::read_to_string(&log_path).expect("read log");
+        let entries = logged
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("json log entry"))
+            .collect::<Vec<_>>();
+
+        assert!(
+            entries
+                .iter()
+                .any(
+                    |entry| entry.get("kind").and_then(|v| v.as_str()) == Some("stream_event")
+                        && entry.get("event").and_then(|v| v.as_str()) == Some("delta")
+                        && entry.get("raw_text").and_then(|v| v.as_str()) == Some("Hello ")
+                ),
+            "expected delta stream event in log: {entries:?}"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(
+                    |entry| entry.get("kind").and_then(|v| v.as_str()) == Some("stream_event")
+                        && entry.get("event").and_then(|v| v.as_str()) == Some("text_part")
+                        && entry.get("raw_text").and_then(|v| v.as_str()) == Some("world")
+                ),
+            "expected text_part stream event in log: {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|entry| entry.get("response").is_some()),
+            "expected final debug log entry in log: {entries:?}"
+        );
+        let response_entry = entries
+            .iter()
+            .find(|entry| entry.get("response").is_some())
+            .expect("final response entry");
+        let stream_summary = response_entry
+            .get("stream_summary")
+            .and_then(|value| value.as_object())
+            .expect("stream summary");
+        assert_eq!(
+            stream_summary
+                .get("text_delta_count")
+                .and_then(|value| value.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            stream_summary
+                .get("visible_chunk_count")
+                .and_then(|value| value.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            stream_summary
+                .get("max_visible_chunk_chars")
+                .and_then(|value| value.as_u64()),
+            Some(6)
+        );
+        let avg_chunk_chars = stream_summary
+            .get("avg_visible_chunk_chars")
+            .and_then(|value| value.as_f64())
+            .expect("avg visible chunk chars");
+        assert!((avg_chunk_chars - 5.5).abs() < f64::EPSILON);
+        assert!(
+            stream_summary
+                .get("first_visible_token_latency_ms")
+                .is_some_and(|value| !value.is_null())
+        );
+        assert!(
+            stream_summary
+                .get("stream_duration_ms")
+                .is_some_and(|value| !value.is_null())
+        );
+
+        let _ = std::fs::remove_file(&log_path);
+    }
+
     #[test]
     fn normalize_prompt_usage_uses_input_tokens_for_openai_compatible() {
         let usage = TokenUsage {
@@ -5325,8 +5854,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_result_projectors_split_model_and_history_views() {
-        let committed_results = Arc::new(tokio::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+    async fn tool_result_projectors_split_state_model_and_history_views() {
+        let committed_results = Arc::new(tokio::sync::Mutex::new(Vec::<(
+            serde_json::Value,
+            serde_json::Value,
+        )>::new()));
         let committed_results_hook = Arc::clone(&committed_results);
         let plugin = Arc::new(RuntimeTestPluginFactory {
             build: Arc::new(move |_| {
@@ -5335,6 +5867,15 @@ mod tests {
                     before_turn: None,
                     checkpoint: None,
                     tool_result_projectors: vec![
+                        (
+                            crate::ToolResultProjectionHook::BeforeState,
+                            Arc::new(|mut ctx| {
+                                Box::pin(async move {
+                                    ctx.result.result = serde_json::json!("state projection");
+                                    Ok(ctx.result)
+                                })
+                            }),
+                        ),
                         (
                             crate::ToolResultProjectionHook::BeforeModel,
                             Arc::new(|mut ctx| {
@@ -5357,12 +5898,17 @@ mod tests {
                     turn_committed: Some(Arc::new(move |turn| {
                         let committed_results = Arc::clone(&committed_results);
                         Box::pin(async move {
-                            committed_results.lock().await.push(
+                            committed_results.lock().await.push((
                                 turn.tool_calls
                                     .first()
                                     .map(|call| call.result.clone())
                                     .unwrap_or(serde_json::Value::Null),
-                            );
+                                turn.state
+                                    .tool_calls
+                                    .first()
+                                    .map(|call| call.result.clone())
+                                    .unwrap_or(serde_json::Value::Null),
+                            ));
                             Ok(())
                         })
                     })),
@@ -5425,15 +5971,22 @@ mod tests {
         let committed = committed_results.lock().await;
         assert_eq!(
             committed.as_slice(),
-            &[serde_json::json!("history projection")]
+            &[(
+                serde_json::json!("history projection"),
+                serde_json::json!("history projection"),
+            )]
         );
         assert_eq!(turn.state.tool_calls.len(), 1);
         assert_eq!(turn.state.tool_calls[0].call_id.as_deref(), Some("tool-1"));
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].call_id.as_deref(), Some("tool-1"));
         assert_eq!(
             turn.state.tool_calls[0].result,
-            serde_json::json!({
-                "payload": "raw:sample"
-            })
+            serde_json::json!("state projection")
+        );
+        assert_eq!(
+            turn.tool_calls[0].result,
+            serde_json::json!("state projection")
         );
     }
 

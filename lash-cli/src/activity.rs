@@ -46,6 +46,7 @@ pub enum ActivityExtra {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivityArtifact {
+    QuestionPanel(QuestionPanelArtifact),
     DiffPreview {
         title: String,
         diff: String,
@@ -63,6 +64,27 @@ pub enum ActivityArtifact {
         title: String,
         items: Vec<String>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct QuestionPanelArtifact {
+    pub prompt_lines: Vec<String>,
+    pub options: Vec<QuestionPanelOption>,
+    pub selection_mode: Option<QuestionPanelSelectionMode>,
+    pub answer: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct QuestionPanelOption {
+    pub label: String,
+    pub selected: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum QuestionPanelSelectionMode {
+    Single,
+    Multi,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -110,6 +132,7 @@ impl ActivityState {
         success: bool,
         duration_ms: u64,
     ) -> Vec<ActivityBlock> {
+        let name = activity_tool_name(name);
         if name == "batch" {
             let blocks = self.blocks_for_batch_tool_call(&args, &result);
             if !blocks.is_empty() {
@@ -124,7 +147,11 @@ impl ActivityState {
     }
 
     fn blocks_for_batch_tool_call(&mut self, args: &Value, result: &Value) -> Vec<ActivityBlock> {
-        let Some(results) = result.get("results").and_then(|value| value.as_array()) else {
+        let Some(entries) = result
+            .get("results")
+            .or_else(|| result.get("details"))
+            .and_then(|value| value.as_array())
+        else {
             return Vec::new();
         };
         let calls = args
@@ -133,7 +160,7 @@ impl ActivityState {
             .cloned()
             .unwrap_or_default();
 
-        results
+        entries
             .iter()
             .enumerate()
             .map(|(index, item)| {
@@ -562,19 +589,23 @@ impl ActivityState {
                     extra: None,
                 }
             }
-            "ask" => ActivityBlock {
-                kind: ActivityKind::Ask,
-                status,
-                tool_name: name.to_string(),
-                summary: ask_summary(&args),
-                detail_lines: ask_detail_lines(&args, &result),
-                duration_ms,
-                args,
-                artifact: None,
-                children: Vec::new(),
-                extra: None,
-                result,
-            },
+            "ask" => {
+                let detail_lines = ask_detail_lines(&args, &result);
+                let artifact = inline_question_panel_artifact(&args, &result);
+                ActivityBlock {
+                    kind: ActivityKind::Ask,
+                    status,
+                    tool_name: name.to_string(),
+                    summary: ask_summary(&args),
+                    detail_lines,
+                    duration_ms,
+                    args,
+                    artifact,
+                    children: Vec::new(),
+                    extra: None,
+                    result,
+                }
+            }
             // update_plan is filtered out in blocks_for_tool_call; this branch
             // is unreachable but kept as a guard.
             "update_plan" => ActivityBlock {
@@ -1094,6 +1125,84 @@ fn ask_detail_lines(args: &Value, _result: &Value) -> Vec<String> {
     lines
 }
 
+fn prompt_lines(question: &str) -> Vec<String> {
+    question
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn inline_question_panel_artifact(args: &Value, result: &Value) -> Option<ActivityArtifact> {
+    let question = tool_arg_str(args, "question")?;
+    let mut options = tool_arg_list(args, "options")
+        .into_iter()
+        .map(|label| QuestionPanelOption {
+            label,
+            selected: false,
+        })
+        .collect::<Vec<_>>();
+    let mut selection_mode = (!options.is_empty()).then_some(QuestionPanelSelectionMode::Single);
+    let note = result
+        .get("note")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let mut answer = None;
+
+    match result.get("kind").and_then(|value| value.as_str()) {
+        Some("single") => {
+            selection_mode = Some(QuestionPanelSelectionMode::Single);
+            if let Some(selection) = result.get("selection").and_then(|value| value.as_str()) {
+                if let Some(option) = options.iter_mut().find(|option| option.label == selection) {
+                    option.selected = true;
+                } else if !selection.trim().is_empty() {
+                    answer = Some(selection.trim().to_string());
+                }
+            }
+        }
+        Some("multi") => {
+            selection_mode = Some(QuestionPanelSelectionMode::Multi);
+            let mut unmatched = Vec::new();
+            for selection in result
+                .get("selections")
+                .and_then(|value| value.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|value| value.as_str())
+            {
+                if let Some(option) = options.iter_mut().find(|option| option.label == selection) {
+                    option.selected = true;
+                } else if !selection.trim().is_empty() {
+                    unmatched.push(selection.trim().to_string());
+                }
+            }
+            if !unmatched.is_empty() {
+                answer = Some(unmatched.join(", "));
+            }
+        }
+        Some("text") => {
+            answer = result
+                .get("text")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+        }
+        _ => {}
+    }
+
+    Some(ActivityArtifact::QuestionPanel(QuestionPanelArtifact {
+        prompt_lines: prompt_lines(question),
+        options,
+        selection_mode,
+        answer,
+        note,
+    }))
+}
+
 fn tool_search_summary(args: &Value) -> String {
     tool_arg_str(args, "query")
         .map(|query| format!("searched tools for {:?}", inline_text(query)))
@@ -1579,6 +1688,62 @@ mod tests {
     }
 
     #[test]
+    fn namespaced_batch_expands_into_child_tool_blocks() {
+        let mut state = ActivityState::default();
+        let blocks = state.blocks_for_tool_call(
+            "functions.batch",
+            json!({
+                "tool_calls": [
+                    {"tool": "functions.read_file", "parameters": {"path": "a.rs"}},
+                    {"tool": "functions.grep", "parameters": {"pattern": "foo", "path": "."}}
+                ]
+            }),
+            json!({
+                "results": [
+                    {"tool": "functions.read_file", "success": true, "result": "x"},
+                    {"tool": "functions.grep", "success": true, "result": "match"}
+                ]
+            }),
+            true,
+            12,
+        );
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].tool_name, "read_file");
+        assert_eq!(blocks[1].tool_name, "grep");
+    }
+
+    #[test]
+    fn projected_batch_details_expand_into_child_tool_blocks() {
+        let mut state = ActivityState::default();
+        let blocks = state.blocks_for_tool_call(
+            "batch",
+            json!({
+                "tool_calls": [
+                    {"tool": "read_file", "parameters": {"path": "README.md"}},
+                    {"tool": "search_web", "parameters": {"query": "OpenAI"}}
+                ]
+            }),
+            json!({
+                "summary": "All 2 tools executed successfully.",
+                "details": [
+                    {"tool": "read_file", "success": true, "duration_ms": 8},
+                    {"tool": "search_web", "success": true, "duration_ms": 1300}
+                ]
+            }),
+            true,
+            1308,
+        );
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].tool_name, "read_file");
+        assert_eq!(blocks[0].summary, "EXPLORE · 1 step");
+        assert_eq!(blocks[0].detail_lines, vec!["Read README.md"]);
+        assert_eq!(blocks[1].tool_name, "search_web");
+        assert_eq!(blocks[1].summary, "searched web for \"OpenAI\"");
+    }
+
+    #[test]
     fn read_file_labels_prefer_repo_relative_paths() {
         let mut state = ActivityState::default();
         let path = std::env::current_dir()
@@ -1732,6 +1897,14 @@ mod tests {
             ask_blocks[0].detail_lines,
             vec!["Which direction should I take?", "1. minimal", "2. full",]
         );
+        assert!(matches!(
+            ask_blocks[0].artifact.as_ref(),
+            Some(ActivityArtifact::QuestionPanel(panel))
+                if panel.options.len() == 2
+                    && !panel.options[0].selected
+                    && panel.options[1].selected
+                    && panel.note.as_deref() == Some("keep the transcript path stable")
+        ));
     }
 
     #[test]

@@ -93,7 +93,7 @@ pub use lash_sansio::{
     PromptSectionOverride, PromptSelectionMode, PruneState, Response, SessionEvent, TokenUsage,
     ToolCallRecord, ToolDefinition, ToolImage, ToolParam, ToolResult, TurnMachine,
     TurnMachineConfig, default_context_strategy, default_execution_mode, default_prompt_renderer,
-    execution_mode_supported,
+    execution_mode_supported, messages_are_live_resume_safe,
 };
 pub use mcp::{McpError, McpServerConfig, McpToolExecutionAdapter, attach_mcp_servers};
 pub use model_info::{

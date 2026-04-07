@@ -278,10 +278,10 @@ impl PlanReport {
     fn blocking_message(&self) -> String {
         let needs = self.needs_items();
         if needs.is_empty() {
-            format!("Plan `{}` is not ready yet.", self.display_path)
+            format!("Plan `{}` isn't ready.", self.display_path)
         } else {
             format!(
-                "Plan `{}` is not ready yet. Fill in: {}.",
+                "Plan `{}` isn't ready. Need: {}.",
                 self.display_path,
                 needs.join(", ")
             )
@@ -360,7 +360,7 @@ fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
     PluginMessage::text(
         crate::MessageRole::System,
         format!(
-            "Plan mode is active. Keep the implementation-ready plan in `{display}`. Use read/search/list tools, web tools, and `ask(...)` as needed. Only edit that file. Call `plan_exit()` when it is ready."
+            "Plan mode: work in `{display}` only. Use read/search/list, web, and `ask(...)` as needed. Call `plan_exit()` when ready."
         ),
     )
 }
@@ -368,10 +368,10 @@ fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
 fn plan_mode_tool_note(plan_path: Option<&Path>) -> String {
     match plan_path {
         Some(path) => format!(
-            "Plan mode: allowed tools are read/search/list, web search/fetch, `ask`, `apply_patch` for `{}`, and `plan_exit()`.",
+            "Plan mode tools: read/search/list, web search/fetch, `ask`, `apply_patch` for `{}`, `plan_exit()`.",
             plan_display_path(path)
         ),
-        None => "Plan mode: allowed tools are read/search/list, web search/fetch, `ask`, plan-file `apply_patch`, and `plan_exit()`.".to_string(),
+        None => "Plan mode tools: read/search/list, web search/fetch, `ask`, plan-file `apply_patch`, `plan_exit()`.".to_string(),
     }
 }
 
@@ -621,11 +621,8 @@ impl PlanModeTools {
             .host
             .prompt_user(
                 PromptRequest::single(
-                    format!(
-                        "Plan `{}` is ready. Start executing it now?",
-                        report.display_path
-                    ),
-                    vec!["Implement it".to_string(), "Keep planning".to_string()],
+                    format!("Plan `{}` is ready. Exit plan mode?", report.display_path),
+                    vec!["Exit plan mode".to_string(), "Keep planning".to_string()],
                 )
                 .with_optional_note(),
             )
@@ -636,7 +633,7 @@ impl PlanModeTools {
         };
 
         let (approved, note) = match &answer {
-            PromptResponse::Single { selection, note } if selection == "Implement it" => {
+            PromptResponse::Single { selection, note } if selection == "Exit plan mode" => {
                 (true, note.clone())
             }
             _ => (false, None),
@@ -669,7 +666,7 @@ impl ToolProvider for PlanModeTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "plan_exit".into(),
-            description: "Validate the current plan file, ask whether to start execution now, and if approved queue a fresh execution turn for that plan.".into(),
+            description: "Validate the plan and ask whether to exit plan mode.".into(),
             params: Vec::new(),
             returns: "dict".into(),
             examples: vec!["plan_exit()".into()],
@@ -849,7 +846,7 @@ impl SessionPlugin for PlanModePlugin {
                     return Ok(vec![PluginDirective::AbortTurn {
                         code: "plan_mode_tool_blocked".to_string(),
                         message: format!(
-                            "Plan mode blocks `{}`. Stay in planning tools until the plan is approved.",
+                            "Plan mode blocks `{}`. Use planning tools or `plan_exit()`.",
                             ctx.tool_name
                         ),
                     }]);

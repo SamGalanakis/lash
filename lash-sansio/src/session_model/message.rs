@@ -1,6 +1,7 @@
 use crate::ExecutionMode;
 use crate::llm::types::{LlmAttachment, LlmMessage, LlmRole};
 use base64::Engine;
+use std::collections::HashSet;
 
 // ─── Structured message types for context-aware pruning ───
 
@@ -208,6 +209,56 @@ pub fn render_prompt(msgs: &[Message], mode: ExecutionMode) -> RenderedPrompt {
         ExecutionMode::Repl => render_repl_chat_prompt(msgs),
         ExecutionMode::Standard => render_structured_prompt(msgs),
     }
+}
+
+pub fn messages_are_live_resume_safe(messages: &[Message]) -> bool {
+    let mut seen_tool_calls = HashSet::new();
+    let mut completed_tool_calls = HashSet::new();
+
+    for message in messages {
+        for part in &message.parts {
+            match part.kind {
+                PartKind::ToolCall => {
+                    if !matches!(message.role, MessageRole::Assistant) {
+                        return false;
+                    }
+                    let Some(call_id) = part
+                        .tool_call_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|call_id| !call_id.is_empty())
+                    else {
+                        return false;
+                    };
+                    if !seen_tool_calls.insert(call_id.to_string()) {
+                        return false;
+                    }
+                }
+                PartKind::ToolResult => {
+                    if !matches!(message.role, MessageRole::User) {
+                        return false;
+                    }
+                    let Some(call_id) = part
+                        .tool_call_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|call_id| !call_id.is_empty())
+                    else {
+                        return false;
+                    };
+                    if !seen_tool_calls.contains(call_id) {
+                        return false;
+                    }
+                    if !completed_tool_calls.insert(call_id.to_string()) {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    seen_tool_calls.len() == completed_tool_calls.len()
 }
 
 pub fn render_transcript_prompt(msgs: &[Message]) -> RenderedPrompt {
@@ -718,5 +769,61 @@ mod tests {
         let rendered = render_transcript_prompt(&msgs);
         let text = &rendered.messages[0].content;
         assert!(!text.contains("Runtime Notes:"));
+    }
+
+    #[test]
+    fn live_resume_safety_accepts_completed_tool_history() {
+        let msgs = vec![
+            Message {
+                id: "m0".to_string(),
+                role: MessageRole::Assistant,
+                parts: vec![Part {
+                    id: "m0.p0".to_string(),
+                    kind: PartKind::ToolCall,
+                    content: r#"{"path":"README.md"}"#.to_string(),
+                    attachment: None,
+                    tool_call_id: Some("tc1".to_string()),
+                    tool_name: Some("read_file".to_string()),
+                    prune_state: PruneState::Intact,
+                }],
+                origin: None,
+            },
+            Message {
+                id: "m1".to_string(),
+                role: MessageRole::User,
+                parts: vec![Part {
+                    id: "m1.p0".to_string(),
+                    kind: PartKind::ToolResult,
+                    content: "ok".to_string(),
+                    attachment: None,
+                    tool_call_id: Some("tc1".to_string()),
+                    tool_name: Some("read_file".to_string()),
+                    prune_state: PruneState::Intact,
+                }],
+                origin: None,
+            },
+        ];
+
+        assert!(messages_are_live_resume_safe(&msgs));
+    }
+
+    #[test]
+    fn live_resume_safety_rejects_unmatched_tool_calls() {
+        let msgs = vec![Message {
+            id: "m0".to_string(),
+            role: MessageRole::Assistant,
+            parts: vec![Part {
+                id: "m0.p0".to_string(),
+                kind: PartKind::ToolCall,
+                content: r#"{"path":"README.md"}"#.to_string(),
+                attachment: None,
+                tool_call_id: Some("tc1".to_string()),
+                tool_name: Some("read_file".to_string()),
+                prune_state: PruneState::Intact,
+            }],
+            origin: None,
+        }];
+
+        assert!(!messages_are_live_resume_safe(&msgs));
     }
 }

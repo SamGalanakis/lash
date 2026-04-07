@@ -3,7 +3,8 @@ pub mod message;
 pub mod prompt;
 
 pub use message::{
-    Message, MessageRole, Part, PartKind, PruneState, render_prompt, render_transcript_prompt,
+    Message, MessageRole, Part, PartKind, PruneState, messages_are_live_resume_safe, render_prompt,
+    render_transcript_prompt,
 };
 pub use prompt::{
     DefaultPromptRenderer, PromptOverrideMode, PromptRenderer, PromptSectionName,

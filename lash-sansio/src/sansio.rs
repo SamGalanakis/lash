@@ -40,7 +40,7 @@ pub struct CompletedToolCall {
     pub call_id: String,
     pub tool_name: String,
     pub args: Value,
-    pub raw_result: ToolResult,
+    pub state_result: ToolResult,
     pub model_result: ToolResult,
     pub duration_ms: u64,
 }
@@ -1083,8 +1083,8 @@ impl TurnMachine {
                 call_id: Some(outcome.call_id.clone()),
                 name: outcome.tool_name.clone(),
                 args: outcome.args.clone(),
-                result: outcome.raw_result.result.clone(),
-                success: outcome.raw_result.success,
+                result: outcome.state_result.result.clone(),
+                success: outcome.state_result.success,
                 duration_ms: outcome.duration_ms,
             });
         }
@@ -2020,7 +2020,7 @@ mod tests {
                 call_id,
                 tool_name,
                 args,
-                raw_result: crate::ToolResult::ok(serde_json::json!("file contents")),
+                state_result: crate::ToolResult::ok(serde_json::json!("file contents")),
                 model_result: crate::ToolResult::ok(serde_json::json!("file contents")),
                 duration_ms: 10,
             }],
@@ -2111,7 +2111,7 @@ mod tests {
                 call_id,
                 tool_name,
                 args: args.clone(),
-                raw_result: crate::ToolResult::ok(serde_json::json!({
+                state_result: crate::ToolResult::ok(serde_json::json!({
                     "output": "ok",
                     "exit_code": 0,
                     "timed_out": false,
@@ -2329,7 +2329,7 @@ mod tests {
                 call_id: "tc1".to_string(),
                 tool_name: "test".to_string(),
                 args: serde_json::json!({}),
-                raw_result: crate::ToolResult::ok(serde_json::json!("ok")),
+                state_result: crate::ToolResult::ok(serde_json::json!("ok")),
                 model_result: crate::ToolResult::ok(serde_json::json!("ok")),
                 duration_ms: 1,
             }],

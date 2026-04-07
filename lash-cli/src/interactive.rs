@@ -29,9 +29,9 @@ use crate::{
     ensure_supported_execution_mode, execution_mode_label, execution_mode_usage, hash12, help_text,
     info_text, latest_user_prompt_hash, normalize_prepared_turn_for_dispatch, parse_execution_mode,
     parse_model_selection, persist_live_runtime_snapshot, persist_root_session_state,
-    push_system_message, resolve_model_selection, resolve_model_variant, shell_escape_command,
-    sync_ui_extensions, turn_has_visible_output, validate_model_selection, variant_lines,
-    version_text,
+    push_system_message, queued_turn_edit_binding, resolve_model_selection, resolve_model_variant,
+    shell_escape_command, sync_ui_extensions, turn_has_visible_output, validate_model_selection,
+    variant_lines, version_text,
 };
 
 /// Returned by the spawned runtime task so we can reclaim ownership.
@@ -51,6 +51,56 @@ struct TurnReplayPayload {
 struct AppEventSink {
     tx: mpsc::UnboundedSender<AppEvent>,
     stream_id: u64,
+}
+
+const TEXT_DELTA_REDRAW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+
+#[derive(Default)]
+struct PendingTextDeltaBuffer {
+    content: String,
+    flush_at: Option<tokio::time::Instant>,
+}
+
+impl PendingTextDeltaBuffer {
+    fn push(&mut self, content: String) {
+        self.push_at(content, tokio::time::Instant::now());
+    }
+
+    fn push_at(&mut self, content: String, now: tokio::time::Instant) {
+        if content.is_empty() {
+            return;
+        }
+        if self.content.is_empty() {
+            self.flush_at = Some(now + TEXT_DELTA_REDRAW_INTERVAL);
+        }
+        self.content.push_str(&content);
+    }
+
+    fn flush_deadline(&self) -> Option<tokio::time::Instant> {
+        self.flush_at
+    }
+
+    fn should_flush(&self, now: tokio::time::Instant) -> bool {
+        self.flush_at.is_some_and(|deadline| deadline <= now)
+    }
+
+    fn take_event(&mut self) -> Option<SessionEvent> {
+        if self.content.is_empty() {
+            self.flush_at = None;
+            return None;
+        }
+        self.flush_at = None;
+        Some(SessionEvent::TextDelta {
+            content: std::mem::take(&mut self.content),
+        })
+    }
+}
+
+fn flush_pending_text_deltas(app: &mut App, pending: &mut PendingTextDeltaBuffer) {
+    if let Some(event) = pending.take_event() {
+        app.handle_session_event(event);
+        app.dirty = true;
+    }
 }
 
 #[async_trait::async_trait]
@@ -134,6 +184,126 @@ async fn handle_ui_command(
         Ok(effects) => apply_ui_host_effects(app, effects),
         Err(err) => push_system_message(app, err),
     }
+}
+
+fn promote_pending_steers_to_queue(app: &mut App) {
+    while let Some(turn) = app.pending_steers.pop_front() {
+        app.queue_turn(turn);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_next_queued_turn(
+    app: &mut App,
+    terminal: &mut DefaultTerminal,
+    logger: &mut SessionLogger,
+    args: &Args,
+    paused: &Arc<AtomicBool>,
+    plugin_host: &PluginHost,
+    ui_extensions: &UiExtensions,
+    dynamic_tools: &Arc<DynamicToolProvider>,
+    runtime: &mut Option<LashRuntime>,
+    history: &mut Vec<Message>,
+    turn_counter: &mut usize,
+    last_turn: &mut Option<TurnReplayPayload>,
+    runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
+    cancel_token: &mut Option<CancellationToken>,
+    active_stream_id: &mut u64,
+    provider: &mut Provider,
+    current_model_variant: &mut Option<String>,
+    current_execution_mode: &mut ExecutionMode,
+    current_context_strategy: &mut ContextStrategy,
+    session_manager: &mut Arc<dyn SessionManager>,
+    desired_dynamic: &mut DynamicStateSnapshot,
+    pending_reconfigure: &mut bool,
+    model_catalog: &CachedModelCatalog,
+    toolset_hash: &mut String,
+    app_tx: &mpsc::UnboundedSender<AppEvent>,
+    pending_clear_after_return: &mut bool,
+) -> anyhow::Result<()> {
+    while let Some((queued, was_pending)) = app.take_next_queued_turn() {
+        let queued = normalize_prepared_turn_for_dispatch(queued, &app.skills);
+        if let Some(cmd) = parse_slash_command(&queued.display_text, &app.skills, ui_extensions) {
+            if handle_parsed_slash_command(
+                cmd,
+                terminal,
+                app,
+                logger,
+                args,
+                paused,
+                plugin_host,
+                ui_extensions,
+                dynamic_tools,
+                runtime,
+                history,
+                turn_counter,
+                last_turn,
+                runtime_return_rx,
+                cancel_token,
+                active_stream_id,
+                provider,
+                current_model_variant,
+                current_execution_mode,
+                current_context_strategy,
+                session_manager,
+                desired_dynamic,
+                pending_reconfigure,
+                model_catalog,
+                toolset_hash,
+                app_tx,
+                pending_clear_after_return,
+            )
+            .await?
+            {
+                return Ok(());
+            }
+            continue;
+        }
+
+        if let Err(e) =
+            apply_pending_reconfigure(dynamic_tools, desired_dynamic, pending_reconfigure, runtime)
+                .await
+        {
+            push_system_message(
+                app,
+                format!(
+                    "Pending runtime reconfigure failed; queued message not sent: {}",
+                    e
+                ),
+            );
+            app.requeue_front(queued, was_pending);
+            return Ok(());
+        }
+        *toolset_hash = hash12(
+            &serde_json::to_vec(&dynamic_tools.definitions()).unwrap_or_else(|_| b"[]".to_vec()),
+        );
+        let (items, image_blobs) =
+            build_items_from_editor_input(&queued.effective_text, queued.images.clone());
+        let turn_input = make_turn_input(app, items, image_blobs);
+        let current_dynamic_state = dynamic_tools.export_state();
+        send_user_message(
+            queued.clone(),
+            turn_input.clone(),
+            app,
+            logger,
+            runtime,
+            history,
+            runtime_return_rx,
+            cancel_token,
+            active_stream_id,
+            app_tx,
+            provider,
+            &current_dynamic_state,
+            toolset_hash,
+        );
+        *last_turn = Some(TurnReplayPayload {
+            prepared_turn: queued,
+            turn_input,
+            execution_mode: *current_execution_mode,
+        });
+        return Ok(());
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1166,6 +1336,7 @@ pub(crate) async fn run_app(
     let mut last_turn: Option<TurnReplayPayload> = None;
     let mut active_stream_id: u64 = 0;
     let mut pending_clear_after_return = false;
+    let mut pending_text_deltas = PendingTextDeltaBuffer::default();
 
     sync_ui_extensions(
         &mut app,
@@ -1281,10 +1452,15 @@ pub(crate) async fn run_app(
     });
 
     loop {
+        if pending_text_deltas.should_flush(tokio::time::Instant::now()) {
+            flush_pending_text_deltas(&mut app, &mut pending_text_deltas);
+        }
+
         // Check if runtime turn completed — reclaim runtime + updated history
         if let Some(ref mut rx) = runtime_return_rx {
             match rx.try_recv() {
                 Ok(done) => {
+                    flush_pending_text_deltas(&mut app, &mut pending_text_deltas);
                     runtime = Some(done.runtime);
                     if done.stream_id != active_stream_id || pending_clear_after_return {
                         if let Some(rt) = runtime.as_mut() {
@@ -1303,6 +1479,7 @@ pub(crate) async fn run_app(
                         app.dirty = true;
                         continue;
                     }
+                    let interrupted = matches!(done.result.status, TurnStatus::Interrupted);
                     let no_visible_output = matches!(done.result.status, TurnStatus::Completed)
                         && !turn_has_visible_output(&done.result);
                     let mut state = done.result.state;
@@ -1338,7 +1515,9 @@ pub(crate) async fn run_app(
                     }
 
                     // Snapshot REPL after each completed turn so resume can restore exact state.
-                    let snapshot_hash = if let Some(rt) = runtime.as_mut() {
+                    let snapshot_hash = if interrupted {
+                        None
+                    } else if let Some(rt) = runtime.as_mut() {
                         if matches!(state.policy.execution_mode, ExecutionMode::Repl) {
                             match rt.snapshot_repl().await {
                                 Ok(blob) => {
@@ -1363,7 +1542,6 @@ pub(crate) async fn run_app(
                     } else {
                         None
                     };
-                    state.task_state = None;
 
                     history = state.messages.clone();
                     turn_counter = state.iteration;
@@ -1381,6 +1559,91 @@ pub(crate) async fn run_app(
                         running = app.running,
                         "reconciling completed runtime turn"
                     );
+                    let persisted_execution_mode = state.policy.execution_mode;
+                    let persisted_context_strategy = state.policy.context_strategy;
+                    let persisted_dynamic_state = dynamic_tools.export_state();
+
+                    if interrupted {
+                        let had_manual_interrupt_message = matches!(
+                            app.blocks.last(),
+                            Some(DisplayBlock::SystemMessage(message))
+                                if message == crate::util::manual_interrupt_message()
+                        );
+                        let ui_resume_state = app.ui_resume_state();
+                        if let Some(context_window) = app.context_window {
+                            persist_live_runtime_snapshot(
+                                &store,
+                                DurableTurnSnapshot {
+                                    messages: state.messages.clone(),
+                                    tool_calls: state.tool_calls.clone(),
+                                    iteration: state.iteration,
+                                },
+                                &ui_resume_state,
+                                &persisted_dynamic_state,
+                                &provider,
+                                &app.model,
+                                context_window,
+                                persisted_execution_mode,
+                                persisted_context_strategy,
+                                current_model_variant.as_deref(),
+                                &toolset_hash,
+                                app.token_usage.clone(),
+                                app.last_prompt_usage.clone(),
+                            );
+                        }
+                        if let Some(rt) = runtime.as_mut() {
+                            rt.set_state(state.clone());
+                        }
+                        let interrupted_message = if had_manual_interrupt_message {
+                            crate::util::manual_interrupt_message().to_string()
+                        } else {
+                            "Cancelled.".to_string()
+                        };
+                        app.stop_turn();
+                        app.blocks = app::project_interrupted_blocks(
+                            &state.messages,
+                            &state.tool_calls,
+                            &ui_resume_state,
+                            interrupted_message,
+                        );
+                        promote_pending_steers_to_queue(&mut app);
+                        app.invalidate_height_cache();
+                        app.scroll_to_bottom();
+                        runtime_return_rx = None;
+                        cancel_token = None;
+                        dispatch_next_queued_turn(
+                            &mut app,
+                            &mut terminal,
+                            logger,
+                            args,
+                            &paused,
+                            &plugin_host,
+                            ui_extensions.as_ref(),
+                            &dynamic_tools,
+                            &mut runtime,
+                            &mut history,
+                            &mut turn_counter,
+                            &mut last_turn,
+                            &mut runtime_return_rx,
+                            &mut cancel_token,
+                            &mut active_stream_id,
+                            &mut provider,
+                            &mut current_model_variant,
+                            &mut current_execution_mode,
+                            &mut current_context_strategy,
+                            &mut session_manager,
+                            &mut desired_dynamic,
+                            &mut pending_reconfigure,
+                            model_catalog.as_ref(),
+                            &mut toolset_hash,
+                            &app_tx,
+                            &mut pending_clear_after_return,
+                        )
+                        .await?;
+                        continue;
+                    }
+
+                    state.task_state = None;
                     let final_output = app::latest_assistant_text_from_messages(&state.messages)
                         .or_else(|| {
                             (!done.result.assistant_output.safe_text.is_empty())
@@ -1388,10 +1651,6 @@ pub(crate) async fn run_app(
                         });
                     let ui_resume_state =
                         app.finish_turn_for_resume_with_output(final_output.as_deref());
-
-                    let persisted_execution_mode = state.policy.execution_mode;
-                    let persisted_context_strategy = state.policy.context_strategy;
-                    let persisted_dynamic_state = dynamic_tools.export_state();
                     persist_root_session_state(
                         &store,
                         &mut state,
@@ -1416,104 +1675,40 @@ pub(crate) async fn run_app(
                     let leftover_injections =
                         turn_injection_bridge.drain().unwrap_or_else(|_| Vec::new());
                     if !leftover_injections.is_empty() {
-                        while let Some(turn) = app.pending_steers.pop_front() {
-                            app.queue_turn(turn);
-                        }
+                        promote_pending_steers_to_queue(&mut app);
                     }
-
-                    if let Some((queued, was_pending)) = app.take_next_queued_turn() {
-                        let queued = normalize_prepared_turn_for_dispatch(queued, &app.skills);
-                        if let Some(cmd) = parse_slash_command(
-                            &queued.display_text,
-                            &app.skills,
-                            ui_extensions.as_ref(),
-                        ) {
-                            if handle_parsed_slash_command(
-                                cmd,
-                                &mut terminal,
-                                &mut app,
-                                logger,
-                                args,
-                                &paused,
-                                &plugin_host,
-                                ui_extensions.as_ref(),
-                                &dynamic_tools,
-                                &mut runtime,
-                                &mut history,
-                                &mut turn_counter,
-                                &mut last_turn,
-                                &mut runtime_return_rx,
-                                &mut cancel_token,
-                                &mut active_stream_id,
-                                &mut provider,
-                                &mut current_model_variant,
-                                &mut current_execution_mode,
-                                &mut current_context_strategy,
-                                &mut session_manager,
-                                &mut desired_dynamic,
-                                &mut pending_reconfigure,
-                                model_catalog.as_ref(),
-                                &mut toolset_hash,
-                                &app_tx,
-                                &mut pending_clear_after_return,
-                            )
-                            .await?
-                            {
-                                break;
-                            }
-                            continue;
-                        }
-                        if let Err(e) = apply_pending_reconfigure(
-                            &dynamic_tools,
-                            &mut desired_dynamic,
-                            &mut pending_reconfigure,
-                            &mut runtime,
-                        )
-                        .await
-                        {
-                            push_system_message(
-                                &mut app,
-                                format!(
-                                    "Pending runtime reconfigure failed; queued message not sent: {}",
-                                    e
-                                ),
-                            );
-                            app.requeue_front(queued, was_pending);
-                            continue;
-                        }
-                        toolset_hash = hash12(
-                            &serde_json::to_vec(&dynamic_tools.definitions())
-                                .unwrap_or_else(|_| b"[]".to_vec()),
-                        );
-                        let (items, image_blobs) = build_items_from_editor_input(
-                            &queued.effective_text,
-                            queued.images.clone(),
-                        );
-                        let turn_input = make_turn_input(&mut app, items, image_blobs);
-                        let current_dynamic_state = dynamic_tools.export_state();
-                        send_user_message(
-                            queued.clone(),
-                            turn_input.clone(),
-                            &mut app,
-                            logger,
-                            &mut runtime,
-                            &mut history,
-                            &mut runtime_return_rx,
-                            &mut cancel_token,
-                            &mut active_stream_id,
-                            &app_tx,
-                            &provider,
-                            &current_dynamic_state,
-                            &toolset_hash,
-                        );
-                        last_turn = Some(TurnReplayPayload {
-                            prepared_turn: queued,
-                            turn_input,
-                            execution_mode: current_execution_mode,
-                        });
-                    }
+                    dispatch_next_queued_turn(
+                        &mut app,
+                        &mut terminal,
+                        logger,
+                        args,
+                        &paused,
+                        &plugin_host,
+                        ui_extensions.as_ref(),
+                        &dynamic_tools,
+                        &mut runtime,
+                        &mut history,
+                        &mut turn_counter,
+                        &mut last_turn,
+                        &mut runtime_return_rx,
+                        &mut cancel_token,
+                        &mut active_stream_id,
+                        &mut provider,
+                        &mut current_model_variant,
+                        &mut current_execution_mode,
+                        &mut current_context_strategy,
+                        &mut session_manager,
+                        &mut desired_dynamic,
+                        &mut pending_reconfigure,
+                        model_catalog.as_ref(),
+                        &mut toolset_hash,
+                        &app_tx,
+                        &mut pending_clear_after_return,
+                    )
+                    .await?;
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    flush_pending_text_deltas(&mut app, &mut pending_text_deltas);
                     app.stop_turn();
                     runtime_return_rx = None;
                     cancel_token = None;
@@ -1541,10 +1736,34 @@ pub(crate) async fn run_app(
         }
 
         // Wait for next event
-        let event = match app_rx.recv().await {
-            Some(e) => e,
-            None => break,
+        let event = if let Some(deadline) = pending_text_deltas.flush_deadline() {
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(deadline) => {
+                    flush_pending_text_deltas(&mut app, &mut pending_text_deltas);
+                    continue;
+                }
+                maybe_event = app_rx.recv() => match maybe_event {
+                    Some(event) => event,
+                    None => break,
+                },
+            }
+        } else {
+            match app_rx.recv().await {
+                Some(event) => event,
+                None => break,
+            }
         };
+
+        if !matches!(
+            &event,
+            AppEvent::Session {
+                event: SessionEvent::TextDelta { .. },
+                ..
+            }
+        ) {
+            flush_pending_text_deltas(&mut app, &mut pending_text_deltas);
+        }
 
         match event {
             AppEvent::Terminal(TermEvent::Paste(text)) => {
@@ -1611,7 +1830,7 @@ pub(crate) async fn run_app(
                     continue;
                 }
 
-                if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Up {
+                if queued_turn_edit_binding().matches(key) {
                     if let Some((turn, _was_pending)) = app.take_last_queued_turn() {
                         app.restore_prepared_turn(turn);
                         app.update_suggestions();
@@ -2378,6 +2597,10 @@ pub(crate) async fn run_app(
                 if stream_id != active_stream_id {
                     continue;
                 }
+                if let SessionEvent::TextDelta { content } = event {
+                    pending_text_deltas.push(content);
+                    continue;
+                }
                 app.dirty = true;
                 if let SessionEvent::DurableSnapshot { snapshot } = event {
                     if runtime_return_rx.is_some()
@@ -2542,6 +2765,54 @@ fn append_turn_input_message(messages: &mut Vec<Message>, turn_input: &TurnInput
         parts: user_parts,
         origin: None,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_text_delta_buffer_coalesces_adjacent_chunks() {
+        let mut pending = PendingTextDeltaBuffer::default();
+        pending.push("Hello".to_string());
+        pending.push(", world".to_string());
+
+        match pending.take_event() {
+            Some(SessionEvent::TextDelta { content }) => assert_eq!(content, "Hello, world"),
+            other => panic!("expected coalesced text delta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pending_text_delta_buffer_uses_first_chunk_deadline() {
+        let mut pending = PendingTextDeltaBuffer::default();
+        let now = tokio::time::Instant::now();
+        pending.push_at("first".to_string(), now);
+        pending.push_at(
+            " second".to_string(),
+            now + std::time::Duration::from_millis(10),
+        );
+
+        let deadline = pending.flush_deadline().expect("deadline");
+        assert_eq!(deadline, now + TEXT_DELTA_REDRAW_INTERVAL);
+        assert!(!pending.should_flush(now + std::time::Duration::from_millis(32)));
+        assert!(pending.should_flush(now + std::time::Duration::from_millis(33)));
+    }
+
+    #[test]
+    fn promote_pending_steers_to_queue_preserves_order() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.queue_pending_steer(PreparedTurn::new("after tool 1".into(), Vec::new()));
+        app.queue_pending_steer(PreparedTurn::new("after tool 2".into(), Vec::new()));
+
+        promote_pending_steers_to_queue(&mut app);
+
+        assert!(app.pending_steers.is_empty());
+        let queued: Vec<String> = std::iter::from_fn(|| app.take_next_queued_turn())
+            .map(|(turn, _)| turn.display_text)
+            .collect();
+        assert_eq!(queued, vec!["after tool 1", "after tool 2"]);
+    }
 }
 
 fn pending_turn_snapshot(

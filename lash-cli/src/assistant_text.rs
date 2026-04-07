@@ -102,6 +102,47 @@ pub fn render_assistant_text_block(
     lines
 }
 
+pub fn render_live_assistant_text_block(text: &str, viewport_width: usize) -> Vec<Line<'static>> {
+    let cleaned = normalize_assistant_text(text);
+    if cleaned.is_empty() {
+        return Vec::new();
+    }
+
+    let first_prefix = "■ ";
+    let continuation_prefix = "  ";
+    let prefix_w = UnicodeWidthStr::width(first_prefix);
+    let content_width = viewport_width.saturating_sub(prefix_w);
+
+    let mut lines = Vec::new();
+    let mut marker_placed = false;
+
+    for line in cleaned.split('\n') {
+        if line.is_empty() {
+            lines.push(Line::from(""));
+            continue;
+        }
+
+        let wrapped = wrap_plain_text_ranges_wordwise(line, content_width);
+        for (seg_start, seg_end) in wrapped {
+            let prefix = if marker_placed {
+                continuation_prefix
+            } else {
+                marker_placed = true;
+                first_prefix
+            };
+            lines.push(Line::from(vec![
+                Span::styled(prefix, theme::assistant_bar()),
+                Span::styled(
+                    line[seg_start..seg_end].to_string(),
+                    theme::assistant_text(),
+                ),
+            ]));
+        }
+    }
+
+    lines
+}
+
 fn clone_line_owned(line: &Line<'_>) -> Line<'static> {
     let spans = line
         .spans
@@ -162,6 +203,111 @@ fn skip_leading_whitespace_glyphs(glyphs: &[StyledGlyph], mut idx: usize) -> usi
         idx += 1;
     }
     idx
+}
+
+fn trim_trailing_whitespace_plain(text: &str, start: usize, end: usize) -> usize {
+    let mut trimmed = end;
+    while trimmed > start {
+        let Some(ch) = text[..trimmed].chars().next_back() else {
+            break;
+        };
+        if !ch.is_whitespace() {
+            break;
+        }
+        trimmed -= ch.len_utf8();
+    }
+    trimmed
+}
+
+fn skip_leading_whitespace_plain(text: &str, mut idx: usize) -> usize {
+    while idx < text.len() {
+        let Some(ch) = text[idx..].chars().next() else {
+            break;
+        };
+        if !ch.is_whitespace() {
+            break;
+        }
+        idx += ch.len_utf8();
+    }
+    idx
+}
+
+fn wrap_plain_text_ranges_wordwise(text: &str, width: usize) -> Vec<(usize, usize)> {
+    if width == 0 || text.is_empty() {
+        return vec![(0, text.len())];
+    }
+
+    let mut wrapped = Vec::new();
+    let mut start = 0usize;
+    let mut continuation = false;
+
+    'line: while start < text.len() {
+        let line_start = if continuation {
+            skip_leading_whitespace_plain(text, start)
+        } else {
+            start
+        };
+        if line_start >= text.len() {
+            break;
+        }
+
+        let mut idx = line_start;
+        let mut row_width = 0usize;
+        let mut last_break = None;
+        let mut prev_was_whitespace = false;
+
+        while idx < text.len() {
+            let ch = text[idx..]
+                .chars()
+                .next()
+                .expect("slice should start on a char boundary");
+            let next_idx = idx + ch.len_utf8();
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            let is_whitespace = ch.is_whitespace();
+
+            if is_whitespace && !prev_was_whitespace && row_width > 0 {
+                last_break = Some(idx);
+            }
+
+            if row_width + ch_width > width && row_width > 0 {
+                if is_whitespace {
+                    let line_end = trim_trailing_whitespace_plain(text, line_start, idx);
+                    if line_end > line_start {
+                        wrapped.push((line_start, line_end));
+                        start = skip_leading_whitespace_plain(text, idx);
+                        continuation = true;
+                        continue 'line;
+                    }
+                }
+                break;
+            }
+
+            row_width += ch_width;
+            prev_was_whitespace = is_whitespace;
+            idx = next_idx;
+        }
+
+        if idx >= text.len() {
+            wrapped.push((line_start, text.len()));
+            break;
+        }
+
+        if let Some(break_idx) = last_break {
+            let line_end = trim_trailing_whitespace_plain(text, line_start, break_idx);
+            if line_end > line_start {
+                wrapped.push((line_start, line_end));
+                start = skip_leading_whitespace_plain(text, break_idx);
+                continuation = true;
+                continue;
+            }
+        }
+
+        wrapped.push((line_start, idx));
+        start = idx;
+        continuation = true;
+    }
+
+    wrapped
 }
 
 fn wrap_rendered_lines_wordwise(lines: &[Line<'_>], width: usize) -> Vec<Line<'static>> {
