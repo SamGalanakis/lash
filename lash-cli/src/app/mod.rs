@@ -372,9 +372,6 @@ pub struct App {
     pub streaming_output: Vec<String>,
     pub streaming_output_hidden: usize,
     pub streaming_output_partial: String,
-    /// Whether to render live `tool_output` chunks in history.
-    /// Default: on (can be disabled via `LASH_SHOW_TOOL_OUTPUT=0`).
-    pub show_live_tool_output: bool,
     /// Loaded skills registry.
     pub skills: SkillCatalog,
     /// Priority follow-ups entered with Enter while a turn is running.
@@ -454,7 +451,7 @@ impl App {
         self.iteration = 0;
         self.live_assistant = None;
         self.assistant_text_finalized = false;
-        self.clear_streaming_output();
+        self.clear_live_tool_output();
         self.active_delegate = None;
         self.live_output_chars_estimate = 0;
         self.live_output_tokens_estimate = 0;
@@ -466,7 +463,7 @@ impl App {
         self.running = false;
         self.manual_interrupt_requested = false;
         self.commit_live_assistant_block();
-        self.clear_streaming_output();
+        self.clear_live_tool_output();
         self.active_delegate = None;
         self.live_output_chars_estimate = 0;
         self.live_output_tokens_estimate = 0;
@@ -630,13 +627,6 @@ impl App {
             streaming_output: Vec::new(),
             streaming_output_hidden: 0,
             streaming_output_partial: String::new(),
-            show_live_tool_output: !matches!(
-                std::env::var("LASH_SHOW_TOOL_OUTPUT")
-                    .unwrap_or_default()
-                    .to_ascii_lowercase()
-                    .as_str(),
-                "0" | "false" | "no" | "off"
-            ),
             skills: SkillCatalog::load(),
             pending_steers: VecDeque::new(),
             queued_turns: VecDeque::new(),
@@ -788,13 +778,7 @@ impl App {
         });
 
         if needs_refresh {
-            let lines = render::render_block_lines(
-                &self.blocks,
-                idx,
-                self.expand_level,
-                viewport_width,
-                viewport_height,
-            );
+            let lines = render::render_block_lines(self, idx, viewport_width, viewport_height);
             self.block_render_cache[idx] = Some(BlockRenderCacheEntry {
                 width: viewport_width,
                 viewport_height,
@@ -842,6 +826,44 @@ impl App {
             return 0;
         }
         self.live_assistant_leading_padding() + view.rendered_lines.len()
+    }
+
+    pub(crate) fn live_tool_output_anchor_block_index(&self) -> Option<usize> {
+        if self.streaming_output_height() == 0 {
+            return None;
+        }
+        self.blocks
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, block)| match block {
+                DisplayBlock::Activity(activity)
+                    if matches!(
+                        activity.kind,
+                        ActivityKind::ShellCommand
+                            | ActivityKind::ShellInteraction
+                            | ActivityKind::Delegate
+                    ) =>
+                {
+                    Some(idx)
+                }
+                _ => None,
+            })
+    }
+
+    fn invalidate_live_tool_output_cache(&mut self) {
+        if let Some(idx) = self.live_tool_output_anchor_block_index() {
+            self.invalidate_height_cache_from(idx);
+        }
+    }
+
+    fn clear_live_tool_output(&mut self) {
+        let had_output = self.streaming_output_height() > 0;
+        let anchor_idx = self.live_tool_output_anchor_block_index();
+        self.clear_streaming_output();
+        if had_output && let Some(idx) = anchor_idx {
+            self.invalidate_height_cache_from(idx);
+        }
     }
 
     fn merge_into_trailing_assistant_block(&mut self, text: &str) -> bool {
@@ -941,9 +963,9 @@ impl App {
             match message.role {
                 MessageRole::User => {
                     committed_user_message = true;
-                    if let Some(turn) = self.pending_steers.pop_front() {
+                    if let Some(turn) = self.take_matching_pending_steer(&message.content) {
                         self.push_prepared_user_input(&turn);
-                    } else if !self.commit_pending_user_preview(&message.content) {
+                    } else {
                         self.blocks
                             .push(DisplayBlock::UserInput(message.content.clone()));
                     }
@@ -1030,7 +1052,7 @@ impl App {
                 ..
             } => {
                 self.finalize_live_assistant();
-                self.clear_streaming_output();
+                self.clear_live_tool_output();
                 if matches!(name.as_str(), "agent_result" | "agent_kill") {
                     self.active_delegate = None;
                 }
@@ -1145,8 +1167,9 @@ impl App {
                     let stream_active = self.running
                         || self.active_delegate.is_some()
                         || current_status.is_some_and(|status| status.contains("shell"));
-                    if self.show_live_tool_output && stream_active {
+                    if stream_active {
                         self.push_streaming_output_text(&text);
+                        self.invalidate_live_tool_output_cache();
                         self.mark_visible_output();
                         self.scroll_to_bottom();
                     }
@@ -1298,16 +1321,15 @@ impl App {
         !self.pending_steers.is_empty() || !self.queued_turns.is_empty()
     }
 
-    pub fn preview_queued_turn(&mut self, turn: &PreparedTurn, inject_at_checkpoint: bool) {
-        let _ = inject_at_checkpoint;
-        let _ = turn;
-        // Queued turns already render in the dedicated queue-preview panel. Duplicating
-        // them into history makes the same text appear twice before it is actually sent.
-    }
-
-    pub fn commit_pending_user_preview(&mut self, text: &str) -> bool {
-        let _ = text;
-        false
+    fn take_matching_pending_steer(&mut self, content: &str) -> Option<PreparedTurn> {
+        let idx = self.pending_steers.iter().position(|turn| {
+            turn.display_text == content
+                || turn.raw_text == content
+                || turn.effective_text == content
+                || (!turn.transform_labels.is_empty() && content.starts_with(&turn.display_text))
+                || (!turn.transform_labels.is_empty() && content.starts_with(&turn.raw_text))
+        })?;
+        self.pending_steers.remove(idx)
     }
 
     pub fn set_ui_extensions(&mut self, ui_extensions: Arc<UiExtensions>) {

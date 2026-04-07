@@ -43,7 +43,7 @@ const MAX_INPUT_HEIGHT: u16 = 20;
 const COMPACT_ACTIVITY_FEED_MAX_ITEMS: usize = 5;
 const COMPACT_ACTIVITY_FEED_MAX_ROWS_PER_ITEM: usize = 2;
 const COMPACT_PATCH_PREVIEW_MAX_FILES: usize = 5;
-const STREAMING_OUTPUT_OVERLAY_MAX_ROWS: usize = 4;
+const STREAMING_OUTPUT_INLINE_MAX_ROWS: usize = 4;
 const SCROLL_INDICATOR_HIDE_TAIL_ROWS: usize = 2;
 const SCROLL_INDICATOR_MIN_HEIGHT: usize = 2;
 const QUEUE_SECTION_ITEM_LIMIT: usize = 2;
@@ -116,7 +116,10 @@ pub fn rendered_block_height(
     viewport_width: usize,
     viewport_height: usize,
 ) -> usize {
-    render_block_lines(blocks, idx, expand_level, viewport_width, viewport_height).len()
+    let mut app = App::new("test-model".into(), "test".into());
+    app.blocks = blocks.to_vec();
+    app.expand_level = expand_level;
+    render_block_lines(&app, idx, viewport_width, viewport_height).len()
 }
 
 pub(crate) fn extract_history_selection_text(
@@ -222,9 +225,8 @@ fn history_content_lines_snapshot(
     let mut lines = Vec::new();
     for idx in 0..app.blocks.len() {
         lines.extend(render_block_lines(
-            &app.blocks,
+            app,
             idx,
-            app.expand_level,
             viewport_width,
             viewport_height,
         ));
@@ -520,21 +522,13 @@ fn build_code_fold_summary(blocks: &[DisplayBlock], idx: usize) -> String {
 }
 
 pub(crate) fn render_block_lines(
-    blocks: &[DisplayBlock],
+    app: &App,
     idx: usize,
-    expand_level: u8,
     viewport_width: usize,
     viewport_height: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    render_block_into(
-        blocks,
-        idx,
-        expand_level,
-        &mut lines,
-        viewport_width,
-        viewport_height,
-    );
+    render_block_into(app, idx, &mut lines, viewport_width, viewport_height);
     lines
 }
 
@@ -546,17 +540,21 @@ fn render_block(
     viewport_width: usize,
     viewport_height: usize,
 ) -> Vec<Line<'static>> {
-    render_block_lines(blocks, idx, expand_level, viewport_width, viewport_height)
+    let mut app = App::new("test-model".into(), "test".into());
+    app.blocks = blocks.to_vec();
+    app.expand_level = expand_level;
+    render_block_lines(&app, idx, viewport_width, viewport_height)
 }
 
 fn render_block_into(
-    blocks: &[DisplayBlock],
+    app: &App,
     idx: usize,
-    expand_level: u8,
     lines: &mut Vec<Line<'static>>,
     viewport_width: usize,
     viewport_height: usize,
 ) {
+    let blocks = &app.blocks;
+    let expand_level = app.expand_level;
     match &blocks[idx] {
         DisplayBlock::UserInput(text) => {
             if idx > 0 && !matches!(blocks[idx - 1], DisplayBlock::Splash) {
@@ -626,6 +624,9 @@ fn render_block_into(
         },
         DisplayBlock::Activity(activity) => {
             render_activity_block(activity, expand_level, lines, viewport_width);
+            if app.live_tool_output_anchor_block_index() == Some(idx) {
+                render_live_tool_output_inline(lines, app, &activity.kind, viewport_width);
+            }
         }
         DisplayBlock::CodeOutput { output, error } => {
             if expand_level >= 2 && !output.is_empty() {
@@ -842,52 +843,57 @@ fn render_splash(
     }
 }
 
-fn append_streaming_output_lines(lines: &mut Vec<Line<'static>>, app: &App, viewport_width: usize) {
+fn append_streaming_output_lines(
+    lines: &mut Vec<Line<'static>>,
+    app: &App,
+    viewport_width: usize,
+    prefix: &str,
+    prefix_style: Style,
+    content_style: Style,
+    row_limit: usize,
+) {
     if app.streaming_output_height() == 0 {
         return;
     }
 
-    let delegate_stream = app.active_delegate.is_some();
+    let mut hidden_rows = app.streaming_output_hidden;
     let mut logical = Vec::with_capacity(app.streaming_output_height());
-    if app.streaming_output_hidden > 0 {
-        logical.push(format!(
-            "… {} earlier shell lines hidden …",
-            app.streaming_output_hidden
-        ));
-    }
     logical.extend(app.streaming_output.iter().cloned());
     if !app.streaming_output_partial.is_empty() {
         logical.push(app.streaming_output_partial.clone());
     }
 
-    for (idx, line) in logical.into_iter().enumerate() {
-        let (prefix, prefix_style, content_style) = if delegate_stream {
-            let prefix = if idx == 0 { "├─ " } else { "│  " };
-            (
-                prefix,
-                Style::default()
-                    .fg(theme::SODIUM)
-                    .add_modifier(Modifier::Bold),
-                Style::default().fg(theme::CHALK_MID),
-            )
-        } else {
-            ("│ ", theme::code_chrome(), theme::code_content())
-        };
+    if row_limit > 0 {
+        let visible_tail = row_limit.saturating_sub(1);
+        if logical.len() > visible_tail {
+            let trimmed = logical.len().saturating_sub(visible_tail);
+            hidden_rows += trimmed;
+            logical = logical.split_off(trimmed);
+        }
+    }
+
+    if hidden_rows > 0 {
+        logical.insert(0, format!("… {hidden_rows} earlier live rows hidden …"));
+    }
+
+    let continuation = " ".repeat(prefix.chars().count());
+    for line in logical {
         push_wrapped_prefixed(
             lines,
             prefix.to_string(),
-            "   ".to_string(),
+            continuation.clone(),
             &line,
             content_style,
             viewport_width,
         );
-        let continuation_rows = text_layout::wrap_text_ranges_wordwise(
+        let rendered_rows = text_layout::wrap_text_ranges_wordwise(
             &line,
             viewport_width.saturating_sub(UnicodeWidthStr::width(prefix)),
         )
-        .len();
-        let written_rows = continuation_rows.max(1).min(lines.len());
-        for row in lines.iter_mut().rev().take(written_rows) {
+        .len()
+        .max(1)
+        .min(lines.len());
+        for row in lines.iter_mut().rev().take(rendered_rows) {
             if let Some(first) = row.spans.first_mut() {
                 first.style = prefix_style;
             }
@@ -895,44 +901,37 @@ fn append_streaming_output_lines(lines: &mut Vec<Line<'static>>, app: &App, view
     }
 }
 
-pub(crate) fn streaming_output_overlay_lines(
+fn render_live_tool_output_inline(
+    lines: &mut Vec<Line<'static>>,
     app: &App,
+    activity_kind: &ActivityKind,
     viewport_width: usize,
-) -> Vec<Line<'static>> {
-    if viewport_width == 0 || app.streaming_output_height() == 0 {
-        return Vec::new();
+) {
+    if app.streaming_output_height() == 0 || viewport_width == 0 {
+        return;
     }
-    let mut lines = Vec::new();
-    append_streaming_output_lines(&mut lines, app, viewport_width);
-    if lines.len() <= STREAMING_OUTPUT_OVERLAY_MAX_ROWS {
-        return lines;
-    }
-    let visible_tail = STREAMING_OUTPUT_OVERLAY_MAX_ROWS.saturating_sub(1);
-    let hidden_rows = lines.len().saturating_sub(visible_tail);
-    let delegate_stream = app.active_delegate.is_some();
-    let prefix_style = if delegate_stream {
-        Style::default()
-            .fg(theme::SODIUM)
-            .add_modifier(Modifier::Bold)
+
+    let (prefix, prefix_style, content_style) = if *activity_kind == ActivityKind::Delegate {
+        (
+            "    │ ",
+            Style::default()
+                .fg(theme::SODIUM)
+                .add_modifier(Modifier::Bold),
+            Style::default().fg(theme::CHALK_MID),
+        )
     } else {
-        theme::code_chrome()
+        ("    │ ", theme::code_chrome(), theme::system_output())
     };
-    let content_style = if delegate_stream {
-        Style::default().fg(theme::CHALK_MID)
-    } else {
-        theme::code_content()
-    };
-    let prefix = if delegate_stream { "├─ " } else { "│ " };
-    let mut overlay = Vec::with_capacity(STREAMING_OUTPUT_OVERLAY_MAX_ROWS);
-    overlay.push(Line::from(vec![
-        Span::styled(prefix.to_string(), prefix_style),
-        Span::styled(
-            format!("… {hidden_rows} earlier live rows hidden …"),
-            content_style,
-        ),
-    ]));
-    overlay.extend(lines.into_iter().skip(hidden_rows).take(visible_tail));
-    overlay
+
+    append_streaming_output_lines(
+        lines,
+        app,
+        viewport_width,
+        prefix,
+        prefix_style,
+        content_style,
+        STREAMING_OUTPUT_INLINE_MAX_ROWS,
+    );
 }
 
 pub(crate) fn history_scroll_indicator(app: &App, area: Rect) -> Option<(u16, u16, u16)> {

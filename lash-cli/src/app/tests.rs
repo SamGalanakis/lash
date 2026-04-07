@@ -545,6 +545,24 @@ fn tool_output_strips_ansi_escape_sequences_from_live_preview() {
 }
 
 #[test]
+fn tool_output_strips_osc_escape_sequences_from_live_preview() {
+    let mut app = App::new("test-model".into(), "test".into());
+    app.start_turn();
+
+    app.handle_session_event(SessionEvent::Message {
+        text: "\u{1b}]11;?\u{1b}\\".into(),
+        kind: "tool_output".into(),
+    });
+    app.handle_session_event(SessionEvent::Message {
+        text: "done\n".into(),
+        kind: "tool_output".into(),
+    });
+
+    assert_eq!(app.streaming_output, vec!["done".to_string()]);
+    assert!(app.streaming_output_partial.is_empty());
+}
+
+#[test]
 fn tool_output_tabs_collapse_to_single_spaces_in_live_preview() {
     let mut app = App::new("test-model".into(), "test".into());
     app.start_turn();
@@ -830,11 +848,10 @@ fn take_last_queued_turn_restores_explicit_queue_only() {
 }
 
 #[test]
-fn injected_messages_commit_render_user_blocks_and_clear_pending_preview() {
+fn injected_messages_commit_render_user_blocks_and_clear_matching_pending_steer() {
     let mut app = App::new("test-model".into(), "test".into());
     let turn = PreparedTurn::new("follow up".into(), Vec::new());
     app.queue_pending_steer(turn.clone());
-    app.preview_queued_turn(&turn, true);
 
     app.handle_session_event(SessionEvent::InjectedMessagesCommitted {
         messages: vec![PluginMessage::text(MessageRole::User, "follow up")],
@@ -849,12 +866,11 @@ fn injected_messages_commit_render_user_blocks_and_clear_pending_preview() {
 }
 
 #[test]
-fn injected_messages_clear_pending_queue_even_when_runtime_content_differs() {
+fn injected_messages_clear_matching_pending_steer_even_when_runtime_content_differs() {
     let mut app = App::new("test-model".into(), "test".into());
     let mut turn = PreparedTurn::new("/localref lash for context if needed".into(), Vec::new());
     turn.transform_labels = vec!["localref".into()];
     app.queue_pending_steer(turn.clone());
-    app.preview_queued_turn(&turn, true);
 
     app.handle_session_event(SessionEvent::InjectedMessagesCommitted {
         messages: vec![PluginMessage::text(
@@ -871,14 +887,37 @@ fn injected_messages_clear_pending_queue_even_when_runtime_content_differs() {
 }
 
 #[test]
-fn queued_injection_preview_stays_out_of_history() {
+fn injected_messages_remove_matching_pending_steer_without_popping_wrong_one() {
+    let mut app = App::new("test-model".into(), "test".into());
+    app.queue_pending_steer(PreparedTurn::new("first queued steer".into(), Vec::new()));
+    app.queue_pending_steer(PreparedTurn::new(
+        "uhh do not switch nvm".into(),
+        Vec::new(),
+    ));
+
+    app.handle_session_event(SessionEvent::InjectedMessagesCommitted {
+        messages: vec![PluginMessage::text(
+            MessageRole::User,
+            "uhh do not switch nvm",
+        )],
+        checkpoint: lash::CheckpointKind::AfterWork,
+    });
+
+    assert_eq!(app.pending_steers.len(), 1);
+    assert_eq!(app.pending_steers[0].display_text, "first queued steer");
+    assert!(
+        matches!(app.blocks.last(), Some(DisplayBlock::UserInput(text)) if text == "uhh do not switch nvm")
+    );
+}
+
+#[test]
+fn queued_injection_stays_out_of_history_until_committed() {
     let mut app = App::new("test-model".into(), "test".into());
     let turn = PreparedTurn::new("follow up now".into(), Vec::new());
 
     app.queue_pending_steer(turn.clone());
-    app.preview_queued_turn(&turn, true);
 
-    assert!(!app.commit_pending_user_preview("follow up now"));
+    assert_eq!(app.pending_steers.len(), 1);
     assert!(!matches!(
         app.blocks.last(),
         Some(DisplayBlock::UserInput(_))
@@ -886,12 +925,12 @@ fn queued_injection_preview_stays_out_of_history() {
 }
 
 #[test]
-fn regular_queued_turn_preview_stays_out_of_history() {
+fn regular_queued_turn_stays_out_of_history_until_dispatched() {
     let mut app = App::new("test-model".into(), "test".into());
     let turn = PreparedTurn::new("queued text".into(), Vec::new());
-    app.preview_queued_turn(&turn, false);
+    app.queue_turn(turn);
 
-    assert!(!app.commit_pending_user_preview("queued text"));
+    assert_eq!(app.queued_turns.len(), 1);
     assert!(!matches!(
         app.blocks.last(),
         Some(DisplayBlock::UserInput(_))

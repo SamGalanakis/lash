@@ -367,12 +367,7 @@ pub(super) fn send_user_message(
     toolset_hash: &str,
 ) {
     let mut ui_trace = ui_trace;
-    let already_visible = if !prepared_turn.display_text.is_empty() {
-        app.commit_pending_user_preview(&prepared_turn.display_text)
-    } else {
-        false
-    };
-    if !prepared_turn.display_text.is_empty() && !already_visible {
+    if !prepared_turn.display_text.is_empty() {
         if let Some(recorder) = ui_trace.as_deref_mut() {
             recorder.record_user_turn(&prepared_turn);
         }

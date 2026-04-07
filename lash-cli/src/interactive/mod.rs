@@ -1323,7 +1323,6 @@ pub(crate) async fn run_app(
                             }
                             record_queue_turn(&mut ui_trace, &queued);
                             app.queue_turn(queued.clone());
-                            app.preview_queued_turn(&queued, false);
                             continue;
                         }
                         if runtime.is_none() {
@@ -1456,7 +1455,6 @@ pub(crate) async fn run_app(
                             if is_host_slash_command {
                                 record_queue_turn(&mut ui_trace, &queued);
                                 app.queue_turn(queued.clone());
-                                app.preview_queued_turn(&queued, false);
                                 continue;
                             }
                             if shell_escape_command(&queued.display_text).is_some() {
@@ -1472,7 +1470,6 @@ pub(crate) async fn run_app(
                                 Ok(()) => {
                                     record_queue_pending_steer(&mut ui_trace, &queued);
                                     app.queue_pending_steer(queued.clone());
-                                    app.preview_queued_turn(&queued, true);
                                 }
                                 Err(err) => {
                                     push_system_message(
