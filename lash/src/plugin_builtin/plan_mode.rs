@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -17,6 +18,44 @@ use crate::{
 
 const PLAN_MODE_BADGE_KEY: &str = "mode";
 const PLAN_MODE_BADGE_LABEL: &str = "plan";
+const PLAN_MODE_PANEL_KEY: &str = "panel";
+const PLAN_MODE_PANEL_TITLE: &str = "PLAN";
+const PLAN_TEMPLATE: &str = r#"# Plan
+
+## Goal
+- TBD
+
+## Steps
+- TBD
+
+## Files
+- TBD
+
+## Risks
+- TBD
+
+## Verification
+- TBD
+"#;
+const REQUIRED_PLAN_SECTIONS: &[&str] = &["Goal", "Steps", "Files", "Risks", "Verification"];
+
+fn default_allowed_tools() -> BTreeSet<String> {
+    [
+        "ask",
+        "fetch_url",
+        "glob",
+        "grep",
+        "ls",
+        "read_file",
+        "search_tools",
+        "search_web",
+        "apply_patch",
+        "plan_exit",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
 
 fn plan_display_path(path: &Path) -> String {
     let display = std::env::current_dir()
@@ -33,11 +72,9 @@ fn plan_display_path(path: &Path) -> String {
 
 fn plan_exit_next_turn_input(display: &str, note: Option<&str>) -> String {
     if let Some(note) = note.filter(|note| !note.trim().is_empty()) {
-        format!(
-            "The plan at `{display}` is approved. Plan mode is off now. Execute that plan.\n\nUser note: {note}"
-        )
+        format!("Execute the plan in `{display}`.\n\nUser note: {note}")
     } else {
-        format!("The plan at `{display}` is approved. Plan mode is off now. Execute that plan.")
+        format!("Execute the plan in `{display}`.")
     }
 }
 
@@ -61,96 +98,304 @@ fn effective_run_session_id(state: &crate::SessionStateEnvelope) -> &str {
         .unwrap_or(&state.session_id)
 }
 
+fn seed_plan_template(path: &Path) -> Result<bool, String> {
+    if path.is_file() {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "Failed to create plan directory `{}`: {err}",
+                plan_display_path(parent)
+            )
+        })?;
+    }
+    fs::write(path, PLAN_TEMPLATE).map_err(|err| {
+        format!(
+            "Failed to seed plan template `{}`: {err}",
+            plan_display_path(path)
+        )
+    })?;
+    Ok(true)
+}
+
+fn canonical_plan_section(heading: &str) -> Option<&'static str> {
+    let normalized = heading.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "goal" | "scope" => Some("Goal"),
+        "steps" | "implementation steps" | "execution steps" | "plan" => Some("Steps"),
+        "files" | "touched files" | "file changes" => Some("Files"),
+        "risks" | "open questions" => Some("Risks"),
+        "verification" | "validation" | "tests" => Some("Verification"),
+        _ => None,
+    }
+}
+
+fn strip_list_prefix(text: &str) -> &str {
+    let trimmed = text.trim();
+    for prefix in ["- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] "] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return rest.trim();
+        }
+    }
+    for prefix in ["- ", "* ", "+ "] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return rest.trim();
+        }
+    }
+    let digit_count = trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digit_count > 0 {
+        let rest = &trimmed[digit_count..];
+        if let Some(rest) = rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") ")) {
+            return rest.trim();
+        }
+    }
+    trimmed
+}
+
+fn line_has_substance(line: &str) -> bool {
+    let stripped = strip_list_prefix(line)
+        .trim_matches(|ch: char| ch.is_ascii_punctuation() || ch.is_whitespace());
+    if stripped.is_empty() {
+        return false;
+    }
+    let normalized = stripped.to_ascii_lowercase();
+    if normalized.starts_with("tbd")
+        || normalized.starts_with("todo")
+        || matches!(normalized.as_str(), "..." | "n/a" | "none")
+    {
+        return false;
+    }
+    normalized.chars().any(|ch| ch.is_alphanumeric())
+}
+
+fn section_preview(lines: &[String], limit: usize) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| strip_list_prefix(line).trim())
+        .filter(|line| line_has_substance(line))
+        .take(limit)
+        .map(str::to_string)
+        .collect()
+}
+
+fn parse_plan_sections(content: &str) -> std::collections::BTreeMap<&'static str, Vec<String>> {
+    let mut sections = std::collections::BTreeMap::<&'static str, Vec<String>>::new();
+    let mut current = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("## ") {
+            current = canonical_plan_section(rest);
+            continue;
+        }
+        if let Some(section) = current {
+            sections
+                .entry(section)
+                .or_default()
+                .push(trimmed.to_string());
+        }
+    }
+
+    sections
+}
+
+#[derive(Clone, Debug, Default)]
+struct PlanReport {
+    display_path: String,
+    exists: bool,
+    ready: bool,
+    missing_sections: Vec<&'static str>,
+    incomplete_sections: Vec<&'static str>,
+    steps_preview: Vec<String>,
+    files_preview: Vec<String>,
+    risks_preview: Vec<String>,
+    verification_preview: Vec<String>,
+}
+
+impl PlanReport {
+    fn needs_items(&self) -> Vec<String> {
+        let mut items = self
+            .missing_sections
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect::<Vec<_>>();
+        items.extend(
+            self.incomplete_sections
+                .iter()
+                .map(|name| format!("{name} (fill in)")),
+        );
+        items
+    }
+
+    fn panel_content(&self) -> String {
+        let mut lines = vec![
+            format!("- Path: `{}`", self.display_path),
+            format!(
+                "- Status: {}",
+                if self.ready { "Ready" } else { "Needs work" }
+            ),
+        ];
+
+        if !self.exists {
+            lines.push("- File: missing".to_string());
+            return lines.join("\n");
+        }
+
+        let needs = self.needs_items();
+        if !needs.is_empty() {
+            lines.push(format!("- Needs: {}", needs.join(", ")));
+        }
+
+        if !self.steps_preview.is_empty() {
+            lines.push(String::new());
+            lines.push("### Steps".to_string());
+            lines.extend(self.steps_preview.iter().map(|item| format!("- {item}")));
+        }
+        if !self.files_preview.is_empty() {
+            lines.push(String::new());
+            lines.push("### Files".to_string());
+            lines.extend(self.files_preview.iter().map(|item| format!("- {item}")));
+        }
+        if !self.verification_preview.is_empty() {
+            lines.push(String::new());
+            lines.push("### Verification".to_string());
+            lines.extend(
+                self.verification_preview
+                    .iter()
+                    .map(|item| format!("- {item}")),
+            );
+        }
+        if !self.risks_preview.is_empty() {
+            lines.push(String::new());
+            lines.push("### Risks".to_string());
+            lines.extend(self.risks_preview.iter().map(|item| format!("- {item}")));
+        }
+
+        lines.join("\n")
+    }
+
+    fn blocking_message(&self) -> String {
+        let needs = self.needs_items();
+        if needs.is_empty() {
+            format!("Plan `{}` is not ready yet.", self.display_path)
+        } else {
+            format!(
+                "Plan `{}` is not ready yet. Fill in: {}.",
+                self.display_path,
+                needs.join(", ")
+            )
+        }
+    }
+}
+
+fn read_plan_report(path: &Path) -> Result<PlanReport, String> {
+    let display_path = plan_display_path(path);
+    if !plan_file_exists(path) {
+        return Ok(PlanReport {
+            display_path,
+            exists: false,
+            ready: false,
+            missing_sections: REQUIRED_PLAN_SECTIONS.to_vec(),
+            ..Default::default()
+        });
+    }
+
+    let content = fs::read_to_string(path).map_err(|err| {
+        format!(
+            "Failed to read plan file `{}`: {err}",
+            plan_display_path(path)
+        )
+    })?;
+    let sections = parse_plan_sections(&content);
+    let mut report = PlanReport {
+        display_path,
+        exists: true,
+        ..Default::default()
+    };
+
+    for section in REQUIRED_PLAN_SECTIONS {
+        match sections.get(section) {
+            None => report.missing_sections.push(*section),
+            Some(lines) if !lines.iter().any(|line| line_has_substance(line)) => {
+                report.incomplete_sections.push(*section)
+            }
+            Some(_) => {}
+        }
+    }
+
+    report.steps_preview = sections
+        .get("Steps")
+        .map_or_else(Vec::new, |lines| section_preview(lines, 4));
+    report.files_preview = sections
+        .get("Files")
+        .map_or_else(Vec::new, |lines| section_preview(lines, 4));
+    report.risks_preview = sections
+        .get("Risks")
+        .map_or_else(Vec::new, |lines| section_preview(lines, 2));
+    report.verification_preview = sections
+        .get("Verification")
+        .map_or_else(Vec::new, |lines| section_preview(lines, 3));
+    report.ready = report.missing_sections.is_empty() && report.incomplete_sections.is_empty();
+
+    Ok(report)
+}
+
+fn plan_panel_event(report: &PlanReport) -> crate::plugin::PluginSurfaceEvent {
+    crate::plugin::PluginSurfaceEvent::PanelUpsert {
+        key: PLAN_MODE_PANEL_KEY.to_string(),
+        title: PLAN_MODE_PANEL_TITLE.to_string(),
+        content: report.panel_content(),
+    }
+}
+
+fn clear_plan_panel_event() -> crate::plugin::PluginSurfaceEvent {
+    crate::plugin::PluginSurfaceEvent::PanelClear {
+        key: PLAN_MODE_PANEL_KEY.to_string(),
+    }
+}
+
 fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
     let display = plan_display_path(plan_path);
-    let exists = plan_file_exists(plan_path);
     PluginMessage::text(
         crate::MessageRole::System,
         format!(
-            r#"
-Plan Mode
-
-Plan mode is active. The official plan lives in `{display}`.
-{plan_file_instruction}
-
-Mode rules (strict)
-
-- Stay in plan mode until it is explicitly disabled.
-- If the user asks for execution while plan mode is active, plan that execution instead of doing it.
-- Do not use `update_plan` in plan mode.
-- Do not use `<proposed_plan>` tags or any special wrapper blocks.
-- Keep the real plan in `{display}` and keep ordinary assistant prose concise.
-
-Execution vs mutation in plan mode
-
-- Read-only exploration is allowed when it improves the plan.
-- `apply_patch` is allowed only for `{display}`.
-- Do not edit any other file.
-- Do not run shell commands or other tools whose purpose is to carry out the implementation.
-
-Planning workflow
-
-1. Ground yourself in the actual repo and current state before asking questions.
-2. Use `ask(...)` for decisions that materially change the plan and cannot be discovered locally.
-3. Keep `{display}` implementation-ready: clear scope, file paths, interfaces, risks, and verification.
-4. When the plan is ready, call `plan_exit()`.
-
-Finalization rule
-
-- End with either an `ask(...)` question or `plan_exit()`.
-- If you call `plan_exit()`, keep the post-tool response to a brief handoff. lash will use the approved plan in a fresh execution turn.
-"#,
-            plan_file_instruction = if exists {
-                "A plan file already exists there. Read it first, then update it incrementally with `apply_patch`.".to_string()
-            } else {
-                "No plan file exists yet. Create it with `apply_patch` and keep updating that same file.".to_string()
-            },
-        )
-        .trim()
-        .to_string(),
+            "Plan mode is active. Keep the implementation-ready plan in `{display}`. Use read/search/list tools, web tools, and `ask(...)` as needed. Only edit that file. Call `plan_exit()` when it is ready."
+        ),
     )
 }
 
 fn plan_mode_tool_note(plan_path: Option<&Path>) -> String {
     match plan_path {
         Some(path) => format!(
-            "Plan mode: only `{}` may be edited with `apply_patch`. Use `plan_exit()` when the plan is ready.",
+            "Plan mode: allowed tools are read/search/list, web search/fetch, `ask`, `apply_patch` for `{}`, and `plan_exit()`.",
             plan_display_path(path)
         ),
-        None => "Plan mode: only the session plan file under `.lash/plans/` may be edited with `apply_patch`. Use `plan_exit()` when the plan is ready.".to_string(),
+        None => "Plan mode: allowed tools are read/search/list, web search/fetch, `ask`, plan-file `apply_patch`, and `plan_exit()`.".to_string(),
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct PlanModePluginConfig {
-    pub blocked_tools: BTreeSet<String>,
+    pub allowed_tools: BTreeSet<String>,
 }
 
 impl Default for PlanModePluginConfig {
     fn default() -> Self {
         Self {
-            blocked_tools: [
-                "agent_call",
-                "agent_kill",
-                "agent_result",
-                "exec_command",
-                "update_plan",
-                "write_stdin",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
+            allowed_tools: default_allowed_tools(),
         }
     }
 }
 
 impl PlanModePluginConfig {
-    pub fn with_blocked_tools<I, S>(mut self, blocked_tools: I) -> Self
+    pub fn with_allowed_tools<I, S>(mut self, allowed_tools: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.blocked_tools = blocked_tools.into_iter().map(Into::into).collect();
+        self.allowed_tools = allowed_tools.into_iter().map(Into::into).collect();
+        self.allowed_tools.insert("plan_exit".to_string());
         self
     }
 }
@@ -284,6 +529,36 @@ async fn ensure_plan_path(
     Ok(path)
 }
 
+async fn ensure_plan_report(
+    state: &Arc<Mutex<PlanModeState>>,
+    session_id: &str,
+    host: &Arc<dyn crate::SessionManager>,
+    seed_if_missing: bool,
+) -> Result<PlanReport, PluginError> {
+    let path = ensure_plan_path(state, session_id, host).await?;
+    if seed_if_missing {
+        seed_plan_template(&path).map_err(PluginError::Session)?;
+    }
+    read_plan_report(&path).map_err(PluginError::Session)
+}
+
+fn plan_status_payload(
+    session_id: &str,
+    enabled: bool,
+    report: Option<&PlanReport>,
+) -> serde_json::Value {
+    json!({
+        "session_id": session_id,
+        "enabled": enabled,
+        "plan_path": report.map(|value| value.display_path.clone()),
+        "ready": report.is_some_and(|value| value.ready),
+        "missing_sections": report.map(|value| value.missing_sections.iter().map(|name| (*name).to_string()).collect::<Vec<_>>()).unwrap_or_default(),
+        "incomplete_sections": report.map(|value| value.incomplete_sections.iter().map(|name| (*name).to_string()).collect::<Vec<_>>()).unwrap_or_default(),
+        "panel_title": enabled.then_some(PLAN_MODE_PANEL_TITLE.to_string()),
+        "panel_content": if enabled { report.map(|value| value.panel_content()) } else { None },
+    })
+}
+
 fn patch_allowed_for_plan_file(args: &serde_json::Value, plan_path: &Path) -> Result<(), String> {
     let input = args
         .get("input")
@@ -333,18 +608,22 @@ impl PlanModeTools {
             return ToolResult::err(json!("plan mode is not active"));
         }
 
-        let plan_path =
-            match ensure_plan_path(&self.state, &context.session_id, &context.host).await {
-                Ok(path) => path,
+        let report =
+            match ensure_plan_report(&self.state, &context.session_id, &context.host, true).await {
+                Ok(report) => report,
                 Err(err) => return ToolResult::err(json!(err.to_string())),
             };
-        let display = plan_display_path(&plan_path);
+        if !report.ready {
+            return ToolResult::err(json!(report.blocking_message()));
+        }
+
         let answer = match context
             .host
             .prompt_user(
                 PromptRequest::single(
                     format!(
-                        "Plan at {display} is ready. Start implementing it in a fresh execution turn?"
+                        "Plan `{}` is ready. Start executing it now?",
+                        report.display_path
                     ),
                     vec!["Implement it".to_string(), "Keep planning".to_string()],
                 )
@@ -365,7 +644,7 @@ impl PlanModeTools {
         if !approved {
             return ToolResult::ok(json!({
                 "approved": false,
-                "plan_path": display,
+                "plan_path": report.display_path,
                 "answer": answer,
             }));
         }
@@ -379,8 +658,8 @@ impl PlanModeTools {
 
         ToolResult::ok(json!({
             "approved": true,
-            "plan_path": display,
-            "next_turn_input": plan_exit_next_turn_input(&display, note.as_deref()),
+            "plan_path": report.display_path,
+            "next_turn_input": plan_exit_next_turn_input(&report.display_path, note.as_deref()),
         }))
     }
 }
@@ -390,7 +669,7 @@ impl ToolProvider for PlanModeTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "plan_exit".into(),
-            description: "Finish planning, ask the user whether to start implementation, and if approved hand off to a fresh execution turn that uses the saved `.lash` plan file.".into(),
+            description: "Validate the current plan file, ask whether to start execution now, and if approved queue a fresh execution turn for that plan.".into(),
             params: Vec::new(),
             returns: "dict".into(),
             examples: vec!["plan_exit()".into()],
@@ -478,16 +757,28 @@ impl SessionPlugin for PlanModePlugin {
         reg.turn().before(Arc::new(move |ctx| {
             let state = Arc::clone(&before_turn_state);
             Box::pin(async move {
-                let mut state = state
-                    .lock()
-                    .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?;
-                let should_inject = state.prepare_turn();
-                if !should_inject {
-                    return Ok(Vec::new());
-                }
-                let plan_path = state.ensure_plan_path_from_state(&ctx.state)?;
+                let plan_path = {
+                    let mut state = state.lock().map_err(|_| {
+                        PluginError::Session("plan mode state poisoned".to_string())
+                    })?;
+                    let should_inject = state.prepare_turn();
+                    if !should_inject {
+                        return Ok(Vec::new());
+                    }
+                    state.ensure_plan_path_from_state(&ctx.state)?
+                };
+                seed_plan_template(&plan_path).map_err(PluginError::Session)?;
+                let report = read_plan_report(&plan_path).map_err(PluginError::Session)?;
                 Ok(vec![
-                    PluginDirective::emit_events(vec![state.badge_event()]),
+                    PluginDirective::emit_events(vec![
+                        state
+                            .lock()
+                            .map_err(|_| {
+                                PluginError::Session("plan mode state poisoned".to_string())
+                            })?
+                            .badge_event(),
+                        plan_panel_event(&report),
+                    ]),
                     PluginDirective::EnqueueMessages {
                         messages: vec![plan_mode_guidance_message(&plan_path)],
                     },
@@ -499,16 +790,28 @@ impl SessionPlugin for PlanModePlugin {
         reg.turn().checkpoint(Arc::new(move |ctx| {
             let state = Arc::clone(&checkpoint_state);
             Box::pin(async move {
-                let mut state = state
-                    .lock()
-                    .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?;
-                let should_inject = state.checkpoint_injection_needed();
-                if !should_inject {
-                    return Ok(Vec::new());
-                }
-                let plan_path = state.ensure_plan_path_from_state(&ctx.state)?;
+                let plan_path = {
+                    let mut state = state.lock().map_err(|_| {
+                        PluginError::Session("plan mode state poisoned".to_string())
+                    })?;
+                    let should_inject = state.checkpoint_injection_needed();
+                    if !should_inject {
+                        return Ok(Vec::new());
+                    }
+                    state.ensure_plan_path_from_state(&ctx.state)?
+                };
+                seed_plan_template(&plan_path).map_err(PluginError::Session)?;
+                let report = read_plan_report(&plan_path).map_err(PluginError::Session)?;
                 Ok(vec![
-                    PluginDirective::emit_events(vec![state.badge_event()]),
+                    PluginDirective::emit_events(vec![
+                        state
+                            .lock()
+                            .map_err(|_| {
+                                PluginError::Session("plan mode state poisoned".to_string())
+                            })?
+                            .badge_event(),
+                        plan_panel_event(&report),
+                    ]),
                     PluginDirective::EnqueueMessages {
                         messages: vec![plan_mode_guidance_message(&plan_path)],
                     },
@@ -542,7 +845,17 @@ impl SessionPlugin for PlanModePlugin {
                     return Ok(Vec::new());
                 }
 
-                if ctx.tool_name == "apply_patch" && !config.blocked_tools.contains("apply_patch") {
+                if ctx.tool_name != "plan_exit" && !config.allowed_tools.contains(&ctx.tool_name) {
+                    return Ok(vec![PluginDirective::AbortTurn {
+                        code: "plan_mode_tool_blocked".to_string(),
+                        message: format!(
+                            "Plan mode blocks `{}`. Stay in planning tools until the plan is approved.",
+                            ctx.tool_name
+                        ),
+                    }]);
+                }
+
+                if ctx.tool_name == "apply_patch" {
                     let plan_path = ensure_plan_path(&state, &ctx.session_id, &ctx.host).await?;
                     if let Err(message) = patch_allowed_for_plan_file(&ctx.args, &plan_path) {
                         return Ok(vec![PluginDirective::AbortTurn {
@@ -550,20 +863,9 @@ impl SessionPlugin for PlanModePlugin {
                             message,
                         }]);
                     }
-                    return Ok(Vec::new());
                 }
 
-                if !config.blocked_tools.contains(&ctx.tool_name) {
-                    return Ok(Vec::new());
-                }
-
-                Ok(vec![PluginDirective::AbortTurn {
-                    code: "plan_mode_tool_blocked".to_string(),
-                    message: format!(
-                        "Plan mode blocks `{}`. Disable plan mode to execute implementation tools.",
-                        ctx.tool_name
-                    ),
-                }])
+                Ok(Vec::new())
             })
         }));
 
@@ -579,20 +881,35 @@ impl SessionPlugin for PlanModePlugin {
                         .get("approved")
                         .and_then(|value| value.as_bool())
                         .unwrap_or(false);
-                if !approved {
-                    return Ok(Vec::new());
+                if approved {
+                    let clear_badge = state
+                        .lock()
+                        .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?
+                        .clear_badge_event();
+                    return Ok(vec![PluginDirective::emit_events(vec![
+                        clear_badge,
+                        clear_plan_panel_event(),
+                    ])]);
                 }
-                let clear = state
+
+                let enabled = state
                     .lock()
                     .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?
-                    .clear_badge_event();
-                Ok(vec![PluginDirective::emit_events(vec![clear])])
+                    .enabled;
+                if !enabled || ctx.tool_name != "apply_patch" || !ctx.result.success {
+                    return Ok(Vec::new());
+                }
+
+                let report = ensure_plan_report(&state, &ctx.session_id, &ctx.host, false).await?;
+                Ok(vec![PluginDirective::emit_events(vec![plan_panel_event(
+                    &report,
+                )])])
             })
         }));
 
         let tool_surface_state = Arc::clone(&self.state);
         let tool_surface_config = self.config.clone();
-        reg.surface().contribute(Arc::new(move |_ctx| {
+        reg.surface().contribute(Arc::new(move |ctx| {
             let state = tool_surface_state
                 .lock()
                 .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?;
@@ -600,11 +917,12 @@ impl SessionPlugin for PlanModePlugin {
                 return Ok(ToolSurfaceContribution::default());
             }
 
-            let mut overrides = tool_surface_config
-                .blocked_tools
+            let mut overrides = ctx
+                .tools
                 .iter()
-                .map(|tool_name| ToolSurfaceOverride {
-                    tool_name: tool_name.clone(),
+                .filter(|tool| !tool_surface_config.allowed_tools.contains(&tool.name))
+                .map(|tool| ToolSurfaceOverride {
+                    tool_name: tool.name.clone(),
                     enabled: Some(false),
                     injected: Some(false),
                 })
@@ -614,6 +932,13 @@ impl SessionPlugin for PlanModePlugin {
                 enabled: Some(true),
                 injected: Some(true),
             });
+            if tool_surface_config.allowed_tools.contains("apply_patch") {
+                overrides.push(ToolSurfaceOverride {
+                    tool_name: "apply_patch".to_string(),
+                    enabled: Some(true),
+                    injected: Some(true),
+                });
+            }
 
             Ok(ToolSurfaceContribution {
                 overrides,
@@ -637,9 +962,14 @@ impl SessionPlugin for PlanModePlugin {
                     "properties": {
                         "session_id": { "type": "string" },
                         "enabled": { "type": "boolean" },
-                        "plan_path": { "type": ["string", "null"] }
+                        "plan_path": { "type": ["string", "null"] },
+                        "ready": { "type": "boolean" },
+                        "missing_sections": { "type": "array", "items": { "type": "string" } },
+                        "incomplete_sections": { "type": "array", "items": { "type": "string" } },
+                        "panel_title": { "type": ["string", "null"] },
+                        "panel_content": { "type": ["string", "null"] }
                     },
-                    "required": ["session_id", "enabled", "plan_path"],
+                    "required": ["session_id", "enabled", "plan_path", "ready", "missing_sections", "incomplete_sections", "panel_title", "panel_content"],
                     "additionalProperties": false
                 }),
             },
@@ -649,15 +979,17 @@ impl SessionPlugin for PlanModePlugin {
                     let Some(session_id) = ctx.session_id else {
                         return ToolResult::err(json!("plan_mode.status requires session_id"));
                     };
-                    let snapshot = match state.lock() {
-                        Ok(guard) => guard.snapshot(),
+                    let enabled = match state.lock() {
+                        Ok(guard) => guard.enabled,
                         Err(_) => return ToolResult::err(json!("plan mode state poisoned")),
                     };
-                    ToolResult::ok(json!({
-                        "session_id": session_id,
-                        "enabled": snapshot.enabled,
-                        "plan_path": snapshot.plan_path,
-                    }))
+                    let report = match ensure_plan_report(&state, &session_id, &ctx.host, enabled)
+                        .await
+                    {
+                        Ok(report) => report,
+                        Err(err) => return ToolResult::err(json!(err.to_string())),
+                    };
+                    ToolResult::ok(plan_status_payload(&session_id, enabled, Some(&report)))
                 })
             }),
         )?;
@@ -695,9 +1027,14 @@ impl SessionPlugin for PlanModePlugin {
                         "properties": {
                             "session_id": { "type": "string" },
                             "enabled": { "type": "boolean" },
-                            "plan_path": { "type": ["string", "null"] }
+                            "plan_path": { "type": ["string", "null"] },
+                            "ready": { "type": "boolean" },
+                            "missing_sections": { "type": "array", "items": { "type": "string" } },
+                            "incomplete_sections": { "type": "array", "items": { "type": "string" } },
+                            "panel_title": { "type": ["string", "null"] },
+                            "panel_content": { "type": ["string", "null"] }
                         },
-                        "required": ["session_id", "enabled", "plan_path"],
+                        "required": ["session_id", "enabled", "plan_path", "ready", "missing_sections", "incomplete_sections", "panel_title", "panel_content"],
                         "additionalProperties": false
                     }),
                 },
@@ -710,20 +1047,22 @@ impl SessionPlugin for PlanModePlugin {
                                 "{op_name} requires session_id"
                             )));
                         };
-                        let snapshot = match state.lock() {
+                        let enabled = match state.lock() {
                             Ok(mut guard) => match op_name.as_str() {
-                                "plan_mode.enable" => guard.set_enabled(true),
-                                "plan_mode.disable" => guard.set_enabled(false),
-                                "plan_mode.toggle" => guard.toggle(),
+                                "plan_mode.enable" => guard.set_enabled(true).enabled,
+                                "plan_mode.disable" => guard.set_enabled(false).enabled,
+                                "plan_mode.toggle" => guard.toggle().enabled,
                                 _ => unreachable!(),
                             },
                             Err(_) => return ToolResult::err(json!("plan mode state poisoned")),
                         };
-                        ToolResult::ok(json!({
-                            "session_id": session_id,
-                            "enabled": snapshot.enabled,
-                            "plan_path": snapshot.plan_path,
-                        }))
+                        let report = match ensure_plan_report(&state, &session_id, &ctx.host, enabled)
+                            .await
+                        {
+                            Ok(report) => report,
+                            Err(err) => return ToolResult::err(json!(err.to_string())),
+                        };
+                        ToolResult::ok(plan_status_payload(&session_id, enabled, Some(&report)))
                     })
                 }),
             )?;
@@ -774,7 +1113,7 @@ impl SessionPlugin for PlanModePlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::plan_exit_next_turn_input;
+    use super::{PLAN_TEMPLATE, line_has_substance, plan_exit_next_turn_input, read_plan_report};
 
     #[test]
     fn plan_exit_next_turn_input_appends_user_note() {
@@ -783,11 +1122,30 @@ mod tests {
                 ".lash/plans/run-session.md",
                 Some("start with the safe slice"),
             ),
-            "The plan at `.lash/plans/run-session.md` is approved. Plan mode is off now. Execute that plan.\n\nUser note: start with the safe slice"
+            "Execute the plan in `.lash/plans/run-session.md`.\n\nUser note: start with the safe slice"
         );
         assert_eq!(
             plan_exit_next_turn_input(".lash/plans/run-session.md", Some("   ")),
-            "The plan at `.lash/plans/run-session.md` is approved. Plan mode is off now. Execute that plan."
+            "Execute the plan in `.lash/plans/run-session.md`."
+        );
+    }
+
+    #[test]
+    fn placeholder_lines_are_not_substantive() {
+        assert!(!line_has_substance("- TBD"));
+        assert!(line_has_substance("- update src/main.rs"));
+    }
+
+    #[test]
+    fn seeded_template_is_not_ready() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("plan.md");
+        std::fs::write(&path, PLAN_TEMPLATE).expect("write template");
+        let report = read_plan_report(&path).expect("report");
+        assert!(!report.ready);
+        assert_eq!(
+            report.incomplete_sections,
+            vec!["Goal", "Steps", "Files", "Risks", "Verification"]
         );
     }
 }

@@ -111,6 +111,69 @@ struct ReplStreamCutover<'a> {
     fallback_request_body: &'a str,
 }
 
+#[derive(Clone, Debug, Default)]
+struct StandardStreamFallback {
+    parts: Vec<LlmOutputPart>,
+}
+
+impl StandardStreamFallback {
+    fn push_text(&mut self, piece: String) {
+        if piece.is_empty() {
+            return;
+        }
+        match self.parts.last_mut() {
+            Some(LlmOutputPart::Text { text }) => append_stream_piece(text, &piece),
+            _ => self.parts.push(LlmOutputPart::Text { text: piece }),
+        }
+    }
+
+    fn push_tool_call(&mut self, call_id: String, tool_name: String, input_json: String) {
+        self.parts.push(LlmOutputPart::ToolCall {
+            call_id,
+            tool_name,
+            input_json,
+        });
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.parts.iter().any(|part| match part {
+            LlmOutputPart::Text { text } => !text.is_empty(),
+            LlmOutputPart::ToolCall { .. } => true,
+        })
+    }
+
+    fn full_text(&self) -> String {
+        let mut full_text = String::new();
+        for part in &self.parts {
+            if let LlmOutputPart::Text { text } = part {
+                full_text.push_str(text);
+            }
+        }
+        full_text
+    }
+
+    fn apply_to_response(&self, response: &mut LlmResponse) {
+        if llm_response_has_content(response) || self.is_empty() {
+            return;
+        }
+        response.parts = self.parts.clone();
+        if response.full_text.is_empty() {
+            response.full_text = self.full_text();
+        }
+    }
+}
+
+fn append_stream_piece(full: &mut String, piece: &str) {
+    if piece.is_empty() {
+        return;
+    }
+    if piece.starts_with(full.as_str()) {
+        full.push_str(&piece[full.len()..]);
+    } else {
+        full.push_str(piece);
+    }
+}
+
 impl Default for SessionStateEnvelope {
     fn default() -> Self {
         Self {
@@ -2568,6 +2631,7 @@ impl RuntimeTurnDriver {
         event_tx: &mpsc::Sender<SessionEvent>,
         cancel: &CancellationToken,
     ) -> (Result<LlmResponse, LlmCallError>, bool) {
+        let fallback_request_body = debug_request_body(&request);
         let (llm_stream_tx, mut llm_stream_rx) =
             tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
         let llm_request = LlmRequest {
@@ -2585,6 +2649,7 @@ impl RuntimeTurnDriver {
 
         let mut text_streamed = false;
         let mut streamed_usage = LlmUsage::default();
+        let mut streamed_output = StandardStreamFallback::default();
         let result = loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -2603,6 +2668,7 @@ impl RuntimeTurnDriver {
                             stream_event,
                             &mut text_streamed,
                             &mut streamed_usage,
+                            &mut streamed_output,
                         )
                         .await
                     {
@@ -2626,6 +2692,7 @@ impl RuntimeTurnDriver {
                             &mut llm_stream_rx,
                             &mut text_streamed,
                             &mut streamed_usage,
+                            &mut streamed_output,
                         )
                         .await
                     {
@@ -2635,6 +2702,10 @@ impl RuntimeTurnDriver {
                         Ok(mut resp) => {
                             if response_usage_is_empty(&resp.usage) {
                                 resp.usage = streamed_usage.clone();
+                            }
+                            streamed_output.apply_to_response(&mut resp);
+                            if resp.request_body.is_none() {
+                                resp.request_body = Some(fallback_request_body.clone());
                             }
                             let resp = match self.transform_assistant_response(event_tx, resp).await {
                                 Ok(resp) => resp,
@@ -2819,6 +2890,7 @@ impl RuntimeTurnDriver {
         stream_event: LlmStreamEvent,
         text_streamed: &mut bool,
         streamed_usage: &mut LlmUsage,
+        streamed_output: &mut StandardStreamFallback,
     ) -> Result<(), LlmCallError> {
         match stream_event {
             LlmStreamEvent::Delta(delta) => {
@@ -2828,6 +2900,7 @@ impl RuntimeTurnDriver {
                         .transform_assistant_stream_chunk(event_tx, delta)
                         .await?;
                     if !delta.is_empty() {
+                        streamed_output.push_text(delta.clone());
                         crate::session_model::send_event(
                             event_tx,
                             SessionEvent::TextDelta { content: delta },
@@ -2843,6 +2916,7 @@ impl RuntimeTurnDriver {
                         .transform_assistant_stream_chunk(event_tx, text)
                         .await?;
                     if !text.is_empty() {
+                        streamed_output.push_text(text.clone());
                         crate::session_model::send_event(
                             event_tx,
                             SessionEvent::TextDelta { content: text },
@@ -2851,7 +2925,13 @@ impl RuntimeTurnDriver {
                     }
                 }
             }
-            LlmStreamEvent::Part(LlmOutputPart::ToolCall { .. }) => {}
+            LlmStreamEvent::Part(LlmOutputPart::ToolCall {
+                call_id,
+                tool_name,
+                input_json,
+            }) => {
+                streamed_output.push_tool_call(call_id, tool_name, input_json);
+            }
             LlmStreamEvent::Usage(usage) => *streamed_usage = usage,
         }
         Ok(())
@@ -2863,6 +2943,7 @@ impl RuntimeTurnDriver {
         llm_stream_rx: &mut tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,
         text_streamed: &mut bool,
         streamed_usage: &mut LlmUsage,
+        streamed_output: &mut StandardStreamFallback,
     ) -> Result<(), LlmCallError> {
         while let Ok(stream_event) = llm_stream_rx.try_recv() {
             self.forward_standard_stream_event(
@@ -2870,6 +2951,7 @@ impl RuntimeTurnDriver {
                 stream_event,
                 text_streamed,
                 streamed_usage,
+                streamed_output,
             )
             .await?;
         }
@@ -2882,6 +2964,16 @@ fn response_usage_is_empty(usage: &LlmUsage) -> bool {
         && usage.output_tokens == 0
         && usage.cached_input_tokens == 0
         && usage.reasoning_tokens == 0
+}
+
+fn llm_response_has_content(response: &LlmResponse) -> bool {
+    if !response.full_text.is_empty() {
+        return true;
+    }
+    response.parts.iter().any(|part| match part {
+        LlmOutputPart::Text { text } => !text.is_empty(),
+        LlmOutputPart::ToolCall { .. } => true,
+    })
 }
 
 fn debug_request_body(req: &LlmRequest) -> String {
@@ -4694,6 +4786,113 @@ mod tests {
             })
             .collect();
         assert_eq!(streamed_text, "What time is it?");
+    }
+
+    #[tokio::test]
+    async fn standard_runtime_recovers_streamed_text_when_final_response_is_empty() {
+        let expected =
+            "I’m continuing with a type-safety cleanup now: replace the remaining raw JSON paths.";
+        let transport = MockTransport::new(vec![MockCall {
+            stream_events: vec![
+                LlmStreamEvent::Delta(
+                    "I’m continuing with a type-safety cleanup now: ".to_string(),
+                ),
+                LlmStreamEvent::Part(LlmOutputPart::Text {
+                    text: "replace the remaining raw JSON paths.".to_string(),
+                }),
+            ],
+            response: Ok(LlmResponse::default()),
+        }]);
+        let mut runtime = standard_runtime_with_transport(transport).await;
+        let sink = RecordingSink::default();
+
+        let turn = runtime
+            .stream_turn(
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "continue".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    mode: None,
+                },
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("turn");
+
+        assert_eq!(turn.status, TurnStatus::Completed);
+        assert_eq!(turn.done_reason, DoneReason::ModelStop);
+        assert_eq!(turn.assistant_output.safe_text, expected);
+        assert!(turn.errors.is_empty());
+
+        let streamed_text: String = sink
+            .snapshot()
+            .into_iter()
+            .filter_map(|event| match event {
+                SessionEvent::TextDelta { content } => Some(content),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(streamed_text, expected);
+    }
+
+    #[tokio::test]
+    async fn standard_runtime_executes_streamed_tool_call_when_final_response_is_empty() {
+        let transport = MockTransport::new(vec![
+            MockCall {
+                stream_events: vec![
+                    LlmStreamEvent::Part(LlmOutputPart::ToolCall {
+                        call_id: "tool-1".to_string(),
+                        tool_name: "echo_tool".to_string(),
+                        input_json: r#"{"value":"sample"}"#.to_string(),
+                    }),
+                    LlmStreamEvent::Usage(LlmUsage {
+                        input_tokens: 12,
+                        output_tokens: 3,
+                        cached_input_tokens: 0,
+                        reasoning_tokens: 0,
+                    }),
+                ],
+                response: Ok(LlmResponse::default()),
+            },
+            MockCall {
+                stream_events: Vec::new(),
+                response: Ok(LlmResponse {
+                    full_text: "done".to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: "done".to_string(),
+                    }],
+                    ..LlmResponse::default()
+                }),
+            },
+        ]);
+        let tools: Arc<dyn crate::ToolProvider> = Arc::new(EchoTool);
+        let mut runtime = runtime_with_plugins_and_tools(Vec::new(), tools, transport).await;
+
+        let turn = runtime
+            .run_turn_assembled(
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "run the tool".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    mode: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("turn");
+
+        assert_eq!(turn.assistant_output.safe_text, "done");
+        assert_eq!(turn.state.tool_calls.len(), 1);
+        assert_eq!(turn.state.tool_calls[0].call_id.as_deref(), Some("tool-1"));
+        assert_eq!(
+            turn.state.tool_calls[0].result,
+            serde_json::json!({
+                "payload": "raw:sample"
+            })
+        );
     }
 
     #[tokio::test]

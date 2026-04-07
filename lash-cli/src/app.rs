@@ -1737,10 +1737,6 @@ impl App {
         }
 
         let Some(last_idx) = self.latest_turn_output_start_index() else {
-            if self.streaming_output_height() > 0 {
-                let streaming_start = self.height_cache.last().copied().unwrap_or(0);
-                return self.contextual_follow_offset(streaming_start, max_scroll);
-            }
             return max_scroll;
         };
 
@@ -1884,9 +1880,7 @@ impl App {
 
     pub fn total_content_height(&mut self, width: usize, viewport_height: usize) -> usize {
         self.ensure_height_cache(width, viewport_height);
-        let block_height = self.height_cache.last().copied().unwrap_or(0);
-        let streaming_height = ui::streaming_output_visual_height(self, width);
-        block_height + streaming_height
+        self.height_cache.last().copied().unwrap_or(0)
     }
 
     pub fn streaming_output_height(&self) -> usize {
@@ -2898,6 +2892,21 @@ mod tests {
     }
 
     #[test]
+    fn tool_output_does_not_change_total_content_height() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.blocks = vec![DisplayBlock::UserInput("inspect this".into())];
+        app.start_turn();
+
+        let baseline = app.total_content_height(32, 8);
+        app.handle_session_event(SessionEvent::Message {
+            text: "started git status --short\n".into(),
+            kind: "tool_output".into(),
+        });
+
+        assert_eq!(app.total_content_height(32, 8), baseline);
+    }
+
+    #[test]
     fn finish_turn_for_resume_preserves_streaming_output_snapshot() {
         let mut app = App::new("test-model".into(), "test".into());
         app.start_turn();
@@ -2958,16 +2967,16 @@ mod tests {
         crate::apply_ui_host_effects(
             &mut app,
             ui_extensions.effects_for_session_event(&SessionEvent::ToolCall {
-            call_id: Some("tc-plan-exit".into()),
-            name: "plan_exit".into(),
-            args: serde_json::json!({}),
-            result: serde_json::json!({
-                "approved": true,
-                "plan_path": ".lash/plans/session.md",
-                "next_turn_input": "The plan at `.lash/plans/session.md` is approved. Execute that plan."
-            }),
-            success: true,
-            duration_ms: 5,
+                call_id: Some("tc-plan-exit".into()),
+                name: "plan_exit".into(),
+                args: serde_json::json!({}),
+                result: serde_json::json!({
+                    "approved": true,
+                    "plan_path": ".lash/plans/session.md",
+                    "next_turn_input": "Execute the plan in `.lash/plans/session.md`."
+                }),
+                success: true,
+                duration_ms: 5,
             }),
         );
 
@@ -2975,7 +2984,7 @@ mod tests {
         assert!(!was_pending);
         assert_eq!(
             queued.display_text,
-            "The plan at `.lash/plans/session.md` is approved. Execute that plan."
+            "Execute the plan in `.lash/plans/session.md`."
         );
     }
 

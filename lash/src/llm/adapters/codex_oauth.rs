@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use base64::Engine;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 
 use crate::llm::adapters::streaming::{drive_sse_response, emit_progress};
 use crate::llm::timeouts::{
@@ -17,6 +18,176 @@ pub struct CodexOAuthAdapter {
     client: reqwest::Client,
     request_timeout: Option<std::time::Duration>,
     chunk_timeout: std::time::Duration,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CodexStreamingToolCall {
+    call_id: String,
+    tool_name: String,
+    input_json: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CodexStreamState {
+    full_text: String,
+    deltas: Vec<String>,
+    parts: Vec<LlmOutputPart>,
+    usage: LlmUsage,
+    final_response: Option<Value>,
+    current_text_part: Option<usize>,
+    tool_calls: HashMap<String, CodexStreamingToolCall>,
+}
+
+impl CodexStreamState {
+    fn begin_message(&mut self) {
+        let index = self.parts.len();
+        self.parts.push(LlmOutputPart::Text {
+            text: String::new(),
+        });
+        self.current_text_part = Some(index);
+    }
+
+    fn finish_message(&mut self, item: Option<&Value>) {
+        if let Some(item) = item {
+            let text = CodexOAuthAdapter::message_text_from_item(item);
+            if !text.is_empty() {
+                self.push_text_piece(&text);
+            }
+        }
+        self.current_text_part = None;
+    }
+
+    fn push_text_piece(&mut self, piece: &str) {
+        CodexOAuthAdapter::apply_stream_piece(&mut self.full_text, &mut self.deltas, piece);
+        if piece.is_empty() {
+            return;
+        }
+
+        let part_index = match self.current_text_part {
+            Some(index) => index,
+            None => match self.parts.last() {
+                Some(LlmOutputPart::Text { .. }) => self.parts.len() - 1,
+                _ => {
+                    let index = self.parts.len();
+                    self.parts.push(LlmOutputPart::Text {
+                        text: String::new(),
+                    });
+                    index
+                }
+            },
+        };
+
+        if let Some(LlmOutputPart::Text { text }) = self.parts.get_mut(part_index) {
+            CodexOAuthAdapter::append_stream_piece(text, piece);
+        }
+    }
+
+    fn update_tool_call_from_item(&mut self, item: &Value) -> Option<String> {
+        let item_id = item.get("id").and_then(|v| v.as_str())?.to_string();
+        let tool_call = self.tool_calls.entry(item_id.clone()).or_default();
+        if let Some(call_id) = item.get("call_id").and_then(|v| v.as_str()) {
+            tool_call.call_id = call_id.to_string();
+        }
+        if let Some(tool_name) = item.get("name").and_then(|v| v.as_str()) {
+            tool_call.tool_name = tool_name.to_string();
+        }
+        if let Some(arguments) = item.get("arguments").and_then(|v| v.as_str())
+            && !arguments.is_empty()
+        {
+            tool_call.input_json = arguments.to_string();
+        }
+        Some(item_id)
+    }
+
+    fn push_tool_call_delta(&mut self, item_id: &str, delta: &str) {
+        if item_id.is_empty() || delta.is_empty() {
+            return;
+        }
+        self.tool_calls
+            .entry(item_id.to_string())
+            .or_default()
+            .input_json
+            .push_str(delta);
+    }
+
+    fn set_tool_call_arguments(&mut self, item_id: &str, arguments: &str) {
+        if item_id.is_empty() {
+            return;
+        }
+        let tool_call = self.tool_calls.entry(item_id.to_string()).or_default();
+        tool_call.input_json = arguments.to_string();
+    }
+
+    fn finish_tool_call(&mut self, item: &Value) -> Option<LlmOutputPart> {
+        let item_id = self.update_tool_call_from_item(item)?;
+        let mut tool_call = self.tool_calls.remove(&item_id).unwrap_or_default();
+        if tool_call.call_id.is_empty() {
+            tool_call.call_id = uuid::Uuid::new_v4().to_string();
+        }
+        if tool_call.tool_name.is_empty() {
+            return None;
+        }
+        if tool_call.input_json.is_empty() {
+            tool_call.input_json = "{}".to_string();
+        }
+
+        let part = LlmOutputPart::ToolCall {
+            call_id: tool_call.call_id,
+            tool_name: tool_call.tool_name,
+            input_json: tool_call.input_json,
+        };
+        if !self.parts.iter().any(|existing| existing == &part) {
+            self.parts.push(part.clone());
+            return Some(part);
+        }
+        None
+    }
+
+    fn response_parts(&self) -> Vec<LlmOutputPart> {
+        let parts = self
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                LlmOutputPart::Text { text } if text.is_empty() => None,
+                _ => Some(part.clone()),
+            })
+            .collect::<Vec<_>>();
+        if !parts.is_empty() {
+            return parts;
+        }
+
+        if let Some(final_response) = &self.final_response {
+            let parts = CodexOAuthAdapter::response_parts_from_value(final_response);
+            if !parts.is_empty() {
+                return parts;
+            }
+            let text = CodexOAuthAdapter::extract_text(final_response);
+            if !text.is_empty() {
+                return vec![LlmOutputPart::Text { text }];
+            }
+        }
+
+        if !self.full_text.is_empty() {
+            return vec![LlmOutputPart::Text {
+                text: self.full_text.clone(),
+            }];
+        }
+
+        Vec::new()
+    }
+
+    fn response_full_text(&self, parts: &[LlmOutputPart]) -> String {
+        if !self.full_text.is_empty() {
+            return self.full_text.clone();
+        }
+        parts
+            .iter()
+            .filter_map(|part| match part {
+                LlmOutputPart::Text { text } => Some(text.as_str()),
+                LlmOutputPart::ToolCall { .. } => None,
+            })
+            .collect::<String>()
+    }
 }
 
 impl Default for CodexOAuthAdapter {
@@ -272,19 +443,30 @@ impl CodexOAuthAdapter {
     }
 
     fn apply_stream_piece(full: &mut String, deltas: &mut Vec<String>, piece: &str) {
+        let delta = Self::stream_piece_delta(full, piece);
+        if !delta.is_empty() {
+            deltas.push(delta);
+        }
+    }
+
+    fn append_stream_piece(full: &mut String, piece: &str) {
+        let _ = Self::stream_piece_delta(full, piece);
+    }
+
+    fn stream_piece_delta(full: &mut String, piece: &str) -> String {
         if piece.is_empty() {
-            return;
+            return String::new();
         }
         if piece.starts_with(full.as_str()) {
             let delta = &piece[full.len()..];
             if !delta.is_empty() {
                 full.push_str(delta);
-                deltas.push(delta.to_string());
+                return delta.to_string();
             }
-            return;
+            return String::new();
         }
         full.push_str(piece);
-        deltas.push(piece.to_string());
+        piece.to_string()
     }
 
     fn log_sse_event(
@@ -312,12 +494,46 @@ impl CodexOAuthAdapter {
         );
     }
 
+    fn message_text_from_item(item: &Value) -> String {
+        item.get("content")
+            .and_then(|v| v.as_array())
+            .map(|content| {
+                content
+                    .iter()
+                    .filter_map(|part| match part.get("type").and_then(|v| v.as_str()) {
+                        Some("output_text") => part.get("text").and_then(|v| v.as_str()),
+                        Some("refusal") => part
+                            .get("refusal")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| part.get("text").and_then(|v| v.as_str())),
+                        _ => None,
+                    })
+                    .collect::<String>()
+            })
+            .unwrap_or_default()
+    }
+
+    fn response_from_stream_state(
+        state: CodexStreamState,
+        request_body: Option<String>,
+        http_summary: String,
+    ) -> LlmResponse {
+        let parts = state.response_parts();
+        let full_text = state.response_full_text(&parts);
+        LlmResponse {
+            deltas: state.deltas,
+            full_text,
+            parts,
+            usage: state.usage,
+            request_body,
+            http_summary: Some(http_summary),
+        }
+    }
+
     fn process_sse_event(
         raw: &str,
-        full: &mut String,
-        deltas: &mut Vec<String>,
-        usage: &mut LlmUsage,
-        final_response: &mut Option<Value>,
+        state: &mut CodexStreamState,
+        emitted_parts: Option<&mut Vec<LlmOutputPart>>,
     ) -> Result<(), LlmTransportError> {
         let raw = raw.trim();
         if raw.is_empty() || raw == "[DONE]" {
@@ -341,32 +557,74 @@ impl CodexOAuthAdapter {
         }
 
         let had_final_response = event.get("response").is_some();
-        let prev_delta_len = deltas.len();
+        let prev_delta_len = state.deltas.len();
 
         if let Some(resp_value) = event.get("response") {
-            *final_response = Some(resp_value.clone());
+            state.final_response = Some(resp_value.clone());
             let u = Self::extract_usage(resp_value);
-            Self::merge_usage(usage, &u);
+            Self::merge_usage(&mut state.usage, &u);
         } else {
             let u = Self::extract_usage(&event);
-            Self::merge_usage(usage, &u);
+            Self::merge_usage(&mut state.usage, &u);
         }
 
         match event_type.as_str() {
+            "response.output_item.added" => {
+                if let Some(item) = event.get("item") {
+                    match item.get("type").and_then(|v| v.as_str()) {
+                        Some("message") => state.begin_message(),
+                        Some("function_call") => {
+                            let _ = state.update_tool_call_from_item(item);
+                        }
+                        _ => {}
+                    }
+                }
+            }
             "response.output_text.delta" => {
                 if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
-                    Self::apply_stream_piece(full, deltas, delta);
+                    state.push_text_piece(delta);
                 }
             }
             "response.output_text.done" => {
                 if let Some(text) = event.get("text").and_then(|t| t.as_str()) {
-                    Self::apply_stream_piece(full, deltas, text);
+                    state.push_text_piece(text);
+                }
+            }
+            "response.function_call_arguments.delta" => {
+                if let Some(item_id) = event.get("item_id").and_then(|v| v.as_str())
+                    && let Some(delta) = event.get("delta").and_then(|v| v.as_str())
+                {
+                    state.push_tool_call_delta(item_id, delta);
+                }
+            }
+            "response.function_call_arguments.done" => {
+                if let Some(item_id) = event.get("item_id").and_then(|v| v.as_str())
+                    && let Some(arguments) = event.get("arguments").and_then(|v| v.as_str())
+                {
+                    state.set_tool_call_arguments(item_id, arguments);
+                }
+            }
+            "response.output_item.done" => {
+                if let Some(item) = event.get("item") {
+                    match item.get("type").and_then(|v| v.as_str()) {
+                        Some("message") => state.finish_message(Some(item)),
+                        Some("function_call") => {
+                            if let Some(parts) = emitted_parts
+                                && let Some(part) = state.finish_tool_call(item)
+                            {
+                                parts.push(part);
+                            } else {
+                                let _ = state.finish_tool_call(item);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
             "response.completed" => {
                 if let Some(resp_value) = event.get("response") {
                     let final_text = Self::extract_text(resp_value);
-                    Self::apply_stream_piece(full, deltas, &final_text);
+                    state.push_text_piece(&final_text);
                 }
             }
             "response.failed" => {
@@ -384,9 +642,9 @@ impl CodexOAuthAdapter {
         Self::log_sse_event(
             &event_type,
             raw,
-            &deltas[prev_delta_len..],
-            full.len(),
-            usage,
+            &state.deltas[prev_delta_len..],
+            state.full_text.len(),
+            &state.usage,
             had_final_response,
         );
         Ok(())
@@ -394,10 +652,7 @@ impl CodexOAuthAdapter {
 
     fn parse_sse_payload(
         payload: &str,
-        full: &mut String,
-        deltas: &mut Vec<String>,
-        usage: &mut LlmUsage,
-        final_response: &mut Option<Value>,
+        state: &mut CodexStreamState,
     ) -> Result<(), LlmTransportError> {
         let mut event_lines: Vec<String> = Vec::new();
         for mut line in payload.lines().map(|l| l.to_string()) {
@@ -414,7 +669,7 @@ impl CodexOAuthAdapter {
             if line.trim().is_empty() {
                 if !event_lines.is_empty() {
                     let raw = event_lines.join("\n");
-                    Self::process_sse_event(&raw, full, deltas, usage, final_response)?;
+                    Self::process_sse_event(&raw, state, None)?;
                     event_lines.clear();
                 }
                 continue;
@@ -422,7 +677,7 @@ impl CodexOAuthAdapter {
         }
         if !event_lines.is_empty() {
             let raw = event_lines.join("\n");
-            Self::process_sse_event(&raw, full, deltas, usage, final_response)?;
+            Self::process_sse_event(&raw, state, None)?;
         }
         Ok(())
     }
@@ -657,47 +912,27 @@ impl LlmTransport for CodexOAuthAdapter {
                         )
                     })?;
             if Self::looks_like_sse_payload(&text) {
-                let mut full = String::new();
-                let mut deltas = Vec::new();
-                let mut usage = LlmUsage::default();
-                let mut final_response = None;
-                Self::parse_sse_payload(
-                    &text,
-                    &mut full,
-                    &mut deltas,
-                    &mut usage,
-                    &mut final_response,
-                )?;
-                let parts = final_response
-                    .as_ref()
-                    .map(Self::response_parts_from_value)
-                    .filter(|parts| !parts.is_empty())
-                    .unwrap_or_else(|| {
-                        if full.is_empty() {
-                            Vec::new()
-                        } else {
-                            vec![LlmOutputPart::Text { text: full.clone() }]
-                        }
-                    });
+                let mut state = CodexStreamState::default();
+                Self::parse_sse_payload(&text, &mut state)?;
+                let response = Self::response_from_stream_state(
+                    state,
+                    request_body,
+                    format!("HTTP POST {} (stream/fallback)", Self::CODEX_RESPONSES_URL),
+                );
                 if let Some(tx) = &stream_events {
-                    if usage != LlmUsage::default() {
-                        tx.send(LlmStreamEvent::Usage(usage.clone()));
+                    if response.usage != LlmUsage::default() {
+                        tx.send(LlmStreamEvent::Usage(response.usage.clone()));
                     }
-                    for piece in &deltas {
+                    for piece in &response.deltas {
                         tx.send(LlmStreamEvent::Delta(piece.clone()));
                     }
+                    for part in &response.parts {
+                        if matches!(part, LlmOutputPart::ToolCall { .. }) {
+                            tx.send(LlmStreamEvent::Part(part.clone()));
+                        }
+                    }
                 }
-                return Ok(LlmResponse {
-                    deltas,
-                    full_text: full,
-                    parts,
-                    usage,
-                    request_body,
-                    http_summary: Some(format!(
-                        "HTTP POST {} (stream/fallback)",
-                        Self::CODEX_RESPONSES_URL
-                    )),
-                });
+                return Ok(response);
             }
             let value: Value = serde_json::from_str(&text).map_err(|e| {
                 LlmTransportError::new(format!("Invalid Codex response JSON: {e}"))
@@ -729,56 +964,38 @@ impl LlmTransport for CodexOAuthAdapter {
             });
         }
 
-        let mut full = String::new();
-        let mut deltas = Vec::new();
-        let mut usage = LlmUsage::default();
-        let mut final_response = None;
+        let mut state = CodexStreamState::default();
         drive_sse_response(
             resp,
             self.chunk_timeout,
             "Codex stream chunk timed out",
             |raw| {
-                let prev_len = deltas.len();
-                let prev_usage = usage.clone();
-                Self::process_sse_event(
-                    &raw,
-                    &mut full,
-                    &mut deltas,
-                    &mut usage,
-                    &mut final_response,
-                )?;
+                let prev_len = state.deltas.len();
+                let prev_usage = state.usage.clone();
+                let mut emitted_parts = Vec::new();
+                Self::process_sse_event(&raw, &mut state, Some(&mut emitted_parts))?;
                 emit_progress(
                     stream_events.as_ref(),
-                    &deltas,
+                    &state.deltas,
                     prev_len,
-                    &usage,
+                    &state.usage,
                     &prev_usage,
                 );
+                if let Some(tx) = &stream_events {
+                    for part in emitted_parts {
+                        tx.send(LlmStreamEvent::Part(part));
+                    }
+                }
                 Ok(())
             },
         )
         .await?;
 
-        let parts = final_response
-            .as_ref()
-            .map(Self::response_parts_from_value)
-            .filter(|parts| !parts.is_empty())
-            .unwrap_or_else(|| {
-                if full.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![LlmOutputPart::Text { text: full.clone() }]
-                }
-            });
-
-        Ok(LlmResponse {
-            deltas,
-            full_text: full,
-            parts,
-            usage,
+        Ok(Self::response_from_stream_state(
+            state,
             request_body,
-            http_summary: Some(format!("HTTP POST {} (stream)", Self::CODEX_RESPONSES_URL)),
-        })
+            format!("HTTP POST {} (stream)", Self::CODEX_RESPONSES_URL),
+        ))
     }
 }
 
@@ -799,32 +1016,25 @@ mod tests {
 
     #[test]
     fn parses_codex_sse_delta_and_completed_usage() {
-        let mut full = String::new();
-        let mut deltas = Vec::new();
-        let mut usage = LlmUsage::default();
-        let mut final_response = None;
+        let mut state = CodexStreamState::default();
 
         CodexOAuthAdapter::process_sse_event(
             r#"{"type":"response.output_text.delta","delta":"Hi "}"#,
-            &mut full,
-            &mut deltas,
-            &mut usage,
-            &mut final_response,
+            &mut state,
+            None,
         )
         .unwrap();
         CodexOAuthAdapter::process_sse_event(
             r#"{"type":"response.completed","response":{"output_text":"Hi there","usage":{"input_tokens":30,"output_tokens":8,"input_tokens_details":{"cached_tokens":10}}}}"#,
-            &mut full,
-            &mut deltas,
-            &mut usage,
-            &mut final_response,
+            &mut state,
+            None,
         )
         .unwrap();
 
-        assert_eq!(full, "Hi there");
-        assert_eq!(usage.input_tokens, 30);
-        assert_eq!(usage.output_tokens, 8);
-        assert_eq!(usage.cached_input_tokens, 10);
+        assert_eq!(state.full_text, "Hi there");
+        assert_eq!(state.usage.input_tokens, 30);
+        assert_eq!(state.usage.output_tokens, 8);
+        assert_eq!(state.usage.cached_input_tokens, 10);
     }
 
     #[test]
@@ -839,23 +1049,13 @@ event: response.completed
 data: {"type":"response.completed","response":{"output_text":"Hey there","usage":{"input_tokens":9,"output_tokens":2,"input_tokens_details":{"cached_tokens":3}}}}
 "#;
 
-        let mut full = String::new();
-        let mut deltas = Vec::new();
-        let mut usage = LlmUsage::default();
-        let mut final_response = None;
-        CodexOAuthAdapter::parse_sse_payload(
-            payload,
-            &mut full,
-            &mut deltas,
-            &mut usage,
-            &mut final_response,
-        )
-        .unwrap();
+        let mut state = CodexStreamState::default();
+        CodexOAuthAdapter::parse_sse_payload(payload, &mut state).unwrap();
 
-        assert_eq!(full, "Hey there");
-        assert_eq!(usage.input_tokens, 9);
-        assert_eq!(usage.output_tokens, 2);
-        assert_eq!(usage.cached_input_tokens, 3);
+        assert_eq!(state.full_text, "Hey there");
+        assert_eq!(state.usage.input_tokens, 9);
+        assert_eq!(state.usage.output_tokens, 2);
+        assert_eq!(state.usage.cached_input_tokens, 3);
     }
 
     #[test]
@@ -864,23 +1064,10 @@ data: {"type":"response.completed","response":{"output_text":"Hey there","usage"
 data: {"type":"response.completed","response":{"output":[{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"README.md\"}"}],"usage":{"input_tokens":12,"output_tokens":3}}}
 "#;
 
-        let mut full = String::new();
-        let mut deltas = Vec::new();
-        let mut usage = LlmUsage::default();
-        let mut final_response = None;
-        CodexOAuthAdapter::parse_sse_payload(
-            payload,
-            &mut full,
-            &mut deltas,
-            &mut usage,
-            &mut final_response,
-        )
-        .unwrap();
+        let mut state = CodexStreamState::default();
+        CodexOAuthAdapter::parse_sse_payload(payload, &mut state).unwrap();
 
-        let parts = final_response
-            .as_ref()
-            .map(CodexOAuthAdapter::response_parts_from_value)
-            .unwrap_or_default();
+        let parts = state.response_parts();
         assert_eq!(
             parts,
             vec![LlmOutputPart::ToolCall {
@@ -889,6 +1076,39 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
                 input_json: "{\"path\":\"README.md\"}".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn extracts_tool_calls_from_stream_events_when_completed_response_is_empty() {
+        let payload = r#"event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","status":"in_progress","arguments":"","call_id":"call_1","name":"exec_command"},"output_index":0}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"{\"cmd\":\"date","item_id":"fc_1","output_index":0}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","arguments":"{\"cmd\":\"date -u\"}","item_id":"fc_1","output_index":0}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"fc_1","type":"function_call","status":"completed","arguments":"{\"cmd\":\"date -u\"}","call_id":"call_1","name":"exec_command"},"output_index":0}
+
+event: response.completed
+data: {"type":"response.completed","response":{"output":[],"usage":{"input_tokens":12,"output_tokens":3}}}
+"#;
+
+        let mut state = CodexStreamState::default();
+        CodexOAuthAdapter::parse_sse_payload(payload, &mut state).unwrap();
+
+        assert_eq!(
+            state.response_parts(),
+            vec![LlmOutputPart::ToolCall {
+                call_id: "call_1".to_string(),
+                tool_name: "exec_command".to_string(),
+                input_json: "{\"cmd\":\"date -u\"}".to_string(),
+            }]
+        );
+        assert_eq!(state.usage.input_tokens, 12);
+        assert_eq!(state.usage.output_tokens, 3);
     }
 
     #[test]

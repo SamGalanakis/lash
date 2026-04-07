@@ -641,6 +641,27 @@ pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<UiHostEffect>) {
             UiHostEffect::ClearModeIndicator { key } => {
                 app.clear_mode_indicator(&key);
             }
+            UiHostEffect::UpsertPanel {
+                plugin_id,
+                key,
+                title,
+                content,
+            } => {
+                app.handle_session_event(SessionEvent::PluginEvent {
+                    plugin_id,
+                    event: PluginSurfaceEvent::PanelUpsert {
+                        key,
+                        title,
+                        content,
+                    },
+                });
+            }
+            UiHostEffect::ClearPanel { plugin_id, key } => {
+                app.handle_session_event(SessionEvent::PluginEvent {
+                    plugin_id,
+                    event: PluginSurfaceEvent::PanelClear { key },
+                });
+            }
             UiHostEffect::QueueTurn { input } => {
                 app.queue_turn(PreparedTurn::prepare(input, Vec::new(), &app.skills));
                 app.dirty = true;
