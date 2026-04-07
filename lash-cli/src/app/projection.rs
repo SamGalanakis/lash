@@ -153,14 +153,48 @@ pub(crate) fn strip_ansi_escape_sequences(text: &str) -> String {
     while idx < bytes.len() {
         if bytes[idx] == 0x1b {
             idx += 1;
-            if idx < bytes.len() && bytes[idx] == b'[' {
-                idx += 1;
-                while idx < bytes.len() {
-                    let byte = bytes[idx];
+            if idx >= bytes.len() {
+                break;
+            }
+            match bytes[idx] {
+                b'[' => {
                     idx += 1;
-                    if (byte as char).is_ascii_alphabetic() {
-                        break;
+                    while idx < bytes.len() {
+                        let byte = bytes[idx];
+                        idx += 1;
+                        if (0x40..=0x7e).contains(&byte) {
+                            break;
+                        }
                     }
+                }
+                b']' => {
+                    idx += 1;
+                    while idx < bytes.len() {
+                        match bytes[idx] {
+                            0x07 => {
+                                idx += 1;
+                                break;
+                            }
+                            0x1b if idx + 1 < bytes.len() && bytes[idx + 1] == b'\\' => {
+                                idx += 2;
+                                break;
+                            }
+                            _ => idx += 1,
+                        }
+                    }
+                }
+                b'P' | b'X' | b'^' | b'_' => {
+                    idx += 1;
+                    while idx < bytes.len() {
+                        if bytes[idx] == 0x1b && idx + 1 < bytes.len() && bytes[idx + 1] == b'\\' {
+                            idx += 2;
+                            break;
+                        }
+                        idx += 1;
+                    }
+                }
+                _ => {
+                    idx += 1;
                 }
             }
             continue;

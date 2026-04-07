@@ -129,26 +129,6 @@ fn draw_history(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
     }
 
-    let overlay_lines = render::streaming_output_overlay_lines(app, viewport_width);
-    if !overlay_lines.is_empty() {
-        let overlay_height = overlay_lines.len().min(area.height as usize) as u16;
-        let overlay_area = Rect::new(
-            area.x,
-            area.bottom().saturating_sub(overlay_height),
-            area.width,
-            overlay_height,
-        );
-        frame.fill(overlay_area, ' ', bg(theme::FORM));
-        for (idx, line) in overlay_lines.iter().enumerate() {
-            frame.write_line(
-                overlay_area.x,
-                overlay_area.y + idx as u16,
-                line,
-                overlay_area.width,
-            );
-        }
-    }
-
     if let Some((x, y, height)) = render::history_scroll_indicator(app, area) {
         for offset in 0..height {
             frame.write_text(x, y + offset, "│", fg(theme::CHALK_DIM), 1);

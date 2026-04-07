@@ -238,6 +238,64 @@ fn activity_block_renders_snippet_preview_at_default_expand_level() {
 }
 
 #[test]
+fn shell_activity_renders_live_output_inline_under_tool() {
+    let mut app = App::new("test-model".into(), "test".into());
+    app.blocks = vec![DisplayBlock::Activity(ActivityBlock {
+        kind: ActivityKind::ShellCommand,
+        status: ActivityStatus::Completed,
+        tool_name: "exec_command".into(),
+        summary: "started cargo check".into(),
+        detail_lines: vec!["Handle shell-1".into()],
+        duration_ms: 0,
+        args: Value::Null,
+        result: Value::Null,
+        artifact: None,
+        children: Vec::new(),
+        extra: None,
+    })];
+    let now = std::time::Instant::now();
+    app.running = true;
+    app.live_turn = Some(crate::app::LiveTurnState {
+        status_text: "shell".into(),
+        status_detail: None,
+        phase_started_at: now,
+        turn_started_at: now,
+        has_visible_output: true,
+        output_start_anchor_pending: false,
+        transient_until: None,
+    });
+    app.streaming_output = vec!["Compiling lash-cli".into(), "warning: unused import".into()];
+
+    let rendered = app
+        .rendered_block_lines_cached(0, 64, 20)
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("started cargo check"))
+    );
+    assert!(rendered.iter().any(|line| line.contains("Handle shell-1")));
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("Compiling lash-cli"))
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("warning: unused import"))
+    );
+}
+
+#[test]
 fn plugin_panel_renders_as_section_header_without_box() {
     let blocks = vec![DisplayBlock::PluginPanel(crate::app::PluginPanelBlock {
         plugin_id: "plan_mode".into(),
