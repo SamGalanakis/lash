@@ -37,7 +37,6 @@ const PLAN_TEMPLATE: &str = r#"# Plan
 ## Verification
 - TBD
 "#;
-const REQUIRED_PLAN_SECTIONS: &[&str] = &["Goal", "Steps", "Files", "Risks", "Verification"];
 
 fn default_allowed_tools() -> BTreeSet<String> {
     [
@@ -120,116 +119,15 @@ fn seed_plan_template(path: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-fn canonical_plan_section(heading: &str) -> Option<&'static str> {
-    let normalized = heading.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "goal" | "scope" => Some("Goal"),
-        "steps" | "implementation steps" | "execution steps" | "plan" => Some("Steps"),
-        "files" | "touched files" | "file changes" => Some("Files"),
-        "risks" | "open questions" => Some("Risks"),
-        "verification" | "validation" | "tests" => Some("Verification"),
-        _ => None,
-    }
-}
-
-fn strip_list_prefix(text: &str) -> &str {
-    let trimmed = text.trim();
-    for prefix in ["- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] "] {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            return rest.trim();
-        }
-    }
-    for prefix in ["- ", "* ", "+ "] {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            return rest.trim();
-        }
-    }
-    let digit_count = trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count();
-    if digit_count > 0 {
-        let rest = &trimmed[digit_count..];
-        if let Some(rest) = rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") ")) {
-            return rest.trim();
-        }
-    }
-    trimmed
-}
-
-fn line_has_substance(line: &str) -> bool {
-    let stripped = strip_list_prefix(line)
-        .trim_matches(|ch: char| ch.is_ascii_punctuation() || ch.is_whitespace());
-    if stripped.is_empty() {
-        return false;
-    }
-    let normalized = stripped.to_ascii_lowercase();
-    if normalized.starts_with("tbd")
-        || normalized.starts_with("todo")
-        || matches!(normalized.as_str(), "..." | "n/a" | "none")
-    {
-        return false;
-    }
-    normalized.chars().any(|ch| ch.is_alphanumeric())
-}
-
-fn parse_plan_sections(content: &str) -> std::collections::BTreeMap<&'static str, Vec<String>> {
-    let mut sections = std::collections::BTreeMap::<&'static str, Vec<String>>::new();
-    let mut current = None;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("## ") {
-            current = canonical_plan_section(rest);
-            continue;
-        }
-        if let Some(section) = current {
-            sections
-                .entry(section)
-                .or_default()
-                .push(trimmed.to_string());
-        }
-    }
-
-    sections
-}
-
 #[derive(Clone, Debug, Default)]
 struct PlanReport {
     display_path: String,
-    ready: bool,
     content: Option<String>,
-    missing_sections: Vec<&'static str>,
-    incomplete_sections: Vec<&'static str>,
 }
 
 impl PlanReport {
-    fn needs_items(&self) -> Vec<String> {
-        let mut items = self
-            .missing_sections
-            .iter()
-            .map(|name| (*name).to_string())
-            .collect::<Vec<_>>();
-        items.extend(
-            self.incomplete_sections
-                .iter()
-                .map(|name| format!("{name} (fill in)")),
-        );
-        items
-    }
-
     fn panel_content(&self) -> String {
         format!("Entered plan mode.\n\n`{}`", self.display_path)
-    }
-
-    fn blocking_message(&self) -> String {
-        let needs = self.needs_items();
-        if needs.is_empty() {
-            format!("Plan `{}` isn't ready.", self.display_path)
-        } else {
-            format!(
-                "Plan `{}` isn't ready. Need: {}.",
-                self.display_path,
-                needs.join(", ")
-            )
-        }
     }
 }
 
@@ -238,8 +136,6 @@ fn read_plan_report(path: &Path) -> Result<PlanReport, String> {
     if !plan_file_exists(path) {
         return Ok(PlanReport {
             display_path,
-            ready: false,
-            missing_sections: REQUIRED_PLAN_SECTIONS.to_vec(),
             ..Default::default()
         });
     }
@@ -250,26 +146,11 @@ fn read_plan_report(path: &Path) -> Result<PlanReport, String> {
             plan_display_path(path)
         )
     })?;
-    let sections = parse_plan_sections(&content);
-    let mut report = PlanReport {
+    Ok(PlanReport {
         display_path,
         content: Some(content.clone()),
         ..Default::default()
-    };
-
-    for section in REQUIRED_PLAN_SECTIONS {
-        match sections.get(section) {
-            None => report.missing_sections.push(*section),
-            Some(lines) if !lines.iter().any(|line| line_has_substance(line)) => {
-                report.incomplete_sections.push(*section)
-            }
-            Some(_) => {}
-        }
-    }
-
-    report.ready = report.missing_sections.is_empty() && report.incomplete_sections.is_empty();
-
-    Ok(report)
+    })
 }
 
 fn plan_panel_event(report: &PlanReport) -> crate::plugin::PluginSurfaceEvent {
@@ -291,7 +172,7 @@ fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
     PluginMessage::text(
         crate::MessageRole::System,
         format!(
-            "Plan mode: work in `{display}` only. Use read/search/list, web, `ask(...)`, and `showcase_snippet(...)` as needed. Call `plan_exit()` when ready."
+            "Plan mode: work in `{display}` only. Use read/search/list, web, `ask(...)`, and `showcase_snippet(...)` as needed. When you're done planning, call `plan_exit()` to leave plan mode."
         ),
     )
 }
@@ -482,9 +363,6 @@ fn plan_status_payload(
         "session_id": session_id,
         "enabled": enabled,
         "plan_path": report.map(|value| value.display_path.clone()),
-        "ready": report.is_some_and(|value| value.ready),
-        "missing_sections": report.map(|value| value.missing_sections.iter().map(|name| (*name).to_string()).collect::<Vec<_>>()).unwrap_or_default(),
-        "incomplete_sections": report.map(|value| value.incomplete_sections.iter().map(|name| (*name).to_string()).collect::<Vec<_>>()).unwrap_or_default(),
         "panel_title": enabled.then_some(PLAN_MODE_PANEL_TITLE.to_string()),
         "panel_content": if enabled { report.map(|value| value.panel_content()) } else { None },
     })
@@ -544,15 +422,12 @@ impl PlanModeTools {
                 Ok(report) => report,
                 Err(err) => return ToolResult::err(json!(err.to_string())),
             };
-        if !report.ready {
-            return ToolResult::err(json!(report.blocking_message()));
-        }
 
         let answer = match context
             .host
             .prompt_user(
                 PromptRequest::single(
-                    format!("Plan `{}` is ready. Exit plan mode?", report.display_path),
+                    format!("Exit plan mode for `{}`?", report.display_path),
                     vec!["Exit plan mode".to_string(), "Keep planning".to_string()],
                 )
                 .with_markdown_panel(
@@ -601,7 +476,7 @@ impl ToolProvider for PlanModeTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "plan_exit".into(),
-            description: "Validate the plan and ask whether to exit plan mode.".into(),
+            description: "Ask whether to exit plan mode.".into(),
             params: Vec::new(),
             returns: "dict".into(),
             examples: vec!["plan_exit()".into()],
@@ -895,13 +770,10 @@ impl SessionPlugin for PlanModePlugin {
                         "session_id": { "type": "string" },
                         "enabled": { "type": "boolean" },
                         "plan_path": { "type": ["string", "null"] },
-                        "ready": { "type": "boolean" },
-                        "missing_sections": { "type": "array", "items": { "type": "string" } },
-                        "incomplete_sections": { "type": "array", "items": { "type": "string" } },
                         "panel_title": { "type": ["string", "null"] },
                         "panel_content": { "type": ["string", "null"] }
                     },
-                    "required": ["session_id", "enabled", "plan_path", "ready", "missing_sections", "incomplete_sections", "panel_title", "panel_content"],
+                    "required": ["session_id", "enabled", "plan_path", "panel_title", "panel_content"],
                     "additionalProperties": false
                 }),
             },
@@ -960,13 +832,10 @@ impl SessionPlugin for PlanModePlugin {
                             "session_id": { "type": "string" },
                             "enabled": { "type": "boolean" },
                             "plan_path": { "type": ["string", "null"] },
-                            "ready": { "type": "boolean" },
-                            "missing_sections": { "type": "array", "items": { "type": "string" } },
-                            "incomplete_sections": { "type": "array", "items": { "type": "string" } },
                             "panel_title": { "type": ["string", "null"] },
                             "panel_content": { "type": ["string", "null"] }
                         },
-                        "required": ["session_id", "enabled", "plan_path", "ready", "missing_sections", "incomplete_sections", "panel_title", "panel_content"],
+                        "required": ["session_id", "enabled", "plan_path", "panel_title", "panel_content"],
                         "additionalProperties": false
                     }),
                 },
@@ -1045,7 +914,7 @@ impl SessionPlugin for PlanModePlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::{PLAN_TEMPLATE, line_has_substance, plan_exit_next_turn_input, read_plan_report};
+    use super::{PLAN_TEMPLATE, plan_exit_next_turn_input, read_plan_report};
 
     #[test]
     fn plan_exit_next_turn_input_appends_user_note() {
@@ -1063,21 +932,11 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_lines_are_not_substantive() {
-        assert!(!line_has_substance("- TBD"));
-        assert!(line_has_substance("- update src/main.rs"));
-    }
-
-    #[test]
-    fn seeded_template_is_not_ready() {
+    fn seeded_template_is_readable_without_validation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("plan.md");
         std::fs::write(&path, PLAN_TEMPLATE).expect("write template");
         let report = read_plan_report(&path).expect("report");
-        assert!(!report.ready);
-        assert_eq!(
-            report.incomplete_sections,
-            vec!["Goal", "Steps", "Files", "Risks", "Verification"]
-        );
+        assert_eq!(report.content.as_deref(), Some(PLAN_TEMPLATE));
     }
 }

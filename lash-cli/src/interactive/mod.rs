@@ -52,9 +52,11 @@ use self::commands::{
 pub(crate) use self::runtime::injected_image_part_indices;
 use self::runtime::{
     RuntimeRunResult, apply_pending_reconfigure, copy_selected_text_or_last_response,
-    make_turn_input, notify_done, send_user_message,
+    make_turn_input, send_user_message,
 };
-pub(crate) use self::runtime::{generate_session_name, make_injected_plugin_message};
+pub(crate) use self::runtime::{
+    generate_session_name, make_injected_plugin_message, notify_desktop,
+};
 
 #[derive(Clone)]
 struct TurnReplayPayload {
@@ -1854,6 +1856,12 @@ pub(crate) async fn run_app(
                     response_tx,
                 } = event
                 {
+                    let ui_effects =
+                        ui_extensions.effects_for_session_event(&SessionEvent::Prompt {
+                            request: request.clone(),
+                            response_tx: response_tx.clone(),
+                        });
+                    apply_ui_host_effects(&mut app, ui_effects);
                     if let Some(recorder) = ui_trace.as_mut() {
                         recorder.record_emit_prompt(&request);
                     }
@@ -1876,12 +1884,8 @@ pub(crate) async fn run_app(
                         recorder.record_session_event(&event);
                     }
                     let ui_effects = ui_extensions.effects_for_session_event(&event);
-                    let is_done = matches!(&event, SessionEvent::Done);
                     app.handle_session_event(event);
                     apply_ui_host_effects(&mut app, ui_effects);
-                    if is_done && !app.focused {
-                        notify_done();
-                    }
                 }
             }
             AppEvent::Quit => break,

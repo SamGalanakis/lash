@@ -18,27 +18,42 @@ pub(super) fn render_question_panel_artifact(
     );
 }
 
+#[cfg(test)]
 pub(super) fn render_snippet_preview(
     preview: &SnippetPreviewArtifact,
     lines: &mut Vec<Line<'static>>,
     viewport_width: usize,
 ) {
+    render_snippet_preview_with_indent(preview, lines, viewport_width, "");
+}
+
+pub(super) fn render_snippet_preview_with_indent(
+    preview: &SnippetPreviewArtifact,
+    lines: &mut Vec<Line<'static>>,
+    viewport_width: usize,
+    indent: &str,
+) {
     let title = preview.title.as_deref().unwrap_or("SNIPPET");
-    lines.push(prompt::prompt_section_label(title, viewport_width));
-    push_wrapped_styled_chunks(
+    lines.push(indented_line(
+        prompt::prompt_section_label(title, viewport_width.saturating_sub(indent.len())),
+        indent,
+    ));
+    push_wrapped_styled_chunks_with_indent(
         lines,
         &snippet_meta_line(preview),
         viewport_width,
-        |chunk| styled_snippet_chunk(chunk, theme::assistant_text(), preview.language.as_deref()),
+        indent,
+        |chunk| styled_snippet_chunk(chunk, theme::system_output(), preview.language.as_deref()),
     );
-    lines.push(Line::from(""));
+    lines.push(Line::from(indent.to_string()));
     match preview.render_mode {
         SnippetRenderMode::Markdown => {
             if !preview.content.trim().is_empty() {
-                lines.extend(markdown::render_markdown_compact(
+                let rendered = markdown::render_markdown(
                     &preview.content,
-                    viewport_width,
-                ));
+                    viewport_width.saturating_sub(indent.len()),
+                );
+                lines.extend(rendered.into_iter().map(|line| indented_line(line, indent)));
             }
         }
         SnippetRenderMode::Code => {
@@ -46,6 +61,7 @@ pub(super) fn render_snippet_preview(
                 preview,
                 lines,
                 viewport_width,
+                indent,
                 theme::code_content(),
             );
         }
@@ -54,6 +70,7 @@ pub(super) fn render_snippet_preview(
                 preview,
                 lines,
                 viewport_width,
+                indent,
                 theme::system_output(),
             );
         }
@@ -222,11 +239,12 @@ fn render_line_numbered_snippet_block(
     preview: &SnippetPreviewArtifact,
     lines: &mut Vec<Line<'static>>,
     viewport_width: usize,
+    indent: &str,
     text_style: Style,
 ) {
     let line_number_width = preview.end_line.to_string().len().max(2);
     if preview.content.is_empty() {
-        push_wrapped_styled_chunks(
+        push_wrapped_styled_chunks_with_indent(
             lines,
             &format!(
                 "{:>width$} │ ",
@@ -234,11 +252,12 @@ fn render_line_numbered_snippet_block(
                 width = line_number_width
             ),
             viewport_width,
+            indent,
             |chunk| styled_snippet_chunk(chunk, text_style, preview.language.as_deref()),
         );
     } else {
         for (offset, line) in preview.content.lines().enumerate() {
-            push_wrapped_styled_chunks(
+            push_wrapped_styled_chunks_with_indent(
                 lines,
                 &format!(
                     "{:>width$} │ {}",
@@ -247,24 +266,27 @@ fn render_line_numbered_snippet_block(
                     width = line_number_width
                 ),
                 viewport_width,
+                indent,
                 |chunk| styled_snippet_chunk(chunk, text_style, preview.language.as_deref()),
             );
         }
     }
 }
 
-fn push_wrapped_styled_chunks<F>(
+fn push_wrapped_styled_chunks_with_indent<F>(
     lines: &mut Vec<Line<'static>>,
     text: &str,
     viewport_width: usize,
+    indent: &str,
     mut style_chunk: F,
 ) where
     F: FnMut(&str) -> Vec<Span<'static>>,
 {
+    let available = viewport_width.saturating_sub(indent.len()).max(1);
     let segments = if text.is_empty() {
         vec![(0usize, 0usize)]
     } else {
-        text_layout::wrap_text_ranges_wordwise(text, viewport_width.max(1))
+        text_layout::wrap_text_ranges_wordwise(text, available)
     };
     for (start, end) in segments {
         let chunk = if text.is_empty() {
@@ -272,8 +294,22 @@ fn push_wrapped_styled_chunks<F>(
         } else {
             text[start..end].to_string()
         };
-        lines.push(Line::from(style_chunk(&chunk)));
+        let mut spans = Vec::new();
+        if !indent.is_empty() {
+            spans.push(Span::raw(indent.to_string()));
+        }
+        spans.extend(style_chunk(&chunk));
+        lines.push(Line::from(spans));
     }
+}
+
+fn indented_line(line: Line<'static>, indent: &str) -> Line<'static> {
+    if indent.is_empty() {
+        return line;
+    }
+    let mut spans = vec![Span::raw(indent.to_string())];
+    spans.extend(line.spans);
+    Line::from(spans)
 }
 
 fn snippet_meta_line(preview: &SnippetPreviewArtifact) -> String {
@@ -297,7 +333,7 @@ fn styled_snippet_chunk(
         return vec![
             Span::styled("File", theme::code_header()),
             Span::styled(" · ", Style::default().fg(theme::ASH_MID)),
-            Span::styled(rest.to_string(), theme::assistant_text()),
+            Span::styled(rest.to_string(), theme::system_output()),
         ];
     }
     if let Some((prefix, rest)) = chunk.split_once("│")

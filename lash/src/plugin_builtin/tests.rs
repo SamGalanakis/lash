@@ -434,13 +434,6 @@ async fn plan_mode_plugin_toggle_and_status_round_trip() {
             .and_then(|value| value.as_str()),
         Some(".lash/plans/run-session.md")
     );
-    assert_eq!(
-        enabled
-            .result
-            .get("ready")
-            .and_then(|value| value.as_bool()),
-        Some(false)
-    );
     assert!(plan_file_path(temp.path(), "run-session").is_file());
 
     let snapshot = session.snapshot().expect("snapshot");
@@ -513,7 +506,8 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                 message.role == MessageRole::System
                     && message.content.contains("Plan mode:")
                     && message.content.contains(".lash/plans/run-session.md")
-                    && message.content.contains("plan_exit()"))
+                    && message.content.contains("plan_exit()")
+                    && message.content.contains("When you're done planning, call `plan_exit()` to leave plan mode."))
     )));
     assert!(before_turn.iter().any(|emitted| {
         emitted.plugin_id == "plan_mode"
@@ -773,7 +767,8 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         PluginDirective::EnqueueMessages { messages }
             if messages.iter().any(|message|
                 message.content.contains(".lash/plans/run-session.md")
-                    && message.content.contains("plan_exit()"))
+                    && message.content.contains("plan_exit()")
+                    && message.content.contains("When you're done planning, call `plan_exit()` to leave plan mode."))
     )));
 
     session
@@ -1005,13 +1000,85 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
 }
 
 #[tokio::test]
-async fn plan_mode_tool_exit_requires_ready_plan() {
+async fn plan_mode_tool_exit_allows_exit_without_validation() {
+    struct PromptingSessionManager;
+
+    #[async_trait::async_trait]
+    impl SessionManager for PromptingSessionManager {
+        async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
+            Ok(mock_snapshot("run-session"))
+        }
+
+        async fn snapshot_session(
+            &self,
+            _session_id: &str,
+        ) -> Result<SessionSnapshot, PluginError> {
+            Ok(mock_snapshot("run-session"))
+        }
+
+        async fn tool_catalog(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<serde_json::Value>, PluginError> {
+            Ok(Vec::new())
+        }
+
+        async fn create_session(
+            &self,
+            request: SessionCreateRequest,
+        ) -> Result<SessionHandle, PluginError> {
+            let base = MockSessionManager;
+            base.create_session(request).await
+        }
+
+        async fn close_session(&self, session_id: &str) -> Result<(), PluginError> {
+            let base = MockSessionManager;
+            base.close_session(session_id).await
+        }
+
+        async fn start_turn_stream(
+            &self,
+            session_id: &str,
+            input: TurnInput,
+        ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
+            let base = MockSessionManager;
+            base.start_turn_stream(session_id, input).await
+        }
+
+        async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError> {
+            let base = MockSessionManager;
+            base.await_turn(turn_id).await
+        }
+
+        async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError> {
+            let base = MockSessionManager;
+            base.cancel_turn(turn_id).await
+        }
+
+        async fn prompt_user(
+            &self,
+            request: crate::PromptRequest,
+        ) -> Result<crate::PromptResponse, PluginError> {
+            assert_eq!(
+                request.question,
+                "Exit plan mode for `.lash/plans/run-session.md`?"
+            );
+            let panel = request.panel.expect("plan review panel");
+            assert_eq!(panel.title, "PLAN");
+            assert!(panel.markdown.contains("# Plan"));
+            Ok(crate::PromptResponse::Single {
+                selection: "Exit plan mode".to_string(),
+                note: None,
+            })
+        }
+    }
+
     let _guard = plan_mode_env_lock().lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
+    let manager: Arc<dyn SessionManager> = Arc::new(PromptingSessionManager);
 
     session
         .invoke_external(
@@ -1024,6 +1091,15 @@ async fn plan_mode_tool_exit_requires_ready_plan() {
         .await
         .expect("enable");
 
+    session
+        .before_turn(TurnHookContext {
+            session_id: "root".to_string(),
+            state: mock_snapshot("run-session"),
+            host: Arc::clone(&manager),
+        })
+        .await
+        .expect("before_turn");
+
     let result = session
         .tools()
         .execute_with_context(
@@ -1035,12 +1111,13 @@ async fn plan_mode_tool_exit_requires_ready_plan() {
             },
         )
         .await;
-    assert!(!result.success);
+    assert!(result.success);
     assert!(
         result
             .result
-            .as_str()
-            .is_some_and(|value| value.contains("Need: Goal (fill in), Steps (fill in), Files (fill in), Risks (fill in), Verification (fill in)."))
+            .get("approved")
+            .and_then(|value| value.as_bool())
+            == Some(true)
     );
 }
 

@@ -1861,6 +1861,19 @@ fn prepared_turn_history_text_annotates_only_pasted_content_inline() {
 }
 
 #[test]
+fn prepared_turn_history_text_keeps_long_user_text_without_middle_truncation() {
+    let text = format!(
+        "I would like to add some kind of all knowing knowledge graph to figments. {} user facing documentation.",
+        "x".repeat(400)
+    );
+    let turn = PreparedTurn::prepare(text.clone(), Vec::new(), &SkillCatalog::default());
+
+    let history = turn.history_text();
+    assert_eq!(history, text);
+    assert!(!history.contains("chars hidden"));
+}
+
+#[test]
 fn prompt_insert_text_inserts_literal_payload_at_cursor() {
     let mut app = App::new("test-model".into(), "test".into());
     app.show_prompt(PromptState {

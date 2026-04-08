@@ -45,6 +45,7 @@ impl TraceRepoStatus {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn into_repo_status(self, cwd: &str) -> RepoStatus {
         RepoStatus {
             repo_root: PathBuf::from(cwd),

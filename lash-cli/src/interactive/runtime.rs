@@ -455,8 +455,7 @@ pub(super) fn send_user_message(
     });
 }
 
-/// Send a desktop notification that the session finished.
-pub(super) fn notify_done() {
+pub(crate) fn notify_desktop(title: &str, body: &str) {
     let icon_path = lash::lash_home().join("icon.svg");
     if !icon_path.exists() {
         let _ = std::fs::write(&icon_path, include_bytes!("../../assets/icon.svg"));
@@ -464,7 +463,8 @@ pub(super) fn notify_done() {
     let _ = std::process::Command::new("notify-send")
         .args(["-a", "lash", "-i"])
         .arg(&icon_path)
-        .args(["lash", "Response complete"])
+        .arg(title)
+        .arg(body)
         .spawn();
 }
 

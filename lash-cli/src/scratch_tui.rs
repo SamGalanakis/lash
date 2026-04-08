@@ -424,6 +424,14 @@ fn draw_suggestions(frame: &mut Frame<'_>, app: &App, input_area: Rect) {
         return;
     }
     let max_visible = app.suggestions().len().min(8);
+    let name_col = app
+        .suggestions()
+        .iter()
+        .take(max_visible)
+        .map(|(name, _)| display_width(name))
+        .max()
+        .unwrap_or(8)
+        .max(8);
     let width = input_area.width.min(72);
     let height = max_visible as u16 + 2;
     if width < 4 || input_area.y < height {
@@ -443,7 +451,7 @@ fn draw_suggestions(frame: &mut Frame<'_>, app: &App, input_area: Rect) {
         } else {
             fg(theme::CHALK_DIM)
         };
-        let row = format!(" {:<20} {}", name, desc);
+        let row = format!(" {:<width$} {}", name, desc, width = name_col);
         frame.write_text(
             popup.x + 1,
             popup.y + 1 + idx as u16,
@@ -474,19 +482,31 @@ fn draw_session_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
         popup.width.saturating_sub(4),
     );
     let scroll = picker.selected.saturating_sub(visible as usize - 1);
-    for (row, session) in picker
+    let visible_items: Vec<_> = picker
         .items
         .iter()
         .skip(scroll)
         .take(visible as usize)
-        .enumerate()
-    {
+        .collect();
+    let time_col = visible_items
+        .iter()
+        .map(|s| display_width(&s.relative_time()))
+        .max()
+        .unwrap_or(6)
+        .max(6);
+    let count_col = visible_items
+        .iter()
+        .map(|s| display_width(&s.message_count.to_string()))
+        .max()
+        .unwrap_or(2)
+        .max(2);
+    for (row, session) in visible_items.iter().enumerate() {
         let selected = scroll + row == picker.selected;
         let prefix = if selected { "> " } else { "  " };
         let preview = session.first_message.replace('\n', " ");
         let cwd = session.cwd_label().unwrap_or_default();
         let line = format!(
-            "{prefix}{:<10} {:>4} {}{}",
+            "{prefix}{:<time_col$} {:>count_col$} {}{}",
             session.relative_time(),
             session.message_count,
             preview,
@@ -494,7 +514,7 @@ fn draw_session_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
                 String::new()
             } else {
                 format!(" {cwd}")
-            }
+            },
         );
         let style = if selected {
             fg(theme::CHALK).bg(theme::FORM_RAISED)
@@ -531,16 +551,22 @@ fn draw_skill_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
         popup.width.saturating_sub(4),
     );
     let scroll = picker.selected.saturating_sub(visible as usize - 1);
-    for (row, (name, desc)) in picker
+    let visible_items: Vec<_> = picker
         .items
         .iter()
         .skip(scroll)
         .take(visible as usize)
-        .enumerate()
-    {
+        .collect();
+    let name_col = visible_items
+        .iter()
+        .map(|(name, _)| display_width(name))
+        .max()
+        .unwrap_or(8)
+        .max(8);
+    for (row, (name, desc)) in visible_items.iter().enumerate() {
         let selected = scroll + row == picker.selected;
         let prefix = if selected { "> " } else { "  " };
-        let line = format!("{prefix}{:<20} {}", name, desc);
+        let line = format!("{prefix}{:<width$} {}", name, desc, width = name_col);
         let style = if selected {
             fg(theme::CHALK).bg(theme::FORM_RAISED)
         } else {
@@ -638,6 +664,23 @@ mod tests {
         let top = snapshot.visible_line_trimmed(0);
         assert!(top.contains("lash · gpt-5.4 · high"));
         assert!(top.contains("7.0k / 1.1M (0.6%)"));
+    }
+
+    #[test]
+    fn input_badge_omits_session_name() {
+        let mut app = App::new("gpt-5.4".into(), "autumn-falls".into());
+        app.repo_status = Some(crate::repo_status::RepoStatus {
+            repo_root: std::path::PathBuf::from("/tmp/lash"),
+            repo_name: "lash".into(),
+            branch: "staging".into(),
+            worktree: None,
+        });
+
+        let snapshot = lash_tui::render_snapshot(84, 8, |frame| draw(frame, &mut app));
+        let visible = snapshot.visible_lines_trimmed().join("\n");
+
+        assert!(visible.contains("lash · staging"));
+        assert!(!visible.contains("autumn-falls"));
     }
 
     #[test]
