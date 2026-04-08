@@ -116,7 +116,9 @@ pub(crate) fn build_execution_preamble(
     } else {
         (String::new(), 0)
     };
-    let tool_specs = if matches!(mode, ExecutionMode::Standard) {
+    let tool_specs = if enabled_tools.is_empty() {
+        Vec::new()
+    } else if matches!(mode, ExecutionMode::Standard) {
         lash_sansio::session_model::model_tool_specs(&enabled_tools)
     } else {
         Vec::new()

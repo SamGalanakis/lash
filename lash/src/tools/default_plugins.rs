@@ -23,7 +23,6 @@ pub fn default_tool_plugin_factories(
     mode: ExecutionMode,
     deps: DefaultToolPluginDeps,
 ) -> Vec<Arc<dyn PluginFactory>> {
-    #[cfg(not(feature = "sqlite-store"))]
     let _ = mode;
 
     let mut factories: Vec<Arc<dyn PluginFactory>> = vec![
@@ -72,8 +71,7 @@ pub fn default_tool_plugin_factories(
         )));
     }
 
-    #[cfg(feature = "sqlite-store")]
-    if deps.store.is_some() && matches!(mode, ExecutionMode::Repl) {
+    if matches!(mode, ExecutionMode::Repl) {
         factories.push(Arc::new(super::StateToolsPluginFactory::new()));
     }
 

@@ -1,3 +1,4 @@
+#[cfg(feature = "sqlite-store")]
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -7,6 +8,7 @@ use crate::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
     ToolSurfaceContribution, ToolSurfaceOverride,
 };
+#[cfg(feature = "sqlite-store")]
 use crate::search::{SearchDoc, SearchMode, limit_from_args, rank_docs};
 use crate::{
     PromptContext, PromptContribution, ToolDefinition, ToolExecutionContext, ToolParam,
@@ -34,6 +36,7 @@ impl StateStore {
         Self
     }
 
+    #[cfg(feature = "sqlite-store")]
     fn search_tools(
         &self,
         args: &serde_json::Value,
@@ -141,6 +144,59 @@ impl StateStore {
             })
             .collect();
         ToolResult::ok(json!(items))
+    }
+
+    #[cfg(not(feature = "sqlite-store"))]
+    fn search_tools(
+        &self,
+        args: &serde_json::Value,
+        catalog: Vec<serde_json::Value>,
+    ) -> ToolResult {
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+
+        let mut filtered = catalog
+            .into_iter()
+            .filter(|tool| {
+                tool.get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true)
+            })
+            .filter(|tool| {
+                if query.is_empty() {
+                    return true;
+                }
+                let name = tool
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let description = tool
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                name.contains(&query) || description.contains(&query)
+            })
+            .collect::<Vec<_>>();
+
+        filtered.sort_by(|left, right| {
+            let left_name = left
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            let right_name = right
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            left_name.cmp(right_name)
+        });
+
+        ToolResult::ok(json!(filtered))
     }
 }
 

@@ -1,7 +1,10 @@
 use super::artifact::render_snippet_preview;
 use super::*;
+use crate::activity::ActivityState;
 use crate::app::projected_blocks_from_state;
 use crate::theme;
+use lash::ToolProvider;
+use lash::tools::ShowcaseSnippet;
 use lash::{Part, PartKind, PromptRequest};
 use serde_json::Value;
 use std::sync::mpsc;
@@ -335,6 +338,78 @@ fn activity_block_indents_showcase_snippet_preview_under_summary() {
         rendered
             .iter()
             .any(|line| line.starts_with("    780 │ if ctx.tool_name != \"plan_exit\" {"))
+    );
+}
+
+#[tokio::test]
+async fn showcase_tool_output_wraps_under_line_number_gutter() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("sample.rs");
+    std::fs::write(
+        &path,
+        "fn autonomous_prompt_overrides() -> Vec<PromptSectionOverride> {\n",
+    )
+    .expect("write file");
+
+    let tool = ShowcaseSnippet::new();
+    let result = tool
+        .execute(
+            "showcase_snippet",
+            &serde_json::json!({
+                "path": path,
+                "start_line": 1,
+                "end_line": 1,
+                "title": "Autonomous-mode prompt overrides"
+            }),
+        )
+        .await;
+
+    assert!(result.success, "tool failed: {:?}", result.result);
+
+    let mut state = ActivityState::default();
+    let activity = state
+        .blocks_for_tool_call(
+            "showcase_snippet",
+            serde_json::json!({
+                "path": path,
+                "start_line": 1,
+                "end_line": 1,
+                "title": "Autonomous-mode prompt overrides"
+            }),
+            result.result,
+            true,
+            5,
+        )
+        .into_iter()
+        .next()
+        .expect("activity block");
+
+    let blocks = vec![DisplayBlock::Activity(Box::new(activity))];
+    let rendered = render_block(&blocks, 0, 1, 54, 24);
+
+    assert!(rendered.iter().all(|line| line.width() <= 54));
+
+    let text = rendered
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        text.iter()
+            .any(|line| line.contains("Autonomous-mode prompt overrides"))
+    );
+    assert!(
+        text.iter()
+            .any(|line| line == "     1 │ fn autonomous_prompt_overrides() -> Vec<Promp")
+    );
+    assert!(
+        text.iter()
+            .any(|line| line == "       │ tSectionOverride> {")
     );
 }
 

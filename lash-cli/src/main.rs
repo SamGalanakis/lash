@@ -82,7 +82,7 @@ fn autonomous_prompt_overrides() -> Vec<PromptSectionOverride> {
             section: PromptSectionName::Execution,
             block: None,
             mode: PromptOverrideMode::Append,
-            content: "- No user is available during this run. Do not rely on `ask`; make the best reasonable decision from local context and continue.".to_string(),
+            content: "- No user is available during this run. Default to acting without asking. Ask only when progress is blocked and user intervention is strictly required; otherwise make the best reasonable decision from local context and continue.".to_string(),
         },
     ]
 }

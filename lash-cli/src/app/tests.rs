@@ -1854,7 +1854,7 @@ fn prepared_turn_history_text_annotates_only_pasted_content_inline() {
         Vec::new(),
         &SkillCatalog::default(),
         vec![LargePaste {
-            placeholder,
+            placeholder: placeholder.clone(),
             content: large,
         }],
     );
@@ -1862,9 +1862,28 @@ fn prepared_turn_history_text_annotates_only_pasted_content_inline() {
     let history = turn.history_text();
     assert!(history.starts_with("before "));
     assert!(history.ends_with(" after"));
-    assert!(history.contains(&format!("[pasted {char_count} chars]")));
-    assert!(!history.contains("[Pasted Content"));
+    assert!(history.contains(&placeholder));
     assert!(!history.contains('\n'));
+}
+
+#[test]
+fn prepared_turn_display_text_keeps_same_large_paste_placeholder_as_input() {
+    let large = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 9);
+    let placeholder = format!("[Pasted Content {} chars]", large.chars().count());
+
+    let turn = PreparedTurn::prepare_with_large_pastes(
+        format!("before {placeholder} after"),
+        Vec::new(),
+        &SkillCatalog::default(),
+        vec![LargePaste {
+            placeholder: placeholder.clone(),
+            content: large.clone(),
+        }],
+    );
+
+    assert_eq!(turn.display_text, format!("before {placeholder} after"));
+    assert_eq!(turn.history_text(), format!("before {placeholder} after"));
+    assert_eq!(turn.effective_text, format!("before {large} after"));
 }
 
 #[test]
