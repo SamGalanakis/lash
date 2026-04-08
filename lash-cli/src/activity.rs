@@ -629,6 +629,19 @@ impl ActivityState {
                     result,
                 }
             }
+            "wait" => ActivityBlock {
+                kind: ActivityKind::Ask,
+                status,
+                tool_name: name.to_string(),
+                summary: wait_summary(&args, &result),
+                detail_lines: wait_detail_lines(&args, &result),
+                duration_ms,
+                args,
+                artifact: None,
+                children: Vec::new(),
+                extra: None,
+                result,
+            },
             "showcase_snippet" => {
                 let artifact = snippet_preview_artifact(&result);
                 let summary =
@@ -1195,6 +1208,42 @@ fn shell_output_artifact(result: &Value) -> Option<ActivityArtifact> {
 fn ask_summary(args: &Value) -> String {
     let _ = args;
     "Question".to_string()
+}
+
+fn wait_summary(args: &Value, result: &Value) -> String {
+    let seconds = result
+        .get("seconds")
+        .and_then(|value| value.as_u64())
+        .or_else(|| args.get("seconds").and_then(|value| value.as_u64()))
+        .unwrap_or(0);
+    if result
+        .get("resumed_early")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        format!("waited {seconds}s window · resumed early")
+    } else {
+        format!("waited {seconds}s")
+    }
+}
+
+fn wait_detail_lines(args: &Value, result: &Value) -> Vec<String> {
+    let seconds = result
+        .get("seconds")
+        .and_then(|value| value.as_u64())
+        .or_else(|| args.get("seconds").and_then(|value| value.as_u64()));
+    let mut lines = Vec::new();
+    if let Some(seconds) = seconds {
+        lines.push(format!("Paused for {seconds}s before continuing."));
+    }
+    if result
+        .get("resumed_early")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        lines.push("Resumed early from the terminal.".to_string());
+    }
+    lines
 }
 
 fn ask_detail_lines(args: &Value, _result: &Value) -> Vec<String> {

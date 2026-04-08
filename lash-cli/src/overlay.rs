@@ -32,6 +32,10 @@ impl PromptState {
         self.request.is_freeform()
     }
 
+    pub fn is_wait(&self) -> bool {
+        self.request.is_wait()
+    }
+
     pub fn supports_note(&self) -> bool {
         self.request.allows_note()
     }
@@ -144,6 +148,11 @@ impl PromptState {
     }
 
     pub fn submitted_response(&self) -> PromptResponse {
+        if self.is_wait() {
+            return PromptResponse::Text {
+                text: lash::WAIT_PROMPT_RESUME_EARLY_TOKEN.to_string(),
+            };
+        }
         if self.is_freeform() {
             return PromptResponse::Text {
                 text: self.reply_text.clone(),
@@ -169,6 +178,11 @@ impl PromptState {
     }
 
     pub fn dismissed_response(&self) -> PromptResponse {
+        if self.is_wait() {
+            return PromptResponse::Text {
+                text: lash::WAIT_PROMPT_TIMEOUT_TOKEN.to_string(),
+            };
+        }
         self.request.empty_response()
     }
 

@@ -237,6 +237,14 @@ pub async fn restore_session_state(
             .and_then(|mode| crate::ensure_supported_execution_mode(mode).ok())
             .unwrap_or(live.state.policy.execution_mode);
         let restored_context_strategy = live.state.policy.context_strategy;
+        tracing::debug!(
+            requested_execution_mode = ?requested_execution_mode,
+            live_policy_execution_mode = ?live.state.policy.execution_mode,
+            restored_execution_mode = ?restored_execution_mode,
+            restored_context_strategy = ?restored_context_strategy,
+            has_repl_snapshot = live.state.repl_snapshot.is_some(),
+            "restoring live session state"
+        );
         *execution_mode = restored_execution_mode;
         *context_strategy = restored_context_strategy;
         if matches!(requested_execution_mode, Some(ExecutionMode::Repl))

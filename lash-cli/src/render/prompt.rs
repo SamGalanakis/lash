@@ -76,6 +76,9 @@ fn prompt_option_text(idx: usize, option: &str) -> String {
 }
 
 fn prompt_help_items(prompt: &PromptState) -> Vec<(&'static str, &'static str)> {
+    if prompt.is_wait() {
+        return vec![("ctrl+j", "resume now"), ("esc", "cancel wait")];
+    }
     if prompt.has_options() {
         if prompt.supports_note() {
             if prompt.is_text_entry() {
@@ -247,6 +250,20 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
             &prompt.request.question,
             inner_w,
             Style::default().fg(theme::CHALK),
+        );
+    }
+    if let Some(wait) = prompt.request.wait.as_ref() {
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        push_wrapped_plain_lines(
+            &mut lines,
+            &format!(
+                "Waiting {}s. The run will resume automatically.",
+                wait.seconds
+            ),
+            inner_w,
+            Style::default().fg(theme::ASH_TEXT),
         );
     }
     if !lines.is_empty() && (has_options || show_text_input) {

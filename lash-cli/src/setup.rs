@@ -194,6 +194,26 @@ async fn run_setup_inner(
         }
 
         let event = event::read()?;
+        if let Event::Paste(text) = &event {
+            match &mut app.step {
+                SetupStep::InputCredential {
+                    input,
+                    cursor,
+                    error,
+                    ..
+                } => {
+                    insert_text(input, cursor, text);
+                    *error = None;
+                    continue;
+                }
+                SetupStep::InputBaseUrl { input, cursor, .. }
+                | SetupStep::InputTavily { input, cursor } => {
+                    insert_text(input, cursor, text);
+                    continue;
+                }
+                _ => {}
+            }
+        }
         let Event::Key(key) = event else { continue };
         if key.kind == KeyEventKind::Release {
             continue;
@@ -950,6 +970,14 @@ fn move_right(input: &str, cursor: &mut usize) {
         .next()
         .map(|ch| ch.len_utf8())
         .unwrap_or(0);
+}
+
+fn insert_text(input: &mut String, cursor: &mut usize, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    input.insert_str(*cursor, text);
+    *cursor += text.len();
 }
 
 fn visible_slice(input: &str, width: usize, cursor_byte: usize) -> &str {

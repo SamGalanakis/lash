@@ -1338,6 +1338,7 @@ impl LashRuntime {
                 tracing::warn!("failed to restore plugin snapshot in set_state: {err}");
             }
         }
+        self.policy = state.policy.clone();
         self.state = state;
     }
 
@@ -6371,5 +6372,30 @@ mod tests {
 
         assert!(text_streamed);
         assert_eq!(streamed_text, "Hello there");
+    }
+
+    #[tokio::test]
+    async fn set_state_syncs_runtime_policy_with_restored_state_policy() {
+        let plugins = crate::PluginHost::new(Vec::new())
+            .build_standard_session("root", None)
+            .expect("plugins");
+        let mut runtime = LashRuntime::from_state(
+            standard_test_policy(),
+            test_host_config(),
+            crate::RuntimeServices::new(plugins),
+            SessionStateEnvelope::default(),
+        )
+        .await
+        .expect("runtime");
+
+        let mut state = runtime.state.clone();
+        state.policy.model = "restored-model".to_string();
+        state.policy.execution_mode = ExecutionMode::Repl;
+        runtime.set_state(state);
+
+        assert_eq!(runtime.state.policy.model, "restored-model");
+        assert_eq!(runtime.policy.model, "restored-model");
+        assert_eq!(runtime.state.policy.execution_mode, ExecutionMode::Repl);
+        assert_eq!(runtime.policy.execution_mode, ExecutionMode::Repl);
     }
 }

@@ -64,6 +64,11 @@ pub fn default_tool_plugin_factories(
                 .with_tool_provider(Arc::new(super::AskTool::new()) as Arc<dyn ToolProvider>),
         )));
         factories.push(Arc::new(StaticPluginFactory::new(
+            "wait",
+            PluginSpec::new()
+                .with_tool_provider(Arc::new(super::WaitTool::new()) as Arc<dyn ToolProvider>),
+        )));
+        factories.push(Arc::new(StaticPluginFactory::new(
             "showcase_snippet",
             PluginSpec::new().with_tool_provider(
                 Arc::new(super::ShowcaseSnippet::new()) as Arc<dyn ToolProvider>
@@ -212,5 +217,6 @@ mod tests {
                 .iter()
                 .any(|factory| factory.id() == "showcase_snippet")
         );
+        assert!(factories.iter().any(|factory| factory.id() == "wait"));
     }
 }

@@ -1921,6 +1921,36 @@ fn prompt_insert_text_inserts_literal_payload_at_cursor() {
 }
 
 #[test]
+fn wait_prompt_submission_returns_resume_early_token_without_chat_echo() {
+    let mut app = App::new("test-model".into(), "test".into());
+    let (response_tx, response_rx) = std::sync::mpsc::channel();
+    app.show_prompt(PromptState {
+        request: lash::PromptRequest::freeform("Paused · waiting 5s").with_wait(5),
+        focus: crate::overlay::PromptFocus::Options,
+        cursor: 0,
+        scroll_offset: 0,
+        selected: Default::default(),
+        reply_text: String::new(),
+        reply_cursor: 0,
+        response_tx,
+    });
+
+    let display = app.take_prompt_response();
+
+    assert!(display.is_some());
+    assert!(!app.has_prompt());
+    assert!(!app.blocks.iter().any(
+        |block| matches!(block, DisplayBlock::UserInput(text) if text.contains("Paused · waiting"))
+    ));
+    assert_eq!(
+        response_rx.recv().expect("response"),
+        lash::PromptResponse::Text {
+            text: lash::WAIT_PROMPT_RESUME_EARLY_TOKEN.to_string()
+        }
+    );
+}
+
+#[test]
 fn prompt_toggle_current_option_ignores_freeform_prompts() {
     let mut app = App::new("test-model".into(), "test".into());
     app.show_prompt(PromptState {

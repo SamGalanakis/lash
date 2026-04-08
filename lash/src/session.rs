@@ -184,8 +184,17 @@ impl Session {
     }
 
     fn repl_tools_json(&self, session_id: &str) -> String {
-        serde_json::to_string(&self.tool_catalog(session_id, crate::ExecutionMode::Repl))
-            .unwrap_or_else(|_| "[]".to_string())
+        let catalog = self.tool_catalog(session_id, crate::ExecutionMode::Repl);
+        tracing::debug!(
+            session_id,
+            tool_count = catalog.len(),
+            tool_names = ?catalog
+                .iter()
+                .filter_map(|tool| tool.get("name").and_then(|value| value.as_str()))
+                .collect::<Vec<_>>(),
+            "serializing REPL tool catalog"
+        );
+        serde_json::to_string(&catalog).unwrap_or_else(|_| "[]".to_string())
     }
 
     pub fn turn_injection_bridge(&self) -> &TurnInjectionBridge {
@@ -359,6 +368,10 @@ impl Session {
 
     /// Check if a code string is syntactically complete for the lashlang REPL.
     pub fn check_complete(&self, code: &str) -> Result<bool, SessionError> {
+        tracing::debug!(
+            code_preview = %code.chars().take(300).collect::<String>(),
+            "checking REPL completeness"
+        );
         self.runtime()?.send(LashlangRequest::CheckComplete {
             code: code.to_string(),
         })?;
@@ -366,7 +379,10 @@ impl Session {
         let response = tokio::task::block_in_place(|| runtime.recv())
             .map_err(|_| SessionError::RuntimeExited)?;
         match response {
-            LashlangResponse::CheckCompleteResult { is_complete } => Ok(is_complete),
+            LashlangResponse::CheckCompleteResult { is_complete } => {
+                tracing::debug!(is_complete, "received REPL completeness result");
+                Ok(is_complete)
+            }
             _ => Ok(false),
         }
     }
@@ -396,6 +412,12 @@ impl Session {
         }
 
         let tools_json = self.repl_tools_json(&self.session_id);
+        tracing::debug!(
+            session_id = self.session_id,
+            generation = self.tools().dynamic_generation().unwrap_or(0),
+            tools_json_preview = %tools_json.chars().take(400).collect::<String>(),
+            "refreshing REPL execution surface"
+        );
         if self.last_repl_tools_json.as_deref() == Some(tools_json.as_str()) {
             return Ok(());
         }
@@ -431,6 +453,11 @@ impl Session {
 
     async fn initialize_execution_surface(&mut self, session_id: &str) -> Result<(), SessionError> {
         let tools_json = self.repl_tools_json(session_id);
+        tracing::debug!(
+            session_id,
+            tools_json_preview = %tools_json.chars().take(400).collect::<String>(),
+            "initializing REPL execution surface"
+        );
         self.runtime()?.send(LashlangRequest::Init {
             tools_json: tools_json.clone(),
             session_id: session_id.to_string(),
@@ -690,5 +717,65 @@ finish "ok"
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].tool, "update_plan");
         assert!(response.tool_calls[0].success);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repl_run_code_can_call_common_repo_tools_without_model() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("alpha.txt"), "hello\n").expect("write alpha");
+        std::fs::write(temp.path().join("beta.rs"), "fn main() {}\n").expect("write beta");
+
+        let deps = crate::DefaultToolPluginDeps {
+            enable_user_prompts: true,
+            ..Default::default()
+        };
+        let plugin_host = PluginHost::new(crate::default_tool_plugin_factories(
+            crate::ExecutionMode::Repl,
+            deps,
+        ));
+        let plugin_session = plugin_host
+            .build_session("root", crate::ExecutionMode::Repl, None)
+            .expect("plugin session");
+        let mut session = Session::new(
+            crate::RuntimeServices::new(plugin_session),
+            "root",
+            crate::ExecutionMode::Repl,
+        )
+        .await
+        .expect("session");
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
+        let manager: Arc<dyn SessionManager> = Arc::new(NoopManager);
+
+        let response = session
+            .run_code(
+                "root",
+                manager,
+                &event_tx,
+                &format!(
+                    r#"
+cwd = {:?}
+files = call ls {{ path: cwd }}
+match = call grep {{ path: {:?}, pattern: "fn main" }}
+observe files
+observe match
+"#,
+                    temp.path(),
+                    temp.path()
+                ),
+            )
+            .await
+            .expect("exec response");
+
+        assert!(
+            response.error.is_none(),
+            "unexpected repl error: {:?}",
+            response.error
+        );
+        assert_eq!(response.tool_calls.len(), 2);
+        assert_eq!(response.tool_calls[0].tool, "ls");
+        assert!(response.tool_calls[0].success);
+        assert_eq!(response.tool_calls[1].tool, "grep");
+        assert!(response.tool_calls[1].success);
     }
 }

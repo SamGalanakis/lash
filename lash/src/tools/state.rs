@@ -269,7 +269,7 @@ impl SessionPlugin for ReplStateToolsPlugin {
                 overrides.push(ToolSurfaceOverride {
                     tool_name: "search_tools".to_string(),
                     enabled: Some(omitted_tool_count > 0),
-                    injected: Some(false),
+                    injected: Some(omitted_tool_count > 0),
                 });
             }
             let tool_list_notes = if omitted_tool_count > 0 {

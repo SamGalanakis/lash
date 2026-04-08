@@ -17,7 +17,8 @@ pub use session_model::{
     DefaultPromptRenderer, DurableTurnSnapshot, ErrorEnvelope, Message, MessageRole, Part,
     PartKind, PromptOverrideMode, PromptPanel, PromptRenderer, PromptRequest, PromptResponse,
     PromptSectionName, PromptSectionOverride, PromptSelectionMode, PruneState, SessionEvent,
-    TokenUsage, default_prompt_renderer, messages_are_live_resume_safe,
+    TokenUsage, WAIT_PROMPT_RESUME_EARLY_TOKEN, WAIT_PROMPT_TIMEOUT_TOKEN, default_prompt_renderer,
+    messages_are_live_resume_safe,
 };
 
 /// Execution backend for session turns.
@@ -229,7 +230,6 @@ impl ToolDefinition {
             "type": "object",
             "properties": properties,
             "required": required,
-            "additionalProperties": false,
         })
     }
 
