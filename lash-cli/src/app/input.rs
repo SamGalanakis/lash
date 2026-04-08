@@ -224,6 +224,18 @@ impl App {
         }
     }
 
+    pub fn prompt_scroll_up(&mut self, amount: usize) {
+        if let Some(OverlayState::Prompt(p)) = &mut self.overlay {
+            p.scroll_up(amount);
+        }
+    }
+
+    pub fn prompt_scroll_down(&mut self, amount: usize, max_scroll: usize) {
+        if let Some(OverlayState::Prompt(p)) = &mut self.overlay {
+            p.scroll_down(amount, max_scroll);
+        }
+    }
+
     pub fn prompt_toggle_current_option(&mut self) {
         if let Some(OverlayState::Prompt(p)) = &mut self.overlay {
             p.toggle_current();

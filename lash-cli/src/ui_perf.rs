@@ -93,7 +93,6 @@ pub(crate) fn run_cli(
     version: &str,
 ) -> anyhow::Result<()> {
     let runs = runs.max(1);
-    let warmups = warmups;
 
     for _ in 0..warmups {
         let _ = run_once();
@@ -239,17 +238,24 @@ fn build_benchmark_app() -> App {
         if turn.draft_id.is_empty() {
             unreachable!("prepared turns should always have a draft id");
         }
-        app.blocks.push(DisplayBlock::Activity(exploration_activity(
-            turn.preview().as_str(),
-            turn.raw_text.as_str(),
-        )));
+        app.blocks
+            .push(DisplayBlock::Activity(Box::new(exploration_activity(
+                turn.preview().as_str(),
+                turn.raw_text.as_str(),
+            ))));
         if turn.raw_text.len().is_multiple_of(3) {
             app.blocks
-                .push(DisplayBlock::Activity(snippet_activity(&turn_label, false)));
+                .push(DisplayBlock::Activity(Box::new(snippet_activity(
+                    &turn_label,
+                    false,
+                ))));
         }
         if turn.raw_text.len().is_multiple_of(5) {
             app.blocks
-                .push(DisplayBlock::Activity(snippet_activity(&turn_label, true)));
+                .push(DisplayBlock::Activity(Box::new(snippet_activity(
+                    &turn_label,
+                    true,
+                ))));
         }
     }
     app.invalidate_height_cache();

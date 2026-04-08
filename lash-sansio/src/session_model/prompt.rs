@@ -366,7 +366,7 @@ fn render_block(block: &PromptBlockState) -> Option<String> {
 }
 
 fn titleize_block_key(key: &str) -> String {
-    key.split(|ch: char| ch == '_' || ch == '-' || ch == '.')
+    key.split(['_', '-', '.'])
         .filter(|segment| !segment.is_empty())
         .map(|segment| {
             let mut chars = segment.chars();

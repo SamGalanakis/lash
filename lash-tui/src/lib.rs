@@ -133,15 +133,6 @@ pub struct Line<'a> {
 }
 
 impl<'a> Line<'a> {
-    pub fn from_iter<T>(iter: T) -> Self
-    where
-        T: IntoIterator<Item = Span<'a>>,
-    {
-        Self {
-            spans: iter.into_iter().collect(),
-        }
-    }
-
     pub fn into_owned(self) -> Line<'static> {
         Line {
             spans: self.spans.into_iter().map(Span::into_owned).collect(),
@@ -178,6 +169,14 @@ impl<'a> From<Span<'a>> for Line<'a> {
 impl<'a> From<Vec<Span<'a>>> for Line<'a> {
     fn from(value: Vec<Span<'a>>) -> Self {
         Self { spans: value }
+    }
+}
+
+impl<'a> std::iter::FromIterator<Span<'a>> for Line<'a> {
+    fn from_iter<T: IntoIterator<Item = Span<'a>>>(iter: T) -> Self {
+        Self {
+            spans: iter.into_iter().collect(),
+        }
     }
 }
 

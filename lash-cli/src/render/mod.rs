@@ -32,6 +32,7 @@ use self::artifact::{
 use self::prompt::prompt_height;
 
 pub(crate) use self::prompt::prompt_content_lines_snapshot;
+pub(crate) use self::prompt::prompt_max_scroll;
 pub(crate) use self::queue::queue_preview_lines_snapshot;
 
 const INPUT_HORIZONTAL_PADDING: u16 = 1;
@@ -64,7 +65,7 @@ fn prompt_inner_width(frame_width: u16) -> usize {
 
 fn desired_input_height(app: &App, frame_width: u16) -> u16 {
     if app.has_prompt() {
-        prompt_height(app, frame_width)
+        prompt_height(app, frame_width, u16::MAX)
     } else {
         let inner_w = padded_content_width(frame_width, INPUT_HORIZONTAL_PADDING);
         let visual_lines = input_visual_lines(app.input(), inner_w);

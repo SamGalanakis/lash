@@ -142,6 +142,7 @@ impl UiHarness {
                     request,
                     focus,
                     cursor: 0,
+                    scroll_offset: 0,
                     selected: Default::default(),
                     reply_text: String::new(),
                     reply_cursor: 0,
@@ -207,6 +208,7 @@ fn run_ui_trace_fixture(path: &Path) {
     let action_context = UiActionContext {
         viewport_width: fixture.width as usize,
         viewport_height: fixture.height as usize,
+        prompt_max_scroll: fixture.height as usize,
     };
 
     for op in fixture.ops {
@@ -335,6 +337,7 @@ fn run_ui_trace_fixture(path: &Path) {
                         harness.width,
                         harness.height,
                     ),
+                    prompt_max_scroll: fixture.height as usize,
                 };
                 apply_ui_action(
                     &mut harness.app,

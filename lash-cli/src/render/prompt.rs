@@ -1,12 +1,13 @@
 use super::*;
 
-pub(crate) fn prompt_height(app: &App, frame_width: u16) -> u16 {
+pub(crate) fn prompt_height(app: &App, frame_width: u16, frame_height: u16) -> u16 {
     let Some(prompt) = app.prompt_state() else {
         return 3;
     };
     let inner_w = prompt_inner_width(frame_width);
+    let max_height = frame_height.saturating_sub(1).max(3);
     let content_h = prompt_content_lines(prompt, inner_w).len() as u16;
-    content_h.max(1)
+    content_h.max(1).min(max_height)
 }
 
 pub(crate) fn prompt_content_lines_snapshot(
@@ -14,6 +15,15 @@ pub(crate) fn prompt_content_lines_snapshot(
     inner_w: usize,
 ) -> Vec<Line<'static>> {
     prompt_content_lines(prompt, inner_w)
+}
+
+pub(crate) fn prompt_max_scroll(
+    prompt: &PromptState,
+    inner_w: usize,
+    visible_height: usize,
+) -> usize {
+    let total_lines = prompt_content_lines(prompt, inner_w).len();
+    total_lines.saturating_sub(visible_height)
 }
 
 pub(crate) fn prompt_section_label(text: &str, inner_w: usize) -> Line<'static> {

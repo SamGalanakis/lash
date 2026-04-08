@@ -403,10 +403,11 @@ fn draw_prompt(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .saturating_sub(PROMPT_HORIZONTAL_PADDING.saturating_mul(2)) as usize;
     let lines = render::prompt_content_lines_snapshot(prompt, inner_width.max(1));
     let visible = area.height as usize;
+    let max_scroll = lines.len().saturating_sub(visible);
     let scroll = if prompt.is_text_entry() {
-        lines.len().saturating_sub(visible)
+        max_scroll
     } else {
-        0
+        prompt.scroll_offset.min(max_scroll)
     };
     for (idx, line) in lines.iter().skip(scroll).take(visible).enumerate() {
         frame.write_line(
@@ -695,6 +696,7 @@ mod tests {
             .with_optional_note(),
             focus: PromptFocus::Options,
             cursor: 0,
+            scroll_offset: 0,
             selected: Default::default(),
             reply_text: String::new(),
             reply_cursor: 0,
@@ -707,6 +709,31 @@ mod tests {
         assert!(visible.contains("Choices"));
         assert!(!visible.contains("Question"));
         assert!(!visible.contains("┌"));
+    }
+
+    #[test]
+    fn prompt_panel_can_scroll_when_content_exceeds_viewport() {
+        let mut app = App::new("gpt-5.4".into(), "test".into());
+        let (response_tx, _response_rx) = mpsc::channel();
+        app.show_prompt(PromptState {
+            request: PromptRequest::single("Exit plan mode?", vec!["Exit".into()])
+                .with_markdown_panel(
+                    "PLAN",
+                    "# Plan\n\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12",
+                ),
+            focus: PromptFocus::Options,
+            cursor: 0,
+            scroll_offset: 5,
+            selected: Default::default(),
+            reply_text: String::new(),
+            reply_cursor: 0,
+            response_tx,
+        });
+
+        let snapshot = lash_tui::render_snapshot(60, 10, |frame| draw(frame, &mut app));
+        let visible = snapshot.visible_lines_trimmed().join("\n");
+        assert!(!visible.contains("line 1"));
+        assert!(visible.contains("line 6") || visible.contains("line 7"));
     }
 
     #[test]

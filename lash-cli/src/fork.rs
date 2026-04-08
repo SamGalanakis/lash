@@ -6,6 +6,7 @@ use anyhow::{Context, Result, anyhow};
 use lash::{DynamicStateSnapshot, ExecutionMode};
 
 use crate::app::UiResumeState;
+use crate::resume_snapshot;
 use crate::session_log::{self, SessionLogger};
 
 #[allow(clippy::too_many_arguments)]
@@ -544,6 +545,52 @@ pub fn spawn_in_new_terminal(exe: &Path, args: &[String]) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn materialize_child_from_live_snapshot(
+    child_store: &lash::Store,
+    live: &resume_snapshot::LoadedLiveResumeSnapshot,
+    provider: &lash::Provider,
+    configured_model: &str,
+    context_window: u64,
+    model_variant: Option<&str>,
+    toolset_hash: &str,
+) {
+    let transcript_keyspaces =
+        lash::semantic_transcript_keyspaces(&live.state.messages, &live.state.tool_calls);
+    child_store.transcript_replace_keyspaces(&transcript_keyspaces);
+
+    let mut root_state = live.state.clone();
+    let execution_mode = root_state.policy.execution_mode;
+    let context_strategy = root_state.policy.context_strategy;
+    let prompt_hash = crate::latest_user_prompt_hash(&root_state.messages);
+    let snapshot_hash = root_state
+        .repl_snapshot
+        .as_ref()
+        .map(|blob| crate::hash12(blob));
+    root_state.task_state = None;
+    crate::persist_root_session_state(
+        child_store,
+        &mut root_state,
+        &live.ui_state,
+        &live.dynamic_state,
+        provider,
+        configured_model,
+        context_window,
+        execution_mode,
+        context_strategy,
+        model_variant,
+        toolset_hash,
+        prompt_hash,
+        snapshot_hash,
+    );
+    let _ = resume_snapshot::save_live_resume_snapshot(
+        child_store,
+        &live.state,
+        &live.ui_state,
+        &live.dynamic_state,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn fork_current_session(
     runtime: Option<&mut lash::LashRuntime>,
     logger: &SessionLogger,
@@ -555,6 +602,11 @@ pub async fn fork_current_session(
     toolset_hash: &str,
     dynamic_state: &DynamicStateSnapshot,
 ) -> Result<(String, String)> {
+    let live_snapshot_for_fork = if runtime.is_none() {
+        resume_snapshot::load_live_resume_snapshot(logger.store().as_ref())
+    } else {
+        None
+    };
     if let Some(runtime) = runtime {
         persist_parent_root_snapshot(
             runtime,
@@ -587,18 +639,30 @@ pub async fn fork_current_session(
         child_session_name.clone(),
     )?;
     child_logger.mark_as_child_of(&logger.session_id)?;
-    child_logger.clone_history_from(logger.filename())?;
-    child_store.save_session_state(lash::SessionState {
-        iteration: parent_state.iteration,
-        config_json: parent_state.config_json.clone(),
-        repl_snapshot: parent_state.repl_snapshot.clone(),
-        input_tokens: parent_state.input_tokens,
-        output_tokens: parent_state.output_tokens,
-        cached_input_tokens: parent_state.cached_input_tokens,
-        reasoning_tokens: parent_state.reasoning_tokens,
-    });
-    if let Some(snapshot) = parent_live_snapshot {
-        child_store.save_live_session_snapshot(snapshot);
+    if let Some(live_snapshot) = live_snapshot_for_fork.as_ref() {
+        materialize_child_from_live_snapshot(
+            child_store.as_ref(),
+            live_snapshot,
+            provider,
+            configured_model,
+            context_window,
+            model_variant,
+            toolset_hash,
+        );
+    } else {
+        child_logger.clone_history_from(logger.filename())?;
+        child_store.save_session_state(lash::SessionState {
+            iteration: parent_state.iteration,
+            config_json: parent_state.config_json.clone(),
+            repl_snapshot: parent_state.repl_snapshot.clone(),
+            input_tokens: parent_state.input_tokens,
+            output_tokens: parent_state.output_tokens,
+            cached_input_tokens: parent_state.cached_input_tokens,
+            reasoning_tokens: parent_state.reasoning_tokens,
+        });
+        if let Some(snapshot) = parent_live_snapshot {
+            child_store.save_live_session_snapshot(snapshot);
+        }
     }
 
     Ok((child_filename, child_session_name))
@@ -628,7 +692,7 @@ mod fork_tests {
     }
 
     #[tokio::test]
-    async fn fork_clones_persisted_root_snapshot_without_runtime() {
+    async fn fork_clones_persisted_root_snapshot_without_runtime_when_no_live_snapshot() {
         let _env_guard = env_lock().lock().await;
         let temp = TempDirGuard::new("lash-fork-persisted-snapshot");
         let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
@@ -654,32 +718,6 @@ mod fork_tests {
             cached_input_tokens: 1,
             reasoning_tokens: 2,
         });
-        crate::resume_snapshot::save_live_resume_snapshot(
-            &parent_store,
-            &lash::SessionStateEnvelope {
-                session_id: crate::ROOT_SESSION_ID.to_string(),
-                policy: lash::SessionPolicy {
-                    execution_mode: lash::ExecutionMode::Standard,
-                    context_strategy: lash::ContextStrategy::RollingContext,
-                    ..lash::SessionPolicy::default()
-                },
-                messages: Vec::new(),
-                tool_calls: Vec::new(),
-                iteration: 1,
-                token_usage: lash::TokenUsage::default(),
-                last_prompt_usage: None,
-                task_state: Some(serde_json::json!({
-                    "kind": "live_resume",
-                    "status": "running"
-                })),
-                replay_manifest: None,
-                plugin_snapshot: None,
-                repl_snapshot: None,
-            },
-            &UiResumeState::default(),
-            &empty_dynamic_state(),
-        )
-        .expect("live snapshot");
         let messages = vec![lash::Message {
             id: "u1".to_string(),
             role: lash::MessageRole::User,
@@ -725,11 +763,137 @@ mod fork_tests {
             child_state.config_json,
             r#"{"task_state":{"kind":"live_resume","status":"running"}}"#
         );
-        assert!(child_store.load_live_session_snapshot().is_some());
+        assert!(child_store.load_live_session_snapshot().is_none());
 
         let child_entries = child_store.transcript_load();
         let child_messages = lash::transcript_messages(&child_entries);
         assert_eq!(child_messages.len(), 1);
         assert_eq!(child_messages[0].parts[0].content, "hello");
+    }
+
+    #[tokio::test]
+    async fn fork_without_runtime_materializes_latest_live_snapshot() {
+        let _env_guard = env_lock().lock().await;
+        let temp = TempDirGuard::new("lash-fork-live-snapshot");
+        let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
+        std::fs::create_dir_all(session_log::sessions_dir()).expect("sessions dir");
+
+        let parent_filename = "parent.db".to_string();
+        let parent_path = session_log::sessions_dir().join(&parent_filename);
+        let parent_store = Arc::new(lash::Store::open(&parent_path).expect("parent store"));
+        let parent_logger = SessionLogger::new(
+            Arc::clone(&parent_store),
+            parent_filename.clone(),
+            "gpt-test",
+            Some("parent-session".into()),
+            "parent".into(),
+        )
+        .expect("parent logger");
+        parent_store.save_session_state(lash::SessionState {
+            iteration: 1,
+            config_json: r#"{"saved":"root"}"#.to_string(),
+            repl_snapshot: None,
+            input_tokens: 10,
+            output_tokens: 3,
+            cached_input_tokens: 1,
+            reasoning_tokens: 2,
+        });
+        let base_messages = vec![lash::Message {
+            id: "u1".to_string(),
+            role: lash::MessageRole::User,
+            parts: vec![lash::Part {
+                id: "u1.p0".to_string(),
+                kind: lash::PartKind::Text,
+                content: "hello".to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: lash::PruneState::Intact,
+            }],
+            origin: None,
+        }];
+        parent_store.transcript_replace_keyspaces(&lash::semantic_transcript_keyspaces(
+            &base_messages,
+            &[],
+        ));
+
+        let live_messages = vec![
+            base_messages[0].clone(),
+            lash::Message {
+                id: "a1".to_string(),
+                role: lash::MessageRole::Assistant,
+                parts: vec![lash::Part {
+                    id: "a1.p0".to_string(),
+                    kind: lash::PartKind::Text,
+                    content: "latest coherent output".to_string(),
+                    attachment: None,
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: lash::PruneState::Intact,
+                }],
+                origin: None,
+            },
+        ];
+        crate::resume_snapshot::save_live_resume_snapshot(
+            &parent_store,
+            &lash::SessionStateEnvelope {
+                session_id: crate::ROOT_SESSION_ID.to_string(),
+                policy: lash::SessionPolicy {
+                    execution_mode: lash::ExecutionMode::Standard,
+                    context_strategy: lash::ContextStrategy::RollingContext,
+                    ..lash::SessionPolicy::default()
+                },
+                messages: live_messages.clone(),
+                tool_calls: Vec::new(),
+                iteration: 2,
+                token_usage: lash::TokenUsage {
+                    input_tokens: 12,
+                    output_tokens: 7,
+                    cached_input_tokens: 1,
+                    reasoning_tokens: 0,
+                },
+                last_prompt_usage: None,
+                task_state: Some(serde_json::json!({
+                    "kind": "live_resume",
+                    "status": "running"
+                })),
+                replay_manifest: Some(serde_json::json!({
+                    "configured_model": "gpt-test",
+                    "context_window": 1024,
+                    "execution_mode": "standard",
+                    "context_strategy": {"type": "rolling_context"}
+                })),
+                plugin_snapshot: None,
+                repl_snapshot: None,
+            },
+            &UiResumeState::default(),
+            &empty_dynamic_state(),
+        )
+        .expect("live snapshot");
+
+        let (child_filename, _child_session_name) = fork_current_session(
+            None,
+            &parent_logger,
+            &UiResumeState::default(),
+            &dummy_provider(),
+            "gpt-test",
+            1024,
+            None,
+            "toolhash",
+            &empty_dynamic_state(),
+        )
+        .await
+        .expect("fork should succeed");
+
+        let child_store = lash::Store::open(&session_log::sessions_dir().join(&child_filename))
+            .expect("child store");
+        let child_state = child_store.load_session_state().expect("child root state");
+        assert_eq!(child_state.iteration, 2);
+        assert!(child_store.load_live_session_snapshot().is_some());
+
+        let child_entries = child_store.transcript_load();
+        let child_messages = lash::transcript_messages(&child_entries);
+        assert_eq!(child_messages.len(), 2);
+        assert_eq!(child_messages[1].parts[0].content, "latest coherent output");
     }
 }

@@ -123,6 +123,37 @@ struct LlmStreamDebugState {
     summary: LlmStreamSummary,
 }
 
+#[derive(Clone, Copy)]
+struct LlmDebugText<'a> {
+    raw: Option<&'a str>,
+    visible: Option<&'a str>,
+}
+
+#[derive(Clone, Copy)]
+struct LlmDebugToolCall<'a> {
+    call_id: &'a str,
+    tool_name: &'a str,
+    input_json: &'a str,
+}
+
+#[derive(Clone, Copy)]
+struct LlmStreamEventLog<'a> {
+    session_id: &'a str,
+    iteration: usize,
+    event_type: &'a str,
+    text: LlmDebugText<'a>,
+    usage: Option<&'a LlmUsage>,
+    tool_call: Option<LlmDebugToolCall<'a>>,
+}
+
+struct StandardStreamState<'a> {
+    text_streamed: &'a mut bool,
+    streamed_usage: &'a mut LlmUsage,
+    streamed_output: &'a mut StandardStreamFallback,
+    debug: &'a mut LlmStreamDebugState,
+    iteration: usize,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct LlmStreamSummary {
     first_visible_token_latency_ms: Option<u64>,
@@ -2458,15 +2489,12 @@ impl RuntimeTurnDriver {
                                 Ok(delta) => delta,
                                 Err(err) => break Err(err),
                             };
-                            self.log_llm_stream_event(
-                                &self.session_id,
-                                iteration,
+                            self.log_llm_text_stream_event(
                                 &mut debug,
+                                iteration,
                                 "delta",
-                                Some(&raw_delta),
-                                Some(&delta),
-                                None,
-                                None,
+                                &raw_delta,
+                                &delta,
                             );
                             if !machine.handle_llm_delta(effect_id, &delta) {
                                 let mut cutover = ReplStreamCutover {
@@ -2487,15 +2515,12 @@ impl RuntimeTurnDriver {
                                 Ok(text) => text,
                                 Err(err) => break Err(err),
                             };
-                            self.log_llm_stream_event(
-                                &self.session_id,
-                                iteration,
+                            self.log_llm_text_stream_event(
                                 &mut debug,
+                                iteration,
                                 "text_part",
-                                Some(&raw_text),
-                                Some(&text),
-                                None,
-                                None,
+                                &raw_text,
+                                &text,
                             );
                             if !machine.handle_llm_delta(effect_id, &text) {
                                 let mut cutover = ReplStreamCutover {
@@ -2515,28 +2540,16 @@ impl RuntimeTurnDriver {
                             tool_name,
                             input_json,
                         }) => {
-                            self.log_llm_stream_event(
-                                &self.session_id,
-                                iteration,
+                            self.log_llm_tool_call_stream_event(
                                 &mut debug,
-                                "tool_call_part",
-                                None,
-                                None,
-                                None,
-                                Some((&call_id, &tool_name, &input_json)),
+                                iteration,
+                                &call_id,
+                                &tool_name,
+                                &input_json,
                             );
                         }
                         LlmStreamEvent::Usage(usage) => {
-                            self.log_llm_stream_event(
-                                &self.session_id,
-                                iteration,
-                                &mut debug,
-                                "usage",
-                                None,
-                                None,
-                                Some(&usage),
-                                None,
-                            );
+                            self.log_llm_usage_stream_event(&mut debug, iteration, &usage);
                             streamed_usage = usage.clone();
                             machine.handle_llm_usage(effect_id, &usage);
                         }
@@ -2566,15 +2579,12 @@ impl RuntimeTurnDriver {
                                         break;
                                     }
                                 };
-                                self.log_llm_stream_event(
-                                    &self.session_id,
-                                    iteration,
+                                self.log_llm_text_stream_event(
                                     &mut debug,
+                                    iteration,
                                     "delta",
-                                    Some(&raw_delta),
-                                    Some(&delta),
-                                    None,
-                                    None,
+                                    &raw_delta,
+                                    &delta,
                                 );
                                 if !machine.handle_llm_delta(effect_id, &delta) {
                                     completed_from_stream = Some(LlmResponse {
@@ -2594,15 +2604,12 @@ impl RuntimeTurnDriver {
                                         break;
                                     }
                                 };
-                                self.log_llm_stream_event(
-                                    &self.session_id,
-                                    iteration,
+                                self.log_llm_text_stream_event(
                                     &mut debug,
+                                    iteration,
                                     "text_part",
-                                    Some(&raw_text),
-                                    Some(&text),
-                                    None,
-                                    None,
+                                    &raw_text,
+                                    &text,
                                 );
                                 if !machine.handle_llm_delta(effect_id, &text) {
                                     completed_from_stream = Some(LlmResponse {
@@ -2618,28 +2625,16 @@ impl RuntimeTurnDriver {
                                 tool_name,
                                 input_json,
                             }) => {
-                                self.log_llm_stream_event(
-                                    &self.session_id,
-                                    iteration,
+                                self.log_llm_tool_call_stream_event(
                                     &mut debug,
-                                    "tool_call_part",
-                                    None,
-                                    None,
-                                    None,
-                                    Some((&call_id, &tool_name, &input_json)),
+                                    iteration,
+                                    &call_id,
+                                    &tool_name,
+                                    &input_json,
                                 );
                             }
                             LlmStreamEvent::Usage(usage) => {
-                                self.log_llm_stream_event(
-                                    &self.session_id,
-                                    iteration,
-                                    &mut debug,
-                                    "usage",
-                                    None,
-                                    None,
-                                    Some(&usage),
-                                    None,
-                                );
+                                self.log_llm_usage_stream_event(&mut debug, iteration, &usage);
                                 streamed_usage = usage.clone();
                                 machine.handle_llm_usage(effect_id, &usage);
                             }
@@ -2841,6 +2836,13 @@ impl RuntimeTurnDriver {
         let mut streamed_usage = LlmUsage::default();
         let mut streamed_output = StandardStreamFallback::default();
         let mut debug = LlmStreamDebugState::new();
+        let mut stream_state = StandardStreamState {
+            text_streamed: &mut text_streamed,
+            streamed_usage: &mut streamed_usage,
+            streamed_output: &mut streamed_output,
+            debug: &mut debug,
+            iteration,
+        };
         let result = loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -2854,15 +2856,7 @@ impl RuntimeTurnDriver {
                 }
                 Some(stream_event) = llm_stream_rx.recv() => {
                     if let Err(err) = self
-                        .forward_standard_stream_event(
-                            event_tx,
-                            stream_event,
-                            &mut text_streamed,
-                            &mut streamed_usage,
-                            &mut streamed_output,
-                            &mut debug,
-                            iteration,
-                        )
+                        .forward_standard_stream_event(event_tx, stream_event, &mut stream_state)
                         .await
                     {
                         break Err(err);
@@ -2880,15 +2874,7 @@ impl RuntimeTurnDriver {
                     };
                     self.policy.provider = provider_after;
                     if let Err(err) = self
-                        .drain_standard_stream_queue(
-                            event_tx,
-                            &mut llm_stream_rx,
-                            &mut text_streamed,
-                            &mut streamed_usage,
-                            &mut streamed_output,
-                            &mut debug,
-                            iteration,
-                        )
+                        .drain_standard_stream_queue(event_tx, &mut llm_stream_rx, &mut stream_state)
                         .await
                     {
                         break Err(err);
@@ -3133,38 +3119,30 @@ impl RuntimeTurnDriver {
         }
     }
 
-    fn log_llm_stream_event(
-        &self,
-        session_id: &str,
-        iteration: usize,
-        debug: &mut LlmStreamDebugState,
-        event_type: &str,
-        raw_text: Option<&str>,
-        visible_text: Option<&str>,
-        usage: Option<&LlmUsage>,
-        tool_call: Option<(&str, &str, &str)>,
-    ) {
+    fn log_llm_stream_event(&self, debug: &mut LlmStreamDebugState, log: LlmStreamEventLog<'_>) {
         if self.host.llm_log_path.is_none() {
             return;
         }
 
         let elapsed_ms = debug.elapsed_ms();
-        if matches!(event_type, "delta" | "text_part") {
-            debug.summary.record_text_chunk(visible_text, elapsed_ms);
+        if matches!(log.event_type, "delta" | "text_part") {
+            debug
+                .summary
+                .record_text_chunk(log.text.visible, elapsed_ms);
         }
 
         let mut entry = serde_json::json!({
             "kind": "stream_event",
-            "turn": iteration,
+            "turn": log.iteration,
             "ts": chrono::Utc::now().to_rfc3339(),
-            "session_id": session_id,
+            "session_id": log.session_id,
             "sequence": debug.next_sequence(),
             "elapsed_ms": elapsed_ms,
-            "event": event_type,
+            "event": log.event_type,
         });
 
         if let Some(object) = entry.as_object_mut() {
-            if let Some(text) = raw_text {
+            if let Some(text) = log.text.raw {
                 object.insert(
                     "raw_text".to_string(),
                     serde_json::Value::String(text.to_string()),
@@ -3174,7 +3152,7 @@ impl RuntimeTurnDriver {
                     serde_json::Value::from(text.chars().count() as u64),
                 );
             }
-            if let Some(text) = visible_text {
+            if let Some(text) = log.text.visible {
                 object.insert(
                     "visible_text".to_string(),
                     serde_json::Value::String(text.to_string()),
@@ -3184,7 +3162,7 @@ impl RuntimeTurnDriver {
                     serde_json::Value::from(text.chars().count() as u64),
                 );
             }
-            if let Some(usage) = usage {
+            if let Some(usage) = log.usage {
                 object.insert(
                     "usage".to_string(),
                     serde_json::json!({
@@ -3195,18 +3173,18 @@ impl RuntimeTurnDriver {
                     }),
                 );
             }
-            if let Some((call_id, tool_name, input_json)) = tool_call {
+            if let Some(tool_call) = log.tool_call {
                 object.insert(
                     "call_id".to_string(),
-                    serde_json::Value::String(call_id.to_string()),
+                    serde_json::Value::String(tool_call.call_id.to_string()),
                 );
                 object.insert(
                     "tool_name".to_string(),
-                    serde_json::Value::String(tool_name.to_string()),
+                    serde_json::Value::String(tool_call.tool_name.to_string()),
                 );
                 object.insert(
                     "input_json".to_string(),
-                    serde_json::Value::String(input_json.to_string()),
+                    serde_json::Value::String(tool_call.input_json.to_string()),
                 );
             }
         }
@@ -3214,36 +3192,110 @@ impl RuntimeTurnDriver {
         self.append_llm_debug_entry(entry);
     }
 
+    fn log_llm_text_stream_event(
+        &self,
+        debug: &mut LlmStreamDebugState,
+        iteration: usize,
+        event_type: &'static str,
+        raw: &str,
+        visible: &str,
+    ) {
+        self.log_llm_stream_event(
+            debug,
+            LlmStreamEventLog {
+                session_id: &self.session_id,
+                iteration,
+                event_type,
+                text: LlmDebugText {
+                    raw: Some(raw),
+                    visible: Some(visible),
+                },
+                usage: None,
+                tool_call: None,
+            },
+        );
+    }
+
+    fn log_llm_tool_call_stream_event(
+        &self,
+        debug: &mut LlmStreamDebugState,
+        iteration: usize,
+        call_id: &str,
+        tool_name: &str,
+        input_json: &str,
+    ) {
+        self.log_llm_stream_event(
+            debug,
+            LlmStreamEventLog {
+                session_id: &self.session_id,
+                iteration,
+                event_type: "tool_call_part",
+                text: LlmDebugText {
+                    raw: None,
+                    visible: None,
+                },
+                usage: None,
+                tool_call: Some(LlmDebugToolCall {
+                    call_id,
+                    tool_name,
+                    input_json,
+                }),
+            },
+        );
+    }
+
+    fn log_llm_usage_stream_event(
+        &self,
+        debug: &mut LlmStreamDebugState,
+        iteration: usize,
+        usage: &LlmUsage,
+    ) {
+        self.log_llm_stream_event(
+            debug,
+            LlmStreamEventLog {
+                session_id: &self.session_id,
+                iteration,
+                event_type: "usage",
+                text: LlmDebugText {
+                    raw: None,
+                    visible: None,
+                },
+                usage: Some(usage),
+                tool_call: None,
+            },
+        );
+    }
+
     async fn forward_standard_stream_event(
         &mut self,
         event_tx: &mpsc::Sender<SessionEvent>,
         stream_event: LlmStreamEvent,
-        text_streamed: &mut bool,
-        streamed_usage: &mut LlmUsage,
-        streamed_output: &mut StandardStreamFallback,
-        debug: &mut LlmStreamDebugState,
-        iteration: usize,
+        state: &mut StandardStreamState<'_>,
     ) -> Result<(), LlmCallError> {
         match stream_event {
             LlmStreamEvent::Delta(delta) => {
                 if !delta.is_empty() {
-                    *text_streamed = true;
+                    *state.text_streamed = true;
                     let raw_delta = delta.clone();
                     let delta = self
                         .transform_assistant_stream_chunk(event_tx, delta)
                         .await?;
                     self.log_llm_stream_event(
-                        &self.session_id,
-                        iteration,
-                        debug,
-                        "delta",
-                        Some(&raw_delta),
-                        Some(&delta),
-                        None,
-                        None,
+                        state.debug,
+                        LlmStreamEventLog {
+                            session_id: &self.session_id,
+                            iteration: state.iteration,
+                            event_type: "delta",
+                            text: LlmDebugText {
+                                raw: Some(&raw_delta),
+                                visible: Some(&delta),
+                            },
+                            usage: None,
+                            tool_call: None,
+                        },
                     );
                     if !delta.is_empty() {
-                        streamed_output.push_text(delta.clone());
+                        state.streamed_output.push_text(delta.clone());
                         crate::session_model::send_event(
                             event_tx,
                             SessionEvent::TextDelta { content: delta },
@@ -3254,23 +3306,27 @@ impl RuntimeTurnDriver {
             }
             LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
                 if !text.is_empty() {
-                    *text_streamed = true;
+                    *state.text_streamed = true;
                     let raw_text = text.clone();
                     let text = self
                         .transform_assistant_stream_chunk(event_tx, text)
                         .await?;
                     self.log_llm_stream_event(
-                        &self.session_id,
-                        iteration,
-                        debug,
-                        "text_part",
-                        Some(&raw_text),
-                        Some(&text),
-                        None,
-                        None,
+                        state.debug,
+                        LlmStreamEventLog {
+                            session_id: &self.session_id,
+                            iteration: state.iteration,
+                            event_type: "text_part",
+                            text: LlmDebugText {
+                                raw: Some(&raw_text),
+                                visible: Some(&text),
+                            },
+                            usage: None,
+                            tool_call: None,
+                        },
                     );
                     if !text.is_empty() {
-                        streamed_output.push_text(text.clone());
+                        state.streamed_output.push_text(text.clone());
                         crate::session_model::send_event(
                             event_tx,
                             SessionEvent::TextDelta { content: text },
@@ -3285,29 +3341,43 @@ impl RuntimeTurnDriver {
                 input_json,
             }) => {
                 self.log_llm_stream_event(
-                    &self.session_id,
-                    iteration,
-                    debug,
-                    "tool_call_part",
-                    None,
-                    None,
-                    None,
-                    Some((&call_id, &tool_name, &input_json)),
+                    state.debug,
+                    LlmStreamEventLog {
+                        session_id: &self.session_id,
+                        iteration: state.iteration,
+                        event_type: "tool_call_part",
+                        text: LlmDebugText {
+                            raw: None,
+                            visible: None,
+                        },
+                        usage: None,
+                        tool_call: Some(LlmDebugToolCall {
+                            call_id: &call_id,
+                            tool_name: &tool_name,
+                            input_json: &input_json,
+                        }),
+                    },
                 );
-                streamed_output.push_tool_call(call_id, tool_name, input_json);
+                state
+                    .streamed_output
+                    .push_tool_call(call_id, tool_name, input_json);
             }
             LlmStreamEvent::Usage(usage) => {
                 self.log_llm_stream_event(
-                    &self.session_id,
-                    iteration,
-                    debug,
-                    "usage",
-                    None,
-                    None,
-                    Some(&usage),
-                    None,
+                    state.debug,
+                    LlmStreamEventLog {
+                        session_id: &self.session_id,
+                        iteration: state.iteration,
+                        event_type: "usage",
+                        text: LlmDebugText {
+                            raw: None,
+                            visible: None,
+                        },
+                        usage: Some(&usage),
+                        tool_call: None,
+                    },
                 );
-                *streamed_usage = usage;
+                *state.streamed_usage = usage;
             }
         }
         Ok(())
@@ -3317,23 +3387,11 @@ impl RuntimeTurnDriver {
         &mut self,
         event_tx: &mpsc::Sender<SessionEvent>,
         llm_stream_rx: &mut tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,
-        text_streamed: &mut bool,
-        streamed_usage: &mut LlmUsage,
-        streamed_output: &mut StandardStreamFallback,
-        debug: &mut LlmStreamDebugState,
-        iteration: usize,
+        state: &mut StandardStreamState<'_>,
     ) -> Result<(), LlmCallError> {
         while let Ok(stream_event) = llm_stream_rx.try_recv() {
-            self.forward_standard_stream_event(
-                event_tx,
-                stream_event,
-                text_streamed,
-                streamed_usage,
-                streamed_output,
-                debug,
-                iteration,
-            )
-            .await?;
+            self.forward_standard_stream_event(event_tx, stream_event, state)
+                .await?;
         }
         Ok(())
     }

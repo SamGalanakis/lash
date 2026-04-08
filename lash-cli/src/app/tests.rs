@@ -1058,6 +1058,7 @@ fn take_prompt_response_renders_visible_user_block() {
         request: lash::PromptRequest::freeform("Pick one"),
         focus: crate::overlay::PromptFocus::Text,
         cursor: 0,
+        scroll_offset: 0,
         selected: Default::default(),
         reply_text: "red".into(),
         reply_cursor: 3,
@@ -1089,6 +1090,7 @@ fn dismiss_prompt_marks_ui_dirty() {
         request: lash::PromptRequest::single("Pick one", vec!["red".into()]),
         focus: crate::overlay::PromptFocus::Options,
         cursor: 0,
+        scroll_offset: 0,
         selected: Default::default(),
         reply_text: String::new(),
         reply_cursor: 0,
@@ -1215,7 +1217,8 @@ fn toggle_code_expand_preserves_scroll_position() {
         code: "let x = 1;\nlet y = 2;\nlet z = 3;\nprintln!();\nlet a = 4;\nlet b = 5;".into(),
         continuation: false,
     });
-    app.blocks.push(DisplayBlock::Activity(dummy_activity()));
+    app.blocks
+        .push(DisplayBlock::Activity(Box::new(dummy_activity())));
     app.blocks.push(DisplayBlock::AssistantText(
         "Response 2 - another reply that is a bit longer".into(),
     ));
@@ -1290,7 +1293,8 @@ fn toggle_code_expand_preserves_scroll_with_splash() {
         code: "let x = 1;\nlet y = 2;\nlet z = 3;\nprintln!();\nlet a = 4;\nlet b = 5;".into(),
         continuation: false,
     });
-    app.blocks.push(DisplayBlock::Activity(dummy_activity()));
+    app.blocks
+        .push(DisplayBlock::Activity(Box::new(dummy_activity())));
     app.blocks.push(DisplayBlock::AssistantText(
         "Response 2 - another reply".into(),
     ));
@@ -1880,6 +1884,7 @@ fn prompt_insert_text_inserts_literal_payload_at_cursor() {
         request: lash::PromptRequest::freeform("Question?"),
         focus: crate::overlay::PromptFocus::Text,
         cursor: 0,
+        scroll_offset: 0,
         selected: Default::default(),
         reply_text: "startend".into(),
         reply_cursor: "start".len(),
@@ -1900,6 +1905,7 @@ fn prompt_toggle_current_option_ignores_freeform_prompts() {
         request: lash::PromptRequest::freeform("Question?"),
         focus: crate::overlay::PromptFocus::Text,
         cursor: 0,
+        scroll_offset: 0,
         selected: Default::default(),
         reply_text: String::new(),
         reply_cursor: 0,
@@ -1922,6 +1928,7 @@ fn prompt_toggle_note_focus_switches_between_choices_and_note() {
             .with_optional_note(),
         focus: crate::overlay::PromptFocus::Options,
         cursor: 0,
+        scroll_offset: 0,
         selected: Default::default(),
         reply_text: String::new(),
         reply_cursor: 0,
@@ -1947,6 +1954,7 @@ fn take_prompt_response_defers_option_prompt_display() {
             .with_optional_note(),
         focus: crate::overlay::PromptFocus::Text,
         cursor: 1,
+        scroll_offset: 0,
         selected: Default::default(),
         reply_text: "ship the blue path".into(),
         reply_cursor: "ship the blue path".len(),
@@ -1981,6 +1989,7 @@ fn option_prompt_response_falls_back_to_user_block_without_inline_panel() {
         request: lash::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()]),
         focus: crate::overlay::PromptFocus::Options,
         cursor: 0,
+        scroll_offset: 0,
         selected: Default::default(),
         reply_text: String::new(),
         reply_cursor: 0,
@@ -2015,6 +2024,7 @@ fn option_prompt_response_is_rendered_inline_by_question_panel_artifact() {
             .with_optional_note(),
         focus: crate::overlay::PromptFocus::Text,
         cursor: 1,
+        scroll_offset: 0,
         selected: Default::default(),
         reply_text: "ship the blue path".into(),
         reply_cursor: "ship the blue path".len(),

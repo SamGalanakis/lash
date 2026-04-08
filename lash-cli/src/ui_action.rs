@@ -16,6 +16,8 @@ pub(crate) enum UiAction {
     SuggestionComplete,
     PromptUp,
     PromptDown,
+    PromptScrollUp(usize),
+    PromptScrollDown(usize),
     PromptToggleCurrentOption,
     PromptToggleNoteFocus,
     PromptInsertText(String),
@@ -39,6 +41,7 @@ pub(crate) enum UiAction {
 pub(crate) struct UiActionContext {
     pub viewport_width: usize,
     pub viewport_height: usize,
+    pub prompt_max_scroll: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,6 +116,14 @@ pub(crate) fn apply_ui_action(
         }
         UiAction::PromptDown => {
             app.prompt_down();
+            UiActionOutcome::None
+        }
+        UiAction::PromptScrollUp(amount) => {
+            app.prompt_scroll_up(amount);
+            UiActionOutcome::None
+        }
+        UiAction::PromptScrollDown(amount) => {
+            app.prompt_scroll_down(amount, context.prompt_max_scroll);
             UiActionOutcome::None
         }
         UiAction::PromptToggleCurrentOption => {
