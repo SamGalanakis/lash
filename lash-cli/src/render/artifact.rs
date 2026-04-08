@@ -33,18 +33,23 @@ pub(super) fn render_snippet_preview_with_indent(
     viewport_width: usize,
     indent: &str,
 ) {
+    let has_custom_title = preview.title.is_some();
     let title = preview.title.as_deref().unwrap_or("SNIPPET");
     lines.push(indented_line(
         prompt::prompt_section_label(title, viewport_width.saturating_sub(indent.len())),
         indent,
     ));
-    push_wrapped_styled_chunks_with_indent(
-        lines,
-        &snippet_meta_line(preview),
-        viewport_width,
-        indent,
-        |chunk| styled_snippet_chunk(chunk, theme::system_output(), preview.language.as_deref()),
-    );
+    if !has_custom_title {
+        push_wrapped_styled_chunks_with_indent(
+            lines,
+            &snippet_meta_line(preview),
+            viewport_width,
+            indent,
+            |chunk| {
+                styled_snippet_chunk(chunk, theme::system_output(), preview.language.as_deref())
+            },
+        );
+    }
     lines.push(Line::from(indent.to_string()));
     match preview.render_mode {
         SnippetRenderMode::Markdown => {

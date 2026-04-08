@@ -518,8 +518,9 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("PLAN · test-session"))
+                .any(|line| line.contains("PLAN · lash · staging"))
         );
+        assert!(!lines.iter().any(|line| line.contains("test-session")));
     }
 
     #[test]
