@@ -259,6 +259,9 @@ pub(crate) async fn run_app(
                 .map(std::time::Duration::from_millis),
         )
     });
+    if let Some(recorder) = ui_trace.as_mut() {
+        recorder.capture_app_context(&app);
+    }
     if ui_trace.is_some() {
         enable_aux_op_recording();
     }

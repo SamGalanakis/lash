@@ -12,7 +12,7 @@ use crate::app::{App, PreparedTurn, PromptState};
 use crate::overlay::PromptFocus;
 use crate::ui_action::{UiAction, UiActionContext, apply_ui_action};
 use crate::ui_trace::{
-    UiTraceOp, assert_snapshot_text, read_ui_trace_fixture, render_screen_snapshot,
+    TraceRepoStatus, UiTraceOp, assert_snapshot_text, read_ui_trace_fixture, render_screen_snapshot,
 };
 use crate::{apply_ui_host_effects, render};
 
@@ -86,7 +86,14 @@ impl UiHarness {
             .expect("lash-cli crate should live under repo root")
             .to_path_buf();
         app.cwd = repo_root.display().to_string();
-        app.repo_status = crate::repo_status::detect_repo_status(&repo_root);
+        app.repo_status = Some(
+            TraceRepoStatus {
+                repo_name: "lash".to_string(),
+                branch: "staging".to_string(),
+                worktree: None,
+            }
+            .into_repo_status(&app.cwd),
+        );
         app.set_ui_extensions(Arc::clone(&ui_extensions));
         Self {
             app,
@@ -179,6 +186,15 @@ fn ui_trace_fixtures_dir() -> PathBuf {
 fn run_ui_trace_fixture(path: &Path) {
     let fixture = read_ui_trace_fixture(path);
     let mut harness = UiHarness::new(fixture.width, fixture.height);
+    if let Some(context) = fixture.context.as_ref() {
+        harness.app.model = context.model.clone();
+        harness.app.session_name = context.session_name.clone();
+        harness.app.cwd = context.cwd.clone();
+        harness.app.repo_status = context
+            .repo_status
+            .clone()
+            .map(|status| status.into_repo_status(&harness.app.cwd));
+    }
     let trace_dir = path.parent().expect("trace fixture parent");
     let mut _last_prompt_rx: Option<std::sync::mpsc::Receiver<PromptResponse>> = None;
     let action_context = UiActionContext {
