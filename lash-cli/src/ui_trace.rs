@@ -8,13 +8,65 @@ use lash_tui::ScreenSnapshot;
 use serde::{Deserialize, Serialize};
 
 use crate::app::{App, PreparedTurn};
+use crate::repo_status::RepoStatus;
 use crate::{render, scratch_tui};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct UiTraceFixture {
     pub width: u16,
     pub height: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<UiTraceContext>,
     pub ops: Vec<UiTraceOp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct UiTraceContext {
+    pub model: String,
+    pub session_name: String,
+    pub cwd: String,
+    pub repo_status: Option<TraceRepoStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct TraceRepoStatus {
+    pub repo_name: String,
+    pub branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+}
+
+impl TraceRepoStatus {
+    pub(crate) fn from_repo_status(status: &RepoStatus) -> Self {
+        Self {
+            repo_name: status.repo_name.clone(),
+            branch: status.branch.clone(),
+            worktree: status.worktree.clone(),
+        }
+    }
+
+    pub(crate) fn into_repo_status(self, cwd: &str) -> RepoStatus {
+        RepoStatus {
+            repo_root: PathBuf::from(cwd),
+            repo_name: self.repo_name,
+            branch: self.branch,
+            worktree: self.worktree,
+        }
+    }
+}
+
+impl UiTraceContext {
+    pub(crate) fn from_app(app: &App) -> Self {
+        Self {
+            model: app.model.clone(),
+            session_name: app.session_name.clone(),
+            cwd: app.cwd.clone(),
+            repo_status: app
+                .repo_status
+                .as_ref()
+                .map(TraceRepoStatus::from_repo_status),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -469,6 +521,7 @@ impl UiTraceRecorder {
             fixture: UiTraceFixture {
                 width,
                 height,
+                context: None,
                 ops: Vec::new(),
             },
             trace_path,
@@ -483,6 +536,10 @@ impl UiTraceRecorder {
     pub(crate) fn set_size(&mut self, width: u16, height: u16) {
         self.fixture.width = width;
         self.fixture.height = height;
+    }
+
+    pub(crate) fn capture_app_context(&mut self, app: &App) {
+        self.fixture.context = Some(UiTraceContext::from_app(app));
     }
 
     pub(crate) fn record_start_turn(&mut self) {
