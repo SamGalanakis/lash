@@ -695,6 +695,15 @@ pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<UiHostEffect>) {
     for effect in effects {
         match effect {
             UiHostEffect::PushSystemMessage(message) => push_system_message(app, message),
+            UiHostEffect::DesktopNotification {
+                title,
+                body,
+                only_when_unfocused,
+            } => {
+                if !only_when_unfocused || !app.focused {
+                    crate::interactive::notify_desktop(&title, &body);
+                }
+            }
             UiHostEffect::UpsertModeIndicator { key, label } => {
                 app.upsert_mode_indicator(key, label);
             }
@@ -768,6 +777,21 @@ mod tests {
     use super::*;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
     use lash::SessionMeta;
+
+    #[test]
+    fn desktop_notification_effect_respects_focus() {
+        let mut app = App::new("test-model".into(), "test".into());
+        app.focused = true;
+
+        apply_ui_host_effects(
+            &mut app,
+            vec![UiHostEffect::DesktopNotification {
+                title: "lash".into(),
+                body: "Response complete".into(),
+                only_when_unfocused: true,
+            }],
+        );
+    }
 
     #[test]
     fn file_backed_store_creates_wal_file() {

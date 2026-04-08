@@ -40,17 +40,6 @@ pub fn user_input() -> Style {
     Style::default().fg(CHALK_MID)
 }
 
-pub fn resolved_token_sigil() -> Style {
-    Style::default()
-        .fg(SODIUM)
-        .bg(FORM_RAISED)
-        .add_modifier(Modifier::Bold)
-}
-
-pub fn resolved_token() -> Style {
-    Style::default().fg(CHALK).bg(FORM_RAISED)
-}
-
 pub fn image_marker() -> Style {
     Style::default().fg(SODIUM).add_modifier(Modifier::Bold)
 }
@@ -61,6 +50,10 @@ pub fn assistant_bar() -> Style {
 
 pub fn assistant_text() -> Style {
     Style::default().fg(CHALK)
+}
+
+pub fn nested_list_item() -> Style {
+    Style::default().fg(CHALK_DIM)
 }
 
 pub fn system_output() -> Style {
@@ -131,6 +124,10 @@ pub fn help_desc() -> Style {
 
 pub fn heading() -> Style {
     Style::default().fg(SODIUM).add_modifier(Modifier::Bold)
+}
+
+pub fn subheading() -> Style {
+    Style::default().fg(CHALK_MID).add_modifier(Modifier::Bold)
 }
 
 pub fn inline_code() -> Style {
@@ -219,7 +216,7 @@ pub fn plan_pending_marker() -> Style {
 }
 
 pub fn turn_separator() -> Style {
-    Style::default().fg(ASH)
+    Style::default().fg(ASH_LIGHT)
 }
 
 pub fn edit_lane_bold() -> Style {

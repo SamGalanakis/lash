@@ -224,11 +224,7 @@ impl PreparedTurn {
 
     pub fn history_text(&self) -> String {
         let annotated = annotate_large_paste_placeholders(&self.raw_text, &self.large_pastes);
-        if annotated.is_empty() {
-            String::new()
-        } else {
-            preview_text_lines(&annotated).join("\n")
-        }
+        annotated.trim().to_string()
     }
 }
 

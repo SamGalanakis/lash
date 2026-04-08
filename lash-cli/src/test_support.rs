@@ -126,6 +126,13 @@ impl UiHarness {
                 request,
                 response_tx,
             } => {
+                let effects = self
+                    .ui_extensions
+                    .effects_for_session_event(&SessionEvent::Prompt {
+                        request: request.clone(),
+                        response_tx: response_tx.clone(),
+                    });
+                apply_ui_host_effects(&mut self.app, effects);
                 let focus = if request.is_freeform() {
                     PromptFocus::Text
                 } else {

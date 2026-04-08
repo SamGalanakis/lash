@@ -1,3 +1,4 @@
+use super::artifact::render_snippet_preview_with_indent;
 use super::*;
 
 fn activity_style(status: ActivityStatus) -> Style {
@@ -139,7 +140,12 @@ pub(super) fn render_activity_block(
                     );
                 }
                 ActivityArtifact::SnippetPreview(preview) => {
-                    render_snippet_preview(preview, lines, viewport_width);
+                    render_snippet_preview_with_indent(
+                        preview,
+                        lines,
+                        viewport_width,
+                        detail_prefix,
+                    );
                 }
                 _ => {}
             }
@@ -270,7 +276,7 @@ fn render_activity_artifact(
             }
         }
         ActivityArtifact::SnippetPreview(preview) => {
-            render_snippet_preview(preview, lines, viewport_width);
+            render_snippet_preview_with_indent(preview, lines, viewport_width, indent);
         }
     }
 }

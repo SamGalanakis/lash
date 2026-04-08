@@ -1,4 +1,6 @@
+use super::artifact::render_snippet_preview;
 use super::*;
+use crate::theme;
 use lash::PromptRequest;
 use serde_json::Value;
 use std::sync::mpsc;
@@ -235,6 +237,82 @@ fn activity_block_renders_snippet_preview_at_default_expand_level() {
     );
     assert!(rendered.iter().any(|line| line.contains("README")));
     assert!(rendered.iter().any(|line| line.contains("Title")));
+}
+
+#[test]
+fn activity_block_indents_showcase_snippet_preview_under_summary() {
+    let activity = ActivityBlock {
+        kind: ActivityKind::GenericTool,
+        status: ActivityStatus::Completed,
+        tool_name: "showcase_snippet".into(),
+        summary: "showcase lash/src/plugin_builtin/plan_mode.rs:780-786".into(),
+        detail_lines: Vec::new(),
+        duration_ms: 0,
+        args: Value::Null,
+        result: Value::Null,
+        artifact: Some(ActivityArtifact::SnippetPreview(SnippetPreviewArtifact {
+            title: Some("plan-modes blocked tool message".into()),
+            path: "lash/src/plugin_builtin/plan_mode.rs".into(),
+            start_line: 780,
+            end_line: 786,
+            content: "if ctx.tool_name != \"plan_exit\" {\n    return Ok(());\n}".into(),
+            render_mode: SnippetRenderMode::Code,
+            language: Some("rs".into()),
+        })),
+        children: Vec::new(),
+        extra: None,
+    };
+
+    let blocks = vec![DisplayBlock::Activity(activity)];
+    let rendered = render_block(&blocks, 0, 1, 100, 24)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(rendered.iter().any(|line| line.starts_with("· showcase lash/src/plugin_builtin/plan_mode.rs:780-786")));
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.starts_with("    plan-modes blocked tool message"))
+    );
+    assert!(rendered.iter().any(|line| {
+        line.starts_with("    File · lash/src/plugin_builtin/plan_mode.rs:780-786 · rs")
+    }));
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.starts_with("    780 │ if ctx.tool_name != \"plan_exit\" {"))
+    );
+}
+
+#[test]
+fn user_input_does_not_highlight_non_command_slash_word_in_prose() {
+    let blocks = vec![DisplayBlock::UserInput(
+        "We need to deal with node /relation types.".into(),
+    )];
+
+    let rendered = render_block(&blocks, 0, 1, 80, 20);
+    let line = rendered
+        .iter()
+        .find(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+                .contains("/relation")
+        })
+        .expect("user input line");
+
+    assert!(
+        line.spans.iter().any(|span| {
+            span.content.contains("/relation") && span.style == theme::user_input()
+        })
+    );
 }
 
 #[test]

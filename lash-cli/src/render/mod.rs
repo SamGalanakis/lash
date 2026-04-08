@@ -5,7 +5,6 @@ mod queue;
 #[cfg(test)]
 mod tests;
 
-use lash::collect_skill_mentions_with_ranges;
 use lash_tui::{Line, Modifier, Rect, Span, Style};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -29,7 +28,6 @@ use crate::theme;
 use self::activity::render_activity_block;
 use self::artifact::{
     render_plan_block, render_question_panel_artifact, render_section_panel_block,
-    render_snippet_preview,
 };
 use self::prompt::prompt_height;
 
@@ -394,14 +392,10 @@ fn build_input_badge(app: &App) -> Option<Line<'static>> {
         .as_ref()
         .map(|repo| format!("{} · {}", repo.repo_name, repo.display_ref()))
         .unwrap_or_else(|| app.cwd.clone());
-    spans.extend([
-        Span::styled(
-            app.session_name.clone(),
-            Style::default().fg(theme::ASH_MID),
-        ),
-        Span::styled(" · ", Style::default().fg(theme::ASH)),
-        text_display::sanitize_span(location_label, Style::default().fg(theme::ASH_TEXT)),
-    ]);
+    spans.push(text_display::sanitize_span(
+        location_label,
+        Style::default().fg(theme::ASH_TEXT),
+    ));
     Some(Line::from(spans))
 }
 
@@ -447,54 +441,10 @@ fn styled_input_segment(
 }
 
 fn styled_user_input_segment(text: &str, seg_start: usize, seg_end: usize) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    let mut cursor = seg_start;
-
-    for (range, _) in collect_skill_mentions_with_ranges(text) {
-        if range.end <= seg_start || range.start >= seg_end {
-            continue;
-        }
-        let start = range.start.max(seg_start);
-        let end = range.end.min(seg_end);
-
-        if cursor < start {
-            spans.push(Span::styled(
-                text[cursor..start].to_string(),
-                theme::user_input(),
-            ));
-        }
-
-        let mention = &text[start..end];
-        if start == range.start {
-            let mut chars = mention.chars();
-            if let Some(sigil) = chars.next() {
-                spans.push(Span::styled(
-                    sigil.to_string(),
-                    theme::resolved_token_sigil(),
-                ));
-                let rest = chars.as_str();
-                if !rest.is_empty() {
-                    spans.push(Span::styled(rest.to_string(), theme::resolved_token()));
-                }
-            }
-        } else if !mention.is_empty() {
-            spans.push(Span::styled(mention.to_string(), theme::resolved_token()));
-        }
-
-        cursor = end;
-    }
-
-    if cursor < seg_end {
-        spans.push(Span::styled(
-            text[cursor..seg_end].to_string(),
-            theme::user_input(),
-        ));
-    }
-
-    if spans.is_empty() {
-        spans.push(Span::styled(String::new(), theme::user_input()));
-    }
-    spans
+    vec![Span::styled(
+        text[seg_start..seg_end].to_string(),
+        theme::user_input(),
+    )]
 }
 
 fn build_code_fold_summary(blocks: &[DisplayBlock], idx: usize) -> String {
@@ -558,11 +508,18 @@ fn render_block_into(
     match &blocks[idx] {
         DisplayBlock::UserInput(text) => {
             if idx > 0 && !matches!(blocks[idx - 1], DisplayBlock::Splash) {
+                let rule_width = (viewport_width * 2 / 5).max(8).min(viewport_width);
+                let pad_left = (viewport_width.saturating_sub(rule_width)) / 2;
                 lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "─".repeat(viewport_width),
+                let mut spans = Vec::new();
+                if pad_left > 0 {
+                    spans.push(Span::raw(" ".repeat(pad_left)));
+                }
+                spans.push(Span::styled(
+                    "─".repeat(rule_width),
                     theme::turn_separator(),
-                )));
+                ));
+                lines.push(Line::from(spans));
             }
 
             let marker_style = Style::default().fg(theme::SODIUM);

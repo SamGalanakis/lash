@@ -1,5 +1,5 @@
 use lash_tui::{Line, Modifier, Span, Style};
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{text_layout, theme};
@@ -393,7 +393,7 @@ fn markdown_continuation_prefix(line: &Line<'static>) -> Vec<Span<'static>> {
     let leading_ws = " ".repeat(leading_ws_chars);
     let trimmed = text.trim_start();
 
-    if trimmed.starts_with("• ") {
+    if trimmed.starts_with("• ") || trimmed.starts_with("· ") {
         return vec![Span::styled(format!("{leading_ws}  "), default_style)];
     }
 
@@ -583,9 +583,13 @@ impl MdRenderer {
             }
 
             // ── Heading ──
-            Event::Start(Tag::Heading { .. }) => {
+            Event::Start(Tag::Heading { level, .. }) => {
                 self.flush_line();
-                self.push_style(theme::heading());
+                let style = match level {
+                    HeadingLevel::H1 | HeadingLevel::H2 => theme::heading(),
+                    _ => theme::subheading(),
+                };
+                self.push_style(style);
             }
             Event::End(TagEnd::Heading(_)) => {
                 self.flush_line();
@@ -652,6 +656,7 @@ impl MdRenderer {
                 self.in_item = true;
                 let depth = self.list_stack.len().saturating_sub(1);
                 let indent = "  ".repeat(depth);
+                let bullet = if depth > 0 { "·" } else { "•" };
                 let prefix = match self
                     .list_stack
                     .last_mut()
@@ -662,12 +667,19 @@ impl MdRenderer {
                         *next_index += 1;
                         format!("{indent}{current}. ")
                     }
-                    None => format!("{indent}• "),
+                    None => format!("{indent}{bullet} "),
                 };
                 self.pending_item_prefix = Some(prefix);
+                if depth > 0 {
+                    self.push_style(theme::nested_list_item());
+                }
             }
             Event::End(TagEnd::Item) => {
                 self.flush_line();
+                let depth = self.list_stack.len().saturating_sub(1);
+                if depth > 0 {
+                    self.pop_style();
+                }
                 self.in_item = false;
                 self.pending_item_prefix = None;
             }

@@ -155,7 +155,7 @@ fn assistant_continuation_prefix(line: &Line<'static>) -> Vec<Span<'static>> {
     let leading_ws = " ".repeat(leading_ws_chars);
     let trimmed = text.trim_start();
 
-    if trimmed.starts_with("• ") {
+    if trimmed.starts_with("• ") || trimmed.starts_with("· ") {
         return vec![Span::styled(format!("{leading_ws}  "), default_style)];
     }
 
