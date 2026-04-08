@@ -33,10 +33,11 @@ pub(super) fn render_snippet_preview_with_indent(
     viewport_width: usize,
     indent: &str,
 ) {
+    let indent_width = UnicodeWidthStr::width(indent);
     let has_custom_title = preview.title.is_some();
     let title = preview.title.as_deref().unwrap_or("SNIPPET");
     lines.push(indented_line(
-        prompt::prompt_section_label(title, viewport_width.saturating_sub(indent.len())),
+        prompt::prompt_section_label(title, viewport_width.saturating_sub(indent_width)),
         indent,
     ));
     if !has_custom_title {
@@ -56,7 +57,7 @@ pub(super) fn render_snippet_preview_with_indent(
             if !preview.content.trim().is_empty() {
                 let rendered = markdown::render_markdown(
                     &preview.content,
-                    viewport_width.saturating_sub(indent.len()),
+                    viewport_width.saturating_sub(indent_width),
                 );
                 lines.extend(rendered.into_iter().map(|line| indented_line(line, indent)));
             }
@@ -248,33 +249,75 @@ fn render_line_numbered_snippet_block(
     text_style: Style,
 ) {
     let line_number_width = preview.end_line.to_string().len().max(2);
+    let continuation_prefix = snippet_line_prefix(None, line_number_width, indent);
     if preview.content.is_empty() {
-        push_wrapped_styled_chunks_with_indent(
+        push_wrapped_styled_line_with_continuation(
             lines,
-            &format!(
-                "{:>width$} │ ",
-                preview.start_line,
-                width = line_number_width
-            ),
+            &Line::from(snippet_line_prefix(
+                Some(preview.start_line),
+                line_number_width,
+                indent,
+            )),
             viewport_width,
-            indent,
-            |chunk| styled_snippet_chunk(chunk, text_style, preview.language.as_deref()),
+            continuation_prefix.clone(),
         );
     } else {
         for (offset, line) in preview.content.lines().enumerate() {
-            push_wrapped_styled_chunks_with_indent(
+            let mut spans =
+                snippet_line_prefix(Some(preview.start_line + offset), line_number_width, indent);
+            if preview.language.is_some() && text_style == theme::code_content() {
+                spans.extend(highlight_code_snippet(line, preview.language.as_deref()));
+            } else {
+                spans.push(Span::styled(line.to_string(), text_style));
+            }
+            push_wrapped_styled_line_with_continuation(
                 lines,
-                &format!(
-                    "{:>width$} │ {}",
-                    preview.start_line + offset,
-                    line,
-                    width = line_number_width
-                ),
+                &Line::from(spans),
                 viewport_width,
-                indent,
-                |chunk| styled_snippet_chunk(chunk, text_style, preview.language.as_deref()),
+                continuation_prefix.clone(),
             );
         }
+    }
+}
+
+fn snippet_line_prefix(
+    line_number: Option<usize>,
+    line_number_width: usize,
+    indent: &str,
+) -> Vec<Span<'static>> {
+    let number = line_number
+        .map(|value| format!("{value:>width$}", width = line_number_width))
+        .unwrap_or_else(|| " ".repeat(line_number_width));
+    let mut spans = Vec::new();
+    if !indent.is_empty() {
+        spans.push(Span::raw(indent.to_string()));
+    }
+    spans.push(Span::styled(number, theme::code_chrome()));
+    spans.push(Span::styled(" │ ".to_string(), theme::code_chrome()));
+    spans
+}
+
+fn push_wrapped_styled_line_with_continuation(
+    lines: &mut Vec<Line<'static>>,
+    line: &Line<'static>,
+    viewport_width: usize,
+    continuation_prefix: Vec<Span<'static>>,
+) {
+    let text = text_layout::line_text(line);
+    let continuation_prefix_width = text_layout::spans_display_width(&continuation_prefix);
+    let segments = if text.is_empty() {
+        vec![(0usize, 0usize)]
+    } else {
+        wrap_line(&text, 0, continuation_prefix_width, viewport_width.max(1))
+    };
+
+    for (segment_idx, (start, end)) in segments.into_iter().enumerate() {
+        let mut spans = Vec::new();
+        if segment_idx > 0 {
+            spans.extend(continuation_prefix.iter().cloned());
+        }
+        spans.extend(text_layout::slice_line_spans(line, start, end));
+        lines.push(Line::from(spans));
     }
 }
 
@@ -287,7 +330,9 @@ fn push_wrapped_styled_chunks_with_indent<F>(
 ) where
     F: FnMut(&str) -> Vec<Span<'static>>,
 {
-    let available = viewport_width.saturating_sub(indent.len()).max(1);
+    let available = viewport_width
+        .saturating_sub(UnicodeWidthStr::width(indent))
+        .max(1);
     let segments = if text.is_empty() {
         vec![(0usize, 0usize)]
     } else {

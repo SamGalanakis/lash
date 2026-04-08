@@ -122,15 +122,19 @@ fn plugin_message_to_message(
     plugin_message: &PluginMessage,
 ) -> Message {
     let msg_idx = existing.len() + idx;
-    let mut parts = vec![Part {
-        id: format!("m{msg_idx}.p0"),
-        kind: PartKind::Text,
-        content: plugin_message.content.clone(),
-        attachment: None,
-        tool_call_id: None,
-        tool_name: None,
-        prune_state: PruneState::Intact,
-    }];
+    let mut parts = if plugin_message.parts.is_empty() {
+        vec![Part {
+            id: format!("m{msg_idx}.p0"),
+            kind: PartKind::Text,
+            content: plugin_message.content.clone(),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            prune_state: PruneState::Intact,
+        }]
+    } else {
+        plugin_message.parts.clone()
+    };
     let has_image_parts = parts
         .iter()
         .any(|part| matches!(part.kind, PartKind::Image));
@@ -171,6 +175,65 @@ fn append_plugin_messages(messages: &mut Vec<Message>, plugin_messages: &[Plugin
         .map(|(idx, message)| plugin_message_to_message(messages, idx, message))
         .collect::<Vec<_>>();
     messages.extend(new_messages);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_message_to_message_preserves_image_parts() {
+        let plugin_message = PluginMessage {
+            role: MessageRole::User,
+            content: "before [Image #1] after".to_string(),
+            parts: vec![
+                Part {
+                    id: String::new(),
+                    kind: PartKind::Text,
+                    content: "before ".to_string(),
+                    attachment: None,
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: PruneState::Intact,
+                },
+                Part {
+                    id: String::new(),
+                    kind: PartKind::Image,
+                    content: String::new(),
+                    attachment: Some(lash_sansio::session_model::message::PartAttachment {
+                        mime: "image/png".to_string(),
+                        url: lash_sansio::session_model::message::data_url_for_bytes(
+                            "image/png",
+                            &[1, 2, 3, 4],
+                        ),
+                        filename: None,
+                    }),
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: PruneState::Intact,
+                },
+                Part {
+                    id: String::new(),
+                    kind: PartKind::Text,
+                    content: " after".to_string(),
+                    attachment: None,
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: PruneState::Intact,
+                },
+            ],
+            images: Vec::new(),
+            user_input: None,
+        };
+
+        let message = plugin_message_to_message(&[], 0, &plugin_message);
+
+        assert_eq!(message.parts.len(), 3);
+        assert!(matches!(message.parts[1].kind, PartKind::Image));
+        assert!(message.parts[1].attachment.is_some());
+        assert_eq!(message.parts[0].content, "before ");
+        assert_eq!(message.parts[2].content, " after");
+    }
 }
 
 fn normalize_message_ids(messages: &mut [Message]) {

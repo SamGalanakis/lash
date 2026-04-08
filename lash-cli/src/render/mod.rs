@@ -38,7 +38,7 @@ pub(crate) use self::queue::queue_preview_lines_snapshot;
 const INPUT_HORIZONTAL_PADDING: u16 = 1;
 const PROMPT_HORIZONTAL_PADDING: u16 = 1;
 const MIN_HISTORY_HEIGHT: u16 = 3;
-const MAX_INPUT_HEIGHT: u16 = 20;
+const MAX_INPUT_HEIGHT: u16 = 10;
 const COMPACT_ACTIVITY_FEED_MAX_ITEMS: usize = 5;
 const COMPACT_ACTIVITY_FEED_MAX_ROWS_PER_ITEM: usize = 2;
 const COMPACT_PATCH_PREVIEW_MAX_FILES: usize = 5;

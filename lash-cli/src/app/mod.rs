@@ -128,18 +128,6 @@ fn expand_large_paste_placeholders(text: &str, large_pastes: &[LargePaste]) -> S
     expanded
 }
 
-fn annotate_large_paste_placeholders(text: &str, large_pastes: &[LargePaste]) -> String {
-    let mut annotated = text.to_string();
-    for paste in large_pastes {
-        if annotated.contains(&paste.placeholder) {
-            let char_count = paste.content.chars().count();
-            annotated =
-                annotated.replace(&paste.placeholder, &format!("[pasted {char_count} chars]"));
-        }
-    }
-    annotated
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedTurn {
     pub draft_id: String,
@@ -210,7 +198,7 @@ impl PreparedTurn {
         }
         let expanded_text = expand_large_paste_placeholders(&text, &large_pastes);
         let effective_text = append_skill_blocks(&expanded_text, skills);
-        let display_text = annotate_large_paste_placeholders(&text, &large_pastes);
+        let display_text = text.clone();
         Self {
             draft_id: uuid::Uuid::new_v4().to_string(),
             display_text: display_text.clone(),
