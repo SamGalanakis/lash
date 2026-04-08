@@ -11,6 +11,7 @@ mod shell;
 mod showcase_snippet;
 mod state;
 mod update_plan;
+mod wait;
 mod web_search;
 
 pub use apply_patch::ApplyPatchTool;
@@ -28,6 +29,7 @@ pub use shell::StandardShell;
 pub use showcase_snippet::ShowcaseSnippet;
 pub use state::{StateStore, StateToolsPluginFactory};
 pub use update_plan::UpdatePlanTool;
+pub use wait::WaitTool;
 pub use web_search::WebSearch;
 
 use crate::ToolResult;
@@ -66,6 +68,9 @@ pub(crate) fn all_native_tool_names() -> impl Iterator<Item = &'static str> {
 }
 
 pub(crate) fn find_native_tool(mode: crate::ExecutionMode, name: &str) -> Option<NativeTool> {
+    if matches!(mode, crate::ExecutionMode::Repl) && name == NativeTool::Batch.name() {
+        return Some(NativeTool::Batch);
+    }
     native_tools(mode)
         .iter()
         .copied()
@@ -338,5 +343,18 @@ mod tests {
         assert_eq!(catalog.len(), 2);
         assert_eq!(catalog[0]["name"], serde_json::json!("read_file"));
         assert_eq!(catalog[1]["injected"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn repl_does_not_surface_batch_as_native_tool() {
+        assert!(native_tools(crate::ExecutionMode::Repl).is_empty());
+    }
+
+    #[test]
+    fn repl_still_dispatches_batch_as_native_tool() {
+        assert!(matches!(
+            find_native_tool(crate::ExecutionMode::Repl, "batch"),
+            Some(NativeTool::Batch)
+        ));
     }
 }

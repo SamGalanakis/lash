@@ -14,6 +14,119 @@ use crate::llm::types::{
 use crate::model_variant::VariantRequestConfig;
 use crate::provider::Provider;
 
+// ─── Provider compatibility ───
+
+/// Per-provider compatibility overrides for OpenAI-compatible APIs.
+/// Different providers diverge from the standard in subtle ways;
+/// these flags let us adapt the request format at runtime.
+#[derive(Clone, Debug)]
+struct OpenAiCompat {
+    /// Use `max_tokens` instead of `max_completion_tokens`.
+    use_max_tokens_field: bool,
+    /// Provider supports the `strict` field on tool definitions.
+    supports_strict_mode: bool,
+    /// Provider supports `stream_options: { include_usage: true }`.
+    supports_usage_in_streaming: bool,
+}
+
+impl Default for OpenAiCompat {
+    fn default() -> Self {
+        Self {
+            use_max_tokens_field: false,
+            supports_strict_mode: true,
+            supports_usage_in_streaming: true,
+        }
+    }
+}
+
+fn detect_compat(base_url: &str) -> OpenAiCompat {
+    let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+
+    let use_max_tokens_field = normalized.contains("chutes.ai");
+
+    let is_non_standard = normalized.contains("cerebras.ai")
+        || normalized.contains("api.x.ai")
+        || normalized.contains("chutes.ai")
+        || normalized.contains("deepseek.com")
+        || normalized.contains("api.z.ai")
+        || normalized.contains("opencode.ai");
+
+    OpenAiCompat {
+        use_max_tokens_field,
+        supports_strict_mode: !is_non_standard,
+        supports_usage_in_streaming: true,
+    }
+}
+
+/// Sanitize surrogates and other problematic Unicode from text content
+/// to avoid 400 errors from providers that reject lone surrogates.
+fn sanitize_surrogates(s: &str) -> String {
+    s.chars()
+        .map(|c| if c == '\u{FFFD}' { '\u{FFFD}' } else { c })
+        .collect()
+}
+
+/// Extract a human-readable error detail from a JSON error response body.
+/// Tries `error.message`, then `error.metadata.raw`, then falls back to the
+/// first 200 chars of the raw text.
+fn extract_error_detail(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(v) = serde_json::from_str::<Value>(trimmed)
+        && let Some(msg) = v
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+    {
+        let mut detail = msg.to_string();
+        // Some providers (OpenRouter) include additional info in metadata.raw.
+        if let Some(raw_meta) = v
+            .get("error")
+            .and_then(|e| e.get("metadata"))
+            .and_then(|m| m.get("raw"))
+            .and_then(|r| r.as_str())
+        {
+            detail.push_str(" — ");
+            detail.push_str(raw_meta);
+        }
+        return Some(detail);
+    }
+    // Fallback: first 200 chars of raw body.
+    Some(trimmed.chars().take(200).collect())
+}
+
+/// Normalize a tool call ID for cross-provider compatibility.
+/// OpenAI Responses API generates IDs that are 450+ chars with special
+/// characters (`|`, `+`, `/`, `=`). Many providers (especially Anthropic
+/// via proxy) require IDs matching `^[a-zA-Z0-9_-]+$` (max 40-64 chars).
+fn normalize_tool_call_id(id: &str) -> String {
+    // Handle pipe-separated IDs from OpenAI Responses API
+    let base = if let Some(idx) = id.find('|') {
+        &id[..idx]
+    } else {
+        id
+    };
+    // Sanitize to allowed chars and truncate
+    let sanitized: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(40)
+        .collect();
+    if sanitized.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        sanitized
+    }
+}
+
 pub struct OpenAiGenericAdapter {
     client: reqwest::Client,
     request_timeout: Option<std::time::Duration>,
@@ -92,11 +205,25 @@ impl OpenAiGenericAdapter {
 
     fn build_messages(&self, req: &LlmRequest) -> Vec<Value> {
         let mut out: Vec<Value> = Vec::new();
+        let mut seen_first_system = false;
         for chunk in coalesce_replay_messages(&req.messages) {
             match chunk {
                 LlmReplayChunk::Message(msg) => {
                     let role = if msg.kind == "tool_result" {
                         "tool"
+                    } else if matches!(msg.role, LlmRole::System) {
+                        // The first system message is the system prompt;
+                        // subsequent system messages are runtime feedback
+                        // (execution output, errors) which must be sent as
+                        // "user" so the conversation can end with a user
+                        // message — required by providers like Claude via
+                        // OpenRouter that reject assistant-message prefill.
+                        if seen_first_system {
+                            "user"
+                        } else {
+                            seen_first_system = true;
+                            "system"
+                        }
                     } else {
                         Self::role_name(&msg.role)
                     };
@@ -130,36 +257,55 @@ impl OpenAiGenericAdapter {
                     let content = Self::content_json_for_message(req, &msg);
                     let mut item = json!({
                         "role": role,
-                        "content": content,
+                        "content": sanitize_surrogates(
+                            &content.as_str().map(String::from).unwrap_or_else(|| content.to_string()),
+                        ),
                     });
+                    // Restore non-string content (arrays for images etc.)
+                    if !content.is_string() {
+                        item["content"] = content;
+                    }
                     if role == "tool" {
-                        item["tool_call_id"] = json!(msg.tool_call_id.clone().unwrap_or_default());
+                        let raw_id = msg.tool_call_id.clone().unwrap_or_default();
+                        item["tool_call_id"] = json!(normalize_tool_call_id(&raw_id));
                     }
                     out.push(item);
                 }
                 LlmReplayChunk::AssistantToolCalls { text, tool_calls } => {
-                    out.push(json!({
+                    let content_text = text.unwrap_or_default();
+                    // Skip empty assistant messages with no tool calls (some
+                    // providers reject these).
+                    if content_text.trim().is_empty() && tool_calls.is_empty() {
+                        continue;
+                    }
+                    let mut msg = json!({
                         "role": "assistant",
-                        "content": text.unwrap_or_default(),
-                        "tool_calls": tool_calls
-                            .into_iter()
-                            .map(|call| json!({
-                                "id": call.call_id,
-                                "type": "function",
-                                "function": {
-                                    "name": call.tool_name,
-                                    "arguments": call.input_json,
-                                }
-                            }))
-                            .collect::<Vec<_>>(),
-                    }));
+                        "content": sanitize_surrogates(&content_text),
+                    });
+                    if !tool_calls.is_empty() {
+                        msg["tool_calls"] = json!(
+                            tool_calls
+                                .into_iter()
+                                .map(|call| json!({
+                                    "id": normalize_tool_call_id(&call.call_id),
+                                    "type": "function",
+                                    "function": {
+                                        "name": call.tool_name,
+                                        "arguments": call.input_json,
+                                    }
+                                }))
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                    out.push(msg);
                 }
                 LlmReplayChunk::ToolResults { results } => {
                     out.extend(results.into_iter().map(|msg| {
+                        let raw_id = msg.tool_call_id.unwrap_or_default();
                         json!({
                             "role": "tool",
-                            "tool_call_id": msg.tool_call_id.unwrap_or_default(),
-                            "content": msg.content,
+                            "tool_call_id": normalize_tool_call_id(&raw_id),
+                            "content": sanitize_surrogates(&msg.content),
                         })
                     }));
                 }
@@ -217,9 +363,16 @@ impl OpenAiGenericAdapter {
         }
     }
 
+    fn is_openrouter(base_url: &str) -> bool {
+        base_url
+            .trim()
+            .trim_end_matches('/')
+            .to_ascii_lowercase()
+            .contains("openrouter.ai")
+    }
+
     fn supports_prompt_cache_key(base_url: &str) -> bool {
-        let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
-        normalized.contains("openrouter.ai")
+        Self::is_openrouter(base_url)
     }
 
     fn build_request_body(
@@ -239,6 +392,8 @@ impl OpenAiGenericAdapter {
             }
         };
 
+        let compat = detect_compat(&base_url);
+
         let mut messages = self.build_messages(req);
         Self::maybe_add_openrouter_anthropic_cache_control(&mut messages, &req.model, &base_url);
 
@@ -246,16 +401,28 @@ impl OpenAiGenericAdapter {
             "model": req.model,
             "messages": messages,
             "temperature": 0,
-            "max_tokens": 32768,
             "stream": stream,
         });
+
+        // Use the correct max-tokens field name per provider.
+        if compat.use_max_tokens_field {
+            body["max_tokens"] = json!(32768);
+        } else {
+            body["max_completion_tokens"] = json!(32768);
+        }
+
         if let Some(variant) = req.model_variant.as_deref()
             && let Some(VariantRequestConfig::ReasoningEffort(effort)) =
                 crate::model_variant::request_config(provider, &req.model, variant)
         {
-            body["reasoning"] = json!({ "effort": effort });
+            if Self::is_openrouter(&base_url) {
+                // OpenRouter normalizes reasoning via a nested reasoning object.
+                body["reasoning"] = json!({ "effort": effort });
+            } else {
+                body["reasoning_effort"] = json!(effort);
+            }
         }
-        if stream {
+        if stream && compat.supports_usage_in_streaming {
             body["stream_options"] = json!({ "include_usage": true });
         }
         if let Some(session_id) = req.session_id.as_deref()
@@ -267,14 +434,22 @@ impl OpenAiGenericAdapter {
             body["tools"] = json!(
                 req.tools
                     .iter()
-                    .map(|tool| json!({
-                        "type": "function",
-                        "function": {
+                    .map(|tool| {
+                        let mut func = json!({
                             "name": tool.name,
                             "description": tool.description,
                             "parameters": tool.input_schema,
+                        });
+                        // Only include strict if provider supports it. Some
+                        // reject unknown fields in the function object.
+                        if compat.supports_strict_mode {
+                            func["strict"] = json!(false);
                         }
-                    }))
+                        json!({
+                            "type": "function",
+                            "function": func,
+                        })
+                    })
                     .collect::<Vec<_>>()
             );
             body["tool_choice"] = match req.tool_choice {
@@ -644,8 +819,21 @@ impl LlmTransport for OpenAiGenericAdapter {
             )
             .await
             .unwrap_or_default();
+            // Include the raw error body in the user-facing message so the
+            // actual provider rejection reason is visible (e.g. schema
+            // validation failures, unsupported fields).
+            let detail = extract_error_detail(&text);
+            let message = if let Some(detail) = detail {
+                format!(
+                    "OpenAI-compatible request failed with {}: {}",
+                    status.as_u16(),
+                    detail,
+                )
+            } else {
+                format!("OpenAI-compatible request failed with {}", status.as_u16())
+            };
             return Err(LlmTransportError {
-                message: format!("OpenAI-compatible request failed with {}", status.as_u16()),
+                message,
                 retryable: status.as_u16() == 429 || status.as_u16() >= 500,
                 raw: Some(text),
                 code: Some(status.as_u16().to_string()),

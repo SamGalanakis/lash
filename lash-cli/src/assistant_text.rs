@@ -1,16 +1,14 @@
-use lash::strip_repl_fragments;
 use lash_tui::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::{app::DisplayBlock, markdown, text_layout, theme};
 
 pub fn normalize_assistant_text(text: &str) -> String {
-    let sanitized = strip_repl_fragments(text);
     let mut out = String::new();
     let mut started = false;
     let mut prev_blank = false;
 
-    for line in sanitized.split('\n') {
+    for line in text.split('\n') {
         let is_blank = line.trim().is_empty();
         if !started {
             if is_blank {

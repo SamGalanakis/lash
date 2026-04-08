@@ -294,7 +294,7 @@ fn repl_tool_surface_plugin_shapes_search_surface_and_omitted_tool_note() {
         surface
             .tools
             .iter()
-            .any(|tool| tool.name == "search_tools" && tool.enabled && !tool.injected)
+            .any(|tool| tool.name == "search_tools" && tool.enabled && tool.injected)
     );
     assert!(surface.tool_list_notes.iter().any(|note| {
         note.contains("additional tool(s) are available but omitted from this prompt")

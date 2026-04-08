@@ -2,6 +2,7 @@ use super::artifact::render_snippet_preview;
 use super::*;
 use crate::activity::ActivityState;
 use crate::app::projected_blocks_from_state;
+use crate::assistant_text::normalize_assistant_text;
 use crate::theme;
 use lash::ToolProvider;
 use lash::tools::ShowcaseSnippet;
@@ -85,6 +86,41 @@ fn prompt_question_wraps_long_path_cleanly() {
     assert_eq!(rendered[2], " mode now?");
     assert_eq!(rendered[3], "");
     assert!(rendered.iter().any(|line| line.contains("Choices")));
+}
+
+#[test]
+fn wait_prompt_help_uses_ctrl_j_resume_binding() {
+    let (response_tx, _response_rx) = mpsc::channel();
+    let prompt = PromptState {
+        request: PromptRequest::freeform("Paused · waiting 5s")
+            .with_wait(5)
+            .with_markdown_panel("PAUSED", "Waiting for a retry window."),
+        focus: crate::overlay::PromptFocus::Options,
+        cursor: 0,
+        scroll_offset: 0,
+        selected: Default::default(),
+        reply_text: String::new(),
+        reply_cursor: 0,
+        response_tx,
+    };
+
+    let rendered = prompt_content_lines_snapshot(&prompt, 48)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(rendered.iter().any(|line| line.contains("Waiting 5s")));
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("ctrl+j resume now"))
+    );
+    assert!(rendered.iter().any(|line| line.contains("esc cancel wait")));
 }
 
 #[test]
@@ -206,6 +242,12 @@ fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
         DisplayBlock::UserInput(text) => text.contains("<skill>") || text.contains("<name>"),
         _ => false,
     }));
+}
+
+#[test]
+fn assistant_text_keeps_literal_repl_tags_in_prose() {
+    let text = "Use the literal tag <repl> and then close </repl>.";
+    assert_eq!(normalize_assistant_text(text), text);
 }
 
 #[test]

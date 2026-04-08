@@ -104,8 +104,8 @@ pub(crate) fn build_execution_preamble(
     let session_id = policy.session_id.as_deref().unwrap_or("root");
     let surface = session.execution_surface(session_id, mode);
     let enabled_tools = surface.enabled_tools();
+    let prompt_tools = surface.prompt_tools();
     let (tool_list, omitted_tool_count) = if matches!(mode, ExecutionMode::Repl) {
-        let prompt_tools = surface.prompt_tools();
         let mut tool_list = ToolDefinition::format_tool_docs(&prompt_tools);
         let omitted_tool_count = count_prompt_omitted_tools(&enabled_tools);
         for note in &surface.tool_list_notes {
@@ -131,6 +131,18 @@ pub(crate) fn build_execution_preamble(
         omitted_tool_count,
         contributions: Vec::new(),
     };
+
+    tracing::debug!(
+        session_id,
+        ?mode,
+        model,
+        enabled_tool_count = enabled_tools.len(),
+        prompt_tool_count = prompt_tools.len(),
+        omitted_tool_count,
+        tool_names = ?prompt.tool_names,
+        tool_list_preview = %prompt.tool_list.chars().take(400).collect::<String>(),
+        "built execution preamble"
+    );
 
     ExecutionPreamble {
         model,

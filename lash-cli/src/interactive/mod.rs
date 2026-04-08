@@ -1254,6 +1254,18 @@ pub(crate) async fn run_app(
 
                 // ── Prompt (ask dialog) key handling ──
                 if app.has_prompt() {
+                    if app.prompt_state().is_some_and(|prompt| prompt.is_wait()) {
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && key.code == KeyCode::Char('j')
+                        {
+                            if let Some(recorder) = ui_trace.as_mut() {
+                                recorder.record_submit_prompt();
+                            }
+                            let _ =
+                                apply_terminal_action(&mut app, &terminal, UiAction::SubmitPrompt);
+                        }
+                        continue;
+                    }
                     let editing_text = app.is_prompt_text_entry();
                     match key.code {
                         KeyCode::Tab if app.prompt_supports_note() => {
@@ -2013,7 +2025,9 @@ pub(crate) async fn run_app(
                     if let Some(recorder) = ui_trace.as_mut() {
                         recorder.record_emit_prompt(&request);
                     }
-                    let focus = if request.is_freeform() {
+                    let focus = if request.is_wait() {
+                        crate::overlay::PromptFocus::Options
+                    } else if request.is_freeform() {
                         crate::overlay::PromptFocus::Text
                     } else {
                         crate::overlay::PromptFocus::Options

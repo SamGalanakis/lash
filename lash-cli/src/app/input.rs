@@ -268,6 +268,9 @@ impl App {
             self.invalidate_height_cache();
             self.scroll_to_bottom();
             self.dirty = true;
+            if p.is_wait() {
+                return Some(display);
+            }
             if !display.trim().is_empty() {
                 if p.request.is_freeform() {
                     self.push_prompt_response_user_block(display.clone());

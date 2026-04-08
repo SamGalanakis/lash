@@ -141,11 +141,16 @@ pub enum SessionEvent {
     },
 }
 
+pub const WAIT_PROMPT_RESUME_EARLY_TOKEN: &str = "__lash_wait_resume_early__";
+pub const WAIT_PROMPT_TIMEOUT_TOKEN: &str = "__lash_wait_timeout__";
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PromptRequest {
     pub question: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub panel: Option<PromptPanel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<PromptWait>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<String>,
     #[serde(default)]
@@ -160,11 +165,17 @@ pub struct PromptPanel {
     pub markdown: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PromptWait {
+    pub seconds: u64,
+}
+
 impl PromptRequest {
     pub fn freeform(question: impl Into<String>) -> Self {
         Self {
             question: question.into(),
             panel: None,
+            wait: None,
             options: Vec::new(),
             selection_mode: PromptSelectionMode::Single,
             allow_note: false,
@@ -175,6 +186,7 @@ impl PromptRequest {
         Self {
             question: question.into(),
             panel: None,
+            wait: None,
             options,
             selection_mode: PromptSelectionMode::Single,
             allow_note: false,
@@ -185,10 +197,16 @@ impl PromptRequest {
         Self {
             question: question.into(),
             panel: None,
+            wait: None,
             options,
             selection_mode: PromptSelectionMode::Multi,
             allow_note: false,
         }
+    }
+
+    pub fn with_wait(mut self, seconds: u64) -> Self {
+        self.wait = Some(PromptWait { seconds });
+        self
     }
 
     pub fn with_optional_note(mut self) -> Self {
@@ -210,6 +228,10 @@ impl PromptRequest {
 
     pub fn is_freeform(&self) -> bool {
         self.options.is_empty()
+    }
+
+    pub fn is_wait(&self) -> bool {
+        self.wait.is_some()
     }
 
     pub fn allows_note(&self) -> bool {
