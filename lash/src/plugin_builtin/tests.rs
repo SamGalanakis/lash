@@ -782,6 +782,60 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
 }
 
 #[tokio::test]
+async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
+    let _guard = plan_mode_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _cwd = CurrentDirGuard::set(temp.path());
+    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
+    let session = host.build_standard_session("root", None).expect("session");
+    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
+
+    session
+        .invoke_external(
+            "plan_mode.enable",
+            json!({}),
+            None,
+            true,
+            Arc::clone(&manager),
+        )
+        .await
+        .expect("enable");
+
+    let first_before_turn = session
+        .before_turn(TurnHookContext {
+            session_id: "root".to_string(),
+            state: mock_snapshot("run-session"),
+            host: Arc::clone(&manager),
+        })
+        .await
+        .expect("first before_turn");
+    assert!(first_before_turn.iter().any(|emitted| matches!(
+        &emitted.value,
+        PluginDirective::EnqueueMessages { messages }
+            if messages.iter().any(|message| message.content.contains("Plan mode:"))
+    )));
+
+    session
+        .after_turn(TurnResultHookContext {
+            session_id: "root".to_string(),
+            turn: empty_turn("root"),
+            host: Arc::clone(&manager),
+        })
+        .await
+        .expect("after_turn");
+
+    let second_before_turn = session
+        .before_turn(TurnHookContext {
+            session_id: "root".to_string(),
+            state: mock_snapshot("run-session"),
+            host: Arc::clone(&manager),
+        })
+        .await
+        .expect("second before_turn");
+    assert!(second_before_turn.is_empty());
+}
+
+#[tokio::test]
 async fn plan_mode_plugin_uses_configured_allowlist() {
     let _guard = plan_mode_env_lock().lock().await;
     let temp = tempfile::tempdir().expect("tempdir");

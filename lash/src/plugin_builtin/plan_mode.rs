@@ -256,8 +256,10 @@ impl PlanModeState {
     }
 
     fn prepare_turn(&mut self) -> bool {
-        self.active_turn_applied_generation = None;
         if !self.enabled {
+            return false;
+        }
+        if self.active_turn_applied_generation == Some(self.generation) {
             return false;
         }
         self.active_turn_applied_generation = Some(self.generation);
@@ -272,9 +274,7 @@ impl PlanModeState {
         true
     }
 
-    fn finish_turn(&mut self) {
-        self.active_turn_applied_generation = None;
-    }
+    fn finish_turn(&mut self) {}
 
     fn badge_event(&self) -> crate::plugin::PluginSurfaceEvent {
         crate::plugin::PluginSurfaceEvent::ModeIndicatorUpsert {
