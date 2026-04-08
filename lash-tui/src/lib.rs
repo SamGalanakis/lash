@@ -541,7 +541,9 @@ impl Terminal {
         stdout.execute(Hide).context("hide cursor")?;
         stdout
             .execute(PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
             ))
             .ok();
         stdout.execute(EnableBracketedPaste).ok();

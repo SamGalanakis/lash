@@ -688,6 +688,7 @@ impl TurnMachine {
                     id: message_id.clone(),
                     role: message.role,
                     parts,
+                    user_input: message.user_input.clone(),
                     origin: Some(MessageOrigin::Plugin {
                         plugin_id: "plugin".to_string(),
                     }),
@@ -1003,6 +1004,7 @@ impl TurnMachine {
                     tool_name: None,
                     prune_state: PruneState::Intact,
                 }],
+                user_input: None,
                 origin: None,
             });
             self.request_checkpoint(CheckpointKind::BeforeCompletion, CheckpointResume::Finish);
@@ -1050,6 +1052,7 @@ impl TurnMachine {
                 id: asst_id,
                 role: MessageRole::Assistant,
                 parts: assistant_parts,
+                user_input: None,
                 origin: None,
             });
         }
@@ -1154,6 +1157,7 @@ impl TurnMachine {
                 id: user_id,
                 role: MessageRole::User,
                 parts: result_parts,
+                user_input: None,
                 origin: None,
             });
         }
@@ -1177,6 +1181,7 @@ impl TurnMachine {
                     tool_name: None,
                     prune_state: PruneState::Intact,
                 }],
+                user_input: None,
                 origin: None,
             });
             self.finish();
@@ -1493,6 +1498,7 @@ impl TurnMachine {
                 id: mid,
                 role: MessageRole::Assistant,
                 parts: asst_parts,
+                user_input: None,
                 origin: None,
             });
             self.request_checkpoint(CheckpointKind::BeforeCompletion, CheckpointResume::Finish);
@@ -1576,6 +1582,7 @@ impl TurnMachine {
             id: asst_id,
             role: MessageRole::Assistant,
             parts: asst_parts,
+            user_input: None,
             origin: None,
         });
 
@@ -1589,6 +1596,7 @@ impl TurnMachine {
                 id: sys_id,
                 role: MessageRole::System,
                 parts: feedback_parts,
+                user_input: None,
                 origin: None,
             });
         }
@@ -1715,6 +1723,7 @@ mod tests {
                 tool_name: None,
                 prune_state: PruneState::Intact,
             }],
+            user_input: None,
             origin: None,
         }
     }
@@ -1939,6 +1948,7 @@ mod tests {
                     prune_state: PruneState::Intact,
                 },
             ],
+            user_input: None,
             origin: None,
         }];
         let mut machine = TurnMachine::new(config, msgs, 0);

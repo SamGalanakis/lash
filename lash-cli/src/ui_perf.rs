@@ -241,16 +241,16 @@ fn build_benchmark_app() -> App {
         app.blocks
             .push(DisplayBlock::Activity(Box::new(exploration_activity(
                 turn.preview().as_str(),
-                turn.raw_text.as_str(),
+                turn.display_text.as_str(),
             ))));
-        if turn.raw_text.len().is_multiple_of(3) {
+        if turn.display_text.len().is_multiple_of(3) {
             app.blocks
                 .push(DisplayBlock::Activity(Box::new(snippet_activity(
                     &turn_label,
                     false,
                 ))));
         }
-        if turn.raw_text.len().is_multiple_of(5) {
+        if turn.display_text.len().is_multiple_of(5) {
             app.blocks
                 .push(DisplayBlock::Activity(Box::new(snippet_activity(
                     &turn_label,

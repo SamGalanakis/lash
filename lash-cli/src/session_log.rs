@@ -374,6 +374,7 @@ mod tests {
                 tool_name: None,
                 prune_state: lash::PruneState::Intact,
             }],
+            user_input: None,
             origin: None,
         }
     }
@@ -391,6 +392,7 @@ mod tests {
                 tool_name: Some(tool_name.to_string()),
                 prune_state: lash::PruneState::Intact,
             }],
+            user_input: None,
             origin: None,
         }
     }

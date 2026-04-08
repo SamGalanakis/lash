@@ -156,6 +156,7 @@ fn plugin_message_to_message(
         id: format!("m{msg_idx}"),
         role: plugin_message.role,
         parts,
+        user_input: plugin_message.user_input.clone(),
         origin: Some(MessageOrigin::Plugin {
             plugin_id: "plugin".to_string(),
         }),
@@ -185,6 +186,9 @@ fn normalize_message_ids(messages: &mut [Message]) {
                 tool_name: None,
                 prune_state: PruneState::Intact,
             });
+        }
+        if !matches!(message.role, MessageRole::User) {
+            message.user_input = None;
         }
         let message_id = message.id.clone();
         for (part_idx, part) in message.parts.iter_mut().enumerate() {

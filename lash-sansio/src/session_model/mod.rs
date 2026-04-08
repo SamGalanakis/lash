@@ -320,6 +320,7 @@ impl TurnTerminationPolicyState {
                 tool_name: None,
                 prune_state: PruneState::Intact,
             }],
+            user_input: None,
             origin: None,
         });
         self.max_steps_final = true;

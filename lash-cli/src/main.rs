@@ -273,6 +273,7 @@ mod tests {
     use lash::session_model::MessageRole;
 
     use crate::app::App;
+    use crate::cli_support::{CopyBinding, copy_binding_from_env};
 
     fn skill_catalog_with(names: &[(&str, &str)]) -> SkillCatalog {
         let root = std::env::temp_dir().join(format!("lash-main-skills-{}", uuid::Uuid::new_v4()));
@@ -477,7 +478,12 @@ mod tests {
                 .effective_text
                 .starts_with("/yolopush merge staging")
         );
-        assert_eq!(normalized.transform_labels, vec!["yolopush".to_string()]);
+        assert_eq!(normalized.input_provenance.transforms.len(), 1);
+        assert!(matches!(
+            normalized.input_provenance.transforms.first(),
+            Some(lash::UserInputTransform::SkillBlockAppend { skill_name, .. })
+                if skill_name == "yolopush"
+        ));
         assert!(normalized.effective_text.contains("<skill>"));
     }
 
@@ -494,9 +500,28 @@ mod tests {
             turn.display_text,
             "Compare with /localref opencode and mention /localref again"
         );
-        assert_eq!(turn.transform_labels, vec!["localref".to_string()]);
+        assert_eq!(turn.input_provenance.transforms.len(), 1);
+        assert!(matches!(
+            turn.input_provenance.transforms.first(),
+            Some(lash::UserInputTransform::SkillBlockAppend { skill_name, .. })
+                if skill_name == "localref"
+        ));
         assert_eq!(turn.effective_text.matches("<skill>").count(), 1);
         assert!(turn.effective_text.contains("<name>localref</name>"));
+    }
+
+    #[test]
+    fn copy_binding_defaults_to_ctrl_c() {
+        assert_eq!(copy_binding_from_env(None), CopyBinding::CtrlC);
+    }
+
+    #[test]
+    fn copy_binding_accepts_configured_variants() {
+        assert_eq!(
+            copy_binding_from_env(Some("ctrl-shift-c")),
+            CopyBinding::CtrlShiftC
+        );
+        assert_eq!(copy_binding_from_env(Some("ctrl-y")), CopyBinding::CtrlY);
     }
 
     #[test]

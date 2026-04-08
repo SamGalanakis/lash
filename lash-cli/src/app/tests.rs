@@ -869,7 +869,10 @@ fn injected_messages_commit_render_user_blocks_and_clear_matching_pending_steer(
 fn injected_messages_clear_matching_pending_steer_even_when_runtime_content_differs() {
     let mut app = App::new("test-model".into(), "test".into());
     let mut turn = PreparedTurn::new("/localref lash for context if needed".into(), Vec::new());
-    turn.transform_labels = vec!["localref".into()];
+    turn.input_provenance.transforms = vec![lash::UserInputTransform::SkillBlockAppend {
+        skill_name: "localref".into(),
+        skill_path: "/tmp/localref/SKILL.md".into(),
+    }];
     app.queue_pending_steer(turn.clone());
 
     app.handle_session_event(SessionEvent::InjectedMessagesCommitted {

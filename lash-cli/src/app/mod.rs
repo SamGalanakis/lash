@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use lash::{
     Message, MessageRole, PartKind, PluginMessage, PromptUsage, SessionEvent, SkillCatalog,
-    TokenUsage, ToolCallRecord, append_skill_blocks, collect_skill_mentions,
-    plugin_surface_event_renders_visible_output,
+    TokenUsage, ToolCallRecord, UserInputProvenance, UserInputTransform, append_skill_blocks,
+    collect_skill_mentions, plugin_surface_event_renders_visible_output,
 };
 use lash_tui::{Line, Rect};
 use lash_ui::UiExtensions;
@@ -143,22 +143,22 @@ fn annotate_large_paste_placeholders(text: &str, large_pastes: &[LargePaste]) ->
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedTurn {
     pub draft_id: String,
-    pub raw_text: String,
     pub display_text: String,
     pub effective_text: String,
     pub images: Vec<PendingImage>,
     pub large_pastes: Vec<LargePaste>,
-    pub transform_labels: Vec<String>,
+    pub input_provenance: UserInputProvenance,
 }
 
 impl PreparedTurn {
     #[cfg(test)]
     pub fn new(text: String, images: Vec<Vec<u8>>) -> Self {
+        let display_text = text.clone();
+        let effective_text = text.clone();
         Self {
             draft_id: uuid::Uuid::new_v4().to_string(),
-            raw_text: text.clone(),
-            display_text: text.clone(),
-            effective_text: text,
+            display_text: display_text.clone(),
+            effective_text: effective_text.clone(),
             images: images
                 .into_iter()
                 .enumerate()
@@ -168,7 +168,11 @@ impl PreparedTurn {
                 })
                 .collect(),
             large_pastes: Vec::new(),
-            transform_labels: Vec::new(),
+            input_provenance: UserInputProvenance {
+                display_text,
+                effective_text,
+                transforms: Vec::new(),
+            },
         }
     }
 
@@ -182,27 +186,42 @@ impl PreparedTurn {
         skills: &SkillCatalog,
         large_pastes: Vec<LargePaste>,
     ) -> Self {
-        let mut labels = Vec::new();
+        let mut transforms = Vec::new();
         let mut seen = HashSet::new();
         for name in collect_skill_mentions(&text) {
             if seen.insert(name.clone()) && skills.get(&name).is_some() {
-                labels.push(name);
+                let skill = skills.get(&name).expect("skill checked above");
+                transforms.push(UserInputTransform::SkillBlockAppend {
+                    skill_name: name,
+                    skill_path: skill.path_to_skill_md.display().to_string(),
+                });
             }
         }
         let large_pastes = large_pastes
             .into_iter()
             .filter(|paste| text.contains(&paste.placeholder))
             .collect::<Vec<_>>();
+        for paste in &large_pastes {
+            transforms.push(UserInputTransform::LargePasteExpand {
+                placeholder: paste.placeholder.clone(),
+                expanded_char_count: paste.content.chars().count(),
+                display_replacement: format!("[pasted {} chars]", paste.content.chars().count()),
+            });
+        }
         let expanded_text = expand_large_paste_placeholders(&text, &large_pastes);
         let effective_text = append_skill_blocks(&expanded_text, skills);
+        let display_text = annotate_large_paste_placeholders(&text, &large_pastes);
         Self {
             draft_id: uuid::Uuid::new_v4().to_string(),
-            raw_text: text.clone(),
-            display_text: text,
-            effective_text,
+            display_text: display_text.clone(),
+            effective_text: effective_text.clone(),
             images,
             large_pastes,
-            transform_labels: labels,
+            input_provenance: UserInputProvenance {
+                display_text,
+                effective_text,
+                transforms,
+            },
         }
     }
 
@@ -223,8 +242,7 @@ impl PreparedTurn {
     }
 
     pub fn history_text(&self) -> String {
-        let annotated = annotate_large_paste_placeholders(&self.raw_text, &self.large_pastes);
-        annotated.trim().to_string()
+        self.display_text.trim().to_string()
     }
 }
 
@@ -1320,10 +1338,9 @@ impl App {
     fn take_matching_pending_steer(&mut self, content: &str) -> Option<PreparedTurn> {
         let idx = self.pending_steers.iter().position(|turn| {
             turn.display_text == content
-                || turn.raw_text == content
                 || turn.effective_text == content
-                || (!turn.transform_labels.is_empty() && content.starts_with(&turn.display_text))
-                || (!turn.transform_labels.is_empty() && content.starts_with(&turn.raw_text))
+                || (!turn.input_provenance.transforms.is_empty()
+                    && content.starts_with(&turn.display_text))
         })?;
         self.pending_steers.remove(idx)
     }

@@ -20,29 +20,6 @@ pub(crate) fn projected_blocks_from_state(
     blocks
 }
 
-fn strip_appended_skill_blocks(text: &str) -> String {
-    let trimmed = text.trim_end();
-    let Some(skill_start) = trimmed.find("\n\n<skill>\n") else {
-        return trimmed.to_string();
-    };
-    let suffix = &trimmed[skill_start + 2..];
-    if !suffix.starts_with("<skill>\n") {
-        return trimmed.to_string();
-    }
-    let mut remainder = suffix;
-    while let Some(rest) = remainder.strip_prefix("<skill>\n") {
-        let Some(end_idx) = rest.find("\n</skill>") else {
-            return trimmed.to_string();
-        };
-        remainder = &rest[end_idx + "\n</skill>".len()..];
-        remainder = remainder.trim_start_matches('\n');
-        if remainder.is_empty() {
-            return trimmed[..skill_start].trim_end().to_string();
-        }
-    }
-    trimmed.to_string()
-}
-
 pub(crate) fn project_interrupted_blocks(
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
@@ -249,7 +226,11 @@ fn append_transcript_blocks(
                     append_tool_result_blocks(blocks, part, tool_calls, activity_state);
                 }
             } else {
-                let text = strip_appended_skill_blocks(&rendered_message_text(message));
+                let text = message
+                    .user_input
+                    .as_ref()
+                    .map(|user_input| user_input.display_text.clone())
+                    .unwrap_or_else(|| rendered_message_text(message));
                 if !text.is_empty() {
                     blocks.push(DisplayBlock::UserInput(text));
                 }
