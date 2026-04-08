@@ -1,6 +1,9 @@
 [alias]
 xtask = "run -p xtask --"
 
+[build]
+rustc-wrapper = "scripts/rustc-wrapper.sh"
+
 [env]
 TMPDIR = { value = ".tmp", relative = true }
 TMP = { value = ".tmp", relative = true }
