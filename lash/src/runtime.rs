@@ -1172,6 +1172,7 @@ fn plugin_message_to_message(
         id: format!("m{msg_idx}"),
         role: plugin_message.role,
         parts,
+        user_input: None,
         origin: Some(crate::MessageOrigin::Plugin {
             plugin_id: "plugin".to_string(),
         }),
@@ -1581,6 +1582,7 @@ impl LashRuntime {
                     tool_name: None,
                     prune_state: PruneState::Intact,
                 }],
+                user_input: None,
                 origin: None,
             });
         }
@@ -1638,6 +1640,7 @@ impl LashRuntime {
             id: user_id.clone(),
             role: MessageRole::User,
             parts: user_parts,
+            user_input: None,
             origin: None,
         });
 
@@ -3707,6 +3710,7 @@ mod tests {
                 tool_name: None,
                 prune_state: PruneState::Intact,
             }],
+            user_input: None,
             origin: None,
         }
     }
@@ -4564,6 +4568,7 @@ mod tests {
                     },
                 ],
                 images: Vec::new(),
+                user_input: None,
             }])
             .expect("enqueue");
         let transport = MockTransport::new(vec![
@@ -4767,6 +4772,7 @@ mod tests {
                 tool_name: None,
                 prune_state: PruneState::Intact,
             }],
+            user_input: None,
             origin: None,
         });
 
@@ -4889,6 +4895,7 @@ mod tests {
                 tool_name: None,
                 prune_state: PruneState::Intact,
             }],
+            user_input: None,
             origin: None,
         });
         runtime.state.iteration = 3;
@@ -5066,6 +5073,7 @@ mod tests {
                 tool_name: None,
                 prune_state: PruneState::Intact,
             }],
+            user_input: None,
             origin: None,
         });
         let mut assembler = TurnAssembler::default();

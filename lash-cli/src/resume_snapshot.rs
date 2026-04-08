@@ -86,6 +86,7 @@ mod tests {
                 tool_name: None,
                 prune_state: PruneState::Intact,
             }],
+            user_input: None,
             origin: None,
         }
     }
@@ -103,6 +104,7 @@ mod tests {
                 tool_name: Some("read_file".to_string()),
                 prune_state: PruneState::Intact,
             }],
+            user_input: None,
             origin: None,
         }
     }

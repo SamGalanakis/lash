@@ -180,6 +180,15 @@ fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
             tool_name: None,
             prune_state: lash::PruneState::Intact,
         }],
+        user_input: Some(lash::UserInputProvenance {
+            display_text: "Use /wholehog".into(),
+            effective_text: "Use /wholehog\n\n<skill>\n<name>wholehog</name>\nbody\n</skill>"
+                .into(),
+            transforms: vec![lash::UserInputTransform::SkillBlockAppend {
+                skill_name: "wholehog".into(),
+                skill_path: "/tmp/wholehog/SKILL.md".into(),
+            }],
+        }),
         origin: None,
     };
 

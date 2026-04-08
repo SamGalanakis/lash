@@ -24,6 +24,41 @@ pub(crate) enum QueuedTurnEditBinding {
     ShiftLeft,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CopyBinding {
+    CtrlC,
+    CtrlShiftC,
+    CtrlY,
+}
+
+impl CopyBinding {
+    pub(crate) fn display(self) -> &'static str {
+        match self {
+            Self::CtrlC => "Ctrl+C",
+            Self::CtrlShiftC => "Ctrl+Shift+C",
+            Self::CtrlY => "Ctrl+Y",
+        }
+    }
+
+    pub(crate) fn matches(self, key: KeyEvent) -> bool {
+        match self {
+            Self::CtrlC => {
+                key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'c'))
+            }
+            Self::CtrlShiftC => {
+                key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.modifiers.contains(KeyModifiers::SHIFT)
+                    && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'c'))
+            }
+            Self::CtrlY => {
+                key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'y'))
+            }
+        }
+    }
+}
+
 impl QueuedTurnEditBinding {
     pub(crate) fn display(self) -> &'static str {
         match self {
@@ -73,6 +108,22 @@ pub(crate) fn queued_turn_edit_binding() -> QueuedTurnEditBinding {
     )
 }
 
+pub(crate) fn copy_binding() -> CopyBinding {
+    copy_binding_from_env(std::env::var("LASH_COPY_BINDING").ok().as_deref())
+}
+
+pub(crate) fn copy_binding_from_env(value: Option<&str>) -> CopyBinding {
+    match value
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("ctrl-shift-c") | Some("ctrl_shift_c") => CopyBinding::CtrlShiftC,
+        Some("ctrl-y") | Some("ctrl_y") => CopyBinding::CtrlY,
+        Some("ctrl-c") | Some("ctrl_c") | None | Some("") => CopyBinding::CtrlC,
+        Some(_) => CopyBinding::CtrlC,
+    }
+}
+
 pub(crate) fn controls_text(ui_extensions: &UiExtensions) -> String {
     let mut lines = vec!["Controls:".to_string()];
     lines.extend(render_shortcut_lines(ui_extensions, true));
@@ -111,7 +162,10 @@ fn render_shortcut_lines(ui_extensions: &UiExtensions, spaced_history_arrows: bo
         "  Shift+Enter        Insert newline".to_string(),
         "  Ctrl+V             Paste image as inline [Image #n]".to_string(),
         "  Ctrl+Shift+V       Paste text only".to_string(),
-        "  Ctrl+Shift+C / Y   Copy selection or last response".to_string(),
+        format!(
+            "  {:<18} Copy selection or last response",
+            copy_binding().display()
+        ),
         "  Ctrl+O             Cycle tool expansion (ghost ↔ compact)".to_string(),
         "  Alt+O              Full expansion (code + stdout)".to_string(),
         history_arrows.to_string(),

@@ -111,6 +111,7 @@ fn append_turn_input_message(messages: &mut Vec<Message>, turn_input: &TurnInput
         id: user_id,
         role: MessageRole::User,
         parts: user_parts,
+        user_input: None,
         origin: None,
     });
 }
@@ -201,6 +202,7 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
         content: turn.effective_text.clone(),
         parts,
         images: Vec::new(),
+        user_input: Some(turn.input_provenance.clone()),
     }
 }
 
@@ -579,9 +581,26 @@ pub(super) fn copy_selected_text_or_last_response(app: &App, terminal_size: Opti
             None
         }
     });
-    if let Some(text) = selected_text.or(last_text)
-        && let Ok(mut clipboard) = arboard::Clipboard::new()
-    {
-        let _ = clipboard.set_text(text);
+    tracing::debug!(
+        selection_visible = app.selection.visible,
+        selection_active = app.selection.active,
+        selected_chars = selected_text.as_ref().map(|text| text.chars().count()),
+        fallback_chars = last_text.as_ref().map(|text| text.chars().count()),
+        has_terminal_size = terminal_size.is_some(),
+        "copy path invoked"
+    );
+    if let Some(text) = selected_text.or(last_text) {
+        match arboard::Clipboard::new() {
+            Ok(mut clipboard) => match clipboard.set_text(text.clone()) {
+                Ok(()) => tracing::debug!(
+                    copied_chars = text.chars().count(),
+                    "clipboard write succeeded"
+                ),
+                Err(err) => tracing::warn!(error = %err, "clipboard write failed"),
+            },
+            Err(err) => tracing::warn!(error = %err, "clipboard unavailable for copy"),
+        }
+    } else {
+        tracing::debug!("copy path had no selected or fallback text");
     }
 }

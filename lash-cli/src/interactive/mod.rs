@@ -35,13 +35,13 @@ use crate::ui_trace::{
 use crate::update;
 use crate::{Args, scratch_tui, setup};
 use crate::{
-    apply_ui_host_effects, controls_text, ensure_supported_execution_mode, execution_mode_label,
-    execution_mode_usage, hash12, help_text, info_text, latest_user_prompt_hash,
-    normalize_prepared_turn_for_dispatch, parse_execution_mode, parse_model_selection,
-    persist_live_runtime_snapshot, persist_root_session_state, push_system_message,
-    queued_turn_edit_binding, resolve_model_selection, resolve_model_variant, shell_escape_command,
-    sync_ui_extensions, turn_has_visible_output, validate_model_selection, variant_lines,
-    version_text,
+    apply_ui_host_effects, controls_text, copy_binding, ensure_supported_execution_mode,
+    execution_mode_label, execution_mode_usage, hash12, help_text, info_text,
+    latest_user_prompt_hash, normalize_prepared_turn_for_dispatch, parse_execution_mode,
+    parse_model_selection, persist_live_runtime_snapshot, persist_root_session_state,
+    push_system_message, queued_turn_edit_binding, resolve_model_selection, resolve_model_variant,
+    shell_escape_command, sync_ui_extensions, turn_has_visible_output, validate_model_selection,
+    variant_lines, version_text,
 };
 
 use self::commands::{
@@ -134,15 +134,17 @@ fn record_queue_turn(ui_trace: &mut Option<UiTraceRecorder>, turn: &PreparedTurn
 }
 
 fn is_copy_shortcut(key: crossterm::event::KeyEvent) -> bool {
-    if key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'y'))
-    {
+    copy_binding().matches(key)
+}
+
+fn should_preserve_selection_for_key(key: crossterm::event::KeyEvent) -> bool {
+    if is_copy_shortcut(key) {
         return true;
     }
 
-    key.modifiers.contains(KeyModifiers::CONTROL)
-        && key.modifiers.contains(KeyModifiers::SHIFT)
-        && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'c'))
+    key.modifiers.intersects(
+        KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+    )
 }
 
 fn record_queue_pending_steer(ui_trace: &mut Option<UiTraceRecorder>, turn: &PreparedTurn) {
@@ -854,15 +856,39 @@ pub(crate) async fn run_app(
                 }
                 app.dirty = true;
                 let copy_shortcut = is_copy_shortcut(key);
+                tracing::debug!(
+                    code = ?key.code,
+                    modifiers = ?key.modifiers,
+                    kind = ?key.kind,
+                    state = ?key.state,
+                    selection_visible = app.selection.visible,
+                    selection_active = app.selection.active,
+                    copy_shortcut,
+                    preserve_selection = should_preserve_selection_for_key(key),
+                    "received key event"
+                );
                 // Clear any active text selection on keypress
-                if app.selection.visible && !copy_shortcut {
+                if app.selection.visible && !should_preserve_selection_for_key(key) {
+                    tracing::debug!("clearing selection on plain keypress");
                     let _ = apply_terminal_action(&mut app, &terminal, UiAction::ClearSelection);
                 }
+
+                // Active selection copy should win before generic Ctrl+C handling.
+                if app.selection.visible && copy_shortcut {
+                    tracing::debug!("selection copy took precedence over generic key handling");
+                    copy_selected_text_or_last_response(&app, terminal.size().ok());
+                    continue;
+                }
+
                 // CTRL+C: dismiss prompt if active, else quit
                 if !key.modifiers.contains(KeyModifiers::SHIFT)
                     && key.modifiers.contains(KeyModifiers::CONTROL)
                     && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'c'))
                 {
+                    tracing::debug!(
+                        has_prompt = app.has_prompt(),
+                        "handling Ctrl+C as dismiss/quit"
+                    );
                     if app.has_prompt() {
                         if let Some(recorder) = ui_trace.as_mut() {
                             recorder.record_prompt_dismiss();
@@ -900,6 +926,7 @@ pub(crate) async fn run_app(
                 // CTRL+Y / CTRL+SHIFT+C: copy current selection when present,
                 // otherwise the last assistant response.
                 if copy_shortcut {
+                    tracing::debug!("copy shortcut matched without active selection precedence");
                     copy_selected_text_or_last_response(&app, terminal.size().ok());
                     continue;
                 }
@@ -1836,6 +1863,11 @@ pub(crate) async fn run_app(
 
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) if in_history => {
+                        tracing::debug!(
+                            row = mouse.row,
+                            column = mouse.column,
+                            "selection started from mouse down"
+                        );
                         let vrow = app.scroll_offset + (mouse.row - ha.y) as usize;
                         app.selection.anchor = (mouse.column, vrow);
                         app.selection.end = (mouse.column, vrow);
@@ -1867,9 +1899,22 @@ pub(crate) async fn run_app(
                         let vrow = app.scroll_offset + (clamped_row - ha.y) as usize;
                         app.selection.end = (col, vrow);
                         app.selection.visible = true;
+                        tracing::debug!(
+                            row = mouse.row,
+                            column = mouse.column,
+                            selection_anchor = ?app.selection.anchor,
+                            selection_end = ?app.selection.end,
+                            "selection updated from mouse drag"
+                        );
                         app.dirty = true;
                     }
                     MouseEventKind::Up(MouseButton::Left) if app.selection.active => {
+                        tracing::debug!(
+                            selection_anchor = ?app.selection.anchor,
+                            selection_end = ?app.selection.end,
+                            selection_visible = app.selection.visible,
+                            "selection finished on mouse up"
+                        );
                         app.selection.active = false;
                     }
                     MouseEventKind::ScrollUp => {

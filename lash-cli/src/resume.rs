@@ -24,6 +24,7 @@ fn push_history_system_message(history: &mut Vec<Message>, content: String) {
             tool_name: None,
             prune_state: PruneState::Intact,
         }],
+        user_input: None,
         origin: None,
     });
 }
@@ -743,6 +744,7 @@ mod tests {
                 tool_name: None,
                 prune_state: PruneState::Intact,
             }],
+            user_input: None,
             origin: None,
         }];
         crate::resume_snapshot::save_live_resume_snapshot(
@@ -793,6 +795,7 @@ mod tests {
                     tool_name: None,
                     prune_state: PruneState::Intact,
                 }],
+                user_input: None,
                 origin: None,
             }],
             crate::app::UiResumeState::default(),
@@ -860,6 +863,7 @@ mod tests {
                 tool_name: None,
                 prune_state: PruneState::Intact,
             }],
+            user_input: None,
             origin: None,
         }];
         let mut runtime = Some(runtime);
@@ -928,6 +932,7 @@ mod tests {
                 tool_name: None,
                 prune_state: PruneState::Intact,
             }],
+            user_input: None,
             origin: None,
         }];
         let config_json = serde_json::json!({

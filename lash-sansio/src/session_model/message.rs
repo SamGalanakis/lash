@@ -1,5 +1,6 @@
 use crate::ExecutionMode;
 use crate::llm::types::{LlmAttachment, LlmMessage, LlmRole};
+use crate::plugin::UserInputProvenance;
 use base64::Engine;
 use std::collections::HashSet;
 
@@ -11,6 +12,8 @@ pub struct Message {
     pub id: String,
     pub role: MessageRole,
     pub parts: Vec<Part>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_input: Option<UserInputProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<MessageOrigin>,
 }
@@ -117,6 +120,20 @@ impl Message {
     pub fn char_count(&self) -> usize {
         self.parts.iter().map(Part::prompt_char_count).sum()
     }
+
+    pub fn user_input_provenance(&self) -> Option<&UserInputProvenance> {
+        self.user_input.as_ref()
+    }
+
+    pub fn display_user_text(&self) -> Option<&str> {
+        self.user_input_provenance()
+            .map(|user_input| user_input.display_text.as_str())
+    }
+
+    pub fn effective_user_text(&self) -> Option<&str> {
+        self.user_input_provenance()
+            .map(|user_input| user_input.effective_text.as_str())
+    }
 }
 
 pub fn data_url_for_bytes(mime: &str, bytes: &[u8]) -> String {
@@ -177,6 +194,11 @@ fn attachment_from_part(part: &Part) -> Option<LlmAttachment> {
 }
 
 fn render_message_for_transcript(msg: &Message, attachments: &mut Vec<LlmAttachment>) -> String {
+    if let Some(display_text) = msg.display_user_text()
+        && matches!(msg.role, MessageRole::User)
+    {
+        return display_text.to_string();
+    }
     let mut out = Vec::new();
     for part in &msg.parts {
         if let Some(attachment) = attachment_from_part(part) {
@@ -521,18 +543,21 @@ mod tests {
                 id: "m0".to_string(),
                 role: MessageRole::User,
                 parts: vec![part(PartKind::Text, "first")],
+                user_input: None,
                 origin: None,
             },
             Message {
                 id: "m1".to_string(),
                 role: MessageRole::Assistant,
                 parts: vec![part(PartKind::Prose, "reply one")],
+                user_input: None,
                 origin: None,
             },
             Message {
                 id: "m2".to_string(),
                 role: MessageRole::User,
                 parts: vec![part(PartKind::Text, "second")],
+                user_input: None,
                 origin: None,
             },
         ];
@@ -546,12 +571,43 @@ mod tests {
     }
 
     #[test]
+    fn display_user_text_prefers_user_input_provenance() {
+        let message = Message {
+            id: "m0".to_string(),
+            role: MessageRole::User,
+            parts: vec![part(
+                PartKind::Text,
+                "Use /wholehog\n\n<skill>\n<name>wholehog</name>\nbody\n</skill>",
+            )],
+            user_input: Some(UserInputProvenance {
+                display_text: "Use /wholehog".to_string(),
+                effective_text: "Use /wholehog\n\n<skill>\n<name>wholehog</name>\nbody\n</skill>"
+                    .to_string(),
+                transforms: vec![crate::plugin::UserInputTransform::SkillBlockAppend {
+                    skill_name: "wholehog".to_string(),
+                    skill_path: "/tmp/wholehog/SKILL.md".to_string(),
+                }],
+            }),
+            origin: None,
+        };
+
+        assert_eq!(message.display_user_text(), Some("Use /wholehog"));
+        assert!(
+            message
+                .effective_user_text()
+                .is_some_and(|text| text.contains("<skill>"))
+        );
+        assert!(message.user_input_provenance().is_some());
+    }
+
+    #[test]
     fn render_prompt_repl_preserves_message_boundaries() {
         let msgs = vec![
             Message {
                 id: "m1".to_string(),
                 role: MessageRole::User,
                 parts: vec![part(PartKind::Text, "first")],
+                user_input: None,
                 origin: None,
             },
             Message {
@@ -561,12 +617,14 @@ mod tests {
                     part(PartKind::Prose, "reply one"),
                     part(PartKind::Code, "x = 1"),
                 ],
+                user_input: None,
                 origin: None,
             },
             Message {
                 id: "m3".to_string(),
                 role: MessageRole::User,
                 parts: vec![part(PartKind::Text, "second")],
+                user_input: None,
                 origin: None,
             },
         ];
@@ -590,12 +648,14 @@ mod tests {
                 id: "m0".to_string(),
                 role: MessageRole::System,
                 parts: vec![part(PartKind::Text, "note")],
+                user_input: None,
                 origin: None,
             },
             Message {
                 id: "m1".to_string(),
                 role: MessageRole::User,
                 parts: vec![part(PartKind::Text, "show this"), image_part(&[1, 2, 3])],
+                user_input: None,
                 origin: None,
             },
             Message {
@@ -610,6 +670,7 @@ mod tests {
                     tool_name: Some("read_file".to_string()),
                     prune_state: PruneState::Intact,
                 }],
+                user_input: None,
                 origin: None,
             },
             Message {
@@ -624,6 +685,7 @@ mod tests {
                     tool_name: Some("read_file".to_string()),
                     prune_state: PruneState::Intact,
                 }],
+                user_input: None,
                 origin: None,
             },
         ];
@@ -655,6 +717,7 @@ mod tests {
                     tool_name: Some("ask".to_string()),
                     prune_state: PruneState::Intact,
                 }],
+                user_input: None,
                 origin: None,
             },
             Message {
@@ -669,6 +732,7 @@ mod tests {
                     tool_name: Some("ask".to_string()),
                     prune_state: PruneState::Intact,
                 }],
+                user_input: None,
                 origin: None,
             },
         ];
@@ -687,6 +751,7 @@ mod tests {
             id: "m0".to_string(),
             role: MessageRole::User,
             parts: vec![image_part(&[9, 8, 7])],
+            user_input: None,
             origin: None,
         }];
 
@@ -703,18 +768,21 @@ mod tests {
                 id: "m0".to_string(),
                 role: MessageRole::User,
                 parts: vec![part(PartKind::Text, "first")],
+                user_input: None,
                 origin: None,
             },
             Message {
                 id: "m1".to_string(),
                 role: MessageRole::Assistant,
                 parts: vec![part(PartKind::Prose, "reply one")],
+                user_input: None,
                 origin: None,
             },
             Message {
                 id: "m2".to_string(),
                 role: MessageRole::User,
                 parts: vec![part(PartKind::Text, "second")],
+                user_input: None,
                 origin: None,
             },
         ];
@@ -733,6 +801,7 @@ mod tests {
                 id: "m0".to_string(),
                 role: MessageRole::User,
                 parts: vec![part(PartKind::Text, "what time is it")],
+                user_input: None,
                 origin: None,
             },
             Message {
@@ -747,6 +816,7 @@ mod tests {
                     tool_name: Some("exec_command".to_string()),
                     prune_state: PruneState::Intact,
                 }],
+                user_input: None,
                 origin: None,
             },
         ];
@@ -763,6 +833,7 @@ mod tests {
             id: "m0".to_string(),
             role: MessageRole::User,
             parts: vec![part(PartKind::Text, "hi")],
+            user_input: None,
             origin: None,
         }];
 
@@ -786,6 +857,7 @@ mod tests {
                     tool_name: Some("read_file".to_string()),
                     prune_state: PruneState::Intact,
                 }],
+                user_input: None,
                 origin: None,
             },
             Message {
@@ -800,6 +872,7 @@ mod tests {
                     tool_name: Some("read_file".to_string()),
                     prune_state: PruneState::Intact,
                 }],
+                user_input: None,
                 origin: None,
             },
         ];
@@ -821,6 +894,7 @@ mod tests {
                 tool_name: Some("read_file".to_string()),
                 prune_state: PruneState::Intact,
             }],
+            user_input: None,
             origin: None,
         }];
 

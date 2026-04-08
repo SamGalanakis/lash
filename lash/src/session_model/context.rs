@@ -773,6 +773,7 @@ fn apply_compaction_summary(messages: &[Message], summary: &str, cut_point: usiz
             tool_name: None,
             prune_state: crate::PruneState::Intact,
         }],
+        user_input: None,
         origin: Some(MessageOrigin::Plugin {
             plugin_id: COMPACTION_PLUGIN_ID.to_string(),
         }),
@@ -807,6 +808,7 @@ mod tests {
                 tool_name: None,
                 prune_state: crate::PruneState::Intact,
             }],
+            user_input: None,
             origin: None,
         }
     }
@@ -828,6 +830,7 @@ mod tests {
                 tool_name: None,
                 prune_state: crate::PruneState::Intact,
             }],
+            user_input: None,
             origin: None,
         }
     }
@@ -1006,6 +1009,7 @@ mod tests {
                     prune_state: crate::PruneState::Intact,
                 })
                 .collect(),
+            user_input: None,
             origin: None,
         });
         messages.push(text_message("u2", MessageRole::User, "recent"));

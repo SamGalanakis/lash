@@ -1,6 +1,28 @@
 use crate::{MessageRole, Part};
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UserInputTransform {
+    SkillBlockAppend {
+        skill_name: String,
+        skill_path: String,
+    },
+    LargePasteExpand {
+        placeholder: String,
+        expanded_char_count: usize,
+        display_replacement: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserInputProvenance {
+    pub display_text: String,
+    pub effective_text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transforms: Vec<UserInputTransform>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PluginMessage {
     pub role: MessageRole,
@@ -9,6 +31,8 @@ pub struct PluginMessage {
     pub parts: Vec<Part>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_input: Option<UserInputProvenance>,
 }
 
 impl PluginMessage {
@@ -18,7 +42,12 @@ impl PluginMessage {
             content: content.into(),
             parts: Vec::new(),
             images: Vec::new(),
+            user_input: None,
         }
+    }
+
+    pub fn user_input_provenance(&self) -> Option<&UserInputProvenance> {
+        self.user_input.as_ref()
     }
 }
 

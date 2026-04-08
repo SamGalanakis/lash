@@ -730,6 +730,7 @@ mod fork_tests {
                 tool_name: None,
                 prune_state: lash::PruneState::Intact,
             }],
+            user_input: None,
             origin: None,
         }];
         let keyspaces = lash::semantic_transcript_keyspaces(&messages, &[]);
@@ -810,6 +811,7 @@ mod fork_tests {
                 tool_name: None,
                 prune_state: lash::PruneState::Intact,
             }],
+            user_input: None,
             origin: None,
         }];
         parent_store.transcript_replace_keyspaces(&lash::semantic_transcript_keyspaces(
@@ -831,6 +833,7 @@ mod fork_tests {
                     tool_name: None,
                     prune_state: lash::PruneState::Intact,
                 }],
+                user_input: None,
                 origin: None,
             },
         ];

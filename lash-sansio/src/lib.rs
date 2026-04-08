@@ -6,7 +6,10 @@ pub mod session_model;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub use plugin::{CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptContribution};
+pub use plugin::{
+    CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptContribution, UserInputProvenance,
+    UserInputTransform,
+};
 pub use sansio::{Effect, EffectId, LlmCallError, Response, TurnMachine, TurnMachineConfig};
 pub use session::ExecResponse;
 pub use session_model::message::MessageOrigin;
