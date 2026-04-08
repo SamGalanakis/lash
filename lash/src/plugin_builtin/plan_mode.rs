@@ -149,7 +149,6 @@ fn read_plan_report(path: &Path) -> Result<PlanReport, String> {
     Ok(PlanReport {
         display_path,
         content: Some(content.clone()),
-        ..Default::default()
     })
 }
 

@@ -16,6 +16,7 @@ pub struct PromptState {
     pub request: PromptRequest,
     pub focus: PromptFocus,
     pub cursor: usize,
+    pub scroll_offset: usize,
     pub selected: BTreeSet<usize>,
     pub reply_text: String,
     pub reply_cursor: usize,
@@ -77,6 +78,14 @@ impl PromptState {
         if self.has_options() {
             self.cursor = (self.cursor + 1).min(self.request.options.len().saturating_sub(1));
         }
+    }
+
+    pub fn scroll_up(&mut self, amount: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+    }
+
+    pub fn scroll_down(&mut self, amount: usize, max_scroll: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max_scroll);
     }
 
     pub fn toggle_current(&mut self) {

@@ -112,9 +112,7 @@ pub(crate) fn wrap_text_ranges_wordwise_prefixed(
             row_width += ch_width;
 
             let is_whitespace = ch.is_whitespace();
-            if is_whitespace {
-                last_break = Some(idx);
-            } else if prev_was_whitespace {
+            if is_whitespace || prev_was_whitespace {
                 last_break = Some(idx);
             }
             prev_was_whitespace = is_whitespace;

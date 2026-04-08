@@ -192,9 +192,22 @@ fn key_chord_from_event(key: crossterm::event::KeyEvent) -> Option<UiKeyChord> {
 
 fn current_ui_action_context(app: &App, terminal: &Terminal) -> UiActionContext {
     let (width, height) = terminal.size().unwrap_or((80, 24));
+    let viewport_height = render::history_viewport_height(app, width, height);
+    let prompt_max_scroll = if let Some(prompt) = app.prompt_state() {
+        let input_area_height = height.saturating_sub(
+            1 + if app.live_turn.is_some() { 1 } else { 0 }
+                + render::queue_preview_lines_snapshot(app, width).len() as u16,
+        );
+        let visible_height = input_area_height as usize;
+        let inner_width = width.saturating_sub(2) as usize;
+        render::prompt_max_scroll(prompt, inner_width.max(1), visible_height)
+    } else {
+        0
+    };
     UiActionContext {
         viewport_width: width as usize,
-        viewport_height: render::history_viewport_height(app, width, height),
+        viewport_height,
+        prompt_max_scroll,
     }
 }
 
@@ -980,6 +993,49 @@ pub(crate) async fn run_app(
                     let vw = width as usize;
                     let half_page = vh / 2;
 
+                    if app.has_prompt() {
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && key.code == KeyCode::Char('u')
+                        {
+                            let _ = apply_terminal_action(
+                                &mut app,
+                                &terminal,
+                                UiAction::PromptScrollUp(half_page),
+                            );
+                            app.dirty = true;
+                            continue;
+                        }
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && key.code == KeyCode::Char('d')
+                        {
+                            let _ = apply_terminal_action(
+                                &mut app,
+                                &terminal,
+                                UiAction::PromptScrollDown(half_page),
+                            );
+                            app.dirty = true;
+                            continue;
+                        }
+                        if key.code == KeyCode::PageUp {
+                            let _ = apply_terminal_action(
+                                &mut app,
+                                &terminal,
+                                UiAction::PromptScrollUp(vh),
+                            );
+                            app.dirty = true;
+                            continue;
+                        }
+                        if key.code == KeyCode::PageDown {
+                            let _ = apply_terminal_action(
+                                &mut app,
+                                &terminal,
+                                UiAction::PromptScrollDown(vh),
+                            );
+                            app.dirty = true;
+                            continue;
+                        }
+                    }
+
                     // Ctrl+U / Ctrl+D: half-page scroll
                     if key.modifiers.contains(KeyModifiers::CONTROL)
                         && key.code == KeyCode::Char('u')
@@ -1007,6 +1063,7 @@ pub(crate) async fn run_app(
                             UiActionContext {
                                 viewport_width: vw,
                                 viewport_height: vh,
+                                prompt_max_scroll: 0,
                             },
                         );
                         app.dirty = true;
@@ -1032,10 +1089,32 @@ pub(crate) async fn run_app(
                             UiActionContext {
                                 viewport_width: vw,
                                 viewport_height: vh,
+                                prompt_max_scroll: 0,
                             },
                         );
                         app.dirty = true;
                         continue;
+                    }
+
+                    if app.has_prompt() && !app.is_prompt_text_entry() {
+                        if key.code == KeyCode::Up {
+                            let _ = apply_terminal_action(
+                                &mut app,
+                                &terminal,
+                                UiAction::PromptScrollUp(1),
+                            );
+                            app.dirty = true;
+                            continue;
+                        }
+                        if key.code == KeyCode::Down {
+                            let _ = apply_terminal_action(
+                                &mut app,
+                                &terminal,
+                                UiAction::PromptScrollDown(1),
+                            );
+                            app.dirty = true;
+                            continue;
+                        }
                     }
                 }
 
@@ -1160,13 +1239,13 @@ pub(crate) async fn run_app(
                                 UiAction::PromptToggleNoteFocus,
                             );
                         }
-                        KeyCode::Up if !editing_text => {
+                        KeyCode::Up if !editing_text && app.prompt_supports_note() => {
                             if let Some(recorder) = ui_trace.as_mut() {
                                 recorder.record_prompt_up();
                             }
                             let _ = apply_terminal_action(&mut app, &terminal, UiAction::PromptUp);
                         }
-                        KeyCode::Down if !editing_text => {
+                        KeyCode::Down if !editing_text && app.prompt_supports_note() => {
                             if let Some(recorder) = ui_trace.as_mut() {
                                 recorder.record_prompt_down();
                             }
@@ -1731,6 +1810,30 @@ pub(crate) async fn run_app(
                     && mouse.column >= ha.x
                     && mouse.column < ha.x + ha.width;
 
+                if app.has_prompt() {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            let _ = apply_terminal_action(
+                                &mut app,
+                                &terminal,
+                                UiAction::PromptScrollUp(3),
+                            );
+                            app.dirty = true;
+                            continue;
+                        }
+                        MouseEventKind::ScrollDown => {
+                            let _ = apply_terminal_action(
+                                &mut app,
+                                &terminal,
+                                UiAction::PromptScrollDown(3),
+                            );
+                            app.dirty = true;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) if in_history => {
                         let vrow = app.scroll_offset + (mouse.row - ha.y) as usize;
@@ -1874,6 +1977,7 @@ pub(crate) async fn run_app(
                         request,
                         focus,
                         cursor: 0,
+                        scroll_offset: 0,
                         selected: Default::default(),
                         reply_text: String::new(),
                         reply_cursor: 0,

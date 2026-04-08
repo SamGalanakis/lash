@@ -238,7 +238,7 @@ pub enum DisplayBlock {
         /// If true, this block is a continuation of a prior code-block group.
         continuation: bool,
     },
-    Activity(ActivityBlock),
+    Activity(Box<ActivityBlock>),
     CodeOutput {
         output: String,
         error: Option<String>,

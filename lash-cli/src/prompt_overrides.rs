@@ -17,7 +17,7 @@ fn parse_target(raw: &str) -> anyhow::Result<(PromptSectionName, Option<String>)
     };
     let section = parse_section(section_raw)?;
     let block = match block_raw {
-        Some(block) if block.is_empty() => {
+        Some("") => {
             return Err(anyhow!(
                 "Expected SECTION[.BLOCK], got `{raw}`. Valid sections: {}",
                 PromptSectionName::names_csv()

@@ -576,13 +576,15 @@ fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
             draw_input_panel(
                 frame,
                 panel,
-                title,
-                &body,
-                label,
-                input,
-                *cursor,
-                error.as_deref(),
-                &help,
+                InputPanelView {
+                    title,
+                    body: &body,
+                    label,
+                    input,
+                    cursor: *cursor,
+                    error: error.as_deref(),
+                    help: &help,
+                },
             );
         }
         SetupStep::CodexDeviceAuth {
@@ -645,29 +647,33 @@ fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
             draw_input_panel(
                 frame,
                 panel,
-                "OpenAI-Compatible",
-                &[
-                    "Enter the API base URL for your endpoint.".to_string(),
-                    "Example: https://api.openai.com/v1".to_string(),
-                ],
-                "Base URL",
-                input,
-                *cursor,
-                None,
-                &[("enter", "save"), ("esc", "back"), ("ctrl+c", "quit")],
+                InputPanelView {
+                    title: "OpenAI-Compatible",
+                    body: &[
+                        "Enter the API base URL for your endpoint.".to_string(),
+                        "Example: https://api.openai.com/v1".to_string(),
+                    ],
+                    label: "Base URL",
+                    input,
+                    cursor: *cursor,
+                    error: None,
+                    help: &[("enter", "save"), ("esc", "back"), ("ctrl+c", "quit")],
+                },
             );
         }
         SetupStep::InputTavily { input, cursor } => {
             draw_input_panel(
                 frame,
                 panel,
-                "Optional Web Search",
-                &["Add a Tavily API key now, or press Esc to skip.".to_string()],
-                "Tavily API key (optional)",
-                input,
-                *cursor,
-                None,
-                &[("enter", "save"), ("esc", "skip"), ("ctrl+c", "quit")],
+                InputPanelView {
+                    title: "Optional Web Search",
+                    body: &["Add a Tavily API key now, or press Esc to skip.".to_string()],
+                    label: "Tavily API key (optional)",
+                    input,
+                    cursor: *cursor,
+                    error: None,
+                    help: &[("enter", "save"), ("esc", "skip"), ("ctrl+c", "quit")],
+                },
             );
         }
         SetupStep::Done => {
@@ -717,22 +723,22 @@ fn draw_panel_title(frame: &mut Frame<'_>, panel: Rect, title: &str) {
     );
 }
 
-fn draw_input_panel(
-    frame: &mut Frame<'_>,
-    panel: Rect,
-    title: &str,
-    body: &[String],
-    label: &str,
-    input: &str,
+struct InputPanelView<'a> {
+    title: &'a str,
+    body: &'a [String],
+    label: &'a str,
+    input: &'a str,
     cursor: usize,
-    error: Option<&str>,
-    help: &[(&str, &str)],
-) {
-    draw_panel_title(frame, panel, title);
+    error: Option<&'a str>,
+    help: &'a [(&'a str, &'a str)],
+}
+
+fn draw_input_panel(frame: &mut Frame<'_>, panel: Rect, view: InputPanelView<'_>) {
+    draw_panel_title(frame, panel, view.title);
     let content = inner_panel(panel);
     let mut y = content.y;
 
-    for line in body {
+    for line in view.body {
         for wrapped in wrap_plain_text(line, content.width as usize) {
             frame.write_text(
                 content.x,
@@ -748,14 +754,14 @@ fn draw_input_panel(
         }
     }
 
-    if !body.is_empty() {
+    if !view.body.is_empty() {
         y += 1;
     }
 
     frame.write_text(
         content.x,
         y,
-        label,
+        view.label,
         Style::default().fg(theme::CHALK),
         content.width,
     );
@@ -768,7 +774,7 @@ fn draw_input_panel(
         Some(Style::default().bg(theme::FORM)),
     );
     let inner_width = field.width.saturating_sub(4) as usize;
-    let visible = visible_slice(input, inner_width, cursor);
+    let visible = visible_slice(view.input, inner_width, view.cursor);
     frame.write_text(
         field.x + 2,
         field.y + 1,
@@ -776,12 +782,15 @@ fn draw_input_panel(
         Style::default().fg(theme::CHALK),
         field.width.saturating_sub(4),
     );
-    let vis_start = visible_start(input, inner_width, cursor);
-    let cursor_char = input[..cursor].chars().count().saturating_sub(vis_start);
+    let vis_start = visible_start(view.input, inner_width, view.cursor);
+    let cursor_char = view.input[..view.cursor]
+        .chars()
+        .count()
+        .saturating_sub(vis_start);
     frame.set_cursor_position((field.x + 2 + cursor_char as u16, field.y + 1));
     y = field.bottom();
 
-    if let Some(error) = error {
+    if let Some(error) = view.error {
         y += 1;
         for wrapped in wrap_plain_text(error, content.width as usize) {
             frame.write_text(
@@ -802,7 +811,7 @@ fn draw_input_panel(
         frame.write_line(
             content.x,
             content.bottom().saturating_sub(1),
-            &help_line(help),
+            &help_line(view.help),
             content.width,
         );
     }

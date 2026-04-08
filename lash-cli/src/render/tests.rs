@@ -1,7 +1,8 @@
 use super::artifact::render_snippet_preview;
 use super::*;
+use crate::app::projected_blocks_from_state;
 use crate::theme;
-use lash::PromptRequest;
+use lash::{Part, PartKind, PromptRequest};
 use serde_json::Value;
 use std::sync::mpsc;
 
@@ -20,7 +21,7 @@ fn exploration_detail_lines_are_indented_under_summary() {
         children: Vec::new(),
         extra: None,
     };
-    let blocks = vec![DisplayBlock::Activity(activity)];
+    let blocks = vec![DisplayBlock::Activity(Box::new(activity))];
     let rendered = render_block(&blocks, 0, 1, 80, 20)
         .into_iter()
         .map(|line| {
@@ -59,6 +60,7 @@ fn prompt_question_wraps_long_path_cleanly() {
         .with_optional_note(),
         focus: crate::overlay::PromptFocus::Options,
         cursor: 0,
+        scroll_offset: 0,
         selected: Default::default(),
         reply_text: String::new(),
         reply_cursor: 0,
@@ -94,6 +96,7 @@ fn prompt_panel_renders_before_question_and_choices() {
         .with_markdown_panel("PLAN", "# Plan\n\n## Steps\n- First\n- Second"),
         focus: crate::overlay::PromptFocus::Options,
         cursor: 0,
+        scroll_offset: 0,
         selected: Default::default(),
         reply_text: String::new(),
         reply_cursor: 0,
@@ -138,6 +141,7 @@ fn prompt_panel_strips_redundant_h1_matching_panel_title() {
             .with_markdown_panel("PLAN", "# Plan\n\n## Steps\n- First"),
         focus: crate::overlay::PromptFocus::Options,
         cursor: 0,
+        scroll_offset: 0,
         selected: Default::default(),
         reply_text: String::new(),
         reply_cursor: 0,
@@ -160,6 +164,36 @@ fn prompt_panel_strips_redundant_h1_matching_panel_title() {
         .collect::<Vec<_>>();
     assert_eq!(panel_labels.len(), 1);
     assert!(!rendered.iter().any(|line| line.trim() == "Plan"));
+}
+
+#[test]
+fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
+    let message = lash::Message {
+        id: "m1".into(),
+        role: lash::MessageRole::User,
+        parts: vec![Part {
+            id: "m1.p1".into(),
+            kind: PartKind::Text,
+            content: "Use /wholehog\n\n<skill>\n<name>wholehog</name>\nbody\n</skill>".into(),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            prune_state: lash::PruneState::Intact,
+        }],
+        origin: None,
+    };
+
+    let blocks =
+        projected_blocks_from_state(&[message], &[], &crate::app::UiResumeState::default());
+
+    assert!(matches!(
+        blocks.first(),
+        Some(DisplayBlock::UserInput(text)) if text == "Use /wholehog"
+    ));
+    assert!(!blocks.iter().any(|block| match block {
+        DisplayBlock::UserInput(text) => text.contains("<skill>") || text.contains("<name>"),
+        _ => false,
+    }));
 }
 
 #[test]
@@ -221,7 +255,7 @@ fn activity_block_renders_snippet_preview_at_default_expand_level() {
         extra: None,
     };
 
-    let blocks = vec![DisplayBlock::Activity(activity)];
+    let blocks = vec![DisplayBlock::Activity(Box::new(activity))];
     let rendered = render_block(&blocks, 0, 1, 80, 24)
         .into_iter()
         .map(|line| {
@@ -265,7 +299,7 @@ fn activity_block_indents_showcase_snippet_preview_under_summary() {
         extra: None,
     };
 
-    let blocks = vec![DisplayBlock::Activity(activity)];
+    let blocks = vec![DisplayBlock::Activity(Box::new(activity))];
     let rendered = render_block(&blocks, 0, 1, 100, 24)
         .into_iter()
         .map(|line| {
@@ -323,7 +357,7 @@ fn user_input_does_not_highlight_non_command_slash_word_in_prose() {
 #[test]
 fn shell_activity_renders_live_output_inline_under_tool() {
     let mut app = App::new("test-model".into(), "test".into());
-    app.blocks = vec![DisplayBlock::Activity(ActivityBlock {
+    app.blocks = vec![DisplayBlock::Activity(Box::new(ActivityBlock {
         kind: ActivityKind::ShellCommand,
         status: ActivityStatus::Completed,
         tool_name: "exec_command".into(),
@@ -335,7 +369,7 @@ fn shell_activity_renders_live_output_inline_under_tool() {
         artifact: None,
         children: Vec::new(),
         extra: None,
-    })];
+    }))];
     let now = std::time::Instant::now();
     app.running = true;
     app.live_turn = Some(crate::app::LiveTurnState {
