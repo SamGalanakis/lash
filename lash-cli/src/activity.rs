@@ -163,6 +163,9 @@ impl ActivityState {
         if name == "update_plan" {
             return Vec::new();
         }
+        if name == "write_stdin" && should_suppress_shell_poll_activity(&args, &result, success) {
+            return Vec::new();
+        }
         vec![self.block_for_single_tool_call(name, args, result, success, duration_ms)]
     }
 
@@ -1359,6 +1362,14 @@ fn shell_result_running(result: &Value) -> bool {
         })
 }
 
+fn should_suppress_shell_poll_activity(args: &Value, result: &Value, success: bool) -> bool {
+    success
+        && tool_arg_str(args, "chars").is_none()
+        && shell_result_running(result)
+        && shell_output_artifact(result).is_none()
+        && shell_result_exit_code(result).is_none()
+}
+
 fn shell_result_exit_code(result: &Value) -> Option<i64> {
     result.get("exit_code").and_then(|value| value.as_i64())
 }
@@ -1976,6 +1987,65 @@ mod tests {
         );
 
         assert_eq!(wrote[0].summary, "sent print(2 + 2) → python3 -q");
+    }
+
+    #[test]
+    fn write_stdin_empty_poll_without_output_is_suppressed() {
+        let mut state = ActivityState::default();
+        state.blocks_for_tool_call(
+            "exec_command",
+            json!({"cmd":"python3 -q"}),
+            json!({
+                "session_id": 7,
+                "output": ""
+            }),
+            true,
+            1,
+        );
+
+        let polled = state.blocks_for_tool_call(
+            "write_stdin",
+            json!({"session_id":7,"chars":"","yield_time_ms":1000}),
+            json!({
+                "session_id": 7,
+                "output": "",
+                "running": true
+            }),
+            true,
+            2,
+        );
+
+        assert!(polled.is_empty());
+    }
+
+    #[test]
+    fn write_stdin_empty_poll_with_output_is_kept() {
+        let mut state = ActivityState::default();
+        state.blocks_for_tool_call(
+            "exec_command",
+            json!({"cmd":"python3 -q"}),
+            json!({
+                "session_id": 7,
+                "output": ""
+            }),
+            true,
+            1,
+        );
+
+        let polled = state.blocks_for_tool_call(
+            "write_stdin",
+            json!({"session_id":7,"chars":"","yield_time_ms":1000}),
+            json!({
+                "session_id": 7,
+                "output": ">>> ",
+                "running": true
+            }),
+            true,
+            2,
+        );
+
+        assert_eq!(polled.len(), 1);
+        assert_eq!(polled[0].summary, "read python3 -q");
     }
 
     #[test]
