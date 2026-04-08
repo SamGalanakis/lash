@@ -188,8 +188,10 @@ fn snippet_preview_renders_line_numbered_code_block() {
 
     assert!(text.iter().any(|line| line.contains("Queue preview")));
     assert!(
-        text.iter()
-            .any(|line| line.contains("File · lash-cli/src/render/mod.rs:12-13 · rs"))
+        !text
+            .iter()
+            .any(|line| line.contains("File · lash-cli/src/render/mod.rs:12-13")),
+        "metadata line should be suppressed when custom title is present"
     );
     assert!(text.iter().any(|line| line.contains("12 │ fn one() {}")));
     assert!(text.iter().any(|line| line.contains("13 │ fn two() {}")));
@@ -280,9 +282,12 @@ fn activity_block_indents_showcase_snippet_preview_under_summary() {
             .iter()
             .any(|line| line.starts_with("    plan-modes blocked tool message"))
     );
-    assert!(rendered.iter().any(|line| {
-        line.starts_with("    File · lash/src/plugin_builtin/plan_mode.rs:780-786 · rs")
-    }));
+    assert!(
+        !rendered.iter().any(|line| {
+            line.starts_with("    File · lash/src/plugin_builtin/plan_mode.rs:780-786")
+        }),
+        "metadata line should be suppressed when custom title is present"
+    );
     assert!(
         rendered
             .iter()
