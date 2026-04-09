@@ -1,4 +1,5 @@
 use super::artifact::render_snippet_preview;
+use super::prompt::prompt_content_lines_snapshot;
 use super::*;
 use crate::activity::ActivityState;
 use crate::app::projected_blocks_from_state;
