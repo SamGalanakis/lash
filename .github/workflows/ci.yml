@@ -109,7 +109,7 @@ jobs:
 
       - name: Disable POSIX rustc wrapper on Windows
         if: runner.os == 'Windows'
-        run: echo "RUSTC_WRAPPER=" >> $GITHUB_ENV
+        run: echo "CARGO_BUILD_RUSTC_WRAPPER=" >> $GITHUB_ENV
 
       - name: Build release binary
         env:
