@@ -102,6 +102,7 @@ impl DelegateTools {
                 TurnInput {
                     items: vec![InputItem::Text { text: user_content }],
                     image_blobs: HashMap::new(),
+                    user_input: None,
                     mode: None,
                 },
             )

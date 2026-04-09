@@ -113,10 +113,18 @@ fn push_wrapped_queue_item(
         } else {
             continuation_prefix
         };
-        lines.push(Line::from(vec![
-            Span::styled(prefix.to_string(), Style::default().fg(theme::ASH)),
-            text_display::sanitize_span(collapsed[start..end].to_string(), style),
-        ]));
+        let mut spans = vec![Span::styled(
+            prefix.to_string(),
+            Style::default().fg(theme::ASH),
+        )];
+        spans.extend(styled_text_with_slash_command(
+            &collapsed,
+            start,
+            end,
+            style,
+            theme::slash_command_slash(),
+        ));
+        lines.push(Line::from(spans));
     }
     if segments_len_exceeds(
         &collapsed,

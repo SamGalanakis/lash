@@ -40,6 +40,10 @@ pub fn user_input() -> Style {
     Style::default().fg(CHALK_MID)
 }
 
+pub fn slash_command_slash() -> Style {
+    Style::default().fg(SODIUM).add_modifier(Modifier::Bold)
+}
+
 pub fn image_marker() -> Style {
     Style::default().fg(SODIUM).add_modifier(Modifier::Bold)
 }
@@ -228,7 +232,7 @@ pub fn turn_status_brand() -> Style {
 }
 
 pub fn turn_status_slash() -> Style {
-    Style::default().fg(SODIUM).add_modifier(Modifier::Bold)
+    slash_command_slash()
 }
 
 pub fn turn_status_state() -> Style {

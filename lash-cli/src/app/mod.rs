@@ -968,8 +968,12 @@ impl App {
                     if let Some(turn) = self.take_matching_pending_steer(&message.content) {
                         self.push_prepared_user_input(&turn);
                     } else {
-                        self.blocks
-                            .push(DisplayBlock::UserInput(message.content.clone()));
+                        let history_text = message
+                            .user_input
+                            .as_ref()
+                            .map(|input| input.display_text.clone())
+                            .unwrap_or_else(|| message.content.clone());
+                        self.blocks.push(DisplayBlock::UserInput(history_text));
                     }
                 }
                 MessageRole::System => {

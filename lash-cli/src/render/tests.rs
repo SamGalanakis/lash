@@ -480,6 +480,66 @@ fn user_input_does_not_highlight_non_command_slash_word_in_prose() {
 }
 
 #[test]
+fn user_input_highlights_slash_in_leading_slash_command() {
+    let blocks = vec![DisplayBlock::UserInput("/help with something".into())];
+
+    let rendered = render_block(&blocks, 0, 1, 80, 20);
+    let line = rendered.first().expect("user input line");
+
+    assert!(
+        line.spans.iter().any(|span| {
+            span.content.contains('/') && span.style == theme::slash_command_slash()
+        })
+    );
+    assert!(
+        line.spans
+            .iter()
+            .any(|span| span.content.contains("help with something")
+                && span.style == theme::user_input())
+    );
+}
+
+#[test]
+fn input_box_highlights_slash_command_slash() {
+    let mut app = App::new("gpt-5.4".into(), "test".into());
+    app.set_input("/model gpt-5.4".into());
+
+    let snapshot = input_render_snapshot(&app, Rect::new(0, 0, 40, 4));
+    let first_line = snapshot.lines.first().expect("input line");
+
+    assert!(
+        first_line.spans.iter().any(|span| {
+            span.content.contains('/') && span.style == theme::slash_command_slash()
+        })
+    );
+}
+
+#[test]
+fn queue_preview_highlights_slash_command_slash() {
+    let mut app = App::new("gpt-5.4".into(), "test".into());
+    let turn = PreparedTurn::prepare("/retry later".into(), Vec::new(), &app.skills);
+    app.queue_turn(turn);
+
+    let rendered = queue_preview_lines_snapshot(&app, 40);
+    let item_line = rendered
+        .iter()
+        .find(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+                .contains("/retry later")
+        })
+        .expect("queue preview line");
+
+    assert!(
+        item_line.spans.iter().any(|span| {
+            span.content.contains('/') && span.style == theme::slash_command_slash()
+        })
+    );
+}
+
+#[test]
 fn shell_activity_renders_live_output_inline_under_tool() {
     let mut app = App::new("test-model".into(), "test".into());
     app.blocks = vec![DisplayBlock::Activity(Box::new(ActivityBlock {

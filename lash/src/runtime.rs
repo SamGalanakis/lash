@@ -54,6 +54,8 @@ pub struct TurnInput {
     pub items: Vec<InputItem>,
     #[serde(default)]
     pub image_blobs: HashMap<String, Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_input: Option<crate::UserInputProvenance>,
     #[serde(default)]
     pub mode: Option<RunMode>,
 }
@@ -1641,7 +1643,7 @@ impl LashRuntime {
             id: user_id.clone(),
             role: MessageRole::User,
             parts: user_parts,
-            user_input: None,
+            user_input: input.user_input.clone(),
             origin: None,
         });
 
@@ -4391,6 +4393,7 @@ mod tests {
                         text: "hello".to_string(),
                     }],
                     image_blobs: HashMap::new(),
+                    user_input: None,
                     mode: None,
                 },
                 CancellationToken::new(),
@@ -4407,6 +4410,64 @@ mod tests {
                 .iter()
                 .any(|part| part.content.contains("plugin preface"))
         }));
+    }
+
+    #[tokio::test]
+    async fn normal_turn_preserves_user_input_provenance_in_state() {
+        let transport = MockTransport::new(vec![MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: "Done".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "Done".to_string(),
+                }],
+                ..LlmResponse::default()
+            }),
+        }]);
+        let mut runtime = runtime_with_plugins(Vec::new(), transport).await;
+
+        let turn = runtime
+            .run_turn_assembled(
+                TurnInput {
+                    items: vec![InputItem::Text {
+                        text: "/yolopush\n\n<skill>\nbody\n</skill>".to_string(),
+                    }],
+                    image_blobs: HashMap::new(),
+                    user_input: Some(crate::UserInputProvenance {
+                        display_text: "/yolopush".to_string(),
+                        effective_text: "/yolopush\n\n<skill>\nbody\n</skill>".to_string(),
+                        transforms: vec![crate::UserInputTransform::SkillBlockAppend {
+                            skill_name: "yolopush".to_string(),
+                            skill_path: "/tmp/yolopush/SKILL.md".to_string(),
+                        }],
+                    }),
+                    mode: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("turn");
+
+        let user_message = turn
+            .state
+            .messages
+            .iter()
+            .find(|message| message.role == MessageRole::User)
+            .expect("user message");
+        assert_eq!(
+            user_message
+                .user_input
+                .as_ref()
+                .map(|input| input.display_text.as_str()),
+            Some("/yolopush")
+        );
+        assert_eq!(
+            user_message
+                .user_input
+                .as_ref()
+                .map(|input| input.effective_text.as_str()),
+            Some("/yolopush\n\n<skill>\nbody\n</skill>")
+        );
     }
 
     #[tokio::test]
@@ -4454,6 +4515,7 @@ mod tests {
                         text: "hello".to_string(),
                     }],
                     image_blobs: HashMap::new(),
+                    user_input: None,
                     mode: None,
                 },
                 CancellationToken::new(),
@@ -4511,6 +4573,7 @@ mod tests {
                         text: "hello".to_string(),
                     }],
                     image_blobs: HashMap::new(),
+                    user_input: None,
                     mode: None,
                 },
                 CancellationToken::new(),
@@ -4603,6 +4666,7 @@ mod tests {
                         text: "hello".to_string(),
                     }],
                     image_blobs: HashMap::new(),
+                    user_input: None,
                     mode: None,
                 },
                 CancellationToken::new(),
@@ -4677,6 +4741,7 @@ mod tests {
                         text: "hello".to_string(),
                     }],
                     image_blobs: HashMap::new(),
+                    user_input: None,
                     mode: None,
                 },
                 CancellationToken::new(),
@@ -4843,6 +4908,7 @@ mod tests {
                         text: "hello".to_string(),
                     }],
                     image_blobs: HashMap::new(),
+                    user_input: None,
                     mode: None,
                 },
             )
@@ -5233,6 +5299,7 @@ mod tests {
                         text: "hi".to_string(),
                     }],
                     image_blobs: HashMap::new(),
+                    user_input: None,
                     mode: None,
                 },
                 &sink,
@@ -5281,6 +5348,7 @@ mod tests {
                         text: "continue".to_string(),
                     }],
                     image_blobs: HashMap::new(),
+                    user_input: None,
                     mode: None,
                 },
                 &sink,
@@ -5345,6 +5413,7 @@ mod tests {
                         text: "run the tool".to_string(),
                     }],
                     image_blobs: HashMap::new(),
+                    user_input: None,
                     mode: None,
                 },
                 CancellationToken::new(),
@@ -5390,6 +5459,7 @@ mod tests {
                         text: "hi".to_string(),
                     }],
                     image_blobs: HashMap::new(),
+                    user_input: None,
                     mode: None,
                 },
                 &sink,
@@ -5490,6 +5560,7 @@ mod tests {
                         text: "hello".to_string(),
                     }],
                     image_blobs: HashMap::new(),
+                    user_input: None,
                     mode: None,
                 },
                 CancellationToken::new(),
@@ -5540,6 +5611,7 @@ mod tests {
                         text: "hello".to_string(),
                     }],
                     image_blobs: HashMap::new(),
+                    user_input: None,
                     mode: None,
                 },
                 CancellationToken::new(),
@@ -5601,6 +5673,7 @@ mod tests {
                         text: "hello".to_string(),
                     }],
                     image_blobs: HashMap::new(),
+                    user_input: None,
                     mode: None,
                 },
                 CancellationToken::new(),
@@ -5662,6 +5735,7 @@ mod tests {
                         text: "hello".to_string(),
                     }],
                     image_blobs: HashMap::new(),
+                    user_input: None,
                     mode: None,
                 },
                 CancellationToken::new(),
@@ -5718,6 +5792,7 @@ mod tests {
                         text: "hello".to_string(),
                     }],
                     image_blobs: HashMap::new(),
+                    user_input: None,
                     mode: None,
                 },
                 CancellationToken::new(),
@@ -6022,6 +6097,7 @@ mod tests {
                         text: "run the tool".to_string(),
                     }],
                     image_blobs: HashMap::new(),
+                    user_input: None,
                     mode: None,
                 },
                 CancellationToken::new(),
@@ -6098,6 +6174,7 @@ mod tests {
                         text: "run the tool".to_string(),
                     }],
                     image_blobs: HashMap::new(),
+                    user_input: None,
                     mode: None,
                 },
                 &sink,
@@ -6174,6 +6251,7 @@ mod tests {
                         text: "where did this go?".to_string(),
                     }],
                     image_blobs: HashMap::new(),
+                    user_input: None,
                     mode: None,
                 },
                 CancellationToken::new(),

@@ -321,6 +321,7 @@ pub(crate) async fn run_autonomous(
                 TurnInput {
                     items,
                     image_blobs,
+                    user_input: None,
                     mode: Some(RunMode::Normal),
                 },
                 &sink,

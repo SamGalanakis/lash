@@ -740,6 +740,7 @@ async fn summarize_compaction_prefix(
             TurnInput {
                 items: vec![InputItem::Text { text: prompt_text }],
                 image_blobs: HashMap::new(),
+                user_input: None,
                 mode: None,
             },
         )

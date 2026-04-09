@@ -423,9 +423,12 @@ fn styled_input_segment(
         let clamped_start = range.start.max(seg_start);
         let clamped_end = range.end.min(seg_end);
         if cursor < clamped_start {
-            spans.push(Span::styled(
-                logical_line[cursor..clamped_start].to_string(),
+            spans.extend(styled_text_with_slash_command(
+                logical_line,
+                cursor,
+                clamped_start,
                 theme::user_input(),
+                theme::slash_command_slash(),
             ));
         }
         spans.push(Span::styled(
@@ -436,9 +439,12 @@ fn styled_input_segment(
     }
 
     if cursor < seg_end {
-        spans.push(Span::styled(
-            logical_line[cursor..seg_end].to_string(),
+        spans.extend(styled_text_with_slash_command(
+            logical_line,
+            cursor,
+            seg_end,
             theme::user_input(),
+            theme::slash_command_slash(),
         ));
     }
 
@@ -449,10 +455,82 @@ fn styled_input_segment(
 }
 
 fn styled_user_input_segment(text: &str, seg_start: usize, seg_end: usize) -> Vec<Span<'static>> {
-    vec![Span::styled(
-        text[seg_start..seg_end].to_string(),
+    styled_text_with_slash_command(
+        text,
+        seg_start,
+        seg_end,
         theme::user_input(),
-    )]
+        theme::slash_command_slash(),
+    )
+}
+
+fn styled_text_with_slash_command(
+    text: &str,
+    seg_start: usize,
+    seg_end: usize,
+    base_style: Style,
+    slash_style: Style,
+) -> Vec<Span<'static>> {
+    if seg_start >= seg_end {
+        return vec![text_display::sanitize_span(String::new(), base_style)];
+    }
+
+    let segment = &text[seg_start..seg_end];
+    let Some((slash_start, slash_end)) = slash_command_range_in_segment(text, seg_start, seg_end)
+    else {
+        return vec![text_display::sanitize_span(segment.to_string(), base_style)];
+    };
+
+    let mut spans = Vec::new();
+    if slash_start > seg_start {
+        spans.push(text_display::sanitize_span(
+            text[seg_start..slash_start].to_string(),
+            base_style,
+        ));
+    }
+    spans.push(text_display::sanitize_span(
+        text[slash_start..slash_end].to_string(),
+        slash_style,
+    ));
+    if slash_end < seg_end {
+        spans.push(text_display::sanitize_span(
+            text[slash_end..seg_end].to_string(),
+            base_style,
+        ));
+    }
+    if spans.is_empty() {
+        spans.push(text_display::sanitize_span(String::new(), base_style));
+    }
+    spans
+}
+
+fn slash_command_range_in_segment(
+    text: &str,
+    seg_start: usize,
+    seg_end: usize,
+) -> Option<(usize, usize)> {
+    let (slash_start, slash_end) = slash_command_slash_range(text)?;
+    if slash_end <= seg_start {
+        return None;
+    }
+    let clamped_start = slash_start.max(seg_start);
+    let clamped_end = slash_end.min(seg_end);
+    (clamped_start < clamped_end).then_some((clamped_start, clamped_end))
+}
+
+fn slash_command_slash_range(text: &str) -> Option<(usize, usize)> {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+    let slash_start = text.len() - trimmed.len();
+    let command_len = trimmed[1..]
+        .find(char::is_whitespace)
+        .unwrap_or(trimmed[1..].len());
+    if command_len == 0 {
+        return None;
+    }
+    Some((slash_start, slash_start + 1))
 }
 
 fn build_code_fold_summary(blocks: &[DisplayBlock], idx: usize) -> String {

@@ -437,7 +437,7 @@ pub(crate) async fn run_app(
                 let prepared = PreparedTurn::prepare(prompt.to_string(), Vec::new(), &app.skills);
                 let (items, image_blobs) =
                     build_items_from_editor_input(&prepared.effective_text, Vec::new());
-                let turn_input = make_turn_input(&mut app, items, image_blobs);
+                let turn_input = make_turn_input(&prepared, items, image_blobs);
                 let current_dynamic_state = dynamic_tools.export_state();
                 send_user_message(
                     prepared.clone(),
@@ -1502,7 +1502,7 @@ pub(crate) async fn run_app(
                             &queued.effective_text,
                             queued.images.clone(),
                         );
-                        let turn_input = make_turn_input(&mut app, items, image_blobs);
+                        let turn_input = make_turn_input(&queued, items, image_blobs);
                         let current_dynamic_state = dynamic_tools.export_state();
                         send_user_message(
                             queued.clone(),
@@ -1789,7 +1789,7 @@ pub(crate) async fn run_app(
                             &queued.effective_text,
                             queued.images.clone(),
                         );
-                        let turn_input = make_turn_input(&mut app, items, image_blobs);
+                        let turn_input = make_turn_input(&queued, items, image_blobs);
                         let current_dynamic_state = dynamic_tools.export_state();
                         send_user_message(
                             queued.clone(),
