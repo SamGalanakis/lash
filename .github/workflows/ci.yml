@@ -107,14 +107,15 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install ${{ matrix.brew_packages }}
 
-      - name: Disable POSIX rustc wrapper on Windows
-        if: runner.os == 'Windows'
-        run: echo "CARGO_BUILD_RUSTC_WRAPPER=" >> $GITHUB_ENV
-
       - name: Build release binary
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
-        run: cargo build --locked --release -p lash-cli --target ${{ matrix.target }}
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cargo build --locked --release -p lash-cli --target ${{ matrix.target }} --config 'build.rustc-wrapper=""'
+          else
+            cargo build --locked --release -p lash-cli --target ${{ matrix.target }}
+          fi
 
       - name: Package release artifact
         if: matrix.package_asset
