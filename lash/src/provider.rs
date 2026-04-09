@@ -619,7 +619,7 @@ mod tests {
     fn supported_variants_follow_provider_rules() {
         assert_eq!(
             codex().supported_variants("gpt-5.4"),
-            &["minimal", "low", "medium", "high"]
+            &["minimal", "low", "medium", "high", "xhigh"]
         );
         assert_eq!(
             codex().supported_variants("gpt-5.3-codex"),

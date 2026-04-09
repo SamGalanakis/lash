@@ -19,7 +19,7 @@ const OPENROUTER_REASONING_VARIANTS: &[&str] =
 
 fn has_xhigh_suffix(model: &str) -> bool {
     let lower = model.to_ascii_lowercase();
-    lower.contains("5.2") || lower.contains("5.3")
+    lower.contains("5.2") || lower.contains("5.3") || lower.contains("5.4")
 }
 
 fn is_openrouter(provider: &Provider) -> bool {
@@ -186,7 +186,7 @@ mod tests {
     fn codex_variants_follow_model_family() {
         assert_eq!(
             supported_variants(&codex(), "gpt-5.4"),
-            OPENAI_GPT5_VARIANTS
+            OPENAI_GPT5_XHIGH_VARIANTS
         );
         assert_eq!(
             supported_variants(&codex(), "gpt-5.3-codex"),
