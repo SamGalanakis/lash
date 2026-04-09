@@ -152,7 +152,7 @@ pub(super) async fn dispatch_next_queued_turn(
         );
         let (items, image_blobs) =
             build_items_from_editor_input(&queued.effective_text, queued.images.clone());
-        let turn_input = make_turn_input(app, items, image_blobs);
+        let turn_input = make_turn_input(&queued, items, image_blobs);
         let current_dynamic_state = dynamic_tools.export_state();
         send_user_message(
             queued.clone(),

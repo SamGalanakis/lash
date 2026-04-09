@@ -914,6 +914,33 @@ fn injected_messages_remove_matching_pending_steer_without_popping_wrong_one() {
 }
 
 #[test]
+fn injected_messages_fallback_to_user_input_display_text() {
+    let mut app = App::new("test-model".into(), "test".into());
+
+    app.handle_session_event(SessionEvent::InjectedMessagesCommitted {
+        messages: vec![PluginMessage {
+            role: MessageRole::User,
+            content: "/yolopush\n\n<skill>\nbody\n</skill>".into(),
+            parts: Vec::new(),
+            images: Vec::new(),
+            user_input: Some(lash::UserInputProvenance {
+                display_text: "/yolopush".into(),
+                effective_text: "/yolopush\n\n<skill>\nbody\n</skill>".into(),
+                transforms: vec![lash::UserInputTransform::SkillBlockAppend {
+                    skill_name: "yolopush".into(),
+                    skill_path: "/tmp/yolopush/SKILL.md".into(),
+                }],
+            }),
+        }],
+        checkpoint: lash::CheckpointKind::AfterWork,
+    });
+
+    assert!(
+        matches!(app.blocks.last(), Some(DisplayBlock::UserInput(text)) if text == "/yolopush")
+    );
+}
+
+#[test]
 fn queued_injection_stays_out_of_history_until_committed() {
     let mut app = App::new("test-model".into(), "test".into());
     let turn = PreparedTurn::new("follow up now".into(), Vec::new());

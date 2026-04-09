@@ -16,13 +16,14 @@ pub(super) struct RuntimeRunResult {
 }
 
 pub(super) fn make_turn_input(
-    _app: &mut App,
+    turn: &PreparedTurn,
     items: Vec<InputItem>,
     image_blobs: HashMap<String, Vec<u8>>,
 ) -> TurnInput {
     TurnInput {
         items,
         image_blobs,
+        user_input: Some(turn.input_provenance.clone()),
         mode: Some(RunMode::Normal),
     }
 }
@@ -111,7 +112,7 @@ fn append_turn_input_message(messages: &mut Vec<Message>, turn_input: &TurnInput
         id: user_id,
         role: MessageRole::User,
         parts: user_parts,
-        user_input: None,
+        user_input: turn_input.user_input.clone(),
         origin: None,
     });
 }
@@ -311,6 +312,59 @@ pub(super) fn register_builtin_tool(
     };
 
     Ok(def)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lash::{SkillCatalog, UserInputProvenance};
+
+    #[test]
+    fn pending_turn_snapshot_preserves_user_input_provenance() {
+        let turn = PreparedTurn::prepare("/yolopush".into(), Vec::new(), &SkillCatalog::default());
+        let (items, image_blobs) =
+            build_items_from_editor_input(&turn.effective_text, turn.images.clone());
+        let turn_input = make_turn_input(&turn, items, image_blobs);
+        let snapshot = pending_turn_snapshot(&SessionStateEnvelope::default(), &turn_input);
+
+        let user_message = snapshot.messages.last().expect("user message");
+        assert_eq!(
+            user_message
+                .user_input
+                .as_ref()
+                .map(|input| input.display_text.as_str()),
+            Some("/yolopush")
+        );
+    }
+
+    #[test]
+    fn pending_turn_snapshot_keeps_explicit_user_input_provenance() {
+        let turn_input = TurnInput {
+            items: vec![InputItem::Text {
+                text: "/localref\n\n<skill>\nbody\n</skill>".into(),
+            }],
+            image_blobs: HashMap::new(),
+            user_input: Some(UserInputProvenance {
+                display_text: "/localref".into(),
+                effective_text: "/localref\n\n<skill>\nbody\n</skill>".into(),
+                transforms: vec![lash::UserInputTransform::SkillBlockAppend {
+                    skill_name: "localref".into(),
+                    skill_path: "/tmp/localref/SKILL.md".into(),
+                }],
+            }),
+            mode: Some(RunMode::Normal),
+        };
+        let snapshot = pending_turn_snapshot(&SessionStateEnvelope::default(), &turn_input);
+
+        let user_message = snapshot.messages.last().expect("user message");
+        assert_eq!(
+            user_message
+                .user_input
+                .as_ref()
+                .map(|input| input.display_text.as_str()),
+            Some("/localref")
+        );
+    }
 }
 
 pub(super) async fn apply_pending_reconfigure(
