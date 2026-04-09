@@ -1978,6 +1978,12 @@ pub(crate) async fn run_app(
             }
             AppEvent::Tick => {
                 app.on_tick();
+                if app.wait_prompt_timed_out() {
+                    if let Some(recorder) = ui_trace.as_mut() {
+                        recorder.record_prompt_dismiss();
+                    }
+                    let _ = apply_terminal_action(&mut app, &terminal, UiAction::DismissPrompt);
+                }
             }
             AppEvent::Session { stream_id, event } => {
                 if stream_id != active_stream_id {

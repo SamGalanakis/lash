@@ -110,12 +110,7 @@ jobs:
       - name: Build release binary
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
-        run: |
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            cargo build --locked --release -p lash-cli --target ${{ matrix.target }} --config 'build.rustc-wrapper=""'
-          else
-            cargo build --locked --release -p lash-cli --target ${{ matrix.target }}
-          fi
+        run: cargo build --locked --release -p lash-cli --target ${{ matrix.target }}
 
       - name: Package release artifact
         if: matrix.package_asset

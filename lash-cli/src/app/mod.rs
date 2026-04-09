@@ -385,6 +385,8 @@ pub struct App {
     pending_option_prompt_response: Option<String>,
     /// Active overlay/picker/dialog state.
     pub overlay: Option<OverlayState>,
+    /// Deadline for an active wait prompt, when present.
+    pub prompt_wait_deadline: Option<std::time::Instant>,
     /// Whether the terminal window is currently focused.
     pub focused: bool,
     /// Cumulative token usage for the current session.
@@ -527,7 +529,7 @@ impl App {
     }
 
     pub fn on_tick(&mut self) {
-        if self.running {
+        if self.running || self.prompt_wait_deadline.is_some() {
             self.tick += 1;
             self.dirty = true;
         }
@@ -634,6 +636,7 @@ impl App {
             queued_turns: VecDeque::new(),
             pending_option_prompt_response: None,
             overlay: None,
+            prompt_wait_deadline: None,
             focused: true,
             token_usage: TokenUsage::default(),
             context_window: None,

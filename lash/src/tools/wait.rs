@@ -24,10 +24,8 @@ impl WaitTool {
             }
         };
 
-        let request = PromptRequest::freeform(format!(
-            "Paused · waiting {seconds}s. Press Ctrl+J to resume early."
-        ))
-        .with_wait(seconds);
+        let request =
+            PromptRequest::freeform("Pausing briefly before continuing.").with_wait(seconds);
 
         match context.host.prompt_user(request).await {
             Ok(crate::PromptResponse::Text { text }) => {
