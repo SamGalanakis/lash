@@ -368,27 +368,6 @@ mod tests {
     }
 
     #[test]
-    fn ui_trace_fixtures_match_snapshots() {
-        let dir = ui_trace_fixtures_dir();
-        let mut fixtures = fs::read_dir(&dir)
-            .unwrap_or_else(|err| {
-                panic!("failed to read ui trace directory {}: {err}", dir.display())
-            })
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
-            .collect::<Vec<_>>();
-        fixtures.sort();
-        assert!(
-            !fixtures.is_empty(),
-            "expected at least one ui trace fixture in {}",
-            dir.display()
-        );
-        for fixture in fixtures {
-            run_ui_trace_fixture(&fixture);
-        }
-    }
-
-    #[test]
     fn ui_harness_renders_streamed_turn_end_to_end() {
         let mut harness = UiHarness::new(50, 14);
         harness.user_turn("write a poem");

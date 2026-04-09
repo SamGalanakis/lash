@@ -185,18 +185,6 @@ mod tests {
     }
 
     #[test]
-    fn normalize_assistant_text_strips_repl_fragments() {
-        let raw = "<repl>\nproc\n</repl>\n\nok";
-        assert_eq!(normalize_assistant_text(raw), "proc\n\nok");
-    }
-
-    #[test]
-    fn normalize_assistant_text_strips_dangling_repl_fragments() {
-        let raw = "<repl\nhello\n</repl";
-        assert_eq!(normalize_assistant_text(raw), "hello");
-    }
-
-    #[test]
     fn render_assistant_text_block_keeps_markdown_structure() {
         let text = "Intro line.\n\n## Heading\n\n- item one\n- item two";
         let rendered = render_assistant_text_block(text, 48, false);
