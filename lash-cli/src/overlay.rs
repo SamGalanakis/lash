@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
 
-use lash::{PromptRequest, PromptResponse, PromptSelectionMode};
+use lash::{PromptPanel, PromptRequest, PromptResponse, PromptSelectionMode};
 
 use crate::session_log::SessionInfo;
 
@@ -30,10 +31,6 @@ impl PromptState {
 
     pub fn is_freeform(&self) -> bool {
         self.request.is_freeform()
-    }
-
-    pub fn is_wait(&self) -> bool {
-        self.request.is_wait()
     }
 
     pub fn supports_note(&self) -> bool {
@@ -148,11 +145,6 @@ impl PromptState {
     }
 
     pub fn submitted_response(&self) -> PromptResponse {
-        if self.is_wait() {
-            return PromptResponse::Text {
-                text: lash::WAIT_PROMPT_RESUME_EARLY_TOKEN.to_string(),
-            };
-        }
         if self.is_freeform() {
             return PromptResponse::Text {
                 text: self.reply_text.clone(),
@@ -178,11 +170,6 @@ impl PromptState {
     }
 
     pub fn dismissed_response(&self) -> PromptResponse {
-        if self.is_wait() {
-            return PromptResponse::Text {
-                text: lash::WAIT_PROMPT_TIMEOUT_TOKEN.to_string(),
-            };
-        }
         self.request.empty_response()
     }
 
@@ -217,6 +204,60 @@ impl PromptState {
                 };
                 Self::format_note_display(base, note.as_deref())
             }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct WaitState {
+    pub question: String,
+    pub panel: Option<PromptPanel>,
+    pub seconds: u64,
+    deadline: Instant,
+    pub response_tx: std::sync::mpsc::Sender<PromptResponse>,
+}
+
+impl WaitState {
+    pub fn from_request(
+        request: PromptRequest,
+        response_tx: std::sync::mpsc::Sender<PromptResponse>,
+    ) -> Self {
+        let seconds = request
+            .wait
+            .as_ref()
+            .map(|wait| wait.seconds)
+            .expect("wait state requires PromptRequest::wait");
+        let now = Instant::now();
+        Self {
+            question: request.question,
+            panel: request.panel,
+            seconds,
+            deadline: now + Duration::from_secs(seconds),
+            response_tx,
+        }
+    }
+
+    pub fn remaining_seconds(&self) -> u64 {
+        let now = Instant::now();
+        if self.deadline <= now {
+            return 0;
+        }
+        self.deadline.duration_since(now).as_millis().div_ceil(1000) as u64
+    }
+
+    pub fn timed_out(&self) -> bool {
+        self.deadline <= Instant::now()
+    }
+
+    pub fn resume_response(&self) -> PromptResponse {
+        PromptResponse::Text {
+            text: lash::WAIT_PROMPT_RESUME_EARLY_TOKEN.to_string(),
+        }
+    }
+
+    pub fn timeout_response(&self) -> PromptResponse {
+        PromptResponse::Text {
+            text: lash::WAIT_PROMPT_TIMEOUT_TOKEN.to_string(),
         }
     }
 }
@@ -258,4 +299,5 @@ pub enum OverlayState {
     SessionPicker(PickerState<SessionInfo>),
     SkillPicker(PickerState<(String, String)>),
     Prompt(PromptState),
+    Wait(WaitState),
 }

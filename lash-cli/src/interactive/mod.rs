@@ -806,6 +806,10 @@ pub(crate) async fn run_app(
             AppEvent::Terminal(TermEvent::Paste(text)) => {
                 app.dirty = true;
 
+                if app.has_wait() {
+                    continue;
+                }
+
                 if app.has_prompt() && app.is_prompt_text_entry() {
                     if let Some(recorder) = ui_trace.as_mut() {
                         recorder.record_prompt_insert_text(text.clone());
@@ -889,6 +893,10 @@ pub(crate) async fn run_app(
                         has_prompt = app.has_prompt(),
                         "handling Ctrl+C as dismiss/quit"
                     );
+                    if app.has_wait() {
+                        app.skip_wait();
+                        continue;
+                    }
                     if app.has_prompt() {
                         if let Some(recorder) = ui_trace.as_mut() {
                             recorder.record_prompt_dismiss();
@@ -900,14 +908,15 @@ pub(crate) async fn run_app(
                 }
 
                 // ALT+O: reliable full expand toggle across most terminals.
-                if key.modifiers.contains(KeyModifiers::ALT)
+                if !app.has_wait()
+                    && key.modifiers.contains(KeyModifiers::ALT)
                     && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'o'))
                 {
                     app.toggle_full_expand();
                     continue;
                 }
 
-                if queued_turn_edit_binding().matches(key) {
+                if !app.has_wait() && queued_turn_edit_binding().matches(key) {
                     if let Some((turn, _was_pending)) = app.take_last_queued_turn() {
                         app.restore_prepared_turn(turn);
                         app.update_suggestions();
@@ -916,7 +925,8 @@ pub(crate) async fn run_app(
                 }
 
                 // CTRL+O: cycle expand (0↔1)
-                if key.modifiers.contains(KeyModifiers::CONTROL)
+                if !app.has_wait()
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
                     && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'o'))
                 {
                     app.cycle_expand();
@@ -932,7 +942,8 @@ pub(crate) async fn run_app(
                 }
 
                 // CTRL+SHIFT+V: always paste text from clipboard
-                if key.modifiers.contains(KeyModifiers::CONTROL)
+                if !app.has_wait()
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
                     && key.modifiers.contains(KeyModifiers::SHIFT)
                     && key.code == KeyCode::Char('V')
                 {
@@ -946,7 +957,10 @@ pub(crate) async fn run_app(
                 }
 
                 // CTRL+V: paste image from clipboard (no text fallback)
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('v') {
+                if !app.has_wait()
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.code == KeyCode::Char('v')
+                {
                     if let Ok(mut clipboard) = arboard::Clipboard::new()
                         && let Ok(img_data) = clipboard.get_image()
                     {
@@ -985,7 +999,9 @@ pub(crate) async fn run_app(
 
                 // Escape key behavior depends on state
                 if key.code == KeyCode::Esc {
-                    if app.has_prompt() {
+                    if app.has_wait() {
+                        app.skip_wait();
+                    } else if app.has_prompt() {
                         if let Some(recorder) = ui_trace.as_mut() {
                             recorder.record_prompt_dismiss();
                         }
@@ -1016,8 +1032,8 @@ pub(crate) async fn run_app(
                 // ── Always-on scroll keys (work in all states) ──
                 {
                     let (width, height) = terminal.size()?;
-                    let vh = render::history_viewport_height(&app, width, height);
                     let vw = width as usize;
+                    let vh = render::history_viewport_height(&app, width, height);
                     let half_page = vh / 2;
 
                     if app.has_prompt() {
@@ -1143,6 +1159,34 @@ pub(crate) async fn run_app(
                             continue;
                         }
                     }
+
+                    if app.has_wait() {
+                        if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
+                            if let Some(recorder) = ui_trace.as_mut() {
+                                recorder.record_scroll_up(1);
+                            }
+                            let _ =
+                                apply_terminal_action(&mut app, &terminal, UiAction::ScrollUp(1));
+                            app.dirty = true;
+                            continue;
+                        }
+                        if matches!(key.code, KeyCode::Down | KeyCode::Char('j')) {
+                            if let Some(recorder) = ui_trace.as_mut() {
+                                recorder.record_scroll_down(1);
+                            }
+                            let _ = apply_ui_action(
+                                &mut app,
+                                UiAction::ScrollDown(1),
+                                UiActionContext {
+                                    viewport_width: vw,
+                                    viewport_height: vh,
+                                    prompt_max_scroll: 0,
+                                },
+                            );
+                            app.dirty = true;
+                            continue;
+                        }
+                    }
                 }
 
                 // ── Skill picker key handling ──
@@ -1254,18 +1298,6 @@ pub(crate) async fn run_app(
 
                 // ── Prompt (ask dialog) key handling ──
                 if app.has_prompt() {
-                    if app.prompt_state().is_some_and(|prompt| prompt.is_wait()) {
-                        if key.modifiers.contains(KeyModifiers::CONTROL)
-                            && key.code == KeyCode::Char('j')
-                        {
-                            if let Some(recorder) = ui_trace.as_mut() {
-                                recorder.record_submit_prompt();
-                            }
-                            let _ =
-                                apply_terminal_action(&mut app, &terminal, UiAction::SubmitPrompt);
-                        }
-                        continue;
-                    }
                     let editing_text = app.is_prompt_text_entry();
                     match key.code {
                         KeyCode::Tab if app.prompt_supports_note() => {
@@ -1339,6 +1371,15 @@ pub(crate) async fn run_app(
                             );
                         }
                         _ => {}
+                    }
+                    continue;
+                }
+
+                if app.has_wait() {
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('j')
+                    {
+                        app.resume_wait();
                     }
                     continue;
                 }
@@ -1978,11 +2019,8 @@ pub(crate) async fn run_app(
             }
             AppEvent::Tick => {
                 app.on_tick();
-                if app.wait_prompt_timed_out() {
-                    if let Some(recorder) = ui_trace.as_mut() {
-                        recorder.record_prompt_dismiss();
-                    }
-                    let _ = apply_terminal_action(&mut app, &terminal, UiAction::DismissPrompt);
+                if app.wait_timed_out() {
+                    app.timeout_wait();
                 }
             }
             AppEvent::Session { stream_id, event } => {
@@ -2031,23 +2069,25 @@ pub(crate) async fn run_app(
                     if let Some(recorder) = ui_trace.as_mut() {
                         recorder.record_emit_prompt(&request);
                     }
-                    let focus = if request.is_wait() {
-                        crate::overlay::PromptFocus::Options
-                    } else if request.is_freeform() {
-                        crate::overlay::PromptFocus::Text
+                    if request.is_wait() {
+                        app.show_wait(app::WaitState::from_request(request, response_tx));
                     } else {
-                        crate::overlay::PromptFocus::Options
-                    };
-                    app.show_prompt(app::PromptState {
-                        request,
-                        focus,
-                        cursor: 0,
-                        scroll_offset: 0,
-                        selected: Default::default(),
-                        reply_text: String::new(),
-                        reply_cursor: 0,
-                        response_tx,
-                    });
+                        let focus = if request.is_freeform() {
+                            crate::overlay::PromptFocus::Text
+                        } else {
+                            crate::overlay::PromptFocus::Options
+                        };
+                        app.show_prompt(app::PromptState {
+                            request,
+                            focus,
+                            cursor: 0,
+                            scroll_offset: 0,
+                            selected: Default::default(),
+                            reply_text: String::new(),
+                            reply_cursor: 0,
+                            response_tx,
+                        });
+                    }
                 } else {
                     if let Some(recorder) = ui_trace.as_mut() {
                         recorder.record_session_event(&event);

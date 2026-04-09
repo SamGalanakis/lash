@@ -90,22 +90,16 @@ fn prompt_question_wraps_long_path_cleanly() {
 }
 
 #[test]
-fn wait_prompt_help_uses_ctrl_j_resume_binding() {
+fn wait_overlay_help_uses_ctrl_j_resume_binding() {
     let (response_tx, _response_rx) = mpsc::channel();
-    let prompt = PromptState {
-        request: PromptRequest::freeform("Pausing briefly before continuing.")
+    let wait = crate::overlay::WaitState::from_request(
+        PromptRequest::freeform("Pausing briefly before continuing.")
             .with_wait(5)
             .with_markdown_panel("PAUSED", "Waiting for a retry window."),
-        focus: crate::overlay::PromptFocus::Options,
-        cursor: 0,
-        scroll_offset: 0,
-        selected: Default::default(),
-        reply_text: String::new(),
-        reply_cursor: 0,
         response_tx,
-    };
+    );
 
-    let rendered = prompt_content_lines_snapshot(&prompt, 48)
+    let rendered = wait_content_lines_snapshot(&wait, 48)
         .into_iter()
         .map(|line| {
             line.spans
