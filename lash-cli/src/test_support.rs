@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -8,7 +7,7 @@ use lash_tui::ScreenSnapshot;
 use lash_ui::UiExtensions;
 use tokio::sync::Mutex;
 
-use crate::app::{App, PreparedTurn, PromptState};
+use crate::app::{App, PreparedTurn, PromptState, WaitState};
 use crate::overlay::PromptFocus;
 use crate::ui_action::{UiAction, UiActionContext, apply_ui_action};
 use crate::ui_trace::{
@@ -133,21 +132,26 @@ impl UiHarness {
                         response_tx: response_tx.clone(),
                     });
                 apply_ui_host_effects(&mut self.app, effects);
-                let focus = if request.is_freeform() {
-                    PromptFocus::Text
+                if request.is_wait() {
+                    self.app
+                        .show_wait(WaitState::from_request(request, response_tx));
                 } else {
-                    PromptFocus::Options
-                };
-                self.app.show_prompt(PromptState {
-                    request,
-                    focus,
-                    cursor: 0,
-                    scroll_offset: 0,
-                    selected: Default::default(),
-                    reply_text: String::new(),
-                    reply_cursor: 0,
-                    response_tx,
-                });
+                    let focus = if request.is_freeform() {
+                        PromptFocus::Text
+                    } else {
+                        PromptFocus::Options
+                    };
+                    self.app.show_prompt(PromptState {
+                        request,
+                        focus,
+                        cursor: 0,
+                        scroll_offset: 0,
+                        selected: Default::default(),
+                        reply_text: String::new(),
+                        reply_cursor: 0,
+                        response_tx,
+                    });
+                }
             }
             other => {
                 let effects = self.ui_extensions.effects_for_session_event(&other);
@@ -321,10 +325,19 @@ fn run_ui_trace_fixture(path: &Path) {
                 apply_ui_action(&mut harness.app, UiAction::PromptBackspace, action_context);
             }
             UiTraceOp::PromptDismiss => {
-                apply_ui_action(&mut harness.app, UiAction::DismissPrompt, action_context);
+                if harness.app.has_wait() {
+                    harness.app.skip_wait();
+                } else {
+                    apply_ui_action(&mut harness.app, UiAction::DismissPrompt, action_context);
+                }
             }
             UiTraceOp::SubmitPrompt => {
-                let _ = apply_ui_action(&mut harness.app, UiAction::SubmitPrompt, action_context);
+                if harness.app.has_wait() {
+                    harness.app.resume_wait();
+                } else {
+                    let _ =
+                        apply_ui_action(&mut harness.app, UiAction::SubmitPrompt, action_context);
+                }
             }
             UiTraceOp::ScrollUp { amount } => {
                 apply_ui_action(&mut harness.app, UiAction::ScrollUp(amount), action_context);

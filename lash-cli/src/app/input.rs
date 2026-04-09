@@ -188,6 +188,10 @@ impl App {
         matches!(self.overlay, Some(OverlayState::Prompt(_)))
     }
 
+    pub fn has_wait(&self) -> bool {
+        matches!(self.overlay, Some(OverlayState::Wait(_)))
+    }
+
     /// Whether the prompt is currently in text-entry mode.
     pub fn is_prompt_text_entry(&self) -> bool {
         match &self.overlay {
@@ -261,41 +265,43 @@ impl App {
     }
 
     pub fn take_prompt_response(&mut self) -> Option<String> {
-        if let Some(OverlayState::Prompt(p)) = self.overlay.take() {
-            self.prompt_wait_deadline = None;
-            let response = p.submitted_response();
-            let display = p.display_response(&response);
-            let _ = p.response_tx.send(response);
-            self.invalidate_height_cache();
-            self.scroll_to_bottom();
-            self.dirty = true;
-            if p.is_wait() {
-                return Some(display);
-            }
-            if !display.trim().is_empty() {
-                if p.request.is_freeform() {
-                    self.push_prompt_response_user_block(display.clone());
-                } else {
-                    self.pending_option_prompt_response = Some(display.clone());
+        match self.overlay.take() {
+            Some(OverlayState::Prompt(p)) => {
+                let response = p.submitted_response();
+                let display = p.display_response(&response);
+                let _ = p.response_tx.send(response);
+                self.invalidate_height_cache();
+                self.scroll_to_bottom();
+                self.dirty = true;
+                if !display.trim().is_empty() {
+                    if p.request.is_freeform() {
+                        self.push_prompt_response_user_block(display.clone());
+                    } else {
+                        self.pending_option_prompt_response = Some(display.clone());
+                    }
+                    return Some(display);
                 }
-                return Some(display);
+            }
+            other => {
+                self.overlay = other;
             }
         }
         None
     }
 
     pub fn dismiss_prompt(&mut self) {
-        if let Some(OverlayState::Prompt(p)) = self.overlay.take() {
-            self.prompt_wait_deadline = None;
-            let _ = p.response_tx.send(p.dismissed_response());
-            self.invalidate_height_cache();
-            self.scroll_to_bottom();
-            self.dirty = true;
+        match self.overlay.take() {
+            Some(OverlayState::Prompt(p)) => {
+                let _ = p.response_tx.send(p.dismissed_response());
+                self.invalidate_height_cache();
+                self.scroll_to_bottom();
+                self.dirty = true;
+            }
+            other => self.overlay = other,
         }
     }
 
     pub fn show_session_picker(&mut self, items: Vec<crate::session_log::SessionInfo>) {
-        self.prompt_wait_deadline = None;
         self.overlay = Some(OverlayState::SessionPicker(PickerState::new(items)));
     }
 
@@ -307,7 +313,6 @@ impl App {
     }
 
     pub fn show_skill_picker(&mut self, items: Vec<(String, String)>) {
-        self.prompt_wait_deadline = None;
         self.overlay = Some(OverlayState::SkillPicker(PickerState::new(items)));
     }
 
@@ -319,11 +324,12 @@ impl App {
     }
 
     pub fn show_prompt(&mut self, prompt: PromptState) {
-        self.prompt_wait_deadline =
-            prompt.request.wait.as_ref().map(|wait| {
-                std::time::Instant::now() + std::time::Duration::from_secs(wait.seconds)
-            });
         self.overlay = Some(OverlayState::Prompt(prompt));
+    }
+
+    pub fn show_wait(&mut self, wait: WaitState) {
+        self.overlay = Some(OverlayState::Wait(wait));
+        self.dirty = true;
     }
 
     pub fn prompt_state(&self) -> Option<&PromptState> {
@@ -333,28 +339,43 @@ impl App {
         }
     }
 
-    pub fn has_wait_prompt(&self) -> bool {
-        self.prompt_state().is_some_and(PromptState::is_wait)
-    }
-
-    pub fn wait_prompt_remaining_seconds(&self) -> Option<u64> {
-        let configured = self.prompt_state()?.request.wait.as_ref()?.seconds;
-        let Some(deadline) = self.prompt_wait_deadline else {
-            return Some(configured);
-        };
-        let now = std::time::Instant::now();
-        if deadline <= now {
-            return Some(0);
+    pub fn wait_state(&self) -> Option<&WaitState> {
+        match &self.overlay {
+            Some(OverlayState::Wait(wait)) => Some(wait),
+            _ => None,
         }
-        let remaining_ms = deadline.duration_since(now).as_millis();
-        Some(remaining_ms.div_ceil(1000) as u64)
     }
 
-    pub fn wait_prompt_timed_out(&self) -> bool {
-        self.has_wait_prompt()
-            && self
-                .prompt_wait_deadline
-                .is_some_and(|deadline| deadline <= std::time::Instant::now())
+    pub fn wait_remaining_seconds(&self) -> Option<u64> {
+        self.wait_state().map(WaitState::remaining_seconds)
+    }
+
+    pub fn wait_timed_out(&self) -> bool {
+        self.wait_state().is_some_and(WaitState::timed_out)
+    }
+
+    pub fn resume_wait(&mut self) {
+        match self.overlay.take() {
+            Some(OverlayState::Wait(wait)) => {
+                let _ = wait.response_tx.send(wait.resume_response());
+                self.dirty = true;
+            }
+            other => self.overlay = other,
+        }
+    }
+
+    pub fn skip_wait(&mut self) {
+        self.resume_wait();
+    }
+
+    pub fn timeout_wait(&mut self) {
+        match self.overlay.take() {
+            Some(OverlayState::Wait(wait)) => {
+                let _ = wait.response_tx.send(wait.timeout_response());
+                self.dirty = true;
+            }
+            other => self.overlay = other,
+        }
     }
 
     pub fn input(&self) -> &str {

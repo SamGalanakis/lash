@@ -6,8 +6,7 @@ pub(crate) fn prompt_height(app: &App, frame_width: u16, frame_height: u16) -> u
     };
     let inner_w = prompt_inner_width(frame_width);
     let max_height = frame_height.saturating_sub(1).max(3);
-    let content_h =
-        prompt_content_lines(prompt, inner_w, app.wait_prompt_remaining_seconds()).len() as u16;
+    let content_h = prompt_content_lines(prompt, inner_w).len() as u16;
     content_h.max(1).min(max_height)
 }
 
@@ -15,11 +14,7 @@ pub(crate) fn prompt_content_lines_snapshot(
     prompt: &PromptState,
     inner_w: usize,
 ) -> Vec<Line<'static>> {
-    prompt_content_lines(
-        prompt,
-        inner_w,
-        prompt.request.wait.as_ref().map(|wait| wait.seconds),
-    )
+    prompt_content_lines(prompt, inner_w)
 }
 
 pub(crate) fn prompt_max_scroll(
@@ -27,21 +22,8 @@ pub(crate) fn prompt_max_scroll(
     inner_w: usize,
     visible_height: usize,
 ) -> usize {
-    let total_lines = prompt_content_lines(
-        prompt,
-        inner_w,
-        prompt.request.wait.as_ref().map(|wait| wait.seconds),
-    )
-    .len();
+    let total_lines = prompt_content_lines(prompt, inner_w).len();
     total_lines.saturating_sub(visible_height)
-}
-
-pub(crate) fn prompt_content_lines_for_app(
-    app: &App,
-    prompt: &PromptState,
-    inner_w: usize,
-) -> Vec<Line<'static>> {
-    prompt_content_lines(prompt, inner_w, app.wait_prompt_remaining_seconds())
 }
 
 pub(crate) fn prompt_section_label(text: &str, inner_w: usize) -> Line<'static> {
@@ -94,9 +76,6 @@ fn prompt_option_text(idx: usize, option: &str) -> String {
 }
 
 fn prompt_help_items(prompt: &PromptState) -> Vec<(&'static str, &'static str)> {
-    if prompt.is_wait() {
-        return vec![("ctrl+j", "resume now"), ("esc", "skip wait")];
-    }
     if prompt.has_options() {
         if prompt.supports_note() {
             if prompt.is_text_entry() {
@@ -246,93 +225,7 @@ fn render_prompt_panel_lines(
     lines
 }
 
-fn render_wait_prompt_lines(
-    prompt: &PromptState,
-    inner_w: usize,
-    wait_remaining_seconds: Option<u64>,
-) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-
-    if let Some(panel) = prompt.request.panel.as_ref() {
-        lines.extend(render_prompt_panel_lines(
-            &panel.title,
-            &panel.markdown,
-            inner_w,
-        ));
-    }
-
-    let has_paused_panel = prompt
-        .request
-        .panel
-        .as_ref()
-        .is_some_and(|panel| normalized_panel_heading(&panel.title) == "paused");
-
-    if !lines.is_empty() {
-        lines.push(Line::from(""));
-    }
-    if !has_paused_panel {
-        lines.push(prompt_section_label("PAUSED", inner_w));
-        lines.push(Line::from(""));
-    }
-
-    if !prompt.request.question.trim().is_empty() {
-        push_wrapped_plain_lines(
-            &mut lines,
-            &prompt.request.question,
-            inner_w,
-            Style::default().fg(theme::CHALK_MID),
-        );
-        lines.push(Line::from(""));
-    }
-
-    let remaining = wait_remaining_seconds
-        .or_else(|| prompt.request.wait.as_ref().map(|wait| wait.seconds))
-        .unwrap_or_default();
-    let status = if remaining == 0 {
-        "Resuming…".to_string()
-    } else if remaining == 1 {
-        "Auto-resume in 1s".to_string()
-    } else {
-        format!("Auto-resume in {remaining}s")
-    };
-    lines.push(Line::from(vec![
-        Span::styled(
-            "● ".to_string(),
-            Style::default()
-                .fg(theme::SODIUM)
-                .add_modifier(Modifier::Bold),
-        ),
-        Span::styled(
-            status,
-            Style::default()
-                .fg(theme::CHALK)
-                .add_modifier(Modifier::Bold),
-        ),
-    ]));
-
-    if remaining > 0 {
-        push_wrapped_plain_lines(
-            &mut lines,
-            "The run continues automatically when the timer ends.",
-            inner_w,
-            Style::default().fg(theme::ASH_TEXT),
-        );
-    }
-
-    lines.push(Line::from(""));
-    lines.push(prompt_help_line(prompt));
-    lines
-}
-
-fn prompt_content_lines(
-    prompt: &PromptState,
-    inner_w: usize,
-    wait_remaining_seconds: Option<u64>,
-) -> Vec<Line<'static>> {
-    if prompt.is_wait() {
-        return render_wait_prompt_lines(prompt, inner_w, wait_remaining_seconds);
-    }
-
+fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'static>> {
     let has_options = prompt.has_options();
     let show_text_input = prompt.shows_text_input();
     let mut lines = Vec::new();
@@ -354,20 +247,6 @@ fn prompt_content_lines(
             &prompt.request.question,
             inner_w,
             Style::default().fg(theme::CHALK),
-        );
-    }
-    if let Some(wait) = prompt.request.wait.as_ref() {
-        if !lines.is_empty() {
-            lines.push(Line::from(""));
-        }
-        push_wrapped_plain_lines(
-            &mut lines,
-            &format!(
-                "Waiting {}s. The run will resume automatically.",
-                wait.seconds
-            ),
-            inner_w,
-            Style::default().fg(theme::ASH_TEXT),
         );
     }
     if !lines.is_empty() && (has_options || show_text_input) {

@@ -38,7 +38,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if queue_height > 0 {
         draw_lines_region(frame, queue_area, &queue_lines, bg(theme::FORM_RAISED));
     }
-    if app.has_prompt() {
+    if app.has_wait() {
+        draw_wait(frame, app, input_area);
+    } else if app.has_prompt() {
         draw_prompt(frame, app, input_area);
     } else {
         draw_input(frame, app, input_area);
@@ -189,7 +191,7 @@ fn draw_turn_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.fill(area, ' ', bg(theme::FORM_RAISED));
     let label = if turn.status_text == "error" {
         "Error"
-    } else if app.has_wait_prompt() {
+    } else if app.has_wait() {
         "Waiting"
     } else if app.has_prompt() {
         "Paused"
@@ -200,8 +202,8 @@ fn draw_turn_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
     } else {
         "Working"
     };
-    let elapsed = if app.has_wait_prompt() {
-        match app.wait_prompt_remaining_seconds() {
+    let elapsed = if app.has_wait() {
+        match app.wait_remaining_seconds() {
             Some(0) => "resuming".to_string(),
             Some(1) => "1s left".to_string(),
             Some(seconds) => format!("{seconds}s left"),
@@ -410,7 +412,7 @@ fn draw_prompt(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let inner_width = area
         .width
         .saturating_sub(PROMPT_HORIZONTAL_PADDING.saturating_mul(2)) as usize;
-    let lines = render::prompt_content_lines_for_app(app, prompt, inner_width.max(1));
+    let lines = render::prompt_content_lines_snapshot(prompt, inner_width.max(1));
     let visible = area.height as usize;
     let max_scroll = lines.len().saturating_sub(visible);
     let scroll = if prompt.is_text_entry() {
@@ -419,6 +421,30 @@ fn draw_prompt(frame: &mut Frame<'_>, app: &App, area: Rect) {
         prompt.scroll_offset.min(max_scroll)
     };
     for (idx, line) in lines.iter().skip(scroll).take(visible).enumerate() {
+        frame.write_line(
+            area.x + PROMPT_HORIZONTAL_PADDING,
+            area.y + idx as u16,
+            line,
+            area.width
+                .saturating_sub(PROMPT_HORIZONTAL_PADDING.saturating_mul(2)),
+        );
+    }
+}
+
+fn draw_wait(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let Some(wait) = app.wait_state() else {
+        return;
+    };
+    if area.width < 2 || area.height < 1 {
+        return;
+    }
+    frame.fill(area, ' ', bg(theme::FORM_DEEP));
+    let inner_width = area
+        .width
+        .saturating_sub(PROMPT_HORIZONTAL_PADDING.saturating_mul(2)) as usize;
+    let lines = render::wait_content_lines_for_app(wait, inner_width.max(1));
+    let visible = area.height as usize;
+    for (idx, line) in lines.iter().take(visible).enumerate() {
         frame.write_line(
             area.x + PROMPT_HORIZONTAL_PADDING,
             area.y + idx as u16,
@@ -639,7 +665,7 @@ mod tests {
     use lash::{PromptRequest, PromptUsage};
     use std::sync::mpsc;
 
-    use crate::overlay::{PromptFocus, PromptState};
+    use crate::overlay::{PromptFocus, PromptState, WaitState};
 
     #[test]
     fn animated_lash_word_cycles_slash_through_wordmark() {
@@ -746,20 +772,14 @@ mod tests {
     }
 
     #[test]
-    fn wait_prompt_status_strip_shows_waiting_and_remaining_time() {
+    fn wait_status_strip_shows_waiting_and_remaining_time() {
         let mut app = App::new("gpt-5.4".into(), "test".into());
         app.start_turn();
         let (response_tx, _response_rx) = mpsc::channel();
-        app.show_prompt(PromptState {
-            request: PromptRequest::freeform("Pausing briefly before continuing.").with_wait(5),
-            focus: PromptFocus::Options,
-            cursor: 0,
-            scroll_offset: 0,
-            selected: Default::default(),
-            reply_text: String::new(),
-            reply_cursor: 0,
+        app.show_wait(WaitState::from_request(
+            PromptRequest::freeform("Pausing briefly before continuing.").with_wait(5),
             response_tx,
-        });
+        ));
 
         let snapshot = lash_tui::render_snapshot(72, 10, |frame| draw(frame, &mut app));
         let visible = snapshot.visible_lines_trimmed().join("\n");

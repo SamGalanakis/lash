@@ -118,6 +118,8 @@ pub(crate) enum TracePromptRequest {
     Freeform {
         question: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_seconds: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         panel: Option<TracePromptPanel>,
     },
     Single {
@@ -125,6 +127,8 @@ pub(crate) enum TracePromptRequest {
         options: Vec<String>,
         #[serde(default)]
         allow_note: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_seconds: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         panel: Option<TracePromptPanel>,
     },
@@ -134,6 +138,8 @@ pub(crate) enum TracePromptRequest {
         #[serde(default)]
         allow_note: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_seconds: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         panel: Option<TracePromptPanel>,
     },
 }
@@ -142,45 +148,57 @@ impl TracePromptRequest {
     #[cfg(test)]
     pub(crate) fn into_request(self) -> PromptRequest {
         match self {
-            Self::Freeform { question, panel } => {
-                let request = PromptRequest::freeform(question);
-                if let Some(panel) = panel {
-                    request.with_markdown_panel(panel.title, panel.markdown)
-                } else {
-                    request
+            Self::Freeform {
+                question,
+                wait_seconds,
+                panel,
+            } => {
+                let mut request = PromptRequest::freeform(question);
+                if let Some(wait_seconds) = wait_seconds {
+                    request = request.with_wait(wait_seconds);
                 }
+                if let Some(panel) = panel {
+                    request = request.with_markdown_panel(panel.title, panel.markdown);
+                }
+                request
             }
             Self::Single {
                 question,
                 options,
                 allow_note,
+                wait_seconds,
                 panel,
             } => {
                 let mut request = PromptRequest::single(question, options);
                 if allow_note {
                     request = request.with_optional_note();
                 }
-                if let Some(panel) = panel {
-                    request.with_markdown_panel(panel.title, panel.markdown)
-                } else {
-                    request
+                if let Some(wait_seconds) = wait_seconds {
+                    request = request.with_wait(wait_seconds);
                 }
+                if let Some(panel) = panel {
+                    request = request.with_markdown_panel(panel.title, panel.markdown);
+                }
+                request
             }
             Self::Multi {
                 question,
                 options,
                 allow_note,
+                wait_seconds,
                 panel,
             } => {
                 let mut request = PromptRequest::multi(question, options);
                 if allow_note {
                     request = request.with_optional_note();
                 }
-                if let Some(panel) = panel {
-                    request.with_markdown_panel(panel.title, panel.markdown)
-                } else {
-                    request
+                if let Some(wait_seconds) = wait_seconds {
+                    request = request.with_wait(wait_seconds);
                 }
+                if let Some(panel) = panel {
+                    request = request.with_markdown_panel(panel.title, panel.markdown);
+                }
+                request
             }
         }
     }
@@ -189,6 +207,7 @@ impl TracePromptRequest {
         if request.is_freeform() {
             Self::Freeform {
                 question: request.question.clone(),
+                wait_seconds: request.wait.as_ref().map(|wait| wait.seconds),
                 panel: request.panel.as_ref().map(|panel| TracePromptPanel {
                     title: panel.title.clone(),
                     markdown: panel.markdown.clone(),
@@ -200,6 +219,7 @@ impl TracePromptRequest {
                     question: request.question.clone(),
                     options: request.options.clone(),
                     allow_note: request.allows_note(),
+                    wait_seconds: request.wait.as_ref().map(|wait| wait.seconds),
                     panel: request.panel.as_ref().map(|panel| TracePromptPanel {
                         title: panel.title.clone(),
                         markdown: panel.markdown.clone(),
@@ -209,6 +229,7 @@ impl TracePromptRequest {
                     question: request.question.clone(),
                     options: request.options.clone(),
                     allow_note: request.allows_note(),
+                    wait_seconds: request.wait.as_ref().map(|wait| wait.seconds),
                     panel: request.panel.as_ref().map(|panel| TracePromptPanel {
                         title: panel.title.clone(),
                         markdown: panel.markdown.clone(),
