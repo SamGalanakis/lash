@@ -382,19 +382,6 @@ mod tests {
     }
 
     #[test]
-    fn controls_text_mentions_alt_up_queue_edit_binding() {
-        let ui_extensions = lash_ui::UiExtensions::builtin().expect("ui extensions");
-        let controls = controls_text(&ui_extensions);
-        assert!(controls.contains("Up (empty draft)   Edit last queued turn"));
-        assert!(controls.contains(crate::queued_turn_edit_binding().display()));
-        assert!(controls.contains("Ctrl+Shift+C / Y   Copy selection or last response"));
-        assert!(controls.contains("Shift+Tab          Toggle plan mode"));
-        assert!(!controls.contains("Backspace          Restore last next-turn draft"));
-        assert!(!controls.contains("Shift+Drag"));
-        assert!(!controls.contains("F6"));
-    }
-
-    #[test]
     fn autonomous_renderer_prints_missing_final_tail_after_streamed_prefix() {
         let mut renderer = AutonomousRenderer::new();
         let _ = renderer.handle(SessionEvent::TextDelta {

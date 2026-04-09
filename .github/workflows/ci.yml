@@ -107,6 +107,10 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install ${{ matrix.brew_packages }}
 
+      - name: Disable POSIX rustc wrapper on Windows
+        if: runner.os == 'Windows'
+        run: echo "RUSTC_WRAPPER=" >> $GITHUB_ENV
+
       - name: Build release binary
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
