@@ -31,7 +31,7 @@ use self::artifact::{
 };
 use self::prompt::prompt_height;
 
-pub(crate) use self::prompt::prompt_content_lines_snapshot;
+pub(crate) use self::prompt::prompt_content_lines_for_app;
 pub(crate) use self::prompt::prompt_max_scroll;
 pub(crate) use self::queue::queue_preview_lines_snapshot;
 

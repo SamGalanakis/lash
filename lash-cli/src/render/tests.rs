@@ -92,7 +92,7 @@ fn prompt_question_wraps_long_path_cleanly() {
 fn wait_prompt_help_uses_ctrl_j_resume_binding() {
     let (response_tx, _response_rx) = mpsc::channel();
     let prompt = PromptState {
-        request: PromptRequest::freeform("Paused · waiting 5s")
+        request: PromptRequest::freeform("Pausing briefly before continuing.")
             .with_wait(5)
             .with_markdown_panel("PAUSED", "Waiting for a retry window."),
         focus: crate::overlay::PromptFocus::Options,
@@ -114,13 +114,17 @@ fn wait_prompt_help_uses_ctrl_j_resume_binding() {
         })
         .collect::<Vec<_>>();
 
-    assert!(rendered.iter().any(|line| line.contains("Waiting 5s")));
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("Auto-resume in 5s"))
+    );
     assert!(
         rendered
             .iter()
             .any(|line| line.contains("ctrl+j resume now"))
     );
-    assert!(rendered.iter().any(|line| line.contains("esc cancel wait")));
+    assert!(rendered.iter().any(|line| line.contains("esc skip wait")));
 }
 
 #[test]

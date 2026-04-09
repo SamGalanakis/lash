@@ -14,6 +14,8 @@ impl App {
         self.pending_steers.clear();
         self.queued_turns.clear();
         self.active_delegate = None;
+        self.overlay = None;
+        self.prompt_wait_deadline = None;
         self.activity_state.reset();
         self.token_usage = TokenUsage::default();
         self.last_response_usage = TokenUsage::default();
