@@ -1,7 +1,2 @@
 [alias]
 xtask = "run -p xtask --"
-
-[env]
-TMPDIR = { value = ".tmp", relative = true }
-TMP = { value = ".tmp", relative = true }
-TEMP = { value = ".tmp", relative = true }
