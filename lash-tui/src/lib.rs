@@ -529,6 +529,7 @@ pub struct Terminal {
     front: Buffer,
     back: Buffer,
     cursor: Option<(u16, u16)>,
+    entered: bool,
 }
 
 impl Terminal {
@@ -561,10 +562,15 @@ impl Terminal {
             front: Buffer::new(width, height),
             back: Buffer::new(width, height),
             cursor: None,
+            entered: true,
         })
     }
 
     pub fn restore(&mut self) {
+        if !self.entered {
+            return;
+        }
+        self.entered = false;
         let _ = self.stdout.execute(PopKeyboardEnhancementFlags);
         let _ = self.stdout.execute(DisableMouseCapture);
         let _ = self.stdout.execute(DisableBracketedPaste);
