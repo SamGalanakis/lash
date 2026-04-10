@@ -1,4 +1,8 @@
 use super::*;
+use crate::app::App;
+use crate::clipboard::{ClipboardEnv, osc52_allowed_by_env, osc52_sequence_for};
+use crate::editor::LARGE_PASTE_CHAR_THRESHOLD;
+use crate::ui_action::{UiAction, UiActionContext, UiActionOutcome, apply_ui_action};
 
 #[test]
 fn pending_text_delta_buffer_coalesces_adjacent_chunks() {
@@ -90,4 +94,75 @@ fn copy_shortcut_accepts_plain_ctrl_c_for_selected_text_precedence() {
     };
 
     assert!(is_copy_shortcut(key));
+}
+
+#[test]
+fn cleared_session_state_preserves_max_context_tokens() {
+    let state = cleared_session_state(SessionPolicy {
+        max_context_tokens: Some(123_456),
+        ..SessionPolicy::default()
+    });
+
+    assert_eq!(state.policy.max_context_tokens, Some(123_456));
+}
+
+#[test]
+fn osc52_sequence_wraps_for_tmux() {
+    let seq = osc52_sequence_for(
+        "YWJj",
+        &ClipboardEnv {
+            tmux: true,
+            ..ClipboardEnv::default()
+        },
+    );
+    assert!(seq.starts_with("\x1bPtmux;\x1b\x1b]52;c;YWJj\x07"));
+    assert!(seq.ends_with("\x1b\\"));
+}
+
+#[test]
+fn osc52_sequence_wraps_for_screen() {
+    let seq = osc52_sequence_for(
+        "YWJj",
+        &ClipboardEnv {
+            term: "screen-256color".to_string(),
+            ..ClipboardEnv::default()
+        },
+    );
+    assert_eq!(seq, "\x1bP\x1b]52;c;YWJj\x07\x1b\\");
+}
+
+#[test]
+fn osc52_allowed_when_ssh_present() {
+    assert!(osc52_allowed_by_env(&ClipboardEnv {
+        ssh_tty: true,
+        ..ClipboardEnv::default()
+    }));
+}
+
+#[test]
+fn osc52_disallowed_for_unknown_terminal_without_ssh() {
+    assert!(!osc52_allowed_by_env(&ClipboardEnv {
+        term: "dumb".to_string(),
+        ..ClipboardEnv::default()
+    }));
+}
+
+#[test]
+fn pasted_text_ui_action_uses_large_paste_placeholder_path() {
+    let mut app = App::new("test-model".into(), "test".into());
+    let large = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 5);
+
+    let outcome = apply_ui_action(
+        &mut app,
+        UiAction::InputInsertPastedText(large),
+        UiActionContext {
+            viewport_width: 80,
+            viewport_height: 24,
+            prompt_max_scroll: 0,
+        },
+    );
+
+    assert_eq!(outcome, UiActionOutcome::None);
+    assert_eq!(app.editor.pending_large_pastes.len(), 1);
+    assert!(app.input().contains("[Pasted Content"));
 }

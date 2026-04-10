@@ -663,15 +663,10 @@ pub(super) fn copy_selected_text_or_last_response(app: &App, terminal_size: Opti
         "copy path invoked"
     );
     if let Some(text) = selected_text.or(last_text) {
-        match arboard::Clipboard::new() {
-            Ok(mut clipboard) => match clipboard.set_text(text.clone()) {
-                Ok(()) => tracing::debug!(
-                    copied_chars = text.chars().count(),
-                    "clipboard write succeeded"
-                ),
-                Err(err) => tracing::warn!(error = %err, "clipboard write failed"),
-            },
-            Err(err) => tracing::warn!(error = %err, "clipboard unavailable for copy"),
+        let copied_chars = text.chars().count();
+        match crate::clipboard::copy_text_robustly(&text) {
+            Ok(method) => tracing::debug!(copied_chars, method, "clipboard write succeeded"),
+            Err(err) => tracing::warn!(error = %err, copied_chars, "clipboard write failed"),
         }
     } else {
         tracing::debug!("copy path had no selected or fallback text");
