@@ -982,18 +982,20 @@ pub(crate) async fn run_app(
                     state = ?key.state,
                     selection_visible = app.selection.visible,
                     selection_active = app.selection.active,
+                    input_selection_visible = app.has_input_selection(),
+                    input_selection_active = app.input_selection_active(),
                     copy_shortcut,
                     preserve_selection = should_preserve_selection_for_key(key),
                     "received key event"
                 );
-                // Clear any active text selection on keypress
+                // Clear any active history selection on plain keypress.
                 if app.selection.visible && !should_preserve_selection_for_key(key) {
                     tracing::debug!("clearing selection on plain keypress");
                     let _ = apply_terminal_action(&mut app, &terminal, UiAction::ClearSelection);
                 }
 
                 // Active selection copy should win before generic Ctrl+C handling.
-                if app.selection.visible && copy_shortcut {
+                if (app.selection.visible || app.has_input_selection()) && copy_shortcut {
                     tracing::debug!("selection copy took precedence over generic key handling");
                     copy_selected_text_or_last_response(&app, terminal.size().ok());
                     continue;
@@ -2006,10 +2008,18 @@ pub(crate) async fn run_app(
                 // so ignored motion events do not leave visual artifacts behind.
                 app.dirty = true;
                 let ha = app.history_area;
+                let (term_width, term_height) = terminal.size()?;
+                let input_area = render::input_content_area(&app, term_width, term_height);
                 let in_history = mouse.row >= ha.y
                     && mouse.row < ha.y + ha.height
                     && mouse.column >= ha.x
                     && mouse.column < ha.x + ha.width;
+                let in_input = input_area.width > 0
+                    && input_area.height > 0
+                    && mouse.row >= input_area.y
+                    && mouse.row < input_area.y + input_area.height
+                    && mouse.column >= input_area.x
+                    && mouse.column < input_area.x + input_area.width;
 
                 if app.has_prompt() {
                     match mouse.kind {
@@ -2037,6 +2047,7 @@ pub(crate) async fn run_app(
 
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) if in_history => {
+                        app.clear_input_selection();
                         tracing::debug!(
                             row = mouse.row,
                             column = mouse.column,
@@ -2048,6 +2059,25 @@ pub(crate) async fn run_app(
                         app.selection.active = true;
                         app.selection.visible = false;
                         app.dirty = true;
+                    }
+                    MouseEventKind::Down(MouseButton::Left) if in_input => {
+                        app.clear_selection();
+                        if let Some(offset) = render::input_byte_offset_for_screen_position(
+                            &app,
+                            term_width,
+                            term_height,
+                            mouse.column,
+                            mouse.row,
+                        ) {
+                            tracing::debug!(
+                                row = mouse.row,
+                                column = mouse.column,
+                                offset,
+                                "input selection started from mouse down"
+                            );
+                            app.start_input_selection(offset);
+                            app.dirty = true;
+                        }
                     }
                     MouseEventKind::Drag(MouseButton::Left) if app.selection.active => {
                         let col = mouse.column.clamp(ha.x, ha.x + ha.width.saturating_sub(1));
@@ -2082,6 +2112,32 @@ pub(crate) async fn run_app(
                         );
                         app.dirty = true;
                     }
+                    MouseEventKind::Drag(MouseButton::Left) if app.input_selection_active() => {
+                        let col = mouse.column.clamp(
+                            input_area.x,
+                            input_area.x + input_area.width.saturating_sub(1),
+                        );
+                        let row = mouse.row.clamp(
+                            input_area.y,
+                            input_area.y + input_area.height.saturating_sub(1),
+                        );
+                        if let Some(offset) = render::input_byte_offset_for_screen_position(
+                            &app,
+                            term_width,
+                            term_height,
+                            col,
+                            row,
+                        ) {
+                            app.update_input_selection(offset);
+                            tracing::debug!(
+                                row = mouse.row,
+                                column = mouse.column,
+                                offset,
+                                "input selection updated from mouse drag"
+                            );
+                            app.dirty = true;
+                        }
+                    }
                     MouseEventKind::Up(MouseButton::Left) if app.selection.active => {
                         tracing::debug!(
                             selection_anchor = ?app.selection.anchor,
@@ -2090,6 +2146,13 @@ pub(crate) async fn run_app(
                             "selection finished on mouse up"
                         );
                         app.selection.active = false;
+                    }
+                    MouseEventKind::Up(MouseButton::Left) if app.input_selection_active() => {
+                        tracing::debug!(
+                            input_selection_range = ?app.input_selection_range(),
+                            "input selection finished on mouse up"
+                        );
+                        app.finish_input_selection();
                     }
                     MouseEventKind::ScrollUp => {
                         // Scroll extends selection if actively dragging, otherwise just scrolls

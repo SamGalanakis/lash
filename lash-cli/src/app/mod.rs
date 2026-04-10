@@ -649,7 +649,7 @@ impl App {
         }
     }
 
-    /// Clear any active text selection.
+    /// Clear any active history text selection.
     pub fn clear_selection(&mut self) {
         self.selection = TextSelection::default();
     }

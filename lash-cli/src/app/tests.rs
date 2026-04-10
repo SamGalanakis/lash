@@ -1005,10 +1005,14 @@ fn restore_prepared_turn_clears_history_selection() {
     let mut app = App::new("test-model".into(), "test".into());
     app.editor.input_history = vec!["older turn".into()];
     app.editor.input_history_idx = Some(0);
+    app.start_input_selection(1);
+    app.update_input_selection(4);
+    app.finish_input_selection();
 
     app.restore_prepared_turn(PreparedTurn::new("queued text".into(), Vec::new()));
 
     assert_eq!(app.editor.input_history_idx, None);
+    assert!(!app.has_input_selection());
 }
 
 #[test]

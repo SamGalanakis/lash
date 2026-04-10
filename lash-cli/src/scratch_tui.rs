@@ -390,6 +390,9 @@ fn draw_input(frame: &mut Frame<'_>, app: &App, area: Rect) {
             content_area.width,
         );
     }
+    for (x, y, width) in render::input_selection_rects(app, area) {
+        frame.patch_row_style_range(x, y, width, |style| style.bg(theme::SELECTION_BG));
+    }
     if let Some(badge) = snapshot.badge {
         let width = badge.width() as u16;
         let x = area.width.saturating_sub(width + 1);
@@ -831,6 +834,30 @@ mod tests {
         assert_eq!(
             snapshot
                 .cell(2, history.y + 1)
+                .and_then(|cell| cell.style.bg),
+            Some(theme::SELECTION_BG)
+        );
+    }
+
+    #[test]
+    fn input_selection_highlights_visible_cells() {
+        let mut app = App::new("gpt-5.4".into(), "test".into());
+        app.set_input("alpha beta".into());
+        app.start_input_selection(2);
+        app.update_input_selection(7);
+        app.finish_input_selection();
+
+        let input = render::input_content_area(&app, 40, 9);
+        let snapshot = lash_tui::render_snapshot(40, 9, |frame| draw(frame, &mut app));
+        assert_eq!(
+            snapshot
+                .cell(input.x + 4, input.y)
+                .and_then(|cell| cell.style.bg),
+            Some(theme::SELECTION_BG)
+        );
+        assert_eq!(
+            snapshot
+                .cell(input.x + 8, input.y)
                 .and_then(|cell| cell.style.bg),
             Some(theme::SELECTION_BG)
         );

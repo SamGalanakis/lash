@@ -641,10 +641,11 @@ pub(crate) fn generate_session_name(sessions_dir: &std::path::Path) -> String {
     }
 }
 
-/// Copy the current history selection when present, otherwise fall back to the
-/// last assistant response.
+/// Copy the current input selection when present, otherwise the history
+/// selection, and finally the last assistant response.
 pub(super) fn copy_selected_text_or_last_response(app: &App, terminal_size: Option<(u16, u16)>) {
-    let selected_text = terminal_size.and_then(|(width, height)| {
+    let input_text = app.selected_input_text();
+    let history_text = terminal_size.and_then(|(width, height)| {
         crate::render::extract_history_selection_text(app, width, height)
     });
     let last_text = app.blocks.iter().rev().find_map(|b| {
@@ -657,12 +658,13 @@ pub(super) fn copy_selected_text_or_last_response(app: &App, terminal_size: Opti
     tracing::debug!(
         selection_visible = app.selection.visible,
         selection_active = app.selection.active,
-        selected_chars = selected_text.as_ref().map(|text| text.chars().count()),
+        input_selected_chars = input_text.as_ref().map(|text| text.chars().count()),
+        history_selected_chars = history_text.as_ref().map(|text| text.chars().count()),
         fallback_chars = last_text.as_ref().map(|text| text.chars().count()),
         has_terminal_size = terminal_size.is_some(),
         "copy path invoked"
     );
-    if let Some(text) = selected_text.or(last_text) {
+    if let Some(text) = input_text.or(history_text).or(last_text) {
         let copied_chars = text.chars().count();
         match crate::clipboard::copy_text_robustly(&text) {
             Ok(method) => tracing::debug!(copied_chars, method, "clipboard write succeeded"),
