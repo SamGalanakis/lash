@@ -73,6 +73,11 @@ fn extract_history_selection_text_reads_across_scrolled_content_rows() {
 }
 
 #[test]
+fn input_byte_offset_mapping_tracks_wrapped_rows() {
+    assert_eq!(input_byte_offset_at_visual_position("abcdef", 1, 3, 6), 5);
+}
+
+#[test]
 fn prompt_question_wraps_long_path_cleanly() {
     let (response_tx, _response_rx) = mpsc::channel();
     let prompt = PromptState {

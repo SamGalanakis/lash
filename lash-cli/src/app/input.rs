@@ -60,6 +60,38 @@ impl App {
         self.editor.move_cursor_end();
     }
 
+    pub fn clear_input_selection(&mut self) {
+        self.editor.clear_selection();
+    }
+
+    pub fn has_input_selection(&self) -> bool {
+        self.editor.has_selection()
+    }
+
+    pub fn input_selection_active(&self) -> bool {
+        self.editor.selection_is_active()
+    }
+
+    pub fn input_selection_range(&self) -> Option<std::ops::Range<usize>> {
+        self.editor.selected_range()
+    }
+
+    pub fn selected_input_text(&self) -> Option<String> {
+        self.editor.selected_text()
+    }
+
+    pub fn start_input_selection(&mut self, offset: usize) {
+        self.editor.start_selection(offset);
+    }
+
+    pub fn update_input_selection(&mut self, offset: usize) {
+        self.editor.update_selection(offset);
+    }
+
+    pub fn finish_input_selection(&mut self) {
+        self.editor.finish_selection();
+    }
+
     /// Load input history from $LASH_HOME/history.
     pub fn load_history(&mut self) {
         self.editor.load_history();

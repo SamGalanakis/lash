@@ -26,10 +26,19 @@ pub enum SuggestionKind {
     Path,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InputSelection {
+    pub anchor: usize,
+    pub end: usize,
+    pub active: bool,
+    pub visible: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct EditorState {
     pub input: String,
     pub cursor_pos: usize,
+    pub selection: InputSelection,
     pub input_history: Vec<String>,
     pub input_history_idx: Option<usize>,
     pub suggestions: Vec<(String, String)>,
@@ -48,6 +57,7 @@ impl Default for EditorState {
         Self {
             input: String::new(),
             cursor_pos: 0,
+            selection: InputSelection::default(),
             input_history: Vec::new(),
             input_history_idx: None,
             suggestions: Vec::new(),
@@ -64,7 +74,7 @@ impl Default for EditorState {
 impl EditorState {
     /// Find the byte offset within `line` that corresponds to a given display column.
     /// If the target column exceeds the line's display width, returns line.len().
-    fn byte_pos_at_display_col(line: &str, target_col: usize) -> usize {
+    pub(crate) fn byte_pos_at_display_col(line: &str, target_col: usize) -> usize {
         let mut col = 0;
         for (byte_idx, ch) in line.char_indices() {
             if col >= target_col {
@@ -82,6 +92,7 @@ impl EditorState {
         }
         self.input.clear();
         self.cursor_pos = 0;
+        self.clear_selection();
         self.input_history_idx = None;
         text
     }
@@ -104,12 +115,68 @@ impl EditorState {
         self.input = text;
         self.cursor_pos = self.input.len();
         self.input_history_idx = None;
+        self.clear_selection();
         self.pending_images = images;
         self.inflight_image_ids.clear();
         self.pending_large_pastes = large_pastes;
         self.suggestions.clear();
         self.suggestion_idx = 0;
         self.suggestion_kind = SuggestionKind::None;
+    }
+
+    fn ordered_selection_bounds(&self) -> (usize, usize) {
+        if self.selection.anchor <= self.selection.end {
+            (self.selection.anchor, self.selection.end)
+        } else {
+            (self.selection.end, self.selection.anchor)
+        }
+    }
+
+    pub fn selected_range(&self) -> Option<std::ops::Range<usize>> {
+        let (start, end) = self.ordered_selection_bounds();
+        ((self.selection.visible || self.selection.active) && start < end).then_some(start..end)
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.selected_range().is_some()
+    }
+
+    pub fn selection_is_active(&self) -> bool {
+        self.selection.active
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = InputSelection::default();
+    }
+
+    pub fn start_selection(&mut self, offset: usize) {
+        let clamped = offset.min(self.input.len());
+        self.selection = InputSelection {
+            anchor: clamped,
+            end: clamped,
+            active: true,
+            visible: false,
+        };
+        self.cursor_pos = clamped;
+    }
+
+    pub fn update_selection(&mut self, offset: usize) {
+        let clamped = offset.min(self.input.len());
+        self.selection.end = clamped;
+        self.selection.visible = self.selection.anchor != clamped;
+        self.cursor_pos = clamped;
+    }
+
+    pub fn finish_selection(&mut self) {
+        self.selection.active = false;
+        if self.selection.anchor == self.selection.end {
+            self.selection.visible = false;
+        }
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        self.selected_range()
+            .map(|range| self.input[range].to_string())
     }
 
     pub fn cursor_line(&self) -> usize {
@@ -136,6 +203,7 @@ impl EditorState {
         self.input_history_idx = Some(idx);
         self.input = self.input_history[idx].clone();
         self.cursor_pos = self.input.len();
+        self.clear_selection();
     }
 
     pub fn history_down(&mut self) {
@@ -149,12 +217,14 @@ impl EditorState {
                 self.input_history_idx = None;
                 self.input.clear();
                 self.cursor_pos = 0;
+                self.clear_selection();
             }
             Some(i) => {
                 let idx = i + 1;
                 self.input_history_idx = Some(idx);
                 self.input = self.input_history[idx].clone();
                 self.cursor_pos = self.input.len();
+                self.clear_selection();
             }
         }
     }
@@ -192,12 +262,112 @@ impl EditorState {
         self.cursor_pos = Self::byte_pos_at_display_col(next_line, display_col) + next_line_start;
     }
 
+    fn large_paste_ranges(&self) -> Vec<(usize, std::ops::Range<usize>)> {
+        self.pending_large_pastes
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, paste)| {
+                self.input
+                    .match_indices(&paste.placeholder)
+                    .next()
+                    .map(|(start, _)| (idx, start..start + paste.placeholder.len()))
+            })
+            .collect()
+    }
+
+    fn ranges_overlap(a: &std::ops::Range<usize>, b: &std::ops::Range<usize>) -> bool {
+        a.start < b.end && b.start < a.end
+    }
+
+    fn expand_range_to_attachment_boundaries(
+        &self,
+        mut range: std::ops::Range<usize>,
+    ) -> std::ops::Range<usize> {
+        loop {
+            let mut expanded = false;
+            for (marker_range, _) in image_marker_ranges(&self.input) {
+                if Self::ranges_overlap(&range, &marker_range)
+                    && (marker_range.start < range.start || marker_range.end > range.end)
+                {
+                    range.start = range.start.min(marker_range.start);
+                    range.end = range.end.max(marker_range.end);
+                    expanded = true;
+                }
+            }
+            for (_, marker_range) in self.large_paste_ranges() {
+                if Self::ranges_overlap(&range, &marker_range)
+                    && (marker_range.start < range.start || marker_range.end > range.end)
+                {
+                    range.start = range.start.min(marker_range.start);
+                    range.end = range.end.max(marker_range.end);
+                    expanded = true;
+                }
+            }
+            if !expanded {
+                return range;
+            }
+        }
+    }
+
+    fn remove_range_internal(&mut self, range: std::ops::Range<usize>) {
+        let range = self.expand_range_to_attachment_boundaries(range);
+        let removed_len = range.end.saturating_sub(range.start);
+        let removed_image_ids: HashSet<usize> = image_marker_ranges(&self.input)
+            .into_iter()
+            .filter(|(marker_range, _)| Self::ranges_overlap(&range, marker_range))
+            .map(|(_, id)| id)
+            .collect();
+        let removed_large_paste_idxs: HashSet<usize> = self
+            .large_paste_ranges()
+            .into_iter()
+            .filter(|(_, marker_range)| Self::ranges_overlap(&range, marker_range))
+            .map(|(idx, _)| idx)
+            .collect();
+
+        self.input.drain(range.clone());
+        if self.cursor_pos > range.end {
+            self.cursor_pos = self.cursor_pos.saturating_sub(removed_len);
+        } else if self.cursor_pos > range.start {
+            self.cursor_pos = range.start;
+        }
+        self.pending_images
+            .retain(|image| !removed_image_ids.contains(&image.id));
+        for image_id in removed_image_ids {
+            self.inflight_image_ids.remove(&image_id);
+        }
+        self.pending_large_pastes = self
+            .pending_large_pastes
+            .drain(..)
+            .enumerate()
+            .filter_map(|(idx, paste)| (!removed_large_paste_idxs.contains(&idx)).then_some(paste))
+            .collect();
+        self.clear_selection();
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        let Some(range) = self.selected_range() else {
+            return false;
+        };
+        self.remove_range_internal(range);
+        true
+    }
+
     pub fn insert_char(&mut self, c: char) {
+        if self.delete_selection() {
+            self.input.insert(self.cursor_pos, c);
+            self.cursor_pos += c.len_utf8();
+            return;
+        }
         self.input.insert(self.cursor_pos, c);
         self.cursor_pos += c.len_utf8();
     }
 
     pub fn insert_text(&mut self, text: &str) {
+        if self.delete_selection() {
+            self.input.insert_str(self.cursor_pos, text);
+            self.cursor_pos += text.len();
+            return;
+        }
         self.input.insert_str(self.cursor_pos, text);
         self.cursor_pos += text.len();
     }
@@ -300,6 +470,9 @@ impl EditorState {
     }
 
     pub fn backspace(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if self.cursor_pos > 0 && self.remove_image_marker_at_probe(self.cursor_pos - 1) {
             return;
         }
@@ -318,6 +491,9 @@ impl EditorState {
     }
 
     pub fn delete(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if self.cursor_pos < self.input.len() && self.remove_image_marker_at_probe(self.cursor_pos)
         {
             return;
@@ -336,6 +512,11 @@ impl EditorState {
     }
 
     pub fn move_cursor_left(&mut self) {
+        if let Some(range) = self.selected_range() {
+            self.cursor_pos = range.start;
+            self.clear_selection();
+            return;
+        }
         if self.cursor_pos > 0 {
             self.cursor_pos = self.input[..self.cursor_pos]
                 .char_indices()
@@ -346,6 +527,11 @@ impl EditorState {
     }
 
     pub fn move_cursor_right(&mut self) {
+        if let Some(range) = self.selected_range() {
+            self.cursor_pos = range.end;
+            self.clear_selection();
+            return;
+        }
         if self.cursor_pos < self.input.len() {
             self.cursor_pos = self.input[self.cursor_pos..]
                 .char_indices()
@@ -356,11 +542,19 @@ impl EditorState {
     }
 
     pub fn move_cursor_home(&mut self) {
+        if let Some(range) = self.selected_range() {
+            self.cursor_pos = range.start;
+            self.clear_selection();
+        }
         let before = &self.input[..self.cursor_pos];
         self.cursor_pos = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
     }
 
     pub fn move_cursor_end(&mut self) {
+        if let Some(range) = self.selected_range() {
+            self.cursor_pos = range.end;
+            self.clear_selection();
+        }
         let after = &self.input[self.cursor_pos..];
         if let Some(pos) = after.find('\n') {
             self.cursor_pos += pos;
@@ -557,6 +751,47 @@ impl EditorState {
     pub fn fail_pending_image(&mut self, id: usize) -> bool {
         self.inflight_image_ids.remove(&id);
         self.remove_image_marker_by_id(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_text_replaces_visible_selection() {
+        let mut editor = EditorState::default();
+        editor.input = "alpha beta".to_string();
+        editor.cursor_pos = editor.input.len();
+        editor.start_selection(6);
+        editor.update_selection(10);
+        editor.finish_selection();
+
+        editor.insert_text("gamma");
+
+        assert_eq!(editor.input, "alpha gamma");
+        assert_eq!(editor.cursor_pos, "alpha gamma".len());
+        assert!(!editor.has_selection());
+    }
+
+    #[test]
+    fn backspace_removes_selected_marker_placeholder() {
+        let mut editor = EditorState::default();
+        editor.input = "before [Image #2] after".to_string();
+        editor.pending_images.push(PendingImage {
+            id: 2,
+            png_bytes: vec![1, 2, 3],
+        });
+        editor.cursor_pos = editor.input.len();
+        editor.start_selection(8);
+        editor.update_selection(12);
+        editor.finish_selection();
+
+        editor.backspace();
+
+        assert_eq!(editor.input, "before  after");
+        assert!(editor.pending_images.is_empty());
+        assert!(!editor.has_selection());
     }
 }
 

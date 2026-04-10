@@ -21,6 +21,7 @@ use crate::app::{
 };
 use crate::assistant_text;
 use crate::diff::render_inline_diff;
+use crate::editor::EditorState;
 use crate::input_items::image_marker_ranges;
 use crate::markdown;
 use crate::text_display;
@@ -113,6 +114,27 @@ pub fn history_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
     let input_h = input_height(app, frame_width, frame_height, reserved_height);
     let history_height = frame_height.saturating_sub(1 + status_h + queued_h + input_h);
     Rect::new(0, 1, frame_width, history_height)
+}
+
+pub fn input_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
+    let history = history_area(app, frame_width, frame_height);
+    let turn_h = turn_status_height(app);
+    let queued_h = queue_preview_height(app, frame_width);
+    let y = history.bottom() + turn_h + queued_h;
+    Rect::new(0, y, frame_width, frame_height.saturating_sub(y))
+}
+
+pub fn input_content_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
+    input_content_area_from_frame(input_area(app, frame_width, frame_height))
+}
+
+fn input_content_area_from_frame(area: Rect) -> Rect {
+    Rect::new(
+        area.x + INPUT_HORIZONTAL_PADDING,
+        area.y + 1,
+        area.width.saturating_sub(INPUT_HORIZONTAL_PADDING * 2),
+        area.height.saturating_sub(2),
+    )
 }
 
 #[cfg(test)]
@@ -215,6 +237,88 @@ pub(crate) fn input_render_snapshot(app: &App, area: Rect) -> InputRenderSnapsho
         scroll_offset,
         badge: build_input_badge(app),
     }
+}
+
+pub(crate) fn input_byte_offset_for_screen_position(
+    app: &App,
+    frame_width: u16,
+    frame_height: u16,
+    column: u16,
+    row: u16,
+) -> Option<usize> {
+    let area = input_area(app, frame_width, frame_height);
+    let content_area = input_content_area_from_frame(area);
+    if content_area.width == 0 || content_area.height == 0 {
+        return None;
+    }
+    if row < content_area.y
+        || row >= content_area.y + content_area.height
+        || column < content_area.x
+        || column >= content_area.x + content_area.width
+    {
+        return None;
+    }
+
+    let snapshot = input_render_snapshot(app, area);
+    let visual_row = snapshot.scroll_offset + (row - content_area.y) as usize;
+    let visual_col = (column - content_area.x) as usize;
+    Some(input_byte_offset_at_visual_position(
+        app.input(),
+        visual_row,
+        visual_col,
+        content_area.width as usize,
+    ))
+}
+
+pub(crate) fn input_selection_rects(app: &App, area: Rect) -> Vec<(u16, u16, u16)> {
+    let Some(range) = app.input_selection_range() else {
+        return Vec::new();
+    };
+    let content_area = input_content_area_from_frame(area);
+    if content_area.width == 0 || content_area.height == 0 {
+        return Vec::new();
+    }
+
+    let snapshot = input_render_snapshot(app, area);
+    let visible_top = snapshot.scroll_offset;
+    let visible_bottom = snapshot.scroll_offset + content_area.height as usize;
+    let total_width = content_area.width as usize;
+    let prefix_w = 2usize;
+    let mut rects = Vec::new();
+    let mut visual_row = 0usize;
+    let mut byte_offset = 0usize;
+
+    for logical_line in app.input().split('\n') {
+        let line_start = byte_offset;
+        let line_end = line_start + logical_line.len();
+        let segments = wrap_line(logical_line, prefix_w, prefix_w, total_width);
+        for &(seg_start, seg_end) in &segments {
+            let segment_range = (line_start + seg_start)..(line_start + seg_end);
+            if visual_row >= visible_top
+                && visual_row < visible_bottom
+                && range.start < segment_range.end
+                && segment_range.start < range.end
+            {
+                let overlap_start = range.start.max(segment_range.start) - line_start;
+                let overlap_end = range.end.min(segment_range.end) - line_start;
+                let col_start =
+                    prefix_w + UnicodeWidthStr::width(&logical_line[seg_start..overlap_start]);
+                let col_end =
+                    prefix_w + UnicodeWidthStr::width(&logical_line[seg_start..overlap_end]);
+                if col_end > col_start {
+                    rects.push((
+                        content_area.x + col_start as u16,
+                        content_area.y + (visual_row - visible_top) as u16,
+                        (col_end - col_start) as u16,
+                    ));
+                }
+            }
+            visual_row += 1;
+        }
+        byte_offset = line_end + 1;
+    }
+
+    rects
 }
 
 pub(crate) fn find_visible_block(app: &App, scroll_offset: usize) -> (usize, usize) {
@@ -378,6 +482,33 @@ fn input_cursor_position(input: &str, cursor_pos: usize, full_width: usize) -> (
     }
 
     (vis_row.saturating_sub(1), prefix_w)
+}
+
+fn input_byte_offset_at_visual_position(
+    input: &str,
+    target_row: usize,
+    target_col: usize,
+    full_width: usize,
+) -> usize {
+    let prefix_w = 2usize;
+    let mut visual_row = 0usize;
+    let mut byte_offset = 0usize;
+
+    for logical_line in input.split('\n') {
+        let segments = wrap_line(logical_line, prefix_w, prefix_w, full_width);
+        for &(seg_start, seg_end) in &segments {
+            if visual_row == target_row {
+                let display_col = target_col.saturating_sub(prefix_w);
+                let seg_text = &logical_line[seg_start..seg_end];
+                let local = EditorState::byte_pos_at_display_col(seg_text, display_col);
+                return byte_offset + seg_start + local;
+            }
+            visual_row += 1;
+        }
+        byte_offset += logical_line.len() + 1;
+    }
+
+    input.len()
 }
 
 fn build_input_badge(app: &App) -> Option<Line<'static>> {
