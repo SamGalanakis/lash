@@ -241,10 +241,7 @@ impl UiExtensions {
     }
 
     pub fn builtin() -> Result<Self, String> {
-        Self::new(vec![
-            Arc::new(PlanModeUiExtension),
-            Arc::new(ActivityNotificationsUiExtension),
-        ])
+        Self::new(vec![Arc::new(PlanModeUiExtension)])
     }
 
     pub fn command_specs(&self) -> Vec<SlashCommandSpec> {
@@ -444,8 +441,6 @@ fn plan_mode_effects(status: &PlanModeStatus) -> Vec<UiHostEffect> {
 
 struct PlanModeUiExtension;
 
-struct ActivityNotificationsUiExtension;
-
 const PLAN_MODE_COMMANDS: &[SlashCommandSpec] = &[SlashCommandSpec {
     name: "/plan",
     aliases: &[],
@@ -535,40 +530,6 @@ impl UiExtension for PlanModeUiExtension {
             ]
         } else {
             Vec::new()
-        }
-    }
-}
-
-#[async_trait]
-impl UiExtension for ActivityNotificationsUiExtension {
-    fn id(&self) -> &'static str {
-        "activity_notifications_ui"
-    }
-
-    async fn invoke_action(
-        &self,
-        action: &str,
-        _arg: Option<&str>,
-        _ctx: UiContext<'_>,
-    ) -> Result<Vec<UiHostEffect>, String> {
-        Err(format!(
-            "activity notification UI extension has no action `{action}`"
-        ))
-    }
-
-    fn handle_session_event(&self, event: &SessionEvent) -> Vec<UiHostEffect> {
-        match event {
-            SessionEvent::Done => vec![UiHostEffect::DesktopNotification {
-                title: "lash".to_string(),
-                body: "Response complete".to_string(),
-                only_when_unfocused: true,
-            }],
-            SessionEvent::Prompt { request, .. } => vec![UiHostEffect::DesktopNotification {
-                title: "lash".to_string(),
-                body: request.question.clone(),
-                only_when_unfocused: true,
-            }],
-            _ => Vec::new(),
         }
     }
 }
@@ -712,38 +673,5 @@ mod tests {
 
         assert_eq!(command_names.len(), 1);
         assert_eq!(shortcuts.len(), 1);
-    }
-
-    #[test]
-    fn done_event_emits_unfocused_desktop_notification() {
-        let extensions = UiExtensions::builtin().expect("builtin extensions");
-
-        let effects = extensions.effects_for_session_event(&SessionEvent::Done);
-
-        assert!(effects.contains(&UiHostEffect::DesktopNotification {
-            title: "lash".to_string(),
-            body: "Response complete".to_string(),
-            only_when_unfocused: true,
-        }));
-    }
-
-    #[test]
-    fn prompt_event_emits_unfocused_desktop_notification() {
-        let extensions = UiExtensions::builtin().expect("builtin extensions");
-        let (_tx, _rx) = std::sync::mpsc::channel();
-
-        let effects = extensions.effects_for_session_event(&SessionEvent::Prompt {
-            request: lash::PromptRequest::single(
-                "Plan `.lash/plans/demo.md` is ready. Exit plan mode?",
-                vec!["Exit plan mode".to_string(), "Keep planning".to_string()],
-            ),
-            response_tx: _tx,
-        });
-
-        assert!(effects.contains(&UiHostEffect::DesktopNotification {
-            title: "lash".to_string(),
-            body: "Plan `.lash/plans/demo.md` is ready. Exit plan mode?".to_string(),
-            only_when_unfocused: true,
-        }));
     }
 }

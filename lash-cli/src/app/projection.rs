@@ -247,20 +247,7 @@ fn append_transcript_blocks(
                     PartKind::ToolCall => {
                         flush_assistant_prose(blocks, &mut prose);
                     }
-                    PartKind::Code => {
-                        flush_assistant_prose(blocks, &mut prose);
-                        blocks.push(DisplayBlock::CodeBlock {
-                            code: text,
-                            continuation: false,
-                        });
-                    }
-                    PartKind::Output => {
-                        flush_assistant_prose(blocks, &mut prose);
-                        blocks.push(DisplayBlock::CodeOutput {
-                            output: text,
-                            error: None,
-                        });
-                    }
+                    PartKind::Code | PartKind::Output => {}
                     PartKind::Error => {
                         flush_assistant_prose(blocks, &mut prose);
                         blocks.push(DisplayBlock::Error(text));
@@ -326,7 +313,7 @@ fn flush_assistant_prose(blocks: &mut Vec<DisplayBlock>, prose: &mut Vec<String>
     prose.clear();
 }
 
-fn rendered_message_text(message: &Message) -> String {
+pub(crate) fn rendered_message_text(message: &Message) -> String {
     message
         .parts
         .iter()

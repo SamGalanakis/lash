@@ -145,7 +145,7 @@ fn render_part_for_chat(role: MessageRole, part: &Part) -> String {
     let rendered = part.render();
     match role {
         MessageRole::System => match part.kind {
-            PartKind::Code => format!("<repl>\n{}\n</repl>", rendered),
+            PartKind::Code => rendered,
             PartKind::Output => format!("<output>\n{}\n</output>", rendered),
             PartKind::Error => format!("<error>\n{}\n</error>", rendered),
             PartKind::Text
@@ -155,7 +155,7 @@ fn render_part_for_chat(role: MessageRole, part: &Part) -> String {
             | PartKind::ToolResult => rendered,
         },
         MessageRole::Assistant => match part.kind {
-            PartKind::Code => format!("<repl>\n{}\n</repl>", rendered),
+            PartKind::Code => rendered,
             PartKind::ToolCall => render_assistant_tool_call(part, &rendered),
             PartKind::Prose | PartKind::Text | PartKind::Image | PartKind::ToolResult => rendered,
             _ => rendered,
@@ -228,7 +228,7 @@ struct TranscriptTurn {
 
 pub fn render_prompt(msgs: &[Message], mode: ExecutionMode) -> RenderedPrompt {
     match mode {
-        ExecutionMode::Repl => render_repl_chat_prompt(msgs),
+        ExecutionMode::Repl => render_structured_prompt(msgs),
         ExecutionMode::Standard => render_structured_prompt(msgs),
     }
 }
@@ -355,70 +355,6 @@ pub fn render_transcript_prompt(msgs: &[Message]) -> RenderedPrompt {
             tool_call_id: None,
             tool_name: None,
         }],
-        attachments,
-    }
-}
-
-fn render_repl_chat_prompt(msgs: &[Message]) -> RenderedPrompt {
-    let mut attachments = Vec::new();
-    let mut messages = Vec::new();
-
-    for msg in msgs {
-        let mut current_chunks = Vec::new();
-
-        for part in &msg.parts {
-            if let Some(attachment) = attachment_from_part(part)
-                && matches!(msg.role, MessageRole::User)
-            {
-                if !current_chunks.is_empty() {
-                    messages.push(LlmMessage {
-                        role: llm_role_for_message(msg.role),
-                        content: current_chunks.join("\n\n"),
-                        kind: "text".to_string(),
-                        image_idx: -1,
-                        tool_call_id: None,
-                        tool_name: None,
-                    });
-                    current_chunks.clear();
-                }
-
-                let image_idx = attachments.len();
-                attachments.push(attachment);
-                messages.push(LlmMessage {
-                    role: LlmRole::User,
-                    content: String::new(),
-                    kind: "image".to_string(),
-                    image_idx: image_idx as i64,
-                    tool_call_id: None,
-                    tool_name: None,
-                });
-                continue;
-            }
-
-            let mut rendered = render_part_for_chat(msg.role, part);
-            if rendered.trim().is_empty() {
-                continue;
-            }
-            if matches!(msg.role, MessageRole::System) {
-                rendered = format!("Runtime note:\n{rendered}");
-            }
-            current_chunks.push(rendered);
-        }
-
-        if !current_chunks.is_empty() {
-            messages.push(LlmMessage {
-                role: llm_role_for_message(msg.role),
-                content: current_chunks.join("\n\n"),
-                kind: "text".to_string(),
-                image_idx: -1,
-                tool_call_id: None,
-                tool_name: None,
-            });
-        }
-    }
-
-    RenderedPrompt {
-        messages,
         attachments,
     }
 }
@@ -630,15 +566,12 @@ mod tests {
         ];
 
         let rendered = render_prompt(&msgs, ExecutionMode::Repl);
-        assert_eq!(rendered.messages.len(), 3);
+        assert_eq!(rendered.messages.len(), 4);
         assert_eq!(rendered.messages[0].content, "first");
         assert!(rendered.messages[1].content.contains("reply one"));
-        assert!(
-            rendered.messages[1]
-                .content
-                .contains("<repl>\nx = 1\n</repl>")
-        );
-        assert_eq!(rendered.messages[2].content, "second");
+        assert_eq!(rendered.messages[2].content, "x = 1");
+        assert_eq!(rendered.messages[2].kind, "text");
+        assert_eq!(rendered.messages[3].content, "second");
     }
 
     #[test]

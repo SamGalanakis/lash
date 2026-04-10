@@ -351,7 +351,7 @@ mod tests {
             iteration: 1,
             config_json: ui_resume::with_ui_resume_state(serde_json::json!({}), &ui_state)
                 .to_string(),
-            repl_snapshot: None,
+            execution_state_snapshot: None,
             input_tokens: 0,
             output_tokens: 0,
             cached_input_tokens: 0,

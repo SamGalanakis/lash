@@ -17,7 +17,6 @@ pub mod session_model;
 pub mod skill_catalog;
 pub mod skill_prompt;
 pub mod store;
-pub mod text;
 mod tool_dispatch;
 pub mod tools;
 
@@ -109,18 +108,18 @@ pub use plugin::{
     ExternalInvokeContext, ExternalInvokeError, ExternalOpDef, ExternalOpKind, PluginDirective,
     PluginError, PluginFactory, PluginHost, PluginOwned, PluginRegistrar, PluginSession,
     PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry,
-    PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext, RuntimeServices,
-    SessionContextSurface, SessionCreateRequest, SessionHandle, SessionManager, SessionParam,
-    SessionPlugin, SessionPluginMode, SessionSnapshot, SessionStartPoint, SessionTurnHandle,
-    SnapshotReader, SnapshotWriter, ToolResultProjectionContext, ToolResultProjectionHook,
-    ToolResultProjectionMode, ToolResultProjectionPluginConfig, ToolResultProjector,
-    ToolSurfaceContribution, TurnHookContext, TurnResultHookContext,
+    PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext, PromptRequestHookContext,
+    RuntimeServices, SessionContextSurface, SessionCreateRequest, SessionHandle, SessionManager,
+    SessionParam, SessionPlugin, SessionPluginMode, SessionSnapshot, SessionStartPoint,
+    SessionTurnHandle, SnapshotReader, SnapshotWriter, ToolResultProjectionContext,
+    ToolResultProjectionHook, ToolResultProjectionMode, ToolResultProjectionPluginConfig,
+    ToolResultProjector, ToolSurfaceContribution, TurnHookContext, TurnResultHookContext,
     plugin_surface_event_renders_visible_output,
 };
 #[cfg(feature = "sqlite-store")]
 pub use plugin::{
     BuiltinPlanModePluginFactory, BuiltinPlanTrackerPluginFactory,
-    BuiltinPromptContextPluginFactory, PromptContextPluginConfig,
+    BuiltinPromptContextPluginFactory, BuiltinUiActivityPluginFactory, PromptContextPluginConfig,
 };
 pub use provider::{LashConfig, Provider, ProviderOptions, RequestTimeout};
 pub use runtime::{
@@ -143,7 +142,6 @@ pub use store::{
 };
 #[cfg(feature = "sqlite-store")]
 pub use store::{SqliteStore, Store};
-pub use text::strip_repl_fragments;
 pub use tools::{DefaultToolPluginDeps, default_tool_plugin_factories};
 
 /// A message sent from the sandbox to the host during execution.

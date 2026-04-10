@@ -92,10 +92,6 @@ pub fn code_chrome() -> Style {
     Style::default().fg(ASH)
 }
 
-pub fn code_scribe() -> Style {
-    Style::default().fg(Color::rgb(100, 72, 28))
-}
-
 pub fn explore_marker() -> Style {
     Style::default()
         .fg(Color::rgb(122, 94, 48))

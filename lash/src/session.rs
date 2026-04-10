@@ -475,8 +475,11 @@ impl Session {
         }
     }
 
-    /// Snapshot the session: REPL state + scratch filesystem.
-    pub async fn snapshot(&mut self) -> Result<Vec<u8>, SessionError> {
+    /// Snapshot execution-mode-local state, if any.
+    pub async fn snapshot_execution_state(&mut self) -> Result<Option<Vec<u8>>, SessionError> {
+        if !self.supports_repl() {
+            return Ok(None);
+        }
         let id = uuid::Uuid::new_v4().to_string();
         self.runtime()?
             .send(LashlangRequest::Snapshot { id: id.clone() })?;
@@ -497,11 +500,14 @@ impl Session {
             "vars": data,
             "files": files,
         });
-        Ok(serde_json::to_vec(&combined).unwrap())
+        Ok(Some(serde_json::to_vec(&combined).unwrap()))
     }
 
-    /// Restore a session from a snapshot.
-    pub async fn restore(&mut self, data: &[u8]) -> Result<(), SessionError> {
+    /// Restore execution-mode-local state from a snapshot blob.
+    pub async fn restore_execution_state(&mut self, data: &[u8]) -> Result<(), SessionError> {
+        if !self.supports_repl() {
+            return Ok(());
+        }
         let parsed: serde_json::Value = serde_json::from_slice(data).unwrap_or(json!({}));
 
         if parsed.get("version").is_none() || parsed.get("engine").is_none() {
@@ -711,7 +717,7 @@ finish "ok"
         assert_eq!(
             response.error,
             Some(
-                "`finish` is no longer supported in `<repl>`. End the task by replying without a `<repl>` block once you are done.".to_string()
+                "This lashlang step tried to terminate the task directly. End the task by replying in plain prose instead of calling `execute_lashlang` again.".to_string()
             )
         );
         assert_eq!(response.tool_calls.len(), 1);

@@ -9,15 +9,16 @@ use super::plan_tracker::PlanTrackerPluginFactory;
 use super::*;
 use crate::instructions::InstructionSource;
 use crate::plugin::{
-    PluginDirective, PluginError, PromptHookContext, ToolCallHookContext, ToolSurfaceContext,
+    PluginDirective, PluginError, PromptHookContext, PromptRequestHookContext, ToolCallHookContext,
+    ToolSurfaceContext,
 };
 use crate::session_model::PromptSectionName;
 use crate::tools::StateToolsPluginFactory;
 use crate::{
     AssembledTurn, AssistantOutput, DoneReason, ExecutionMode, MessageRole, OutputState,
-    PluginHost, SessionCreateRequest, SessionHandle, SessionManager, SessionPolicy,
-    SessionSnapshot, SessionStateEnvelope, TokenUsage, ToolDefinition, TurnHookContext, TurnInput,
-    TurnResultHookContext, TurnStatus,
+    PluginHost, PluginSurfaceEvent, SessionCreateRequest, SessionHandle, SessionManager,
+    SessionPolicy, SessionSnapshot, SessionStateEnvelope, TokenUsage, ToolDefinition,
+    TurnHookContext, TurnInput, TurnResultHookContext, TurnStatus,
 };
 
 struct MockSessionManager;
@@ -202,9 +203,85 @@ fn empty_turn(session_id: &str) -> AssembledTurn {
         },
         token_usage: TokenUsage::default(),
         tool_calls: Vec::new(),
-        code_outputs: Vec::new(),
         errors: Vec::new(),
     }
+}
+
+#[tokio::test]
+async fn ui_activity_plugin_emits_done_notification_surface_event() {
+    let host = PluginHost::new(vec![Arc::new(BuiltinUiActivityPluginFactory)]);
+    let session = host.build_standard_session("root", None).expect("session");
+    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
+
+    let events = session
+        .after_turn(TurnResultHookContext {
+            session_id: "root".to_string(),
+            turn: empty_turn("root"),
+            host: manager,
+        })
+        .await
+        .expect("after turn");
+
+    assert!(events.iter().any(|emitted| {
+        matches!(
+            &emitted.value,
+            PluginDirective::EmitEvents { events }
+                if events.iter().any(|event| matches!(
+                    event,
+                    PluginSurfaceEvent::Custom { name, payload }
+                        if name == "desktop_notification"
+                            && payload.get("body").and_then(|value| value.as_str())
+                                == Some("Response complete")
+                ))
+        )
+    }));
+}
+
+#[tokio::test]
+async fn ui_activity_plugin_skips_wait_prompt_notifications() {
+    let host = PluginHost::new(vec![Arc::new(BuiltinUiActivityPluginFactory)]);
+    let session = host.build_standard_session("root", None).expect("session");
+    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
+
+    let events = session
+        .on_prompt_request(PromptRequestHookContext {
+            session_id: "root".to_string(),
+            request: crate::PromptRequest::freeform("Pausing briefly before continuing.")
+                .with_wait(5),
+            host: manager,
+        })
+        .await
+        .expect("prompt hooks");
+
+    assert!(events.is_empty());
+}
+
+#[tokio::test]
+async fn ui_activity_plugin_emits_prompt_notification_surface_event() {
+    let host = PluginHost::new(vec![Arc::new(BuiltinUiActivityPluginFactory)]);
+    let session = host.build_standard_session("root", None).expect("session");
+    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
+
+    let events = session
+        .on_prompt_request(PromptRequestHookContext {
+            session_id: "root".to_string(),
+            request: crate::PromptRequest::single(
+                "Need approval?",
+                vec!["yes".to_string(), "no".to_string()],
+            ),
+            host: manager,
+        })
+        .await
+        .expect("prompt hooks");
+
+    assert!(events.iter().any(|emitted| {
+        matches!(
+            &emitted.value,
+            PluginSurfaceEvent::Custom { name, payload }
+                if name == "desktop_notification"
+                    && payload.get("body").and_then(|value| value.as_str()) == Some("Need approval?")
+        )
+    }));
 }
 
 #[tokio::test]

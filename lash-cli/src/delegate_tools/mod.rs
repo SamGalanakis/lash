@@ -541,7 +541,6 @@ mod tests {
                     cached_input_tokens: 3,
                     reasoning_tokens: 2,
                 },
-                code_outputs: Vec::new(),
                 tool_calls: vec![lash::ToolCallRecord {
                     call_id: Some("call-1".to_string()),
                     tool: "read_file".to_string(),

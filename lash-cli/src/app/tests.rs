@@ -1,12 +1,20 @@
-impl DisplayBlock {
-    pub fn height(&self, expand_level: u8, width: usize, viewport_height: usize) -> usize {
-        let blocks = [self.clone()];
-        render::rendered_block_height(&blocks, 0, expand_level, width, viewport_height)
-    }
-}
-
 use super::*;
 use crate::editor::LARGE_PASTE_CHAR_THRESHOLD;
+use lash::Part;
+
+fn other_variant_name(block: &DisplayBlock) -> &'static str {
+    match block {
+        DisplayBlock::UserInput(_) => "UserInput",
+        DisplayBlock::AssistantText(_) => "AssistantText",
+        DisplayBlock::Activity(_) => "Activity",
+        DisplayBlock::ShellOutput { .. } => "ShellOutput",
+        DisplayBlock::Error(_) => "Error",
+        DisplayBlock::SystemMessage(_) => "SystemMessage",
+        DisplayBlock::PlanContent(_) => "PlanContent",
+        DisplayBlock::PluginPanel(_) => "PluginPanel",
+        DisplayBlock::Splash => "Splash",
+    }
+}
 
 #[test]
 fn renders_plan_content_from_update_plan_args() {
@@ -22,28 +30,6 @@ fn renders_plan_content_from_update_plan_args() {
     assert!(content.contains("\u{2713} Inspect UI"));
     assert!(content.contains("\u{25b8} Patch layout"));
     assert!(!content.contains("1."));
-}
-
-#[test]
-fn display_block_code_block_height() {
-    let block = DisplayBlock::CodeBlock {
-        code: "print('hi')".into(),
-        continuation: false,
-    };
-    // Level 0: first in group = 1 (ghost fold summary)
-    assert_eq!(block.height(0, 80, 0), 1);
-    // Level 1: compact view hides code blocks
-    assert_eq!(block.height(1, 80, 0), 0);
-    // Level 2: full code view
-    assert_eq!(block.height(2, 80, 0), 1);
-
-    let cont = DisplayBlock::CodeBlock {
-        code: "print('hi')".into(),
-        continuation: true,
-    };
-    assert_eq!(cont.height(0, 80, 0), 0); // absorbed into ghost fold
-    assert_eq!(cont.height(1, 80, 0), 0); // enabled at level 1
-    assert_eq!(cont.height(2, 80, 0), 1); // visible at level 2
 }
 
 #[test]
@@ -747,6 +733,80 @@ fn repeated_cancelled_errors_do_not_duplicate_system_message() {
 }
 
 #[test]
+fn interrupted_transcript_can_replace_shorter_local_user_block() {
+    let mut app = App::new("test-model".into(), "test".into());
+    app.blocks.push(DisplayBlock::UserInput(
+        "what do you mean \"no longer supported\" why are you describing legacy stuff again!"
+            .into(),
+    ));
+
+    let message = lash::Message {
+        id: "m1".into(),
+        role: lash::MessageRole::User,
+        parts: vec![Part {
+            id: "m1.p1".into(),
+            kind: PartKind::Text,
+            content: "what do you mean \"no longer supported\" why are you describing legacy stuff again!\n\n<skill>\nlegacy\n</skill>".into(),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            prune_state: lash::PruneState::Intact,
+        }],
+        user_input: Some(lash::UserInputProvenance {
+            display_text: "what do you mean \"no longer supported\" why are you describing legacy stuff again!\n\n<skill>\nlegacy\n</skill>".into(),
+            effective_text: "what do you mean \"no longer supported\" why are you describing legacy stuff again!\n\n<skill>\nlegacy\n</skill>".into(),
+            transforms: Vec::new(),
+        }),
+        origin: None,
+    };
+
+    app.reconcile_interrupted_transcript_user_block(&[message]);
+
+    assert!(matches!(
+        app.blocks.last(),
+        Some(DisplayBlock::UserInput(text)) if text.contains("<skill>")
+    ));
+}
+
+#[test]
+fn interrupted_transcript_does_not_add_second_user_block() {
+    let mut app = App::new("test-model".into(), "test".into());
+    app.blocks.push(DisplayBlock::UserInput("/yolopush".into()));
+
+    let message = lash::Message {
+        id: "m1".into(),
+        role: lash::MessageRole::User,
+        parts: vec![Part {
+            id: "m1.p1".into(),
+            kind: PartKind::Text,
+            content: "/yolopush\n\n<skill>body</skill>".into(),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            prune_state: lash::PruneState::Intact,
+        }],
+        user_input: Some(lash::UserInputProvenance {
+            display_text: "/yolopush".into(),
+            effective_text: "/yolopush\n\n<skill>body</skill>".into(),
+            transforms: vec![lash::UserInputTransform::SkillBlockAppend {
+                skill_name: "yolopush".into(),
+                skill_path: "/tmp/yolopush/SKILL.md".into(),
+            }],
+        }),
+        origin: None,
+    };
+
+    app.reconcile_interrupted_transcript_user_block(&[message]);
+
+    let user_blocks = app
+        .blocks
+        .iter()
+        .filter(|block| matches!(block, DisplayBlock::UserInput(_)))
+        .count();
+    assert_eq!(user_blocks, 1);
+}
+
+#[test]
 fn non_manual_error_sets_transient_status() {
     let mut app = App::new("test-model".into(), "test".into());
     app.handle_session_event(SessionEvent::LlmRequest {
@@ -1233,183 +1293,6 @@ fn dismiss_splash_removes_empty_state_before_history_content() {
 }
 
 #[test]
-fn toggle_code_expand_preserves_scroll_position() {
-    let mut app = App::new("test-model".into(), "test".into());
-    // Remove the Splash block
-    app.blocks.clear();
-
-    // Add a mix of blocks: prose, code, prose, code, prose
-    app.blocks.push(DisplayBlock::UserInput("Message 1".into()));
-    app.blocks.push(DisplayBlock::AssistantText(
-        "Response 1 - a short reply".into(),
-    ));
-    app.blocks.push(DisplayBlock::CodeBlock {
-        code: "let x = 1;\nlet y = 2;\nlet z = 3;\nprintln!();\nlet a = 4;\nlet b = 5;".into(),
-        continuation: false,
-    });
-    app.blocks
-        .push(DisplayBlock::Activity(Box::new(dummy_activity())));
-    app.blocks.push(DisplayBlock::AssistantText(
-        "Response 2 - another reply that is a bit longer".into(),
-    ));
-    app.blocks.push(DisplayBlock::UserInput("Message 2".into()));
-    app.blocks
-        .push(DisplayBlock::AssistantText("Response 3".into()));
-    app.blocks.push(DisplayBlock::CodeBlock {
-        code: "fn main() {\n    println!(\"hello\");\n}".into(),
-        continuation: false,
-    });
-    app.blocks.push(DisplayBlock::AssistantText(
-        "Final response with some text".into(),
-    ));
-
-    let width = 80;
-    let vh = 24;
-    app.expand_level = 0;
-
-    // Build the height cache (level 0 = ghost fold)
-    app.ensure_height_cache_pub(width, vh);
-
-    // Verify we have blocks and cache
-    assert!(
-        !app.height_cache.is_empty(),
-        "height cache should be populated"
-    );
-
-    // Simulate scrolling up near AssistantText "Response 2" and ensure the same
-    // anchored block stays visible across expand/collapse.
-    let cache = app.height_cache_snapshot().to_vec();
-    let block4_start = cache[3]; // cumulative height after first 4 blocks (0-indexed)
-    let anchor_idx = cache.partition_point(|&cum| cum <= block4_start);
-    app.scroll_offset = block4_start;
-    app.follow_mode = FollowOutputMode::Paused;
-
-    // Cycle to level 1 (compact plus)
-    app.cycle_expand();
-    assert_eq!(app.expand_level, 1);
-
-    let new_cache = app.height_cache_snapshot().to_vec();
-    let new_anchor_idx = new_cache.partition_point(|&cum| cum <= app.scroll_offset);
-
-    assert_eq!(
-        new_anchor_idx, anchor_idx,
-        "scroll should keep the same anchored block after expanding to level 1"
-    );
-
-    // Cycle back to level 0
-    app.cycle_expand();
-    assert_eq!(app.expand_level, 0);
-
-    let final_cache = app.height_cache_snapshot().to_vec();
-    let final_anchor_idx = final_cache.partition_point(|&cum| cum <= app.scroll_offset);
-
-    assert_eq!(
-        final_anchor_idx, anchor_idx,
-        "scroll should keep the same anchored block after collapsing back to level 0"
-    );
-}
-
-#[test]
-fn toggle_code_expand_preserves_scroll_with_splash() {
-    let mut app = App::new("test-model".into(), "test".into());
-    // App starts with Splash at index 0 - keep it!
-
-    // Add blocks after Splash
-    app.blocks.push(DisplayBlock::UserInput("Message 1".into()));
-    app.blocks.push(DisplayBlock::AssistantText(
-        "Response 1 - a short reply".into(),
-    ));
-    app.blocks.push(DisplayBlock::CodeBlock {
-        code: "let x = 1;\nlet y = 2;\nlet z = 3;\nprintln!();\nlet a = 4;\nlet b = 5;".into(),
-        continuation: false,
-    });
-    app.blocks
-        .push(DisplayBlock::Activity(Box::new(dummy_activity())));
-    app.blocks.push(DisplayBlock::AssistantText(
-        "Response 2 - another reply".into(),
-    ));
-    app.blocks.push(DisplayBlock::UserInput("Message 2".into()));
-    app.blocks
-        .push(DisplayBlock::AssistantText("Response 3".into()));
-
-    let width = 80;
-    let vh = 24;
-
-    // Build the height cache
-    app.ensure_height_cache_pub(width, vh);
-    let cache = app.height_cache_snapshot().to_vec();
-
-    // Scroll to block 5 (AssistantText "Response 2", index 5 with Splash at 0)
-    let block5_start = cache[4]; // after Splash + UserInput + AssistantText + CodeBlock + Activity
-    app.scroll_offset = block5_start;
-    app.follow_mode = FollowOutputMode::Paused;
-
-    // Cycle to level 1
-    app.cycle_expand();
-
-    let new_cache = app.height_cache_snapshot().to_vec();
-    let new_block5_start = new_cache[4];
-
-    assert_eq!(
-        app.scroll_offset, new_block5_start,
-        "scroll should track block 5 start after expanding (with Splash)"
-    );
-
-    // Cycle back to level 0
-    app.cycle_expand();
-    let final_cache = app.height_cache_snapshot().to_vec();
-    let final_block5_start = final_cache[4];
-
-    assert_eq!(
-        app.scroll_offset, final_block5_start,
-        "scroll should track block 5 start after collapsing (with Splash)"
-    );
-}
-
-#[test]
-fn toggle_code_expand_follow_output_stays_at_bottom() {
-    let mut app = App::new("test-model".into(), "test".into());
-    app.blocks.clear();
-
-    app.blocks.push(DisplayBlock::UserInput("Message 1".into()));
-    app.blocks
-        .push(DisplayBlock::AssistantText("Response 1".into()));
-    app.blocks.push(DisplayBlock::CodeBlock {
-        code: "line1\nline2\nline3\nline4\nline5".into(),
-        continuation: false,
-    });
-    app.blocks
-        .push(DisplayBlock::AssistantText("Final response".into()));
-
-    let width = 80;
-    let vh = 24;
-
-    // Simulate following from the bottom.
-    app.follow_mode = FollowOutputMode::Bottom;
-    app.scroll_offset = usize::MAX;
-    app.ensure_height_cache_pub(width, vh);
-
-    // Cycle to level 1
-    app.cycle_expand();
-
-    let expanded_bottom = app.total_content_height(width, vh).saturating_sub(vh);
-    assert_eq!(
-        app.scroll_offset, expanded_bottom,
-        "should stay at the bottom after expanding"
-    );
-    assert_eq!(app.follow_mode, FollowOutputMode::Bottom);
-
-    // Cycle back to level 0
-    app.cycle_expand();
-    let collapsed_bottom = app.total_content_height(width, vh).saturating_sub(vh);
-    assert_eq!(
-        app.scroll_offset, collapsed_bottom,
-        "should stay at the bottom after collapsing"
-    );
-    assert_eq!(app.follow_mode, FollowOutputMode::Bottom);
-}
-
-#[test]
 fn refresh_follow_output_anchor_tracks_bottom_when_idle() {
     let mut app = App::new("test-model".into(), "test".into());
     app.blocks.clear();
@@ -1460,47 +1343,6 @@ fn refresh_follow_output_anchor_reveals_output_start_once_then_follows_tail() {
 
     app.refresh_follow_output_anchor(width, viewport_height);
     assert_eq!(app.scroll_offset, max_scroll);
-}
-
-#[test]
-fn refresh_follow_output_anchor_uses_first_visible_output_block_of_turn() {
-    let mut app = App::new("test-model".into(), "test".into());
-    app.blocks.clear();
-
-    app.blocks
-        .push(DisplayBlock::AssistantText("older history".into()));
-    app.blocks.push(DisplayBlock::UserInput("prompt".into()));
-    app.blocks
-        .push(DisplayBlock::AssistantText("response start".into()));
-    app.blocks.push(DisplayBlock::CodeBlock {
-        code: "let value = 1;".into(),
-        continuation: false,
-    });
-    app.blocks.push(DisplayBlock::CodeOutput {
-        output: "ok".into(),
-        error: None,
-    });
-    app.blocks
-        .push(DisplayBlock::AssistantText("response tail".into()));
-    app.start_turn();
-    app.follow_mode = FollowOutputMode::Contextual;
-    if let Some(turn) = app.live_turn.as_mut() {
-        turn.has_visible_output = true;
-        turn.output_start_anchor_pending = true;
-    }
-
-    let width = 80;
-    let viewport_height = 6;
-
-    app.refresh_follow_output_anchor(width, viewport_height);
-
-    let max_scroll = app
-        .total_content_height(width, viewport_height)
-        .saturating_sub(viewport_height);
-    let expected = app.contextual_follow_offset(app.block_content_start_offset(2), max_scroll);
-
-    assert_eq!(app.scroll_offset, expected);
-    assert_eq!(app.follow_mode, FollowOutputMode::Bottom);
 }
 
 #[test]
@@ -1656,52 +1498,6 @@ fn refresh_follow_output_anchor_repositions_waiting_prompt_on_resize() {
     assert!(
         app.scroll_offset <= initial_offset,
         "larger viewport should not push the waiting prompt further down"
-    );
-}
-
-#[test]
-fn toggle_code_expand_stale_cache() {
-    let mut app = App::new("test-model".into(), "test".into());
-    app.blocks.clear();
-
-    app.blocks.push(DisplayBlock::UserInput("Message 1".into()));
-    app.blocks
-        .push(DisplayBlock::AssistantText("Response 1".into()));
-    app.blocks.push(DisplayBlock::CodeBlock {
-        code: "line1\nline2\nline3".into(),
-        continuation: false,
-    });
-    app.blocks
-        .push(DisplayBlock::AssistantText("Response 2".into()));
-
-    let width = 80;
-    let vh = 24;
-
-    // Build cache, then scroll to block 3 (Response 2)
-    app.ensure_height_cache_pub(width, vh);
-    let cache = app.height_cache_snapshot().to_vec();
-    let block3_start = cache[2]; // after UserInput + AssistantText + CodeBlock
-    app.scroll_offset = block3_start;
-    app.follow_mode = FollowOutputMode::Paused;
-
-    // Invalidate cache (simulates a session event arriving between frames)
-    app.invalidate_height_cache();
-    assert!(
-        app.height_cache_dirty_from == 0,
-        "cache should be marked fully dirty"
-    );
-
-    // Cycle - should still anchor correctly despite stale cache
-    app.cycle_expand();
-
-    // Rebuild cache to check where block 3 is now
-    app.ensure_height_cache_pub(width, vh);
-    let new_cache = app.height_cache_snapshot().to_vec();
-    let new_block3_start = new_cache[2];
-
-    assert_eq!(
-        app.scroll_offset, new_block3_start,
-        "scroll should track block 3 even with stale cache"
     );
 }
 
@@ -2177,62 +1973,4 @@ fn option_prompt_response_is_rendered_inline_by_question_panel_artifact() {
                         && panel.note.as_deref() == Some("ship the blue path")
             )
     ));
-}
-
-#[test]
-fn live_tool_output_keeps_tail_and_counts_hidden_lines() {
-    let mut app = App::new("test-model".into(), "test".into());
-    app.running = true;
-    app.live_turn = Some(LiveTurnState::new("shell", None));
-
-    let payload = (0..60)
-        .map(|idx| format!("line-{idx}\n"))
-        .collect::<String>();
-    app.handle_session_event(SessionEvent::Message {
-        text: payload,
-        kind: "tool_output".into(),
-    });
-
-    assert_eq!(app.streaming_output_hidden, 12);
-    assert_eq!(
-        app.streaming_output.first().map(String::as_str),
-        Some("line-12")
-    );
-    assert_eq!(
-        app.streaming_output.last().map(String::as_str),
-        Some("line-59")
-    );
-    assert_eq!(app.streaming_output_height(), 49);
-}
-
-fn other_variant_name(block: &DisplayBlock) -> &'static str {
-    match block {
-        DisplayBlock::UserInput(_) => "UserInput",
-        DisplayBlock::AssistantText(_) => "AssistantText",
-        DisplayBlock::CodeBlock { .. } => "CodeBlock",
-        DisplayBlock::Activity(_) => "Activity",
-        DisplayBlock::CodeOutput { .. } => "CodeOutput",
-        DisplayBlock::ShellOutput { .. } => "ShellOutput",
-        DisplayBlock::Error(_) => "Error",
-        DisplayBlock::SystemMessage(_) => "SystemMessage",
-        DisplayBlock::PlanContent(_) => "PlanContent",
-        DisplayBlock::PluginPanel(_) => "PluginPanel",
-        DisplayBlock::Splash => "Splash",
-    }
-}
-
-fn dummy_activity() -> ActivityBlock {
-    ActivityBlock {
-        kind: ActivityKind::Exploration,
-        status: ActivityStatus::Completed,
-        tool_name: "read_file".into(),
-        summary: "explored".into(),
-        detail_lines: vec!["read lash-cli/src/app/mod.rs".into()],
-        duration_ms: 50,
-        args: serde_json::json!({}),
-        result: serde_json::Value::Null,
-        artifact: None,
-        children: Vec::new(),
-        extra: None,
-    }
 }

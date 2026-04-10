@@ -17,6 +17,7 @@ pub enum ActivityKind {
     Parallel,
     Ask,
     GenericTool,
+    Hidden,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -162,6 +163,29 @@ impl ActivityState {
         // Plan content block already renders the full checklist, so no activity line needed.
         if name == "update_plan" {
             return Vec::new();
+        }
+        if name == "execute_lashlang" {
+            let code = tool_arg_str(&args, "code").unwrap_or("").to_string();
+            return vec![ActivityBlock {
+                kind: ActivityKind::Hidden,
+                status: if success {
+                    ActivityStatus::Completed
+                } else {
+                    ActivityStatus::Failed
+                },
+                tool_name: name.to_string(),
+                summary: String::new(),
+                detail_lines: Vec::new(),
+                duration_ms,
+                args,
+                result,
+                artifact: Some(ActivityArtifact::TextPreview {
+                    title: Some("lashlang".to_string()),
+                    text: code,
+                }),
+                children: Vec::new(),
+                extra: None,
+            }];
         }
         if name == "write_stdin" && should_suppress_shell_poll_activity(&args, &result, success) {
             return Vec::new();

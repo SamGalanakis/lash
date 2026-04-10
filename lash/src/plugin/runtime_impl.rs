@@ -274,6 +274,7 @@ pub struct PluginRegistrar {
     tool_names: BTreeSet<String>,
     tool_providers: Vec<Arc<dyn ToolProvider>>,
     prompt_contributors: Vec<RegisteredHook<PromptContributor>>,
+    prompt_request_hooks: Vec<RegisteredHook<PromptRequestHook>>,
     tool_surface_contributors: Vec<RegisteredHook<ToolSurfaceContributor>>,
     before_turn_hooks: Vec<RegisteredHook<BeforeTurnHook>>,
     before_tool_call_hooks: Vec<RegisteredHook<BeforeToolCallHook>>,
@@ -309,6 +310,10 @@ pub struct PromptRegistrations<'a> {
 impl PromptRegistrations<'_> {
     pub fn contribute(self, contributor: PromptContributor) {
         self.reg.add_prompt_contributor(contributor);
+    }
+
+    pub fn on_request(self, hook: PromptRequestHook) {
+        self.reg.add_prompt_request_hook(hook);
     }
 }
 
@@ -422,6 +427,7 @@ impl PluginRegistrar {
                 .collect(),
             tool_providers: Vec::new(),
             prompt_contributors: Vec::new(),
+            prompt_request_hooks: Vec::new(),
             tool_surface_contributors: Vec::new(),
             before_turn_hooks: Vec::new(),
             before_tool_call_hooks: Vec::new(),
@@ -494,6 +500,14 @@ impl PluginRegistrar {
             &mut self.prompt_contributors,
             &self.registering_plugin_id,
             contributor,
+        );
+    }
+
+    fn add_prompt_request_hook(&mut self, hook: PromptRequestHook) {
+        push_registered_hook(
+            &mut self.prompt_request_hooks,
+            &self.registering_plugin_id,
+            hook,
         );
     }
 
@@ -724,6 +738,7 @@ impl PluginHost {
             dynamic_tools,
             tool_surface_overlay,
             prompt_contributors: reg.prompt_contributors,
+            prompt_request_hooks: reg.prompt_request_hooks,
             tool_surface_contributors: reg.tool_surface_contributors,
             before_turn_hooks: reg.before_turn_hooks,
             before_tool_call_hooks: reg.before_tool_call_hooks,
@@ -826,6 +841,7 @@ pub struct PluginSession {
     dynamic_tools: Option<Arc<crate::DynamicToolProvider>>,
     tool_surface_overlay: ToolSurfaceContribution,
     prompt_contributors: Vec<RegisteredHook<PromptContributor>>,
+    prompt_request_hooks: Vec<RegisteredHook<PromptRequestHook>>,
     tool_surface_contributors: Vec<RegisteredHook<ToolSurfaceContributor>>,
     before_turn_hooks: Vec<RegisteredHook<BeforeTurnHook>>,
     before_tool_call_hooks: Vec<RegisteredHook<BeforeToolCallHook>>,
@@ -986,6 +1002,13 @@ impl PluginSession {
                 .then(a.priority.cmp(&b.priority))
         });
         Ok(out)
+    }
+
+    pub async fn on_prompt_request(
+        &self,
+        ctx: PromptRequestHookContext,
+    ) -> Result<Vec<PluginOwned<PluginSurfaceEvent>>, PluginError> {
+        collect_owned_async(&self.prompt_request_hooks, ctx, |hook, ctx| hook(ctx)).await
     }
 
     async fn apply_turn_directives(

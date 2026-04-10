@@ -45,30 +45,6 @@ fn promote_pending_steers_to_queue_preserves_order() {
 }
 
 #[test]
-fn copy_shortcut_accepts_ctrl_c_even_when_shift_modifier_is_present() {
-    let key = crossterm::event::KeyEvent {
-        code: crossterm::event::KeyCode::Char('c'),
-        modifiers: crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::SHIFT,
-        kind: crossterm::event::KeyEventKind::Press,
-        state: crossterm::event::KeyEventState::NONE,
-    };
-
-    assert!(is_copy_shortcut(key));
-}
-
-#[test]
-fn copy_shortcut_accepts_plain_ctrl_c_for_selected_text_precedence() {
-    let key = crossterm::event::KeyEvent {
-        code: crossterm::event::KeyCode::Char('c'),
-        modifiers: crossterm::event::KeyModifiers::CONTROL,
-        kind: crossterm::event::KeyEventKind::Press,
-        state: crossterm::event::KeyEventState::NONE,
-    };
-
-    assert!(is_copy_shortcut(key));
-}
-
-#[test]
 fn selection_is_preserved_for_modified_key_chords() {
     let key = crossterm::event::KeyEvent {
         code: crossterm::event::KeyCode::Char('c'),
@@ -90,4 +66,28 @@ fn selection_is_cleared_for_plain_typing_keys() {
     };
 
     assert!(!should_preserve_selection_for_key(key));
+}
+
+#[test]
+fn copy_shortcut_accepts_ctrl_c_even_when_shift_modifier_is_present() {
+    let key = crossterm::event::KeyEvent {
+        code: crossterm::event::KeyCode::Char('c'),
+        modifiers: crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::SHIFT,
+        kind: crossterm::event::KeyEventKind::Press,
+        state: crossterm::event::KeyEventState::NONE,
+    };
+
+    assert!(is_copy_shortcut(key));
+}
+
+#[test]
+fn copy_shortcut_accepts_plain_ctrl_c_for_selected_text_precedence() {
+    let key = crossterm::event::KeyEvent {
+        code: crossterm::event::KeyCode::Char('c'),
+        modifiers: crossterm::event::KeyModifiers::CONTROL,
+        kind: crossterm::event::KeyEventKind::Press,
+        state: crossterm::event::KeyEventState::NONE,
+    };
+
+    assert!(is_copy_shortcut(key));
 }

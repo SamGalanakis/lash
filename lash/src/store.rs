@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS session_state (
     singleton             INTEGER PRIMARY KEY CHECK (singleton = 1),
     iteration             INTEGER NOT NULL DEFAULT 0,
     config_json           TEXT NOT NULL DEFAULT '{}',
-    repl_snapshot         BLOB,
+    execution_state_snapshot         BLOB,
     input_tokens          INTEGER NOT NULL DEFAULT 0,
     output_tokens         INTEGER NOT NULL DEFAULT 0,
     cached_input_tokens   INTEGER NOT NULL DEFAULT 0,
@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS session_state (
 CREATE TABLE IF NOT EXISTS live_session_snapshot (
     singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
     snapshot_json  TEXT NOT NULL DEFAULT '{}',
-    repl_snapshot  BLOB
+    execution_state_snapshot  BLOB
 );
 
 CREATE TABLE IF NOT EXISTS transcript_entries (
@@ -105,7 +105,7 @@ fn apply_pragmas(conn: &Connection, backing: StoreBacking) -> rusqlite::Result<(
 pub struct SessionState {
     pub iteration: i64,
     pub config_json: String,
-    pub repl_snapshot: Option<Vec<u8>>,
+    pub execution_state_snapshot: Option<Vec<u8>>,
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cached_input_tokens: i64,
@@ -115,7 +115,7 @@ pub struct SessionState {
 #[derive(Clone, Debug)]
 pub struct LiveSessionSnapshot {
     pub snapshot_json: String,
-    pub repl_snapshot: Option<Vec<u8>>,
+    pub execution_state_snapshot: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -455,13 +455,13 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO session_state (
-                singleton, iteration, config_json, repl_snapshot,
+                singleton, iteration, config_json, execution_state_snapshot,
                 input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
              ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 state.iteration,
                 state.config_json,
-                state.repl_snapshot,
+                state.execution_state_snapshot,
                 state.input_tokens,
                 state.output_tokens,
                 state.cached_input_tokens,
@@ -475,14 +475,14 @@ impl Store {
     pub fn load_session_state(&self) -> Option<SessionState> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT iteration, config_json, repl_snapshot, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
+            "SELECT iteration, config_json, execution_state_snapshot, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
              FROM session_state WHERE singleton = 1",
             [],
             |row| {
                 Ok(SessionState {
                     iteration: row.get(0)?,
                     config_json: row.get(1)?,
-                    repl_snapshot: row.get(2)?,
+                    execution_state_snapshot: row.get(2)?,
                     input_tokens: row.get(3)?,
                     output_tokens: row.get(4)?,
                     cached_input_tokens: row.get(5)?,
@@ -497,9 +497,9 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO live_session_snapshot (
-                singleton, snapshot_json, repl_snapshot
+                singleton, snapshot_json, execution_state_snapshot
              ) VALUES (1, ?1, ?2)",
-            params![snapshot.snapshot_json, snapshot.repl_snapshot],
+            params![snapshot.snapshot_json, snapshot.execution_state_snapshot],
         )
         .unwrap();
     }
@@ -507,13 +507,13 @@ impl Store {
     pub fn load_live_session_snapshot(&self) -> Option<LiveSessionSnapshot> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT snapshot_json, repl_snapshot
+            "SELECT snapshot_json, execution_state_snapshot
              FROM live_session_snapshot WHERE singleton = 1",
             [],
             |row| {
                 Ok(LiveSessionSnapshot {
                     snapshot_json: row.get(0)?,
-                    repl_snapshot: row.get(1)?,
+                    execution_state_snapshot: row.get(1)?,
                 })
             },
         )
@@ -876,7 +876,7 @@ mod tests {
         store.save_session_state(SessionState {
             iteration: 0,
             config_json: "{}".into(),
-            repl_snapshot: None,
+            execution_state_snapshot: None,
             input_tokens: 0,
             output_tokens: 0,
             cached_input_tokens: 0,
@@ -886,7 +886,7 @@ mod tests {
         store.save_session_state(SessionState {
             iteration: 7,
             config_json: r#"{"mode":"updated"}"#.into(),
-            repl_snapshot: None,
+            execution_state_snapshot: None,
             input_tokens: 5,
             output_tokens: 2,
             cached_input_tokens: 1,
@@ -904,16 +904,16 @@ mod tests {
         let store = mem();
         store.save_live_session_snapshot(LiveSessionSnapshot {
             snapshot_json: r#"{"iteration":1}"#.into(),
-            repl_snapshot: Some(vec![1, 2, 3]),
+            execution_state_snapshot: Some(vec![1, 2, 3]),
         });
         store.save_live_session_snapshot(LiveSessionSnapshot {
             snapshot_json: r#"{"iteration":2}"#.into(),
-            repl_snapshot: None,
+            execution_state_snapshot: None,
         });
 
         let snapshot = store.load_live_session_snapshot().expect("live snapshot");
         assert_eq!(snapshot.snapshot_json, r#"{"iteration":2}"#);
-        assert_eq!(snapshot.repl_snapshot, None);
+        assert_eq!(snapshot.execution_state_snapshot, None);
 
         store.clear_live_session_snapshot();
         assert!(store.load_live_session_snapshot().is_none());

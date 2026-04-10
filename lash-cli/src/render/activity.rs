@@ -45,6 +45,15 @@ pub(super) fn render_activity_block(
     lines: &mut Vec<Line<'static>>,
     viewport_width: usize,
 ) {
+    if activity.kind == ActivityKind::Hidden {
+        if expand_level >= 2
+            && let Some(artifact) = &activity.artifact
+        {
+            render_activity_artifact(lines, artifact, viewport_width, "    ");
+        }
+        return;
+    }
+
     if expand_level >= 1
         && let Some(ActivityArtifact::QuestionPanel(panel)) = activity.artifact.as_ref()
     {

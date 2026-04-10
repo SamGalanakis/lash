@@ -25,25 +25,19 @@ pub(crate) struct AutonomousPersistenceContext {
 async fn persist_autonomous_runtime_state(
     runtime: &mut LashRuntime,
     persistence: &AutonomousPersistenceContext,
-    mut state: SessionStateEnvelope,
+    _state: SessionStateEnvelope,
 ) {
-    let snapshot_hash = if matches!(state.policy.execution_mode, ExecutionMode::Repl) {
-        match runtime.snapshot_repl().await {
-            Ok(blob) => {
-                state = runtime.export_state();
-                Some(hash12(&blob))
-            }
-            Err(err) => {
-                tracing::warn!(
-                    "failed to snapshot repl state during autonomous persistence: {err}"
-                );
-                None
-            }
+    let snapshot_hash = match runtime.snapshot_execution_state().await {
+        Ok(Some(blob)) => Some(hash12(&blob)),
+        Ok(None) => None,
+        Err(err) => {
+            tracing::warn!(
+                "failed to snapshot execution state during autonomous persistence: {err}"
+            );
+            None
         }
-    } else {
-        state = runtime.export_state();
-        None
     };
+    let mut state = runtime.export_state();
 
     let execution_mode = state.policy.execution_mode;
     let context_strategy = state.policy.context_strategy;
@@ -106,13 +100,6 @@ impl AutonomousRenderer {
                     let _ = io::stdout().flush();
                 }
             }
-            SessionEvent::CodeBlock { code } => {
-                if !code.trim().is_empty() {
-                    eprintln!("[code]");
-                    eprintln!("{code}");
-                    eprintln!("[/code]");
-                }
-            }
             SessionEvent::ToolCall {
                 name,
                 success,
@@ -124,14 +111,6 @@ impl AutonomousRenderer {
                     eprintln!("[tool] {name} · {status} · {duration_text}");
                 } else {
                     eprintln!("[tool] {name} · {status}");
-                }
-            }
-            SessionEvent::CodeOutput { output, error } => {
-                if !output.trim().is_empty() {
-                    eprintln!("{output}");
-                }
-                if let Some(error) = error.filter(|value| !value.trim().is_empty()) {
-                    eprintln!("{error}");
                 }
             }
             SessionEvent::Message { text, kind } => match kind.as_str() {

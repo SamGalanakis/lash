@@ -295,9 +295,7 @@ impl App {
         matches!(
             block,
             DisplayBlock::AssistantText(_)
-                | DisplayBlock::CodeBlock { .. }
                 | DisplayBlock::Activity(_)
-                | DisplayBlock::CodeOutput { .. }
                 | DisplayBlock::ShellOutput { .. }
                 | DisplayBlock::Error(_)
                 | DisplayBlock::PlanContent(_)

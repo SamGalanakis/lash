@@ -436,6 +436,16 @@ pub(super) fn send_user_message(
     app.resume_contextual_follow_output();
     app.keep_latest_user_block_visible();
 
+    tracing::debug!(
+        display_text = prepared_turn.display_text,
+        runtime_present_before_take = runtime.is_some(),
+        runtime_return_rx_present_before_take = runtime_return_rx.is_some(),
+        cancel_token_present_before_take = cancel_token.is_some(),
+        queued_turns = app.queued_turns.len(),
+        pending_steers = app.pending_steers.len(),
+        "send_user_message taking runtime for dispatch"
+    );
+
     let mut rt = runtime
         .take()
         .expect("runtime should be available when not running");
@@ -470,8 +480,17 @@ pub(super) fn send_user_message(
     *active_stream_id = active_stream_id.wrapping_add(1);
     let stream_id = *active_stream_id;
 
+    tracing::debug!(
+        stream_id,
+        runtime_present_after_take = runtime.is_some(),
+        runtime_return_rx_present_after_set = runtime_return_rx.is_some(),
+        cancel_token_present_after_set = cancel_token.is_some(),
+        "send_user_message armed runtime return channel"
+    );
+
     let sink_tx = app_tx.clone();
     tokio::spawn(async move {
+        tracing::debug!(stream_id, "runtime turn task spawned");
         let sink = AppEventSink {
             tx: sink_tx,
             stream_id,
@@ -495,7 +514,6 @@ pub(super) fn send_user_message(
                 },
                 token_usage: TokenUsage::default(),
                 tool_calls: Vec::new(),
-                code_outputs: Vec::new(),
                 errors: vec![TurnIssue {
                     kind: "runtime".to_string(),
                     code: Some(e.code),
@@ -503,6 +521,7 @@ pub(super) fn send_user_message(
                 }],
             },
         };
+        tracing::debug!(stream_id, status = ?result.status, "runtime turn task returning runtime");
         let _ = return_tx.send(RuntimeRunResult {
             stream_id,
             runtime: rt,

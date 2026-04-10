@@ -359,8 +359,6 @@ impl TraceSessionEvent {
             }),
             SessionEvent::Prompt { .. }
             | SessionEvent::DurableSnapshot { .. }
-            | SessionEvent::CodeBlock { .. }
-            | SessionEvent::CodeOutput { .. }
             | SessionEvent::LlmResponse { .. }
             | SessionEvent::TokenUsage { .. }
             | SessionEvent::RetryStatus { .. }
