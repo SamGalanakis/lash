@@ -211,6 +211,10 @@ fn cleanup_terminal() {
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = crossterm::execute!(
         std::io::stdout(),
+        crossterm::cursor::MoveTo(0, 0),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+        crossterm::style::ResetColor,
+        crossterm::style::SetAttribute(crossterm::style::Attribute::Reset),
         crossterm::cursor::Show,
         crossterm::event::PopKeyboardEnhancementFlags,
         crossterm::event::DisableMouseCapture,

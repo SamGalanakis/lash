@@ -571,6 +571,10 @@ impl Terminal {
             return;
         }
         self.entered = false;
+        let _ = self.stdout.execute(MoveTo(0, 0));
+        let _ = self.stdout.execute(Clear(ClearType::All));
+        let _ = self.stdout.execute(ResetColor);
+        let _ = self.stdout.execute(SetAttribute(Attribute::Reset));
         let _ = self.stdout.execute(PopKeyboardEnhancementFlags);
         let _ = self.stdout.execute(DisableMouseCapture);
         let _ = self.stdout.execute(DisableBracketedPaste);

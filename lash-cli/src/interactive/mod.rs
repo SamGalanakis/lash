@@ -2391,6 +2391,8 @@ pub(crate) async fn run_app(
     // Signal reader thread and tick timer to stop
     stop.store(true, Ordering::Relaxed);
 
+    terminal.restore();
+
     // Save input history
     app.save_history();
 
