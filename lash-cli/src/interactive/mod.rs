@@ -70,6 +70,13 @@ struct AppEventSink {
     stream_id: u64,
 }
 
+fn cleared_session_state(policy: SessionPolicy) -> SessionStateEnvelope {
+    SessionStateEnvelope {
+        policy,
+        ..SessionStateEnvelope::default()
+    }
+}
+
 fn log_runtime_handoff(
     phase: &str,
     app: &App,
@@ -565,8 +572,9 @@ pub(crate) async fn run_app(
                     runtime = Some(done.runtime);
                     if done.stream_id != active_stream_id || pending_clear_after_return {
                         if let Some(rt) = runtime.as_mut() {
+                            let preserved_policy = rt.export_state().policy;
                             let _ = rt.reset_session().await;
-                            rt.set_state(SessionStateEnvelope::default());
+                            rt.set_state(cleared_session_state(preserved_policy));
                         }
                         history.clear();
                         turn_counter = 0;
@@ -925,7 +933,11 @@ pub(crate) async fn run_app(
                 if let Some(recorder) = ui_trace.as_mut() {
                     recorder.record_input_insert_text(text.clone());
                 }
-                let _ = apply_terminal_action(&mut app, &terminal, UiAction::InputInsertText(text));
+                let _ = apply_terminal_action(
+                    &mut app,
+                    &terminal,
+                    UiAction::InputInsertPastedText(text),
+                );
             }
             AppEvent::ClipboardImageReady { id, png } => {
                 app.dirty = true;

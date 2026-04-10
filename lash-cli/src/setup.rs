@@ -1066,10 +1066,8 @@ fn open_browser(url: &str) -> std::io::Result<()> {
 }
 
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
-    let mut clipboard =
-        arboard::Clipboard::new().map_err(|err| format!("Clipboard unavailable: {err}"))?;
-    clipboard
-        .set_text(text.to_string())
+    crate::clipboard::copy_text_robustly(text)
+        .map(|_| ())
         .map_err(|err| format!("Failed to copy code: {err}"))
 }
 

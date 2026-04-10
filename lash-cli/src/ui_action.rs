@@ -3,6 +3,7 @@ use crate::app::App;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum UiAction {
     InputInsertText(String),
+    InputInsertPastedText(String),
     InputBackspace,
     InputDelete,
     MoveCursorLeft,
@@ -60,6 +61,11 @@ pub(crate) fn apply_ui_action(
     match action {
         UiAction::InputInsertText(text) => {
             app.insert_text(&text);
+            app.update_suggestions();
+            UiActionOutcome::None
+        }
+        UiAction::InputInsertPastedText(text) => {
+            app.insert_pasted_text(&text);
             app.update_suggestions();
             UiActionOutcome::None
         }

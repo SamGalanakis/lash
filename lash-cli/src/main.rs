@@ -4,6 +4,7 @@ mod assistant_text;
 mod autonomous;
 mod bootstrap;
 mod cli_support;
+mod clipboard;
 mod command;
 mod delegate_tools;
 mod diff;
