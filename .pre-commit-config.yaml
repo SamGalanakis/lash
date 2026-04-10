@@ -39,3 +39,11 @@ repos:
         entry: cargo clippy --fix --allow-dirty --allow-staged --manifest-path lash-cli/Cargo.toml -- -D warnings
         files: '^lash-cli/.*\.rs$'
         pass_filenames: false
+
+      # Rust workspace tests
+      - id: cargo-test-workspace
+        name: cargo test (workspace)
+        language: system
+        entry: cargo test --workspace --locked
+        files: '^(Cargo\.(toml|lock)|[A-Za-z0-9._-]+/Cargo\.toml|.+\.rs)$'
+        pass_filenames: false

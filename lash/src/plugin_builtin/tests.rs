@@ -9,15 +9,15 @@ use super::plan_tracker::PlanTrackerPluginFactory;
 use super::*;
 use crate::instructions::InstructionSource;
 use crate::plugin::{
-    PluginDirective, PluginError, PromptHookContext, PromptRequestHookContext, ToolCallHookContext,
-    ToolSurfaceContext,
+    PluginDirective, PluginError, PromptHookContext, PromptRequestHookContext, SessionPluginMode,
+    SessionStartPoint, ToolCallHookContext, ToolResultHookContext, ToolSurfaceContext,
 };
 use crate::session_model::PromptSectionName;
 use crate::tools::StateToolsPluginFactory;
 use crate::{
     AssembledTurn, AssistantOutput, DoneReason, ExecutionMode, MessageRole, OutputState,
     PluginHost, PluginSurfaceEvent, SessionCreateRequest, SessionHandle, SessionManager,
-    SessionPolicy, SessionSnapshot, SessionStateEnvelope, TokenUsage, ToolDefinition,
+    SessionPolicy, SessionSnapshot, SessionStateEnvelope, TokenUsage, ToolDefinition, ToolResult,
     TurnHookContext, TurnInput, TurnResultHookContext, TurnStatus,
 };
 
@@ -1419,6 +1419,7 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
                     .clone()
                     .unwrap_or_else(|| "new-session".to_string()),
                 parent_session_id: request.parent_session_id.clone(),
+                policy: request.policy.clone().unwrap_or_default(),
             })
         }
 
@@ -1472,13 +1473,19 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
         .await
         .expect("after_tool_call");
 
-    let created = manager.created.lock().expect("created");
-    assert_eq!(created.len(), 1);
-    assert_eq!(created[0].start, SessionStartPoint::Empty);
-    assert_eq!(created[0].plugin_mode, SessionPluginMode::Fresh);
-    assert_eq!(created[0].initial_messages.len(), 1);
+    let create_request = directives
+        .iter()
+        .find_map(|owned| match &owned.value {
+            PluginDirective::CreateSession { request } => Some(request.as_ref()),
+            _ => None,
+        })
+        .expect("create session directive");
+    assert_eq!(manager.created.lock().expect("created").len(), 0);
+    assert!(matches!(create_request.start, SessionStartPoint::Empty));
+    assert_eq!(create_request.plugin_mode, SessionPluginMode::Fresh);
+    assert_eq!(create_request.initial_messages.len(), 1);
     assert_eq!(
-        created[0].initial_messages[0].content,
+        create_request.initial_messages[0].content,
         "Do a full, faithful implementation of the plan found at: .lash/plans/run-session.md"
     );
     assert!(
