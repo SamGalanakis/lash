@@ -12,8 +12,9 @@ use crate::plugin::{
 };
 use crate::tools::{PatchAction, inspect_patch_ops};
 use crate::{
-    PluginMessage, PromptRequest, PromptResponse, ToolDefinition, ToolExecutionContext,
-    ToolProvider, ToolResult,
+    MessageRole, PluginMessage, PromptRequest, PromptResponse, SessionContextSurface,
+    SessionCreateRequest, SessionPluginMode, SessionStartPoint, ToolDefinition,
+    ToolExecutionContext, ToolProvider, ToolResult,
 };
 
 const PLAN_MODE_BADGE_KEY: &str = "mode";
@@ -76,6 +77,14 @@ fn plan_exit_next_turn_input(display: &str, note: Option<&str>) -> String {
     } else {
         format!("Execute the plan in `{display}`.")
     }
+}
+
+fn plan_exit_fresh_context_input(display: &str) -> String {
+    format!("Do a full, faithful implementation of the plan found at: {display}")
+}
+
+fn fresh_context_session_id() -> String {
+    format!("plan-{}", uuid::Uuid::new_v4().simple())
 }
 
 fn plan_file_exists(path: &Path) -> bool {
@@ -427,7 +436,11 @@ impl PlanModeTools {
             .prompt_user(
                 PromptRequest::single(
                     format!("Exit plan mode for `{}`?", report.display_path),
-                    vec!["Exit plan mode".to_string(), "Keep planning".to_string()],
+                    vec![
+                        "Execute plan now".to_string(),
+                        "Iterate on plan with lash".to_string(),
+                        "Execute with fresh context".to_string(),
+                    ],
                 )
                 .with_markdown_panel(
                     "PLAN",
@@ -441,19 +454,22 @@ impl PlanModeTools {
             Err(err) => return ToolResult::err(json!(err.to_string())),
         };
 
-        let (approved, note) = match &answer {
-            PromptResponse::Single { selection, note } if selection == "Exit plan mode" => {
-                (true, note.clone())
-            }
-            _ => (false, None),
+        let selection = match &answer {
+            PromptResponse::Single { selection, .. } => selection.as_str(),
+            _ => "Iterate on plan with lash",
         };
-        if !approved {
+        if selection == "Iterate on plan with lash" {
             return ToolResult::ok(json!({
                 "approved": false,
                 "plan_path": report.display_path,
                 "answer": answer,
             }));
         }
+
+        let note = match &answer {
+            PromptResponse::Single { note, .. } => note.clone(),
+            _ => None,
+        };
 
         match self.state.lock() {
             Ok(mut guard) => {
@@ -462,9 +478,19 @@ impl PlanModeTools {
             Err(_) => return ToolResult::err(json!("plan mode state poisoned")),
         }
 
+        if selection == "Execute with fresh context" {
+            return ToolResult::ok(json!({
+                "approved": true,
+                "plan_path": report.display_path,
+                "execution_mode": "fresh_context",
+                "fresh_context_input": plan_exit_fresh_context_input(&report.display_path),
+            }));
+        }
+
         ToolResult::ok(json!({
             "approved": true,
             "plan_path": report.display_path,
+            "execution_mode": "current_session",
             "next_turn_input": plan_exit_next_turn_input(&report.display_path, note.as_deref()),
         }))
     }
@@ -692,10 +718,49 @@ impl SessionPlugin for PlanModePlugin {
                         .lock()
                         .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?
                         .clear_badge_event();
-                    return Ok(vec![PluginDirective::emit_events(vec![
+                    let mut directives = vec![PluginDirective::emit_events(vec![
                         clear_badge,
                         clear_plan_panel_event(),
-                    ])]);
+                    ])];
+                    if ctx
+                        .result
+                        .result
+                        .get("execution_mode")
+                        .and_then(|value| value.as_str())
+                        == Some("fresh_context")
+                    {
+                        let Some(seed) = ctx
+                            .result
+                            .result
+                            .get("fresh_context_input")
+                            .and_then(|value| value.as_str())
+                        else {
+                            return Ok(vec![PluginDirective::AbortTurn {
+                                code: "plan_mode_fresh_context_missing_input".to_string(),
+                                message: "Plan exit requested fresh-context execution without a seed prompt.".to_string(),
+                            }]);
+                        };
+                        let session_id = fresh_context_session_id();
+                        directives.push(PluginDirective::CreateSession {
+                            request: Box::new(SessionCreateRequest {
+                                session_id: Some(session_id.clone()),
+                                parent_session_id: Some(ctx.session_id.clone()),
+                                start: SessionStartPoint::Empty,
+                                policy: None,
+                                plugin_mode: SessionPluginMode::Fresh,
+                                initial_messages: vec![PluginMessage::text(MessageRole::User, seed)],
+                                context_surface: SessionContextSurface::default(),
+                            }),
+                        });
+                        directives.push(PluginDirective::short_circuit(ToolResult::ok(json!({
+                            "approved": true,
+                            "plan_path": ctx.result.result.get("plan_path").cloned().unwrap_or(serde_json::Value::Null),
+                            "execution_mode": "fresh_context",
+                            "fresh_context_input": seed,
+                            "session_id": session_id,
+                        }))));
+                    }
+                    return Ok(directives);
                 }
 
                 let enabled = state
@@ -913,7 +978,9 @@ impl SessionPlugin for PlanModePlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::{PLAN_TEMPLATE, plan_exit_next_turn_input, read_plan_report};
+    use super::{
+        PLAN_TEMPLATE, plan_exit_fresh_context_input, plan_exit_next_turn_input, read_plan_report,
+    };
 
     #[test]
     fn plan_exit_next_turn_input_appends_user_note() {
@@ -927,6 +994,14 @@ mod tests {
         assert_eq!(
             plan_exit_next_turn_input(".lash/plans/run-session.md", Some("   ")),
             "Execute the plan in `.lash/plans/run-session.md`."
+        );
+    }
+
+    #[test]
+    fn plan_exit_fresh_context_input_is_short_and_direct() {
+        assert_eq!(
+            plan_exit_fresh_context_input(".lash/plans/run-session.md"),
+            "Do a full, faithful implementation of the plan found at: .lash/plans/run-session.md"
         );
     }
 

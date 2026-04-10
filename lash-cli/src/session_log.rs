@@ -263,6 +263,16 @@ pub fn load_session_start(filename: &str) -> Result<SessionStart> {
     })
 }
 
+pub fn filename_for_session_id(session_id: &str) -> Option<String> {
+    collect_session_candidates()
+        .into_iter()
+        .find_map(|(path, filename, _)| {
+            let store = Store::open_readonly(&path).ok()?;
+            let meta = store.load_session_meta()?;
+            (meta.session_id == session_id).then_some(filename)
+        })
+}
+
 pub fn list_recent_sessions(limit: usize) -> Vec<SessionInfo> {
     if limit == 0 {
         return Vec::new();

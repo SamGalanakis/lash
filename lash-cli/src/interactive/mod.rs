@@ -13,7 +13,7 @@ use lash::*;
 use lash_tui::Terminal;
 use lash_ui::{
     KeyChord as UiKeyChord, KeyCode as UiKeyCode, KeyModifiers as UiKeyModifiers,
-    UiCommandInvocation, UiContext, UiExtensions,
+    UiCommandInvocation, UiContext, UiExtensions, UiHostEffect,
 };
 use tokio::sync::mpsc;
 use tokio::task;
@@ -185,6 +185,67 @@ fn record_queue_pending_steer(ui_trace: &mut Option<UiTraceRecorder>, turn: &Pre
 fn drain_aux_trace_ops(ui_trace: &mut Option<UiTraceRecorder>) {
     if let Some(recorder) = ui_trace.as_mut() {
         drain_aux_ops_into(recorder);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_ui_host_effect(
+    app: &mut App,
+    effect: UiHostEffect,
+    history: &mut Vec<Message>,
+    runtime: &mut Option<LashRuntime>,
+    turn_counter: &mut usize,
+    current_execution_mode: &mut ExecutionMode,
+    current_context_strategy: &mut ContextStrategy,
+    provider: &Provider,
+    current_model_variant: &mut Option<String>,
+    dynamic_tools: &Arc<DynamicToolProvider>,
+    desired_dynamic: &mut DynamicStateSnapshot,
+    model_catalog: &CachedModelCatalog,
+    session_manager: &mut Arc<dyn SessionManager>,
+    ui_extensions: &UiExtensions,
+    plugin_host: &PluginHost,
+) {
+    match effect {
+        UiHostEffect::SwitchToNewSession { session_id } => {
+            match resume::load_resumed_session_by_id(
+                &session_id,
+                app,
+                history,
+                runtime,
+                turn_counter,
+                current_execution_mode,
+                current_context_strategy,
+                provider,
+                current_model_variant,
+                dynamic_tools,
+                desired_dynamic,
+                model_catalog,
+            )
+            .await
+            {
+                Ok(()) => {
+                    if let Some(rt) = runtime.as_ref() {
+                        match rt.session_manager() {
+                            Ok(manager) => *session_manager = manager,
+                            Err(err) => push_system_message(
+                                app,
+                                format!("Failed to refresh session manager: {}", err),
+                            ),
+                        }
+                    }
+                    sync_ui_extensions(
+                        app,
+                        ui_extensions,
+                        plugin_host,
+                        Arc::clone(session_manager),
+                    )
+                    .await;
+                }
+                Err(err) => push_system_message(app, err),
+            }
+        }
+        other => apply_ui_host_effects(app, vec![other]),
     }
 }
 
@@ -2284,7 +2345,26 @@ pub(crate) async fn run_app(
                             None
                         };
                     app.handle_session_event(event);
-                    apply_ui_host_effects(&mut app, ui_effects);
+                    for effect in ui_effects {
+                        apply_ui_host_effect(
+                            &mut app,
+                            effect,
+                            &mut history,
+                            &mut runtime,
+                            &mut turn_counter,
+                            &mut current_execution_mode,
+                            &mut current_context_strategy,
+                            &provider,
+                            &mut current_model_variant,
+                            &dynamic_tools,
+                            &mut desired_dynamic,
+                            model_catalog.as_ref(),
+                            &mut session_manager,
+                            ui_extensions.as_ref(),
+                            &plugin_host,
+                        )
+                        .await;
+                    }
                     if let Some(effect) = plugin_notification {
                         apply_ui_host_effects(&mut app, vec![effect]);
                     }

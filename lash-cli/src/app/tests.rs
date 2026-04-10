@@ -656,6 +656,30 @@ fn plan_exit_tool_does_not_queue_follow_up_turn() {
 }
 
 #[test]
+fn plan_exit_fresh_context_tool_does_not_queue_follow_up_turn() {
+    let mut app = App::new("test-model".into(), "test".into());
+    let ui_extensions = lash_ui::UiExtensions::builtin().expect("builtin ui extensions");
+    crate::apply_ui_host_effects(
+        &mut app,
+        ui_extensions.effects_for_session_event(&SessionEvent::ToolCall {
+            call_id: Some("tc-plan-exit-fresh".into()),
+            name: "plan_exit".into(),
+            args: serde_json::json!({}),
+            result: serde_json::json!({
+                "approved": true,
+                "execution_mode": "fresh_context",
+                "session_id": "new-plan-session",
+                "fresh_context_input": "Do a full, faithful implementation of the plan found at: .lash/plans/session.md"
+            }),
+            success: true,
+            duration_ms: 5,
+        }),
+    );
+
+    assert!(app.take_next_queued_turn().is_none());
+}
+
+#[test]
 fn cancelled_error_renders_as_system_message() {
     let mut app = App::new("test-model".into(), "test".into());
     app.start_turn();
