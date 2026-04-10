@@ -312,8 +312,16 @@ pub async fn restore_session_state(
             .await;
             let _ = rt.refresh_session_execution_surface().await;
             let mut restored_state = live.state.clone();
-            restored_state.policy.execution_mode = restored_execution_mode;
-            restored_state.policy.context_strategy = restored_context_strategy;
+            let mut restored_policy = rt.export_state().policy;
+            restored_policy.execution_mode = restored_execution_mode;
+            restored_policy.context_strategy = restored_context_strategy;
+            restored_policy.model = app.model.clone();
+            restored_policy.model_variant = current_model_variant.clone();
+            restored_policy.provider = provider.clone();
+            if let Some(context_window) = app.context_window {
+                restored_policy.max_context_tokens = Some(context_window as usize);
+            }
+            restored_state.policy = restored_policy;
             restored_state.task_state = None;
             rt.set_state(restored_state);
         }
@@ -473,13 +481,18 @@ pub async fn restore_session_state(
             let last_prompt_usage = restored_last_prompt_usage(config_value.as_ref());
             let tool_calls = lash::transcript_tool_calls(&transcript_entries);
             app.last_prompt_usage = last_prompt_usage.clone();
+            let mut restored_policy = rt.export_state().policy;
+            restored_policy.execution_mode = restored_execution_mode;
+            restored_policy.context_strategy = restored_context_strategy;
+            restored_policy.model = app.model.clone();
+            restored_policy.model_variant = current_model_variant.clone();
+            restored_policy.provider = provider.clone();
+            if let Some(context_window) = app.context_window {
+                restored_policy.max_context_tokens = Some(context_window as usize);
+            }
             rt.set_state(SessionStateEnvelope {
                 session_id: crate::ROOT_SESSION_ID.to_string(),
-                policy: lash::SessionPolicy {
-                    execution_mode: restored_execution_mode,
-                    context_strategy: restored_context_strategy,
-                    ..rt.export_state().policy
-                },
+                policy: restored_policy,
                 messages: history.clone(),
                 tool_calls,
                 iteration: *turn_counter,
@@ -907,6 +920,10 @@ mod tests {
                 if msg == "Interrupted runtime state restored from a live snapshot."
                     || msg == "Execution state restored from snapshot."
         )));
+        assert_eq!(
+            restored_runtime.export_state().policy.max_context_tokens,
+            Some(200_000)
+        );
     }
 
     #[tokio::test]
