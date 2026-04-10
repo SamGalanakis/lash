@@ -279,6 +279,7 @@ pub(crate) async fn run(
         )) as Arc<dyn PluginFactory>,
         Arc::new(BuiltinPlanTrackerPluginFactory),
         Arc::new(BuiltinPlanModePluginFactory::new(Default::default())),
+        Arc::new(lash::BuiltinUiActivityPluginFactory),
         Arc::new(DelegateToolsPluginFactory::new(
             session_policy.clone(),
             delegate_tool_config,

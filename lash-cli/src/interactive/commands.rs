@@ -92,6 +92,15 @@ pub(super) async fn dispatch_next_queued_turn(
     pending_clear_after_return: &mut bool,
 ) -> anyhow::Result<()> {
     while let Some((queued, was_pending)) = app.take_next_queued_turn() {
+        if runtime.is_none() {
+            tracing::debug!(
+                queued = queued.display_text,
+                was_pending,
+                "queued dispatch paused because runtime is still unavailable"
+            );
+            app.requeue_front(queued, was_pending);
+            return Ok(());
+        }
         let queued = normalize_prepared_turn_for_dispatch(queued, &app.skills);
         if let Some(cmd) = parse_slash_command(&queued.display_text, &app.skills, ui_extensions) {
             if let Some(recorder) = ui_trace.as_mut() {
@@ -305,7 +314,7 @@ async fn handle_slash_command(
                     task_state: None,
                     replay_manifest: None,
                     plugin_snapshot: None,
-                    repl_snapshot: None,
+                    execution_state_snapshot: None,
                 });
                 match rt.session_manager() {
                     Ok(manager) => *session_manager = manager,

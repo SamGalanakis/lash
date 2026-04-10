@@ -599,7 +599,7 @@ mod tests {
             task_state: None,
             replay_manifest: None,
             plugin_snapshot: None,
-            repl_snapshot: None,
+            execution_state_snapshot: None,
         }
     }
 

@@ -70,6 +70,28 @@ struct AppEventSink {
     stream_id: u64,
 }
 
+fn log_runtime_handoff(
+    phase: &str,
+    app: &App,
+    runtime: &Option<LashRuntime>,
+    runtime_return_rx_present: bool,
+    cancel_token_present: bool,
+    active_stream_id: u64,
+) {
+    tracing::debug!(
+        phase,
+        app_running = app.running,
+        runtime_present = runtime.is_some(),
+        runtime_return_rx_present,
+        cancel_token_present,
+        queued_turns = app.queued_turns.len(),
+        pending_steers = app.pending_steers.len(),
+        active_stream_id,
+        live_turn = app.live_turn.as_ref().map(|turn| turn.status_text.as_str()),
+        "interactive runtime handoff"
+    );
+}
+
 const TEXT_DELTA_REDRAW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
 
 #[derive(Default)]
@@ -476,10 +498,65 @@ pub(crate) async fn run_app(
             flush_pending_text_deltas(&mut app, &mut pending_text_deltas, ui_trace.as_mut());
         }
 
+        log_runtime_handoff(
+            "loop_top",
+            &app,
+            &runtime,
+            runtime_return_rx.is_some(),
+            cancel_token.is_some(),
+            active_stream_id,
+        );
+
+        if !app.running
+            && runtime.is_some()
+            && runtime_return_rx.is_none()
+            && app.has_queued_messages()
+        {
+            tracing::debug!("dispatching queued turn from idle-ready trigger");
+            dispatch_next_queued_turn(
+                &mut app,
+                &mut ui_trace,
+                &mut terminal,
+                logger,
+                args,
+                &paused,
+                &plugin_host,
+                ui_extensions.as_ref(),
+                &dynamic_tools,
+                &mut runtime,
+                &mut history,
+                &mut turn_counter,
+                &mut last_turn,
+                &mut runtime_return_rx,
+                &mut cancel_token,
+                &mut active_stream_id,
+                &mut provider,
+                &mut current_model_variant,
+                &mut current_execution_mode,
+                &mut current_context_strategy,
+                &mut session_manager,
+                &mut desired_dynamic,
+                &mut pending_reconfigure,
+                model_catalog.as_ref(),
+                &mut toolset_hash,
+                &app_tx,
+                &mut pending_clear_after_return,
+            )
+            .await?;
+            continue;
+        }
+
         // Check if runtime turn completed — reclaim runtime + updated history
         if let Some(ref mut rx) = runtime_return_rx {
             match rx.try_recv() {
                 Ok(done) => {
+                    tracing::debug!(
+                        stream_id = done.stream_id,
+                        status = ?done.result.status,
+                        done_reason = ?done.result.done_reason,
+                        active_stream_id,
+                        "runtime return received in interactive loop"
+                    );
                     flush_pending_text_deltas(
                         &mut app,
                         &mut pending_text_deltas,
@@ -501,6 +578,14 @@ pub(crate) async fn run_app(
                         cancel_token = None;
                         pending_clear_after_return = false;
                         app.dirty = true;
+                        log_runtime_handoff(
+                            "runtime_return_ignored_or_cleared",
+                            &app,
+                            &runtime,
+                            runtime_return_rx.is_some(),
+                            cancel_token.is_some(),
+                            active_stream_id,
+                        );
                         continue;
                     }
                     let interrupted = matches!(done.result.status, TurnStatus::Interrupted);
@@ -538,30 +623,27 @@ pub(crate) async fn run_app(
                         }
                     }
 
-                    // Snapshot REPL after each completed turn so resume can restore exact state.
+                    // Snapshot execution-mode-local state after each completed turn so resume can restore exact state.
                     let snapshot_hash = if interrupted {
                         None
                     } else if let Some(rt) = runtime.as_mut() {
-                        if matches!(state.policy.execution_mode, ExecutionMode::Repl) {
-                            match rt.snapshot_repl().await {
-                                Ok(blob) => {
-                                    let snapshot_hash = hash12(&blob);
-                                    state.repl_snapshot = Some(blob);
-                                    Some(snapshot_hash)
-                                }
-                                Err(e) => {
-                                    push_system_message(
-                                        &mut app,
-                                        format!(
-                                            "Warning: failed to snapshot REPL state for resume: {}",
-                                            e
-                                        ),
-                                    );
-                                    None
-                                }
+                        match rt.snapshot_execution_state().await {
+                            Ok(Some(blob)) => {
+                                let snapshot_hash = hash12(&blob);
+                                state.execution_state_snapshot = Some(blob);
+                                Some(snapshot_hash)
                             }
-                        } else {
-                            None
+                            Ok(None) => None,
+                            Err(e) => {
+                                push_system_message(
+                                    &mut app,
+                                    format!(
+                                        "Warning: failed to snapshot execution state for resume: {}",
+                                        e
+                                    ),
+                                );
+                                None
+                            }
                         }
                     } else {
                         None
@@ -624,6 +706,7 @@ pub(crate) async fn run_app(
                             "Cancelled.".to_string()
                         };
                         app.stop_turn();
+                        app.reconcile_interrupted_transcript_user_block(&state.messages);
                         app.blocks = app::project_interrupted_blocks(
                             &state.messages,
                             &state.tool_calls,
@@ -697,6 +780,14 @@ pub(crate) async fn run_app(
                     }
                     runtime_return_rx = None;
                     cancel_token = None;
+                    log_runtime_handoff(
+                        "runtime_return_completed",
+                        &app,
+                        &runtime,
+                        runtime_return_rx.is_some(),
+                        cancel_token.is_some(),
+                        active_stream_id,
+                    );
                     let leftover_injections =
                         turn_injection_bridge.drain().unwrap_or_else(|_| Vec::new());
                     if !leftover_injections.is_empty() {
@@ -734,6 +825,7 @@ pub(crate) async fn run_app(
                     .await?;
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    tracing::debug!("runtime return channel closed before delivering runtime");
                     flush_pending_text_deltas(
                         &mut app,
                         &mut pending_text_deltas,
@@ -742,6 +834,14 @@ pub(crate) async fn run_app(
                     app.stop_turn();
                     runtime_return_rx = None;
                     cancel_token = None;
+                    log_runtime_handoff(
+                        "runtime_return_channel_closed",
+                        &app,
+                        &runtime,
+                        runtime_return_rx.is_some(),
+                        cancel_token.is_some(),
+                        active_stream_id,
+                    );
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
             }
@@ -1490,11 +1590,14 @@ pub(crate) async fn run_app(
                             continue;
                         }
                         if runtime.is_none() {
-                            push_system_message(
-                                &mut app,
-                                "Runtime is still finalizing the previous turn. Please retry in a moment.",
+                            tracing::debug!(
+                                queued = queued.display_text,
+                                app_running = app.running,
+                                runtime_return_rx_present = runtime_return_rx.is_some(),
+                                "queueing turn because runtime handoff is still in progress"
                             );
-                            app.restore_prepared_turn(queued);
+                            record_queue_turn(&mut ui_trace, &queued);
+                            app.queue_turn(queued);
                             continue;
                         }
 
@@ -1646,11 +1749,14 @@ pub(crate) async fn run_app(
                             continue;
                         }
                         if runtime.is_none() {
-                            push_system_message(
-                                &mut app,
-                                "Runtime is still finalizing the previous turn. Please retry in a moment.",
+                            tracing::debug!(
+                                queued = queued.display_text,
+                                app_running = app.running,
+                                runtime_return_rx_present = runtime_return_rx.is_some(),
+                                "queueing turn because runtime handoff is still in progress"
                             );
-                            app.restore_prepared_turn(queued);
+                            record_queue_turn(&mut ui_trace, &queued);
+                            app.queue_turn(queued);
                             continue;
                         }
 
@@ -2093,8 +2199,17 @@ pub(crate) async fn run_app(
                         recorder.record_session_event(&event);
                     }
                     let ui_effects = ui_extensions.effects_for_session_event(&event);
+                    let plugin_notification =
+                        if let SessionEvent::PluginEvent { event, .. } = &event {
+                            crate::plugin_surface::desktop_notification_effect(event)
+                        } else {
+                            None
+                        };
                     app.handle_session_event(event);
                     apply_ui_host_effects(&mut app, ui_effects);
+                    if let Some(effect) = plugin_notification {
+                        apply_ui_host_effects(&mut app, vec![effect]);
+                    }
                 }
             }
             AppEvent::Quit => break,

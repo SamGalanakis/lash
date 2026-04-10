@@ -445,7 +445,6 @@ mod tests {
                 },
                 token_usage: crate::TokenUsage::default(),
                 tool_calls: Vec::new(),
-                code_outputs: Vec::new(),
                 errors: Vec::new(),
             })
         }

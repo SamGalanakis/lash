@@ -65,7 +65,6 @@ const LONG_VERSION: &str = concat!(
 
 fn turn_has_visible_output(turn: &AssembledTurn) -> bool {
     !turn.assistant_output.safe_text.trim().is_empty()
-        || !turn.code_outputs.is_empty()
         || !turn.errors.is_empty()
         || turn.has_plugin_visible_output
 }
@@ -422,7 +421,7 @@ mod tests {
             assistant_output: AssistantOutput {
                 safe_text: String::new(),
                 raw_text: String::new(),
-                state: OutputState::Sanitized,
+                state: OutputState::Usable,
             },
             has_plugin_visible_output: true,
             done_reason: DoneReason::ModelStop,
@@ -433,7 +432,6 @@ mod tests {
             },
             token_usage: TokenUsage::default(),
             tool_calls: Vec::new(),
-            code_outputs: Vec::new(),
             errors: Vec::new(),
         };
 

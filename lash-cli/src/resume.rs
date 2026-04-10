@@ -29,8 +29,43 @@ fn push_history_system_message(history: &mut Vec<Message>, content: String) {
     });
 }
 
-fn repl_reset_message() -> String {
-    "Session resumed. Your REPL environment was reset — re-import modules and recreate any state you need.".to_string()
+fn execution_state_reset_message() -> String {
+    "Session resumed, but execution state could not be restored. Recreate any in-memory state you still need.".to_string()
+}
+
+async fn restore_execution_state_if_present<'a>(
+    runtime: &'a mut Option<LashRuntime>,
+    app: &'a mut App,
+    history: &'a mut Vec<Message>,
+    restored_context_strategy: ContextStrategy,
+    snapshot: Option<&'a [u8]>,
+) {
+    let Some(rt) = runtime.as_mut() else {
+        return;
+    };
+    rt.update_session_config(None, None, None, None, Some(restored_context_strategy))
+        .await;
+    match snapshot {
+        Some(snapshot) => match rt.restore_execution_state(snapshot).await {
+            Ok(()) => {
+                app.blocks.push(DisplayBlock::SystemMessage(
+                    "Execution state restored from snapshot.".to_string(),
+                ));
+            }
+            Err(e) => {
+                push_history_system_message(
+                    history,
+                    format!(
+                        "Session resumed, but execution-state restore failed ({}). Recreate any in-memory state you still need.",
+                        e
+                    ),
+                );
+            }
+        },
+        None => {
+            push_history_system_message(history, execution_state_reset_message());
+        }
+    }
 }
 
 fn restored_token_usage(state: &lash::store::SessionState) -> Option<TokenUsage> {
@@ -130,7 +165,7 @@ pub async fn restore_session_state(
     let db_path = session_log::sessions_dir().join(session_filename);
 
     if !db_path.exists() {
-        push_history_system_message(history, repl_reset_message());
+        push_history_system_message(history, execution_state_reset_message());
         return Ok(());
     }
 
@@ -242,51 +277,29 @@ pub async fn restore_session_state(
             live_policy_execution_mode = ?live.state.policy.execution_mode,
             restored_execution_mode = ?restored_execution_mode,
             restored_context_strategy = ?restored_context_strategy,
-            has_repl_snapshot = live.state.repl_snapshot.is_some(),
+            has_execution_state_snapshot = live.state.execution_state_snapshot.is_some(),
             "restoring live session state"
         );
         *execution_mode = restored_execution_mode;
         *context_strategy = restored_context_strategy;
-        if matches!(requested_execution_mode, Some(ExecutionMode::Repl))
-            && !lash::execution_mode_supported(ExecutionMode::Repl)
+        if let Some(requested_execution_mode) = requested_execution_mode.as_ref()
+            && !lash::execution_mode_supported(restored_execution_mode)
         {
-            app.blocks.push(DisplayBlock::SystemMessage(
-                "This build does not support REPL mode; resuming in `standard`.".to_string(),
-            ));
+            app.blocks.push(DisplayBlock::SystemMessage(format!(
+                "This build does not support `{}` mode; resuming in `standard`.",
+                serde_json::to_string(requested_execution_mode)
+                    .unwrap_or_else(|_| "requested".to_string())
+                    .trim_matches('"')
+            )));
         }
-
-        if matches!(restored_execution_mode, ExecutionMode::Repl) {
-            if let Some(ref repl_snapshot) = live.state.repl_snapshot {
-                if let Some(rt) = runtime.as_mut() {
-                    rt.update_session_config(
-                        None,
-                        None,
-                        None,
-                        None,
-                        Some(restored_context_strategy),
-                    )
-                    .await;
-                    match rt.restore_repl(repl_snapshot).await {
-                        Ok(()) => {
-                            app.blocks.push(DisplayBlock::SystemMessage(
-                                "REPL state restored from snapshot.".to_string(),
-                            ));
-                        }
-                        Err(e) => {
-                            push_history_system_message(
-                                history,
-                                format!(
-                                    "Session resumed but REPL restore failed ({}). Re-import modules and recreate any state you need.",
-                                    e
-                                ),
-                            );
-                        }
-                    }
-                }
-            } else {
-                push_history_system_message(history, repl_reset_message());
-            }
-        }
+        restore_execution_state_if_present(
+            runtime,
+            app,
+            history,
+            restored_context_strategy,
+            live.state.execution_state_snapshot.as_deref(),
+        )
+        .await;
 
         if let Some(rt) = runtime.as_mut() {
             rt.update_session_config(
@@ -417,49 +430,28 @@ pub async fn restore_session_state(
             .unwrap_or_else(|_| lash::default_context_strategy());
         *execution_mode = restored_execution_mode;
         *context_strategy = restored_context_strategy;
-        if matches!(requested_execution_mode, Some(ExecutionMode::Repl))
-            && !lash::execution_mode_supported(ExecutionMode::Repl)
+        if let Some(requested_execution_mode) = requested_execution_mode.as_ref()
+            && !lash::execution_mode_supported(restored_execution_mode)
         {
-            app.blocks.push(DisplayBlock::SystemMessage(
-                "This build does not support REPL mode; resuming in `standard`.".to_string(),
-            ));
+            app.blocks.push(DisplayBlock::SystemMessage(format!(
+                "This build does not support `{}` mode; resuming in `standard`.",
+                serde_json::to_string(requested_execution_mode)
+                    .unwrap_or_else(|_| "requested".to_string())
+                    .trim_matches('"')
+            )));
         }
         if let Some(usage) = restored_token_usage(&state) {
             app.token_usage = usage;
         }
 
-        if matches!(restored_execution_mode, ExecutionMode::Repl) {
-            if let Some(ref repl_snapshot) = state.repl_snapshot {
-                if let Some(rt) = runtime.as_mut() {
-                    rt.update_session_config(
-                        None,
-                        None,
-                        None,
-                        None,
-                        Some(restored_context_strategy),
-                    )
-                    .await;
-                    match rt.restore_repl(repl_snapshot).await {
-                        Ok(()) => {
-                            app.blocks.push(DisplayBlock::SystemMessage(
-                                "REPL state restored from snapshot.".to_string(),
-                            ));
-                        }
-                        Err(e) => {
-                            push_history_system_message(
-                                history,
-                                format!(
-                                    "Session resumed but REPL restore failed ({}). Re-import modules and recreate any state you need.",
-                                    e
-                                ),
-                            );
-                        }
-                    }
-                }
-            } else {
-                push_history_system_message(history, repl_reset_message());
-            }
-        }
+        restore_execution_state_if_present(
+            runtime,
+            app,
+            history,
+            restored_context_strategy,
+            state.execution_state_snapshot.as_deref(),
+        )
+        .await;
 
         if let Some(rt) = runtime.as_mut() {
             rt.update_session_config(
@@ -496,11 +488,11 @@ pub async fn restore_session_state(
                 task_state: None,
                 replay_manifest,
                 plugin_snapshot,
-                repl_snapshot: state.repl_snapshot.clone(),
+                execution_state_snapshot: state.execution_state_snapshot.clone(),
             });
         }
-    } else if matches!(*execution_mode, ExecutionMode::Repl) {
-        push_history_system_message(history, repl_reset_message());
+    } else if runtime.is_some() {
+        push_history_system_message(history, execution_state_reset_message());
     }
     Ok(())
 }
@@ -529,9 +521,9 @@ mod tests {
         store.save_session_state(lash::SessionState {
             iteration: existing.as_ref().map(|state| state.iteration).unwrap_or(0),
             config_json: ui_resume::with_ui_resume_state(config, &ui_state).to_string(),
-            repl_snapshot: existing
+            execution_state_snapshot: existing
                 .as_ref()
-                .and_then(|state| state.repl_snapshot.clone()),
+                .and_then(|state| state.execution_state_snapshot.clone()),
             input_tokens: existing
                 .as_ref()
                 .map(|state| state.input_tokens)
@@ -558,7 +550,7 @@ mod tests {
         let state = lash::store::SessionState {
             iteration: 3,
             config_json: "{}".into(),
-            repl_snapshot: None,
+            execution_state_snapshot: None,
             input_tokens: 1200,
             output_tokens: 340,
             cached_input_tokens: 80,
@@ -616,7 +608,7 @@ mod tests {
         store.save_session_state(lash::SessionState {
             iteration: 7,
             config_json,
-            repl_snapshot: None,
+            execution_state_snapshot: None,
             input_tokens: 1200,
             output_tokens: 340,
             cached_input_tokens: 80,
@@ -779,7 +771,7 @@ mod tests {
                     "execution_mode": "standard"
                 })),
                 plugin_snapshot: None,
-                repl_snapshot: None,
+                execution_state_snapshot: None,
             },
             &crate::app::UiResumeState::default(),
             &DynamicStateSnapshot {
@@ -897,7 +889,6 @@ mod tests {
         .await
         .expect("restore");
 
-        assert_eq!(history.len(), 1);
         assert_eq!(history[0].role, MessageRole::User);
         assert_eq!(history[0].parts.len(), 1);
         assert_eq!(history[0].parts[0].content, "live snapshot message");
@@ -914,6 +905,7 @@ mod tests {
             block,
             DisplayBlock::SystemMessage(msg)
                 if msg == "Interrupted runtime state restored from a live snapshot."
+                    || msg == "Execution state restored from snapshot."
         )));
     }
 
@@ -952,7 +944,7 @@ mod tests {
         store.save_session_state(lash::SessionState {
             iteration: 1,
             config_json,
-            repl_snapshot: None,
+            execution_state_snapshot: None,
             input_tokens: 0,
             output_tokens: 0,
             cached_input_tokens: 0,

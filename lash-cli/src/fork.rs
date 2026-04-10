@@ -3,7 +3,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use lash::{DynamicStateSnapshot, ExecutionMode};
+use lash::DynamicStateSnapshot;
 
 use crate::app::UiResumeState;
 use crate::resume_snapshot;
@@ -24,16 +24,17 @@ async fn persist_parent_root_snapshot(
     let mut state = runtime.export_state();
     let execution_mode = state.policy.execution_mode;
     let context_strategy = state.policy.context_strategy;
-    let snapshot_hash = if matches!(execution_mode, ExecutionMode::Repl) {
-        let blob = runtime
-            .snapshot_repl()
-            .await
-            .context("Failed to snapshot REPL state for fork")?;
-        let hash = crate::hash12(&blob);
-        state.repl_snapshot = Some(blob);
-        Some(hash)
-    } else {
-        None
+    let snapshot_hash = match runtime
+        .snapshot_execution_state()
+        .await
+        .context("Failed to snapshot execution state for fork")?
+    {
+        Some(blob) => {
+            let hash = crate::hash12(&blob);
+            state.execution_state_snapshot = Some(blob);
+            Some(hash)
+        }
+        None => None,
     };
     state.task_state = None;
     let prompt_hash = crate::latest_user_prompt_hash(&state.messages);
@@ -563,7 +564,7 @@ fn materialize_child_from_live_snapshot(
     let context_strategy = root_state.policy.context_strategy;
     let prompt_hash = crate::latest_user_prompt_hash(&root_state.messages);
     let snapshot_hash = root_state
-        .repl_snapshot
+        .execution_state_snapshot
         .as_ref()
         .map(|blob| crate::hash12(blob));
     root_state.task_state = None;
@@ -654,7 +655,7 @@ pub async fn fork_current_session(
         child_store.save_session_state(lash::SessionState {
             iteration: parent_state.iteration,
             config_json: parent_state.config_json.clone(),
-            repl_snapshot: parent_state.repl_snapshot.clone(),
+            execution_state_snapshot: parent_state.execution_state_snapshot.clone(),
             input_tokens: parent_state.input_tokens,
             output_tokens: parent_state.output_tokens,
             cached_input_tokens: parent_state.cached_input_tokens,
@@ -712,7 +713,7 @@ mod fork_tests {
         parent_store.save_session_state(lash::SessionState {
             iteration: 1,
             config_json: r#"{"task_state":{"kind":"live_resume","status":"running"}}"#.to_string(),
-            repl_snapshot: None,
+            execution_state_snapshot: None,
             input_tokens: 10,
             output_tokens: 3,
             cached_input_tokens: 1,
@@ -793,7 +794,7 @@ mod fork_tests {
         parent_store.save_session_state(lash::SessionState {
             iteration: 1,
             config_json: r#"{"saved":"root"}"#.to_string(),
-            repl_snapshot: None,
+            execution_state_snapshot: None,
             input_tokens: 10,
             output_tokens: 3,
             cached_input_tokens: 1,
@@ -867,7 +868,7 @@ mod fork_tests {
                     "context_strategy": {"type": "rolling_context"}
                 })),
                 plugin_snapshot: None,
-                repl_snapshot: None,
+                execution_state_snapshot: None,
             },
             &UiResumeState::default(),
             &empty_dynamic_state(),

@@ -533,30 +533,6 @@ fn slash_command_slash_range(text: &str) -> Option<(usize, usize)> {
     Some((slash_start, slash_start + 1))
 }
 
-fn build_code_fold_summary(blocks: &[DisplayBlock], idx: usize) -> String {
-    let mut block_count = 0usize;
-    let mut line_count = 0usize;
-
-    for block in &blocks[idx..] {
-        match block {
-            DisplayBlock::CodeBlock { code, .. } => {
-                block_count += 1;
-                line_count += code.lines().count().max(1);
-            }
-            DisplayBlock::Activity(_) | DisplayBlock::CodeOutput { .. } => continue,
-            _ => break,
-        }
-    }
-
-    format!(
-        "▶ {} code block{} · {} line{}",
-        block_count,
-        if block_count == 1 { "" } else { "s" },
-        line_count,
-        if line_count == 1 { "" } else { "s" }
-    )
-}
-
 pub(crate) fn render_block_lines(
     app: &App,
     idx: usize,
@@ -643,64 +619,10 @@ fn render_block_into(
                 add_spacing_before,
             ));
         }
-        DisplayBlock::CodeBlock { code, continuation } => match expand_level {
-            0 => {
-                if !*continuation {
-                    lines.push(Line::from(Span::styled(
-                        truncate_to_display_width(
-                            &build_code_fold_summary(blocks, idx),
-                            viewport_width,
-                        ),
-                        theme::code_header(),
-                    )));
-                }
-            }
-            1 => {}
-            _ => {
-                for line in code.lines() {
-                    lines.push(Line::from(vec![
-                        Span::styled("│ ", theme::code_scribe()),
-                        Span::styled(line.to_string(), theme::code_content()),
-                    ]));
-                }
-            }
-        },
         DisplayBlock::Activity(activity) => {
             render_activity_block(activity, expand_level, lines, viewport_width);
             if app.live_tool_output_anchor_block_index() == Some(idx) {
                 render_live_tool_output_inline(lines, app, &activity.kind, viewport_width);
-            }
-        }
-        DisplayBlock::CodeOutput { output, error } => {
-            if expand_level >= 2 && !output.is_empty() {
-                for line in output.lines() {
-                    lines.push(Line::from(vec![
-                        Span::styled("│ ", theme::code_chrome()),
-                        Span::styled(line.to_string(), theme::system_output()),
-                    ]));
-                }
-            }
-            if let Some(err) = error {
-                let summary = err
-                    .lines()
-                    .find(|line| {
-                        !line.trim().is_empty()
-                            && !line.trim_start().starts_with("File ")
-                            && !line.trim_start().starts_with("Traceback")
-                    })
-                    .unwrap_or_else(|| err.lines().next().unwrap_or("error"));
-                lines.push(Line::from(Span::styled(
-                    format!("✖ Execution failed: {}", summary.trim()),
-                    theme::error(),
-                )));
-                if expand_level >= 2 {
-                    for line in err.lines() {
-                        lines.push(Line::from(vec![
-                            Span::styled("│ ", theme::code_chrome()),
-                            Span::styled(line.to_string(), theme::error()),
-                        ]));
-                    }
-                }
             }
         }
         DisplayBlock::ShellOutput {

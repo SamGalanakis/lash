@@ -29,9 +29,9 @@ pub(crate) fn save_live_resume_snapshot(
     if !lash::messages_are_live_resume_safe(&state.messages) {
         return Ok(());
     }
-    let repl_snapshot = state.repl_snapshot.clone();
+    let execution_state_snapshot = state.execution_state_snapshot.clone();
     let mut stored_state = state.clone();
-    stored_state.repl_snapshot = None;
+    stored_state.execution_state_snapshot = None;
     let payload = LiveResumeSnapshotPayload {
         version: LIVE_RESUME_SNAPSHOT_VERSION,
         state: stored_state,
@@ -41,7 +41,7 @@ pub(crate) fn save_live_resume_snapshot(
     let snapshot_json = serde_json::to_string(&payload).map_err(|err| err.to_string())?;
     store.save_live_session_snapshot(LiveSessionSnapshot {
         snapshot_json,
-        repl_snapshot,
+        execution_state_snapshot,
     });
     Ok(())
 }
@@ -58,7 +58,7 @@ pub(crate) fn load_live_resume_snapshot(store: &Store) -> Option<LoadedLiveResum
         return None;
     }
     let mut state = payload.state;
-    state.repl_snapshot = stored.repl_snapshot;
+    state.execution_state_snapshot = stored.execution_state_snapshot;
     Some(LoadedLiveResumeSnapshot {
         state,
         dynamic_state: payload.dynamic_state,
@@ -154,7 +154,7 @@ mod tests {
                 "ui_state": UiResumeState::default(),
             })
             .to_string(),
-            repl_snapshot: None,
+            execution_state_snapshot: None,
         });
 
         assert!(load_live_resume_snapshot(&store).is_none());

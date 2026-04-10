@@ -2,10 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, mpsc};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::llm::factory::adapter_for;
@@ -23,7 +21,6 @@ use crate::session_model::{
     SessionPolicy, TokenUsage, build_execution_preamble, context::build_context,
     finalize_prompt_context, make_error_event, transport_stream_events,
 };
-use crate::strip_repl_fragments;
 use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call};
 use crate::{
     CheckpointKind, ContextStrategy, ExecutionMode, ExternalInvokeError, PluginSessionSnapshot,
@@ -99,18 +96,7 @@ pub struct SessionStateEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_snapshot: Option<PluginSessionSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repl_snapshot: Option<Vec<u8>>,
-}
-
-struct ReplStreamCutover<'a> {
-    effect_id: crate::sansio::EffectId,
-    llm_task: &'a mut JoinHandle<(
-        Result<LlmResponse, crate::llm::transport::LlmTransportError>,
-        Provider,
-    )>,
-    llm_stream_rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,
-    streamed_usage: &'a mut LlmUsage,
-    fallback_request_body: &'a str,
+    pub execution_state_snapshot: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -305,7 +291,7 @@ impl Default for SessionStateEnvelope {
             task_state: None,
             replay_manifest: None,
             plugin_snapshot: None,
-            repl_snapshot: None,
+            execution_state_snapshot: None,
         }
     }
 }
@@ -325,7 +311,6 @@ pub enum OutputState {
     Usable,
     EmptyOutput,
     TracebackOnly,
-    Sanitized,
     RecoveredFromError,
 }
 
@@ -377,8 +362,6 @@ pub struct TurnIssue {
 }
 
 /// Canonical high-level turn result returned to hosts.
-/// This contract is stable across execution modes; mode-specific detail is summarized in
-/// `execution`, while REPL-only detail is exposed through `code_outputs`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AssembledTurn {
     pub state: SessionStateEnvelope,
@@ -392,8 +375,6 @@ pub struct AssembledTurn {
     pub token_usage: TokenUsage,
     #[serde(default)]
     pub tool_calls: Vec<ToolCallRecord>,
-    #[serde(default)]
-    pub code_outputs: Vec<CodeOutputRecord>,
     #[serde(default)]
     pub errors: Vec<TurnIssue>,
 }
@@ -428,25 +409,8 @@ pub trait PathResolver: Send + Sync {
 }
 
 /// Sanitization policy knobs.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct SanitizerPolicy {
-    #[serde(default = "SanitizerPolicy::default_strip_repl_fragments")]
-    pub strip_repl_fragments: bool,
-}
-
-impl SanitizerPolicy {
-    fn default_strip_repl_fragments() -> bool {
-        true
-    }
-}
-
-impl Default for SanitizerPolicy {
-    fn default() -> Self {
-        Self {
-            strip_repl_fragments: true,
-        }
-    }
-}
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct SanitizerPolicy {}
 
 /// Termination policy knobs.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -533,7 +497,6 @@ struct TurnAssembler {
     final_message: Option<String>,
     text_deltas: String,
     tool_calls: Vec<ToolCallRecord>,
-    code_outputs: Vec<CodeOutputRecord>,
     token_usage: TokenUsage,
     last_llm_usage: Option<TokenUsage>,
     issues: Vec<TurnIssue>,
@@ -567,15 +530,6 @@ impl TurnAssembler {
                 if !success {
                     self.saw_tool_failure = true;
                 }
-            }
-            SessionEvent::CodeOutput { output, error } => {
-                if error.is_some() {
-                    self.saw_tool_failure = true;
-                }
-                self.code_outputs.push(CodeOutputRecord {
-                    output: output.clone(),
-                    error: error.clone(),
-                });
             }
             SessionEvent::Message { text, kind } if kind == "final" => {
                 self.final_message = Some(text.clone());
@@ -658,7 +612,7 @@ impl TurnAssembler {
             execution: ExecutionSummary {
                 mode: state.policy.execution_mode,
                 had_tool_calls: !self.tool_calls.is_empty(),
-                had_code_execution: !self.code_outputs.is_empty(),
+                had_code_execution: false,
             },
             state,
             status,
@@ -671,7 +625,6 @@ impl TurnAssembler {
             done_reason,
             token_usage: self.token_usage,
             tool_calls: self.tool_calls,
-            code_outputs: self.code_outputs,
             errors: issues,
         }
     }
@@ -1240,9 +1193,9 @@ impl LashRuntime {
                 .map_err(|err| SessionError::Protocol(err.to_string()))?;
         }
         if matches!(state.policy.execution_mode, ExecutionMode::Repl)
-            && let Some(snapshot) = state.repl_snapshot.clone()
+            && let Some(snapshot) = state.execution_state_snapshot.clone()
         {
-            session.restore(&snapshot).await?;
+            session.restore_execution_state(&snapshot).await?;
         }
         session.plugins().on_session_restored(&state).await;
         Ok(Self {
@@ -1446,27 +1399,27 @@ impl LashRuntime {
         session.reset().await
     }
 
-    /// Explicitly snapshot REPL state; does not run an LLM turn.
-    pub async fn snapshot_repl(&mut self) -> Result<Vec<u8>, SessionError> {
+    /// Explicitly snapshot execution-mode-local state, if any.
+    pub async fn snapshot_execution_state(&mut self) -> Result<Option<Vec<u8>>, SessionError> {
         let Some(session) = self.session.as_mut() else {
             return Err(SessionError::Protocol(
                 "runtime session not available".to_string(),
             ));
         };
-        let blob = session.snapshot().await?;
-        self.state.repl_snapshot = Some(blob.clone());
+        let blob = session.snapshot_execution_state().await?;
+        self.state.execution_state_snapshot = blob.clone();
         Ok(blob)
     }
 
-    /// Explicitly restore REPL state from an opaque snapshot blob.
-    pub async fn restore_repl(&mut self, snapshot: &[u8]) -> Result<(), SessionError> {
+    /// Explicitly restore execution-mode-local state from an opaque snapshot blob.
+    pub async fn restore_execution_state(&mut self, snapshot: &[u8]) -> Result<(), SessionError> {
         let Some(session) = self.session.as_mut() else {
             return Err(SessionError::Protocol(
                 "runtime session not available".to_string(),
             ));
         };
-        session.restore(snapshot).await?;
-        self.state.repl_snapshot = Some(snapshot.to_vec());
+        session.restore_execution_state(snapshot).await?;
+        self.state.execution_state_snapshot = Some(snapshot.to_vec());
         Ok(())
     }
 
@@ -1697,18 +1650,54 @@ impl LashRuntime {
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         let prompt_bridge = HostPromptBridge::new();
+        let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(100);
         let manager = self
             .runtime_session_manager_with_prompt_bridge(Some(prompt_bridge.clone()))
             .map_err(|err| RuntimeError {
                 code: "plugin_session_manager".to_string(),
                 message: err.to_string(),
             })?;
-        let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(100);
         let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::unbounded_channel::<PendingPrompt>();
         prompt_bridge.set_sender(prompt_tx);
         let prompt_event_tx = event_tx.clone();
+        let prompt_hook_manager = Arc::clone(&manager);
+        let prompt_plugins = self
+            .session
+            .as_ref()
+            .map(|session| Arc::clone(session.plugins()));
         let prompt_forward = tokio::spawn(async move {
             while let Some(prompt) = prompt_rx.recv().await {
+                if let Some(plugins) = prompt_plugins.as_ref() {
+                    match plugins
+                        .on_prompt_request(crate::PromptRequestHookContext {
+                            session_id: plugins.session_id().to_string(),
+                            request: prompt.request.clone(),
+                            host: Arc::clone(&prompt_hook_manager),
+                        })
+                        .await
+                    {
+                        Ok(emitted) => {
+                            for surface in emitted {
+                                emit_plugin_surface_events(
+                                    &prompt_event_tx,
+                                    &surface.plugin_id,
+                                    vec![surface.value],
+                                )
+                                .await;
+                            }
+                        }
+                        Err(err) => {
+                            let _ = prompt_event_tx
+                                .send(make_error_event(
+                                    "plugin_prompt_request",
+                                    None,
+                                    err.to_string(),
+                                    Some(err.to_string()),
+                                ))
+                                .await;
+                        }
+                    }
+                }
                 if !prompt_event_tx.is_closed() {
                     let _ = prompt_event_tx
                         .send(SessionEvent::Prompt {
@@ -1908,7 +1897,7 @@ fn persisted_session_state(state: &SessionStateEnvelope) -> crate::store::Sessio
     crate::store::SessionState {
         iteration: state.iteration as i64,
         config_json,
-        repl_snapshot: state.repl_snapshot.clone(),
+        execution_state_snapshot: state.execution_state_snapshot.clone(),
         input_tokens: state.token_usage.input_tokens,
         output_tokens: state.token_usage.output_tokens,
         cached_input_tokens: state.token_usage.cached_input_tokens,
@@ -1939,42 +1928,6 @@ impl RuntimeTurnDriver {
 
     fn llm(&self, provider: &Provider) -> Box<dyn LlmTransport> {
         (self.llm_factory)(provider)
-    }
-
-    async fn finalize_repl_llm_task(
-        &mut self,
-        event_tx: &mpsc::Sender<SessionEvent>,
-        llm_task: &mut JoinHandle<(
-            Result<LlmResponse, crate::llm::transport::LlmTransportError>,
-            Provider,
-        )>,
-        streamed_usage: &LlmUsage,
-        fallback_request_body: &str,
-    ) -> Result<LlmResponse, LlmCallError> {
-        let (result, provider_after) = llm_task.await.map_err(|e| LlmCallError {
-            message: format!("internal task failed: {e}"),
-            retryable: false,
-            raw: None,
-            code: Some("task_join_failed".to_string()),
-        })?;
-        self.policy.provider = provider_after;
-        match result {
-            Ok(mut resp) => {
-                if response_usage_is_empty(&resp.usage) {
-                    resp.usage = streamed_usage.clone();
-                }
-                if resp.request_body.is_none() {
-                    resp.request_body = Some(fallback_request_body.to_string());
-                }
-                self.transform_assistant_response(event_tx, resp).await
-            }
-            Err(e) => Err(LlmCallError {
-                message: e.message,
-                retryable: e.retryable,
-                raw: e.raw,
-                code: e.code,
-            }),
-        }
     }
 
     async fn run(
@@ -2201,10 +2154,10 @@ impl RuntimeTurnDriver {
                     .await
             }
             ExecutionMode::Repl => {
-                let result = self
-                    .run_repl_llm_call(machine, effect_id, request, iteration, event_tx, cancel)
-                    .await;
-                (result, false)
+                let _ = machine;
+                let _ = effect_id;
+                self.run_standard_llm_call(request, iteration, event_tx, cancel)
+                    .await
             }
         }
     }
@@ -2229,7 +2182,7 @@ impl RuntimeTurnDriver {
             task_state: None,
             replay_manifest: None,
             plugin_snapshot: self.session.plugins().snapshot().ok(),
-            repl_snapshot: None,
+            execution_state_snapshot: None,
         }
     }
 
@@ -2437,382 +2390,6 @@ impl RuntimeTurnDriver {
         self.session.clear_message_sender();
         let _ = drain_handle.await;
         result
-    }
-
-    async fn run_repl_llm_call(
-        &mut self,
-        machine: &mut TurnMachine,
-        effect_id: crate::sansio::EffectId,
-        request: LlmRequest,
-        iteration: usize,
-        event_tx: &mpsc::Sender<SessionEvent>,
-        cancel: &CancellationToken,
-    ) -> Result<LlmResponse, LlmCallError> {
-        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
-        self.session.set_message_sender(msg_tx);
-        let (llm_stream_tx, mut llm_stream_rx) =
-            tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
-        let fallback_request_body = debug_request_body(&request);
-        let llm_request = LlmRequest {
-            stream_events: transport_stream_events(&self.policy.provider, Some(llm_stream_tx)),
-            ..request
-        };
-
-        let mut call_provider = self.policy.provider.clone();
-        let llm_factory = Arc::clone(&self.llm_factory);
-        let mut llm_task = tokio::spawn(async move {
-            let llm = llm_factory(&call_provider);
-            let result = llm.complete(&mut call_provider, llm_request).await;
-            (result, call_provider)
-        });
-        let mut streamed_usage = LlmUsage::default();
-        let mut debug = LlmStreamDebugState::new();
-
-        let result = loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    llm_task.abort();
-                    break Err(LlmCallError {
-                        message: "cancelled".to_string(),
-                        retryable: false,
-                        raw: None,
-                        code: Some("cancelled".to_string()),
-                    });
-                }
-                Some(sandbox_msg) = msg_rx.recv() => {
-                    if sandbox_msg.kind != "final" && !event_tx.is_closed() {
-                        let _ = event_tx.send(SessionEvent::Message {
-                            text: sandbox_msg.text,
-                            kind: sandbox_msg.kind,
-                        }).await;
-                    }
-                }
-                Some(stream_event) = llm_stream_rx.recv() => {
-                    match stream_event {
-                        LlmStreamEvent::Delta(delta) => {
-                            let raw_delta = delta.clone();
-                            let delta = match self.transform_assistant_stream_chunk(event_tx, delta).await {
-                                Ok(delta) => delta,
-                                Err(err) => break Err(err),
-                            };
-                            self.log_llm_text_stream_event(
-                                &mut debug,
-                                iteration,
-                                "delta",
-                                &raw_delta,
-                                &delta,
-                            );
-                            if !machine.handle_llm_delta(effect_id, &delta) {
-                                let mut cutover = ReplStreamCutover {
-                                    effect_id,
-                                    llm_task: &mut llm_task,
-                                    llm_stream_rx: &mut llm_stream_rx,
-                                    streamed_usage: &mut streamed_usage,
-                                    fallback_request_body: &fallback_request_body,
-                                };
-                                break self
-                                    .finish_repl_stream_cutover(machine, event_tx, &mut cutover)
-                                    .await;
-                            }
-                        }
-                        LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
-                            let raw_text = text.clone();
-                            let text = match self.transform_assistant_stream_chunk(event_tx, text).await {
-                                Ok(text) => text,
-                                Err(err) => break Err(err),
-                            };
-                            self.log_llm_text_stream_event(
-                                &mut debug,
-                                iteration,
-                                "text_part",
-                                &raw_text,
-                                &text,
-                            );
-                            if !machine.handle_llm_delta(effect_id, &text) {
-                                let mut cutover = ReplStreamCutover {
-                                    effect_id,
-                                    llm_task: &mut llm_task,
-                                    llm_stream_rx: &mut llm_stream_rx,
-                                    streamed_usage: &mut streamed_usage,
-                                    fallback_request_body: &fallback_request_body,
-                                };
-                                break self
-                                    .finish_repl_stream_cutover(machine, event_tx, &mut cutover)
-                                    .await;
-                            }
-                        }
-                        LlmStreamEvent::Part(LlmOutputPart::ToolCall {
-                            call_id,
-                            tool_name,
-                            input_json,
-                        }) => {
-                            self.log_llm_tool_call_stream_event(
-                                &mut debug,
-                                iteration,
-                                &call_id,
-                                &tool_name,
-                                &input_json,
-                            );
-                        }
-                        LlmStreamEvent::Usage(usage) => {
-                            self.log_llm_usage_stream_event(&mut debug, iteration, &usage);
-                            streamed_usage = usage.clone();
-                            machine.handle_llm_usage(effect_id, &usage);
-                        }
-                    }
-                }
-                join = &mut llm_task => {
-                    let (result, provider_after) = match join {
-                        Ok(v) => v,
-                        Err(e) => break Err(LlmCallError {
-                            message: format!("internal task failed: {e}"),
-                            retryable: false,
-                            raw: None,
-                            code: Some("task_join_failed".to_string()),
-                        }),
-                    };
-                    self.policy.provider = provider_after;
-                    let mut completed_from_stream: Option<LlmResponse> = None;
-                    let mut stream_transform_error: Option<LlmCallError> = None;
-                    while let Ok(stream_event) = llm_stream_rx.try_recv() {
-                        match stream_event {
-                            LlmStreamEvent::Delta(delta) => {
-                                let raw_delta = delta.clone();
-                                let delta = match self.transform_assistant_stream_chunk(event_tx, delta).await {
-                                    Ok(delta) => delta,
-                                    Err(err) => {
-                                        stream_transform_error = Some(err);
-                                        break;
-                                    }
-                                };
-                                self.log_llm_text_stream_event(
-                                    &mut debug,
-                                    iteration,
-                                    "delta",
-                                    &raw_delta,
-                                    &delta,
-                                );
-                                if !machine.handle_llm_delta(effect_id, &delta) {
-                                    completed_from_stream = Some(LlmResponse {
-                                        usage: streamed_usage.clone(),
-                                        request_body: Some(fallback_request_body.clone()),
-                                        ..Default::default()
-                                    });
-                                    break;
-                                }
-                            }
-                            LlmStreamEvent::Part(LlmOutputPart::Text { text }) => {
-                                let raw_text = text.clone();
-                                let text = match self.transform_assistant_stream_chunk(event_tx, text).await {
-                                    Ok(text) => text,
-                                    Err(err) => {
-                                        stream_transform_error = Some(err);
-                                        break;
-                                    }
-                                };
-                                self.log_llm_text_stream_event(
-                                    &mut debug,
-                                    iteration,
-                                    "text_part",
-                                    &raw_text,
-                                    &text,
-                                );
-                                if !machine.handle_llm_delta(effect_id, &text) {
-                                    completed_from_stream = Some(LlmResponse {
-                                        usage: streamed_usage.clone(),
-                                        request_body: Some(fallback_request_body.clone()),
-                                        ..Default::default()
-                                    });
-                                    break;
-                                }
-                            }
-                            LlmStreamEvent::Part(LlmOutputPart::ToolCall {
-                                call_id,
-                                tool_name,
-                                input_json,
-                            }) => {
-                                self.log_llm_tool_call_stream_event(
-                                    &mut debug,
-                                    iteration,
-                                    &call_id,
-                                    &tool_name,
-                                    &input_json,
-                                );
-                            }
-                            LlmStreamEvent::Usage(usage) => {
-                                self.log_llm_usage_stream_event(&mut debug, iteration, &usage);
-                                streamed_usage = usage.clone();
-                                machine.handle_llm_usage(effect_id, &usage);
-                            }
-                        }
-                    }
-                    if let Some(err) = stream_transform_error {
-                        break Err(err);
-                    }
-                    if let Some(response) = completed_from_stream {
-                        break Ok(response);
-                    }
-                    match result {
-                        Ok(mut resp) => {
-                            if response_usage_is_empty(&resp.usage) {
-                                resp.usage = streamed_usage.clone();
-                            }
-                            if resp.request_body.is_none() {
-                                resp.request_body = Some(fallback_request_body.clone());
-                            }
-                            let resp = match self.transform_assistant_response(event_tx, resp).await {
-                                Ok(resp) => resp,
-                                Err(err) => break Err(err),
-                            };
-                            break Ok(resp)
-                        }
-                        Err(e) => break Err(LlmCallError {
-                            message: e.message,
-                            retryable: e.retryable,
-                            raw: e.raw,
-                            code: e.code,
-                        }),
-                    }
-                }
-            }
-        };
-
-        self.session.clear_message_sender();
-        while let Ok(sandbox_msg) = msg_rx.try_recv() {
-            if sandbox_msg.kind != "final" && !event_tx.is_closed() {
-                let _ = event_tx
-                    .send(SessionEvent::Message {
-                        text: sandbox_msg.text,
-                        kind: sandbox_msg.kind,
-                    })
-                    .await;
-            }
-        }
-        self.llm_stream_summaries.insert(iteration, debug.summary);
-        result
-    }
-
-    async fn finish_repl_stream_cutover(
-        &mut self,
-        machine: &mut TurnMachine,
-        event_tx: &mpsc::Sender<SessionEvent>,
-        cutover: &mut ReplStreamCutover<'_>,
-    ) -> Result<LlmResponse, LlmCallError> {
-        while let Ok(stream_event) = cutover.llm_stream_rx.try_recv() {
-            match stream_event {
-                LlmStreamEvent::Usage(usage) => {
-                    *cutover.streamed_usage = usage.clone();
-                    machine.handle_llm_usage(cutover.effect_id, &usage);
-                }
-                LlmStreamEvent::Delta(_) | LlmStreamEvent::Part(_) => {}
-            }
-        }
-
-        if cutover.llm_task.is_finished() {
-            while let Ok(stream_event) = cutover.llm_stream_rx.try_recv() {
-                match stream_event {
-                    LlmStreamEvent::Usage(usage) => {
-                        *cutover.streamed_usage = usage.clone();
-                        machine.handle_llm_usage(cutover.effect_id, &usage);
-                    }
-                    LlmStreamEvent::Delta(_) | LlmStreamEvent::Part(_) => {}
-                }
-            }
-            return self
-                .finalize_repl_llm_task(
-                    event_tx,
-                    cutover.llm_task,
-                    cutover.streamed_usage,
-                    cutover.fallback_request_body,
-                )
-                .await;
-        }
-
-        let deadline = Instant::now() + Duration::from_millis(250);
-        loop {
-            if cutover.llm_task.is_finished() {
-                while let Ok(stream_event) = cutover.llm_stream_rx.try_recv() {
-                    match stream_event {
-                        LlmStreamEvent::Usage(usage) => {
-                            *cutover.streamed_usage = usage.clone();
-                            machine.handle_llm_usage(cutover.effect_id, &usage);
-                        }
-                        LlmStreamEvent::Delta(_) | LlmStreamEvent::Part(_) => {}
-                    }
-                }
-                return self
-                    .finalize_repl_llm_task(
-                        event_tx,
-                        cutover.llm_task,
-                        cutover.streamed_usage,
-                        cutover.fallback_request_body,
-                    )
-                    .await;
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                break;
-            }
-            let remaining = deadline.saturating_duration_since(now);
-            tokio::select! {
-                join = &mut *cutover.llm_task => {
-                    let (result, provider_after) = join.map_err(|e| LlmCallError {
-                        message: format!("internal task failed: {e}"),
-                        retryable: false,
-                        raw: None,
-                        code: Some("task_join_failed".to_string()),
-                    })?;
-                    self.policy.provider = provider_after;
-                    while let Ok(stream_event) = cutover.llm_stream_rx.try_recv() {
-                        match stream_event {
-                            LlmStreamEvent::Usage(usage) => {
-                                *cutover.streamed_usage = usage.clone();
-                                machine.handle_llm_usage(cutover.effect_id, &usage);
-                            }
-                            LlmStreamEvent::Delta(_) | LlmStreamEvent::Part(_) => {}
-                        }
-                    }
-                    return match result {
-                        Ok(mut resp) => {
-                            if response_usage_is_empty(&resp.usage) {
-                                resp.usage = cutover.streamed_usage.clone();
-                            }
-                            if resp.request_body.is_none() {
-                                resp.request_body =
-                                    Some(cutover.fallback_request_body.to_string());
-                            }
-                            self.transform_assistant_response(event_tx, resp).await
-                        }
-                        Err(e) => Err(LlmCallError {
-                            message: e.message,
-                            retryable: e.retryable,
-                            raw: e.raw,
-                            code: e.code,
-                        }),
-                    };
-                }
-                maybe_event = cutover.llm_stream_rx.recv() => {
-                    match maybe_event {
-                        Some(LlmStreamEvent::Usage(usage)) => {
-                            *cutover.streamed_usage = usage.clone();
-                            machine.handle_llm_usage(cutover.effect_id, &usage);
-                        }
-                        Some(LlmStreamEvent::Delta(_)) | Some(LlmStreamEvent::Part(_)) => {}
-                        None => break,
-                    }
-                }
-                _ = tokio::time::sleep(remaining) => {
-                    break;
-                }
-            }
-        }
-
-        cutover.llm_task.abort();
-        Ok(LlmResponse {
-            usage: cutover.streamed_usage.clone(),
-            request_body: Some(cutover.fallback_request_body.to_string()),
-            ..Default::default()
-        })
     }
 
     async fn run_standard_llm_call(
@@ -3198,80 +2775,6 @@ impl RuntimeTurnDriver {
         self.append_llm_debug_entry(entry);
     }
 
-    fn log_llm_text_stream_event(
-        &self,
-        debug: &mut LlmStreamDebugState,
-        iteration: usize,
-        event_type: &'static str,
-        raw: &str,
-        visible: &str,
-    ) {
-        self.log_llm_stream_event(
-            debug,
-            LlmStreamEventLog {
-                session_id: &self.session_id,
-                iteration,
-                event_type,
-                text: LlmDebugText {
-                    raw: Some(raw),
-                    visible: Some(visible),
-                },
-                usage: None,
-                tool_call: None,
-            },
-        );
-    }
-
-    fn log_llm_tool_call_stream_event(
-        &self,
-        debug: &mut LlmStreamDebugState,
-        iteration: usize,
-        call_id: &str,
-        tool_name: &str,
-        input_json: &str,
-    ) {
-        self.log_llm_stream_event(
-            debug,
-            LlmStreamEventLog {
-                session_id: &self.session_id,
-                iteration,
-                event_type: "tool_call_part",
-                text: LlmDebugText {
-                    raw: None,
-                    visible: None,
-                },
-                usage: None,
-                tool_call: Some(LlmDebugToolCall {
-                    call_id,
-                    tool_name,
-                    input_json,
-                }),
-            },
-        );
-    }
-
-    fn log_llm_usage_stream_event(
-        &self,
-        debug: &mut LlmStreamDebugState,
-        iteration: usize,
-        usage: &LlmUsage,
-    ) {
-        self.log_llm_stream_event(
-            debug,
-            LlmStreamEventLog {
-                session_id: &self.session_id,
-                iteration,
-                event_type: "usage",
-                text: LlmDebugText {
-                    raw: None,
-                    visible: None,
-                },
-                usage: Some(usage),
-                tool_call: None,
-            },
-        );
-    }
-
     async fn forward_standard_stream_event(
         &mut self,
         event_tx: &mpsc::Sender<SessionEvent>,
@@ -3617,19 +3120,17 @@ fn resolve_existing_path(
         .map_err(|e| format!("Failed to canonicalize {}: {e}", candidate.display()))
 }
 
-fn sanitize_assistant_output(text: String, policy: &SanitizerPolicy) -> String {
-    if !policy.strip_repl_fragments || text.is_empty() {
-        return text;
-    }
-    let stripped = strip_repl_fragments(&text);
-    let normalized = stripped
-        .lines()
+fn sanitize_assistant_output(text: String, _policy: &SanitizerPolicy) -> String {
+    text.lines()
         .map(str::trim_end)
         .collect::<Vec<_>>()
-        .join("\n");
-    normalized.trim().to_string()
+        .join(
+            "
+",
+        )
+        .trim()
+        .to_string()
 }
-
 fn classify_output_state(raw_text: &str, safe_text: &str, issues: &[TurnIssue]) -> OutputState {
     if safe_text.is_empty() && raw_text.is_empty() {
         return OutputState::EmptyOutput;
@@ -3639,9 +3140,6 @@ fn classify_output_state(raw_text: &str, safe_text: &str, issues: &[TurnIssue]) 
     }
     if !issues.is_empty() && !safe_text.is_empty() {
         return OutputState::RecoveredFromError;
-    }
-    if safe_text != raw_text {
-        return OutputState::Sanitized;
     }
     OutputState::Usable
 }
@@ -4057,36 +3555,6 @@ mod tests {
         let mut runtime = LashRuntime::from_state(
             repl_test_policy(),
             test_host_config(),
-            crate::RuntimeServices::new_with_bridges(plugins, crate::TurnInjectionBridge::new()),
-            SessionStateEnvelope {
-                policy: SessionPolicy {
-                    execution_mode: ExecutionMode::Repl,
-                    ..Default::default()
-                },
-                ..SessionStateEnvelope::default()
-            },
-        )
-        .await
-        .expect("runtime");
-        runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
-        runtime
-    }
-
-    async fn repl_runtime_with_transport_and_host(
-        transport: MockTransport,
-        host: RuntimeHostConfig,
-    ) -> LashRuntime {
-        let plugins = default_tool_session(
-            "root",
-            ExecutionMode::Repl,
-            crate::DefaultToolPluginDeps {
-                enable_user_prompts: true,
-                ..Default::default()
-            },
-        );
-        let mut runtime = LashRuntime::from_state(
-            repl_test_policy(),
-            host,
             crate::RuntimeServices::new_with_bridges(plugins, crate::TurnInjectionBridge::new()),
             SessionStateEnvelope {
                 policy: SessionPolicy {
@@ -5180,28 +4648,6 @@ mod tests {
     }
 
     #[test]
-    fn sanitizer_strips_repl_tags() {
-        let cleaned = sanitize_assistant_output(
-            "<repl>print('x')</repl> done".to_string(),
-            &SanitizerPolicy {
-                strip_repl_fragments: true,
-            },
-        );
-        assert_eq!(cleaned, "print('x') done");
-    }
-
-    #[test]
-    fn sanitizer_strips_dangling_repl_fragments() {
-        let cleaned = sanitize_assistant_output(
-            "status <repl\nstill here </repl".to_string(),
-            &SanitizerPolicy {
-                strip_repl_fragments: true,
-            },
-        );
-        assert_eq!(cleaned, "status\nstill here");
-    }
-
-    #[test]
     fn output_state_empty_output() {
         assert_eq!(classify_output_state("", "", &[]), OutputState::EmptyOutput);
     }
@@ -5212,16 +4658,6 @@ mod tests {
         assert_eq!(
             classify_output_state(raw, "", &[]),
             OutputState::TracebackOnly
-        );
-    }
-
-    #[test]
-    fn output_state_sanitized() {
-        let raw = "<repl>print('x')</repl> done";
-        let safe = "print('x') done";
-        assert_eq!(
-            classify_output_state(raw, safe, &[]),
-            OutputState::Sanitized
         );
     }
 
@@ -5571,133 +5007,6 @@ mod tests {
         assert_eq!(turn.token_usage.input_tokens, 9);
         assert_eq!(turn.token_usage.output_tokens, 3);
         assert_eq!(turn.token_usage.cached_input_tokens, 2);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn repl_runtime_preserves_streamed_usage_when_cutover_happens_before_usage_event() {
-        let transport = MockTransport::new(vec![
-            MockCall {
-                stream_events: vec![
-                    LlmStreamEvent::Delta("<repl>\nobserve \"done\"\n</repl>\n".to_string()),
-                    LlmStreamEvent::Usage(LlmUsage {
-                        input_tokens: 9,
-                        output_tokens: 3,
-                        cached_input_tokens: 2,
-                        reasoning_tokens: 4,
-                    }),
-                ],
-                response: Ok(LlmResponse {
-                    usage: LlmUsage::default(),
-                    ..LlmResponse::default()
-                }),
-            },
-            MockCall {
-                stream_events: Vec::new(),
-                response: Ok(LlmResponse {
-                    full_text: "done".to_string(),
-                    parts: vec![LlmOutputPart::Text {
-                        text: "done".to_string(),
-                    }],
-                    ..LlmResponse::default()
-                }),
-            },
-        ]);
-        let mut runtime = repl_runtime_with_transport(transport).await;
-
-        let turn = runtime
-            .run_turn_assembled(
-                TurnInput {
-                    items: vec![InputItem::Text {
-                        text: "hello".to_string(),
-                    }],
-                    image_blobs: HashMap::new(),
-                    user_input: None,
-                    mode: None,
-                },
-                CancellationToken::new(),
-            )
-            .await
-            .expect("turn");
-
-        assert_eq!(turn.status, TurnStatus::Completed);
-        assert_eq!(turn.assistant_output.safe_text, "done");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn repl_runtime_debug_log_preserves_request_body_on_stream_cutover() {
-        let transport = MockTransport::new(vec![
-            MockCall {
-                stream_events: vec![
-                    LlmStreamEvent::Delta("<repl>\nobserve \"done\"\n</repl>\n".to_string()),
-                    LlmStreamEvent::Usage(LlmUsage {
-                        input_tokens: 9,
-                        output_tokens: 3,
-                        cached_input_tokens: 2,
-                        reasoning_tokens: 4,
-                    }),
-                ],
-                response: Ok(LlmResponse {
-                    usage: LlmUsage::default(),
-                    ..LlmResponse::default()
-                }),
-            },
-            MockCall {
-                stream_events: Vec::new(),
-                response: Ok(LlmResponse {
-                    full_text: "done".to_string(),
-                    parts: vec![LlmOutputPart::Text {
-                        text: "done".to_string(),
-                    }],
-                    ..LlmResponse::default()
-                }),
-            },
-        ]);
-        let log_path = std::env::temp_dir().join(format!(
-            "lash-repl-debug-log-{}-{}.jsonl",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        let mut runtime = repl_runtime_with_transport_and_host(
-            transport,
-            test_host_config_with_llm_log_path(log_path.clone()),
-        )
-        .await;
-
-        let turn = runtime
-            .run_turn_assembled(
-                TurnInput {
-                    items: vec![InputItem::Text {
-                        text: "hello".to_string(),
-                    }],
-                    image_blobs: HashMap::new(),
-                    user_input: None,
-                    mode: None,
-                },
-                CancellationToken::new(),
-            )
-            .await
-            .expect("turn");
-
-        assert_eq!(turn.status, TurnStatus::Completed);
-
-        let logged = std::fs::read_to_string(&log_path).expect("read log");
-        let line = logged.lines().last().expect("log line");
-        let entry: serde_json::Value = serde_json::from_str(line).expect("json log entry");
-        let request = entry
-            .get("request")
-            .and_then(|value| value.as_str())
-            .expect("request body");
-        assert!(!request.is_empty());
-        assert_ne!(request, "null");
-        assert!(request.contains("\"model\":\"mock-model\""));
-        assert!(request.contains("\"messages\""));
-        assert!(entry.get("usage").is_some());
-        assert!(entry["usage"]["input_tokens"].as_i64().unwrap_or_default() >= 0);
-
-        let _ = std::fs::remove_file(&log_path);
     }
 
     #[tokio::test]

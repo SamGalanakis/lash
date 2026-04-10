@@ -501,7 +501,7 @@ pub(crate) fn persist_root_session_state(
     store.save_session_state(lash::SessionState {
         iteration: state.iteration as i64,
         config_json,
-        repl_snapshot: state.repl_snapshot.clone(),
+        execution_state_snapshot: state.execution_state_snapshot.clone(),
         input_tokens: state.token_usage.input_tokens,
         output_tokens: state.token_usage.output_tokens,
         cached_input_tokens: state.token_usage.cached_input_tokens,
@@ -549,9 +549,9 @@ pub(crate) fn persist_live_runtime_snapshot(
             "saved_at": chrono::Utc::now().to_rfc3339(),
         })),
         plugin_snapshot: existing.as_ref().and_then(persisted_plugin_snapshot),
-        repl_snapshot: existing
+        execution_state_snapshot: existing
             .as_ref()
-            .and_then(|state| state.repl_snapshot.clone()),
+            .and_then(|state| state.execution_state_snapshot.clone()),
         ..Default::default()
     };
     let prompt_hash = latest_user_prompt_hash(&state.messages);

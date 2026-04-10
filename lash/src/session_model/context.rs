@@ -694,7 +694,7 @@ async fn summarize_compaction_prefix(
     snapshot.policy.max_turns = Some(1);
     strip_all_image_attachments(&mut snapshot.messages, COMPACTED_IMAGE_PLACEHOLDER);
     snapshot.plugin_snapshot = None;
-    snapshot.repl_snapshot = None;
+    snapshot.execution_state_snapshot = None;
     snapshot.last_prompt_usage = None;
     let previous_summary = extract_previous_summary(&snapshot.messages);
     let referenced = referenced_tool_call_ids(&snapshot.messages);
@@ -787,9 +787,7 @@ fn apply_compaction_summary(messages: &[Message], summary: &str, cut_point: usiz
 mod tests {
     use super::*;
     use crate::plugin::{SessionHandle, SessionTurnHandle};
-    use crate::{
-        AssistantOutput, CodeOutputRecord, DoneReason, ExecutionSummary, OutputState, TurnStatus,
-    };
+    use crate::{AssistantOutput, DoneReason, ExecutionSummary, OutputState, TurnStatus};
     use serde_json::json;
     use tempfile::tempdir;
     use tokio::sync::Mutex;
@@ -892,7 +890,6 @@ mod tests {
             },
             token_usage: crate::TokenUsage::default(),
             tool_calls: Vec::new(),
-            code_outputs: Vec::<CodeOutputRecord>::new(),
             errors: Vec::new(),
         }
     }

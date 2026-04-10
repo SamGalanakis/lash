@@ -244,7 +244,7 @@ fn execute_code(
             output: String::new(),
             observations: observations.into_inner().unwrap_or_default(),
             error: Some(
-                "`finish` is no longer supported in `<repl>`. End the task by replying without a `<repl>` block once you are done.".to_string(),
+                "This lashlang step tried to terminate the task directly. End the task by replying in plain prose instead of calling `execute_lashlang` again.".to_string(),
             ),
         },
         Ok(ExecutionOutcome::Continued) => ExecOutcome {
@@ -677,7 +677,7 @@ mod tests {
         assert_eq!(
             result.error,
             Some(
-                "`finish` is no longer supported in `<repl>`. End the task by replying without a `<repl>` block once you are done.".to_string()
+                "This lashlang step tried to terminate the task directly. End the task by replying in plain prose instead of calling `execute_lashlang` again.".to_string()
             )
         );
     }

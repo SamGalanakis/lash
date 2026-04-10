@@ -18,10 +18,8 @@ pub use lash_sansio::session_model::{
     DefaultPromptRenderer, DurableTurnSnapshot, ErrorEnvelope, LLM_MAX_RETRIES, LLM_RETRY_DELAYS,
     Message, MessageRole, Part, PartKind, PromptOverrideMode, PromptRenderer, PromptSectionName,
     PromptSectionOverride, PruneState, SessionEvent, TokenUsage, TurnTerminationPolicyState,
-    append_line_segment, build_assistant_parts, default_prompt_renderer,
-    format_tool_result_content, is_malformed_assistant_output, make_error_envelope,
-    make_error_event, parse_fence_line, render_prompt, render_transcript_prompt,
-    truncate_raw_error,
+    default_prompt_renderer, format_tool_result_content, make_error_envelope, make_error_event,
+    render_prompt, render_transcript_prompt,
 };
 
 /// Send an event to the channel if it's still open.
@@ -67,6 +65,16 @@ pub(crate) struct ExecutionPreamble {
     pub(crate) model: String,
     pub(crate) tool_specs: Vec<LlmToolSpec>,
     pub(crate) prompt: PromptContext,
+}
+
+fn repl_model_tool_specs() -> Vec<LlmToolSpec> {
+    let tool = crate::tools::repl_execute_lashlang_tool_definition().model_tool();
+    vec![LlmToolSpec {
+        name: tool.name,
+        description: tool.description,
+        input_schema: tool.input_schema,
+        output_schema: tool.output_schema,
+    }]
 }
 
 pub(crate) fn transport_stream_events(
@@ -116,12 +124,12 @@ pub(crate) fn build_execution_preamble(
     } else {
         (String::new(), 0)
     };
-    let tool_specs = if enabled_tools.is_empty() {
-        Vec::new()
-    } else if matches!(mode, ExecutionMode::Standard) {
-        lash_sansio::session_model::model_tool_specs(&enabled_tools)
-    } else {
-        Vec::new()
+    let tool_specs = match mode {
+        ExecutionMode::Standard if !enabled_tools.is_empty() => {
+            lash_sansio::session_model::model_tool_specs(&enabled_tools)
+        }
+        ExecutionMode::Repl => repl_model_tool_specs(),
+        _ => Vec::new(),
     };
     let tool_names: Vec<String> = enabled_tools.iter().map(|t| t.name.clone()).collect();
     let prompt = PromptContext {

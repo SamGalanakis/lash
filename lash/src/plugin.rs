@@ -41,6 +41,8 @@ pub type CheckpointHook =
     Arc<dyn Fn(CheckpointHookContext) -> PluginFuture<Vec<PluginDirective>> + Send + Sync>;
 pub type PromptContributor =
     Arc<dyn Fn(PromptHookContext) -> PluginFuture<Vec<PromptContribution>> + Send + Sync>;
+pub type PromptRequestHook =
+    Arc<dyn Fn(PromptRequestHookContext) -> PluginFuture<Vec<PluginSurfaceEvent>> + Send + Sync>;
 pub type ToolSurfaceContributor =
     Arc<dyn Fn(ToolSurfaceContext) -> Result<ToolSurfaceContribution, PluginError> + Send + Sync>;
 pub type AssistantStreamHook =
@@ -361,6 +363,13 @@ pub struct PromptHookContext {
 }
 
 #[derive(Clone)]
+pub struct PromptRequestHookContext {
+    pub session_id: String,
+    pub request: crate::PromptRequest,
+    pub host: Arc<dyn SessionManager>,
+}
+
+#[derive(Clone)]
 pub struct TurnHookContext {
     pub session_id: String,
     pub state: SessionSnapshot,
@@ -573,6 +582,7 @@ struct RegisteredExternalOp {
 pub struct PluginSpec {
     pub tool_providers: Vec<Arc<dyn ToolProvider>>,
     pub prompt_contributors: Vec<PromptContributor>,
+    pub prompt_request_hooks: Vec<PromptRequestHook>,
     pub tool_surface_contributors: Vec<ToolSurfaceContributor>,
     pub before_turn_hooks: Vec<BeforeTurnHook>,
     pub before_tool_call_hooks: Vec<BeforeToolCallHook>,
@@ -601,6 +611,11 @@ impl PluginSpec {
 
     pub fn with_prompt_contributor(mut self, contributor: PromptContributor) -> Self {
         self.prompt_contributors.push(contributor);
+        self
+    }
+
+    pub fn with_prompt_request(mut self, hook: PromptRequestHook) -> Self {
+        self.prompt_request_hooks.push(hook);
         self
     }
 
@@ -798,6 +813,9 @@ impl SessionPlugin for SpecPlugin {
         for contributor in &self.spec.prompt_contributors {
             reg.prompt().contribute(Arc::clone(contributor));
         }
+        for hook in &self.spec.prompt_request_hooks {
+            reg.prompt().on_request(Arc::clone(hook));
+        }
         for contributor in &self.spec.tool_surface_contributors {
             reg.surface().contribute(Arc::clone(contributor));
         }
@@ -867,7 +885,7 @@ mod builtin;
 #[cfg(feature = "sqlite-store")]
 pub use builtin::{
     BuiltinPlanModePluginFactory, BuiltinPlanTrackerPluginFactory,
-    BuiltinPromptContextPluginFactory, PromptContextPluginConfig,
+    BuiltinPromptContextPluginFactory, BuiltinUiActivityPluginFactory, PromptContextPluginConfig,
 };
 
 #[cfg(test)]
@@ -1023,7 +1041,6 @@ mod tests {
                 },
                 token_usage: crate::TokenUsage::default(),
                 tool_calls: Vec::new(),
-                code_outputs: Vec::new(),
                 errors: Vec::new(),
             })
         }

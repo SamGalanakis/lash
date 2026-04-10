@@ -16,9 +16,8 @@ use crate::session_model::exec::ExecAccumulator;
 use crate::session_model::message::{MessageOrigin, PartAttachment, data_url_for_bytes};
 use crate::session_model::{
     LLM_MAX_RETRIES, LLM_RETRY_DELAYS, Message, MessageRole, Part, PartKind, PromptSectionOverride,
-    PruneState, SessionEvent, TokenUsage, TurnTerminationPolicyState, build_assistant_parts,
-    format_tool_result_content, is_malformed_assistant_output, make_error_envelope,
-    make_error_event, parse_fence_line, render_prompt, truncate_raw_error,
+    PruneState, SessionEvent, TokenUsage, TurnTerminationPolicyState, format_tool_result_content,
+    make_error_envelope, make_error_event, render_prompt,
 };
 use crate::{CheckpointKind, ExecutionMode, PluginMessage, ToolCallRecord, ToolResult};
 
@@ -154,62 +153,33 @@ pub struct TurnMachineConfig {
 
 // ─── Internal state ───
 
-/// REPL fence parser state.
-struct FenceState {
-    response: String,
-    in_code_fence: bool,
-    current_prose: String,
-    current_code: String,
-    prose_parts: Vec<String>,
-    code_parts: Vec<String>,
-    last_line_start: usize,
-    code_executed: bool,
+/// REPL iteration state carried across lashlang tool executions.
+struct ReplState {
     acc: ExecAccumulator,
     latest_usage: LlmUsage,
+    execute_call_id: Option<String>,
+    execute_args: Option<Value>,
 }
 
-impl FenceState {
+impl ReplState {
     fn new() -> Self {
         Self {
-            response: String::new(),
-            in_code_fence: false,
-            current_prose: String::new(),
-            current_code: String::new(),
-            prose_parts: Vec::new(),
-            code_parts: Vec::new(),
-            last_line_start: 0,
-            code_executed: false,
             acc: ExecAccumulator::new(),
             latest_usage: LlmUsage::default(),
+            execute_call_id: None,
+            execute_args: None,
         }
-    }
-
-    fn reset_for_retry(&mut self) {
-        self.response.clear();
-        self.in_code_fence = false;
-        self.current_prose.clear();
-        self.current_code.clear();
-        self.prose_parts.clear();
-        self.code_parts.clear();
-        self.last_line_start = 0;
-        self.code_executed = false;
-        self.acc = ExecAccumulator::new();
     }
 }
 
 /// Accumulated REPL turn state carried across exec cycles.
 struct ReplTurnState {
-    fence: FenceState,
-}
-
-struct PendingReplLlmCompletion {
-    response_text: String,
-    latest_usage: LlmUsage,
+    state: ReplState,
 }
 
 struct WaitingLlmState {
     retry_attempt: usize,
-    fence: Option<FenceState>,
+    repl: Option<ReplState>,
     request: LlmRequest,
 }
 
@@ -225,20 +195,19 @@ enum MachineState {
     },
     PrepareIteration,
     WaitingLlm {
-        effect_id: EffectId,
+        _effect_id: EffectId,
         request: LlmRequest,
-        // REPL streaming state (None for Standard)
-        fence: Option<FenceState>,
+        // REPL state (None for Standard)
+        repl: Option<ReplState>,
         retry_attempt: usize,
-        stop_stream_processing: bool,
     },
     WaitingRetry {
         effect_id: EffectId,
         retry_attempt: usize,
         last_error: String,
         request: LlmRequest,
-        /// Saved REPL fence state for retry continuation
-        fence: Option<FenceState>,
+        /// Saved REPL state for retry continuation
+        repl: Option<ReplState>,
     },
     WaitingTools {
         effect_id: EffectId,
@@ -267,7 +236,6 @@ pub struct TurnMachine {
     iteration: usize,
     run_offset: usize,
     cumulative_usage: TokenUsage,
-    pending_repl_completion: Option<PendingReplLlmCompletion>,
     termination: TurnTerminationPolicyState,
 }
 
@@ -283,7 +251,6 @@ impl TurnMachine {
             iteration: run_offset,
             run_offset,
             cumulative_usage: TokenUsage::default(),
-            pending_repl_completion: None,
             termination: TurnTerminationPolicyState::new(),
         }
     }
@@ -371,7 +338,7 @@ impl TurnMachine {
 
         let rendered_prompt = render_prompt(&self.messages, self.config.execution_mode);
 
-        let is_standard = matches!(self.config.execution_mode, ExecutionMode::Standard);
+        let use_tools = !self.config.tool_specs.is_empty();
         let attachments: Vec<LlmAttachment> = rendered_prompt.attachments;
         let mut messages = rendered_prompt.messages;
         if !system_prompt.trim().is_empty() {
@@ -392,12 +359,12 @@ impl TurnMachine {
             model: self.config.model.clone(),
             messages,
             attachments,
-            tools: if is_standard {
+            tools: if use_tools {
                 self.config.tool_specs.clone()
             } else {
                 Vec::new()
             },
-            tool_choice: if is_standard && !self.config.tool_specs.is_empty() {
+            tool_choice: if use_tools {
                 LlmToolChoice::Auto
             } else {
                 LlmToolChoice::None
@@ -414,7 +381,7 @@ impl TurnMachine {
         &mut self,
         request: LlmRequest,
         retry_attempt: usize,
-        fence: Option<FenceState>,
+        repl: Option<ReplState>,
     ) {
         self.emit(SessionEvent::LlmRequest {
             iteration: self.iteration,
@@ -423,128 +390,23 @@ impl TurnMachine {
         });
 
         let id = self.next_id();
-        let is_standard = matches!(self.config.execution_mode, ExecutionMode::Standard);
-        let fence = if is_standard {
-            None
+        let repl = if matches!(self.config.execution_mode, ExecutionMode::Repl) {
+            Some(repl.unwrap_or_else(ReplState::new))
         } else {
-            Some(fence.unwrap_or_else(FenceState::new))
+            None
         };
         self.state = MachineState::WaitingLlm {
-            effect_id: id,
+            _effect_id: id,
             request: request.clone(),
-            fence,
+            repl,
             retry_attempt,
-            stop_stream_processing: false,
         };
         self.pending_effects
             .push_back(Effect::LlmCall { id, request });
     }
 
-    /// Feed an incremental LLM text delta (REPL mode only).
-    /// Returns `true` if the host should continue streaming, `false` to cancel.
-    pub fn handle_llm_delta(&mut self, _id: EffectId, text: &str) -> bool {
-        // Extract state we need — avoid holding &mut self.state across pushes to pending_effects
-        let (fence, effect_id) = match &mut self.state {
-            MachineState::WaitingLlm {
-                fence: Some(fence),
-                stop_stream_processing,
-                effect_id,
-                ..
-            } => {
-                if *stop_stream_processing || text.is_empty() {
-                    return !*stop_stream_processing;
-                }
-                (fence as *mut FenceState, *effect_id)
-            }
-            _ => return true,
-        };
-
-        // SAFETY: We hold &mut self exclusively. The pointer avoids the borrow checker
-        // issue of borrowing self.state and self.pending_effects simultaneously.
-        // We never invalidate the pointer (no state transitions) until the explicit
-        // mem::replace below.
-        let fence = unsafe { &mut *fence };
-
-        fence.response.push_str(text);
-
-        let mut queued_effects: Vec<Effect> = Vec::new();
-        let mut transition_to_exec: Option<String> = None;
-
-        while let Some(nl) = fence.response[fence.last_line_start..].find('\n') {
-            let line_end = fence.last_line_start + nl;
-            let line = fence.response[fence.last_line_start..line_end].to_string();
-            fence.last_line_start = line_end + 1;
-
-            let parsed = parse_fence_line(
-                &line,
-                &mut fence.in_code_fence,
-                &mut fence.current_prose,
-                &mut fence.current_code,
-                &mut fence.prose_parts,
-            );
-
-            if !parsed.prose_delta.is_empty() {
-                queued_effects.push(Effect::Emit(SessionEvent::TextDelta {
-                    content: format!("{}\n", parsed.prose_delta),
-                }));
-            }
-
-            for code in parsed.codes_to_execute {
-                fence.code_parts.push(code.clone());
-                queued_effects.push(Effect::Emit(SessionEvent::CodeBlock { code: code.clone() }));
-
-                if !fence.acc.had_failure {
-                    fence.code_executed = true;
-                    transition_to_exec = Some(code);
-                    break;
-                }
-                fence.code_executed = true;
-            }
-
-            if transition_to_exec.is_some() || fence.code_executed {
-                break;
-            }
-        }
-
-        // Flush queued effects
-        for e in queued_effects {
-            self.pending_effects.push_back(e);
-        }
-
-        if let Some(code) = transition_to_exec {
-            let exec_id = self.next_id();
-            let fence_taken = match std::mem::replace(&mut self.state, MachineState::Finished) {
-                MachineState::WaitingLlm { fence: Some(f), .. } => f,
-                _ => unreachable!(),
-            };
-            self.pending_repl_completion = Some(PendingReplLlmCompletion {
-                response_text: fence_taken.response.clone(),
-                latest_usage: fence_taken.latest_usage.clone(),
-            });
-
-            self.pending_effects
-                .push_back(Effect::CancelLlm { id: effect_id });
-
-            self.state = MachineState::WaitingExec {
-                repl: ReplTurnState { fence: fence_taken },
-            };
-            self.pending_effects
-                .push_back(Effect::ExecCode { id: exec_id, code });
-            return false;
-        }
-
-        // Mark stop if code was executed
-        if let MachineState::WaitingLlm {
-            fence: Some(f),
-            stop_stream_processing,
-            ..
-        } = &mut self.state
-            && f.code_executed
-        {
-            *stop_stream_processing = true;
-            return false;
-        }
-
+    /// Feed an incremental LLM text delta. Tool-call based modes do not use text deltas for control flow.
+    pub fn handle_llm_delta(&mut self, _id: EffectId, _text: &str) -> bool {
         true
     }
 
@@ -563,18 +425,10 @@ impl TurnMachine {
             usage: usage.clone(),
             cumulative,
         });
-        if let MachineState::WaitingLlm { fence, .. } = &mut self.state
-            && let Some(fence) = fence
+        if let MachineState::WaitingLlm { repl, .. } = &mut self.state
+            && let Some(repl) = repl
         {
-            fence.latest_usage = LlmUsage {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                cached_input_tokens: usage.cached_input_tokens,
-                reasoning_tokens: usage.reasoning_tokens,
-            };
-        }
-        if let Some(pending) = &mut self.pending_repl_completion {
-            pending.latest_usage = LlmUsage {
+            repl.latest_usage = LlmUsage {
                 input_tokens: usage.input_tokens,
                 output_tokens: usage.output_tokens,
                 cached_input_tokens: usage.cached_input_tokens,
@@ -755,18 +609,8 @@ impl TurnMachine {
     ) {
         let waiting = self.take_waiting_llm_state();
         let Some(waiting) = waiting else {
-            let pending = self.pending_repl_completion.take();
-            if let (Some(pending), Ok(llm_response)) = (pending, &result) {
-                self.record_llm_usage(
-                    llm_response,
-                    &pending.response_text,
-                    Some(&pending.latest_usage),
-                );
-            }
             return;
         };
-        self.pending_repl_completion = None;
-
         match result {
             Err(error) => {
                 if error.retryable && waiting.retry_attempt < LLM_MAX_RETRIES {
@@ -774,18 +618,18 @@ impl TurnMachine {
                         waiting.retry_attempt,
                         error,
                         waiting.request,
-                        waiting.fence,
+                        waiting.repl,
                     );
                     return;
                 }
                 self.emit_llm_error(error);
             }
             Ok(llm_response) => {
-                let response_text = self.llm_response_text(&llm_response, waiting.fence.as_ref());
+                let response_text = self.llm_response_text(&llm_response);
                 self.record_llm_usage(
                     &llm_response,
                     response_text,
-                    waiting.fence.as_ref().map(|fence| &fence.latest_usage),
+                    waiting.repl.as_ref().map(|repl| &repl.latest_usage),
                 );
                 match self.config.execution_mode {
                     ExecutionMode::Standard => {
@@ -794,7 +638,7 @@ impl TurnMachine {
                     ExecutionMode::Repl => self.handle_repl_llm_success(
                         llm_response,
                         waiting.request,
-                        waiting.fence.unwrap_or_else(FenceState::new),
+                        waiting.repl.unwrap_or_else(ReplState::new),
                         waiting.retry_attempt,
                     ),
                 }
@@ -806,12 +650,12 @@ impl TurnMachine {
         match std::mem::replace(&mut self.state, MachineState::Finished) {
             MachineState::WaitingLlm {
                 request,
-                fence,
+                repl,
                 retry_attempt,
                 ..
             } => Some(WaitingLlmState {
                 retry_attempt,
-                fence,
+                repl,
                 request,
             }),
             other => {
@@ -826,7 +670,7 @@ impl TurnMachine {
         retry_attempt: usize,
         error: LlmCallError,
         request: LlmRequest,
-        fence: Option<FenceState>,
+        repl: Option<ReplState>,
     ) {
         let delay = LLM_RETRY_DELAYS[retry_attempt];
         let reason = error.message.clone();
@@ -848,7 +692,7 @@ impl TurnMachine {
             retry_attempt: retry_attempt + 1,
             last_error: reason,
             request,
-            fence,
+            repl,
         };
         self.pending_effects.push_back(Effect::Sleep {
             id: sleep_id,
@@ -856,16 +700,8 @@ impl TurnMachine {
         });
     }
 
-    fn llm_response_text<'a>(
-        &self,
-        llm_response: &'a LlmResponse,
-        fence: Option<&'a FenceState>,
-    ) -> &'a str {
-        match (self.config.execution_mode, fence) {
-            (ExecutionMode::Standard, _) => &llm_response.full_text,
-            (ExecutionMode::Repl, Some(fence)) if !fence.response.is_empty() => &fence.response,
-            (ExecutionMode::Repl, _) => &llm_response.full_text,
-        }
+    fn llm_response_text<'a>(&self, llm_response: &'a LlmResponse) -> &'a str {
+        &llm_response.full_text
     }
 
     fn llm_response_debug_parts(&self, llm_response: &LlmResponse) -> Option<Value> {
@@ -1199,195 +1035,162 @@ impl TurnMachine {
     fn handle_repl_llm_success(
         &mut self,
         llm_response: LlmResponse,
-        request: LlmRequest,
-        mut fence: FenceState,
-        retry_attempt: usize,
+        _request: LlmRequest,
+        repl: ReplState,
+        _retry_attempt: usize,
     ) {
-        // If we already executed code mid-stream, go to processing
-        if fence.code_executed {
-            self.emit(SessionEvent::LlmResponse {
-                iteration: self.iteration,
-                content: fence.response.clone(),
-                duration_ms: 0,
-            });
-            self.state = MachineState::ProcessReplResult {
-                repl: ReplTurnState { fence },
-            };
-            self.process_repl_result();
-            return;
-        }
-
-        // Process non-streamed deltas (buffered response)
-        if fence.response.is_empty() && !llm_response.full_text.is_empty() {
-            // Apply full text through fence parser
-            for delta in &llm_response.deltas {
-                if delta.is_empty() {
-                    continue;
-                }
-                fence.response.push_str(delta);
-
-                while let Some(nl) = fence.response[fence.last_line_start..].find('\n') {
-                    let line_end = fence.last_line_start + nl;
-                    let line = fence.response[fence.last_line_start..line_end].to_string();
-                    fence.last_line_start = line_end + 1;
-
-                    let parsed = parse_fence_line(
-                        &line,
-                        &mut fence.in_code_fence,
-                        &mut fence.current_prose,
-                        &mut fence.current_code,
-                        &mut fence.prose_parts,
-                    );
-
-                    if !parsed.prose_delta.is_empty() {
-                        self.emit(SessionEvent::TextDelta {
-                            content: format!("{}\n", parsed.prose_delta),
-                        });
-                    }
-
-                    if let Some(code) = parsed.codes_to_execute.into_iter().next() {
-                        fence.code_parts.push(code.clone());
-                        self.emit(SessionEvent::CodeBlock { code: code.clone() });
-                        fence.code_executed = true;
-
-                        let exec_id = self.next_id();
-                        self.emit(SessionEvent::LlmResponse {
-                            iteration: self.iteration,
-                            content: fence.response.clone(),
-                            duration_ms: 0,
-                        });
-                        self.state = MachineState::WaitingExec {
-                            repl: ReplTurnState { fence },
-                        };
-                        self.pending_effects
-                            .push_back(Effect::ExecCode { id: exec_id, code });
-                        return;
-                    }
-                }
-                if fence.code_executed {
-                    break;
-                }
-            }
-
-            if fence.code_executed {
-                self.emit(SessionEvent::LlmResponse {
-                    iteration: self.iteration,
-                    content: fence.response.clone(),
-                    duration_ms: 0,
-                });
-                self.state = MachineState::ProcessReplResult {
-                    repl: ReplTurnState { fence },
-                };
-                self.process_repl_result();
-                return;
-            }
-
-            if fence.response.is_empty() {
-                fence.response = llm_response.full_text.clone();
-            }
-        }
-
         self.emit(SessionEvent::LlmResponse {
             iteration: self.iteration,
-            content: if fence.response.is_empty() {
-                llm_response.full_text.clone()
-            } else {
-                fence.response.clone()
-            },
+            content: llm_response.full_text.clone(),
             duration_ms: 0,
         });
 
-        // Process trailing text
-        if fence.last_line_start < fence.response.len() {
-            let trailing = fence.response[fence.last_line_start..].to_string();
-            let parsed = parse_fence_line(
-                &trailing,
-                &mut fence.in_code_fence,
-                &mut fence.current_prose,
-                &mut fence.current_code,
-                &mut fence.prose_parts,
-            );
-            if !parsed.prose_delta.is_empty() {
-                self.emit(SessionEvent::TextDelta {
-                    content: parsed.prose_delta,
-                });
-            }
-            if let Some(code) = parsed.codes_to_execute.into_iter().next() {
-                fence.code_parts.push(code.clone());
-                self.emit(SessionEvent::CodeBlock { code: code.clone() });
-                fence.code_executed = true;
+        let mut assistant_text = String::new();
+        let mut tool_calls: Vec<(String, String, String)> = Vec::new();
+        let response_parts = if llm_response.parts.is_empty() && !llm_response.full_text.is_empty()
+        {
+            vec![LlmOutputPart::Text {
+                text: llm_response.full_text.clone(),
+            }]
+        } else {
+            llm_response.parts.clone()
+        };
 
-                let exec_id = self.next_id();
-                self.state = MachineState::WaitingExec {
-                    repl: ReplTurnState { fence },
-                };
-                self.pending_effects
-                    .push_back(Effect::ExecCode { id: exec_id, code });
-                return;
+        for part in response_parts {
+            match part {
+                LlmOutputPart::Text { text } => {
+                    append_assistant_text_part(&mut assistant_text, &text)
+                }
+                LlmOutputPart::ToolCall {
+                    call_id,
+                    tool_name,
+                    input_json,
+                } => tool_calls.push((call_id, tool_name, input_json)),
             }
         }
 
-        // Unclosed code fence at end of response
-        if fence.in_code_fence && !fence.current_code.trim().is_empty() {
-            let code = fence.current_code.clone();
-            fence.code_parts.push(code.clone());
-            self.emit(SessionEvent::CodeBlock { code: code.clone() });
-            fence.current_code.clear();
-            fence.code_executed = true;
-
-            let exec_id = self.next_id();
-            self.state = MachineState::WaitingExec {
-                repl: ReplTurnState { fence },
-            };
-            self.pending_effects
-                .push_back(Effect::ExecCode { id: exec_id, code });
+        if tool_calls.is_empty() {
+            if assistant_text.trim().is_empty() {
+                self.emit(make_error_event(
+                    "llm_provider",
+                    Some("empty_response"),
+                    "Model returned no assistant text or tool calls.",
+                    None,
+                ));
+                self.finish();
+                return;
+            }
+            let mid = format!("m{}", self.messages.len());
+            self.messages.push(Message {
+                id: mid.clone(),
+                role: MessageRole::Assistant,
+                parts: vec![Part {
+                    id: format!("{}.p0", mid),
+                    kind: PartKind::Prose,
+                    content: assistant_text,
+                    attachment: None,
+                    tool_call_id: None,
+                    tool_name: None,
+                    prune_state: PruneState::Intact,
+                }],
+                user_input: None,
+                origin: None,
+            });
+            self.request_checkpoint(CheckpointKind::BeforeCompletion, CheckpointResume::Finish);
             return;
         }
 
-        // Flush remaining prose
-        let remaining_prose = fence.current_prose.trim().to_string();
-        if !remaining_prose.is_empty() {
-            fence.prose_parts.push(remaining_prose);
-            fence.current_prose.clear();
-        }
-
-        if fence.response.is_empty() && !llm_response.full_text.is_empty() {
-            fence.response = llm_response.full_text;
-        }
-
-        // Check for malformed output
-        if is_malformed_assistant_output(&fence.response) {
-            let preview = truncate_raw_error(fence.response.trim());
-            if retry_attempt < LLM_MAX_RETRIES {
-                fence.reset_for_retry();
-                self.schedule_llm_retry(
-                    retry_attempt,
-                    LlmCallError {
-                        message: "malformed assistant output from model (partial repl fragment)"
-                            .to_string(),
-                        retryable: true,
-                        raw: Some(preview.clone()),
-                        code: Some("malformed_output".to_string()),
-                    },
-                    request,
-                    Some(fence),
-                );
+        let mut exec_call: Option<(String, String)> = None;
+        for (call_id, tool_name, input_json) in tool_calls {
+            if tool_name != "execute_lashlang" {
+                self.emit(make_error_event(
+                    "llm_provider",
+                    Some("invalid_tool_call"),
+                    format!("REPL mode only supports `execute_lashlang`, got `{tool_name}`."),
+                    Some(input_json),
+                ));
+                self.finish();
                 return;
             }
+            if exec_call.is_some() {
+                self.emit(make_error_event(
+                    "llm_provider",
+                    Some("multiple_repl_tool_calls"),
+                    "REPL mode allows at most one `execute_lashlang` tool call per turn.",
+                    None,
+                ));
+                self.finish();
+                return;
+            }
+            exec_call = Some((call_id, input_json));
+        }
+
+        let (call_id, input_json) = exec_call.expect("checked above");
+        let args: Value = match serde_json::from_str(&input_json) {
+            Ok(value) => value,
+            Err(err) => {
+                self.emit(make_error_event(
+                    "llm_provider",
+                    Some("invalid_tool_args"),
+                    format!("Invalid execute_lashlang arguments: {err}"),
+                    Some(input_json),
+                ));
+                self.finish();
+                return;
+            }
+        };
+        let Some(code) = args.get("code").and_then(Value::as_str) else {
             self.emit(make_error_event(
                 "llm_provider",
-                Some("malformed_output"),
-                "Model returned malformed output. Use /retry to replay this turn.",
-                Some(preview),
+                Some("invalid_tool_args"),
+                "`execute_lashlang` requires a string `code` argument.",
+                Some(args.to_string()),
             ));
             self.finish();
             return;
-        }
-
-        self.state = MachineState::ProcessReplResult {
-            repl: ReplTurnState { fence },
         };
-        self.process_repl_result();
+
+        let asst_id = format!("m{}", self.messages.len());
+        let mut parts = Vec::new();
+        if !assistant_text.trim().is_empty() {
+            parts.push(Part {
+                id: format!("{}.p{}", asst_id, parts.len()),
+                kind: PartKind::Prose,
+                content: assistant_text,
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: PruneState::Intact,
+            });
+        }
+        parts.push(Part {
+            id: format!("{}.p{}", asst_id, parts.len()),
+            kind: PartKind::ToolCall,
+            content: input_json.clone(),
+            attachment: None,
+            tool_call_id: Some(call_id.clone()),
+            tool_name: Some("execute_lashlang".to_string()),
+            prune_state: PruneState::Intact,
+        });
+        self.messages.push(Message {
+            id: asst_id,
+            role: MessageRole::Assistant,
+            parts,
+            user_input: None,
+            origin: None,
+        });
+
+        let exec_id = self.next_id();
+        let mut repl = repl;
+        repl.execute_call_id = Some(call_id);
+        repl.execute_args = Some(args.clone());
+        self.state = MachineState::WaitingExec {
+            repl: ReplTurnState { state: repl },
+        };
+        self.pending_effects.push_back(Effect::ExecCode {
+            id: exec_id,
+            code: code.to_string(),
+        });
     }
 
     fn handle_exec_result(&mut self, _id: EffectId, result: Result<crate::ExecResponse, String>) {
@@ -1411,47 +1214,35 @@ impl TurnMachine {
                         duration_ms: tc.duration_ms,
                     });
                 }
-                if !r.output.is_empty() || r.error.is_some() {
-                    self.emit(SessionEvent::CodeOutput {
-                        output: r.output.clone(),
-                        error: r.error.clone(),
-                    });
-                }
-
-                repl.fence.acc.tool_calls.extend(r.tool_calls);
-                repl.fence.acc.images.extend(r.images);
+                repl.state.acc.tool_calls.extend(r.tool_calls);
+                repl.state.acc.images.extend(r.images);
                 if !r.output.is_empty() {
-                    repl.fence.acc.combined_output.push_str(&r.output);
+                    repl.state.acc.combined_output.push_str(&r.output);
                 }
                 for observation in r.observations {
                     if !observation.is_empty() {
-                        if !repl.fence.acc.combined_output.is_empty()
-                            && !repl.fence.acc.combined_output.ends_with('\n')
+                        if !repl.state.acc.combined_output.is_empty()
+                            && !repl.state.acc.combined_output.ends_with('\n')
                         {
-                            repl.fence.acc.combined_output.push('\n');
+                            repl.state.acc.combined_output.push('\n');
                         }
-                        repl.fence.acc.combined_output.push_str(&observation);
-                        if !repl.fence.acc.combined_output.ends_with('\n') {
-                            repl.fence.acc.combined_output.push('\n');
+                        repl.state.acc.combined_output.push_str(&observation);
+                        if !repl.state.acc.combined_output.ends_with('\n') {
+                            repl.state.acc.combined_output.push('\n');
                         }
                     }
                 }
                 if let Some(raw_error) = r.error {
-                    repl.fence.acc.exec_error = Some(raw_error);
-                    repl.fence.acc.had_failure = true;
+                    repl.state.acc.exec_error = Some(raw_error);
+                    repl.state.acc.had_failure = true;
                 }
             }
             Err(e) => {
-                self.emit(SessionEvent::CodeOutput {
-                    output: String::new(),
-                    error: Some(e.clone()),
-                });
-                repl.fence.acc.exec_error = Some(e);
-                repl.fence.acc.had_failure = true;
+                repl.state.acc.exec_error = Some(e);
+                repl.state.acc.had_failure = true;
             }
         }
 
-        // Move to processing the repl result
         self.state = MachineState::ProcessReplResult { repl };
         self.process_repl_result();
     }
@@ -1465,141 +1256,85 @@ impl TurnMachine {
             }
         };
 
-        let fence = repl.fence;
-        let executed_text = &fence.response;
-        let has_code = !fence.code_parts.is_empty();
-
-        // Check for empty response with no execution
-        if executed_text.trim().is_empty()
-            && fence.acc.tool_calls.is_empty()
-            && fence.acc.combined_output.is_empty()
-            && !fence.acc.had_failure
-        {
-            self.emit(make_error_event(
-                "llm_provider",
-                Some("empty_response"),
-                "I didn't get a response. Use /retry to replay this turn, or /provider if credentials changed.",
-                None,
-            ));
-            self.finish();
-            return;
-        }
-
-        let next_tool_images = fence.acc.images.clone();
-
-        let has_output = !fence.acc.combined_output.is_empty();
-        let has_tool_calls = !fence.acc.tool_calls.is_empty();
-
-        // Pure prose response finalizes the turn, even after prior REPL cycles.
-        if !has_code && !has_output && !has_tool_calls && !fence.acc.had_failure {
-            let mid = format!("m{}", self.messages.len());
-            let asst_parts = build_assistant_parts(&mid, &fence.prose_parts, &fence.code_parts);
-            self.messages.push(Message {
-                id: mid,
-                role: MessageRole::Assistant,
-                parts: asst_parts,
-                user_input: None,
-                origin: None,
-            });
-            self.request_checkpoint(CheckpointKind::BeforeCompletion, CheckpointResume::Finish);
-            return;
-        }
-
-        // Build feedback parts for execution results. The executed code itself already lives
-        // in the assistant message and should not be replayed a second time via system feedback.
-        let mut feedback_parts: Vec<Part> = Vec::new();
-
-        if has_output {
-            let mut output_text = fence.acc.combined_output.clone();
-            if has_tool_calls {
-                output_text.push_str(&format!(
-                    "\n[{} tool call(s) executed]",
-                    fence.acc.tool_calls.len()
-                ));
-            }
-            feedback_parts.push(Part {
-                id: String::new(),
-                kind: PartKind::Output,
-                content: output_text,
-                attachment: None,
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: PruneState::Intact,
-            });
-        } else if has_tool_calls {
-            feedback_parts.push(Part {
-                id: String::new(),
-                kind: PartKind::Output,
-                content: format!("[{} tool call(s) executed]", fence.acc.tool_calls.len()),
-                attachment: None,
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: PruneState::Intact,
-            });
-        }
-        if let Some(err) = &fence.acc.exec_error {
-            feedback_parts.push(Part {
-                id: String::new(),
-                kind: PartKind::Error,
-                content: format!("{}\nFix and retry.", err),
-                attachment: None,
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: PruneState::Intact,
-            });
-        }
+        let repl_state = repl.state;
+        let next_tool_images = repl_state.acc.images.clone();
+        let result_call_id = repl_state
+            .execute_call_id
+            .clone()
+            .unwrap_or_else(|| format!("repl_exec_{}", self.iteration));
+        let mut result_payload = serde_json::json!({
+            "observations": repl_state.acc.combined_output,
+            "tool_calls": repl_state.acc.tool_calls,
+            "error": repl_state.acc.exec_error,
+        });
         if !next_tool_images.is_empty() {
-            for img in &next_tool_images {
-                feedback_parts.push(Part {
-                    id: String::new(),
-                    kind: PartKind::Text,
-                    content: format!("[Tool image: {}]", img.label),
-                    attachment: None,
-                    tool_call_id: None,
-                    tool_name: None,
-                    prune_state: PruneState::Intact,
-                });
-                feedback_parts.push(Part {
-                    id: String::new(),
-                    kind: PartKind::Image,
-                    content: String::new(),
-                    attachment: Some(PartAttachment {
-                        mime: img.mime.clone(),
-                        url: data_url_for_bytes(&img.mime, &img.data),
-                        filename: Some(img.label.clone()),
-                    }),
-                    tool_call_id: None,
-                    tool_name: None,
-                    prune_state: PruneState::Intact,
-                });
-            }
+            let images = next_tool_images
+                .iter()
+                .map(|img| {
+                    serde_json::json!({
+                        "label": img.label,
+                        "mime": img.mime,
+                    })
+                })
+                .collect::<Vec<_>>();
+            result_payload["images"] = serde_json::Value::Array(images);
         }
-
-        // Push assistant message
-        let asst_id = format!("m{}", self.messages.len());
-        let asst_parts = build_assistant_parts(&asst_id, &fence.prose_parts, &fence.code_parts);
+        let success = result_payload
+            .get("error")
+            .is_none_or(|value| value.is_null());
+        let execute_args = repl_state
+            .execute_args
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
+        self.emit(SessionEvent::ToolCall {
+            call_id: Some(result_call_id.clone()),
+            name: "execute_lashlang".to_string(),
+            args: execute_args,
+            result: result_payload.clone(),
+            success,
+            duration_ms: 0,
+        });
+        let user_id = format!("m{}", self.messages.len());
+        let mut result_parts = vec![Part {
+            id: format!("{}.p0", user_id),
+            kind: PartKind::ToolResult,
+            content: format_tool_result_content(success, &result_payload),
+            attachment: None,
+            tool_call_id: Some(result_call_id.clone()),
+            tool_name: Some("execute_lashlang".to_string()),
+            prune_state: PruneState::Intact,
+        }];
+        for (image_offset, img) in next_tool_images.iter().enumerate() {
+            result_parts.push(Part {
+                id: format!("{}.p{}", user_id, result_parts.len()),
+                kind: PartKind::Text,
+                content: format!("[Tool image: {}]", img.label),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: PruneState::Intact,
+            });
+            result_parts.push(Part {
+                id: format!("{}.p{}", user_id, result_parts.len()),
+                kind: PartKind::Image,
+                content: String::new(),
+                attachment: Some(PartAttachment {
+                    mime: img.mime.clone(),
+                    url: data_url_for_bytes(&img.mime, &img.data),
+                    filename: Some(format!("tool-image-{image_offset}")),
+                }),
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: PruneState::Intact,
+            });
+        }
         self.messages.push(Message {
-            id: asst_id,
-            role: MessageRole::Assistant,
-            parts: asst_parts,
+            id: user_id,
+            role: MessageRole::User,
+            parts: result_parts,
             user_input: None,
             origin: None,
         });
-
-        // Push system feedback only when execution produced something new to feed back.
-        if !feedback_parts.is_empty() {
-            let sys_id = format!("m{}", self.messages.len());
-            for (idx, part) in feedback_parts.iter_mut().enumerate() {
-                part.id = format!("{}.p{}", sys_id, idx);
-            }
-            self.messages.push(Message {
-                id: sys_id,
-                role: MessageRole::System,
-                parts: feedback_parts,
-                user_input: None,
-                origin: None,
-            });
-        }
 
         self.iteration += 1;
         if self.termination.should_force_exit_after_grace_turn() {
@@ -1620,16 +1355,16 @@ impl TurnMachine {
     }
 
     fn handle_timeout(&mut self, id: EffectId) {
-        let (effect_id, retry_attempt, last_error, request, fence) =
+        let (effect_id, retry_attempt, last_error, request, repl) =
             match std::mem::replace(&mut self.state, MachineState::Finished) {
                 MachineState::WaitingRetry {
                     effect_id,
                     retry_attempt,
                     last_error,
                     request,
-                    fence,
+                    repl,
                     ..
-                } => (effect_id, retry_attempt, last_error, request, fence),
+                } => (effect_id, retry_attempt, last_error, request, repl),
                 other => {
                     self.state = other;
                     return;
@@ -1642,12 +1377,12 @@ impl TurnMachine {
                 retry_attempt,
                 last_error,
                 request,
-                fence,
+                repl,
             };
             return;
         }
 
-        self.queue_llm_request(request, retry_attempt, fence);
+        self.queue_llm_request(request, retry_attempt, repl);
     }
 }
 
@@ -1799,13 +1534,6 @@ mod tests {
     fn find_checkpoint(effects: &[Effect]) -> Option<(EffectId, CheckpointKind)> {
         effects.iter().find_map(|e| match e {
             Effect::Checkpoint { id, checkpoint } => Some((*id, *checkpoint)),
-            _ => None,
-        })
-    }
-
-    fn find_token_usage(effects: &[Effect]) -> Option<TokenUsage> {
-        effects.iter().find_map(|e| match e {
-            Effect::Emit(SessionEvent::TokenUsage { usage, .. }) => Some(usage.clone()),
             _ => None,
         })
     }
@@ -2426,29 +2154,54 @@ mod tests {
     }
 
     #[test]
-    fn repl_checkpoint_after_work_continues_turn() {
-        let config = test_config(ExecutionMode::Repl);
+    fn repl_execute_lashlang_tool_call_runs_exec_and_continues() {
+        let mut config = test_config(ExecutionMode::Repl);
+        config.tool_specs = vec![LlmToolSpec {
+            name: "execute_lashlang".to_string(),
+            description: "run lashlang".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            output_schema: serde_json::json!({"type":"object"}),
+        }];
         let msgs = vec![user_message("run some code")];
         let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).expect("llm call");
+        let request = find_llm_request(&effects).expect("request");
+        assert_eq!(request.tools.len(), 1);
+        assert_eq!(request.tools[0].name, "execute_lashlang");
 
-        let cont =
-            machine.handle_llm_delta(llm_id, "Here's the code:\n<repl>\nprint('hi')\n</repl>\n");
-        assert!(!cont);
+        machine.handle_response(Response::LlmComplete {
+            id: llm_id,
+            text_streamed: false,
+            result: Ok(LlmResponse {
+                parts: vec![LlmOutputPart::ToolCall {
+                    call_id: "repl_1".to_string(),
+                    tool_name: "execute_lashlang".to_string(),
+                    input_json: r#"{"code":"print('hi')"}"#.to_string(),
+                }],
+                usage: LlmUsage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    cached_input_tokens: 0,
+                    reasoning_tokens: 0,
+                },
+                ..LlmResponse::default()
+            }),
+        });
 
         let effects = drain_effects(&mut machine);
-        let (exec_id, _) = effects
-            .iter()
-            .find_map(|e| match e {
-                Effect::ExecCode { id, code } => Some((*id, code.clone())),
-                _ => None,
-            })
-            .expect("exec");
+        let exec_effect = effects.iter().find_map(|e| match e {
+            Effect::ExecCode { id, code } => Some((*id, code.clone())),
+            _ => None,
+        });
+        assert_eq!(
+            exec_effect.as_ref().map(|(_, code)| code.as_str()),
+            Some("print('hi')")
+        );
 
         machine.handle_response(Response::ExecResult {
-            id: exec_id,
+            id: exec_effect.expect("exec").0,
             result: Ok(crate::ExecResponse {
                 output: "hi\n".to_string(),
                 observations: Vec::new(),
@@ -2458,18 +2211,13 @@ mod tests {
                 duration_ms: 1,
             }),
         });
-        machine.handle_response(Response::LlmComplete {
-            id: llm_id,
-            text_streamed: false,
-            result: Ok(LlmResponse::default()),
-        });
 
         let effects = drain_effects(&mut machine);
         let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
         assert_eq!(checkpoint, CheckpointKind::AfterWork);
         machine.handle_response(Response::Checkpoint {
             id: checkpoint_id,
-            messages: vec![PluginMessage::text(MessageRole::User, "keep going")],
+            messages: Vec::new(),
         });
 
         let effects = drain_effects(&mut machine);
@@ -2477,29 +2225,42 @@ mod tests {
     }
 
     #[test]
-    fn repl_code_block_triggers_exec() {
-        let config = test_config(ExecutionMode::Repl);
-        let msgs = vec![user_message("run some code")];
+    fn repl_prose_after_exec_finishes_turn() {
+        let mut config = test_config(ExecutionMode::Repl);
+        config.tool_specs = vec![LlmToolSpec {
+            name: "execute_lashlang".to_string(),
+            description: "run lashlang".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            output_schema: serde_json::json!({"type":"object"}),
+        }];
+        let msgs = vec![user_message("run code then summarize")];
         let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).unwrap();
 
-        // Stream deltas with a code block
-        let cont =
-            machine.handle_llm_delta(llm_id, "Here's the code:\n<repl>\nprint('hi')\n</repl>\n");
-        assert!(!cont, "should signal to cancel stream after code block");
+        machine.handle_response(Response::LlmComplete {
+            id: llm_id,
+            text_streamed: false,
+            result: Ok(LlmResponse {
+                parts: vec![LlmOutputPart::ToolCall {
+                    call_id: "repl_1".to_string(),
+                    tool_name: "execute_lashlang".to_string(),
+                    input_json: r#"{"code":"print('hi')"}"#.to_string(),
+                }],
+                ..LlmResponse::default()
+            }),
+        });
 
         let effects = drain_effects(&mut machine);
-        let exec_effect = effects.iter().find_map(|e| match e {
-            Effect::ExecCode { id, code } => Some((*id, code.clone())),
-            _ => None,
-        });
-        assert!(exec_effect.is_some(), "should emit ExecCode");
-        let (exec_id, code) = exec_effect.unwrap();
-        assert_eq!(code, "print('hi')");
+        let exec_id = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::ExecCode { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("exec effect");
 
-        // Feed exec result
         machine.handle_response(Response::ExecResult {
             id: exec_id,
             result: Ok(crate::ExecResponse {
@@ -2509,21 +2270,6 @@ mod tests {
                 images: Vec::new(),
                 error: None,
                 duration_ms: 5,
-            }),
-        });
-
-        // Now feed the LlmComplete since stream was cancelled
-        machine.handle_response(Response::LlmComplete {
-            id: llm_id,
-            text_streamed: false,
-            result: Ok(LlmResponse {
-                usage: LlmUsage {
-                    input_tokens: 100,
-                    output_tokens: 50,
-                    cached_input_tokens: 0,
-                    reasoning_tokens: 0,
-                },
-                ..LlmResponse::default()
             }),
         });
 
@@ -2541,8 +2287,10 @@ mod tests {
             id: next_llm_id,
             text_streamed: false,
             result: Ok(LlmResponse {
-                full_text: "done".to_string(),
-                deltas: vec!["done".to_string()],
+                full_text: "All done.".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "All done.".to_string(),
+                }],
                 ..LlmResponse::default()
             }),
         });
@@ -2560,60 +2308,91 @@ mod tests {
     }
 
     #[test]
-    fn repl_stream_cancel_still_records_usage_and_debug_log() {
+    fn repl_rejects_non_execute_lashlang_tool_calls() {
         let mut config = test_config(ExecutionMode::Repl);
-        config.emit_llm_debug_log = true;
+        config.tool_specs = vec![LlmToolSpec {
+            name: "execute_lashlang".to_string(),
+            description: "run lashlang".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            output_schema: serde_json::json!({"type":"object"}),
+        }];
         let msgs = vec![user_message("run some code")];
         let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
-        let llm_id = *find_llm_call(&effects).expect("llm call");
-
-        machine.handle_llm_usage(
-            llm_id,
-            &LlmUsage {
-                input_tokens: 321,
-                output_tokens: 123,
-                cached_input_tokens: 45,
-                reasoning_tokens: 67,
-            },
-        );
-        let cont =
-            machine.handle_llm_delta(llm_id, "Here's the code:\n<repl>\nprint('hi')\n</repl>\n");
-        assert!(!cont);
-
-        let effects = drain_effects(&mut machine);
-        assert!(
-            effects
-                .iter()
-                .any(|effect| matches!(effect, Effect::ExecCode { .. })),
-            "should emit ExecCode"
-        );
-
+        let llm_id = *find_llm_call(&effects).unwrap();
         machine.handle_response(Response::LlmComplete {
             id: llm_id,
-            text_streamed: true,
-            result: Ok(LlmResponse::default()),
+            text_streamed: false,
+            result: Ok(LlmResponse {
+                parts: vec![LlmOutputPart::ToolCall {
+                    call_id: "tc1".to_string(),
+                    tool_name: "read_file".to_string(),
+                    input_json: r#"{"path":"foo.txt"}"#.to_string(),
+                }],
+                ..LlmResponse::default()
+            }),
         });
 
         let effects = drain_effects(&mut machine);
-        let usage = find_token_usage(&effects).expect("token usage");
-        assert_eq!(usage.input_tokens, 321);
-        assert_eq!(usage.output_tokens, 123);
-        assert_eq!(usage.cached_input_tokens, 45);
-        assert_eq!(usage.reasoning_tokens, 67);
+        assert!(has_error_event(
+            &effects,
+            "only supports `execute_lashlang`"
+        ));
+        assert!(find_done(&effects).is_some());
+    }
 
+    #[test]
+    fn repl_debug_log_preserves_tool_call_only_responses() {
+        let mut config = test_config(ExecutionMode::Repl);
+        config.emit_llm_debug_log = true;
+        config.tool_specs = vec![LlmToolSpec {
+            name: "execute_lashlang".to_string(),
+            description: "run lashlang".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            output_schema: serde_json::json!({"type":"object"}),
+        }];
+        let msgs = vec![user_message("run code")];
+        let mut machine = TurnMachine::new(config, msgs, 0);
+
+        let effects = drain_effects(&mut machine);
+        let llm_id = *find_llm_call(&effects).expect("llm call");
+        machine.handle_response(Response::LlmComplete {
+            id: llm_id,
+            text_streamed: false,
+            result: Ok(LlmResponse {
+                parts: vec![LlmOutputPart::ToolCall {
+                    call_id: "repl_1".to_string(),
+                    tool_name: "execute_lashlang".to_string(),
+                    input_json: r#"{"code":"print('hi')"}"#.to_string(),
+                }],
+                usage: LlmUsage {
+                    input_tokens: 321,
+                    output_tokens: 123,
+                    cached_input_tokens: 45,
+                    reasoning_tokens: 67,
+                },
+                ..LlmResponse::default()
+            }),
+        });
+
+        let effects = drain_effects(&mut machine);
         let (debug_usage, response_text, response_parts) =
             find_llm_debug(&effects).expect("llm debug");
         assert_eq!(debug_usage.input_tokens, 321);
         assert_eq!(debug_usage.output_tokens, 123);
         assert_eq!(debug_usage.cached_input_tokens, 45);
         assert_eq!(debug_usage.reasoning_tokens, 67);
+        assert!(response_text.is_empty());
         assert_eq!(
-            response_text,
-            "Here's the code:\n<repl>\nprint('hi')\n</repl>\n"
+            response_parts,
+            Some(Value::Array(vec![serde_json::json!({
+                "type": "tool_call",
+                "call_id": "repl_1",
+                "tool_name": "execute_lashlang",
+                "input_json": r#"{"code":"print('hi')"}"#,
+            })]))
         );
-        assert!(response_parts.is_none());
     }
 
     #[test]
@@ -2652,316 +2431,5 @@ mod tests {
                 "input_json": r#"{"path":"foo.txt"}"#,
             })]))
         );
-    }
-
-    #[test]
-    fn repl_prose_after_exec_finishes_turn() {
-        let config = test_config(ExecutionMode::Repl);
-        let msgs = vec![user_message("run code then summarize")];
-        let mut machine = TurnMachine::new(config, msgs, 0);
-
-        let effects = drain_effects(&mut machine);
-        let llm_id = *find_llm_call(&effects).unwrap();
-
-        let cont = machine.handle_llm_delta(llm_id, "<repl>\nprint('hi')\n</repl>\n");
-        assert!(!cont);
-
-        let effects = drain_effects(&mut machine);
-        let exec_id = effects
-            .iter()
-            .find_map(|effect| match effect {
-                Effect::ExecCode { id, .. } => Some(*id),
-                _ => None,
-            })
-            .expect("exec effect");
-
-        machine.handle_response(Response::ExecResult {
-            id: exec_id,
-            result: Ok(crate::ExecResponse {
-                output: "hi\n".to_string(),
-                observations: Vec::new(),
-                tool_calls: Vec::new(),
-                images: Vec::new(),
-                error: None,
-                duration_ms: 5,
-            }),
-        });
-        machine.handle_response(Response::LlmComplete {
-            id: llm_id,
-            text_streamed: false,
-            result: Ok(LlmResponse {
-                usage: LlmUsage {
-                    input_tokens: 100,
-                    output_tokens: 50,
-                    cached_input_tokens: 0,
-                    reasoning_tokens: 0,
-                },
-                ..LlmResponse::default()
-            }),
-        });
-
-        let effects = drain_effects(&mut machine);
-        let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
-        assert_eq!(checkpoint, CheckpointKind::AfterWork);
-        machine.handle_response(Response::Checkpoint {
-            id: checkpoint_id,
-            messages: Vec::new(),
-        });
-
-        let effects = drain_effects(&mut machine);
-        let next_llm_id = *find_llm_call(&effects).expect("next llm call");
-        assert!(find_done(&effects).is_none());
-
-        machine.handle_response(Response::LlmComplete {
-            id: next_llm_id,
-            text_streamed: false,
-            result: Ok(LlmResponse {
-                full_text: "All done.".to_string(),
-                deltas: vec!["All done.".to_string()],
-                ..LlmResponse::default()
-            }),
-        });
-
-        let effects = drain_effects(&mut machine);
-        let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("completion checkpoint");
-        assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
-        machine.handle_response(Response::Checkpoint {
-            id: checkpoint_id,
-            messages: Vec::new(),
-        });
-
-        let effects = drain_effects(&mut machine);
-        assert!(find_done(&effects).is_some());
-    }
-
-    #[test]
-    fn repl_followup_prompt_replays_executed_code_once() {
-        let config = test_config(ExecutionMode::Repl);
-        let msgs = vec![user_message("run code then continue")];
-        let mut machine = TurnMachine::new(config, msgs, 0);
-
-        let effects = drain_effects(&mut machine);
-        let llm_id = *find_llm_call(&effects).expect("llm call");
-
-        let cont = machine.handle_llm_delta(llm_id, "<repl>\nprint('hi')\n</repl>\n");
-        assert!(!cont);
-
-        let effects = drain_effects(&mut machine);
-        let exec_id = effects
-            .iter()
-            .find_map(|effect| match effect {
-                Effect::ExecCode { id, .. } => Some(*id),
-                _ => None,
-            })
-            .expect("exec effect");
-
-        machine.handle_response(Response::ExecResult {
-            id: exec_id,
-            result: Ok(crate::ExecResponse {
-                output: "hi\n".to_string(),
-                observations: Vec::new(),
-                tool_calls: Vec::new(),
-                images: Vec::new(),
-                error: None,
-                duration_ms: 5,
-            }),
-        });
-        machine.handle_response(Response::LlmComplete {
-            id: llm_id,
-            text_streamed: false,
-            result: Ok(LlmResponse::default()),
-        });
-
-        let effects = drain_effects(&mut machine);
-        let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
-        assert_eq!(checkpoint, CheckpointKind::AfterWork);
-        machine.handle_response(Response::Checkpoint {
-            id: checkpoint_id,
-            messages: Vec::new(),
-        });
-
-        let effects = drain_effects(&mut machine);
-        let request = find_llm_request(&effects).expect("next llm request");
-        let replay_text = request
-            .messages
-            .iter()
-            .map(|message| message.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let code_block = "<repl>\nprint('hi')\n</repl>";
-        assert_eq!(replay_text.matches(code_block).count(), 1);
-        assert_eq!(replay_text.matches("<output>\nhi\n\n</output>").count(), 1);
-    }
-
-    #[test]
-    fn repl_exec_error_produces_feedback() {
-        let config = test_config(ExecutionMode::Repl);
-        let msgs = vec![user_message("run code")];
-        let mut machine = TurnMachine::new(config, msgs, 0);
-
-        let effects = drain_effects(&mut machine);
-        let llm_id = *find_llm_call(&effects).unwrap();
-
-        // Feed deltas with code block via buffered response
-        machine.handle_response(Response::LlmComplete {
-            id: llm_id,
-            text_streamed: false,
-            result: Ok(LlmResponse {
-                full_text: "<repl>\nbad_code()\n</repl>\n".to_string(),
-                deltas: vec!["<repl>\nbad_code()\n</repl>\n".to_string()],
-                ..LlmResponse::default()
-            }),
-        });
-
-        let effects = drain_effects(&mut machine);
-        let exec_effect = effects.iter().find_map(|e| match e {
-            Effect::ExecCode { id, .. } => Some(*id),
-            _ => None,
-        });
-        assert!(exec_effect.is_some());
-
-        // Return error
-        machine.handle_response(Response::ExecResult {
-            id: exec_effect.unwrap(),
-            result: Err("NameError: name 'bad_code' is not defined".to_string()),
-        });
-
-        let effects = drain_effects(&mut machine);
-        let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
-        assert_eq!(checkpoint, CheckpointKind::AfterWork);
-        machine.handle_response(Response::Checkpoint {
-            id: checkpoint_id,
-            messages: Vec::new(),
-        });
-
-        let effects = drain_effects(&mut machine);
-        // Should have error event and loop to next iteration (not done, since there was output)
-        let has_llm_call = effects.iter().any(|e| matches!(e, Effect::LlmCall { .. }));
-        assert!(
-            has_llm_call,
-            "should loop to next iteration after exec error"
-        );
-    }
-
-    #[test]
-    fn repl_observations_feed_back_without_visible_code_output() {
-        let config = test_config(ExecutionMode::Repl);
-        let msgs = vec![user_message("inspect a value")];
-        let mut machine = TurnMachine::new(config, msgs, 0);
-
-        let effects = drain_effects(&mut machine);
-        let llm_id = *find_llm_call(&effects).unwrap();
-
-        let cont = machine.handle_llm_delta(llm_id, "Check it:\n<repl>\nobserve value\n</repl>\n");
-        assert!(!cont);
-
-        let effects = drain_effects(&mut machine);
-        let exec_id = effects
-            .iter()
-            .find_map(|effect| match effect {
-                Effect::ExecCode { id, .. } => Some(*id),
-                _ => None,
-            })
-            .expect("exec effect");
-
-        machine.handle_response(Response::ExecResult {
-            id: exec_id,
-            result: Ok(crate::ExecResponse {
-                output: String::new(),
-                observations: vec!["value={\"ok\":true}".to_string()],
-                tool_calls: Vec::new(),
-                images: Vec::new(),
-                error: None,
-                duration_ms: 1,
-            }),
-        });
-        machine.handle_response(Response::LlmComplete {
-            id: llm_id,
-            text_streamed: false,
-            result: Ok(LlmResponse::default()),
-        });
-
-        let effects = drain_effects(&mut machine);
-        assert!(
-            !effects
-                .iter()
-                .any(|effect| matches!(effect, Effect::Emit(SessionEvent::CodeOutput { .. })))
-        );
-        let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
-        assert_eq!(checkpoint, CheckpointKind::AfterWork);
-        machine.handle_response(Response::Checkpoint {
-            id: checkpoint_id,
-            messages: Vec::new(),
-        });
-
-        let messages = machine.messages();
-        let system_output = messages
-            .iter()
-            .rev()
-            .find(|message| matches!(message.role, MessageRole::System))
-            .and_then(|message| {
-                message
-                    .parts
-                    .iter()
-                    .find(|part| matches!(part.kind, PartKind::Output))
-            })
-            .map(|part| part.content.clone())
-            .expect("system output feedback");
-        assert!(system_output.contains("value={\"ok\":true}"));
-    }
-
-    #[test]
-    fn repl_malformed_output_retries() {
-        let config = test_config(ExecutionMode::Repl);
-        let msgs = vec![user_message("hello")];
-        let mut machine = TurnMachine::new(config, msgs, 0);
-
-        let effects = drain_effects(&mut machine);
-        let llm_id = *find_llm_call(&effects).unwrap();
-
-        // Malformed output
-        machine.handle_response(Response::LlmComplete {
-            id: llm_id,
-            text_streamed: false,
-            result: Ok(LlmResponse {
-                full_text: "<repl>".to_string(),
-                deltas: vec!["<repl>".to_string()],
-                ..LlmResponse::default()
-            }),
-        });
-
-        let effects = drain_effects(&mut machine);
-        let has_sleep = effects.iter().any(|e| matches!(e, Effect::Sleep { .. }));
-        assert!(has_sleep, "should retry with sleep on malformed output");
-    }
-
-    #[test]
-    fn repl_mid_stream_cancel_when_fence_closes() {
-        let config = test_config(ExecutionMode::Repl);
-        let msgs = vec![user_message("code")];
-        let mut machine = TurnMachine::new(config, msgs, 0);
-
-        let effects = drain_effects(&mut machine);
-        let llm_id = *find_llm_call(&effects).unwrap();
-
-        // Stream: first delta opens fence
-        let cont = machine.handle_llm_delta(llm_id, "<repl>\n");
-        assert!(cont, "should continue while fence is open");
-
-        // Stream: code line
-        let cont = machine.handle_llm_delta(llm_id, "x = 42\n");
-        assert!(cont, "should continue with code");
-
-        // Stream: close fence
-        let cont = machine.handle_llm_delta(llm_id, "</repl>\n");
-        assert!(!cont, "should cancel after fence closes");
-
-        let effects = drain_effects(&mut machine);
-        let has_cancel = effects
-            .iter()
-            .any(|e| matches!(e, Effect::CancelLlm { .. }));
-        let has_exec = effects.iter().any(|e| matches!(e, Effect::ExecCode { .. }));
-        assert!(has_cancel, "should emit CancelLlm");
-        assert!(has_exec, "should emit ExecCode");
     }
 }

@@ -239,16 +239,7 @@ impl PreparedTurn {
 pub enum DisplayBlock {
     UserInput(String),
     AssistantText(String),
-    CodeBlock {
-        code: String,
-        /// If true, this block is a continuation of a prior code-block group.
-        continuation: bool,
-    },
     Activity(Box<ActivityBlock>),
-    CodeOutput {
-        output: String,
-        error: Option<String>,
-    },
     ShellOutput {
         command: String,
         output: String,
@@ -590,6 +581,50 @@ impl App {
         self.keep_latest_user_block_visible();
     }
 
+    pub(crate) fn reconcile_interrupted_transcript_user_block(&mut self, messages: &[Message]) {
+        let Some(last_user_message) = messages
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::User)
+        else {
+            return;
+        };
+
+        let transcript_text = last_user_message
+            .user_input
+            .as_ref()
+            .map(|input| input.display_text.trim().to_string())
+            .unwrap_or_else(|| projection::rendered_message_text(last_user_message));
+        if transcript_text.is_empty() {
+            return;
+        }
+
+        let Some(last_user_idx) = self
+            .blocks
+            .iter()
+            .rposition(|block| matches!(block, DisplayBlock::UserInput(_)))
+        else {
+            return;
+        };
+
+        let Some(DisplayBlock::UserInput(current_text)) = self.blocks.get_mut(last_user_idx) else {
+            return;
+        };
+
+        if current_text.trim() == transcript_text {
+            return;
+        }
+
+        let current_trimmed = current_text.trim();
+        let transcript_trimmed = transcript_text.as_str();
+        let should_replace = current_trimmed.is_empty()
+            || transcript_trimmed.starts_with(current_trimmed)
+            || current_trimmed.starts_with(transcript_trimmed);
+        if should_replace {
+            *current_text = transcript_text;
+        }
+    }
+
     fn push_plan_content(&mut self, content: String) {
         self.blocks.push(DisplayBlock::PlanContent(content));
         self.invalidate_height_cache_from(self.blocks.len() - 1);
@@ -726,17 +761,6 @@ impl App {
     /// Returns `true` if there is a prior CodeBlock with only Activity / CodeOutput
     /// blocks between it and the end (no user-facing boundary like AssistantText,
     /// Error, UserInput, etc.).
-    fn is_code_continuation(&self) -> bool {
-        for block in self.blocks.iter().rev() {
-            match block {
-                DisplayBlock::CodeBlock { .. } => return true,
-                DisplayBlock::Activity(_) | DisplayBlock::CodeOutput { .. } => continue,
-                _ => return false,
-            }
-        }
-        false
-    }
-
     fn live_assistant_mut(&mut self) -> &mut LiveAssistantView {
         self.live_assistant
             .get_or_insert_with(LiveAssistantView::default)
@@ -1034,21 +1058,6 @@ impl App {
                 }
                 self.scroll_to_bottom();
             }
-            SessionEvent::CodeBlock { code } => {
-                self.set_status("writing code", None, true);
-                self.finalize_live_assistant();
-                let trimmed = code.trim_matches('\n');
-                if !trimmed.is_empty() {
-                    let continuation = self.is_code_continuation();
-                    self.blocks.push(DisplayBlock::CodeBlock {
-                        code: trimmed.to_string(),
-                        continuation,
-                    });
-                    self.invalidate_height_cache_from(self.blocks.len() - 1);
-                    self.mark_visible_output();
-                }
-                self.scroll_to_bottom();
-            }
             SessionEvent::ToolCall {
                 name,
                 args,
@@ -1095,18 +1104,6 @@ impl App {
                     self.push_plan_content(content);
                 }
                 if !matches!(self.blocks.last(), Some(DisplayBlock::Splash)) {
-                    self.mark_visible_output();
-                }
-                self.scroll_to_bottom();
-            }
-            SessionEvent::CodeOutput { output, error } => {
-                let error = error.filter(|value| !value.trim().is_empty());
-                if error.is_some() {
-                    self.set_status("execution failed", None, true);
-                }
-                if error.is_some() || !output.is_empty() {
-                    self.blocks.push(DisplayBlock::CodeOutput { output, error });
-                    self.invalidate_height_cache_from(self.blocks.len() - 1);
                     self.mark_visible_output();
                 }
                 self.scroll_to_bottom();

@@ -42,6 +42,8 @@ pub(crate) enum NativeTool {
     Batch,
 }
 
+pub(crate) const REPL_EXECUTE_LASHLANG_TOOL_NAME: &str = "execute_lashlang";
+
 impl NativeTool {
     pub(crate) fn name(self) -> &'static str {
         match self {
@@ -60,6 +62,28 @@ pub(crate) fn native_tools(mode: crate::ExecutionMode) -> &'static [NativeTool] 
     match mode {
         crate::ExecutionMode::Standard => &[NativeTool::Batch],
         crate::ExecutionMode::Repl => &[],
+    }
+}
+
+pub(crate) fn repl_execute_lashlang_tool_definition() -> crate::ToolDefinition {
+    crate::ToolDefinition {
+        name: REPL_EXECUTE_LASHLANG_TOOL_NAME.to_string(),
+        description: "Execute one lashlang work step inside the persistent REPL runtime. Use this for inspection, editing, validation, and other actions. Put lashlang source in `code`; it can call the Available Tools listed in the prompt via `call tool_name { ... }`. Reply in plain prose instead of calling this tool when the task is complete.".to_string(),
+        params: vec![crate::ToolParam {
+            name: "code".to_string(),
+            r#type: "str".to_string(),
+            description: "lashlang source code to execute in the persistent REPL state".to_string(),
+            default_value: None,
+            required: true,
+        }],
+        returns: "dict".to_string(),
+        examples: vec![
+            r#"execute_lashlang(code="files = call ls { path: \".\" }\nobserve files")"#.to_string(),
+        ],
+        enabled: true,
+        injected: true,
+        input_schema_override: None,
+        output_schema_override: None,
     }
 }
 

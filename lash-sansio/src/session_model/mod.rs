@@ -74,13 +74,6 @@ pub enum SessionEvent {
         success: bool,
         duration_ms: u64,
     },
-    #[serde(rename = "code_block")]
-    CodeBlock { code: String },
-    #[serde(rename = "code_output")]
-    CodeOutput {
-        output: String,
-        error: Option<String>,
-    },
     #[serde(rename = "message")]
     Message { text: String, kind: String },
     #[serde(rename = "llm_request")]

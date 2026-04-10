@@ -116,7 +116,7 @@ impl DelegateTools {
         };
 
         let buffer = Arc::new(StdMutex::new(String::new()));
-        let context_chunks = Arc::new(StdMutex::new(Vec::new()));
+        let context_chunks = Arc::new(StdMutex::new(Vec::<String>::new()));
         let result = Arc::new(StdMutex::new(None));
         let done_notify = Arc::new(Notify::new());
 
@@ -144,13 +144,6 @@ impl DelegateTools {
                         if kind == "final" {
                             final_message = Some(text);
                         }
-                    }
-                    SessionEvent::CodeBlock { .. } => {
-                        let trimmed = current_prose.trim().to_string();
-                        if !trimmed.is_empty() {
-                            context_chunks_clone.lock().unwrap().push(trimmed);
-                        }
-                        current_prose.clear();
                     }
                     _ => {}
                 }
