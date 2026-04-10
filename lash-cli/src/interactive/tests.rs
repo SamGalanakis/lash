@@ -49,6 +49,25 @@ fn promote_pending_steers_to_queue_preserves_order() {
 }
 
 #[test]
+fn manual_interrupt_prefers_queued_followup_over_interrupted_reprojection() {
+    let mut app = App::new("test-model".into(), "test".into());
+    app.blocks.push(DisplayBlock::UserInput(
+        "(I want future migrations to work though!)".into(),
+    ));
+    app.queue_pending_steer(PreparedTurn::new("next queued thing".into(), Vec::new()));
+
+    let mut ui_trace = None;
+    promote_pending_steers_to_queue(&mut app, &mut ui_trace);
+
+    assert!(app.pending_steers.is_empty());
+    assert!(app.has_queued_messages());
+    assert!(matches!(
+        app.blocks.last(),
+        Some(DisplayBlock::UserInput(text)) if text == "(I want future migrations to work though!)"
+    ));
+}
+
+#[test]
 fn selection_is_preserved_for_modified_key_chords() {
     let key = crossterm::event::KeyEvent {
         code: crossterm::event::KeyCode::Char('c'),

@@ -46,7 +46,8 @@ Example patch:
 It is important to remember:
 
 - You must include a header with your intended action (Add/Delete/Update)
-- You must prefix new lines with `+` even when creating a new file"#;
+- You must prefix new lines with `+` even when creating a new file
+- Avoid re-reading a file just to confirm a successful patch; if `apply_patch` succeeds, trust it and move on to the next targeted check"#;
 
 #[derive(Default)]
 pub struct ApplyPatchTool;
@@ -115,6 +116,17 @@ impl ToolProvider for ApplyPatchTool {
             .map(str::to_string);
 
         run_blocking(move || execute_apply_patch_sync(&input, workdir.as_deref())).await
+    }
+}
+
+#[cfg(test)]
+mod description_tests {
+    use super::*;
+
+    #[test]
+    fn apply_patch_description_mentions_avoiding_rereads() {
+        let description = ApplyPatchTool.definitions()[0].description.clone();
+        assert!(description.contains("Avoid re-reading a file"));
     }
 }
 

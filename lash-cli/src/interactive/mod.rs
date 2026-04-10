@@ -714,16 +714,19 @@ pub(crate) async fn run_app(
                             "Cancelled.".to_string()
                         };
                         app.stop_turn();
-                        app.reconcile_interrupted_transcript_user_block(&state.messages);
-                        app.blocks = app::project_interrupted_blocks(
-                            &state.messages,
-                            &state.tool_calls,
-                            &ui_resume_state,
-                            interrupted_message,
-                        );
                         promote_pending_steers_to_queue(&mut app, &mut ui_trace);
-                        app.invalidate_height_cache();
-                        app.scroll_to_bottom();
+                        if app.has_queued_messages() {
+                            push_system_message(&mut app, interrupted_message);
+                        } else {
+                            app.blocks = app::project_interrupted_blocks(
+                                &state.messages,
+                                &state.tool_calls,
+                                &ui_resume_state,
+                                interrupted_message,
+                            );
+                            app.invalidate_height_cache();
+                            app.scroll_to_bottom();
+                        }
                         runtime_return_rx = None;
                         cancel_token = None;
                         dispatch_next_queued_turn(

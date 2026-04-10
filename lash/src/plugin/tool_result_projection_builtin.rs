@@ -126,6 +126,13 @@ fn project_model_value(
     config: &ToolResultProjectionPluginConfig,
     ctx: &ToolResultProjectionContext,
 ) -> serde_json::Value {
+    if ctx.tool_name == "show_snippet_to_user" {
+        return if ctx.result.success {
+            serde_json::Value::String(String::new())
+        } else {
+            serde_json::Value::String(concise_tool_error(&ctx.result.result))
+        };
+    }
     if ctx.tool_name == "batch" {
         return serde_json::Value::String(render_batch_model_summary(&ctx.result.result));
     }
@@ -139,6 +146,25 @@ fn project_model_value(
         tool_projection_direction(&ctx.tool_name),
         Some(ctx),
     ))
+}
+
+fn concise_tool_error(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => {
+            text.lines().next().unwrap_or_default().trim().to_string()
+        }
+        serde_json::Value::Object(map) => map
+            .get("error")
+            .and_then(|value| value.as_str())
+            .map(|text| text.lines().next().unwrap_or_default().trim().to_string())
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| {
+                serde_json::to_string(value).unwrap_or_else(|_| "tool execution failed".to_string())
+            }),
+        other => {
+            serde_json::to_string(other).unwrap_or_else(|_| "tool execution failed".to_string())
+        }
+    }
 }
 
 fn project_stateful_value(
@@ -673,5 +699,44 @@ mod tests {
         assert_eq!(details.len(), 2);
         assert!(details[0].get("result").is_none());
         assert_eq!(details[1].get("error"), Some(&json!("boom")));
+    }
+
+    #[test]
+    fn show_snippet_to_user_model_projection_is_empty_on_success() {
+        let projected = project_tool_result(
+            &ToolResultProjectionPluginConfig::default(),
+            ToolResultProjectionContext {
+                hook: ToolResultProjectionHook::BeforeModel,
+                session_id: "root".to_string(),
+                tool_name: "show_snippet_to_user".to_string(),
+                args: json!({}),
+                result: ToolResult::ok(json!({
+                    "path": "README.md",
+                    "start_line": 1,
+                    "end_line": 3,
+                    "content": "# Title"
+                })),
+                duration_ms: 1,
+                host: Arc::new(NoopSessionManager),
+            },
+        );
+        assert_eq!(projected.result, json!(""));
+    }
+
+    #[test]
+    fn show_snippet_to_user_model_projection_keeps_concise_error() {
+        let projected = project_tool_result(
+            &ToolResultProjectionPluginConfig::default(),
+            ToolResultProjectionContext {
+                hook: ToolResultProjectionHook::BeforeModel,
+                session_id: "root".to_string(),
+                tool_name: "show_snippet_to_user".to_string(),
+                args: json!({}),
+                result: ToolResult::err_fmt("Path does not exist: nope.txt\nextra detail"),
+                duration_ms: 1,
+                host: Arc::new(NoopSessionManager),
+            },
+        );
+        assert_eq!(projected.result, json!("Path does not exist: nope.txt"));
     }
 }

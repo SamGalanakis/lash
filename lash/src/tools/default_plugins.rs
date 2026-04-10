@@ -69,9 +69,9 @@ pub fn default_tool_plugin_factories(
                 .with_tool_provider(Arc::new(super::WaitTool::new()) as Arc<dyn ToolProvider>),
         )));
         factories.push(Arc::new(StaticPluginFactory::new(
-            "showcase_snippet",
+            "show_snippet_to_user",
             PluginSpec::new().with_tool_provider(
-                Arc::new(super::ShowcaseSnippet::new()) as Arc<dyn ToolProvider>
+                Arc::new(super::ShowSnippetToUser::new()) as Arc<dyn ToolProvider>
             ),
         )));
     }
@@ -203,7 +203,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn interactive_default_tools_include_showcase_snippet() {
+    fn interactive_default_tools_include_show_snippet_to_user() {
         let factories = default_tool_plugin_factories(
             crate::ExecutionMode::Standard,
             DefaultToolPluginDeps {
@@ -215,7 +215,7 @@ mod tests {
         assert!(
             factories
                 .iter()
-                .any(|factory| factory.id() == "showcase_snippet")
+                .any(|factory| factory.id() == "show_snippet_to_user")
         );
         assert!(factories.iter().any(|factory| factory.id() == "wait"));
     }

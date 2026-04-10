@@ -66,7 +66,7 @@ impl ToolProvider for UpdatePlanTool {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
             name: "update_plan".into(),
-            description: "Update the task plan. Provide an optional explanation and a list of short plan items, each with a step and status. Valid statuses: pending, in_progress, completed. At most one step can be in_progress at a time.".into(),
+            description: "Update the task plan. Provide an optional explanation and a list of short plan items, each with a step and status. Valid statuses: pending, in_progress, completed. At most one step can be in_progress at a time. Use this to keep user-visible progress current for substantial multi-step work. After updating the plan, do not repeat the full checklist in prose; briefly summarize what changed and what comes next.".into(),
             params: vec![
                 ToolParam::optional("explanation", "str"),
                 ToolParam::typed("plan", "list"),
@@ -218,6 +218,14 @@ mod tests {
                 .as_str()
                 .is_some_and(|value| value.contains("at most one in_progress"))
         );
+    }
+
+    #[test]
+    fn update_plan_description_mentions_progress_summaries() {
+        let tool = UpdatePlanTool::new();
+        let description = &tool.definitions()[0].description;
+        assert!(description.contains("keep user-visible progress current"));
+        assert!(description.contains("what changed and what comes next"));
     }
 
     #[test]

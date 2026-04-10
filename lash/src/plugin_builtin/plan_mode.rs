@@ -48,7 +48,7 @@ fn default_allowed_tools() -> BTreeSet<String> {
         "read_file",
         "search_tools",
         "search_web",
-        "showcase_snippet",
+        "show_snippet_to_user",
         "apply_patch",
         "plan_exit",
     ]
@@ -171,7 +171,7 @@ fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
     PluginMessage::text(
         crate::MessageRole::System,
         format!(
-            "Plan mode: work in `{display}` only. Use read/search/list, web, `ask(...)`, and `showcase_snippet(...)` as needed. When you're done planning, call `plan_exit()` to leave plan mode."
+            "Plan mode: work in `{display}` only. Use read/search/list, web, `ask(...)`, and `show_snippet_to_user(...)` as needed. When you're done planning, call `plan_exit()` to leave plan mode."
         ),
     )
 }
@@ -179,10 +179,10 @@ fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
 fn plan_mode_tool_note(plan_path: Option<&Path>) -> String {
     match plan_path {
         Some(path) => format!(
-            "Plan mode tools: read/search/list, web search/fetch, `ask`, `showcase_snippet`, `apply_patch` for `{}`, `plan_exit()`.",
+            "Plan mode tools: read/search/list, web search/fetch, `ask`, `show_snippet_to_user`, `apply_patch` for `{}`, `plan_exit()`.",
             plan_display_path(path)
         ),
-        None => "Plan mode tools: read/search/list, web search/fetch, `ask`, `showcase_snippet`, plan-file `apply_patch`, `plan_exit()`.".to_string(),
+        None => "Plan mode tools: read/search/list, web search/fetch, `ask`, `show_snippet_to_user`, plan-file `apply_patch`, `plan_exit()`.".to_string(),
     }
 }
 

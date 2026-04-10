@@ -666,7 +666,7 @@ impl ActivityState {
                 extra: None,
                 result,
             },
-            "showcase_snippet" => {
+            "show_snippet_to_user" => {
                 let artifact = snippet_preview_artifact(&result);
                 let summary =
                     snippet_summary(&result).unwrap_or_else(|| semantic_tool_summary(name, &args));
@@ -826,7 +826,7 @@ fn semantic_tool_summary(name: &str, args: &Value) -> String {
             .unwrap_or_else(|| "delegate task".to_string()),
         "agent_result" => "delegate done".to_string(),
         "agent_kill" => "delegate stopped".to_string(),
-        "showcase_snippet" => tool_arg_str(args, "path")
+        "show_snippet_to_user" => tool_arg_str(args, "path")
             .map(|path| {
                 let start = args
                     .get("start_line")
@@ -836,9 +836,14 @@ fn semantic_tool_summary(name: &str, args: &Value) -> String {
                     .get("end_line")
                     .and_then(|value| value.as_u64())
                     .unwrap_or(start);
-                format!("showcase {}:{}-{}", compact_path_display(path), start, end)
+                format!(
+                    "show {}:{}-{} to user",
+                    compact_path_display(path),
+                    start,
+                    end
+                )
             })
-            .unwrap_or_else(|| "showcase snippet".to_string()),
+            .unwrap_or_else(|| "show snippet to user".to_string()),
         _ => name.replace('_', " "),
     }
 }
@@ -1149,7 +1154,7 @@ fn snippet_summary(result: &Value) -> Option<String> {
     let start_line = result.get("start_line").and_then(|value| value.as_u64())?;
     let end_line = result.get("end_line").and_then(|value| value.as_u64())?;
     Some(format!(
-        "showcase {}:{}-{}",
+        "show {}:{}-{} to user",
         compact_path_display(path),
         start_line,
         end_line
@@ -1963,10 +1968,10 @@ mod tests {
     }
 
     #[test]
-    fn showcase_snippet_builds_snippet_preview_artifact() {
+    fn show_snippet_to_user_builds_snippet_preview_artifact() {
         let mut state = ActivityState::default();
         let blocks = state.blocks_for_tool_call(
-            "showcase_snippet",
+            "show_snippet_to_user",
             json!({
                 "path": "lash-cli/src/render/mod.rs",
                 "start_line": 12,
@@ -1987,7 +1992,7 @@ mod tests {
 
         assert_eq!(
             blocks[0].summary,
-            "showcase lash-cli/src/render/mod.rs:12-14"
+            "show lash-cli/src/render/mod.rs:12-14 to user"
         );
         assert!(matches!(
             blocks[0].artifact,

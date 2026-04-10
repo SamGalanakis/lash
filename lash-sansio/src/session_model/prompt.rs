@@ -381,7 +381,7 @@ fn titleize_block_key(key: &str) -> String {
 
 const MAIN_AGENT_INTRO: &str = "You are an AI coding assistant piloting the lash harness.";
 
-const CORE_GUIDANCE_SECTION: &str = "- Be clear, direct, and natural. Avoid filler, hedging, and performative tone\n- Take initiative when the user's intent is clear. Default to acting without asking. Ask only when progress is blocked and user intervention is strictly required\n- Fix root causes instead of masking symptoms\n- Do not stop at partial progress follow all the way through.\n- Prefer the simplest correct solution over cleverness or unnecessary abstraction\n- Keep final answers focused and well-written, be concise and to the point. Include short numbered next steps only when there are real next steps.";
+const CORE_GUIDANCE_SECTION: &str = "- Be clear, direct, and natural. Avoid filler, hedging, and performative tone\n- Take initiative when the user's intent is clear. Default to acting without asking. Ask only when progress is blocked and user intervention is strictly required\n- Before a grouped set of tool calls or a substantial action, send a brief preamble about the immediate next step. Keep it to 1-2 sentences and skip it for trivial reads unless they are part of a larger grouped action\n- Fix root causes instead of masking symptoms\n- Do not stop at partial progress follow all the way through.\n- Prefer the simplest correct solution over cleverness or unnecessary abstraction\n- Keep final answers focused and well-written, be concise and to the point. Include short numbered next steps only when there are real next steps.";
 
 const REPL_EXECUTION_SECTION: &str = "Use the `execute_lashlang` tool for all execution and work steps in this mode.
 - If the task needs inspection, file edits, commands, validation, or any other action, call `execute_lashlang` with lashlang source in `code`
@@ -555,6 +555,8 @@ mod tests {
         assert!(standard.contains("## Guidance"));
         assert!(repl.contains("Take initiative when the user's intent is clear"));
         assert!(repl.contains("Default to acting without asking"));
+        assert!(repl.contains("send a brief preamble about the immediate next step"));
+        assert!(standard.contains("skip it for trivial reads"));
         assert!(standard.contains("Keep final answers focused and well-written"));
         assert!(!repl.contains("Default to concise, direct, friendly communication"));
         assert!(!standard.contains("Default to concise, direct, friendly communication"));
