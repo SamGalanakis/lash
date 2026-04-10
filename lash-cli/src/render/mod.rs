@@ -6,6 +6,7 @@ mod queue;
 mod tests;
 mod wait;
 
+use lash::{SkillCatalog, collect_skill_mentions_with_ranges};
 use lash_tui::{Line, Modifier, Rect, Span, Style};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -181,7 +182,13 @@ pub(crate) fn input_render_snapshot(app: &App, area: Rect) -> InputRenderSnapsho
     for (i, logical_line) in app.input().split('\n').enumerate() {
         let segments = wrap_line(logical_line, prefix_w, prefix_w, total_width);
         for (j, &(seg_start, seg_end)) in segments.iter().enumerate() {
-            let seg_spans = styled_input_segment(logical_line, seg_start, seg_end, &image_markers);
+            let seg_spans = styled_input_segment(
+                logical_line,
+                seg_start,
+                seg_end,
+                &image_markers,
+                &app.skills,
+            );
             let prefix = if i == 0 && j == 0 {
                 Span::styled(format!("{} ", theme::PROMPT_CHAR), theme::prompt())
             } else {
@@ -412,6 +419,7 @@ fn styled_input_segment(
     seg_start: usize,
     seg_end: usize,
     image_markers: &[(std::ops::Range<usize>, usize)],
+    skills: &SkillCatalog,
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut cursor = seg_start;
@@ -427,6 +435,7 @@ fn styled_input_segment(
                 logical_line,
                 cursor,
                 clamped_start,
+                skills,
                 theme::user_input(),
                 theme::slash_command_slash(),
             ));
@@ -443,6 +452,7 @@ fn styled_input_segment(
             logical_line,
             cursor,
             seg_end,
+            skills,
             theme::user_input(),
             theme::slash_command_slash(),
         ));
@@ -454,11 +464,17 @@ fn styled_input_segment(
     spans
 }
 
-fn styled_user_input_segment(text: &str, seg_start: usize, seg_end: usize) -> Vec<Span<'static>> {
+fn styled_user_input_segment(
+    text: &str,
+    seg_start: usize,
+    seg_end: usize,
+    skills: &SkillCatalog,
+) -> Vec<Span<'static>> {
     styled_text_with_slash_command(
         text,
         seg_start,
         seg_end,
+        skills,
         theme::user_input(),
         theme::slash_command_slash(),
     )
@@ -468,33 +484,33 @@ fn styled_text_with_slash_command(
     text: &str,
     seg_start: usize,
     seg_end: usize,
+    skills: &SkillCatalog,
     base_style: Style,
     slash_style: Style,
 ) -> Vec<Span<'static>> {
     if seg_start >= seg_end {
         return vec![text_display::sanitize_span(String::new(), base_style)];
     }
-
-    let segment = &text[seg_start..seg_end];
-    let Some((slash_start, slash_end)) = slash_command_range_in_segment(text, seg_start, seg_end)
-    else {
-        return vec![text_display::sanitize_span(segment.to_string(), base_style)];
-    };
-
     let mut spans = Vec::new();
-    if slash_start > seg_start {
+    let mut cursor = seg_start;
+    for (slash_start, slash_end) in
+        slash_command_ranges_in_segment(text, seg_start, seg_end, skills)
+    {
+        if slash_start > cursor {
+            spans.push(text_display::sanitize_span(
+                text[cursor..slash_start].to_string(),
+                base_style,
+            ));
+        }
         spans.push(text_display::sanitize_span(
-            text[seg_start..slash_start].to_string(),
-            base_style,
+            text[slash_start..slash_end].to_string(),
+            slash_style,
         ));
+        cursor = slash_end;
     }
-    spans.push(text_display::sanitize_span(
-        text[slash_start..slash_end].to_string(),
-        slash_style,
-    ));
-    if slash_end < seg_end {
+    if cursor < seg_end || spans.is_empty() {
         spans.push(text_display::sanitize_span(
-            text[slash_end..seg_end].to_string(),
+            text[cursor..seg_end].to_string(),
             base_style,
         ));
     }
@@ -504,33 +520,49 @@ fn styled_text_with_slash_command(
     spans
 }
 
-fn slash_command_range_in_segment(
+fn slash_command_ranges_in_segment(
     text: &str,
     seg_start: usize,
     seg_end: usize,
-) -> Option<(usize, usize)> {
-    let (slash_start, slash_end) = slash_command_slash_range(text)?;
-    if slash_end <= seg_start {
-        return None;
-    }
-    let clamped_start = slash_start.max(seg_start);
-    let clamped_end = slash_end.min(seg_end);
-    (clamped_start < clamped_end).then_some((clamped_start, clamped_end))
+    skills: &SkillCatalog,
+) -> Vec<(usize, usize)> {
+    slash_command_slash_ranges(text, skills)
+        .into_iter()
+        .filter_map(|(slash_start, slash_end)| {
+            if slash_end <= seg_start || slash_start >= seg_end {
+                return None;
+            }
+            let clamped_start = slash_start.max(seg_start);
+            let clamped_end = slash_end.min(seg_end);
+            (clamped_start < clamped_end).then_some((clamped_start, clamped_end))
+        })
+        .collect()
 }
 
-fn slash_command_slash_range(text: &str) -> Option<(usize, usize)> {
+fn slash_command_slash_ranges(text: &str, skills: &SkillCatalog) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
     let trimmed = text.trim_start();
-    if !trimmed.starts_with('/') {
-        return None;
+    if trimmed.starts_with('/') {
+        let slash_start = text.len() - trimmed.len();
+        if crate::command::parse(trimmed, skills).is_some()
+            || crate::command::slash_skill_prompt(trimmed, skills).is_some()
+        {
+            ranges.push((slash_start, slash_start + 1));
+        }
     }
-    let slash_start = text.len() - trimmed.len();
-    let command_len = trimmed[1..]
-        .find(char::is_whitespace)
-        .unwrap_or(trimmed[1..].len());
-    if command_len == 0 {
-        return None;
+
+    for (range, name) in collect_skill_mentions_with_ranges(text) {
+        if skills.get(&name).is_none() {
+            continue;
+        }
+        let slash_range = (range.start, range.start + 1);
+        if !ranges.contains(&slash_range) {
+            ranges.push(slash_range);
+        }
     }
-    Some((slash_start, slash_start + 1))
+
+    ranges.sort_unstable_by_key(|(start, _)| *start);
+    ranges
 }
 
 pub(crate) fn render_block_lines(
@@ -602,7 +634,12 @@ fn render_block_into(
                     };
                     first = false;
                     let mut spans = vec![prefix];
-                    spans.extend(styled_user_input_segment(line, seg_start, seg_end));
+                    spans.extend(styled_user_input_segment(
+                        line,
+                        seg_start,
+                        seg_end,
+                        &app.skills,
+                    ));
                     lines.push(Line::from(spans));
                 }
             }

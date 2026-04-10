@@ -53,11 +53,6 @@ fn copy_via_terminal_osc52(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn osc52_allowed_by_terminal_env() -> bool {
-    osc52_allowed_by_env(&current_clipboard_env())
-}
-
 pub(crate) fn osc52_allowed_by_env(env: &ClipboardEnv) -> bool {
     if env.ssh_connection || env.ssh_tty {
         return true;
@@ -76,11 +71,6 @@ pub(crate) fn osc52_allowed_by_env(env: &ClipboardEnv) -> bool {
         || env.term_program.contains("wezterm")
         || env.term_program.contains("apple_terminal")
         || env.term_program.contains("vscode")
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn osc52_sequence_for_env(encoded: &str) -> String {
-    osc52_sequence_for(encoded, &current_clipboard_env())
 }
 
 pub(crate) fn osc52_sequence_for(encoded: &str, env: &ClipboardEnv) -> String {

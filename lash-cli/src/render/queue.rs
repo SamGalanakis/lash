@@ -24,6 +24,7 @@ fn queue_preview_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             inner_width,
             "◆ after next tool/result",
             &pending_previews,
+            &app.skills,
             Style::default().fg(theme::SODIUM),
             Style::default().fg(theme::CHALK_MID),
         );
@@ -38,6 +39,7 @@ fn queue_preview_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             inner_width,
             "◇ next full turn",
             &queued_previews,
+            &app.skills,
             Style::default().fg(theme::LICHEN),
             Style::default().fg(theme::CHALK_DIM),
         );
@@ -51,6 +53,7 @@ fn push_queue_section(
     width: usize,
     title: &str,
     items: &[String],
+    skills: &lash::SkillCatalog,
     header_style: Style,
     item_style: Style,
 ) {
@@ -73,6 +76,7 @@ fn push_queue_section(
             lines,
             width,
             item,
+            skills,
             item_style,
             "  ↳ ",
             "    ",
@@ -95,6 +99,7 @@ fn push_wrapped_queue_item(
     lines: &mut Vec<Line<'static>>,
     width: usize,
     text: &str,
+    skills: &lash::SkillCatalog,
     style: Style,
     first_prefix: &str,
     continuation_prefix: &str,
@@ -121,6 +126,7 @@ fn push_wrapped_queue_item(
             &collapsed,
             start,
             end,
+            skills,
             style,
             theme::slash_command_slash(),
         ));
