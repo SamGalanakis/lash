@@ -121,6 +121,9 @@ pub enum UiHostEffect {
     QueueTurn {
         input: String,
     },
+    SwitchToNewSession {
+        session_id: String,
+    },
 }
 
 pub struct UiContext<'a> {
@@ -519,7 +522,7 @@ impl UiExtension for PlanModeUiExtension {
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
         if approved {
-            vec![
+            let mut effects = vec![
                 UiHostEffect::ClearModeIndicator {
                     key: surface_key("plan_mode", "mode"),
                 },
@@ -527,7 +530,18 @@ impl UiExtension for PlanModeUiExtension {
                     plugin_id: "plan_mode".to_string(),
                     key: "panel".to_string(),
                 },
-            ]
+            ];
+            if result
+                .get("execution_mode")
+                .and_then(|value| value.as_str())
+                == Some("fresh_context")
+                && let Some(session_id) = result.get("session_id").and_then(|value| value.as_str())
+            {
+                effects.push(UiHostEffect::SwitchToNewSession {
+                    session_id: session_id.to_string(),
+                });
+            }
+            effects
         } else {
             Vec::new()
         }
@@ -637,6 +651,7 @@ mod tests {
             args: json!({}),
             result: json!({
                 "approved": true,
+                "execution_mode": "current_session",
                 "next_turn_input": "Execute the approved plan."
             }),
             success: true,
@@ -652,6 +667,40 @@ mod tests {
                 UiHostEffect::ClearPanel {
                     plugin_id: "plan_mode".to_string(),
                     key: "panel".to_string()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_exit_event_can_switch_to_fresh_context_session() {
+        let extensions = UiExtensions::builtin().expect("builtin extensions");
+
+        let effects = extensions.effects_for_session_event(&SessionEvent::ToolCall {
+            call_id: None,
+            name: "plan_exit".to_string(),
+            args: json!({}),
+            result: json!({
+                "approved": true,
+                "execution_mode": "fresh_context",
+                "session_id": "new-plan-session"
+            }),
+            success: true,
+            duration_ms: 12,
+        });
+
+        assert_eq!(
+            effects,
+            vec![
+                UiHostEffect::ClearModeIndicator {
+                    key: "plan_mode:mode".to_string()
+                },
+                UiHostEffect::ClearPanel {
+                    plugin_id: "plan_mode".to_string(),
+                    key: "panel".to_string()
+                },
+                UiHostEffect::SwitchToNewSession {
+                    session_id: "new-plan-session".to_string()
                 }
             ]
         );

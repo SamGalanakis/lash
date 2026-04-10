@@ -1198,7 +1198,7 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
             assert_eq!(panel.title, "PLAN");
             assert!(panel.markdown.contains("# Plan"));
             Ok(crate::PromptResponse::Single {
-                selection: "Exit plan mode".to_string(),
+                selection: "Execute plan now".to_string(),
                 note: None,
             })
         }
@@ -1249,6 +1249,242 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
             .get("approved")
             .and_then(|value| value.as_bool())
             == Some(true)
+    );
+    assert_eq!(
+        result
+            .result
+            .get("execution_mode")
+            .and_then(|value| value.as_str()),
+        Some("current_session")
+    );
+}
+
+#[tokio::test]
+async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
+    struct PromptingSessionManager;
+
+    #[async_trait::async_trait]
+    impl SessionManager for PromptingSessionManager {
+        async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
+            Ok(mock_snapshot("run-session"))
+        }
+
+        async fn snapshot_session(
+            &self,
+            _session_id: &str,
+        ) -> Result<SessionSnapshot, PluginError> {
+            Ok(mock_snapshot("run-session"))
+        }
+
+        async fn tool_catalog(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<serde_json::Value>, PluginError> {
+            Ok(Vec::new())
+        }
+
+        async fn create_session(
+            &self,
+            request: SessionCreateRequest,
+        ) -> Result<SessionHandle, PluginError> {
+            let base = MockSessionManager;
+            base.create_session(request).await
+        }
+
+        async fn close_session(&self, session_id: &str) -> Result<(), PluginError> {
+            let base = MockSessionManager;
+            base.close_session(session_id).await
+        }
+
+        async fn start_turn_stream(
+            &self,
+            session_id: &str,
+            input: TurnInput,
+        ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
+            let base = MockSessionManager;
+            base.start_turn_stream(session_id, input).await
+        }
+
+        async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError> {
+            let base = MockSessionManager;
+            base.await_turn(turn_id).await
+        }
+
+        async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError> {
+            let base = MockSessionManager;
+            base.cancel_turn(turn_id).await
+        }
+
+        async fn prompt_user(
+            &self,
+            _request: crate::PromptRequest,
+        ) -> Result<crate::PromptResponse, PluginError> {
+            Ok(crate::PromptResponse::Single {
+                selection: "Execute with fresh context".to_string(),
+                note: None,
+            })
+        }
+    }
+
+    let _guard = plan_mode_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _cwd = CurrentDirGuard::set(temp.path());
+    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
+    let session = host.build_standard_session("root", None).expect("session");
+    let manager: Arc<dyn SessionManager> = Arc::new(PromptingSessionManager);
+
+    session
+        .invoke_external(
+            "plan_mode.enable",
+            json!({}),
+            None,
+            true,
+            Arc::clone(&manager),
+        )
+        .await
+        .expect("enable");
+
+    session
+        .before_turn(TurnHookContext {
+            session_id: "root".to_string(),
+            state: mock_snapshot("run-session"),
+            host: Arc::clone(&manager),
+        })
+        .await
+        .expect("before_turn");
+
+    let result = session
+        .tools()
+        .execute_with_context(
+            "plan_exit",
+            &json!({}),
+            &crate::ToolExecutionContext {
+                session_id: "root".to_string(),
+                host: Arc::clone(&manager),
+            },
+        )
+        .await;
+    assert!(result.success);
+    assert_eq!(
+        result
+            .result
+            .get("execution_mode")
+            .and_then(|value| value.as_str()),
+        Some("fresh_context")
+    );
+    assert_eq!(
+        result
+            .result
+            .get("fresh_context_input")
+            .and_then(|value| value.as_str()),
+        Some("Do a full, faithful implementation of the plan found at: .lash/plans/run-session.md")
+    );
+}
+
+#[tokio::test]
+async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
+    #[derive(Clone, Default)]
+    struct CapturingSessionManager {
+        created: Arc<std::sync::Mutex<Vec<SessionCreateRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionManager for CapturingSessionManager {
+        async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
+            Ok(mock_snapshot("run-session"))
+        }
+
+        async fn snapshot_session(
+            &self,
+            _session_id: &str,
+        ) -> Result<SessionSnapshot, PluginError> {
+            Ok(mock_snapshot("run-session"))
+        }
+
+        async fn tool_catalog(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<serde_json::Value>, PluginError> {
+            Ok(Vec::new())
+        }
+
+        async fn create_session(
+            &self,
+            request: SessionCreateRequest,
+        ) -> Result<SessionHandle, PluginError> {
+            self.created.lock().expect("created").push(request.clone());
+            Ok(SessionHandle {
+                session_id: request
+                    .session_id
+                    .clone()
+                    .unwrap_or_else(|| "new-session".to_string()),
+                parent_session_id: request.parent_session_id.clone(),
+            })
+        }
+
+        async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
+            Ok(())
+        }
+
+        async fn start_turn_stream(
+            &self,
+            _session_id: &str,
+            _input: TurnInput,
+        ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
+            Err(PluginError::Session("unused".to_string()))
+        }
+
+        async fn await_turn(&self, _turn_id: &str) -> Result<AssembledTurn, PluginError> {
+            Err(PluginError::Session("unused".to_string()))
+        }
+
+        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
+            Ok(())
+        }
+    }
+
+    let _guard = plan_mode_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _cwd = CurrentDirGuard::set(temp.path());
+    let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
+    let session = host.build_standard_session("root", None).expect("session");
+    let manager = Arc::new(CapturingSessionManager::default());
+
+    session
+        .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())
+        .await
+        .expect("enable");
+
+    let directives = session
+        .after_tool_call(ToolResultHookContext {
+            session_id: "root".to_string(),
+            tool_name: "plan_exit".to_string(),
+            args: json!({}),
+            result: ToolResult::ok(json!({
+                "approved": true,
+                "plan_path": ".lash/plans/run-session.md",
+                "execution_mode": "fresh_context",
+                "fresh_context_input": "Do a full, faithful implementation of the plan found at: .lash/plans/run-session.md"
+            })),
+            duration_ms: 1,
+            host: manager.clone(),
+        })
+        .await
+        .expect("after_tool_call");
+
+    let created = manager.created.lock().expect("created");
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].start, SessionStartPoint::Empty);
+    assert_eq!(created[0].plugin_mode, SessionPluginMode::Fresh);
+    assert_eq!(created[0].initial_messages.len(), 1);
+    assert_eq!(
+        created[0].initial_messages[0].content,
+        "Do a full, faithful implementation of the plan found at: .lash/plans/run-session.md"
+    );
+    assert!(
+        directives
+            .iter()
+            .any(|owned| matches!(owned.value, PluginDirective::EmitEvents { .. }))
     );
 }
 

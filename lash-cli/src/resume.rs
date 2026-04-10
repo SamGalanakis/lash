@@ -148,6 +148,40 @@ pub async fn load_resumed_session(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub async fn load_resumed_session_by_id(
+    session_id: &str,
+    app: &mut App,
+    history: &mut Vec<Message>,
+    runtime: &mut Option<LashRuntime>,
+    turn_counter: &mut usize,
+    execution_mode: &mut ExecutionMode,
+    context_strategy: &mut ContextStrategy,
+    provider: &Provider,
+    current_model_variant: &mut Option<String>,
+    dynamic_tools: &Arc<DynamicToolProvider>,
+    desired_dynamic: &mut DynamicStateSnapshot,
+    model_catalog: &CachedModelCatalog,
+) -> Result<(), String> {
+    let filename = session_log::filename_for_session_id(session_id)
+        .ok_or_else(|| format!("Could not find session `{session_id}`"))?;
+    load_resumed_session(
+        &filename,
+        app,
+        history,
+        runtime,
+        turn_counter,
+        execution_mode,
+        context_strategy,
+        provider,
+        current_model_variant,
+        dynamic_tools,
+        desired_dynamic,
+        model_catalog,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn restore_session_state(
     session_filename: &str,
     history: &mut Vec<Message>,

@@ -789,6 +789,9 @@ pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<UiHostEffect>) {
                 app.queue_turn(PreparedTurn::prepare(input, Vec::new(), &app.skills));
                 app.dirty = true;
             }
+            UiHostEffect::SwitchToNewSession { .. } => {
+                app.dirty = true;
+            }
         }
     }
 }
