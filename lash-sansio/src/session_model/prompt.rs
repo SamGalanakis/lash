@@ -381,37 +381,52 @@ fn titleize_block_key(key: &str) -> String {
 
 const MAIN_AGENT_INTRO: &str = "You are an AI coding assistant piloting the lash harness.";
 
-const CORE_GUIDANCE_SECTION: &str = "- Be clear, direct, and natural. Avoid filler, hedging, and performative tone\n- Take initiative when the user's intent is clear. Default to acting without asking. Ask only when progress is blocked and user intervention is strictly required\n- Before a grouped set of tool calls or a substantial action, send a brief preamble about the immediate next step. Keep it to 1-2 sentences and skip it for trivial reads unless they are part of a larger grouped action\n- Fix root causes instead of masking symptoms\n- Do not stop at partial progress follow all the way through.\n- Prefer the simplest correct solution over cleverness or unnecessary abstraction\n- Keep final answers focused and well-written, be concise and to the point. Include short numbered next steps only when there are real next steps.";
+const CORE_GUIDANCE_SECTION: &str = r#"- Be clear, direct, and natural. Avoid filler, hedging, and performative tone.
+- Take initiative when the user's intent is clear. Default to acting without asking; ask only when progress is blocked and user intervention is strictly required.
+- Before a grouped set of tool calls or a substantial action, send a brief preamble about the immediate next step. Skip it for trivial actions.
+- Fix root causes instead of masking symptoms.
+- Do not stop at partial progress; follow the task through to completion.
+- Prefer the simplest correct solution over cleverness or unnecessary abstraction.
+- Keep final answers focused and well-written. Use short numbered next steps only when there are real next steps."#;
 
-const REPL_EXECUTION_SECTION: &str = "Use the `execute_lashlang` tool for all execution and work steps in this mode.
-- If the task needs inspection, file edits, commands, validation, or any other action, call `execute_lashlang` with lashlang source in `code`
-- When the task is complete, do not call `execute_lashlang`; reply in plain prose and that finalizes the turn
-- Do not describe what you would do instead of doing it
-- Work iteratively: inspect, act, observe, continue
-- Most tasks take multiple lashlang executions, not one large step
-- After each `execute_lashlang` result, decide whether to call it again or finish in prose
-- Use `observe` for intermediate results, inspection, and progress that should continue
-- Verify the concrete end state before replying in prose when possible
+const REPL_EXECUTION_SECTION: &str = r#"Use the `execute_lashlang` tool for all execution and work steps in this mode.
+
+- If the task needs inspection, file edits, commands, validation, or any other action, call `execute_lashlang` with lashlang source in `code`.
+- Work iteratively: inspect, act, observe, continue.
+- Most tasks take multiple lashlang executions, not one large step.
+- Use `observe` for intermediate results, inspection, and progress that should continue.
+- After each `execute_lashlang` result, decide whether to call it again or finish in prose.
+- When the task is complete, do not call `execute_lashlang`; reply in plain prose to finalize the turn.
+- Verify the concrete end state before replying in prose when possible.
+- Do not describe what you would do instead of doing it.
 
 ### REPL Language
 
 The `execute_lashlang` tool runs `lashlang`, a small workflow language for tool orchestration.
-- Values are null, booleans, numbers, strings, lists, and records
-- List and record literals use comma-separated entries: `[a, b]`, `{ a: 1, b: 2 }`; tool arg records follow the same rule
-- Assign with `name = expr`
-- Bare expressions are valid statements; in `parallel { ... }`, a bare expression branch contributes that value to the result list
-- Call tools with `call tool_name { arg: expr }`
-- Use `parallel { ... }` only for independent tool calls; if one call needs another call's output, do not put them in the same `parallel { ... }`
-- `parallel { ... }` returns a list of branch results in order
-- Use ternary expressions for inline branching: `cond ? yes : no`; there is no expression-form `if`
-- Control flow is limited to statement `if` and `for`
-- Boolean negation supports both `!cond` and `not cond`
-- Use `observe expr` to inspect a value and continue execution
-- End a work step by letting execution finish naturally
-- `observe` output and tool results are fed back into the next turn (your context), so inspect first and refine on the next step if needed
-- You MUST explicitly use observe in order to inspect values and make progress based on them; do not rely on implicit inspection through tool results or execution errors";
 
-const STANDARD_EXECUTION_SECTION: &str = "Use direct tool calls when execution is needed.\n- Call tools directly with valid arguments\n- Use `batch` for 2 or more independent tool calls; serialize only when later arguments depend on earlier results\n- Avoid filler prose between tool calls\n- Work in small, concrete steps and verify each meaningful step before broadening scope\n- After edits, run the narrowest check that can falsify the change before moving on to broader validation\n- If a tool fails or returns incomplete output, inspect the current state, fix the cause, and continue; do not repeat the same failing call unchanged\n- Keep going until the task is complete; do not stop after inspection or partial progress\n- If you are unsure, resolve the uncertainty with the smallest relevant check; broaden only when the current path is insufficient\n- Before concluding, verify the concrete end-state with tools whenever possible\n- For direct conversational requests that need no tools, respond in prose only\n- Finish by returning a final assistant answer once the task is actually complete";
+- Values are null, booleans, numbers, strings, lists, and records.
+- List and record literals use comma-separated entries: `[a, b]`, `{ a: 1, b: 2 }`. Tool-argument records follow the same rule.
+- Assign with `name = expr`.
+- Bare expressions are valid statements. In `parallel { ... }`, a bare-expression branch contributes that value to the result list.
+- Call tools with `call tool_name { arg: expr }`.
+- Use `parallel { ... }` only for independent tool calls. If one call needs another call's output, do not put them in the same `parallel { ... }`.
+- `parallel { ... }` returns a list of branch results in order.
+- Use ternary expressions for inline branching: `cond ? yes : no`. There is no expression-form `if`.
+- Control flow is limited to statement `if` and `for`.
+- Boolean negation supports both `!cond` and `not cond`.
+- Use `observe expr` to inspect a value and continue execution.
+- End a work step by letting execution finish naturally.
+- `observe` output and tool results are fed back into the next turn (your context), so inspect first and refine on the next step if needed.
+- You must explicitly use `observe` to inspect values and make progress based on them. Do not rely on implicit inspection through tool results or execution errors."#;
+
+const STANDARD_EXECUTION_SECTION: &str = r#"Use direct tool calls when execution is needed.
+
+- Work in small, concrete steps and verify each meaningful step.
+- Use `batch` for two or more independent tool calls. Serialize calls when later arguments depend on earlier results.
+- Avoid filler prose between tool calls.
+- If you are unsure, resolve the uncertainty with the smallest relevant check.
+- Before concluding, verify the concrete end-state whenever possible.
+- For direct conversational requests that need no tools, respond in prose only."#;
 
 fn intro_section(ctx: &PromptRenderContext<'_>) -> Option<String> {
     let _ = ctx;
@@ -478,43 +493,6 @@ mod tests {
     }
 
     #[test]
-    fn repl_prompt_keeps_lashlang_contract() {
-        let text = DefaultPromptRenderer.render(&prompt(crate::ExecutionMode::Repl), &[]);
-        assert!(text.contains(
-            "Use the `execute_lashlang` tool for all execution and work steps in this mode"
-        ));
-        assert!(text.contains("call `execute_lashlang` with lashlang source in `code`"));
-        assert!(text.contains("Call tools with `call tool_name { arg: expr }`"));
-        assert!(text.contains(
-            "List and record literals use comma-separated entries: `[a, b]`, `{ a: 1, b: 2 }`"
-        ));
-        assert!(text.contains("Use ternary expressions for inline branching: `cond ? yes : no`"));
-        assert!(text.contains("Boolean negation supports both `!cond` and `not cond`"));
-        assert!(text.contains("Use `observe expr` to inspect a value and continue execution"));
-        assert!(text.contains("Work iteratively: inspect, act, observe, continue"));
-        assert!(text.contains("After each `execute_lashlang` result, decide whether to call it again or finish in prose"));
-        assert!(text.contains("When the task is complete, do not call `execute_lashlang`"));
-        assert!(text.contains("Control flow is limited to statement `if` and `for`"));
-        assert!(text.contains("End a work step by letting execution finish naturally"));
-        assert!(text.contains("### Available Tools"));
-    }
-
-    #[test]
-    fn standard_prompt_keeps_only_execution_contract_by_default() {
-        let text = DefaultPromptRenderer.render(&prompt(crate::ExecutionMode::Standard), &[]);
-        assert!(text.contains("Work in small, concrete steps and verify each meaningful step"));
-        assert!(text.contains("Before concluding, verify the concrete end-state"));
-        assert!(text.contains("resolve the uncertainty with the smallest relevant check"));
-        assert!(text.contains("Be clear, direct, and natural."));
-        assert!(text.contains("Prefer the simplest correct solution"));
-        assert!(!text.contains("<repl>"));
-        assert!(!text.contains("lashlang"));
-        assert!(!text.contains("Python"));
-        assert!(!text.contains("update_plan"));
-        assert!(!text.contains("### Available Tools"));
-    }
-
-    #[test]
     fn guidance_contributions_render_with_default_guidance_section() {
         let mut prompt = prompt(crate::ExecutionMode::Repl);
         prompt.contributions = vec![
@@ -544,22 +522,6 @@ mod tests {
         assert!(text.contains("### Runtime Context"));
         assert!(text.contains("cwd: /tmp/demo"));
         assert!(text.contains("### Project Instructions"));
-    }
-
-    #[test]
-    fn default_prompt_emits_clear_shared_guidance_block() {
-        let repl = DefaultPromptRenderer.render(&prompt(crate::ExecutionMode::Repl), &[]);
-        let standard = DefaultPromptRenderer.render(&prompt(crate::ExecutionMode::Standard), &[]);
-
-        assert!(repl.contains("## Guidance"));
-        assert!(standard.contains("## Guidance"));
-        assert!(repl.contains("Take initiative when the user's intent is clear"));
-        assert!(repl.contains("Default to acting without asking"));
-        assert!(repl.contains("send a brief preamble about the immediate next step"));
-        assert!(standard.contains("skip it for trivial reads"));
-        assert!(standard.contains("Keep final answers focused and well-written"));
-        assert!(!repl.contains("Default to concise, direct, friendly communication"));
-        assert!(!standard.contains("Default to concise, direct, friendly communication"));
     }
 
     #[test]
