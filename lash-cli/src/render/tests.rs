@@ -7,9 +7,27 @@ use crate::assistant_text::normalize_assistant_text;
 use crate::theme;
 use lash::ToolProvider;
 use lash::tools::ShowcaseSnippet;
-use lash::{Part, PartKind, PromptRequest};
+use lash::{Part, PartKind, PromptRequest, SkillCatalog};
 use serde_json::Value;
+use std::path::PathBuf;
 use std::sync::mpsc;
+
+fn skill_catalog_with(names: &[(&str, &str)]) -> SkillCatalog {
+    let root = std::env::temp_dir().join(format!("lash-render-skills-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).expect("temp root");
+    for (name, description) in names {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).expect("skill dir");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\n\nbody\n"),
+        )
+        .expect("skill file");
+    }
+    let catalog = SkillCatalog::from_dirs(&[PathBuf::from(&root)]);
+    let _ = std::fs::remove_dir_all(root);
+    catalog
+}
 
 #[test]
 fn exploration_detail_lines_are_indented_under_summary() {
@@ -537,6 +555,70 @@ fn queue_preview_highlights_slash_command_slash() {
             span.content.contains('/') && span.style == theme::slash_command_slash()
         })
     );
+}
+
+#[test]
+fn user_input_highlights_every_detected_slash_command() {
+    let mut app = App::new("gpt-5.4".into(), "test".into());
+    app.skills = skill_catalog_with(&[
+        ("spring-cleaning", "cleanup"),
+        ("yolopush", "ship changes"),
+        ("ghmonitor", "monitor"),
+    ]);
+    app.blocks = vec![DisplayBlock::UserInput(
+        "/spring-cleaning /yolopush and then /ghmonitor status".into(),
+    )];
+
+    let rendered = render_block_lines(&app, 0, 80, 20);
+    let slash_spans = rendered
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .filter(|span| span.content == "/" && span.style == theme::slash_command_slash())
+        .count();
+
+    assert_eq!(slash_spans, 3);
+}
+
+#[test]
+fn user_input_does_not_highlight_unknown_inline_slash_words() {
+    let mut app = App::new("gpt-5.4".into(), "test".into());
+    app.skills = skill_catalog_with(&[("ghmonitor", "monitor")]);
+    app.blocks = vec![DisplayBlock::UserInput(
+        "Please check /not-a-command and /ghmonitor soon".into(),
+    )];
+
+    let rendered = render_block_lines(&app, 0, 80, 20);
+    let line = rendered.first().expect("user input line");
+
+    assert!(
+        line.spans
+            .iter()
+            .any(|span| { span.content == "/" && span.style == theme::slash_command_slash() })
+    );
+    assert!(line.spans.iter().any(|span| {
+        span.content.contains("/not-a-command") && span.style == theme::user_input()
+    }));
+}
+
+#[test]
+fn queue_preview_highlights_multiple_detected_slash_commands() {
+    let mut app = App::new("gpt-5.4".into(), "test".into());
+    app.skills = skill_catalog_with(&[("ghmonitor", "monitor")]);
+    let turn = PreparedTurn::prepare(
+        "/retry then /ghmonitor and /bogus".into(),
+        Vec::new(),
+        &app.skills,
+    );
+    app.queue_turn(turn);
+
+    let rendered = queue_preview_lines_snapshot(&app, 80);
+    let slash_spans = rendered
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .filter(|span| span.content == "/" && span.style == theme::slash_command_slash())
+        .count();
+
+    assert_eq!(slash_spans, 2);
 }
 
 #[test]
