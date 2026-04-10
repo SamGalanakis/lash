@@ -331,9 +331,9 @@ fn snippet_activity(subject: &str, markdown: bool) -> ActivityBlock {
     ActivityBlock {
         kind: ActivityKind::GenericTool,
         status: ActivityStatus::Completed,
-        tool_name: "showcase_snippet".to_string(),
-        summary: format!("showcase render/mod.rs:120-164 for {subject}"),
-        detail_lines: vec!["showcase lash-cli/src/render/mod.rs:120-164".to_string()],
+        tool_name: "show_snippet_to_user".to_string(),
+        summary: format!("show render/mod.rs:120-164 to user for {subject}"),
+        detail_lines: vec!["show lash-cli/src/render/mod.rs:120-164 to user".to_string()],
         duration_ms: 7,
         args: serde_json::json!({}),
         result: serde_json::json!({}),

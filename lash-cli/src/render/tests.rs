@@ -6,7 +6,7 @@ use crate::app::projected_blocks_from_state;
 use crate::assistant_text::normalize_assistant_text;
 use crate::theme;
 use lash::ToolProvider;
-use lash::tools::ShowcaseSnippet;
+use lash::tools::ShowSnippetToUser;
 use lash::{Part, PartKind, PromptRequest, SkillCatalog};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -307,8 +307,8 @@ fn activity_block_renders_snippet_preview_at_default_expand_level() {
     let activity = ActivityBlock {
         kind: ActivityKind::GenericTool,
         status: ActivityStatus::Completed,
-        tool_name: "showcase_snippet".into(),
-        summary: "showcase README.md:1-3".into(),
+        tool_name: "show_snippet_to_user".into(),
+        summary: "show README.md:1-3 to user".into(),
         detail_lines: Vec::new(),
         duration_ms: 0,
         args: Value::Null,
@@ -340,19 +340,19 @@ fn activity_block_renders_snippet_preview_at_default_expand_level() {
     assert!(
         rendered
             .iter()
-            .any(|line| line.contains("showcase README.md:1-3"))
+            .any(|line| line.contains("show README.md:1-3 to user"))
     );
     assert!(rendered.iter().any(|line| line.contains("README")));
     assert!(rendered.iter().any(|line| line.contains("Title")));
 }
 
 #[test]
-fn activity_block_indents_showcase_snippet_preview_under_summary() {
+fn activity_block_indents_show_snippet_to_user_preview_under_summary() {
     let activity = ActivityBlock {
         kind: ActivityKind::GenericTool,
         status: ActivityStatus::Completed,
-        tool_name: "showcase_snippet".into(),
-        summary: "showcase lash/src/plugin_builtin/plan_mode.rs:780-786".into(),
+        tool_name: "show_snippet_to_user".into(),
+        summary: "show lash/src/plugin_builtin/plan_mode.rs:780-786 to user".into(),
         detail_lines: Vec::new(),
         duration_ms: 0,
         args: Value::Null,
@@ -381,7 +381,9 @@ fn activity_block_indents_showcase_snippet_preview_under_summary() {
         })
         .collect::<Vec<_>>();
 
-    assert!(rendered.iter().any(|line| line.starts_with("· showcase lash/src/plugin_builtin/plan_mode.rs:780-786")));
+    assert!(rendered.iter().any(|line| {
+        line.starts_with("· show lash/src/plugin_builtin/plan_mode.rs:780-786 to user")
+    }));
     assert!(
         rendered
             .iter()
@@ -401,7 +403,7 @@ fn activity_block_indents_showcase_snippet_preview_under_summary() {
 }
 
 #[tokio::test]
-async fn showcase_tool_output_wraps_under_line_number_gutter() {
+async fn show_snippet_to_user_output_wraps_under_line_number_gutter() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("sample.rs");
     std::fs::write(
@@ -410,10 +412,10 @@ async fn showcase_tool_output_wraps_under_line_number_gutter() {
     )
     .expect("write file");
 
-    let tool = ShowcaseSnippet::new();
+    let tool = ShowSnippetToUser::new();
     let result = tool
         .execute(
-            "showcase_snippet",
+            "show_snippet_to_user",
             &serde_json::json!({
                 "path": path,
                 "start_line": 1,
@@ -428,7 +430,7 @@ async fn showcase_tool_output_wraps_under_line_number_gutter() {
     let mut state = ActivityState::default();
     let activity = state
         .blocks_for_tool_call(
-            "showcase_snippet",
+            "show_snippet_to_user",
             serde_json::json!({
                 "path": path,
                 "start_line": 1,

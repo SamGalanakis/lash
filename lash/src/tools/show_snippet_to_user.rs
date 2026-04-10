@@ -9,7 +9,7 @@ use super::{require_str, run_blocking};
 const MAX_SNIPPET_LINES: usize = 400;
 
 #[derive(Default)]
-pub struct ShowcaseSnippet;
+pub struct ShowSnippetToUser;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SnippetRenderMode {
@@ -28,18 +28,18 @@ impl SnippetRenderMode {
     }
 }
 
-impl ShowcaseSnippet {
+impl ShowSnippetToUser {
     pub fn new() -> Self {
         Self
     }
 }
 
 #[async_trait::async_trait]
-impl ToolProvider for ShowcaseSnippet {
+impl ToolProvider for ShowSnippetToUser {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
-            name: "showcase_snippet".into(),
-            description: "Show a specific line range from a file as a framed snippet in the chat."
+            name: "show_snippet_to_user".into(),
+            description: "Show a specific line range from a file as a framed snippet to the user. This is only for sharing a snippet with the user, not for your own viewing or model-context ingestion."
                 .into(),
             params: vec![
                 ToolParam::typed("path", "str"),
@@ -49,7 +49,7 @@ impl ToolProvider for ShowcaseSnippet {
             ],
             returns: "dict".into(),
             examples: vec![
-                "showcase_snippet(path=\"lash-cli/src/render/mod.rs\", start_line=120, end_line=180)"
+                "show_snippet_to_user(path=\"lash-cli/src/render/mod.rs\", start_line=120, end_line=180)"
                     .into(),
             ],
             enabled: true,
@@ -90,7 +90,8 @@ impl ToolProvider for ShowcaseSnippet {
             .filter(|value| !value.is_empty())
             .map(str::to_string);
 
-        run_blocking(move || execute_showcase_snippet(&path_str, start_line, end_line, title)).await
+        run_blocking(move || execute_show_snippet_to_user(&path_str, start_line, end_line, title))
+            .await
     }
 }
 
@@ -114,7 +115,7 @@ fn parse_required_line_arg(args: &serde_json::Value, key: &str) -> Result<usize,
     Ok(value)
 }
 
-fn execute_showcase_snippet(
+fn execute_show_snippet_to_user(
     path_str: &str,
     start_line: usize,
     end_line: usize,
@@ -125,15 +126,13 @@ fn execute_showcase_snippet(
         return ToolResult::err_fmt(format_args!("Path does not exist: {path_str}"));
     }
     if path.is_dir() {
-        return ToolResult::err_fmt(format_args!("Cannot showcase a directory: {path_str}"));
+        return ToolResult::err_fmt(format_args!("Cannot show a directory: {path_str}"));
     }
 
     let content = match std::fs::read_to_string(path) {
         Ok(value) => value,
         Err(err) => {
-            return ToolResult::err_fmt(format_args!(
-                "Failed to read text file `{path_str}`: {err}"
-            ));
+            return ToolResult::err_fmt(format_args!("Failed to read `{path_str}`: {err}"));
         }
     };
     let lines = content.lines().collect::<Vec<_>>();
@@ -238,15 +237,15 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn showcase_snippet_returns_code_metadata_and_content() {
+    async fn show_snippet_to_user_returns_code_metadata_and_content() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("sample.rs");
         std::fs::write(&path, "fn one() {}\nfn two() {}\nfn three() {}\n").expect("write file");
 
-        let tool = ShowcaseSnippet::new();
+        let tool = ShowSnippetToUser::new();
         let result = tool
             .execute(
-                "showcase_snippet",
+                "show_snippet_to_user",
                 &json!({
                     "path": path,
                     "start_line": 2,
@@ -274,15 +273,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn showcase_snippet_detects_markdown() {
+    async fn show_snippet_to_user_detects_markdown() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("README.md");
         std::fs::write(&path, "# Title\n\n- item\n").expect("write file");
 
-        let tool = ShowcaseSnippet::new();
+        let tool = ShowSnippetToUser::new();
         let result = tool
             .execute(
-                "showcase_snippet",
+                "show_snippet_to_user",
                 &json!({
                     "path": path,
                     "start_line": 1,
@@ -297,15 +296,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn showcase_snippet_detects_shebang_script_as_code() {
+    async fn show_snippet_to_user_detects_shebang_script_as_code() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("script");
         std::fs::write(&path, "#!/usr/bin/env python3\nprint('hi')\n").expect("write file");
 
-        let tool = ShowcaseSnippet::new();
+        let tool = ShowSnippetToUser::new();
         let result = tool
             .execute(
-                "showcase_snippet",
+                "show_snippet_to_user",
                 &json!({
                     "path": path,
                     "start_line": 1,
@@ -320,15 +319,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn showcase_snippet_rejects_invalid_range() {
+    async fn show_snippet_to_user_rejects_invalid_range() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("notes.txt");
         std::fs::write(&path, "one\ntwo\n").expect("write file");
 
-        let tool = ShowcaseSnippet::new();
+        let tool = ShowSnippetToUser::new();
         let result = tool
             .execute(
-                "showcase_snippet",
+                "show_snippet_to_user",
                 &json!({
                     "path": path,
                     "start_line": 3,

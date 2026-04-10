@@ -581,50 +581,6 @@ impl App {
         self.keep_latest_user_block_visible();
     }
 
-    pub(crate) fn reconcile_interrupted_transcript_user_block(&mut self, messages: &[Message]) {
-        let Some(last_user_message) = messages
-            .iter()
-            .rev()
-            .find(|message| message.role == MessageRole::User)
-        else {
-            return;
-        };
-
-        let transcript_text = last_user_message
-            .user_input
-            .as_ref()
-            .map(|input| input.display_text.trim().to_string())
-            .unwrap_or_else(|| projection::rendered_message_text(last_user_message));
-        if transcript_text.is_empty() {
-            return;
-        }
-
-        let Some(last_user_idx) = self
-            .blocks
-            .iter()
-            .rposition(|block| matches!(block, DisplayBlock::UserInput(_)))
-        else {
-            return;
-        };
-
-        let Some(DisplayBlock::UserInput(current_text)) = self.blocks.get_mut(last_user_idx) else {
-            return;
-        };
-
-        if current_text.trim() == transcript_text {
-            return;
-        }
-
-        let current_trimmed = current_text.trim();
-        let transcript_trimmed = transcript_text.as_str();
-        let should_replace = current_trimmed.is_empty()
-            || transcript_trimmed.starts_with(current_trimmed)
-            || current_trimmed.starts_with(transcript_trimmed);
-        if should_replace {
-            *current_text = transcript_text;
-        }
-    }
-
     fn push_plan_content(&mut self, content: String) {
         self.blocks.push(DisplayBlock::PlanContent(content));
         self.invalidate_height_cache_from(self.blocks.len() - 1);
@@ -1020,6 +976,11 @@ impl App {
     pub fn push_prepared_user_input(&mut self, turn: &PreparedTurn) {
         let history_text = turn.history_text();
         if history_text.is_empty() {
+            return;
+        }
+        if self.blocks.last().is_some_and(
+            |block| matches!(block, DisplayBlock::UserInput(text) if text.trim() == history_text),
+        ) {
             return;
         }
         self.blocks.push(DisplayBlock::UserInput(history_text));

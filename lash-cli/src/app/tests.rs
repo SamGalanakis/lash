@@ -1,7 +1,5 @@
 use super::*;
 use crate::editor::LARGE_PASTE_CHAR_THRESHOLD;
-use lash::Part;
-
 fn other_variant_name(block: &DisplayBlock) -> &'static str {
     match block {
         DisplayBlock::UserInput(_) => "UserInput",
@@ -733,80 +731,6 @@ fn repeated_cancelled_errors_do_not_duplicate_system_message() {
 }
 
 #[test]
-fn interrupted_transcript_can_replace_shorter_local_user_block() {
-    let mut app = App::new("test-model".into(), "test".into());
-    app.blocks.push(DisplayBlock::UserInput(
-        "what do you mean \"no longer supported\" why are you describing legacy stuff again!"
-            .into(),
-    ));
-
-    let message = lash::Message {
-        id: "m1".into(),
-        role: lash::MessageRole::User,
-        parts: vec![Part {
-            id: "m1.p1".into(),
-            kind: PartKind::Text,
-            content: "what do you mean \"no longer supported\" why are you describing legacy stuff again!\n\n<skill>\nlegacy\n</skill>".into(),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            prune_state: lash::PruneState::Intact,
-        }],
-        user_input: Some(lash::UserInputProvenance {
-            display_text: "what do you mean \"no longer supported\" why are you describing legacy stuff again!\n\n<skill>\nlegacy\n</skill>".into(),
-            effective_text: "what do you mean \"no longer supported\" why are you describing legacy stuff again!\n\n<skill>\nlegacy\n</skill>".into(),
-            transforms: Vec::new(),
-        }),
-        origin: None,
-    };
-
-    app.reconcile_interrupted_transcript_user_block(&[message]);
-
-    assert!(matches!(
-        app.blocks.last(),
-        Some(DisplayBlock::UserInput(text)) if text.contains("<skill>")
-    ));
-}
-
-#[test]
-fn interrupted_transcript_does_not_add_second_user_block() {
-    let mut app = App::new("test-model".into(), "test".into());
-    app.blocks.push(DisplayBlock::UserInput("/yolopush".into()));
-
-    let message = lash::Message {
-        id: "m1".into(),
-        role: lash::MessageRole::User,
-        parts: vec![Part {
-            id: "m1.p1".into(),
-            kind: PartKind::Text,
-            content: "/yolopush\n\n<skill>body</skill>".into(),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            prune_state: lash::PruneState::Intact,
-        }],
-        user_input: Some(lash::UserInputProvenance {
-            display_text: "/yolopush".into(),
-            effective_text: "/yolopush\n\n<skill>body</skill>".into(),
-            transforms: vec![lash::UserInputTransform::SkillBlockAppend {
-                skill_name: "yolopush".into(),
-                skill_path: "/tmp/yolopush/SKILL.md".into(),
-            }],
-        }),
-        origin: None,
-    };
-
-    app.reconcile_interrupted_transcript_user_block(&[message]);
-
-    let user_blocks = app
-        .blocks
-        .iter()
-        .filter(|block| matches!(block, DisplayBlock::UserInput(_)))
-        .count();
-    assert_eq!(user_blocks, 1);
-}
-
-#[test]
 fn non_manual_error_sets_transient_status() {
     let mut app = App::new("test-model".into(), "test".into());
     app.handle_session_event(SessionEvent::LlmRequest {
@@ -998,6 +922,39 @@ fn injected_messages_fallback_to_user_input_display_text() {
     assert!(
         matches!(app.blocks.last(), Some(DisplayBlock::UserInput(text)) if text == "/yolopush")
     );
+}
+
+#[test]
+fn injected_messages_committed_do_not_duplicate_existing_visible_user_input() {
+    let mut app = App::new("test-model".into(), "test".into());
+    let turn = PreparedTurn::new(
+        "(I want future migrations to work though!)".into(),
+        Vec::new(),
+    );
+    app.push_prepared_user_input(&turn);
+    app.queue_pending_steer(turn.clone());
+
+    app.handle_session_event(SessionEvent::InjectedMessagesCommitted {
+        messages: vec![PluginMessage::text(
+            MessageRole::User,
+            "(I want future migrations to work though!)",
+        )],
+        checkpoint: lash::CheckpointKind::AfterWork,
+    });
+
+    let matching_blocks = app
+        .blocks
+        .iter()
+        .filter(|block| {
+            matches!(
+                block,
+                DisplayBlock::UserInput(text)
+                    if text == "(I want future migrations to work though!)"
+            )
+        })
+        .count();
+    assert_eq!(matching_blocks, 1);
+    assert!(app.pending_steers.is_empty());
 }
 
 #[test]
