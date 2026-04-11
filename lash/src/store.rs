@@ -29,7 +29,11 @@ CREATE TABLE IF NOT EXISTS archive (
 CREATE TABLE IF NOT EXISTS session_state (
     singleton             INTEGER PRIMARY KEY CHECK (singleton = 1),
     iteration             INTEGER NOT NULL DEFAULT 0,
-    config_json           TEXT NOT NULL DEFAULT '{}',
+    last_prompt_usage_json          TEXT,
+    task_state_json                 TEXT,
+    replay_manifest_json            TEXT,
+    plugin_snapshot_json            TEXT,
+    dynamic_state_json              TEXT,
     execution_state_snapshot         BLOB,
     input_tokens          INTEGER NOT NULL DEFAULT 0,
     output_tokens         INTEGER NOT NULL DEFAULT 0,
@@ -39,8 +43,14 @@ CREATE TABLE IF NOT EXISTS session_state (
 
 CREATE TABLE IF NOT EXISTS live_session_snapshot (
     singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
-    snapshot_json  TEXT NOT NULL DEFAULT '{}',
+    state_json     TEXT NOT NULL DEFAULT '{}',
+    dynamic_state_json TEXT NOT NULL DEFAULT '{}',
     execution_state_snapshot  BLOB
+);
+
+CREATE TABLE IF NOT EXISTS ui_resume_state (
+    singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
+    state_json     TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS transcript_entries (
@@ -69,7 +79,7 @@ CREATE TABLE IF NOT EXISTS session_meta (
 ";
 
 #[cfg(feature = "sqlite-store")]
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
 
 #[cfg(feature = "sqlite-store")]
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -103,18 +113,20 @@ fn apply_pragmas(conn: &Connection, backing: StoreBacking) -> rusqlite::Result<(
 /// Persisted session runtime state for snapshot/resume.
 #[derive(Clone, Debug)]
 pub struct SessionState {
-    pub iteration: i64,
-    pub config_json: String,
+    pub iteration: usize,
+    pub token_usage: crate::TokenUsage,
+    pub last_prompt_usage: Option<crate::PromptUsage>,
+    pub task_state: Option<crate::SessionTaskState>,
+    pub replay_manifest: Option<crate::ReplayManifest>,
+    pub plugin_snapshot: Option<crate::PluginSessionSnapshot>,
+    pub dynamic_state: Option<crate::DynamicStateSnapshot>,
     pub execution_state_snapshot: Option<Vec<u8>>,
-    pub input_tokens: i64,
-    pub output_tokens: i64,
-    pub cached_input_tokens: i64,
-    pub reasoning_tokens: i64,
 }
 
 #[derive(Clone, Debug)]
 pub struct LiveSessionSnapshot {
-    pub snapshot_json: String,
+    pub state: crate::SessionStateEnvelope,
+    pub dynamic_state: crate::DynamicStateSnapshot,
     pub execution_state_snapshot: Option<Vec<u8>>,
 }
 
@@ -319,6 +331,21 @@ pub fn transcript_tool_calls(entries: &[TranscriptEntry]) -> Vec<crate::ToolCall
         .collect()
 }
 
+#[cfg(feature = "sqlite-store")]
+fn encode_json<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_string(value).expect("persisted state should serialize")
+}
+
+#[cfg(feature = "sqlite-store")]
+fn encode_optional_json<T: serde::Serialize>(value: Option<&T>) -> Option<String> {
+    value.map(encode_json)
+}
+
+#[cfg(feature = "sqlite-store")]
+fn decode_optional_json<T: serde::de::DeserializeOwned>(value: Option<String>) -> Option<T> {
+    value.and_then(|value| serde_json::from_str(&value).ok())
+}
+
 fn transcript_message_role(message: &crate::Message) -> String {
     match message.role {
         crate::MessageRole::User => "user".to_string(),
@@ -455,17 +482,23 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO session_state (
-                singleton, iteration, config_json, execution_state_snapshot,
+                singleton, iteration, last_prompt_usage_json, task_state_json,
+                replay_manifest_json, plugin_snapshot_json, dynamic_state_json,
+                execution_state_snapshot,
                 input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
-             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
-                state.iteration,
-                state.config_json,
+                state.iteration as i64,
+                encode_optional_json(state.last_prompt_usage.as_ref()),
+                encode_optional_json(state.task_state.as_ref()),
+                encode_optional_json(state.replay_manifest.as_ref()),
+                encode_optional_json(state.plugin_snapshot.as_ref()),
+                encode_optional_json(state.dynamic_state.as_ref()),
                 state.execution_state_snapshot,
-                state.input_tokens,
-                state.output_tokens,
-                state.cached_input_tokens,
-                state.reasoning_tokens
+                state.token_usage.input_tokens,
+                state.token_usage.output_tokens,
+                state.token_usage.cached_input_tokens,
+                state.token_usage.reasoning_tokens
             ],
         )
         .unwrap();
@@ -474,50 +507,96 @@ impl Store {
     /// Load the persisted session runtime state.
     pub fn load_session_state(&self) -> Option<SessionState> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT iteration, config_json, execution_state_snapshot, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
+        let (
+            iteration,
+            last_prompt_usage_json,
+            task_state_json,
+            replay_manifest_json,
+            plugin_snapshot_json,
+            dynamic_state_json,
+            execution_state_snapshot,
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            reasoning_tokens,
+        ) = conn
+            .query_row(
+                "SELECT iteration, last_prompt_usage_json, task_state_json,
+                    replay_manifest_json, plugin_snapshot_json, dynamic_state_json,
+                    execution_state_snapshot, input_tokens, output_tokens,
+                    cached_input_tokens, reasoning_tokens
              FROM session_state WHERE singleton = 1",
-            [],
-            |row| {
-                Ok(SessionState {
-                    iteration: row.get(0)?,
-                    config_json: row.get(1)?,
-                    execution_state_snapshot: row.get(2)?,
-                    input_tokens: row.get(3)?,
-                    output_tokens: row.get(4)?,
-                    cached_input_tokens: row.get(5)?,
-                    reasoning_tokens: row.get(6)?,
-                })
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<Vec<u8>>>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, i64>(9)?,
+                        row.get::<_, i64>(10)?,
+                    ))
+                },
+            )
+            .ok()?;
+        Some(SessionState {
+            iteration: usize::try_from(iteration).ok()?,
+            token_usage: crate::TokenUsage {
+                input_tokens,
+                output_tokens,
+                cached_input_tokens,
+                reasoning_tokens,
             },
-        )
-        .ok()
+            last_prompt_usage: decode_optional_json(last_prompt_usage_json),
+            task_state: decode_optional_json(task_state_json),
+            replay_manifest: decode_optional_json(replay_manifest_json),
+            plugin_snapshot: decode_optional_json(plugin_snapshot_json),
+            dynamic_state: decode_optional_json(dynamic_state_json),
+            execution_state_snapshot,
+        })
     }
 
     pub fn save_live_session_snapshot(&self, snapshot: LiveSessionSnapshot) {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO live_session_snapshot (
-                singleton, snapshot_json, execution_state_snapshot
-             ) VALUES (1, ?1, ?2)",
-            params![snapshot.snapshot_json, snapshot.execution_state_snapshot],
+                singleton, state_json, dynamic_state_json, execution_state_snapshot
+             ) VALUES (1, ?1, ?2, ?3)",
+            params![
+                encode_json(&snapshot.state),
+                encode_json(&snapshot.dynamic_state),
+                snapshot.execution_state_snapshot
+            ],
         )
         .unwrap();
     }
 
     pub fn load_live_session_snapshot(&self) -> Option<LiveSessionSnapshot> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT snapshot_json, execution_state_snapshot
+        let (state_json, dynamic_state_json, execution_state_snapshot) = conn
+            .query_row(
+                "SELECT state_json, dynamic_state_json, execution_state_snapshot
              FROM live_session_snapshot WHERE singleton = 1",
-            [],
-            |row| {
-                Ok(LiveSessionSnapshot {
-                    snapshot_json: row.get(0)?,
-                    execution_state_snapshot: row.get(1)?,
-                })
-            },
-        )
-        .ok()
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<Vec<u8>>>(2)?,
+                    ))
+                },
+            )
+            .ok()?;
+        Some(LiveSessionSnapshot {
+            state: serde_json::from_str(&state_json).ok()?,
+            dynamic_state: serde_json::from_str(&dynamic_state_json).ok()?,
+            execution_state_snapshot,
+        })
     }
 
     pub fn clear_live_session_snapshot(&self) {
@@ -526,6 +605,36 @@ impl Store {
         {
             tracing::warn!(error = %err, "failed to clear live session snapshot");
         }
+    }
+
+    pub fn save_ui_resume_state<T: serde::Serialize>(&self, state: &T) {
+        let state_json = match serde_json::to_string(state) {
+            Ok(state_json) => state_json,
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to serialize UI resume state");
+                return;
+            }
+        };
+        let conn = self.conn.lock().unwrap();
+        if let Err(err) = conn.execute(
+            "INSERT OR REPLACE INTO ui_resume_state (singleton, state_json)
+             VALUES (1, ?1)",
+            params![state_json],
+        ) {
+            tracing::warn!(error = %err, "failed to persist UI resume state");
+        }
+    }
+
+    pub fn load_ui_resume_state<T: serde::de::DeserializeOwned>(&self) -> Option<T> {
+        let conn = self.conn.lock().unwrap();
+        let state_json: String = conn
+            .query_row(
+                "SELECT state_json FROM ui_resume_state WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .ok()?;
+        serde_json::from_str(&state_json).ok()
     }
 
     pub fn transcript_clear(&self) {
@@ -760,6 +869,7 @@ fn unsupported_schema_message() -> String {
 mod tests {
     use super::*;
     use rusqlite::Connection;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn mem() -> Store {
         Store::memory().unwrap()
@@ -875,44 +985,98 @@ mod tests {
         let store = mem();
         store.save_session_state(SessionState {
             iteration: 0,
-            config_json: "{}".into(),
+            token_usage: crate::TokenUsage::default(),
+            last_prompt_usage: None,
+            task_state: None,
+            replay_manifest: None,
+            plugin_snapshot: None,
+            dynamic_state: None,
             execution_state_snapshot: None,
-            input_tokens: 0,
-            output_tokens: 0,
-            cached_input_tokens: 0,
-            reasoning_tokens: 0,
         });
 
         store.save_session_state(SessionState {
             iteration: 7,
-            config_json: r#"{"mode":"updated"}"#.into(),
+            token_usage: crate::TokenUsage {
+                input_tokens: 5,
+                output_tokens: 2,
+                cached_input_tokens: 1,
+                reasoning_tokens: 0,
+            },
+            last_prompt_usage: Some(crate::PromptUsage {
+                prompt_context_tokens: 11,
+                input_tokens: 10,
+                cached_input_tokens: 1,
+                context_budget_tokens: 11,
+            }),
+            task_state: Some(crate::SessionTaskState::LiveResume {
+                status: crate::SessionTaskStatus::Running,
+                saved_at: "2026-04-11T00:00:00Z".to_string(),
+            }),
+            replay_manifest: Some(crate::ReplayManifest {
+                version: 3,
+                saved_at: "2026-04-11T00:00:00Z".to_string(),
+                provider: "test".to_string(),
+                configured_model: "gpt-5".to_string(),
+                resolved_model: "gpt-5".to_string(),
+                context_window: 1024,
+                execution_mode: crate::ExecutionMode::Standard,
+                context_strategy: crate::ContextStrategy::RollingContext,
+                model_variant: None,
+                toolset_hash: "hash".to_string(),
+                prompt_hash: None,
+                snapshot_hash: None,
+            }),
+            plugin_snapshot: Some(crate::PluginSessionSnapshot::default()),
+            dynamic_state: Some(crate::DynamicStateSnapshot {
+                base_generation: 1,
+                tools: BTreeMap::new(),
+                enabled_tools: BTreeSet::new(),
+            }),
             execution_state_snapshot: None,
-            input_tokens: 5,
-            output_tokens: 2,
-            cached_input_tokens: 1,
-            reasoning_tokens: 0,
         });
 
         let state = store.load_session_state().expect("session state");
         assert_eq!(state.iteration, 7);
-        assert_eq!(state.config_json, r#"{"mode":"updated"}"#);
-        assert_eq!(state.input_tokens, 5);
+        assert_eq!(state.token_usage.input_tokens, 5);
+        assert!(matches!(
+            state.task_state,
+            Some(crate::SessionTaskState::LiveResume { .. })
+        ));
+        assert!(state.replay_manifest.is_some());
+        assert!(state.dynamic_state.is_some());
     }
 
     #[test]
     fn live_session_snapshot_rewrites_and_clears() {
         let store = mem();
         store.save_live_session_snapshot(LiveSessionSnapshot {
-            snapshot_json: r#"{"iteration":1}"#.into(),
+            state: crate::SessionStateEnvelope {
+                iteration: 1,
+                ..crate::SessionStateEnvelope::default()
+            },
+            dynamic_state: crate::DynamicStateSnapshot {
+                base_generation: 1,
+                tools: BTreeMap::new(),
+                enabled_tools: BTreeSet::new(),
+            },
             execution_state_snapshot: Some(vec![1, 2, 3]),
         });
         store.save_live_session_snapshot(LiveSessionSnapshot {
-            snapshot_json: r#"{"iteration":2}"#.into(),
+            state: crate::SessionStateEnvelope {
+                iteration: 2,
+                ..crate::SessionStateEnvelope::default()
+            },
+            dynamic_state: crate::DynamicStateSnapshot {
+                base_generation: 2,
+                tools: BTreeMap::new(),
+                enabled_tools: BTreeSet::new(),
+            },
             execution_state_snapshot: None,
         });
 
         let snapshot = store.load_live_session_snapshot().expect("live snapshot");
-        assert_eq!(snapshot.snapshot_json, r#"{"iteration":2}"#);
+        assert_eq!(snapshot.state.iteration, 2);
+        assert_eq!(snapshot.dynamic_state.base_generation, 2);
         assert_eq!(snapshot.execution_state_snapshot, None);
 
         store.clear_live_session_snapshot();

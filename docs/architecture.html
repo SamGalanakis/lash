@@ -799,8 +799,8 @@ flowchart LR
           <div class="panel">
             <h3>What is not transcript truth</h3>
             <ul>
-              <li><code>session_state.config_json</code> carries plugin snapshot and task/runtime metadata.</li>
-              <li><code>UiResumeState</code> stores only live affordances that cannot be derived from completed transcript rows.</li>
+              <li><code>session_state</code> stores typed runtime metadata such as prompt usage, replay manifest, plugin snapshot, dynamic tool state, and task state.</li>
+              <li><code>ui_resume_state</code> stores only live affordances that cannot be derived from completed transcript rows.</li>
               <li><code>UiHostEffect</code> values such as mode-indicator updates, queued turns, and host messages are ephemeral host actions.</li>
               <li>Examples: streaming tail lines, plugin panels, idle mode badges, and partial assistant text during an interrupted turn.</li>
             </ul>
@@ -1161,7 +1161,7 @@ uuid]
             <h3>Persistence-facing files</h3>
             <ul class="files-list">
               <li><strong>/lash-cli/src/session_log.rs</strong> — session discovery, picker info, load/resume from canonical transcript rows.</li>
-              <li><strong>/lash-cli/src/ui_resume.rs</strong> — live-only resume state embedded in <code>session_state.config_json</code>.</li>
+              <li><strong>/lash-cli/src/ui_resume.rs</strong> — live-only resume state persisted separately from Lash runtime session state.</li>
               <li><strong>/lashlang/src/runtime.rs</strong> — evaluator, state snapshots, tool-host callbacks, profiling.</li>
             </ul>
           </div>

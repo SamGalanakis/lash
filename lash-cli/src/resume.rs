@@ -3,7 +3,8 @@ use std::sync::Arc;
 use lash::session_model::{Message, MessageRole, Part, PartKind, PruneState};
 use lash::{
     CachedModelCatalog, ContextStrategy, DynamicStateSnapshot, DynamicToolProvider, ExecutionMode,
-    LashRuntime, PromptUsage, Provider, SessionStateEnvelope, Store, TokenUsage,
+    LashRuntime, PromptUsage, Provider, ReplayManifest, SessionStateEnvelope, SessionTaskState,
+    Store, TokenUsage,
 };
 
 use crate::app::{App, DisplayBlock, projected_blocks_from_state};
@@ -69,23 +70,66 @@ async fn restore_execution_state_if_present<'a>(
 }
 
 fn restored_token_usage(state: &lash::store::SessionState) -> Option<TokenUsage> {
-    let usage = TokenUsage {
-        input_tokens: state.input_tokens,
-        output_tokens: state.output_tokens,
-        cached_input_tokens: state.cached_input_tokens,
-        reasoning_tokens: state.reasoning_tokens,
-    };
-    (usage.total() > 0).then_some(usage)
+    (state.token_usage.total() > 0).then_some(state.token_usage.clone())
 }
 
-fn restored_last_prompt_usage(config_value: Option<&serde_json::Value>) -> Option<PromptUsage> {
-    let mut usage: PromptUsage = config_value
-        .and_then(|value| value.get("last_prompt_usage").cloned())
-        .and_then(|value| serde_json::from_value(value).ok())?;
+fn normalized_last_prompt_usage(last_prompt_usage: Option<PromptUsage>) -> Option<PromptUsage> {
+    let mut usage = last_prompt_usage?;
     if usage.context_budget_tokens == 0 && usage.prompt_context_tokens > 0 {
         usage.context_budget_tokens = usage.prompt_context_tokens;
     }
     Some(usage)
+}
+
+async fn restore_model_from_manifest(
+    manifest: Option<&ReplayManifest>,
+    app: &mut App,
+    runtime: &mut Option<LashRuntime>,
+    provider: &Provider,
+    model_catalog: &CachedModelCatalog,
+) -> Result<(), String> {
+    let Some(manifest) = manifest else {
+        return Ok(());
+    };
+    let restored_model = manifest.configured_model.as_str();
+    if restored_model.is_empty() {
+        return Ok(());
+    }
+    provider
+        .validate_model_name(restored_model)
+        .map_err(|err| {
+            format!(
+                "Cannot resume session with model `{}`: {}",
+                restored_model, err
+            )
+        })?;
+    let restored_context_window = Some(manifest.context_window).or_else(|| {
+        let snapshot = model_catalog.snapshot();
+        provider
+            .resolve_model_spec(restored_model, &snapshot)
+            .ok()
+            .map(|spec| spec.context_window())
+    })
+    .ok_or_else(|| {
+        format!(
+            "Cannot resume session with model `{}`: no context-window entry was saved and the supplied model catalog does not contain it.",
+            restored_model
+        )
+    })?;
+    app.model = restored_model.to_string();
+    app.context_window = Some(restored_context_window);
+    app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
+    if let Some(rt) = runtime.as_mut() {
+        rt.update_session_config(
+            None,
+            Some(app.model.clone()),
+            None,
+            Some(restored_context_window as usize),
+            None,
+        )
+        .await;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -235,60 +279,21 @@ pub async fn restore_session_state(
 
         *turn_counter = live.state.iteration;
         app.token_usage = live.state.token_usage.clone();
-        app.last_prompt_usage = live.state.last_prompt_usage.clone();
+        app.last_prompt_usage = normalized_last_prompt_usage(live.state.last_prompt_usage.clone());
 
         let replay_manifest = live.state.replay_manifest.clone();
-        if let Some(restored_model) = replay_manifest
-            .as_ref()
-            .and_then(|m| m.get("configured_model"))
-            .and_then(|m| m.as_str())
-            .filter(|model| !model.is_empty())
-        {
-            provider
-                .validate_model_name(restored_model)
-                .map_err(|err| {
-                    format!(
-                        "Cannot resume session with model `{}`: {}",
-                        restored_model, err
-                    )
-                })?;
-            let restored_context_window = replay_manifest
-                .as_ref()
-                .and_then(|m| m.get("context_window"))
-                .and_then(|m| m.as_u64())
-                .or_else(|| {
-                    let snapshot = model_catalog.snapshot();
-                    provider
-                        .resolve_model_spec(restored_model, &snapshot)
-                        .ok()
-                        .map(|spec| spec.context_window())
-                })
-                .ok_or_else(|| {
-                    format!(
-                        "Cannot resume session with model `{}`: no context-window entry was saved and the supplied model catalog does not contain it.",
-                        restored_model
-                    )
-                })?;
-            app.model = restored_model.to_string();
-            app.context_window = Some(restored_context_window);
-            app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
-            if let Some(rt) = runtime.as_mut() {
-                rt.update_session_config(
-                    None,
-                    Some(app.model.clone()),
-                    None,
-                    Some(restored_context_window as usize),
-                    None,
-                )
-                .await;
-            }
-        }
+        restore_model_from_manifest(
+            replay_manifest.as_ref(),
+            app,
+            runtime,
+            provider,
+            model_catalog,
+        )
+        .await?;
 
         *current_model_variant = replay_manifest
             .as_ref()
-            .and_then(|m| m.get("model_variant").or_else(|| m.get("reasoning_effort")))
-            .and_then(|m| m.as_str())
-            .map(str::to_string)
+            .and_then(|m| m.model_variant.clone())
             .or_else(|| {
                 provider
                     .default_model_variant(&app.model)
@@ -296,16 +301,16 @@ pub async fn restore_session_state(
             });
         app.set_model_variant(current_model_variant.clone());
 
-        let requested_execution_mode = replay_manifest
-            .as_ref()
-            .and_then(|m| m.get("execution_mode"))
-            .and_then(|m| m.as_str())
-            .map(str::to_string)
-            .and_then(|raw| crate::parse_execution_mode(&raw).ok());
+        let requested_execution_mode = replay_manifest.as_ref().map(|m| m.execution_mode);
         let restored_execution_mode = requested_execution_mode
             .and_then(|mode| crate::ensure_supported_execution_mode(mode).ok())
             .unwrap_or(live.state.policy.execution_mode);
-        let restored_context_strategy = live.state.policy.context_strategy;
+        let restored_context_strategy = replay_manifest
+            .as_ref()
+            .map(|m| m.context_strategy)
+            .unwrap_or(live.state.policy.context_strategy)
+            .validate()
+            .unwrap_or_else(|_| lash::default_context_strategy());
         tracing::debug!(
             requested_execution_mode = ?requested_execution_mode,
             live_policy_execution_mode = ?live.state.policy.execution_mode,
@@ -321,9 +326,7 @@ pub async fn restore_session_state(
         {
             app.blocks.push(DisplayBlock::SystemMessage(format!(
                 "This build does not support `{}` mode; resuming in `standard`.",
-                serde_json::to_string(requested_execution_mode)
-                    .unwrap_or_else(|_| "requested".to_string())
-                    .trim_matches('"')
+                crate::execution_mode_label(*requested_execution_mode)
             )));
         }
         restore_execution_state_if_present(
@@ -365,108 +368,44 @@ pub async fn restore_session_state(
     if let Some(state) = resume_store.load_session_state() {
         let transcript_entries = resume_store.transcript_load();
         *history = lash::transcript_messages(&transcript_entries);
-        let config_value = serde_json::from_str::<serde_json::Value>(&state.config_json).ok();
-        let resumed_live_snapshot = config_value
-            .as_ref()
-            .and_then(|value| value.get("task_state"))
-            .and_then(|value| value.get("kind"))
-            .and_then(|value| value.as_str())
-            == Some("live_resume");
+        let resumed_live_snapshot =
+            matches!(state.task_state, Some(SessionTaskState::LiveResume { .. }));
         if resumed_live_snapshot {
             app.blocks.push(DisplayBlock::SystemMessage(
                 "Interrupted runtime state restored from a live snapshot.".to_string(),
             ));
         }
-        if let Some(dynamic_state) = config_value
-            .as_ref()
-            .and_then(|v| v.get("dynamic_state").cloned())
-            .and_then(|v| serde_json::from_value::<DynamicStateSnapshot>(v).ok())
-        {
+        if let Some(dynamic_state) = state.dynamic_state.clone() {
             let _ = dynamic_tools.apply_state(dynamic_state);
             *desired_dynamic = dynamic_tools.export_state();
         }
-        *turn_counter = state.iteration.max(0) as usize;
-        if let Some(restored_model) = config_value
+        *turn_counter = state.iteration;
+        restore_model_from_manifest(
+            state.replay_manifest.as_ref(),
+            app,
+            runtime,
+            provider,
+            model_catalog,
+        )
+        .await?;
+        *current_model_variant = state
+            .replay_manifest
             .as_ref()
-            .and_then(|v| {
-                v.get("manifest")
-                    .and_then(|m| m.get("configured_model"))
-                    .and_then(|m| m.as_str())
-            })
-            .filter(|model| !model.is_empty())
-        {
-            provider
-                .validate_model_name(restored_model)
-                .map_err(|err| {
-                    format!(
-                        "Cannot resume session with model `{}`: {}",
-                        restored_model, err
-                    )
-                })?;
-            let restored_context_window = config_value
-                .as_ref()
-                .and_then(|v| {
-                    v.get("manifest")
-                        .and_then(|m| m.get("context_window"))
-                        .and_then(|m| m.as_u64())
-                })
-                .or_else(|| {
-                    let snapshot = model_catalog.snapshot();
-                    provider
-                        .resolve_model_spec(restored_model, &snapshot)
-                        .ok()
-                        .map(|spec| spec.context_window())
-                })
-                .ok_or_else(|| {
-                    format!(
-                        "Cannot resume session with model `{}`: no context-window entry was saved and the supplied model catalog does not contain it.",
-                        restored_model
-                    )
-            })?;
-            app.model = restored_model.to_string();
-            app.context_window = Some(restored_context_window);
-            app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
-            if let Some(rt) = runtime.as_mut() {
-                rt.update_session_config(
-                    None,
-                    Some(app.model.clone()),
-                    None,
-                    Some(restored_context_window as usize),
-                    None,
-                )
-                .await;
-            }
-        }
-        *current_model_variant = config_value
-            .as_ref()
-            .and_then(|v| {
-                v.get("manifest")
-                    .and_then(|m| m.get("model_variant").or_else(|| m.get("reasoning_effort")))
-                    .and_then(|m| m.as_str())
-                    .map(str::to_string)
-            })
+            .and_then(|m| m.model_variant.clone())
             .or_else(|| {
                 provider
                     .default_model_variant(&app.model)
                     .map(str::to_string)
             });
         app.set_model_variant(current_model_variant.clone());
-        let requested_execution_mode = config_value
-            .as_ref()
-            .and_then(|v| {
-                v.get("manifest")
-                    .and_then(|m| m.get("execution_mode"))
-                    .and_then(|m| m.as_str())
-                    .map(str::to_string)
-            })
-            .and_then(|raw| crate::parse_execution_mode(&raw).ok());
+        let requested_execution_mode = state.replay_manifest.as_ref().map(|m| m.execution_mode);
         let restored_execution_mode = requested_execution_mode
             .and_then(|mode| crate::ensure_supported_execution_mode(mode).ok())
             .unwrap_or_else(lash::default_execution_mode);
-        let restored_context_strategy = config_value
+        let restored_context_strategy = state
+            .replay_manifest
             .as_ref()
-            .and_then(|v| v.get("context_strategy").cloned())
-            .and_then(|v| serde_json::from_value::<ContextStrategy>(v).ok())
+            .map(|m| m.context_strategy)
             .unwrap_or_else(lash::default_context_strategy)
             .validate()
             .unwrap_or_else(|_| lash::default_context_strategy());
@@ -477,14 +416,14 @@ pub async fn restore_session_state(
         {
             app.blocks.push(DisplayBlock::SystemMessage(format!(
                 "This build does not support `{}` mode; resuming in `standard`.",
-                serde_json::to_string(requested_execution_mode)
-                    .unwrap_or_else(|_| "requested".to_string())
-                    .trim_matches('"')
+                crate::execution_mode_label(*requested_execution_mode)
             )));
         }
         if let Some(usage) = restored_token_usage(&state) {
             app.token_usage = usage;
         }
+        let last_prompt_usage = normalized_last_prompt_usage(state.last_prompt_usage.clone());
+        app.last_prompt_usage = last_prompt_usage.clone();
 
         restore_execution_state_if_present(
             runtime,
@@ -505,16 +444,7 @@ pub async fn restore_session_state(
             )
             .await;
             let _ = rt.refresh_session_execution_surface().await;
-            let replay_manifest = config_value
-                .as_ref()
-                .and_then(|v| v.get("manifest").cloned());
-            let plugin_snapshot = config_value
-                .as_ref()
-                .and_then(|v| v.get("plugin_snapshot").cloned())
-                .and_then(|v| serde_json::from_value(v).ok());
-            let last_prompt_usage = restored_last_prompt_usage(config_value.as_ref());
             let tool_calls = lash::transcript_tool_calls(&transcript_entries);
-            app.last_prompt_usage = last_prompt_usage.clone();
             let mut restored_policy = rt.export_state().policy;
             restored_policy.execution_mode = restored_execution_mode;
             restored_policy.context_strategy = restored_context_strategy;
@@ -533,8 +463,8 @@ pub async fn restore_session_state(
                 token_usage: app.token_usage.clone(),
                 last_prompt_usage,
                 task_state: None,
-                replay_manifest,
-                plugin_snapshot,
+                replay_manifest: state.replay_manifest.clone(),
+                plugin_snapshot: state.plugin_snapshot.clone(),
                 execution_state_snapshot: state.execution_state_snapshot.clone(),
             });
         }
@@ -561,32 +491,29 @@ mod tests {
         ui_state: crate::app::UiResumeState,
     ) {
         let existing = store.load_session_state();
-        let config = existing
-            .as_ref()
-            .and_then(|state| serde_json::from_str::<serde_json::Value>(&state.config_json).ok())
-            .unwrap_or_else(|| serde_json::json!({}));
+        ui_resume::save_ui_resume_state(store, &ui_state);
         store.save_session_state(lash::SessionState {
             iteration: existing.as_ref().map(|state| state.iteration).unwrap_or(0),
-            config_json: ui_resume::with_ui_resume_state(config, &ui_state).to_string(),
+            token_usage: existing
+                .as_ref()
+                .map(|state| state.token_usage.clone())
+                .unwrap_or_default(),
+            last_prompt_usage: existing
+                .as_ref()
+                .and_then(|state| state.last_prompt_usage.clone()),
+            task_state: existing.as_ref().and_then(|state| state.task_state.clone()),
+            replay_manifest: existing
+                .as_ref()
+                .and_then(|state| state.replay_manifest.clone()),
+            plugin_snapshot: existing
+                .as_ref()
+                .and_then(|state| state.plugin_snapshot.clone()),
+            dynamic_state: existing
+                .as_ref()
+                .and_then(|state| state.dynamic_state.clone()),
             execution_state_snapshot: existing
                 .as_ref()
                 .and_then(|state| state.execution_state_snapshot.clone()),
-            input_tokens: existing
-                .as_ref()
-                .map(|state| state.input_tokens)
-                .unwrap_or(0),
-            output_tokens: existing
-                .as_ref()
-                .map(|state| state.output_tokens)
-                .unwrap_or(0),
-            cached_input_tokens: existing
-                .as_ref()
-                .map(|state| state.cached_input_tokens)
-                .unwrap_or(0),
-            reasoning_tokens: existing
-                .as_ref()
-                .map(|state| state.reasoning_tokens)
-                .unwrap_or(0),
         });
         let keyspaces = lash::semantic_transcript_keyspaces(&messages, &[]);
         store.transcript_replace_keyspaces(&keyspaces);
@@ -596,12 +523,18 @@ mod tests {
     fn restored_token_usage_includes_reasoning_tokens() {
         let state = lash::store::SessionState {
             iteration: 3,
-            config_json: "{}".into(),
+            token_usage: TokenUsage {
+                input_tokens: 1200,
+                output_tokens: 340,
+                cached_input_tokens: 80,
+                reasoning_tokens: 55,
+            },
+            last_prompt_usage: None,
+            task_state: None,
+            replay_manifest: None,
+            plugin_snapshot: None,
+            dynamic_state: None,
             execution_state_snapshot: None,
-            input_tokens: 1200,
-            output_tokens: 340,
-            cached_input_tokens: 80,
-            reasoning_tokens: 55,
         };
 
         let usage = restored_token_usage(&state).expect("usage");
@@ -613,15 +546,13 @@ mod tests {
 
     #[test]
     fn restored_last_prompt_usage_reads_persisted_snapshot() {
-        let config = serde_json::json!({
-            "last_prompt_usage": {
-                "prompt_context_tokens": 4096,
-                "input_tokens": 3900,
-                "cached_input_tokens": 196
-            }
-        });
-
-        let usage = restored_last_prompt_usage(Some(&config)).expect("prompt usage");
+        let usage = normalized_last_prompt_usage(Some(PromptUsage {
+            prompt_context_tokens: 4096,
+            input_tokens: 3900,
+            cached_input_tokens: 196,
+            context_budget_tokens: 0,
+        }))
+        .expect("prompt usage");
         assert_eq!(usage.prompt_context_tokens, 4096);
         assert_eq!(usage.input_tokens, 3900);
         assert_eq!(usage.cached_input_tokens, 196);
@@ -638,28 +569,38 @@ mod tests {
 
         let db_path = sessions_dir.join("resume-usage.db");
         let store = Store::open(&db_path).expect("store");
-        let config_json = serde_json::json!({
-            "manifest": {
-                "execution_mode": "standard"
-            },
-            "context_strategy": {
-                "type": "rolling_context"
-            },
-            "last_prompt_usage": {
-                "prompt_context_tokens": 4096,
-                "input_tokens": 3900,
-                "cached_input_tokens": 196
-            }
-        })
-        .to_string();
         store.save_session_state(lash::SessionState {
             iteration: 7,
-            config_json,
+            token_usage: TokenUsage {
+                input_tokens: 1200,
+                output_tokens: 340,
+                cached_input_tokens: 80,
+                reasoning_tokens: 55,
+            },
+            last_prompt_usage: Some(PromptUsage {
+                prompt_context_tokens: 4096,
+                input_tokens: 3900,
+                cached_input_tokens: 196,
+                context_budget_tokens: 0,
+            }),
+            task_state: None,
+            replay_manifest: Some(ReplayManifest {
+                version: 3,
+                saved_at: "2026-04-11T00:00:00Z".to_string(),
+                provider: "openai_generic".to_string(),
+                configured_model: String::new(),
+                resolved_model: String::new(),
+                context_window: 0,
+                execution_mode: ExecutionMode::Standard,
+                context_strategy: ContextStrategy::RollingContext,
+                model_variant: None,
+                toolset_hash: "toolhash".to_string(),
+                prompt_hash: None,
+                snapshot_hash: None,
+            }),
+            plugin_snapshot: None,
+            dynamic_state: None,
             execution_state_snapshot: None,
-            input_tokens: 1200,
-            output_tokens: 340,
-            cached_input_tokens: 80,
-            reasoning_tokens: 55,
         });
         persist_transcript(&store, Vec::new(), crate::app::UiResumeState::default());
 
@@ -808,15 +749,24 @@ mod tests {
                 iteration: 2,
                 token_usage: TokenUsage::default(),
                 last_prompt_usage: None,
-                task_state: Some(serde_json::json!({
-                    "kind": "live_resume",
-                    "status": "running"
-                })),
-                replay_manifest: Some(serde_json::json!({
-                    "configured_model": "gpt-5",
-                    "context_window": 200000,
-                    "execution_mode": "standard"
-                })),
+                task_state: Some(lash::SessionTaskState::LiveResume {
+                    status: lash::SessionTaskStatus::Running,
+                    saved_at: "2026-04-11T00:00:00Z".to_string(),
+                }),
+                replay_manifest: Some(ReplayManifest {
+                    version: 3,
+                    saved_at: "2026-04-11T00:00:00Z".to_string(),
+                    provider: "openai_generic".to_string(),
+                    configured_model: "gpt-5".to_string(),
+                    resolved_model: "gpt-5".to_string(),
+                    context_window: 200000,
+                    execution_mode: ExecutionMode::Standard,
+                    context_strategy: ContextStrategy::RollingContext,
+                    model_variant: None,
+                    toolset_hash: "toolhash".to_string(),
+                    prompt_hash: None,
+                    snapshot_hash: None,
+                }),
                 plugin_snapshot: None,
                 execution_state_snapshot: None,
             },
@@ -986,20 +936,28 @@ mod tests {
             user_input: None,
             origin: None,
         }];
-        let config_json = serde_json::json!({
-            "manifest": {
-                "execution_mode": "standard"
-            }
-        })
-        .to_string();
         store.save_session_state(lash::SessionState {
             iteration: 1,
-            config_json,
+            token_usage: TokenUsage::default(),
+            last_prompt_usage: None,
+            task_state: None,
+            replay_manifest: Some(ReplayManifest {
+                version: 3,
+                saved_at: "2026-04-11T00:00:00Z".to_string(),
+                provider: "openai_generic".to_string(),
+                configured_model: String::new(),
+                resolved_model: String::new(),
+                context_window: 0,
+                execution_mode: ExecutionMode::Standard,
+                context_strategy: ContextStrategy::RollingContext,
+                model_variant: None,
+                toolset_hash: "toolhash".to_string(),
+                prompt_hash: None,
+                snapshot_hash: None,
+            }),
+            plugin_snapshot: None,
+            dynamic_state: None,
             execution_state_snapshot: None,
-            input_tokens: 0,
-            output_tokens: 0,
-            cached_input_tokens: 0,
-            reasoning_tokens: 0,
         });
         persist_transcript(
             &store,

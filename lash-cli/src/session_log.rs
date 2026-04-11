@@ -357,15 +357,16 @@ mod tests {
         tool_calls: Vec<ToolCallRecord>,
         ui_state: UiResumeState,
     ) {
+        ui_resume::save_ui_resume_state(store, &ui_state);
         store.save_session_state(lash::SessionState {
             iteration: 1,
-            config_json: ui_resume::with_ui_resume_state(serde_json::json!({}), &ui_state)
-                .to_string(),
+            token_usage: TokenUsage::default(),
+            last_prompt_usage: None,
+            task_state: None,
+            replay_manifest: None,
+            plugin_snapshot: None,
+            dynamic_state: None,
             execution_state_snapshot: None,
-            input_tokens: 0,
-            output_tokens: 0,
-            cached_input_tokens: 0,
-            reasoning_tokens: 0,
         });
         let keyspaces = lash::semantic_transcript_keyspaces(&messages, &tool_calls);
         store.transcript_replace_keyspaces(&keyspaces);
@@ -449,12 +450,18 @@ mod tests {
 
             let loaded = load_session(&filename).unwrap();
             assert_eq!(loaded.messages.len(), 2);
+            // blocks[0] is the TurnStart marker the projection emits above
+            // the first user input.
             assert!(matches!(
                 loaded.blocks.first(),
-                Some(DisplayBlock::UserInput(text)) if text == "Hi"
+                Some(DisplayBlock::TurnStart(_))
             ));
             assert!(matches!(
                 loaded.blocks.get(1),
+                Some(DisplayBlock::UserInput(text)) if text == "Hi"
+            ));
+            assert!(matches!(
+                loaded.blocks.get(2),
                 Some(DisplayBlock::AssistantText(text)) if text == "Hello world"
             ));
             assert_eq!(loaded.last_token_usage.input_tokens, 12);
@@ -505,13 +512,18 @@ mod tests {
             persist_root_snapshot(&store, messages, tool_calls, UiResumeState::default());
 
             let loaded = load_session(&filename).unwrap();
+            // blocks[0] = TurnStart, [1] = UserInput, [2] = Activity, [3] = AssistantText
             assert!(matches!(
-                loaded.blocks.get(1),
-                Some(DisplayBlock::Activity(activity))
-                    if activity.summary == "git status --short"
+                loaded.blocks.first(),
+                Some(DisplayBlock::TurnStart(_))
             ));
             assert!(matches!(
                 loaded.blocks.get(2),
+                Some(DisplayBlock::Activity(activity))
+                    if activity.call.summary == "git status --short"
+            ));
+            assert!(matches!(
+                loaded.blocks.get(3),
                 Some(DisplayBlock::AssistantText(text)) if text == "Done"
             ));
         });
@@ -539,8 +551,9 @@ mod tests {
             persist_root_snapshot(&store, messages, Vec::new(), UiResumeState::default());
 
             let loaded = load_session(&filename).unwrap();
+            // blocks[0] = TurnStart, [1] = UserInput, [2] = AssistantText
             assert!(matches!(
-                loaded.blocks.get(1),
+                loaded.blocks.get(2),
                 Some(DisplayBlock::AssistantText(text)) if text == assistant.trim()
             ));
         });

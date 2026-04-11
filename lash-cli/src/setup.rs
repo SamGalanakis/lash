@@ -493,13 +493,13 @@ async fn start_provider_flow(
 
 fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
     let area = frame.area();
-    frame.clear(Style::default().bg(theme::FORM));
+    frame.clear(Style::default().bg(theme::surface_base()));
     if area.width < 24 || area.height < 10 {
         frame.write_text(
             2,
             2,
             "Enlarge the terminal to continue setup.",
-            Style::default().fg(theme::CHALK_DIM),
+            Style::default().fg(theme::text_subtle()),
             area.width.saturating_sub(4),
         );
         return;
@@ -513,8 +513,8 @@ fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
     );
     frame.draw_box(
         panel,
-        Style::default().fg(theme::ASH_LIGHT),
-        Some(Style::default().bg(theme::FORM_DEEP)),
+        Style::default().fg(theme::rule()),
+        Some(Style::default().bg(theme::surface_deep())),
     );
 
     match &app.step {
@@ -522,14 +522,20 @@ fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
             draw_panel_title(frame, panel, "Provider Setup");
             let mut lines = vec![
                 Line::from(vec![
-                    Span::styled("Select a provider. ", Style::default().fg(theme::CHALK)),
+                    Span::styled(
+                        "Select a provider. ",
+                        Style::default().fg(theme::text_primary()),
+                    ),
                     Span::styled("Enter", theme::help_key()),
                     Span::styled(
                         " uses a saved login when one exists; ",
-                        Style::default().fg(theme::CHALK_DIM),
+                        Style::default().fg(theme::text_subtle()),
                     ),
                     Span::styled("r", theme::help_key()),
-                    Span::styled(" forces re-auth.", Style::default().fg(theme::CHALK_DIM)),
+                    Span::styled(
+                        " forces re-auth.",
+                        Style::default().fg(theme::text_subtle()),
+                    ),
                 ]),
                 Line::from(""),
             ];
@@ -538,10 +544,10 @@ fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
                 let selected_marker = if *selected == idx { "▸" } else { " " };
                 let name_style = if *selected == idx {
                     Style::default()
-                        .fg(theme::CHALK)
+                        .fg(theme::text_primary())
                         .add_modifier(Modifier::Bold)
                 } else {
-                    Style::default().fg(theme::CHALK_DIM)
+                    Style::default().fg(theme::text_subtle())
                 };
                 let mut meta = kind.setup_description().to_string();
                 if app.active_kind == Some(*kind) {
@@ -553,11 +559,11 @@ fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
                     Span::styled(
                         format!("{selected_marker} "),
                         Style::default()
-                            .fg(theme::SODIUM)
+                            .fg(theme::brand())
                             .add_modifier(Modifier::Bold),
                     ),
                     Span::styled(format!("{:<22}", kind.setup_name()), name_style),
-                    Span::styled(meta, Style::default().fg(theme::ASH_TEXT)),
+                    Span::styled(meta, Style::default().fg(theme::text_faint())),
                 ]));
             }
 
@@ -619,40 +625,40 @@ fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
                 Line::from("Open the device login page and approve this machine."),
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled("URL: ", Style::default().fg(theme::ASH_TEXT)),
+                    Span::styled("URL: ", Style::default().fg(theme::text_faint())),
                     Span::styled(
                         "auth.openai.com/codex/device",
-                        Style::default().fg(theme::CHALK),
+                        Style::default().fg(theme::text_primary()),
                     ),
                 ]),
                 Line::from(vec![
-                    Span::styled("Code: ", Style::default().fg(theme::ASH_TEXT)),
+                    Span::styled("Code: ", Style::default().fg(theme::text_faint())),
                     Span::styled(
                         user_code.to_string(),
                         Style::default()
-                            .fg(theme::SODIUM)
+                            .fg(theme::brand())
                             .add_modifier(Modifier::Bold),
                     ),
                 ]),
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled(spinner.to_string(), Style::default().fg(theme::SODIUM)),
+                    Span::styled(spinner.to_string(), Style::default().fg(theme::brand())),
                     Span::styled(
                         " Waiting for authorization…",
-                        Style::default().fg(theme::CHALK_DIM),
+                        Style::default().fg(theme::text_subtle()),
                     ),
                 ]),
             ];
             if let Some(status) = copy_status {
                 lines.push(Line::from(Span::styled(
                     status.to_string(),
-                    Style::default().fg(theme::LICHEN),
+                    Style::default().fg(theme::state_ok()),
                 )));
             }
             if let Some(error) = error {
                 lines.push(Line::from(Span::styled(
                     error.to_string(),
-                    Style::default().fg(theme::ERROR),
+                    Style::default().fg(theme::state_error()),
                 )));
             }
             lines.push(Line::from(""));
@@ -703,7 +709,7 @@ fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
                 Line::from(Span::styled(
                     "Authenticated.",
                     Style::default()
-                        .fg(theme::LICHEN)
+                        .fg(theme::state_ok())
                         .add_modifier(Modifier::Bold),
                 )),
             ];
@@ -718,7 +724,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect) {
         1,
         "lash",
         Style::default()
-            .fg(theme::SODIUM)
+            .fg(theme::brand())
             .add_modifier(Modifier::Bold),
         area.width.saturating_sub(6),
     );
@@ -726,7 +732,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect) {
         8,
         1,
         "provider setup",
-        Style::default().fg(theme::CHALK_DIM),
+        Style::default().fg(theme::text_subtle()),
         area.width.saturating_sub(11),
     );
 }
@@ -737,7 +743,7 @@ fn draw_panel_title(frame: &mut Frame<'_>, panel: Rect, title: &str) {
         panel.y,
         &format!(" {title} "),
         Style::default()
-            .fg(theme::SODIUM)
+            .fg(theme::brand())
             .add_modifier(Modifier::Bold),
         panel.width.saturating_sub(4),
     );
@@ -764,7 +770,7 @@ fn draw_input_panel(frame: &mut Frame<'_>, panel: Rect, view: InputPanelView<'_>
                 content.x,
                 y,
                 &wrapped,
-                Style::default().fg(theme::CHALK_DIM),
+                Style::default().fg(theme::text_subtle()),
                 content.width,
             );
             y += 1;
@@ -782,7 +788,7 @@ fn draw_input_panel(frame: &mut Frame<'_>, panel: Rect, view: InputPanelView<'_>
         content.x,
         y,
         view.label,
-        Style::default().fg(theme::CHALK),
+        Style::default().fg(theme::text_primary()),
         content.width,
     );
     y += 1;
@@ -790,8 +796,8 @@ fn draw_input_panel(frame: &mut Frame<'_>, panel: Rect, view: InputPanelView<'_>
     let field = Rect::new(content.x, y, content.width, 3);
     frame.draw_box(
         field,
-        Style::default().fg(theme::ASH),
-        Some(Style::default().bg(theme::FORM)),
+        Style::default().fg(theme::border_faint()),
+        Some(Style::default().bg(theme::surface_base())),
     );
     let inner_width = field.width.saturating_sub(4) as usize;
     let visible = visible_slice(view.input, inner_width, view.cursor);
@@ -799,7 +805,7 @@ fn draw_input_panel(frame: &mut Frame<'_>, panel: Rect, view: InputPanelView<'_>
         field.x + 2,
         field.y + 1,
         visible,
-        Style::default().fg(theme::CHALK),
+        Style::default().fg(theme::text_primary()),
         field.width.saturating_sub(4),
     );
     let vis_start = visible_start(view.input, inner_width, view.cursor);
@@ -817,7 +823,7 @@ fn draw_input_panel(frame: &mut Frame<'_>, panel: Rect, view: InputPanelView<'_>
                 content.x,
                 y,
                 &wrapped,
-                Style::default().fg(theme::ERROR),
+                Style::default().fg(theme::state_error()),
                 content.width,
             );
             y += 1;
@@ -863,7 +869,10 @@ fn help_line(items: &[(&str, &str)]) -> Line<'static> {
     let mut spans = Vec::new();
     for (idx, (key, desc)) in items.iter().enumerate() {
         if idx > 0 {
-            spans.push(Span::styled("   ", Style::default().fg(theme::ASH)));
+            spans.push(Span::styled(
+                "   ",
+                Style::default().fg(theme::border_faint()),
+            ));
         }
         spans.push(Span::styled((*key).to_string(), theme::help_key()));
         spans.push(Span::styled(format!(" {}", desc), theme::help_desc()));

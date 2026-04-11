@@ -10,9 +10,9 @@ pub(super) fn render_question_panel_artifact(
         &question_panel_lines(panel),
         lines,
         viewport_width,
-        Style::default().fg(theme::ASH),
+        Style::default().fg(theme::border_faint()),
         Style::default()
-            .fg(theme::SODIUM)
+            .fg(theme::brand())
             .add_modifier(Modifier::Bold),
         styled_question_chunk,
     );
@@ -94,9 +94,9 @@ pub(super) fn render_plan_block(
         &content_lines,
         lines,
         viewport_width,
-        Style::default().fg(theme::ASH),
+        Style::default().fg(theme::border_faint()),
         Style::default()
-            .fg(theme::SODIUM)
+            .fg(theme::brand())
             .add_modifier(Modifier::Bold),
         styled_plan_chunk,
     );
@@ -160,10 +160,10 @@ fn styled_question_chunk(chunk: &str) -> Vec<Span<'static>> {
             Span::styled(
                 "Answer",
                 Style::default()
-                    .fg(theme::LICHEN)
+                    .fg(theme::state_ok())
                     .add_modifier(Modifier::Bold),
             ),
-            Span::styled(" · ", Style::default().fg(theme::ASH_MID)),
+            Span::styled(" · ", Style::default().fg(theme::border_dim())),
             Span::styled(rest.to_string(), theme::assistant_text()),
         ];
     }
@@ -172,10 +172,10 @@ fn styled_question_chunk(chunk: &str) -> Vec<Span<'static>> {
             Span::styled(
                 "Note",
                 Style::default()
-                    .fg(theme::LICHEN)
+                    .fg(theme::state_ok())
                     .add_modifier(Modifier::Bold),
             ),
-            Span::styled(" · ", Style::default().fg(theme::ASH_MID)),
+            Span::styled(" · ", Style::default().fg(theme::border_dim())),
             Span::styled(rest.to_string(), theme::assistant_text()),
         ];
     }
@@ -183,10 +183,10 @@ fn styled_question_chunk(chunk: &str) -> Vec<Span<'static>> {
         if let Some(rest) = chunk.strip_prefix(marker) {
             let marker_style = if selected {
                 Style::default()
-                    .fg(theme::LICHEN)
+                    .fg(theme::state_ok())
                     .add_modifier(Modifier::Bold)
             } else {
-                Style::default().fg(theme::ASH_MID)
+                Style::default().fg(theme::border_dim())
             };
             let text_style = if selected {
                 theme::assistant_text().add_modifier(Modifier::Bold)
@@ -206,7 +206,7 @@ fn styled_question_chunk(chunk: &str) -> Vec<Span<'static>> {
             Span::styled(
                 format!("{num}."),
                 Style::default()
-                    .fg(theme::SODIUM)
+                    .fg(theme::brand())
                     .add_modifier(Modifier::Bold),
             ),
             Span::raw(" "),
@@ -382,7 +382,7 @@ fn styled_snippet_chunk(
     if let Some(rest) = chunk.strip_prefix("File · ") {
         return vec![
             Span::styled("File", theme::code_header()),
-            Span::styled(" · ", Style::default().fg(theme::ASH_MID)),
+            Span::styled(" · ", Style::default().fg(theme::border_dim())),
             Span::styled(rest.to_string(), theme::system_output()),
         ];
     }

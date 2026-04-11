@@ -277,41 +277,39 @@ Next I’m using the synthetic UI benchmark workload to lock those costs down an
 }
 
 fn exploration_activity(subject: &str, detail_seed: &str) -> ActivityBlock {
-    ActivityBlock {
-        kind: ActivityKind::Exploration,
-        status: ActivityStatus::Completed,
-        tool_name: "grep".to_string(),
-        summary: "EXPLORE · 4 steps".to_string(),
-        detail_lines: vec![
-            format!("Search \"render cache|height cache|selection\" in {detail_seed}"),
-            format!("Read src/render/mod.rs for {subject}"),
-            "Read src/app/view.rs for cumulative height math".to_string(),
-            "Read src/scratch_tui.rs for selection painting".to_string(),
-        ],
-        duration_ms: 13,
-        args: serde_json::json!({}),
-        result: serde_json::json!({}),
-        artifact: None,
-        children: Vec::new(),
-        extra: Some(crate::activity::ActivityExtra::Exploration(vec![
-            ExplorationOp {
-                kind: ExplorationOpKind::Search,
-                subject: subject.to_string(),
-            },
-            ExplorationOp {
-                kind: ExplorationOpKind::Read,
-                subject: "src/render/mod.rs".to_string(),
-            },
-            ExplorationOp {
-                kind: ExplorationOpKind::Read,
-                subject: "src/app/view.rs".to_string(),
-            },
-            ExplorationOp {
-                kind: ExplorationOpKind::Read,
-                subject: "src/scratch_tui.rs".to_string(),
-            },
-        ])),
-    }
+    ActivityBlock::new(
+        ActivityKind::Exploration,
+        "grep",
+        serde_json::json!({}),
+        "Explored",
+        ActivityStatus::Completed,
+        serde_json::json!({}),
+        13,
+    )
+    .with_detail_lines(vec![
+        format!("Search \"render cache|height cache|selection\" in {detail_seed}"),
+        format!("Read src/render/mod.rs for {subject}"),
+        "Read src/app/view.rs for cumulative height math".to_string(),
+        "Read src/scratch_tui.rs for selection painting".to_string(),
+    ])
+    .with_extra(Some(crate::activity::ActivityExtra::Exploration(vec![
+        ExplorationOp {
+            kind: ExplorationOpKind::Search,
+            subject: subject.to_string(),
+        },
+        ExplorationOp {
+            kind: ExplorationOpKind::Read,
+            subject: "src/render/mod.rs".to_string(),
+        },
+        ExplorationOp {
+            kind: ExplorationOpKind::Read,
+            subject: "src/app/view.rs".to_string(),
+        },
+        ExplorationOp {
+            kind: ExplorationOpKind::Read,
+            subject: "src/scratch_tui.rs".to_string(),
+        },
+    ])))
 }
 
 fn snippet_activity(subject: &str, markdown: bool) -> ActivityBlock {
@@ -328,16 +326,20 @@ fn snippet_activity(subject: &str, markdown: bool) -> ActivityBlock {
             Some("rust".to_string()),
         )
     };
-    ActivityBlock {
-        kind: ActivityKind::GenericTool,
-        status: ActivityStatus::Completed,
-        tool_name: "show_snippet_to_user".to_string(),
-        summary: format!("show render/mod.rs:120-164 to user for {subject}"),
-        detail_lines: vec!["show lash-cli/src/render/mod.rs:120-164 to user".to_string()],
-        duration_ms: 7,
-        args: serde_json::json!({}),
-        result: serde_json::json!({}),
-        artifact: Some(ActivityArtifact::SnippetPreview(SnippetPreviewArtifact {
+    ActivityBlock::new(
+        ActivityKind::GenericTool,
+        "show_snippet_to_user",
+        serde_json::json!({}),
+        format!("show render/mod.rs:120-164 to user for {subject}"),
+        ActivityStatus::Completed,
+        serde_json::json!({}),
+        7,
+    )
+    .with_detail_lines(vec![
+        "show lash-cli/src/render/mod.rs:120-164 to user".to_string(),
+    ])
+    .with_artifact(Some(ActivityArtifact::SnippetPreview(
+        SnippetPreviewArtifact {
             title: Some("Render cache candidate".to_string()),
             path: "lash-cli/src/render/mod.rs".to_string(),
             start_line: 120,
@@ -345,10 +347,8 @@ fn snippet_activity(subject: &str, markdown: bool) -> ActivityBlock {
             content,
             render_mode,
             language,
-        })),
-        children: Vec::new(),
-        extra: None,
-    }
+        },
+    )))
 }
 
 fn summarize(results: &[UiPerfRunResult]) -> UiPerfSummary {

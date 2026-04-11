@@ -2,6 +2,7 @@ use super::*;
 use crate::editor::LARGE_PASTE_CHAR_THRESHOLD;
 fn other_variant_name(block: &DisplayBlock) -> &'static str {
     match block {
+        DisplayBlock::TurnStart(_) => "TurnStart",
         DisplayBlock::UserInput(_) => "UserInput",
         DisplayBlock::AssistantText(_) => "AssistantText",
         DisplayBlock::Activity(_) => "Activity",
@@ -1511,11 +1512,15 @@ fn handle_tool_call_merges_contiguous_exploration_activity() {
     assert_eq!(app.blocks.len(), 1);
     match &app.blocks[0] {
         DisplayBlock::Activity(activity) => {
-            assert_eq!(activity.kind, ActivityKind::Exploration);
-            assert_eq!(activity.summary, "EXPLORE · 2 steps");
+            assert_eq!(activity.call.kind, ActivityKind::Exploration);
+            // Multi-op explorations render as `Explored` + an op list.
+            // No tag, no step counter — the list is always visible at
+            // the default expand level so the count would duplicate it.
+            assert_eq!(activity.call.tag, None);
+            assert_eq!(activity.call.summary, "Explored");
             assert!(activity.children.is_empty());
             assert_eq!(
-                activity.detail_lines,
+                activity.result.detail_lines,
                 vec![
                     "Search \"ctx\" in lash-cli/src".to_string(),
                     "Read lash-cli/src/render/mod.rs".to_string(),
@@ -1576,8 +1581,8 @@ fn handle_tool_call_merges_contiguous_edit_activity() {
     assert_eq!(app.blocks.len(), 1);
     match &app.blocks[0] {
         DisplayBlock::Activity(activity) => {
-            assert_eq!(activity.kind, ActivityKind::Edit);
-            assert_eq!(activity.summary, "Edited 2 files (+3 -1)");
+            assert_eq!(activity.call.kind, ActivityKind::Edit);
+            assert_eq!(activity.call.summary, "Edited 2 files (+3 -1)");
             assert_eq!(activity.duration_ms, 12);
             assert!(activity.children.is_empty());
         }
@@ -1950,7 +1955,7 @@ fn option_prompt_response_is_rendered_inline_by_question_panel_artifact() {
         app.blocks.last(),
         Some(DisplayBlock::Activity(activity))
             if matches!(
-                activity.artifact.as_ref(),
+                activity.result.artifact.as_ref(),
                 Some(ActivityArtifact::QuestionPanel(panel))
                     if panel.options.len() == 2
                         && !panel.options[0].selected

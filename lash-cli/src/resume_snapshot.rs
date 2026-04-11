@@ -2,16 +2,7 @@ use lash::store::LiveSessionSnapshot;
 use lash::{DynamicStateSnapshot, SessionStateEnvelope, Store};
 
 use crate::app::UiResumeState;
-
-const LIVE_RESUME_SNAPSHOT_VERSION: u8 = 2;
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct LiveResumeSnapshotPayload {
-    version: u8,
-    state: SessionStateEnvelope,
-    dynamic_state: DynamicStateSnapshot,
-    ui_state: UiResumeState,
-}
+use crate::ui_resume;
 
 #[derive(Clone, Debug)]
 pub(crate) struct LoadedLiveResumeSnapshot {
@@ -32,15 +23,10 @@ pub(crate) fn save_live_resume_snapshot(
     let execution_state_snapshot = state.execution_state_snapshot.clone();
     let mut stored_state = state.clone();
     stored_state.execution_state_snapshot = None;
-    let payload = LiveResumeSnapshotPayload {
-        version: LIVE_RESUME_SNAPSHOT_VERSION,
+    ui_resume::save_ui_resume_state(store, ui_state);
+    store.save_live_session_snapshot(LiveSessionSnapshot {
         state: stored_state,
         dynamic_state: dynamic_state.clone(),
-        ui_state: ui_state.clone(),
-    };
-    let snapshot_json = serde_json::to_string(&payload).map_err(|err| err.to_string())?;
-    store.save_live_session_snapshot(LiveSessionSnapshot {
-        snapshot_json,
         execution_state_snapshot,
     });
     Ok(())
@@ -48,21 +34,16 @@ pub(crate) fn save_live_resume_snapshot(
 
 pub(crate) fn load_live_resume_snapshot(store: &Store) -> Option<LoadedLiveResumeSnapshot> {
     let stored = store.load_live_session_snapshot()?;
-    let payload: LiveResumeSnapshotPayload = serde_json::from_str(&stored.snapshot_json).ok()?;
-    if payload.version != LIVE_RESUME_SNAPSHOT_VERSION {
+    if !lash::messages_are_live_resume_safe(&stored.state.messages) {
         store.clear_live_session_snapshot();
         return None;
     }
-    if !lash::messages_are_live_resume_safe(&payload.state.messages) {
-        store.clear_live_session_snapshot();
-        return None;
-    }
-    let mut state = payload.state;
+    let mut state = stored.state;
     state.execution_state_snapshot = stored.execution_state_snapshot;
     Some(LoadedLiveResumeSnapshot {
         state,
-        dynamic_state: payload.dynamic_state,
-        ui_state: payload.ui_state,
+        dynamic_state: stored.dynamic_state,
+        ui_state: ui_resume::load_ui_resume_state(store),
     })
 }
 
@@ -141,23 +122,5 @@ mod tests {
         let loaded = load_live_resume_snapshot(&store).expect("safe snapshot still present");
         assert_eq!(loaded.state.messages.len(), 1);
         assert_eq!(loaded.state.messages[0].parts[0].content, "hello");
-    }
-
-    #[test]
-    fn old_live_snapshot_versions_are_ignored() {
-        let store = Store::memory().expect("store");
-        store.save_live_session_snapshot(LiveSessionSnapshot {
-            snapshot_json: serde_json::json!({
-                "version": 1,
-                "state": snapshot_state(vec![text_message("m0", "legacy")]),
-                "dynamic_state": empty_dynamic_state(),
-                "ui_state": UiResumeState::default(),
-            })
-            .to_string(),
-            execution_state_snapshot: None,
-        });
-
-        assert!(load_live_resume_snapshot(&store).is_none());
-        assert!(store.load_live_session_snapshot().is_none());
     }
 }

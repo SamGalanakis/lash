@@ -73,6 +73,40 @@ pub struct PromptUsage {
     pub context_budget_tokens: usize,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionTaskStatus {
+    Running,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionTaskState {
+    LiveResume {
+        status: SessionTaskStatus,
+        saved_at: String,
+    },
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ReplayManifest {
+    pub version: u8,
+    pub saved_at: String,
+    pub provider: String,
+    pub configured_model: String,
+    pub resolved_model: String,
+    pub context_window: u64,
+    pub execution_mode: ExecutionMode,
+    pub context_strategy: ContextStrategy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_variant: Option<String>,
+    pub toolset_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_hash: Option<String>,
+}
+
 /// Serializable host-owned session envelope.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SessionStateEnvelope {
@@ -90,9 +124,9 @@ pub struct SessionStateEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt_usage: Option<PromptUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_state: Option<serde_json::Value>,
+    pub task_state: Option<SessionTaskState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replay_manifest: Option<serde_json::Value>,
+    pub replay_manifest: Option<ReplayManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_snapshot: Option<PluginSessionSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1887,21 +1921,15 @@ impl LashRuntime {
 }
 
 fn persisted_session_state(state: &SessionStateEnvelope) -> crate::store::SessionState {
-    let config_json = serde_json::json!({
-        "last_prompt_usage": state.last_prompt_usage,
-        "task_state": state.task_state,
-        "replay_manifest": state.replay_manifest,
-        "plugin_snapshot": state.plugin_snapshot,
-    })
-    .to_string();
     crate::store::SessionState {
-        iteration: state.iteration as i64,
-        config_json,
+        iteration: state.iteration,
+        token_usage: state.token_usage.clone(),
+        last_prompt_usage: state.last_prompt_usage.clone(),
+        task_state: state.task_state.clone(),
+        replay_manifest: state.replay_manifest.clone(),
+        plugin_snapshot: state.plugin_snapshot.clone(),
+        dynamic_state: None,
         execution_state_snapshot: state.execution_state_snapshot.clone(),
-        input_tokens: state.token_usage.input_tokens,
-        output_tokens: state.token_usage.output_tokens,
-        cached_input_tokens: state.token_usage.cached_input_tokens,
-        reasoning_tokens: state.token_usage.reasoning_tokens,
     }
 }
 

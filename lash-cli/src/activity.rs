@@ -118,19 +118,97 @@ pub struct PatchFilePreview {
     pub diff: String,
 }
 
+/// What the tool was invoked as. Describes the call, not what came back.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ActivityCall {
+    pub kind: ActivityKind,
+    pub tool_name: String,
+    pub args: Value,
+    /// Optional structured tag rendered as a distinct brand-weight span
+    /// before `summary`. Currently unused — single-op explorations now
+    /// promote the op straight onto the call line instead of using a tag
+    /// wrapper. Kept as an affordance for future call kinds that want a
+    /// short categorical label styled independently from the body.
+    #[serde(default)]
+    pub tag: Option<String>,
+    /// Human-facing label for the call line (e.g. "Read README.md",
+    /// "git status --short", "Explored").
+    pub summary: String,
+    pub extra: Option<ActivityExtra>,
+}
+
+/// What came back from the tool. Describes the result, not the invocation.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ActivityResult {
+    pub status: ActivityStatus,
+    /// Raw JSON result payload.
+    pub raw: Value,
+    /// Rendered preview lines shown under the call line.
+    pub detail_lines: Vec<String>,
+    pub artifact: Option<ActivityArtifact>,
+}
+
+/// A tool activity: a call paired with its result. The two sides used to be
+/// flat fields on a single struct, which meant the renderer couldn't
+/// address them independently (summary and result artifact competed for
+/// the same block) and duration was burned into the summary string via a
+/// `" · "` format. They're now nested so the renderer composes them as
+/// separate styled regions.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ActivityBlock {
-    pub kind: ActivityKind,
-    pub status: ActivityStatus,
-    pub tool_name: String,
-    pub summary: String,
-    pub detail_lines: Vec<String>,
+    pub call: ActivityCall,
+    pub result: ActivityResult,
     pub duration_ms: u64,
-    pub args: Value,
-    pub result: Value,
-    pub artifact: Option<ActivityArtifact>,
     pub children: Vec<ActivityBlock>,
-    pub extra: Option<ActivityExtra>,
+}
+
+impl ActivityBlock {
+    /// Construct an activity with the standard layout: call fields on one
+    /// side, result fields on the other, no children. Use field-set helpers
+    /// below for anything that needs customization beyond the defaults.
+    pub fn new(
+        kind: ActivityKind,
+        tool_name: impl Into<String>,
+        args: Value,
+        summary: impl Into<String>,
+        status: ActivityStatus,
+        raw_result: Value,
+        duration_ms: u64,
+    ) -> Self {
+        Self {
+            call: ActivityCall {
+                kind,
+                tool_name: tool_name.into(),
+                args,
+                tag: None,
+                summary: summary.into(),
+                extra: None,
+            },
+            result: ActivityResult {
+                status,
+                raw: raw_result,
+                detail_lines: Vec::new(),
+                artifact: None,
+            },
+            duration_ms,
+            children: Vec::new(),
+        }
+    }
+
+    pub fn with_detail_lines(mut self, detail_lines: Vec<String>) -> Self {
+        self.result.detail_lines = detail_lines;
+        self
+    }
+
+    pub fn with_artifact(mut self, artifact: Option<ActivityArtifact>) -> Self {
+        self.result.artifact = artifact;
+        self
+    }
+
+    pub fn with_extra(mut self, extra: Option<ActivityExtra>) -> Self {
+        self.call.extra = extra;
+        self
+    }
 }
 
 #[derive(Default, Clone, Debug)]
@@ -166,26 +244,26 @@ impl ActivityState {
         }
         if name == "execute_lashlang" {
             let code = tool_arg_str(&args, "code").unwrap_or("").to_string();
-            return vec![ActivityBlock {
-                kind: ActivityKind::Hidden,
-                status: if success {
-                    ActivityStatus::Completed
-                } else {
-                    ActivityStatus::Failed
-                },
-                tool_name: name.to_string(),
-                summary: String::new(),
-                detail_lines: Vec::new(),
-                duration_ms,
-                args,
-                result,
-                artifact: Some(ActivityArtifact::TextPreview {
+            let status = if success {
+                ActivityStatus::Completed
+            } else {
+                ActivityStatus::Failed
+            };
+            return vec![
+                ActivityBlock::new(
+                    ActivityKind::Hidden,
+                    name,
+                    args,
+                    String::new(),
+                    status,
+                    result,
+                    duration_ms,
+                )
+                .with_artifact(Some(ActivityArtifact::TextPreview {
                     title: Some("lashlang".to_string()),
                     text: code,
-                }),
-                children: Vec::new(),
-                extra: None,
-            }];
+                })),
+            ];
         }
         if name == "write_stdin" && should_suppress_shell_poll_activity(&args, &result, success) {
             return Vec::new();
@@ -266,65 +344,15 @@ impl ActivityState {
             ActivityStatus::Failed
         };
 
+        // The four read-only tools all produce an Exploration block; the
+        // only thing that differs is the `ExplorationOp` that gets fed in.
+        // Computing the op up front lets the branch collapse to one arm
+        // instead of four near-identical copies.
+        if let Some(op) = exploration_op_for(name, &args, &result) {
+            return exploration_block(name, status, duration_ms, args, result, op);
+        }
+
         match name {
-            "read_file" => {
-                let subject = read_label(&result).unwrap_or_else(|| {
-                    compact_path_display(tool_arg_str(&args, "path").unwrap_or("file"))
-                });
-                exploration_block(
-                    name,
-                    status,
-                    duration_ms,
-                    args,
-                    result,
-                    ExplorationOp {
-                        kind: ExplorationOpKind::Read,
-                        subject,
-                    },
-                )
-            }
-            "grep" => {
-                let subject = grep_label(&args);
-                exploration_block(
-                    name,
-                    status,
-                    duration_ms,
-                    args,
-                    result,
-                    ExplorationOp {
-                        kind: ExplorationOpKind::Search,
-                        subject,
-                    },
-                )
-            }
-            "glob" => {
-                let subject = glob_label(&args);
-                exploration_block(
-                    name,
-                    status,
-                    duration_ms,
-                    args,
-                    result,
-                    ExplorationOp {
-                        kind: ExplorationOpKind::Glob,
-                        subject,
-                    },
-                )
-            }
-            "ls" => {
-                let subject = compact_path_display(tool_arg_str(&args, "path").unwrap_or("."));
-                exploration_block(
-                    name,
-                    status,
-                    duration_ms,
-                    args,
-                    result,
-                    ExplorationOp {
-                        kind: ExplorationOpKind::List,
-                        subject,
-                    },
-                )
-            }
             "exec_command" => {
                 let command = tool_arg_str(&args, "cmd")
                     .map(str::to_string)
@@ -360,19 +388,17 @@ impl ActivityState {
                 } else {
                     inline_text(&command)
                 };
-                ActivityBlock {
-                    kind: ActivityKind::ShellCommand,
-                    status,
-                    tool_name: name.to_string(),
-                    summary,
-                    detail_lines,
-                    duration_ms,
+                ActivityBlock::new(
+                    ActivityKind::ShellCommand,
+                    name,
                     args,
+                    summary,
+                    status,
                     result,
-                    artifact,
-                    children: Vec::new(),
-                    extra: None,
-                }
+                    duration_ms,
+                )
+                .with_detail_lines(detail_lines)
+                .with_artifact(artifact)
             }
             "write_stdin" => {
                 let handle_id = tool_arg_shell_id(&args).unwrap_or_default();
@@ -407,19 +433,17 @@ impl ActivityState {
                 }
                 let artifact = shell_output_artifact(&result);
                 let summary = shell_write_summary(&command, chars, &result, status);
-                ActivityBlock {
-                    kind: ActivityKind::ShellInteraction,
-                    status,
-                    tool_name: name.to_string(),
-                    summary,
-                    detail_lines,
-                    duration_ms,
+                ActivityBlock::new(
+                    ActivityKind::ShellInteraction,
+                    name,
                     args,
+                    summary,
+                    status,
                     result,
-                    artifact,
-                    children: Vec::new(),
-                    extra: None,
-                }
+                    duration_ms,
+                )
+                .with_detail_lines(detail_lines)
+                .with_artifact(artifact)
             }
             "search_web" => {
                 let query = tool_arg_str(&args, "query")
@@ -430,36 +454,33 @@ impl ActivityState {
                     title: "Sources".to_string(),
                     items,
                 });
-                ActivityBlock {
-                    kind: ActivityKind::WebSearch,
-                    status,
-                    tool_name: name.to_string(),
-                    summary: web_search_summary(&query),
-                    detail_lines: web_search_detail_lines(&result),
-                    duration_ms,
+                let summary = web_search_summary(&query);
+                let detail_lines = web_search_detail_lines(&result);
+                ActivityBlock::new(
+                    ActivityKind::WebSearch,
+                    name,
                     args,
+                    summary,
+                    status,
                     result,
-                    artifact,
-                    children: Vec::new(),
-                    extra: None,
-                }
+                    duration_ms,
+                )
+                .with_detail_lines(detail_lines)
+                .with_artifact(artifact)
             }
             "fetch_url" => {
                 let url = tool_arg_str(&args, "url").unwrap_or("url").to_string();
                 let artifact = text_preview_artifact(Some("Fetched content"), &result);
-                ActivityBlock {
-                    kind: ActivityKind::WebFetch,
-                    status,
-                    tool_name: name.to_string(),
-                    summary: format!("fetch {}", display_url(&url)),
-                    detail_lines: Vec::new(),
-                    duration_ms,
+                ActivityBlock::new(
+                    ActivityKind::WebFetch,
+                    name,
                     args,
+                    format!("fetch {}", display_url(&url)),
+                    status,
                     result,
-                    artifact,
-                    children: Vec::new(),
-                    extra: None,
-                }
+                    duration_ms,
+                )
+                .with_artifact(artifact)
             }
             "apply_patch" => {
                 let artifact = patch_preview_artifact(&result);
@@ -471,19 +492,16 @@ impl ActivityState {
                             .map(str::to_string)
                     })
                     .unwrap_or_else(|| semantic_tool_summary(name, &args));
-                ActivityBlock {
-                    kind: ActivityKind::Edit,
-                    status,
-                    tool_name: name.to_string(),
-                    summary,
-                    detail_lines: Vec::new(),
-                    duration_ms,
+                ActivityBlock::new(
+                    ActivityKind::Edit,
+                    name,
                     args,
+                    summary,
+                    status,
                     result,
-                    artifact,
-                    children: Vec::new(),
-                    extra: None,
-                }
+                    duration_ms,
+                )
+                .with_artifact(artifact)
             }
             "agent_call" => {
                 let task = tool_arg_str(&args, "task")
@@ -512,19 +530,16 @@ impl ActivityState {
                         detail_lines.push(label);
                     }
                 }
-                ActivityBlock {
-                    kind: ActivityKind::Delegate,
-                    status,
-                    tool_name: name.to_string(),
-                    summary: format!("delegate · {}", inline_text(&task)),
-                    detail_lines,
-                    duration_ms,
+                ActivityBlock::new(
+                    ActivityKind::Delegate,
+                    name,
                     args,
+                    format!("delegate · {}", inline_text(&task)),
+                    status,
                     result,
-                    artifact: None,
-                    children: Vec::new(),
-                    extra: None,
-                }
+                    duration_ms,
+                )
+                .with_detail_lines(detail_lines)
             }
             "agent_result" => {
                 let handle_id = tool_arg_str(&args, "id").unwrap_or_default().to_string();
@@ -602,19 +617,17 @@ impl ActivityState {
                         title: Some("Delegate result".to_string()),
                         text: text.to_string(),
                     });
-                ActivityBlock {
-                    kind: ActivityKind::Delegate,
-                    status: delegate_status,
-                    tool_name: name.to_string(),
-                    summary: delegate_summary,
-                    detail_lines,
-                    duration_ms,
+                ActivityBlock::new(
+                    ActivityKind::Delegate,
+                    name,
                     args,
+                    delegate_summary,
+                    delegate_status,
                     result,
-                    artifact,
-                    children: Vec::new(),
-                    extra: None,
-                }
+                    duration_ms,
+                )
+                .with_detail_lines(detail_lines)
+                .with_artifact(artifact)
             }
             "agent_kill" => {
                 let handle_id = tool_arg_str(&args, "id").unwrap_or_default().to_string();
@@ -622,109 +635,99 @@ impl ActivityState {
                     .delegate_handles
                     .remove(&handle_id)
                     .unwrap_or(handle_id);
-                ActivityBlock {
-                    kind: ActivityKind::Delegate,
-                    status,
-                    tool_name: name.to_string(),
-                    summary: format!("delegate stopped · {}", inline_text(&task)),
-                    detail_lines: Vec::new(),
-                    duration_ms,
+                ActivityBlock::new(
+                    ActivityKind::Delegate,
+                    name,
                     args,
+                    format!("delegate stopped · {}", inline_text(&task)),
+                    status,
                     result,
-                    artifact: None,
-                    children: Vec::new(),
-                    extra: None,
-                }
+                    duration_ms,
+                )
             }
             "ask" => {
                 let detail_lines = ask_detail_lines(&args, &result);
                 let artifact = inline_question_panel_artifact(&args, &result);
-                ActivityBlock {
-                    kind: ActivityKind::Ask,
-                    status,
-                    tool_name: name.to_string(),
-                    summary: ask_summary(&args),
-                    detail_lines,
-                    duration_ms,
+                ActivityBlock::new(
+                    ActivityKind::Ask,
+                    name,
                     args,
-                    artifact,
-                    children: Vec::new(),
-                    extra: None,
+                    "Question",
+                    status,
                     result,
-                }
+                    duration_ms,
+                )
+                .with_detail_lines(detail_lines)
+                .with_artifact(artifact)
             }
-            "wait" => ActivityBlock {
-                kind: ActivityKind::Ask,
-                status,
-                tool_name: name.to_string(),
-                summary: wait_summary(&args, &result),
-                detail_lines: wait_detail_lines(&args, &result),
-                duration_ms,
-                args,
-                artifact: None,
-                children: Vec::new(),
-                extra: None,
-                result,
-            },
+            "wait" => {
+                let summary = wait_summary(&args, &result);
+                let detail_lines = wait_detail_lines(&args, &result);
+                ActivityBlock::new(
+                    ActivityKind::Ask,
+                    name,
+                    args,
+                    summary,
+                    status,
+                    result,
+                    duration_ms,
+                )
+                .with_detail_lines(detail_lines)
+            }
             "show_snippet_to_user" => {
                 let artifact = snippet_preview_artifact(&result);
                 let summary =
                     snippet_summary(&result).unwrap_or_else(|| semantic_tool_summary(name, &args));
-                ActivityBlock {
-                    kind: ActivityKind::GenericTool,
-                    status,
-                    tool_name: name.to_string(),
-                    summary,
-                    detail_lines: Vec::new(),
-                    duration_ms,
+                ActivityBlock::new(
+                    ActivityKind::GenericTool,
+                    name,
                     args,
+                    summary,
+                    status,
                     result,
-                    artifact,
-                    children: Vec::new(),
-                    extra: None,
-                }
+                    duration_ms,
+                )
+                .with_artifact(artifact)
             }
             // update_plan is filtered out in blocks_for_tool_call; this branch
             // is unreachable but kept as a guard.
-            "update_plan" => ActivityBlock {
-                kind: ActivityKind::GenericTool,
-                status,
-                tool_name: name.to_string(),
-                summary: "updated plan".to_string(),
-                detail_lines: Vec::new(),
-                duration_ms,
+            "update_plan" => ActivityBlock::new(
+                ActivityKind::GenericTool,
+                name,
                 args,
-                result,
-                artifact: None,
-                children: Vec::new(),
-                extra: None,
-            },
-            "search_tools" => ActivityBlock {
-                kind: ActivityKind::GenericTool,
+                "updated plan",
                 status,
-                tool_name: name.to_string(),
-                summary: tool_search_summary(&args),
-                detail_lines: tool_search_detail_lines(&result),
-                duration_ms,
-                args,
-                artifact: None,
-                children: Vec::new(),
-                extra: None,
                 result,
-            },
-            _ => ActivityBlock {
-                kind: ActivityKind::GenericTool,
-                status,
-                tool_name: name.to_string(),
-                summary: semantic_tool_summary(name, &args),
-                detail_lines: Vec::new(),
                 duration_ms,
-                args,
-                artifact: { text_preview_artifact(None, &result) },
-                children: Vec::new(),
-                extra: None,
-                result,
-            },
+            ),
+            "search_tools" => {
+                let summary = tool_search_summary(&args);
+                let detail_lines = tool_search_detail_lines(&result);
+                ActivityBlock::new(
+                    ActivityKind::GenericTool,
+                    name,
+                    args,
+                    summary,
+                    status,
+                    result,
+                    duration_ms,
+                )
+                .with_detail_lines(detail_lines)
+            }
+            _ => {
+                let summary = semantic_tool_summary(name, &args);
+                let artifact = text_preview_artifact(None, &result);
+                ActivityBlock::new(
+                    ActivityKind::GenericTool,
+                    name,
+                    args,
+                    summary,
+                    status,
+                    result,
+                    duration_ms,
+                )
+                .with_artifact(artifact)
+            }
         }
     }
 }
@@ -736,10 +739,10 @@ fn activity_tool_name(name: &str) -> &str {
 }
 
 pub fn merge_exploration_activity(target: &mut ActivityBlock, mut incoming: ActivityBlock) -> bool {
-    let Some(ActivityExtra::Exploration(target_ops)) = target.extra.as_mut() else {
+    let Some(ActivityExtra::Exploration(target_ops)) = target.call.extra.as_mut() else {
         return false;
     };
-    let Some(ActivityExtra::Exploration(incoming_ops)) = incoming.extra.take() else {
+    let Some(ActivityExtra::Exploration(incoming_ops)) = incoming.call.extra.take() else {
         return false;
     };
     target_ops.extend(incoming_ops);
@@ -753,7 +756,7 @@ pub fn merge_edit_activity(target: &mut ActivityBlock, incoming: ActivityBlock) 
         files,
         total_added,
         total_removed,
-    }) = target.artifact.as_mut()
+    }) = target.result.artifact.as_mut()
     else {
         return false;
     };
@@ -761,7 +764,7 @@ pub fn merge_edit_activity(target: &mut ActivityBlock, incoming: ActivityBlock) 
         files: incoming_files,
         total_added: incoming_added,
         total_removed: incoming_removed,
-    }) = incoming.artifact.clone()
+    }) = incoming.result.artifact.clone()
     else {
         return false;
     };
@@ -770,16 +773,34 @@ pub fn merge_edit_activity(target: &mut ActivityBlock, incoming: ActivityBlock) 
     *total_added += incoming_added;
     *total_removed += incoming_removed;
     target.duration_ms += incoming.duration_ms;
-    target.summary = patch_summary_from_preview(files, *total_added, *total_removed);
+    target.call.summary = patch_summary_from_preview(files, *total_added, *total_removed);
     true
 }
 
+/// Rebuild an Exploration block's display after its op list changes (either
+/// on construction or after a merge). Two modes:
+///
+/// - **Single op**: promote the op straight onto the call line, no detail
+///   lines, no `EXPLORE` tag. Visually `· Read README.md`. A solo
+///   read/search/glob/ls reads cleaner as one line than as a wrapper +
+///   indented body — the old `EXPLORE · 1 step` layout doubled the
+///   line count for a single operation and duplicated the op text.
+/// - **Multiple ops**: show `· Explored` as the call line, list the ops
+///   as detail lines below. The old `N steps` counter is gone — the
+///   detail list is always visible at the default expand level, so the
+///   count duplicated information the reader could already see.
 fn rebuild_exploration_summary(block: &mut ActivityBlock) {
-    let Some(ActivityExtra::Exploration(ops)) = block.extra.as_ref() else {
+    let Some(ActivityExtra::Exploration(ops)) = block.call.extra.as_ref() else {
         return;
     };
-    block.summary = exploration_summary(ops);
-    block.detail_lines = ops.iter().map(exploration_step_line).collect();
+    block.call.tag = None;
+    if ops.len() == 1 {
+        block.call.summary = exploration_step_line(&ops[0]);
+        block.result.detail_lines = Vec::new();
+    } else {
+        block.call.summary = "Explored".to_string();
+        block.result.detail_lines = ops.iter().map(exploration_step_line).collect();
+    }
 }
 
 fn semantic_tool_summary(name: &str, args: &Value) -> String {
@@ -903,6 +924,35 @@ fn delegate_token_usage_line(meta: &Value) -> Option<String> {
     }
 }
 
+/// Return the `ExplorationOp` for the four read-only tools that project
+/// into an `Exploration` activity, or `None` for anything else. The big
+/// match in `block_for_single_tool_call` used to carry four near-identical
+/// arms just to pick a kind/subject pair — this moves the picking here and
+/// leaves the caller with a single early return.
+fn exploration_op_for(name: &str, args: &Value, result: &Value) -> Option<ExplorationOp> {
+    match name {
+        "read_file" => Some(ExplorationOp {
+            kind: ExplorationOpKind::Read,
+            subject: read_label(result).unwrap_or_else(|| {
+                compact_path_display(tool_arg_str(args, "path").unwrap_or("file"))
+            }),
+        }),
+        "grep" => Some(ExplorationOp {
+            kind: ExplorationOpKind::Search,
+            subject: grep_label(args),
+        }),
+        "glob" => Some(ExplorationOp {
+            kind: ExplorationOpKind::Glob,
+            subject: glob_label(args),
+        }),
+        "ls" => Some(ExplorationOp {
+            kind: ExplorationOpKind::List,
+            subject: compact_path_display(tool_arg_str(args, "path").unwrap_or(".")),
+        }),
+        _ => None,
+    }
+}
+
 fn exploration_block(
     name: &str,
     status: ActivityStatus,
@@ -911,30 +961,18 @@ fn exploration_block(
     result: Value,
     op: ExplorationOp,
 ) -> ActivityBlock {
-    let mut block = ActivityBlock {
-        kind: ActivityKind::Exploration,
-        status,
-        tool_name: name.to_string(),
-        summary: String::new(),
-        detail_lines: Vec::new(),
-        duration_ms,
+    let mut block = ActivityBlock::new(
+        ActivityKind::Exploration,
+        name,
         args,
+        String::new(),
+        status,
         result,
-        artifact: None,
-        children: Vec::new(),
-        extra: Some(ActivityExtra::Exploration(vec![op])),
-    };
+        duration_ms,
+    )
+    .with_extra(Some(ActivityExtra::Exploration(vec![op])));
     rebuild_exploration_summary(&mut block);
     block
-}
-
-fn exploration_summary(ops: &[ExplorationOp]) -> String {
-    let count = ops.len();
-    if count == 1 {
-        "EXPLORE · 1 step".to_string()
-    } else {
-        format!("EXPLORE · {count} steps")
-    }
 }
 
 fn exploration_step_line(op: &ExplorationOp) -> String {
@@ -1232,11 +1270,6 @@ fn shell_output_artifact(result: &Value) -> Option<ActivityArtifact> {
             })
         }
     })
-}
-
-fn ask_summary(args: &Value) -> String {
-    let _ = args;
-    "Question".to_string()
 }
 
 fn wait_summary(args: &Value, result: &Value) -> String {
@@ -1727,11 +1760,11 @@ mod tests {
         );
 
         assert_eq!(
-            blocks[0].summary,
+            blocks[0].call.summary,
             "Edited lash-cli/src/render/mod.rs (+3 -1)"
         );
         assert!(matches!(
-            blocks[0].artifact,
+            blocks[0].result.artifact,
             Some(ActivityArtifact::PatchPreview {
                 total_added: 3,
                 total_removed: 1,
@@ -1763,7 +1796,7 @@ mod tests {
             11,
         );
 
-        assert_eq!(blocks[0].summary, "Moved old.rs → new.rs (+2 -2)");
+        assert_eq!(blocks[0].call.summary, "Moved old.rs → new.rs (+2 -2)");
     }
 
     #[test]
@@ -1784,7 +1817,7 @@ mod tests {
         );
 
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].summary, "date '+%Y-%m-%d %H:%M:%S %Z'");
+        assert_eq!(blocks[0].call.summary, "date '+%Y-%m-%d %H:%M:%S %Z'");
     }
 
     #[test]
@@ -1805,8 +1838,14 @@ mod tests {
         );
 
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].summary, "started python3 -q");
-        assert!(blocks[0].detail_lines.iter().any(|line| line == "Handle 7"));
+        assert_eq!(blocks[0].call.summary, "started python3 -q");
+        assert!(
+            blocks[0]
+                .result
+                .detail_lines
+                .iter()
+                .any(|line| line == "Handle 7")
+        );
     }
 
     #[test]
@@ -1831,15 +1870,18 @@ mod tests {
             12,
         );
 
+        // Single-op exploration activities promote the op straight onto
+        // the call line. There are no detail lines and no `EXPLORE`
+        // wrapper — that's now reserved for multi-op clusters.
         assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].tool_name, "read_file");
-        assert_eq!(blocks[0].summary, "EXPLORE · 1 step");
-        assert_eq!(blocks[0].detail_lines, vec!["Read a.rs"]);
-        assert_eq!(blocks[1].tool_name, "grep");
-        assert_eq!(blocks[1].summary, "EXPLORE · 1 step");
-        assert_eq!(blocks[1].detail_lines, vec!["Search \"foo\" in ."]);
-        assert_ne!(blocks[0].tool_name, "batch");
-        assert_ne!(blocks[1].tool_name, "batch");
+        assert_eq!(blocks[0].call.tool_name, "read_file");
+        assert_eq!(blocks[0].call.summary, "Read a.rs");
+        assert!(blocks[0].result.detail_lines.is_empty());
+        assert_eq!(blocks[1].call.tool_name, "grep");
+        assert_eq!(blocks[1].call.summary, "Search \"foo\" in .");
+        assert!(blocks[1].result.detail_lines.is_empty());
+        assert_ne!(blocks[0].call.tool_name, "batch");
+        assert_ne!(blocks[1].call.tool_name, "batch");
     }
 
     #[test]
@@ -1864,10 +1906,10 @@ mod tests {
         );
 
         assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].tool_name, "read_file");
-        assert_eq!(blocks[0].summary, "EXPLORE · 1 step");
-        assert_eq!(blocks[1].tool_name, "grep");
-        assert_eq!(blocks[1].summary, "EXPLORE · 1 step");
+        assert_eq!(blocks[0].call.tool_name, "read_file");
+        assert_eq!(blocks[0].call.summary, "Read a.rs");
+        assert_eq!(blocks[1].call.tool_name, "grep");
+        assert_eq!(blocks[1].call.summary, "Search \"foo\" in .");
     }
 
     #[test]
@@ -1892,8 +1934,8 @@ mod tests {
         );
 
         assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].tool_name, "read_file");
-        assert_eq!(blocks[1].tool_name, "grep");
+        assert_eq!(blocks[0].call.tool_name, "read_file");
+        assert_eq!(blocks[1].call.tool_name, "grep");
     }
 
     #[test]
@@ -1919,11 +1961,11 @@ mod tests {
         );
 
         assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].tool_name, "read_file");
-        assert_eq!(blocks[0].summary, "EXPLORE · 1 step");
-        assert_eq!(blocks[0].detail_lines, vec!["Read README.md"]);
-        assert_eq!(blocks[1].tool_name, "search_web");
-        assert_eq!(blocks[1].summary, "searched web for \"OpenAI\"");
+        assert_eq!(blocks[0].call.tool_name, "read_file");
+        assert_eq!(blocks[0].call.summary, "Read README.md");
+        assert!(blocks[0].result.detail_lines.is_empty());
+        assert_eq!(blocks[1].call.tool_name, "search_web");
+        assert_eq!(blocks[1].call.summary, "searched web for \"OpenAI\"");
     }
 
     #[test]
@@ -1940,11 +1982,8 @@ mod tests {
             4,
         );
 
-        assert_eq!(blocks[0].summary, "EXPLORE · 1 step");
-        assert_eq!(
-            blocks[0].detail_lines,
-            vec!["Read lash-cli/src/render/mod.rs"]
-        );
+        assert_eq!(blocks[0].call.summary, "Read lash-cli/src/render/mod.rs");
+        assert!(blocks[0].result.detail_lines.is_empty());
     }
 
     #[test]
@@ -1962,9 +2001,10 @@ mod tests {
         );
 
         assert_eq!(
-            blocks[0].detail_lines,
-            vec!["Search \"render_activity_block\" in lash-cli/src/render/mod.rs"]
+            blocks[0].call.summary,
+            "Search \"render_activity_block\" in lash-cli/src/render/mod.rs"
         );
+        assert!(blocks[0].result.detail_lines.is_empty());
     }
 
     #[test]
@@ -1991,11 +2031,11 @@ mod tests {
         );
 
         assert_eq!(
-            blocks[0].summary,
+            blocks[0].call.summary,
             "show lash-cli/src/render/mod.rs:12-14 to user"
         );
         assert!(matches!(
-            blocks[0].artifact,
+            blocks[0].result.artifact,
             Some(ActivityArtifact::SnippetPreview(SnippetPreviewArtifact {
                 title: Some(ref title),
                 start_line: 12,
@@ -2034,8 +2074,14 @@ mod tests {
         );
 
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].summary, "sent print(2 + 2) → python3 -q");
-        assert!(blocks[0].detail_lines.iter().any(|line| line == "Handle 7"));
+        assert_eq!(blocks[0].call.summary, "sent print(2 + 2) → python3 -q");
+        assert!(
+            blocks[0]
+                .result
+                .detail_lines
+                .iter()
+                .any(|line| line == "Handle 7")
+        );
     }
 
     #[test]
@@ -2064,7 +2110,7 @@ mod tests {
             7,
         );
 
-        assert_eq!(wrote[0].summary, "sent print(2 + 2) → python3 -q");
+        assert_eq!(wrote[0].call.summary, "sent print(2 + 2) → python3 -q");
     }
 
     #[test]
@@ -2123,7 +2169,7 @@ mod tests {
         );
 
         assert_eq!(polled.len(), 1);
-        assert_eq!(polled[0].summary, "read python3 -q");
+        assert_eq!(polled[0].call.summary, "read python3 -q");
     }
 
     #[test]
@@ -2149,14 +2195,17 @@ mod tests {
             0,
         );
 
-        assert_eq!(search_blocks[0].summary, "searched tools for \"planning\"");
         assert_eq!(
-            search_blocks[0].detail_lines,
+            search_blocks[0].call.summary,
+            "searched tools for \"planning\""
+        );
+        assert_eq!(
+            search_blocks[0].result.detail_lines,
             vec!["update_plan: Update the active execution plan with concrete steps."]
         );
-        assert_eq!(ask_blocks[0].summary, "Question");
+        assert_eq!(ask_blocks[0].call.summary, "Question");
         assert_eq!(
-            ask_blocks[0].detail_lines,
+            ask_blocks[0].result.detail_lines,
             vec!["Which environment should I use?", "1. staging", "2. prod",]
         );
     }
@@ -2176,13 +2225,13 @@ mod tests {
             0,
         );
 
-        assert_eq!(ask_blocks[0].summary, "Question");
+        assert_eq!(ask_blocks[0].call.summary, "Question");
         assert_eq!(
-            ask_blocks[0].detail_lines,
+            ask_blocks[0].result.detail_lines,
             vec!["Which direction should I take?", "1. minimal", "2. full",]
         );
         assert!(matches!(
-            ask_blocks[0].artifact.as_ref(),
+            ask_blocks[0].result.artifact.as_ref(),
             Some(ActivityArtifact::QuestionPanel(panel))
                 if panel.options.len() == 2
                     && !panel.options[0].selected
@@ -2213,11 +2262,11 @@ mod tests {
 
         assert_eq!(blocks.len(), 1);
         assert_eq!(
-            blocks[0].summary,
+            blocks[0].call.summary,
             "searched web for \"terminal queue preview\""
         );
         assert_eq!(
-            blocks[0].detail_lines,
+            blocks[0].result.detail_lines,
             vec![
                 "Answer Queue preview rendering is discussed in the terminal docs.".to_string(),
                 "Terminal queue preview guide · example.com/guide/queue-preview".to_string()
@@ -2267,13 +2316,13 @@ mod tests {
         );
 
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].status, ActivityStatus::Failed);
+        assert_eq!(blocks[0].result.status, ActivityStatus::Failed);
         assert_eq!(
-            blocks[0].summary,
+            blocks[0].call.summary,
             "delegate stopped · inspect queue rendering"
         );
         assert_eq!(
-            blocks[0].detail_lines,
+            blocks[0].result.detail_lines,
             vec![
                 "gpt-5.4 (high) · 2 iterations · 1 tool call".to_string(),
                 "135 total tokens · 101 in · 22 out · 7 reasoning · 5 cached".to_string(),
@@ -2316,13 +2365,13 @@ mod tests {
         );
 
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].status, ActivityStatus::Failed);
+        assert_eq!(blocks[0].result.status, ActivityStatus::Failed);
         assert_eq!(
-            blocks[0].summary,
+            blocks[0].call.summary,
             "delegate failed · inspect queue rendering"
         );
         assert_eq!(
-            blocks[0].detail_lines,
+            blocks[0].result.detail_lines,
             vec![
                 "Error LLM error: Codex request failed with 400".to_string(),
                 "gpt-5.4-mini (low) · 24 iterations · 49 tool calls".to_string(),

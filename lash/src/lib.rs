@@ -125,9 +125,9 @@ pub use provider::{LashConfig, Provider, ProviderOptions, RequestTimeout};
 pub use runtime::{
     AssembledTurn, AssistantOutput, CodeOutputRecord, DoneReason, EventSink, ExecutionSummary,
     HostProfile, InputItem, LashRuntime, NoopEventSink, OutputState, PathResolver, PromptUsage,
-    RunMode, RuntimeError, RuntimeHostConfig, SanitizerPolicy, SessionStateEnvelope,
-    SessionStoreCreateRequest, SessionStoreFactory, TerminationPolicy, TurnInput, TurnIssue,
-    TurnStatus,
+    ReplayManifest, RunMode, RuntimeError, RuntimeHostConfig, SanitizerPolicy,
+    SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory, SessionTaskState,
+    SessionTaskStatus, TerminationPolicy, TurnInput, TurnIssue, TurnStatus,
 };
 pub use session::{Session, SessionError, TurnInjectionBridge};
 pub use session_model::SessionPolicy;

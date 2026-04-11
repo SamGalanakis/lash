@@ -25,8 +25,8 @@ fn queue_preview_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             "◆ after next tool/result",
             &pending_previews,
             &app.skills,
-            Style::default().fg(theme::SODIUM),
-            Style::default().fg(theme::CHALK_MID),
+            Style::default().fg(theme::brand()),
+            Style::default().fg(theme::text_muted()),
         );
     }
 
@@ -40,8 +40,8 @@ fn queue_preview_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             "◇ next full turn",
             &queued_previews,
             &app.skills,
-            Style::default().fg(theme::LICHEN),
-            Style::default().fg(theme::CHALK_DIM),
+            Style::default().fg(theme::state_ok()),
+            Style::default().fg(theme::text_subtle()),
         );
     }
 
@@ -85,12 +85,12 @@ fn push_queue_section(
     }
     if items.len() > QUEUE_SECTION_ITEM_LIMIT {
         lines.push(Line::from(vec![
-            Span::styled("    +", Style::default().fg(theme::ASH)),
+            Span::styled("    +", Style::default().fg(theme::border_faint())),
             Span::styled(
                 format!("{}", items.len() - QUEUE_SECTION_ITEM_LIMIT),
                 item_style,
             ),
-            Span::styled(" more", Style::default().fg(theme::ASH_TEXT)),
+            Span::styled(" more", Style::default().fg(theme::text_faint())),
         ]));
     }
 }
@@ -120,7 +120,7 @@ fn push_wrapped_queue_item(
         };
         let mut spans = vec![Span::styled(
             prefix.to_string(),
-            Style::default().fg(theme::ASH),
+            Style::default().fg(theme::border_faint()),
         )];
         spans.extend(styled_text_with_slash_command(
             &collapsed,
@@ -141,7 +141,7 @@ fn push_wrapped_queue_item(
     ) {
         lines.push(Line::from(vec![Span::styled(
             format!("{continuation_prefix}…"),
-            Style::default().fg(theme::ASH_TEXT),
+            Style::default().fg(theme::text_faint()),
         )]));
     }
 }

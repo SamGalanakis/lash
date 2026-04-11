@@ -394,21 +394,8 @@ pub(crate) fn latest_user_prompt_hash(messages: &[Message]) -> Option<String> {
         })
 }
 
-struct ReplayManifest {
-    version: u8,
-    saved_at: String,
-    provider: String,
-    configured_model: String,
-    resolved_model: String,
-    context_window: u64,
-    model_variant: Option<String>,
-    toolset_hash: String,
-    prompt_hash: Option<String>,
-    snapshot_hash: Option<String>,
-}
-
 #[allow(clippy::too_many_arguments)]
-fn build_replay_manifest_json(
+fn build_replay_manifest(
     provider: &Provider,
     configured_model: &str,
     context_window: u64,
@@ -418,33 +405,21 @@ fn build_replay_manifest_json(
     toolset_hash: &str,
     prompt_hash: Option<String>,
     snapshot_hash: Option<String>,
-) -> serde_json::Value {
-    let manifest = ReplayManifest {
+) -> ReplayManifest {
+    ReplayManifest {
         version: 3,
         saved_at: chrono::Utc::now().to_rfc3339(),
         provider: provider.id().to_string(),
         configured_model: configured_model.to_string(),
         resolved_model: provider.resolve_model(configured_model),
         context_window,
+        execution_mode,
+        context_strategy,
         model_variant: model_variant.map(str::to_string),
         toolset_hash: toolset_hash.to_string(),
         prompt_hash,
         snapshot_hash,
-    };
-    serde_json::json!({
-        "version": manifest.version,
-        "saved_at": manifest.saved_at,
-        "provider": manifest.provider,
-        "configured_model": manifest.configured_model,
-        "resolved_model": manifest.resolved_model,
-        "context_window": manifest.context_window,
-        "execution_mode": execution_mode_label(execution_mode),
-        "context_strategy": context_strategy,
-        "model_variant": manifest.model_variant,
-        "toolset_hash": manifest.toolset_hash,
-        "prompt_hash": manifest.prompt_hash,
-        "snapshot_hash": manifest.snapshot_hash,
-    })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -463,7 +438,7 @@ pub(crate) fn persist_root_session_state(
     prompt_hash: Option<String>,
     snapshot_hash: Option<String>,
 ) {
-    let manifest_json = build_replay_manifest_json(
+    let manifest = build_replay_manifest(
         provider,
         configured_model,
         context_window,
@@ -474,19 +449,7 @@ pub(crate) fn persist_root_session_state(
         prompt_hash,
         snapshot_hash,
     );
-    state.replay_manifest = Some(manifest_json.clone());
-    let config_json = ui_resume::with_ui_resume_state(
-        serde_json::json!({
-            "manifest": manifest_json,
-            "context_strategy": context_strategy,
-            "last_prompt_usage": state.last_prompt_usage.clone(),
-            "plugin_snapshot": state.plugin_snapshot,
-            "task_state": state.task_state,
-            "dynamic_state": dynamic_state,
-        }),
-        ui_state,
-    )
-    .to_string();
+    state.replay_manifest = Some(manifest.clone());
     tracing::debug!(
         iteration = state.iteration,
         messages = state.messages.len(),
@@ -498,26 +461,21 @@ pub(crate) fn persist_root_session_state(
         reasoning_tokens = state.token_usage.reasoning_tokens,
         "persisting root session state"
     );
+    ui_resume::save_ui_resume_state(store, ui_state);
     store.save_session_state(lash::SessionState {
-        iteration: state.iteration as i64,
-        config_json,
+        iteration: state.iteration,
+        token_usage: state.token_usage.clone(),
+        last_prompt_usage: state.last_prompt_usage.clone(),
+        task_state: state.task_state.clone(),
+        replay_manifest: Some(manifest),
+        plugin_snapshot: state.plugin_snapshot.clone(),
+        dynamic_state: Some(dynamic_state.clone()),
         execution_state_snapshot: state.execution_state_snapshot.clone(),
-        input_tokens: state.token_usage.input_tokens,
-        output_tokens: state.token_usage.output_tokens,
-        cached_input_tokens: state.token_usage.cached_input_tokens,
-        reasoning_tokens: state.token_usage.reasoning_tokens,
     });
     let transcript_keyspaces =
         lash::semantic_transcript_keyspaces(&state.messages, &state.tool_calls);
     store.transcript_replace_keyspaces(&transcript_keyspaces);
     store.clear_live_session_snapshot();
-}
-
-fn persisted_plugin_snapshot(state: &lash::SessionState) -> Option<PluginSessionSnapshot> {
-    serde_json::from_str::<serde_json::Value>(&state.config_json)
-        .ok()
-        .and_then(|config| config.get("plugin_snapshot").cloned())
-        .and_then(|value| serde_json::from_value(value).ok())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -543,19 +501,20 @@ pub(crate) fn persist_live_runtime_snapshot(
         iteration: snapshot.iteration,
         token_usage,
         last_prompt_usage,
-        task_state: Some(serde_json::json!({
-            "kind": "live_resume",
-            "status": "running",
-            "saved_at": chrono::Utc::now().to_rfc3339(),
-        })),
-        plugin_snapshot: existing.as_ref().and_then(persisted_plugin_snapshot),
+        task_state: Some(SessionTaskState::LiveResume {
+            status: SessionTaskStatus::Running,
+            saved_at: chrono::Utc::now().to_rfc3339(),
+        }),
+        plugin_snapshot: existing
+            .as_ref()
+            .and_then(|state| state.plugin_snapshot.clone()),
         execution_state_snapshot: existing
             .as_ref()
             .and_then(|state| state.execution_state_snapshot.clone()),
         ..Default::default()
     };
     let prompt_hash = latest_user_prompt_hash(&state.messages);
-    let manifest_json = build_replay_manifest_json(
+    let manifest = build_replay_manifest(
         provider,
         configured_model,
         context_window,
@@ -566,7 +525,7 @@ pub(crate) fn persist_live_runtime_snapshot(
         prompt_hash,
         None,
     );
-    state.replay_manifest = Some(manifest_json);
+    state.replay_manifest = Some(manifest);
     tracing::debug!(
         iteration = state.iteration,
         messages = state.messages.len(),
