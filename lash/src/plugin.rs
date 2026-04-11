@@ -15,10 +15,7 @@ use tokio::sync::mpsc;
 pub use lash_sansio::{CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptContribution};
 
 pub type PluginFuture<T> = Pin<Box<dyn Future<Output = Result<T, PluginError>> + Send>>;
-pub type TurnCommittedHook = Arc<dyn Fn(AssembledTurn) -> PluginFuture<()> + Send + Sync>;
-pub type SessionRestoredHook = Arc<dyn Fn(SessionStateEnvelope) -> PluginFuture<()> + Send + Sync>;
-pub type SessionConfigChangedHook =
-    Arc<dyn Fn(SessionConfigChangedContext) -> PluginFuture<()> + Send + Sync>;
+pub type PluginRuntimeEventHook = Arc<dyn Fn(PluginRuntimeEvent) -> PluginFuture<()> + Send + Sync>;
 pub type SessionConfigMutator = Arc<
     dyn Fn(SessionConfigChangedContext, SessionStateEnvelope) -> PluginFuture<SessionStateEnvelope>
         + Send
@@ -50,6 +47,111 @@ pub type AssistantStreamHook =
 pub type AssistantResponseHook = Arc<
     dyn Fn(AssistantResponseHookContext) -> PluginFuture<AssistantResponseTransform> + Send + Sync,
 >;
+pub type CommandHandler =
+    Arc<dyn Fn(CommandInvocation) -> PluginFuture<CommandOutcome> + Send + Sync>;
+
+/// Reason the history pipeline is being invoked.
+#[derive(Clone, Debug)]
+pub enum RewriteTrigger {
+    /// User invoked `/compact` (or an equivalent plugin command).
+    Manual { instructions: Option<String> },
+    /// The previous turn overflowed the context window; retry with
+    /// compacted history.
+    OverflowRecovery,
+    /// Session config changed to a smaller context window.
+    WindowShrink {
+        old_max: Option<usize>,
+        new_max: Option<usize>,
+    },
+    /// Reserved for future scheduled compactors — not fired by any call
+    /// site today.
+    Periodic,
+}
+
+/// Metadata accumulated as a history rewrite pipeline runs.
+#[derive(Clone, Debug, Default)]
+pub struct HistoryRewriteMetadata {
+    pub summarized_token_count: Option<u64>,
+    pub pruned_message_count: u32,
+    pub produced_summary: bool,
+}
+
+/// Mutable state passed through the history rewrite pipeline.
+#[derive(Clone, Debug)]
+pub struct HistoryState {
+    pub messages: Vec<crate::Message>,
+    pub tool_calls: Vec<crate::ToolCallRecord>,
+    pub metadata: HistoryRewriteMetadata,
+}
+
+impl HistoryState {
+    pub fn from_state(state: &SessionStateEnvelope) -> Self {
+        Self {
+            messages: state.messages.clone(),
+            tool_calls: state.tool_calls.clone(),
+            metadata: HistoryRewriteMetadata::default(),
+        }
+    }
+}
+
+/// Context passed to a turn-context transform.
+#[derive(Clone)]
+pub struct TurnTransformContext {
+    pub session_id: String,
+    pub state: SessionStateEnvelope,
+    pub prompt_usage: Option<crate::runtime::PromptUsage>,
+    pub max_context_tokens: Option<usize>,
+    pub host: Arc<dyn SessionManager>,
+}
+
+/// Context passed to a history rewriter.
+#[derive(Clone)]
+pub struct RewriteContext {
+    pub session_id: String,
+    pub trigger: RewriteTrigger,
+    pub state: SessionStateEnvelope,
+    pub host: Arc<dyn SessionManager>,
+}
+
+#[derive(Debug, thiserror::Error, Clone)]
+pub enum HistoryError {
+    #[error("history pipeline error: {0}")]
+    Pipeline(String),
+    #[error("history session error: {0}")]
+    Session(String),
+}
+
+impl From<PluginError> for HistoryError {
+    fn from(value: PluginError) -> Self {
+        Self::Session(value.to_string())
+    }
+}
+
+/// Prepares the ephemeral turn context presented to the model.
+#[async_trait::async_trait]
+pub trait TurnContextTransform: Send + Sync {
+    fn id(&self) -> &'static str;
+    async fn transform(
+        &self,
+        ctx: &TurnTransformContext,
+        input: crate::session_model::context::PreparedContext,
+    ) -> Result<crate::session_model::context::PreparedContext, HistoryError>;
+}
+
+/// Performs a permanent transform on persisted history (compaction,
+/// overflow recovery, manual `/compact`, …).
+#[async_trait::async_trait]
+pub trait HistoryRewriter: Send + Sync {
+    fn id(&self) -> &'static str;
+    fn accepts(&self, _trigger: &RewriteTrigger) -> bool {
+        true
+    }
+    async fn rewrite(
+        &self,
+        ctx: &RewriteContext,
+        input: HistoryState,
+    ) -> Result<HistoryState, HistoryError>;
+}
 
 #[derive(Debug, thiserror::Error, Clone)]
 pub enum PluginError {
@@ -246,16 +348,22 @@ pub(crate) async fn emit_plugin_surface_events(
     plugin_id: &str,
     events: Vec<PluginSurfaceEvent>,
 ) {
-    for event in events {
-        crate::session_model::send_event(
-            event_tx,
-            crate::SessionEvent::PluginEvent {
-                plugin_id: plugin_id.to_string(),
-                event,
-            },
-        )
-        .await;
+    for event in plugin_surface_session_events(plugin_id, events) {
+        crate::session_model::send_event(event_tx, event).await;
     }
+}
+
+pub(crate) fn plugin_surface_session_events(
+    plugin_id: &str,
+    events: Vec<PluginSurfaceEvent>,
+) -> Vec<crate::SessionEvent> {
+    events
+        .into_iter()
+        .map(|event| crate::SessionEvent::PluginEvent {
+            plugin_id: plugin_id.to_string(),
+            event,
+        })
+        .collect()
 }
 
 pub fn plugin_surface_event_renders_visible_output(event: &PluginSurfaceEvent) -> bool {
@@ -385,6 +493,13 @@ pub struct SessionConfigChangedContext {
 }
 
 #[derive(Clone)]
+pub enum PluginRuntimeEvent {
+    TurnCommitted(AssembledTurn),
+    SessionRestored(SessionStateEnvelope),
+    SessionConfigChanged(SessionConfigChangedContext),
+}
+
+#[derive(Clone)]
 pub struct ToolCallHookContext {
     pub session_id: String,
     pub tool_name: String,
@@ -444,6 +559,40 @@ pub struct CheckpointHookContext {
     pub checkpoint: CheckpointKind,
     pub state: SessionSnapshot,
     pub host: Arc<dyn SessionManager>,
+}
+
+/// Metadata about a slash command contributed by a plugin.
+#[derive(Clone, Debug)]
+pub struct CommandDef {
+    pub name: &'static str,
+    pub usage: &'static str,
+    pub description: &'static str,
+    pub takes_argument: bool,
+    /// When true, the host may invoke this command while a turn is
+    /// streaming instead of queueing it behind the turn. Plugins should
+    /// only opt in for handlers that are read-only with respect to the
+    /// runtime / persisted state.
+    pub runs_out_of_band: bool,
+}
+
+/// Runtime context passed to a plugin command handler.
+#[derive(Clone)]
+pub struct CommandInvocation {
+    pub name: String,
+    pub argument: Option<String>,
+    pub session_id: String,
+    pub host: Arc<dyn SessionManager>,
+}
+
+/// Result from a plugin command handler, surfaced into the host UI.
+#[derive(Clone, Debug)]
+pub enum CommandOutcome {
+    /// Handler did its work and has no user-visible message.
+    Handled,
+    /// Push a user-visible system message.
+    Message(String),
+    /// Push a user-visible error message.
+    Error(String),
 }
 
 #[derive(Clone)]
@@ -592,11 +741,12 @@ pub struct PluginSpec {
     pub assistant_stream_hooks: Vec<AssistantStreamHook>,
     pub assistant_response_hooks: Vec<AssistantResponseHook>,
     pub tool_result_projectors: BTreeMap<ToolResultProjectionHook, ToolResultProjector>,
-    pub turn_committed_hooks: Vec<TurnCommittedHook>,
-    pub session_restored_hooks: Vec<SessionRestoredHook>,
+    pub runtime_event_hooks: Vec<PluginRuntimeEventHook>,
     pub session_config_mutators: Vec<SessionConfigMutator>,
-    pub session_config_changed_hooks: Vec<SessionConfigChangedHook>,
     pub external_ops: Vec<(ExternalOpDef, ExternalInvokeHandler)>,
+    pub commands: Vec<(CommandDef, CommandHandler)>,
+    pub turn_context_transforms: Vec<(i32, Arc<dyn TurnContextTransform>)>,
+    pub history_rewriters: Vec<(i32, Arc<dyn HistoryRewriter>)>,
 }
 
 impl PluginSpec {
@@ -668,13 +818,8 @@ impl PluginSpec {
         self
     }
 
-    pub fn with_turn_committed(mut self, hook: TurnCommittedHook) -> Self {
-        self.turn_committed_hooks.push(hook);
-        self
-    }
-
-    pub fn with_session_restored(mut self, hook: SessionRestoredHook) -> Self {
-        self.session_restored_hooks.push(hook);
+    pub fn with_runtime_event(mut self, hook: PluginRuntimeEventHook) -> Self {
+        self.runtime_event_hooks.push(hook);
         self
     }
 
@@ -683,13 +828,31 @@ impl PluginSpec {
         self
     }
 
-    pub fn with_session_config_changed(mut self, hook: SessionConfigChangedHook) -> Self {
-        self.session_config_changed_hooks.push(hook);
+    pub fn with_external_op(mut self, def: ExternalOpDef, handler: ExternalInvokeHandler) -> Self {
+        self.external_ops.push((def, handler));
         self
     }
 
-    pub fn with_external_op(mut self, def: ExternalOpDef, handler: ExternalInvokeHandler) -> Self {
-        self.external_ops.push((def, handler));
+    pub fn with_command(mut self, def: CommandDef, handler: CommandHandler) -> Self {
+        self.commands.push((def, handler));
+        self
+    }
+
+    pub fn with_turn_context_transform(
+        mut self,
+        priority: i32,
+        transform: Arc<dyn TurnContextTransform>,
+    ) -> Self {
+        self.turn_context_transforms.push((priority, transform));
+        self
+    }
+
+    pub fn with_history_rewriter(
+        mut self,
+        priority: i32,
+        rewriter: Arc<dyn HistoryRewriter>,
+    ) -> Self {
+        self.history_rewriters.push((priority, rewriter));
         self
     }
 }
@@ -843,20 +1006,23 @@ impl SessionPlugin for SpecPlugin {
         for (hook, projector) in &self.spec.tool_result_projectors {
             reg.tool_results().projector(*hook, Arc::clone(projector))?;
         }
-        for hook in &self.spec.turn_committed_hooks {
-            reg.turn().committed(Arc::clone(hook));
-        }
-        for hook in &self.spec.session_restored_hooks {
-            reg.session().restored(Arc::clone(hook));
+        for hook in &self.spec.runtime_event_hooks {
+            reg.session().on_event(Arc::clone(hook));
         }
         for hook in &self.spec.session_config_mutators {
             reg.session().config_mutator(Arc::clone(hook));
         }
-        for hook in &self.spec.session_config_changed_hooks {
-            reg.session().config_changed(Arc::clone(hook));
-        }
         for (def, handler) in &self.spec.external_ops {
             reg.external().op(def.clone(), Arc::clone(handler))?;
+        }
+        for (def, handler) in &self.spec.commands {
+            reg.commands().register(def.clone(), Arc::clone(handler))?;
+        }
+        for (priority, transform) in &self.spec.turn_context_transforms {
+            reg.history().prepare_turn(*priority, Arc::clone(transform));
+        }
+        for (priority, rewriter) in &self.spec.history_rewriters {
+            reg.history().rewrite(*priority, Arc::clone(rewriter));
         }
         Ok(())
     }
@@ -864,11 +1030,16 @@ impl SessionPlugin for SpecPlugin {
 mod runtime_impl;
 mod tool_result_projection_builtin;
 
+#[path = "plugin_builtin/rolling_history.rs"]
+mod rolling_history;
+
+pub use rolling_history::{RollingHistoryConfig, RollingHistoryPluginFactory};
+
 pub use runtime_impl::{
-    ExternalInvokeError, ExternalRegistrations, OutputRegistrations, PluginHost, PluginRegistrar,
-    PluginSession, PromptRegistrations, RuntimeServices, SessionRegistrations,
-    SurfaceRegistrations, ToolCallRegistrations, ToolRegistrations, ToolResultRegistrations,
-    TurnRegistrations,
+    CommandRegistrations, ExternalInvokeError, ExternalRegistrations, HistoryRegistrations,
+    OutputRegistrations, PluginHost, PluginRegistrar, PluginSession, PromptRegistrations,
+    RuntimeServices, SessionRegistrations, SurfaceRegistrations, ToolCallRegistrations,
+    ToolRegistrations, ToolResultRegistrations, TurnRegistrations,
 };
 pub use tool_result_projection_builtin::{
     BuiltinToolResultProjectionPluginFactory, ToolResultProjectionMode,
@@ -895,7 +1066,6 @@ mod tests {
     use super::*;
     use crate::{
         ExecutionMode, PromptSectionName, SessionStateEnvelope, ToolDefinition, ToolParam,
-        TurnInput,
     };
 
     struct MockToolProvider;
@@ -939,116 +1109,7 @@ mod tests {
         session_id: String,
     }
 
-    struct MockSessionManager;
-
-    #[async_trait::async_trait]
-    impl SessionManager for MockSessionManager {
-        async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
-            Ok(SessionStateEnvelope::default())
-        }
-
-        async fn snapshot_session(
-            &self,
-            _session_id: &str,
-        ) -> Result<SessionSnapshot, PluginError> {
-            Ok(SessionStateEnvelope::default())
-        }
-
-        async fn tool_catalog(
-            &self,
-            _session_id: &str,
-        ) -> Result<Vec<serde_json::Value>, PluginError> {
-            Ok(Vec::new())
-        }
-
-        async fn create_session(
-            &self,
-            request: SessionCreateRequest,
-        ) -> Result<SessionHandle, PluginError> {
-            Ok(SessionHandle {
-                session_id: request.session_id.unwrap_or_else(|| "child".to_string()),
-                parent_session_id: request.parent_session_id,
-                policy: SessionPolicy {
-                    provider: crate::Provider::OpenAiGeneric {
-                        api_key: String::new(),
-                        base_url: "https://example.invalid/v1".to_string(),
-                        options: crate::ProviderOptions::default(),
-                    },
-                    model: "mock-model".to_string(),
-                    execution_mode: ExecutionMode::Standard,
-                    context_strategy: crate::default_context_strategy(),
-                    ..Default::default()
-                },
-            })
-        }
-
-        async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
-            Ok(())
-        }
-
-        async fn start_turn_stream(
-            &self,
-            session_id: &str,
-            _input: TurnInput,
-        ) -> Result<SessionTurnHandle, PluginError> {
-            let (tx, rx) = mpsc::channel(1);
-            let turn_id = format!("{session_id}-turn");
-            tokio::spawn(async move {
-                drop(tx);
-            });
-            Ok(SessionTurnHandle {
-                turn_id,
-                session_id: session_id.to_string(),
-                policy: SessionPolicy {
-                    provider: crate::Provider::OpenAiGeneric {
-                        api_key: String::new(),
-                        base_url: "https://example.invalid/v1".to_string(),
-                        options: crate::ProviderOptions::default(),
-                    },
-                    model: "mock-model".to_string(),
-                    execution_mode: ExecutionMode::Standard,
-                    context_strategy: crate::default_context_strategy(),
-                    ..Default::default()
-                },
-                events: rx,
-            })
-        }
-
-        async fn await_turn(&self, session_turn_id: &str) -> Result<AssembledTurn, PluginError> {
-            let session_id = session_turn_id.trim_end_matches("-turn");
-            Ok(AssembledTurn {
-                state: SessionStateEnvelope {
-                    session_id: session_id.to_string(),
-                    policy: SessionPolicy {
-                        execution_mode: ExecutionMode::Standard,
-                        context_strategy: crate::default_context_strategy(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
-                status: crate::TurnStatus::Completed,
-                assistant_output: crate::AssistantOutput {
-                    safe_text: String::new(),
-                    raw_text: String::new(),
-                    state: crate::OutputState::Usable,
-                },
-                has_plugin_visible_output: false,
-                done_reason: crate::DoneReason::ModelStop,
-                execution: crate::ExecutionSummary {
-                    mode: ExecutionMode::Standard,
-                    had_tool_calls: false,
-                    had_code_execution: false,
-                },
-                token_usage: crate::TokenUsage::default(),
-                tool_calls: Vec::new(),
-                errors: Vec::new(),
-            })
-        }
-
-        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
-            Ok(())
-        }
-    }
+    use crate::test_support::MockSessionManager;
 
     impl SessionPlugin for MockPlugin {
         fn id(&self) -> &'static str {
@@ -1121,7 +1182,7 @@ mod tests {
         let contributions = session
             .collect_prompt_contributions(PromptHookContext {
                 session_id: "root".to_string(),
-                host: Arc::new(MockSessionManager),
+                host: Arc::new(MockSessionManager::default()),
                 prompt: crate::PromptContext::default(),
                 state: SessionStateEnvelope::default(),
             })
@@ -1158,7 +1219,7 @@ mod tests {
                 json!({"ok":true}),
                 None,
                 true,
-                Arc::new(MockSessionManager),
+                Arc::new(MockSessionManager::default()),
             )
             .await
             .expect("invoke");
@@ -1179,7 +1240,7 @@ mod tests {
                 "root",
                 "mock.echo",
                 json!({"ok":true}),
-                Arc::new(MockSessionManager),
+                Arc::new(MockSessionManager::default()),
             )
             .await
             .expect("invoke");
@@ -1210,7 +1271,7 @@ mod tests {
                 "child",
                 "mock.echo",
                 json!({"ok":true}),
-                Arc::new(MockSessionManager),
+                Arc::new(MockSessionManager::default()),
             )
             .await
             .expect("invoke");

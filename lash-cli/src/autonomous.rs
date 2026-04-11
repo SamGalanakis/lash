@@ -2,24 +2,18 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::sync::Arc;
 
-use lash::provider::Provider;
 use lash::*;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{PreparedTurn, UiResumeState};
 use crate::input_items::build_items_from_editor_input;
-use crate::{hash12, latest_user_prompt_hash, persist_root_session_state};
+use crate::persist_root_session_state;
 use crate::{plugin_surface, util};
 
 pub(crate) struct AutonomousPersistenceContext {
     pub(crate) store: Arc<Store>,
     pub(crate) dynamic_state: DynamicStateSnapshot,
-    pub(crate) provider: Provider,
-    pub(crate) configured_model: String,
-    pub(crate) context_window: u64,
-    pub(crate) model_variant: Option<String>,
-    pub(crate) toolset_hash: String,
 }
 
 async fn persist_autonomous_runtime_state(
@@ -27,8 +21,8 @@ async fn persist_autonomous_runtime_state(
     persistence: &AutonomousPersistenceContext,
     _state: SessionStateEnvelope,
 ) {
-    let snapshot_hash = match runtime.snapshot_execution_state().await {
-        Ok(Some(blob)) => Some(hash12(&blob)),
+    let execution_state_snapshot = match runtime.snapshot_execution_state().await {
+        Ok(Some(blob)) => Some(blob),
         Ok(None) => None,
         Err(err) => {
             tracing::warn!(
@@ -38,25 +32,13 @@ async fn persist_autonomous_runtime_state(
         }
     };
     let mut state = runtime.export_state();
-
-    let execution_mode = state.policy.execution_mode;
-    let context_strategy = state.policy.context_strategy;
-    let prompt_hash = latest_user_prompt_hash(&state.messages);
+    state.execution_state_snapshot = execution_state_snapshot;
     let ui_state = UiResumeState::default();
     persist_root_session_state(
         &persistence.store,
         &mut state,
         &ui_state,
         &persistence.dynamic_state,
-        &persistence.provider,
-        &persistence.configured_model,
-        persistence.context_window,
-        execution_mode,
-        context_strategy,
-        persistence.model_variant.as_deref(),
-        &persistence.toolset_hash,
-        prompt_hash,
-        snapshot_hash,
     );
     runtime.set_state(state);
 }

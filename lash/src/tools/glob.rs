@@ -3,8 +3,8 @@ use std::path::Path;
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
 use super::{
-    build_path_entry, filesystem_entries_result, parse_optional_bool, parse_optional_usize_arg,
-    require_str,
+    GitignoreMode, build_path_entry, configure_walk_builder, filesystem_entries_result,
+    parse_gitignore_mode, parse_optional_bool, parse_optional_usize_arg, require_str,
 };
 
 /// Find files by glob pattern.
@@ -19,7 +19,7 @@ impl ToolProvider for Glob {
         vec![ToolDefinition {
             name: "glob".into(),
             description: format!(
-                "Find filesystem entries by glob. Returns a record with `items` sorted by `modified_at` (newest first). Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: limit={}, with_lines=false.",
+                "Find filesystem entries by glob. By default this includes hidden files and honors `.gitignore` only inside Git repos. Returns a record with `items` sorted by `modified_at` (newest first). Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: limit={}, with_lines=false, include_hidden=true, gitignore_mode=\"repo_only\".",
                 MAX_RESULTS
             ),
             params: vec![
@@ -49,6 +49,20 @@ impl ToolProvider for Glob {
                     default_value: Some(serde_json::json!(false)),
                     required: false,
                 },
+                ToolParam {
+                    name: "include_hidden".into(),
+                    r#type: "bool".into(),
+                    description: "Include dotfiles and dot-directories. Default: true.".into(),
+                    default_value: Some(serde_json::json!(true)),
+                    required: false,
+                },
+                ToolParam {
+                    name: "gitignore_mode".into(),
+                    r#type: "str".into(),
+                    description: "How `.gitignore` should behave. Use `repo_only` (default: only honor `.gitignore` inside Git repos) or `always` (honor local `.gitignore` files even outside Git repos).".into(),
+                    default_value: Some(serde_json::json!("repo_only")),
+                    required: false,
+                },
             ],
             returns: "dict".into(),
             examples: vec![],
@@ -73,6 +87,15 @@ impl ToolProvider for Glob {
             Ok(v) => v,
             Err(e) => return e,
         };
+        let include_hidden = match parse_optional_bool(args, "include_hidden", true) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let gitignore_mode =
+            match parse_gitignore_mode(args, "gitignore_mode", GitignoreMode::RepoOnly) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
 
         let base = Path::new(base_dir);
         if !base.exists() {
@@ -102,11 +125,9 @@ impl ToolProvider for Glob {
             }
         };
 
-        // Walk the directory tree, respecting .gitignore
-        let walker = ignore::WalkBuilder::new(base)
-            .hidden(false)
-            .git_ignore(true)
-            .build();
+        let mut builder = ignore::WalkBuilder::new(base);
+        configure_walk_builder(&mut builder, include_hidden, gitignore_mode, None);
+        let walker = builder.build();
 
         let mut matches: Vec<(super::PathEntry, std::time::SystemTime)> = Vec::new();
 
@@ -293,5 +314,48 @@ mod tests {
         let arr = items(&result);
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0].get("lines").and_then(|v| v.as_u64()), Some(3));
+    }
+
+    #[tokio::test]
+    async fn test_glob_includes_hidden_by_default() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".hidden.rs"), "").unwrap();
+        let tool = Glob;
+        let result = tool
+            .execute(
+                "glob",
+                &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
+            )
+            .await;
+        assert!(result.success);
+        let paths: Vec<&str> = items(&result)
+            .iter()
+            .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
+            .collect();
+        assert!(paths.iter().any(|p| p.ends_with("/.hidden.rs")));
+    }
+
+    #[tokio::test]
+    async fn test_glob_gitignore_mode_always_honors_gitignore_outside_repo() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "ignored.rs\n").unwrap();
+        std::fs::write(dir.path().join("ignored.rs"), "").unwrap();
+        let tool = Glob;
+        let result = tool
+            .execute(
+                "glob",
+                &json!({
+                    "pattern": "*.rs",
+                    "path": dir.path().to_str().unwrap(),
+                    "gitignore_mode": "always"
+                }),
+            )
+            .await;
+        assert!(result.success);
+        let paths: Vec<&str> = items(&result)
+            .iter()
+            .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
+            .collect();
+        assert!(!paths.iter().any(|p| p.ends_with("/ignored.rs")));
     }
 }

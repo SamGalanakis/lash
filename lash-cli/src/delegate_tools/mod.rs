@@ -491,7 +491,6 @@ mod tests {
                     model_variant: Some("low".to_string()),
                     session_id: Some(session_id.to_string()),
                     execution_mode: lash::ExecutionMode::Standard,
-                    context_strategy: lash::default_context_strategy(),
                     max_context_tokens: Some(128_000),
                     max_turns: None,
                 },
@@ -512,7 +511,6 @@ mod tests {
                     policy: lash::SessionPolicy {
                         session_id: Some("child-session".to_string()),
                         execution_mode: lash::ExecutionMode::Standard,
-                        context_strategy: lash::default_context_strategy(),
                         ..Default::default()
                     },
                     iteration: 2,

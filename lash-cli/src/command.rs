@@ -1,4 +1,4 @@
-use lash::SkillCatalog;
+use lash::{CommandDef, SkillCatalog};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommandSpec {
@@ -7,6 +7,10 @@ pub struct CommandSpec {
     pub usage: &'static str,
     pub description: &'static str,
     pub takes_argument: bool,
+    /// When true, the dispatch loop may invoke this command while a
+    /// turn is streaming instead of queueing it. Reserved for handlers
+    /// that don't mutate runtime / dynamic-tools / provider state.
+    pub runs_out_of_band: bool,
 }
 
 /// Builtin slash-command catalog used for parse, autocomplete, and help.
@@ -17,6 +21,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: "/clear",
         description: "Reset conversation",
         takes_argument: false,
+        runs_out_of_band: false,
     },
     CommandSpec {
         name: "/controls",
@@ -24,13 +29,23 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: "/controls",
         description: "Show keyboard shortcuts",
         takes_argument: false,
+        runs_out_of_band: true,
     },
     CommandSpec {
         name: "/fork",
         aliases: &[],
-        usage: "/fork [prompt]",
+        usage: "/fork",
         description: "Open a forked session in a new terminal",
-        takes_argument: true,
+        takes_argument: false,
+        runs_out_of_band: true,
+    },
+    CommandSpec {
+        name: "/tree",
+        aliases: &[],
+        usage: "/tree",
+        description: "Browse and switch branches in the current session",
+        takes_argument: false,
+        runs_out_of_band: false,
     },
     CommandSpec {
         name: "/version",
@@ -38,6 +53,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: "/version",
         description: "Show lash-cli and lash-sansio versions",
         takes_argument: false,
+        runs_out_of_band: true,
     },
     CommandSpec {
         name: "/info",
@@ -45,6 +61,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: "/info",
         description: "Show current session/runtime info",
         takes_argument: false,
+        runs_out_of_band: true,
     },
     CommandSpec {
         name: "/model",
@@ -52,6 +69,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: "/model [name]",
         description: "Show or switch LLM model",
         takes_argument: true,
+        runs_out_of_band: false,
     },
     CommandSpec {
         name: "/variant",
@@ -59,6 +77,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: "/variant [name]",
         description: "Show or switch model variant",
         takes_argument: true,
+        runs_out_of_band: false,
     },
     CommandSpec {
         name: "/mode",
@@ -66,6 +85,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: "/mode [name]",
         description: "Show current execution mode",
         takes_argument: true,
+        runs_out_of_band: false,
     },
     CommandSpec {
         name: "/provider",
@@ -73,6 +93,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: "/provider",
         description: "Switch, add, or re-authenticate providers",
         takes_argument: false,
+        runs_out_of_band: false,
     },
     CommandSpec {
         name: "/logout",
@@ -80,6 +101,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: "/logout",
         description: "Remove stored credentials for active provider",
         takes_argument: false,
+        runs_out_of_band: false,
     },
     CommandSpec {
         name: "/retry",
@@ -87,6 +109,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: "/retry",
         description: "Replay the previous turn payload",
         takes_argument: false,
+        runs_out_of_band: false,
     },
     CommandSpec {
         name: "/resume",
@@ -94,6 +117,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: "/resume [name]",
         description: "Browse or load a previous session",
         takes_argument: true,
+        runs_out_of_band: false,
     },
     CommandSpec {
         name: "/skills",
@@ -101,6 +125,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: "/skills",
         description: "Browse loaded skills",
         takes_argument: false,
+        runs_out_of_band: true,
     },
     CommandSpec {
         name: "/tools",
@@ -108,6 +133,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: "/tools ...",
         description: "Inspect or edit dynamic tools",
         takes_argument: true,
+        runs_out_of_band: false,
     },
     CommandSpec {
         name: "/reconfigure",
@@ -115,6 +141,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: "/reconfigure ...",
         description: "Apply or inspect pending runtime reconfigure",
         takes_argument: true,
+        runs_out_of_band: false,
     },
     CommandSpec {
         name: "/help",
@@ -122,6 +149,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: "/help",
         description: "Show commands and shortcuts",
         takes_argument: false,
+        runs_out_of_band: true,
     },
     CommandSpec {
         name: "/exit",
@@ -129,6 +157,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: "/exit",
         description: "Quit",
         takes_argument: false,
+        runs_out_of_band: true,
     },
 ];
 
@@ -137,12 +166,23 @@ pub fn catalog() -> &'static [CommandSpec] {
 }
 
 /// Return commands matching the given prefix.
-pub fn completions(prefix: &str, skills: &SkillCatalog) -> Vec<(String, String)> {
+pub fn completions(
+    prefix: &str,
+    skills: &SkillCatalog,
+    plugin_commands: &[CommandDef],
+) -> Vec<(String, String)> {
     let mut results = COMMANDS
         .iter()
         .filter(|spec| spec.name.starts_with(prefix))
         .map(|spec| (spec.name.to_string(), spec.description.to_string()))
         .collect::<Vec<_>>();
+
+    for def in plugin_commands {
+        if def.name.starts_with(prefix) && !results.iter().any(|(existing, _)| existing == def.name)
+        {
+            results.push((def.name.to_string(), def.description.to_string()));
+        }
+    }
 
     if prefix.starts_with('/') {
         for skill in skills.iter() {
@@ -162,15 +202,53 @@ pub fn completions(prefix: &str, skills: &SkillCatalog) -> Vec<(String, String)>
 }
 
 /// Whether accepting autocomplete should append a trailing space.
-pub fn completion_inserts_space(cmd: &str, skills: &SkillCatalog) -> bool {
+pub fn completion_inserts_space(
+    cmd: &str,
+    skills: &SkillCatalog,
+    plugin_commands: &[CommandDef],
+) -> bool {
     if let Some(spec) = COMMANDS.iter().find(|spec| spec.name == cmd) {
         return spec.takes_argument;
+    }
+    if let Some(def) = plugin_commands.iter().find(|def| def.name == cmd) {
+        return def.takes_argument;
     }
     slash_skill_prompt(cmd, skills).is_some()
 }
 
-pub fn runs_out_of_band_while_running(cmd: &Command) -> bool {
-    matches!(cmd, Command::Fork(_))
+/// Whether the dispatch loop is allowed to fire `cmd` while a turn is
+/// streaming (instead of queueing it).
+pub fn runs_out_of_band_while_running(cmd: &Command, plugin_commands: &[CommandDef]) -> bool {
+    let name = match cmd {
+        Command::Clear => "/clear",
+        Command::Controls => "/controls",
+        Command::Fork => "/fork",
+        Command::Tree => "/tree",
+        Command::Version => "/version",
+        Command::Info => "/info",
+        Command::Model(_) => "/model",
+        Command::Variant(_) => "/variant",
+        Command::Mode(_) => "/mode",
+        Command::ChangeProvider => "/provider",
+        Command::Logout => "/logout",
+        Command::Retry => "/retry",
+        Command::Help => "/help",
+        Command::Exit => "/exit",
+        Command::Resume(_) => "/resume",
+        Command::Skills => "/skills",
+        Command::Tools(_) => "/tools",
+        Command::Reconfigure(_) => "/reconfigure",
+        Command::Plugin { name, .. } => {
+            return plugin_commands
+                .iter()
+                .find(|def| def.name == name)
+                .is_some_and(|def| def.runs_out_of_band);
+        }
+    };
+    COMMANDS
+        .iter()
+        .find(|spec| spec.name == name)
+        .is_some_and(|spec| spec.runs_out_of_band)
 }
 
 /// Slash commands recognized by the TUI.
@@ -178,7 +256,8 @@ pub fn runs_out_of_band_while_running(cmd: &Command) -> bool {
 pub enum Command {
     Clear,
     Controls,
-    Fork(Option<String>),
+    Fork,
+    Tree,
     Version,
     Info,
     Model(Option<String>),
@@ -193,6 +272,11 @@ pub enum Command {
     Skills,
     Tools(Option<String>),
     Reconfigure(Option<String>),
+    /// A command registered by a plugin (dispatched via `PluginSession::invoke_command`).
+    Plugin {
+        name: String,
+        argument: Option<String>,
+    },
 }
 
 pub fn slash_skill_prompt(input: &str, skills: &SkillCatalog) -> Option<String> {
@@ -213,7 +297,11 @@ pub fn slash_skill_prompt(input: &str, skills: &SkillCatalog) -> Option<String> 
 }
 
 /// Try to parse a slash command from user input.
-pub fn parse(input: &str, _skills: &SkillCatalog) -> Option<Command> {
+pub fn parse(
+    input: &str,
+    _skills: &SkillCatalog,
+    plugin_commands: &[CommandDef],
+) -> Option<Command> {
     let trimmed = input.trim();
     if !trimmed.starts_with('/') {
         return None;
@@ -223,12 +311,11 @@ pub fn parse(input: &str, _skills: &SkillCatalog) -> Option<Command> {
         Some((c, a)) => (c, Some(a.trim())),
         None => (rest, None),
     };
-    match cmd {
+    let builtin = match cmd {
         "clear" | "new" => Some(Command::Clear),
         "controls" => Some(Command::Controls),
-        "fork" => Some(Command::Fork(
-            arg.filter(|a| !a.is_empty()).map(|a| a.to_string()),
-        )),
+        "fork" => Some(Command::Fork),
+        "tree" => Some(Command::Tree),
         "version" => Some(Command::Version),
         "info" => Some(Command::Info),
         "model" => Some(Command::Model(
@@ -250,7 +337,20 @@ pub fn parse(input: &str, _skills: &SkillCatalog) -> Option<Command> {
         "tools" => Some(Command::Tools(arg.map(|a| a.to_string()))),
         "reconfigure" => Some(Command::Reconfigure(arg.map(|a| a.to_string()))),
         _ => None,
+    };
+    if builtin.is_some() {
+        return builtin;
     }
+    let full_name = format!("/{cmd}");
+    plugin_commands
+        .iter()
+        .find(|def| def.name == full_name)
+        .map(|def| Command::Plugin {
+            name: def.name.to_string(),
+            argument: arg
+                .filter(|a| !a.is_empty() && def.takes_argument)
+                .map(|a| a.to_string()),
+        })
 }
 
 #[cfg(test)]
@@ -279,9 +379,10 @@ mod tests {
     #[test]
     fn parses_all_primary_commands() {
         let skills = SkillCatalog::load();
+        let plugin_commands: Vec<CommandDef> = Vec::new();
         for spec in COMMANDS {
             assert!(
-                parse(spec.name, &skills).is_some(),
+                parse(spec.name, &skills, &plugin_commands).is_some(),
                 "displayed command should parse: {}",
                 spec.name
             );
@@ -291,54 +392,105 @@ mod tests {
     #[test]
     fn parses_aliases_and_arguments() {
         let skills = SkillCatalog::load();
-        assert!(matches!(parse("/new", &skills), Some(Command::Clear)));
-        assert!(matches!(parse("/fork", &skills), Some(Command::Fork(None))));
+        let plugin_commands: Vec<CommandDef> = Vec::new();
         assert!(matches!(
-            parse("/fork draft a reply", &skills),
-            Some(Command::Fork(Some(_)))
+            parse("/new", &skills, &plugin_commands),
+            Some(Command::Clear)
         ));
         assert!(matches!(
-            parse("/provider", &skills),
+            parse("/fork", &skills, &plugin_commands),
+            Some(Command::Fork)
+        ));
+        assert!(matches!(
+            parse("/fork draft a reply", &skills, &plugin_commands),
+            Some(Command::Fork)
+        ));
+        assert!(matches!(
+            parse("/tree", &skills, &plugin_commands),
+            Some(Command::Tree)
+        ));
+        assert!(matches!(
+            parse("/provider", &skills, &plugin_commands),
             Some(Command::ChangeProvider)
         ));
         assert!(matches!(
-            parse("/login", &skills),
+            parse("/login", &skills, &plugin_commands),
             Some(Command::ChangeProvider)
         ));
-        assert!(matches!(parse("/retry", &skills), Some(Command::Retry)));
-        assert!(matches!(parse("/version", &skills), Some(Command::Version)));
-        assert!(matches!(parse("/info", &skills), Some(Command::Info)));
-        assert!(matches!(parse("/quit", &skills), Some(Command::Exit)));
-        assert!(matches!(parse("/?", &skills), Some(Command::Help)));
         assert!(matches!(
-            parse("/model gpt-5.4", &skills),
+            parse("/retry", &skills, &plugin_commands),
+            Some(Command::Retry)
+        ));
+        assert!(matches!(
+            parse("/version", &skills, &plugin_commands),
+            Some(Command::Version)
+        ));
+        assert!(matches!(
+            parse("/info", &skills, &plugin_commands),
+            Some(Command::Info)
+        ));
+        assert!(matches!(
+            parse("/quit", &skills, &plugin_commands),
+            Some(Command::Exit)
+        ));
+        assert!(matches!(
+            parse("/?", &skills, &plugin_commands),
+            Some(Command::Help)
+        ));
+        assert!(matches!(
+            parse("/model gpt-5.4", &skills, &plugin_commands),
             Some(Command::Model(Some(_)))
         ));
         assert!(matches!(
-            parse("/variant high", &skills),
+            parse("/variant high", &skills, &plugin_commands),
             Some(Command::Variant(Some(_)))
         ));
         assert!(matches!(
-            parse("/mode standard", &skills),
+            parse("/mode standard", &skills, &plugin_commands),
             Some(Command::Mode(Some(_)))
         ));
         assert!(matches!(
-            parse("/resume", &skills),
+            parse("/resume", &skills, &plugin_commands),
             Some(Command::Resume(None))
         ));
-        assert!(matches!(parse("/tools", &skills), Some(Command::Tools(_))));
         assert!(matches!(
-            parse("/reconfigure apply", &skills),
+            parse("/tools", &skills, &plugin_commands),
+            Some(Command::Tools(_))
+        ));
+        assert!(matches!(
+            parse("/reconfigure apply", &skills, &plugin_commands),
             Some(Command::Reconfigure(Some(_)))
         ));
-        assert!(parse("/not-a-command", &skills).is_none());
+        assert!(parse("/not-a-command", &skills, &plugin_commands).is_none());
+    }
+
+    #[test]
+    fn parses_plugin_registered_commands() {
+        let skills = SkillCatalog::load();
+        let plugin_commands = vec![CommandDef {
+            name: "/compact",
+            usage: "/compact [focus]",
+            description: "Summarize older messages",
+            takes_argument: true,
+            runs_out_of_band: false,
+        }];
+        assert!(matches!(
+            parse("/compact", &skills, &plugin_commands),
+            Some(Command::Plugin { ref name, argument: None }) if name == "/compact"
+        ));
+        assert!(matches!(
+            parse("/compact focus on X", &skills, &plugin_commands),
+            Some(Command::Plugin { ref name, argument: Some(ref arg) })
+                if name == "/compact" && arg == "focus on X"
+        ));
+        assert!(parse("/compact", &skills, &[]).is_none());
     }
 
     #[test]
     fn completion_spacing_matches_argument_commands() {
         let skills = SkillCatalog::load();
+        let plugin_commands: Vec<CommandDef> = Vec::new();
         for cmd in [
-            "/fork",
             "/model",
             "/variant",
             "/mode",
@@ -346,29 +498,107 @@ mod tests {
             "/tools",
             "/reconfigure",
         ] {
-            assert!(completion_inserts_space(cmd, &skills));
+            assert!(completion_inserts_space(cmd, &skills, &plugin_commands));
         }
 
-        for cmd in ["/clear", "/skills", "/help", "/exit"] {
-            assert!(!completion_inserts_space(cmd, &skills));
+        for cmd in ["/clear", "/fork", "/tree", "/skills", "/help", "/exit"] {
+            assert!(!completion_inserts_space(cmd, &skills, &plugin_commands));
         }
     }
 
     #[test]
-    fn fork_runs_out_of_band_while_running() {
-        assert!(runs_out_of_band_while_running(&Command::Fork(None)));
-        assert!(!runs_out_of_band_while_running(&Command::Help));
-        assert!(!runs_out_of_band_while_running(&Command::Model(None)));
+    fn read_only_commands_run_out_of_band() {
+        let plugin_commands: Vec<CommandDef> = Vec::new();
+        for cmd in [
+            Command::Fork,
+            Command::Help,
+            Command::Version,
+            Command::Info,
+            Command::Skills,
+            Command::Controls,
+            Command::Exit,
+        ] {
+            assert!(
+                runs_out_of_band_while_running(&cmd, &plugin_commands),
+                "expected {:?} to run out-of-band",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn mutating_commands_must_wait_while_running() {
+        let plugin_commands: Vec<CommandDef> = Vec::new();
+        for cmd in [
+            Command::Clear,
+            Command::Tree,
+            Command::Model(None),
+            Command::Variant(None),
+            Command::Mode(None),
+            Command::Resume(None),
+            Command::Tools(None),
+            Command::Reconfigure(None),
+            Command::ChangeProvider,
+            Command::Logout,
+            Command::Retry,
+        ] {
+            assert!(
+                !runs_out_of_band_while_running(&cmd, &plugin_commands),
+                "expected {:?} to wait until the turn finishes",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_commands_respect_their_runs_out_of_band_flag() {
+        let oob = vec![CommandDef {
+            name: "/peek",
+            usage: "/peek",
+            description: "read-only",
+            takes_argument: false,
+            runs_out_of_band: true,
+        }];
+        let waiting = vec![CommandDef {
+            name: "/peek",
+            usage: "/peek",
+            description: "stateful",
+            takes_argument: false,
+            runs_out_of_band: false,
+        }];
+        let cmd = Command::Plugin {
+            name: "/peek".to_string(),
+            argument: None,
+        };
+        assert!(runs_out_of_band_while_running(&cmd, &oob));
+        assert!(!runs_out_of_band_while_running(&cmd, &waiting));
+        assert!(!runs_out_of_band_while_running(&cmd, &[]));
     }
 
     #[test]
     fn completions_include_matching_skills() {
         let skills =
             skill_catalog_with(&[("yolopush", "ship changes"), ("spring-cleaning", "cleanup")]);
-        let results = completions("/s", &skills);
+        let plugin_commands: Vec<CommandDef> = Vec::new();
+        let results = completions("/s", &skills, &plugin_commands);
         assert!(results.iter().any(|(cmd, _)| cmd == "/skills"));
         assert!(results.iter().any(|(cmd, _)| cmd == "/spring-cleaning"));
         assert!(!results.iter().any(|(cmd, _)| cmd == "/yolopush"));
+    }
+
+    #[test]
+    fn completions_include_plugin_commands() {
+        let skills = SkillCatalog::load();
+        let plugin_commands = vec![CommandDef {
+            name: "/compact",
+            usage: "/compact [focus]",
+            description: "Summarize older messages",
+            takes_argument: true,
+            runs_out_of_band: false,
+        }];
+        let results = completions("/c", &skills, &plugin_commands);
+        assert!(results.iter().any(|(cmd, _)| cmd == "/compact"));
+        assert!(results.iter().any(|(cmd, _)| cmd == "/clear"));
     }
 
     #[test]

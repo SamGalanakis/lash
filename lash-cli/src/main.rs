@@ -29,6 +29,7 @@ mod test_support;
 mod text_display;
 mod text_layout;
 mod theme;
+mod tree;
 mod ui_action;
 mod ui_perf;
 mod ui_resume;
@@ -109,10 +110,6 @@ struct Args {
     /// Execution backend (`repl` or `standard`, default: `standard`)
     #[arg(long = "execution-mode")]
     execution_mode: Option<String>,
-
-    /// Context strategy (`rolling_context`)
-    #[arg(long = "context-strategy")]
-    context_strategy: Option<String>,
 
     /// Base URL for the LLM API
     #[arg(long, default_value = "")]
@@ -452,7 +449,7 @@ mod tests {
 
         assert_eq!(normalized.display_text, "/not-a-command details");
         assert_eq!(normalized.effective_text, "/not-a-command details");
-        assert!(command::parse(&normalized.display_text, &skills).is_none());
+        assert!(command::parse(&normalized.display_text, &skills, &[]).is_none());
     }
 
     #[test]

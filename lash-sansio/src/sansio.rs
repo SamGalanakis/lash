@@ -17,7 +17,7 @@ use crate::session_model::message::{MessageOrigin, PartAttachment, data_url_for_
 use crate::session_model::{
     LLM_MAX_RETRIES, LLM_RETRY_DELAYS, Message, MessageRole, Part, PartKind, PromptSectionOverride,
     PruneState, SessionEvent, TokenUsage, TurnTerminationPolicyState, format_tool_result_content,
-    make_error_envelope, make_error_event, render_prompt,
+    fresh_message_id, make_error_envelope, make_error_event, reassign_part_ids, render_prompt,
 };
 use crate::{CheckpointKind, ExecutionMode, PluginMessage, ToolCallRecord, ToolResult};
 
@@ -138,7 +138,6 @@ pub enum Response {
 /// Configuration for a `TurnMachine` instance.
 pub struct TurnMachineConfig {
     pub execution_mode: ExecutionMode,
-    pub context_strategy: crate::ContextStrategy,
     pub model: String,
     pub max_turns: Option<usize>,
     pub model_variant: Option<String>,
@@ -497,13 +496,12 @@ impl TurnMachine {
     }
 
     fn append_checkpoint_messages(&mut self, plugin_messages: &[PluginMessage]) {
-        let base_len = self.messages.len();
         let appended = plugin_messages
             .iter()
             .filter(|message| matches!(message.role, MessageRole::User | MessageRole::System))
             .enumerate()
-            .map(|(offset, message)| {
-                let message_id = format!("m{}", base_len + offset);
+            .map(|(_, message)| {
+                let message_id = fresh_message_id();
                 let mut parts = if message.parts.is_empty() {
                     vec![Part {
                         id: format!("{message_id}.p0"),
@@ -535,9 +533,7 @@ impl TurnMachine {
                         prune_state: PruneState::Intact,
                     }));
                 }
-                for (part_idx, part) in parts.iter_mut().enumerate() {
-                    part.id = format!("{message_id}.p{part_idx}");
-                }
+                reassign_part_ids(&message_id, &mut parts);
                 Message {
                     id: message_id.clone(),
                     role: message.role,
@@ -827,7 +823,7 @@ impl TurnMachine {
                 self.finish();
                 return;
             }
-            let mid = format!("m{}", self.messages.len());
+            let mid = fresh_message_id();
             self.messages.push(Message {
                 id: mid.clone(),
                 role: MessageRole::Assistant,
@@ -848,7 +844,7 @@ impl TurnMachine {
         }
 
         // Build assistant message with tool call parts
-        let asst_id = format!("m{}", self.messages.len());
+        let asst_id = fresh_message_id();
         let mut assistant_parts = Vec::new();
         if !assistant_text.trim().is_empty() {
             assistant_parts.push(Part {
@@ -985,10 +981,8 @@ impl TurnMachine {
         }
 
         if !result_parts.is_empty() {
-            let user_id = format!("m{}", self.messages.len());
-            for (idx, part) in result_parts.iter_mut().enumerate() {
-                part.id = format!("{}.p{}", user_id, idx);
-            }
+            let user_id = fresh_message_id();
+            reassign_part_ids(&user_id, &mut result_parts);
             self.messages.push(Message {
                 id: user_id,
                 role: MessageRole::User,
@@ -1002,7 +996,7 @@ impl TurnMachine {
         if let Some(max_turns) = self.config.max_turns
             && self.iteration >= self.run_offset + max_turns
         {
-            let sys_id = format!("m{}", self.messages.len());
+            let sys_id = fresh_message_id();
             self.messages.push(Message {
                 id: sys_id.clone(),
                 role: MessageRole::System,
@@ -1080,7 +1074,7 @@ impl TurnMachine {
                 self.finish();
                 return;
             }
-            let mid = format!("m{}", self.messages.len());
+            let mid = fresh_message_id();
             self.messages.push(Message {
                 id: mid.clone(),
                 role: MessageRole::Assistant,
@@ -1150,7 +1144,7 @@ impl TurnMachine {
             return;
         };
 
-        let asst_id = format!("m{}", self.messages.len());
+        let asst_id = fresh_message_id();
         let mut parts = Vec::new();
         if !assistant_text.trim().is_empty() {
             parts.push(Part {
@@ -1294,7 +1288,7 @@ impl TurnMachine {
             success,
             duration_ms: 0,
         });
-        let user_id = format!("m{}", self.messages.len());
+        let user_id = fresh_message_id();
         let mut result_parts = vec![Part {
             id: format!("{}.p0", user_id),
             kind: PartKind::ToolResult,
@@ -1428,7 +1422,6 @@ mod tests {
     fn test_config(mode: ExecutionMode) -> TurnMachineConfig {
         TurnMachineConfig {
             execution_mode: mode,
-            context_strategy: crate::default_context_strategy(),
             model: "test-model".to_string(),
             max_turns: None,
             model_variant: None,

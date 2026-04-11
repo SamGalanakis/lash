@@ -13,10 +13,13 @@ pub mod runtime;
 #[cfg(feature = "sqlite-store")]
 mod search;
 pub mod session;
+pub mod session_graph;
 pub mod session_model;
 pub mod skill_catalog;
 pub mod skill_prompt;
 pub mod store;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod tool_dispatch;
 pub mod tools;
 
@@ -85,16 +88,15 @@ pub use dynamic::{
 pub use instructions::InstructionLoaderConfig;
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
 pub use lash_sansio::{
-    CheckpointKind, ContextStrategy, DefaultPromptRenderer, DurableTurnSnapshot, Effect, EffectId,
-    ErrorEnvelope, ExecResponse, ExecutionMode, LlmCallError, Message, MessageOrigin, MessageRole,
-    Part, PartKind, PluginMessage, PluginSurfaceEvent, PromptContext, PromptContribution,
-    PromptOverrideMode, PromptPanel, PromptRenderer, PromptRequest, PromptResponse,
-    PromptSectionName, PromptSectionOverride, PromptSelectionMode, PruneState, Response,
-    SessionEvent, TokenUsage, ToolCallRecord, ToolDefinition, ToolImage, ToolParam, ToolResult,
-    TurnMachine, TurnMachineConfig, UserInputProvenance, UserInputTransform,
-    WAIT_PROMPT_RESUME_EARLY_TOKEN, WAIT_PROMPT_TIMEOUT_TOKEN, default_context_strategy,
-    default_execution_mode, default_prompt_renderer, execution_mode_supported,
-    messages_are_live_resume_safe,
+    CheckpointKind, DefaultPromptRenderer, DurableTurnSnapshot, Effect, EffectId, ErrorEnvelope,
+    ExecResponse, ExecutionMode, LlmCallError, Message, MessageOrigin, MessageRole, Part, PartKind,
+    PluginMessage, PluginSurfaceEvent, PromptContext, PromptContribution, PromptOverrideMode,
+    PromptPanel, PromptRenderer, PromptRequest, PromptResponse, PromptSectionName,
+    PromptSectionOverride, PromptSelectionMode, PruneState, Response, SessionEvent, TokenUsage,
+    ToolCallRecord, ToolDefinition, ToolImage, ToolParam, ToolResult, TurnMachine,
+    TurnMachineConfig, UserInputProvenance, UserInputTransform, WAIT_PROMPT_RESUME_EARLY_TOKEN,
+    WAIT_PROMPT_TIMEOUT_TOKEN, default_execution_mode, default_prompt_renderer,
+    execution_mode_supported, messages_are_live_resume_safe,
 };
 pub use mcp::{McpError, McpServerConfig, McpToolExecutionAdapter, attach_mcp_servers};
 pub use model_info::{
@@ -105,41 +107,51 @@ pub use model_variant::VariantRequestConfig;
 pub use plugin::{
     AssistantResponseHookContext, AssistantResponseTransform, AssistantStreamHookContext,
     AssistantStreamTransform, BuiltinToolResultProjectionPluginFactory, CheckpointHookContext,
-    ExternalInvokeContext, ExternalInvokeError, ExternalOpDef, ExternalOpKind, PluginDirective,
-    PluginError, PluginFactory, PluginHost, PluginOwned, PluginRegistrar, PluginSession,
-    PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry,
-    PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext, PromptRequestHookContext,
-    RuntimeServices, SessionContextSurface, SessionCreateRequest, SessionHandle, SessionManager,
-    SessionParam, SessionPlugin, SessionPluginMode, SessionSnapshot, SessionStartPoint,
-    SessionTurnHandle, SnapshotReader, SnapshotWriter, ToolResultProjectionContext,
-    ToolResultProjectionHook, ToolResultProjectionMode, ToolResultProjectionPluginConfig,
-    ToolResultProjector, ToolSurfaceContribution, TurnHookContext, TurnResultHookContext,
-    plugin_surface_event_renders_visible_output,
+    CommandDef, CommandHandler, CommandInvocation, CommandOutcome, CommandRegistrations,
+    ExternalInvokeContext, ExternalInvokeError, ExternalOpDef, ExternalOpKind, HistoryError,
+    HistoryRegistrations, HistoryRewriteMetadata, HistoryRewriter, HistoryState, PluginDirective,
+    PluginError, PluginFactory, PluginHost, PluginOwned, PluginRegistrar, PluginRuntimeEvent,
+    PluginRuntimeEventHook, PluginSession, PluginSessionContext, PluginSessionSnapshot,
+    PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta, PluginSpec, PluginSpecFactory,
+    PromptHookContext, PromptRequestHookContext, RewriteContext, RewriteTrigger, RuntimeServices,
+    SessionContextSurface, SessionCreateRequest, SessionHandle, SessionManager, SessionParam,
+    SessionPlugin, SessionPluginMode, SessionSnapshot, SessionStartPoint, SessionTurnHandle,
+    SnapshotReader, SnapshotWriter, ToolResultProjectionContext, ToolResultProjectionHook,
+    ToolResultProjectionMode, ToolResultProjectionPluginConfig, ToolResultProjector,
+    ToolSurfaceContribution, TurnContextTransform, TurnHookContext, TurnResultHookContext,
+    TurnTransformContext, plugin_surface_event_renders_visible_output,
 };
 #[cfg(feature = "sqlite-store")]
 pub use plugin::{
     BuiltinPlanModePluginFactory, BuiltinPlanTrackerPluginFactory,
     BuiltinPromptContextPluginFactory, BuiltinUiActivityPluginFactory, PromptContextPluginConfig,
 };
+pub use plugin::{
+    RollingHistoryConfig, RollingHistoryPluginFactory as BuiltinRollingHistoryPluginFactory,
+};
 pub use provider::{LashConfig, Provider, ProviderOptions, RequestTimeout};
 pub use runtime::{
     AssembledTurn, AssistantOutput, CodeOutputRecord, DoneReason, EventSink, ExecutionSummary,
     HostProfile, InputItem, LashRuntime, NoopEventSink, OutputState, PathResolver, PromptUsage,
-    ReplayManifest, RunMode, RuntimeError, RuntimeHostConfig, SanitizerPolicy,
-    SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory, SessionTaskState,
-    SessionTaskStatus, TerminationPolicy, TurnInput, TurnIssue, TurnStatus,
+    RunMode, RuntimeError, RuntimeHostConfig, SanitizerPolicy, SessionStateEnvelope,
+    SessionStoreCreateRequest, SessionStoreFactory, TerminationPolicy, TurnInput, TurnIssue,
+    TurnStatus,
 };
 pub use session::{Session, SessionError, TurnInjectionBridge};
+pub use session_graph::{
+    ExecutionStatePluginBody, INTERNAL_DYNAMIC_STATE_PLUGIN_TYPE,
+    INTERNAL_EXECUTION_STATE_PLUGIN_TYPE, INTERNAL_PLUGIN_SNAPSHOT_PLUGIN_TYPE,
+    INTERNAL_SESSION_CONFIG_PLUGIN_TYPE, INTERNAL_TOOL_CALL_PLUGIN_TYPE,
+    INTERNAL_TURN_STATE_PLUGIN_TYPE, PersistedSessionConfig, PersistedTurnState, SessionGraph,
+    SessionMessageTreeNode, SessionNodePayload, SessionNodeRecord, ToolCallPluginBody,
+};
 pub use session_model::SessionPolicy;
+pub use session_model::context::PreparedContext;
 pub use skill_catalog::{LoadedSkill, SkillCatalog};
 pub use skill_prompt::{
     append_skill_blocks, collect_skill_mentions, collect_skill_mentions_with_ranges,
 };
-pub use store::{
-    RuntimeStore, SessionMeta, SessionPickerInfo, SessionState, TranscriptEntry,
-    TranscriptEntryPayload, TranscriptKeyspace, TurnCheckpoint, group_transcript_entries,
-    semantic_transcript_keyspaces, transcript_messages, transcript_tool_calls,
-};
+pub use store::{RuntimeStore, SessionMeta, SessionPickerInfo};
 #[cfg(feature = "sqlite-store")]
 pub use store::{SqliteStore, Store};
 pub use tools::{DefaultToolPluginDeps, default_tool_plugin_factories};

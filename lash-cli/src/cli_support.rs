@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lash::provider::Provider;
-use lash::session_model::{Message, MessageRole};
+use lash::session_model::Message;
 use lash::*;
 use lash_ui::{UiContext, UiExtensions, UiHostEffect};
 use sha2::{Digest, Sha256};
@@ -10,7 +10,6 @@ use sha2::{Digest, Sha256};
 use crate::ROOT_SESSION_ID;
 use crate::app::{App, DisplayBlock, PreparedTurn, UiResumeState};
 use crate::command;
-use crate::resume_snapshot;
 use crate::ui_resume;
 
 #[derive(Debug, Clone)]
@@ -270,23 +269,6 @@ pub(crate) fn execution_mode_label(mode: ExecutionMode) -> &'static str {
     }
 }
 
-pub(crate) fn parse_context_strategy(input: &str) -> Result<ContextStrategy, String> {
-    match input.trim().to_ascii_lowercase().as_str() {
-        "" => Err("Context strategy cannot be empty.".to_string()),
-        "rolling_context" | "rolling-context" | "rolling" => Ok(ContextStrategy::RollingContext),
-        other => Err(format!(
-            "Unknown context strategy `{other}`. Expected `rolling_context`."
-        )),
-    }
-}
-
-pub(crate) fn resolve_context_strategy(
-    configured: ContextStrategy,
-    requested: Option<ContextStrategy>,
-) -> Result<ContextStrategy, String> {
-    requested.unwrap_or(configured).validate()
-}
-
 pub(crate) fn validate_model_selection(
     provider: &Provider,
     selection: &ModelSelection,
@@ -375,81 +357,59 @@ pub(crate) fn hash12(bytes: &[u8]) -> String {
     format!("{:x}", digest)[..12].to_string()
 }
 
-pub(crate) fn latest_user_prompt_hash(messages: &[Message]) -> Option<String> {
-    messages
-        .iter()
-        .rev()
-        .find(|m| m.role == MessageRole::User)
-        .map(|m| {
-            let text = m
-                .parts
-                .iter()
-                .map(|p| p.content.as_str())
-                .collect::<Vec<_>>()
-                .join(
-                    "
-",
-                );
-            hash12(text.as_bytes())
-        })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_replay_manifest(
-    provider: &Provider,
-    configured_model: &str,
-    context_window: u64,
-    execution_mode: ExecutionMode,
-    context_strategy: ContextStrategy,
-    model_variant: Option<&str>,
-    toolset_hash: &str,
-    prompt_hash: Option<String>,
-    snapshot_hash: Option<String>,
-) -> ReplayManifest {
-    ReplayManifest {
-        version: 3,
-        saved_at: chrono::Utc::now().to_rfc3339(),
-        provider: provider.id().to_string(),
-        configured_model: configured_model.to_string(),
-        resolved_model: provider.resolve_model(configured_model),
-        context_window,
-        execution_mode,
-        context_strategy,
-        model_variant: model_variant.map(str::to_string),
-        toolset_hash: toolset_hash.to_string(),
-        prompt_hash,
-        snapshot_hash,
+fn persisted_session_config(policy: &lash::SessionPolicy) -> lash::PersistedSessionConfig {
+    lash::PersistedSessionConfig {
+        provider_id: policy.provider.id().to_string(),
+        configured_model: policy.model.clone(),
+        context_window: policy.max_context_tokens.unwrap_or_default() as u64,
+        execution_mode: policy.execution_mode,
+        model_variant: policy.model_variant.clone(),
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+fn stamp_runtime_graph_state(
+    graph: &mut lash::SessionGraph,
+    messages: &[Message],
+    tool_calls: &[ToolCallRecord],
+    policy: &lash::SessionPolicy,
+    iteration: usize,
+    token_usage: TokenUsage,
+    last_prompt_usage: Option<PromptUsage>,
+    dynamic_state: &DynamicStateSnapshot,
+    execution_state_snapshot: Option<&[u8]>,
+) {
+    graph.merge_active_projection(messages, tool_calls);
+    let plugin_snapshot = graph.latest_plugin_snapshot();
+    graph.record_runtime_state(
+        &persisted_session_config(policy),
+        &lash::PersistedTurnState {
+            iteration,
+            token_usage,
+            last_prompt_usage,
+        },
+        Some(dynamic_state),
+        plugin_snapshot.as_ref(),
+        execution_state_snapshot,
+    );
+}
+
 pub(crate) fn persist_root_session_state(
     store: &Store,
     state: &mut SessionStateEnvelope,
     ui_state: &UiResumeState,
     dynamic_state: &DynamicStateSnapshot,
-    provider: &Provider,
-    configured_model: &str,
-    context_window: u64,
-    execution_mode: ExecutionMode,
-    context_strategy: ContextStrategy,
-    model_variant: Option<&str>,
-    toolset_hash: &str,
-    prompt_hash: Option<String>,
-    snapshot_hash: Option<String>,
 ) {
-    let manifest = build_replay_manifest(
-        provider,
-        configured_model,
-        context_window,
-        execution_mode,
-        context_strategy,
-        model_variant,
-        toolset_hash,
-        prompt_hash,
-        snapshot_hash,
+    stamp_runtime_graph_state(
+        &mut state.session_graph,
+        &state.messages,
+        &state.tool_calls,
+        &state.policy,
+        state.iteration,
+        state.token_usage.clone(),
+        state.last_prompt_usage.clone(),
+        dynamic_state,
+        state.execution_state_snapshot.as_deref(),
     );
-    state.replay_manifest = Some(manifest.clone());
     tracing::debug!(
         iteration = state.iteration,
         messages = state.messages.len(),
@@ -462,83 +422,46 @@ pub(crate) fn persist_root_session_state(
         "persisting root session state"
     );
     ui_resume::save_ui_resume_state(store, ui_state);
-    store.save_session_state(lash::SessionState {
-        iteration: state.iteration,
-        token_usage: state.token_usage.clone(),
-        last_prompt_usage: state.last_prompt_usage.clone(),
-        task_state: state.task_state.clone(),
-        replay_manifest: Some(manifest),
-        plugin_snapshot: state.plugin_snapshot.clone(),
-        dynamic_state: Some(dynamic_state.clone()),
-        execution_state_snapshot: state.execution_state_snapshot.clone(),
-    });
-    let transcript_keyspaces =
-        lash::semantic_transcript_keyspaces(&state.messages, &state.tool_calls);
-    store.transcript_replace_keyspaces(&transcript_keyspaces);
-    store.clear_live_session_snapshot();
+    store.save_session_graph(state.session_graph.clone());
+    store.clear_live_session_graph();
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn persist_live_runtime_snapshot(
     store: &Store,
+    seed_graph: Option<lash::SessionGraph>,
     snapshot: DurableTurnSnapshot,
     ui_state: &UiResumeState,
     dynamic_state: &DynamicStateSnapshot,
-    provider: &Provider,
-    configured_model: &str,
-    context_window: u64,
-    execution_mode: ExecutionMode,
-    context_strategy: ContextStrategy,
-    model_variant: Option<&str>,
-    toolset_hash: &str,
+    policy: &lash::SessionPolicy,
     token_usage: TokenUsage,
     last_prompt_usage: Option<PromptUsage>,
 ) {
-    let existing = store.load_session_state();
-    let mut state = SessionStateEnvelope {
-        messages: snapshot.messages,
-        tool_calls: snapshot.tool_calls,
-        iteration: snapshot.iteration,
+    let mut graph = seed_graph
+        .or_else(|| store.load_live_session_graph())
+        .or_else(|| store.load_session_graph())
+        .unwrap_or_default();
+    let execution_state_snapshot = graph.latest_execution_state().unwrap_or(None);
+    stamp_runtime_graph_state(
+        &mut graph,
+        &snapshot.messages,
+        &snapshot.tool_calls,
+        policy,
+        snapshot.iteration,
         token_usage,
         last_prompt_usage,
-        task_state: Some(SessionTaskState::LiveResume {
-            status: SessionTaskStatus::Running,
-            saved_at: chrono::Utc::now().to_rfc3339(),
-        }),
-        plugin_snapshot: existing
-            .as_ref()
-            .and_then(|state| state.plugin_snapshot.clone()),
-        execution_state_snapshot: existing
-            .as_ref()
-            .and_then(|state| state.execution_state_snapshot.clone()),
-        ..Default::default()
-    };
-    let prompt_hash = latest_user_prompt_hash(&state.messages);
-    let manifest = build_replay_manifest(
-        provider,
-        configured_model,
-        context_window,
-        execution_mode,
-        context_strategy,
-        model_variant,
-        toolset_hash,
-        prompt_hash,
-        None,
+        dynamic_state,
+        execution_state_snapshot.as_deref(),
     );
-    state.replay_manifest = Some(manifest);
     tracing::debug!(
-        iteration = state.iteration,
-        messages = state.messages.len(),
-        tool_calls = state.tool_calls.len(),
+        iteration = snapshot.iteration,
+        messages = snapshot.messages.len(),
+        tool_calls = snapshot.tool_calls.len(),
         plugin_mode_indicators = ui_state.plugin_mode_indicators.len(),
         plugin_panels = ui_state.plugin_panels.len(),
         "persisting live runtime snapshot"
     );
-    if let Err(err) =
-        resume_snapshot::save_live_resume_snapshot(store, &state, ui_state, dynamic_state)
-    {
-        tracing::warn!(error = %err, "failed to persist live runtime snapshot");
-    }
+    ui_resume::save_ui_resume_state(store, ui_state);
+    store.save_live_session_graph(graph);
 }
 
 pub(crate) fn push_system_message(app: &mut App, msg: impl Into<String>) {
@@ -592,7 +515,6 @@ pub(crate) fn info_text(
     context_window: Option<u64>,
     tool_count: usize,
     toolset_hash: &str,
-    context_strategy: ContextStrategy,
     cwd: &str,
     session_name: Option<&str>,
 ) -> String {
@@ -615,11 +537,7 @@ pub(crate) fn info_text(
         lines.push("context window: unknown".to_string());
     }
 
-    let context_line = match context_strategy {
-        ContextStrategy::RollingContext => "context strategy: rolling_context".to_string(),
-    };
     lines.extend([
-        context_line,
         format!("tools: {} (hash {})", tool_count, toolset_hash),
         format!("cwd: {}", cwd),
         format!("session: {}", session_name.unwrap_or("(not started)")),

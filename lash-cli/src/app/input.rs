@@ -104,8 +104,11 @@ impl App {
 
     /// Update the suggestion list based on current input.
     pub fn update_suggestions(&mut self) {
-        self.editor
-            .update_suggestions(&self.skills, self.ui_extensions.as_ref());
+        self.editor.update_suggestions(
+            &self.skills,
+            self.ui_extensions.as_ref(),
+            &self.plugin_commands,
+        );
     }
 
     /// Whether the suggestion popup is active.
@@ -125,8 +128,11 @@ impl App {
 
     /// Accept the selected suggestion.
     pub fn complete_suggestion(&mut self) {
-        self.editor
-            .complete_suggestion(&self.skills, self.ui_extensions.as_ref());
+        self.editor.complete_suggestion(
+            &self.skills,
+            self.ui_extensions.as_ref(),
+            &self.plugin_commands,
+        );
     }
 
     pub fn ui_extensions(&self) -> &UiExtensions {
@@ -172,6 +178,50 @@ impl App {
     /// Dismiss the session picker without selecting.
     pub fn dismiss_session_picker(&mut self) {
         if matches!(self.overlay, Some(OverlayState::SessionPicker(_))) {
+            self.overlay = None;
+        }
+    }
+
+    pub fn has_tree(&self) -> bool {
+        matches!(&self.overlay, Some(OverlayState::Tree(state)) if !state.is_empty())
+    }
+
+    pub fn tree_up(&mut self) {
+        if let Some(OverlayState::Tree(state)) = &mut self.overlay {
+            state.up();
+        }
+    }
+
+    pub fn tree_down(&mut self) {
+        if let Some(OverlayState::Tree(state)) = &mut self.overlay {
+            state.down();
+        }
+    }
+
+    pub fn tree_prev_branch(&mut self) {
+        if let Some(OverlayState::Tree(state)) = &mut self.overlay {
+            state.collapse_or_jump_prev_branch();
+        }
+    }
+
+    pub fn tree_next_branch(&mut self) {
+        if let Some(OverlayState::Tree(state)) = &mut self.overlay {
+            state.expand_or_jump_next_branch();
+        }
+    }
+
+    pub fn take_tree_pick(&mut self) -> Option<crate::overlay::TreeSelection> {
+        match self.overlay.take() {
+            Some(OverlayState::Tree(mut state)) => state.take_selected(),
+            other => {
+                self.overlay = other;
+                None
+            }
+        }
+    }
+
+    pub fn dismiss_tree(&mut self) {
+        if matches!(self.overlay, Some(OverlayState::Tree(_))) {
             self.overlay = None;
         }
     }
@@ -348,6 +398,17 @@ impl App {
         self.overlay = Some(OverlayState::SkillPicker(PickerState::new(items)));
     }
 
+    pub fn show_tree(&mut self, roots: Vec<lash::SessionMessageTreeNode>) {
+        self.overlay = Some(OverlayState::Tree(crate::overlay::TreeState::new(roots)));
+    }
+
+    pub fn tree_state(&self) -> Option<&crate::overlay::TreeState> {
+        match &self.overlay {
+            Some(OverlayState::Tree(state)) => Some(state),
+            _ => None,
+        }
+    }
+
     pub fn skill_picker_state(&self) -> Option<&PickerState<(String, String)>> {
         match &self.overlay {
             Some(OverlayState::SkillPicker(state)) => Some(state),
@@ -422,12 +483,27 @@ impl App {
     }
 
     pub fn set_input(&mut self, input: String) {
+        // Wholesale replacement (tree-selection seeding, skill
+        // prompt staging, test setup) — not a user edit, so drop
+        // the undo history rather than recording it.
         self.editor.input = input;
         self.editor.cursor_pos = self.editor.input.len();
+        self.editor.clear_undo_history_from_app();
     }
 
     pub fn cursor_pos(&self) -> usize {
         self.editor.cursor_pos
+    }
+
+    /// Undo the most recent edit to the input draft. Bound to
+    /// `Ctrl+Z` in interactive mode.
+    pub fn editor_undo(&mut self) -> bool {
+        self.editor.undo()
+    }
+
+    /// Redo an edit that was previously undone. Bound to `Ctrl+Y`.
+    pub fn editor_redo(&mut self) -> bool {
+        self.editor.redo()
     }
 
     pub fn suggestions(&self) -> &[(String, String)] {

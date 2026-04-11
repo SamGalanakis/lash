@@ -176,21 +176,14 @@ impl ProviderOptions {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct RuntimeSettings {
-    #[serde(default, skip_serializing_if = "is_default_context_strategy")]
-    pub context_strategy: crate::ContextStrategy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub low_tier_delegate_execution_mode: Option<crate::ExecutionMode>,
 }
 
 impl RuntimeSettings {
     fn is_default(&self) -> bool {
-        is_default_context_strategy(&self.context_strategy)
-            && self.low_tier_delegate_execution_mode.is_none()
+        self.low_tier_delegate_execution_mode.is_none()
     }
-}
-
-fn is_default_context_strategy(strategy: &crate::ContextStrategy) -> bool {
-    *strategy == crate::default_context_strategy()
 }
 
 /// Stored configuration: provider credentials + service API keys.
@@ -531,20 +524,12 @@ impl LashConfig {
         self.auxiliary_secrets.tavily_api_key = key;
     }
 
-    pub fn context_strategy(&self) -> crate::ContextStrategy {
-        self.runtime.context_strategy
-    }
-
     pub fn mcp_servers(&self) -> &BTreeMap<String, McpServerConfig> {
         &self.mcp_servers
     }
 
     pub fn set_mcp_servers(&mut self, servers: BTreeMap<String, McpServerConfig>) {
         self.mcp_servers = servers;
-    }
-
-    pub fn set_context_strategy(&mut self, strategy: crate::ContextStrategy) {
-        self.runtime.context_strategy = strategy;
     }
 
     /// Delete ~/.lash/config.json
@@ -853,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_context_strategy_preserved() {
+    fn legacy_runtime_context_strategy_is_ignored() {
         let raw = serde_json::json!({
             "active_provider": "openai-compatible",
             "providers": {
@@ -870,11 +855,12 @@ mod tests {
             }
         });
 
-        let cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
-        assert_eq!(
-            cfg.context_strategy(),
-            crate::ContextStrategy::RollingContext
-        );
+        // Legacy configs may carry a `runtime.context_strategy` field from
+        // before the rolling-history plugin was extracted. The field is no
+        // longer read — this test just confirms deserialization still
+        // succeeds rather than rejecting the unknown key.
+        let _cfg: LashConfig =
+            serde_json::from_value(raw).expect("legacy config json still deserializes");
     }
 
     #[test]

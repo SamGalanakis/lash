@@ -53,6 +53,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         draw_suggestions(frame, app, input_area);
     }
     draw_session_picker(frame, app, history);
+    draw_tree(frame, app, history);
     draw_skill_picker(frame, app, history);
 }
 
@@ -681,6 +682,107 @@ fn draw_session_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
     // box drawn on top of history with no scrim; the user needs at least
     // one explicit signal that it's modal and how to close it.
     let hint = "esc close · ↑↓ choose · enter open";
+    let hint_width = display_width(hint) as u16;
+    if popup.width > hint_width + 4 {
+        frame.write_text(
+            popup.x + popup.width - hint_width - 2,
+            popup.y + popup.height - 1,
+            hint,
+            theme::text_faint_style(),
+            hint_width,
+        );
+    }
+}
+
+fn draw_tree(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
+    let Some(tree) = app.tree_state() else {
+        return;
+    };
+    let rows = tree.rows();
+    let width = 96u16.min(history_area.width.saturating_sub(4));
+    let list_height = rows.len().min(18).max(1) as u16;
+    let height = list_height + 3;
+    if width < 4 || history_area.height < height {
+        return;
+    }
+
+    draw_overlay_scrim(frame, history_area);
+    let popup = centered_rect(history_area, width, height);
+    frame.draw_box(
+        popup,
+        fg(theme::border_faint()),
+        Some(bg(theme::surface_deep())),
+    );
+    frame.write_text(
+        popup.x + 2,
+        popup.y,
+        &format!("Tree ({})", rows.len()),
+        fg(theme::brand()).add_modifier(Modifier::Bold),
+        popup.width.saturating_sub(4),
+    );
+
+    if rows.is_empty() {
+        frame.write_text(
+            popup.x + 2,
+            popup.y + 1,
+            "No messages yet",
+            theme::text_faint_style(),
+            popup.width.saturating_sub(4),
+        );
+    } else {
+        let selected_idx = tree
+            .selected_node_id
+            .as_deref()
+            .and_then(|selected| rows.iter().position(|row| row.node_id == selected))
+            .unwrap_or(0);
+        let scroll = selected_idx.saturating_sub(list_height as usize - 1);
+        for (row_idx, row) in rows
+            .iter()
+            .skip(scroll)
+            .take(list_height as usize)
+            .enumerate()
+        {
+            let selected = scroll + row_idx == selected_idx;
+            let depth_indent = "  ".repeat(row.depth);
+            let branch = if row.has_children {
+                if row.collapsed { "▸" } else { "▾" }
+            } else {
+                "·"
+            };
+            let role = match row.message.role {
+                lash::MessageRole::User => "user",
+                lash::MessageRole::Assistant => "assistant",
+                lash::MessageRole::System => "system",
+            };
+            let preview = crate::overlay::tree_message_preview(&row.message);
+            let active_marker = if row.active { " *" } else { "" };
+            let line = format!(
+                "{}{} {} [{}] {}{}",
+                if selected { "> " } else { "  " },
+                depth_indent,
+                branch,
+                role,
+                preview,
+                active_marker
+            );
+            let style = if selected {
+                fg(theme::text_primary()).bg(theme::surface_raised())
+            } else if row.active {
+                fg(theme::brand())
+            } else {
+                fg(theme::text_subtle())
+            };
+            frame.write_text(
+                popup.x + 1,
+                popup.y + 1 + row_idx as u16,
+                &line,
+                style,
+                popup.width.saturating_sub(2),
+            );
+        }
+    }
+
+    let hint = "esc close · ↑↓ move · enter switch · ctrl/alt ←→ branch";
     let hint_width = display_width(hint) as u16;
     if popup.width > hint_width + 4 {
         frame.write_text(

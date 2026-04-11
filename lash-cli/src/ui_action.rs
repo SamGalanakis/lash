@@ -31,6 +31,12 @@ pub(crate) enum UiAction {
     SessionPickerDown,
     SubmitSessionPicker,
     DismissSessionPicker,
+    TreeUp,
+    TreeDown,
+    TreePrevBranch,
+    TreeNextBranch,
+    SubmitTree,
+    DismissTree,
     SkillPickerUp,
     SkillPickerDown,
     SubmitSkillPicker,
@@ -48,8 +54,8 @@ pub(crate) struct UiActionContext {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum UiActionOutcome {
     None,
-    PromptSubmitted(Option<String>),
     SessionPicked(Option<String>),
+    TreePicked(Option<crate::overlay::TreeSelection>),
     SkillPicked(Option<String>),
 }
 
@@ -148,7 +154,10 @@ pub(crate) fn apply_ui_action(
             app.prompt_backspace();
             UiActionOutcome::None
         }
-        UiAction::SubmitPrompt => UiActionOutcome::PromptSubmitted(app.take_prompt_response()),
+        UiAction::SubmitPrompt => {
+            let _ = app.take_prompt_response();
+            UiActionOutcome::None
+        }
         UiAction::DismissPrompt => {
             app.dismiss_prompt();
             UiActionOutcome::None
@@ -172,6 +181,27 @@ pub(crate) fn apply_ui_action(
         UiAction::SubmitSessionPicker => UiActionOutcome::SessionPicked(app.take_session_pick()),
         UiAction::DismissSessionPicker => {
             app.dismiss_session_picker();
+            UiActionOutcome::None
+        }
+        UiAction::TreeUp => {
+            app.tree_up();
+            UiActionOutcome::None
+        }
+        UiAction::TreeDown => {
+            app.tree_down();
+            UiActionOutcome::None
+        }
+        UiAction::TreePrevBranch => {
+            app.tree_prev_branch();
+            UiActionOutcome::None
+        }
+        UiAction::TreeNextBranch => {
+            app.tree_next_branch();
+            UiActionOutcome::None
+        }
+        UiAction::SubmitTree => UiActionOutcome::TreePicked(app.take_tree_pick()),
+        UiAction::DismissTree => {
+            app.dismiss_tree();
             UiActionOutcome::None
         }
         UiAction::SkillPickerUp => {

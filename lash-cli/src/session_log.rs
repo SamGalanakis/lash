@@ -132,18 +132,8 @@ impl SessionLogger {
         })
     }
 
-    pub fn filename(&self) -> &str {
-        &self.filename
-    }
-
     pub fn store(&self) -> &Arc<Store> {
         &self.store
-    }
-
-    pub fn clone_history_from(&mut self, source_filename: &str) -> Result<()> {
-        let source = Store::open(&sessions_dir().join(source_filename))?;
-        self.store.transcript_copy_from_store(&source);
-        Ok(())
     }
 
     pub fn mark_as_child_of(&self, parent_session_id: &str) -> Result<()> {
@@ -291,25 +281,26 @@ pub fn list_recent_sessions(limit: usize) -> Vec<SessionInfo> {
 pub fn load_session(filename: &str) -> Result<LoadedSession> {
     let store = Store::open(&sessions_dir().join(filename))?;
     if let Some(live) = resume_snapshot::load_live_resume_snapshot(&store) {
-        let messages = live.state.messages.clone();
-        let blocks = projected_blocks_from_state(
-            &live.state.messages,
-            &live.state.tool_calls,
-            &live.ui_state,
-        );
+        let messages = live.graph.project_messages();
+        let tool_calls = live.graph.project_tool_calls();
+        let blocks = projected_blocks_from_state(&messages, &tool_calls, &live.ui_state);
         return Ok(LoadedSession {
             messages,
             blocks,
-            last_token_usage: live.ui_state.last_response_usage.clone(),
+            last_token_usage: live
+                .graph
+                .latest_turn_state()
+                .map(|state| state.token_usage)
+                .unwrap_or_default(),
             plugin_mode_indicators: live.ui_state.plugin_mode_indicators.clone(),
             streaming_output: live.ui_state.streaming_output.clone(),
             streaming_output_hidden: live.ui_state.streaming_output_hidden,
             streaming_output_partial: live.ui_state.streaming_output_partial.clone(),
         });
     }
-    let transcript_entries = store.transcript_load();
-    let messages = lash::transcript_messages(&transcript_entries);
-    let tool_calls = lash::transcript_tool_calls(&transcript_entries);
+    let graph = store.load_session_graph().unwrap_or_default();
+    let messages = graph.project_messages();
+    let tool_calls = graph.project_tool_calls();
     let ui_state = ui_resume::load_ui_resume_state(&store);
     let last_response_usage = ui_state.last_response_usage.clone();
     let plugin_mode_indicators = ui_state.plugin_mode_indicators.clone();
@@ -323,14 +314,17 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
         tool_calls = tool_calls.len(),
         blocks = blocks.len(),
         plugin_mode_indicators = plugin_mode_indicators.len(),
-        transcript_entries = transcript_entries.len(),
+        graph_nodes = graph.nodes.len(),
         "loaded persisted session snapshot"
     );
 
     Ok(LoadedSession {
         messages,
         blocks,
-        last_token_usage: last_response_usage,
+        last_token_usage: graph
+            .latest_turn_state()
+            .map(|state| state.token_usage)
+            .unwrap_or(last_response_usage),
         plugin_mode_indicators,
         streaming_output,
         streaming_output_hidden,
@@ -358,18 +352,29 @@ mod tests {
         ui_state: UiResumeState,
     ) {
         ui_resume::save_ui_resume_state(store, &ui_state);
-        store.save_session_state(lash::SessionState {
-            iteration: 1,
-            token_usage: TokenUsage::default(),
-            last_prompt_usage: None,
-            task_state: None,
-            replay_manifest: None,
-            plugin_snapshot: None,
-            dynamic_state: None,
-            execution_state_snapshot: None,
-        });
-        let keyspaces = lash::semantic_transcript_keyspaces(&messages, &tool_calls);
-        store.transcript_replace_keyspaces(&keyspaces);
+        let mut graph = lash::SessionGraph::from_projection(&messages, &tool_calls);
+        graph.record_runtime_state(
+            &lash::PersistedSessionConfig {
+                provider_id: "openai_generic".to_string(),
+                configured_model: "gpt-test".to_string(),
+                context_window: 200_000,
+                execution_mode: lash::ExecutionMode::Standard,
+                model_variant: None,
+            },
+            &lash::PersistedTurnState {
+                iteration: 1,
+                token_usage: ui_state.last_response_usage.clone(),
+                last_prompt_usage: None,
+            },
+            Some(&lash::DynamicStateSnapshot {
+                base_generation: 0,
+                tools: BTreeMap::new(),
+                enabled_tools: std::collections::BTreeSet::new(),
+            }),
+            None,
+            None,
+        );
+        store.save_session_graph(graph);
     }
 
     fn text_message(role: MessageRole, id: &str, content: &str) -> Message {
@@ -479,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn load_session_projects_activity_blocks_from_semantic_transcript() {
+    fn load_session_projects_activity_blocks_from_session_graph() {
         with_temp_lash_home("lash-session-load-activity-blocks", || {
             let filename = new_session_filename();
             let path = sessions_dir().join(&filename);
@@ -602,48 +607,6 @@ mod tests {
             assert_eq!(sessions[0].filename, "parent.db");
             assert_eq!(sessions[0].message_count, 1);
             assert_eq!(sessions[0].first_message, "hello there");
-        });
-    }
-
-    #[test]
-    fn clone_history_from_copies_transcript_entries() {
-        with_temp_lash_home("lash-session-log-clone", || {
-            let source_filename = "source.db".to_string();
-            let target_filename = "target.db".to_string();
-            let source_store =
-                Arc::new(Store::open(&sessions_dir().join(&source_filename)).unwrap());
-            let target_store =
-                Arc::new(Store::open(&sessions_dir().join(&target_filename)).unwrap());
-            let mut source = SessionLogger::new(
-                Arc::clone(&source_store),
-                source_filename.clone(),
-                "gpt-test",
-                Some("source".into()),
-                "source".into(),
-            )
-            .unwrap();
-            persist_root_snapshot(
-                &source_store,
-                vec![text_message(MessageRole::User, "m0", "hello")],
-                Vec::new(),
-                UiResumeState::default(),
-            );
-
-            let mut target = SessionLogger::new(
-                Arc::clone(&target_store),
-                target_filename.clone(),
-                "gpt-test",
-                Some("target".into()),
-                "target".into(),
-            )
-            .unwrap();
-            target.clone_history_from(&source_filename).unwrap();
-
-            let entries = target_store.transcript_load();
-            let messages = lash::transcript_messages(&entries);
-            assert_eq!(messages.len(), 1);
-            assert_eq!(messages[0].parts[0].content, "hello");
-            let _ = (&mut source, &mut target);
         });
     }
 }

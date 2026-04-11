@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use super::{
-    build_path_entry, filesystem_entries_result, parse_optional_bool, parse_optional_usize_arg,
+    DEFAULT_LS_IGNORE_GLOBS, GitignoreMode, IgnoreProfile, build_path_entry,
+    configure_walk_builder, filesystem_entries_result, parse_gitignore_mode, parse_ignore_profile,
+    parse_optional_bool, parse_optional_usize_arg,
 };
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
@@ -18,7 +20,7 @@ impl ToolProvider for Ls {
         vec![ToolDefinition {
             name: "ls".into(),
             description: format!(
-                "List filesystem entries, respecting `.gitignore`. Returns a record with `items` sorted by path. Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: depth={}, limit={}, with_lines=false.",
+                "List filesystem entries. By default this includes hidden files, honors `.gitignore` only inside Git repos, and applies the `common` ignore profile for typical build/cache/vendor directories. Returns a record with `items` sorted by path. Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: depth={}, limit={}, with_lines=false, include_hidden=true, gitignore_mode=\"repo_only\", ignore_profile=\"common\".",
                 DEFAULT_DEPTH, MAX_ENTRIES
             ),
             params: vec![
@@ -64,6 +66,27 @@ impl ToolProvider for Ls {
                     default_value: Some(serde_json::json!(false)),
                     required: false,
                 },
+                ToolParam {
+                    name: "include_hidden".into(),
+                    r#type: "bool".into(),
+                    description: "Include dotfiles and dot-directories. Default: true.".into(),
+                    default_value: Some(serde_json::json!(true)),
+                    required: false,
+                },
+                ToolParam {
+                    name: "gitignore_mode".into(),
+                    r#type: "str".into(),
+                    description: "How `.gitignore` should behave. Use `repo_only` (default: only honor `.gitignore` inside Git repos) or `always` (honor local `.gitignore` files even outside Git repos).".into(),
+                    default_value: Some(serde_json::json!("repo_only")),
+                    required: false,
+                },
+                ToolParam {
+                    name: "ignore_profile".into(),
+                    r#type: "str".into(),
+                    description: "Built-in ignore set to apply before your custom `ignore` globs. Use `common` (default: skips common build/cache/vendor dirs like `node_modules/`, `dist/`, `target/`) or `none`.".into(),
+                    default_value: Some(serde_json::json!("common")),
+                    required: false,
+                },
             ],
             returns: "dict".into(),
             examples: vec![],
@@ -93,6 +116,20 @@ impl ToolProvider for Ls {
             Ok(v) => v,
             Err(e) => return e,
         };
+        let include_hidden = match parse_optional_bool(args, "include_hidden", true) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let gitignore_mode =
+            match parse_gitignore_mode(args, "gitignore_mode", GitignoreMode::RepoOnly) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+        let ignore_profile =
+            match parse_ignore_profile(args, "ignore_profile", IgnoreProfile::Common) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
 
         let base = Path::new(base_dir);
         if !base.is_dir() {
@@ -100,10 +137,15 @@ impl ToolProvider for Ls {
         }
 
         let mut builder = ignore::WalkBuilder::new(base);
-        builder.hidden(true).git_ignore(true).max_depth(max_depth);
+        configure_walk_builder(&mut builder, include_hidden, gitignore_mode, max_depth);
 
         // Add custom ignore patterns
         let mut overrides = ignore::overrides::OverrideBuilder::new(base);
+        if matches!(ignore_profile, IgnoreProfile::Common) {
+            for pat in DEFAULT_LS_IGNORE_GLOBS {
+                let _ = overrides.add(pat);
+            }
+        }
         for pat in &ignore_patterns {
             let _ = overrides.add(&format!("!{}", pat));
         }
@@ -268,5 +310,101 @@ mod tests {
         let arr = items(&result);
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0].get("lines").and_then(|v| v.as_u64()), Some(2));
+    }
+
+    #[tokio::test]
+    async fn test_ls_includes_hidden_by_default() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".env"), "KEY=value\n").unwrap();
+        let tool = Ls;
+        let result = tool
+            .execute("ls", &json!({"path": dir.path().to_str().unwrap()}))
+            .await;
+        assert!(result.success);
+        let paths: Vec<&str> = items(&result)
+            .iter()
+            .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
+            .collect();
+        assert!(paths.iter().any(|p| p.ends_with("/.env")));
+    }
+
+    #[tokio::test]
+    async fn test_ls_gitignore_mode_repo_only_does_not_apply_gitignore_outside_repo() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(dir.path().join("ignored.txt"), "").unwrap();
+        let tool = Ls;
+        let result = tool
+            .execute("ls", &json!({"path": dir.path().to_str().unwrap()}))
+            .await;
+        assert!(result.success);
+        let paths: Vec<&str> = items(&result)
+            .iter()
+            .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
+            .collect();
+        assert!(paths.iter().any(|p| p.ends_with("/ignored.txt")));
+    }
+
+    #[tokio::test]
+    async fn test_ls_gitignore_mode_always_honors_gitignore_outside_repo() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(dir.path().join("ignored.txt"), "").unwrap();
+        let tool = Ls;
+        let result = tool
+            .execute(
+                "ls",
+                &json!({
+                    "path": dir.path().to_str().unwrap(),
+                    "gitignore_mode": "always"
+                }),
+            )
+            .await;
+        assert!(result.success);
+        let paths: Vec<&str> = items(&result)
+            .iter()
+            .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
+            .collect();
+        assert!(!paths.iter().any(|p| p.ends_with("/ignored.txt")));
+    }
+
+    #[tokio::test]
+    async fn test_ls_common_ignore_profile_is_default() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+        std::fs::write(dir.path().join("node_modules/pkg/index.js"), "").unwrap();
+        let tool = Ls;
+        let result = tool
+            .execute("ls", &json!({"path": dir.path().to_str().unwrap()}))
+            .await;
+        assert!(result.success);
+        let paths: Vec<&str> = items(&result)
+            .iter()
+            .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
+            .collect();
+        assert!(!paths.iter().any(|p| p.contains("node_modules")));
+    }
+
+    #[tokio::test]
+    async fn test_ls_ignore_profile_none_disables_builtin_ignores() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+        std::fs::write(dir.path().join("node_modules/pkg/index.js"), "").unwrap();
+        let tool = Ls;
+        let result = tool
+            .execute(
+                "ls",
+                &json!({
+                    "path": dir.path().to_str().unwrap(),
+                    "ignore_profile": "none"
+                }),
+            )
+            .await;
+        assert!(result.success);
+        let paths: Vec<&str> = items(&result)
+            .iter()
+            .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
+            .collect();
+        assert!(paths.iter().any(|p| p.contains("node_modules")));
     }
 }

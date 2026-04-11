@@ -11,9 +11,9 @@ use crate::session_log::{self, DbSessionStoreFactory, SessionLogger};
 use crate::{Args, setup};
 use crate::{
     autonomous_prompt_overrides, cleanup_terminal, ensure_supported_execution_mode, hash12,
-    info_text, info_text_unconfigured, models_dev_catalog, parse_context_strategy,
-    parse_execution_mode, parse_model_selection, resolve_context_strategy, resolve_model_selection,
-    resolve_model_variant, validate_model_selection,
+    info_text, info_text_unconfigured, models_dev_catalog, parse_execution_mode,
+    parse_model_selection, resolve_model_selection, resolve_model_variant,
+    validate_model_selection,
 };
 
 pub(crate) async fn run(
@@ -141,14 +141,6 @@ pub(crate) async fn run(
     if let Some(ref key) = args.tavily_api_key {
         lash_config.set_tavily_api_key(Some(key.clone()));
     }
-    let requested_context_strategy = match args.context_strategy.as_deref() {
-        Some(raw) => Some(parse_context_strategy(raw).map_err(anyhow::Error::msg)?),
-        None => None,
-    };
-    let context_strategy =
-        resolve_context_strategy(lash_config.context_strategy(), requested_context_strategy)
-            .map_err(anyhow::Error::msg)?;
-    lash_config.set_context_strategy(context_strategy);
     if args.print_prompt.is_none() {
         lash_config.save()?;
     }
@@ -233,7 +225,6 @@ pub(crate) async fn run(
         max_context_tokens: Some(resolved_model_spec.context_window() as usize),
         session_id: run_session_id.clone(),
         execution_mode,
-        context_strategy,
         ..Default::default()
     };
     let host_config = RuntimeHostConfig {
@@ -313,7 +304,6 @@ pub(crate) async fn run(
                 Some(resolved_model_spec.context_window()),
                 dynamic_tools_provider.definitions().len(),
                 &toolset_hash,
-                context_strategy,
                 &cwd,
                 None,
             )
@@ -343,11 +333,6 @@ pub(crate) async fn run(
             AutonomousPersistenceContext {
                 store: Arc::clone(&store),
                 dynamic_state: dynamic_tools.export_state(),
-                provider: session_policy.provider.clone(),
-                configured_model: model.clone(),
-                context_window: resolved_model_spec.context_window(),
-                model_variant: initial_model_variant.clone(),
-                toolset_hash: toolset_hash.clone(),
             },
         )
         .await;

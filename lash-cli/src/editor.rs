@@ -48,7 +48,37 @@ pub struct EditorState {
     pub inflight_image_ids: HashSet<usize>,
     pub pending_large_pastes: Vec<LargePaste>,
     pub large_paste_counters: HashMap<usize, usize>,
+    undo_stack: Vec<EditorSnapshot>,
+    redo_stack: Vec<EditorSnapshot>,
+    /// Kind of the most recent recorded mutation. Used to coalesce
+    /// runs of the same action into a single undo entry — typing
+    /// "hello" records one `Insert` snapshot, not five.
+    last_undo_action: Option<UndoAction>,
 }
+
+#[derive(Clone, Debug)]
+struct EditorSnapshot {
+    input: String,
+    cursor_pos: usize,
+}
+
+/// Coarse category for coalescing consecutive mutations into a single
+/// undo entry. Same kind → one entry. Different kind → new entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UndoAction {
+    Insert,
+    Delete,
+    /// Anything that wholesale replaces the input: large pastes,
+    /// history cycling, programmatic `set_input`, etc. Each of these
+    /// forces its own undo entry so a single `Ctrl+Z` rewinds the
+    /// whole replacement.
+    Bulk,
+}
+
+/// Cap on how many undo entries we keep. 100 entries × ~200 chars of
+/// typical draft content is ~20 KB — cheap, and plenty for a session's
+/// worth of edits.
+const MAX_UNDO_DEPTH: usize = 100;
 
 pub(crate) const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
 
@@ -67,11 +97,87 @@ impl Default for EditorState {
             inflight_image_ids: HashSet::new(),
             pending_large_pastes: Vec::new(),
             large_paste_counters: HashMap::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            last_undo_action: None,
         }
     }
 }
 
 impl EditorState {
+    // ─── Undo / redo ─────────────────────────────────────────────────────────
+
+    fn snapshot(&self) -> EditorSnapshot {
+        EditorSnapshot {
+            input: self.input.clone(),
+            cursor_pos: self.cursor_pos,
+        }
+    }
+
+    fn apply_snapshot(&mut self, snap: EditorSnapshot) {
+        self.input = snap.input;
+        self.cursor_pos = snap.cursor_pos.min(self.input.len());
+        self.clear_selection();
+        self.input_history_idx = None;
+    }
+
+    /// Record an undo entry for a mutation about to happen. Consecutive
+    /// same-kind mutations reuse the existing top-of-stack entry so
+    /// typing one word doesn't produce one undo step per character.
+    /// Any recorded mutation clears the redo stack — you can't redo
+    /// past a fresh edit.
+    fn record_undo(&mut self, kind: UndoAction) {
+        if self.last_undo_action != Some(kind) {
+            self.undo_stack.push(self.snapshot());
+            if self.undo_stack.len() > MAX_UNDO_DEPTH {
+                self.undo_stack.remove(0);
+            }
+            self.last_undo_action = Some(kind);
+        }
+        self.redo_stack.clear();
+    }
+
+    /// Clear both stacks. Called when the draft changes meaning
+    /// entirely (submission, restore from a persisted turn, etc.).
+    fn clear_undo_history(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.last_undo_action = None;
+    }
+
+    /// Public wrapper so callers outside the module (notably
+    /// `App::set_input`) can reset undo history on a wholesale
+    /// replacement without recording a snapshot.
+    pub(crate) fn clear_undo_history_from_app(&mut self) {
+        self.clear_undo_history();
+    }
+
+    /// Pop the most recent undo entry and apply it. Returns `true`
+    /// if a state was restored, `false` if the undo stack was empty.
+    pub fn undo(&mut self) -> bool {
+        let Some(prev) = self.undo_stack.pop() else {
+            return false;
+        };
+        self.redo_stack.push(self.snapshot());
+        self.apply_snapshot(prev);
+        self.last_undo_action = None;
+        true
+    }
+
+    /// Pop the most recent redo entry and apply it. Returns `true`
+    /// if a state was restored, `false` if the redo stack was empty.
+    pub fn redo(&mut self) -> bool {
+        let Some(next) = self.redo_stack.pop() else {
+            return false;
+        };
+        self.undo_stack.push(self.snapshot());
+        self.apply_snapshot(next);
+        self.last_undo_action = None;
+        true
+    }
+
+    // ─── Cursor mapping (pre-existing) ───────────────────────────────────────
+
     /// Find the byte offset within `line` that corresponds to a given display column.
     /// If the target column exceeds the line's display width, returns line.len().
     pub(crate) fn byte_pos_at_display_col(line: &str, target_col: usize) -> usize {
@@ -94,6 +200,7 @@ impl EditorState {
         self.cursor_pos = 0;
         self.clear_selection();
         self.input_history_idx = None;
+        self.clear_undo_history();
         text
     }
 
@@ -122,6 +229,9 @@ impl EditorState {
         self.suggestions.clear();
         self.suggestion_idx = 0;
         self.suggestion_kind = SuggestionKind::None;
+        // Restoring a persisted turn is a wholesale draft swap, not
+        // an undoable edit — drop the undo/redo history.
+        self.clear_undo_history();
     }
 
     fn ordered_selection_bounds(&self) -> (usize, usize) {
@@ -195,6 +305,7 @@ impl EditorState {
         if self.input_history.is_empty() {
             return;
         }
+        self.record_undo(UndoAction::Bulk);
         let idx = match self.input_history_idx {
             None => self.input_history.len() - 1,
             Some(0) => 0,
@@ -214,12 +325,14 @@ impl EditorState {
         match self.input_history_idx {
             None => {}
             Some(i) if i + 1 >= self.input_history.len() => {
+                self.record_undo(UndoAction::Bulk);
                 self.input_history_idx = None;
                 self.input.clear();
                 self.cursor_pos = 0;
                 self.clear_selection();
             }
             Some(i) => {
+                self.record_undo(UndoAction::Bulk);
                 let idx = i + 1;
                 self.input_history_idx = Some(idx);
                 self.input = self.input_history[idx].clone();
@@ -353,6 +466,15 @@ impl EditorState {
     }
 
     pub fn insert_char(&mut self, c: char) {
+        // Word boundaries force a new undo entry so `Ctrl+Z` rewinds
+        // a word at a time rather than a single character. Whitespace
+        // and newlines are the coarse split; anything else coalesces.
+        let kind = if c.is_whitespace() {
+            UndoAction::Bulk
+        } else {
+            UndoAction::Insert
+        };
+        self.record_undo(kind);
         if self.delete_selection() {
             self.input.insert(self.cursor_pos, c);
             self.cursor_pos += c.len_utf8();
@@ -363,6 +485,7 @@ impl EditorState {
     }
 
     pub fn insert_text(&mut self, text: &str) {
+        self.record_undo(UndoAction::Bulk);
         if self.delete_selection() {
             self.input.insert_str(self.cursor_pos, text);
             self.cursor_pos += text.len();
@@ -384,6 +507,7 @@ impl EditorState {
     }
 
     pub fn insert_pasted_text(&mut self, text: &str) {
+        self.record_undo(UndoAction::Bulk);
         let char_count = text.chars().count();
         if char_count > LARGE_PASTE_CHAR_THRESHOLD {
             let placeholder = self.next_large_paste_placeholder(char_count);
@@ -470,6 +594,7 @@ impl EditorState {
     }
 
     pub fn backspace(&mut self) {
+        self.record_undo(UndoAction::Delete);
         if self.delete_selection() {
             return;
         }
@@ -491,6 +616,7 @@ impl EditorState {
     }
 
     pub fn delete(&mut self) {
+        self.record_undo(UndoAction::Delete);
         if self.delete_selection() {
             return;
         }
@@ -586,9 +712,14 @@ impl EditorState {
         let _ = std::fs::write(&path, lines.join("\n"));
     }
 
-    pub fn update_suggestions(&mut self, skills: &SkillCatalog, ui_extensions: &UiExtensions) {
+    pub fn update_suggestions(
+        &mut self,
+        skills: &SkillCatalog,
+        ui_extensions: &UiExtensions,
+        plugin_commands: &[lash::CommandDef],
+    ) {
         if let Some((_slash_pos, prefix)) = self.slash_token_at_cursor() {
-            self.suggestions = command::completions(&prefix, skills);
+            self.suggestions = command::completions(&prefix, skills, plugin_commands);
             for completion in ui_extensions.completions(&prefix) {
                 if !self
                     .suggestions
@@ -669,15 +800,24 @@ impl EditorState {
         }
     }
 
-    pub fn complete_suggestion(&mut self, skills: &SkillCatalog, ui_extensions: &UiExtensions) {
+    pub fn complete_suggestion(
+        &mut self,
+        skills: &SkillCatalog,
+        ui_extensions: &UiExtensions,
+        plugin_commands: &[lash::CommandDef],
+    ) {
         match self.suggestion_kind {
             SuggestionKind::Command => {
                 if let Some((slash_pos, _prefix)) = self.slash_token_at_cursor()
                     && let Some((cmd, _)) = self.suggestions.get(self.suggestion_idx).cloned()
                 {
-                    let needs_arg = ui_extensions
-                        .command_takes_argument(&cmd)
-                        .unwrap_or_else(|| command::completion_inserts_space(&cmd, skills));
+                    self.record_undo(UndoAction::Bulk);
+                    let needs_arg =
+                        ui_extensions
+                            .command_takes_argument(&cmd)
+                            .unwrap_or_else(|| {
+                                command::completion_inserts_space(&cmd, skills, plugin_commands)
+                            });
                     let replacement = if needs_arg { format!("{} ", cmd) } else { cmd };
                     let before = self.input[..slash_pos].to_string();
                     let after = self.input[self.cursor_pos..].to_string();
@@ -692,6 +832,7 @@ impl EditorState {
                 if let Some((at_pos, _partial)) = self.at_token_at_cursor()
                     && let Some((path, _)) = self.suggestions.get(self.suggestion_idx).cloned()
                 {
+                    self.record_undo(UndoAction::Bulk);
                     let before = self.input[..at_pos].to_string();
                     let after = self.input[self.cursor_pos..].to_string();
                     let is_dir = path.ends_with('/');
@@ -757,6 +898,67 @@ impl EditorState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn undo_rewinds_word_typing_and_redo_replays_it() {
+        let mut editor = EditorState::default();
+        for c in "hello".chars() {
+            editor.insert_char(c);
+        }
+        assert_eq!(editor.input, "hello");
+
+        // One undo should rewind the entire word because consecutive
+        // non-whitespace character insertions coalesce.
+        assert!(editor.undo());
+        assert_eq!(editor.input, "");
+        assert_eq!(editor.cursor_pos, 0);
+
+        // Redo should replay the word.
+        assert!(editor.redo());
+        assert_eq!(editor.input, "hello");
+        assert_eq!(editor.cursor_pos, 5);
+
+        // Nothing more to redo.
+        assert!(!editor.redo());
+    }
+
+    #[test]
+    fn whitespace_forces_new_undo_entry() {
+        let mut editor = EditorState::default();
+        for c in "hello world".chars() {
+            editor.insert_char(c);
+        }
+        assert_eq!(editor.input, "hello world");
+
+        // Space and "world" become their own undo group, separate
+        // from "hello". First undo drops "world".
+        assert!(editor.undo());
+        assert_eq!(editor.input, "hello ");
+    }
+
+    #[test]
+    fn new_edit_clears_redo_stack() {
+        let mut editor = EditorState::default();
+        editor.insert_text("draft");
+        assert!(editor.undo());
+        assert_eq!(editor.input, "");
+
+        // A fresh mutation clears the redo history.
+        editor.insert_text("other");
+        assert_eq!(editor.input, "other");
+        assert!(!editor.redo());
+    }
+
+    #[test]
+    fn backspace_is_undoable() {
+        let mut editor = EditorState::default();
+        editor.insert_text("hello");
+        editor.backspace();
+        editor.backspace();
+        assert_eq!(editor.input, "hel");
+        assert!(editor.undo());
+        assert_eq!(editor.input, "hello");
+    }
 
     #[test]
     fn insert_text_replaces_visible_selection() {

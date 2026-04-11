@@ -1,5 +1,6 @@
 use super::runtime::{parse_kv_args, register_builtin_tool};
 use super::*;
+use crate::app::projected_blocks_from_state;
 
 #[derive(Clone)]
 pub(super) enum ParsedSlashCommand {
@@ -11,8 +12,9 @@ pub(super) fn parse_slash_command(
     input: &str,
     skills: &SkillCatalog,
     ui_extensions: &UiExtensions,
+    plugin_commands: &[lash::CommandDef],
 ) -> Option<ParsedSlashCommand> {
-    command::parse(input, skills)
+    command::parse(input, skills, plugin_commands)
         .map(ParsedSlashCommand::Builtin)
         .or_else(|| {
             ui_extensions
@@ -21,9 +23,14 @@ pub(super) fn parse_slash_command(
         })
 }
 
-pub(super) fn slash_command_runs_out_of_band_while_running(cmd: &ParsedSlashCommand) -> bool {
+pub(super) fn slash_command_runs_out_of_band_while_running(
+    cmd: &ParsedSlashCommand,
+    plugin_commands: &[lash::CommandDef],
+) -> bool {
     match cmd {
-        ParsedSlashCommand::Builtin(command) => command::runs_out_of_band_while_running(command),
+        ParsedSlashCommand::Builtin(command) => {
+            command::runs_out_of_band_while_running(command, plugin_commands)
+        }
         ParsedSlashCommand::Ui(command) => command.allow_while_running(),
     }
 }
@@ -82,7 +89,6 @@ pub(super) async fn dispatch_next_queued_turn(
     provider: &mut Provider,
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
-    current_context_strategy: &mut ContextStrategy,
     session_manager: &mut Arc<dyn SessionManager>,
     desired_dynamic: &mut DynamicStateSnapshot,
     pending_reconfigure: &mut bool,
@@ -102,7 +108,12 @@ pub(super) async fn dispatch_next_queued_turn(
             return Ok(());
         }
         let queued = normalize_prepared_turn_for_dispatch(queued, &app.skills);
-        if let Some(cmd) = parse_slash_command(&queued.display_text, &app.skills, ui_extensions) {
+        if let Some(cmd) = parse_slash_command(
+            &queued.display_text,
+            &app.skills,
+            ui_extensions,
+            &app.plugin_commands,
+        ) {
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_slash_command(queued.display_text.clone());
             }
@@ -126,7 +137,6 @@ pub(super) async fn dispatch_next_queued_turn(
                 provider,
                 current_model_variant,
                 current_execution_mode,
-                current_context_strategy,
                 session_manager,
                 desired_dynamic,
                 pending_reconfigure,
@@ -210,7 +220,6 @@ pub(super) async fn handle_parsed_slash_command(
     provider: &mut Provider,
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
-    current_context_strategy: &mut ContextStrategy,
     session_manager: &mut Arc<dyn SessionManager>,
     desired_dynamic: &mut DynamicStateSnapshot,
     pending_reconfigure: &mut bool,
@@ -240,7 +249,6 @@ pub(super) async fn handle_parsed_slash_command(
                 provider,
                 current_model_variant,
                 current_execution_mode,
-                current_context_strategy,
                 session_manager,
                 desired_dynamic,
                 pending_reconfigure,
@@ -278,7 +286,6 @@ async fn handle_slash_command(
     provider: &mut Provider,
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
-    current_context_strategy: &mut ContextStrategy,
     session_manager: &mut Arc<dyn SessionManager>,
     desired_dynamic: &mut DynamicStateSnapshot,
     pending_reconfigure: &mut bool,
@@ -303,17 +310,14 @@ async fn handle_slash_command(
                     session_id: "root".to_string(),
                     policy: SessionPolicy {
                         execution_mode: *current_execution_mode,
-                        context_strategy: *current_context_strategy,
                         ..rt.export_state().policy
                     },
+                    session_graph: lash::SessionGraph::default(),
                     messages: history.clone(),
                     tool_calls: Vec::new(),
                     iteration: *turn_counter,
                     token_usage: app.token_usage.clone(),
                     last_prompt_usage: None,
-                    task_state: None,
-                    replay_manifest: None,
-                    plugin_snapshot: None,
                     execution_state_snapshot: None,
                 });
                 match rt.session_manager() {
@@ -354,7 +358,6 @@ async fn handle_slash_command(
                     context_window,
                     dynamic_tools.definitions().len(),
                     toolset_hash,
-                    *current_context_strategy,
                     &cwd,
                     Some(&session_name),
                 ),
@@ -407,7 +410,6 @@ async fn handle_slash_command(
                     Some(selection.model.clone()),
                     Some(model_variant.clone()),
                     Some(resolved_model_spec.context_window() as usize),
-                    None,
                 )
                 .await;
             }
@@ -451,7 +453,7 @@ async fn handle_slash_command(
                     }
                 };
             if let Some(rt) = runtime.as_mut() {
-                rt.update_session_config(None, None, Some(variant.clone()), None, None)
+                rt.update_session_config(None, None, Some(variant.clone()), None)
                     .await;
             }
             *current_model_variant = variant;
@@ -612,7 +614,6 @@ async fn handle_slash_command(
                             Some(selection.model.clone()),
                             Some(model_variant.clone()),
                             Some(resolved_model_spec.context_window() as usize),
-                            None,
                         )
                         .await;
                     }
@@ -751,7 +752,7 @@ async fn handle_slash_command(
         command::Command::Controls => {
             push_system_message(app, controls_text(app.ui_extensions()));
         }
-        command::Command::Fork(prompt) => {
+        command::Command::Fork => {
             let current_dynamic_state = dynamic_tools.export_state();
             match fork::fork_current_session(
                 runtime.as_mut(),
@@ -778,15 +779,7 @@ async fn handle_slash_command(
                             return Ok(false);
                         }
                     };
-                    let mut child_args = vec!["--resume".to_string(), child_filename.clone()];
-                    if let Some(prompt) = prompt
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|prompt| !prompt.is_empty())
-                    {
-                        child_args.push("--resume-prompt".to_string());
-                        child_args.push(prompt.to_string());
-                    }
+                    let child_args = vec!["--resume".to_string(), child_filename.clone()];
                     match fork::spawn_in_new_terminal(&exe, &child_args) {
                         Ok(()) => push_system_message(
                             app,
@@ -799,6 +792,28 @@ async fn handle_slash_command(
                     }
                 }
                 Err(err) => push_system_message(app, format!("Fork failed: {}", err)),
+            }
+        }
+        command::Command::Tree => {
+            if app.has_prompt() || app.has_wait() {
+                push_system_message(
+                    app,
+                    "Close the active prompt or wait state before opening /tree.",
+                );
+                return Ok(false);
+            }
+            let Some(rt) = runtime.as_ref() else {
+                push_system_message(
+                    app,
+                    "Branch navigation is unavailable while a turn is running.",
+                );
+                return Ok(false);
+            };
+            let roots = crate::tree::current_message_tree(rt);
+            if roots.is_empty() {
+                push_system_message(app, "No messages yet.");
+            } else {
+                app.show_tree(roots);
             }
         }
         command::Command::Help => {
@@ -814,7 +829,6 @@ async fn handle_slash_command(
                     runtime,
                     turn_counter,
                     current_execution_mode,
-                    current_context_strategy,
                     provider,
                     current_model_variant,
                     dynamic_tools,
@@ -1089,6 +1103,64 @@ async fn handle_slash_command(
                 app.scroll_to_bottom();
             } else {
                 app.show_skill_picker(items);
+            }
+        }
+        command::Command::Plugin { name, argument } => {
+            // `/compact` is a built-in plugin command but its handler needs
+            // to mutate the live runtime state, which the in-tree plugin
+            // command surface cannot do today. Route it through
+            // `LashRuntime::rewrite_history` directly so the rewritten
+            // messages take effect immediately.
+            if name == "/compact" {
+                let Some(rt) = runtime.as_mut() else {
+                    push_system_message(app, "Compaction is unavailable while a turn is running.");
+                    return Ok(false);
+                };
+                let trigger = lash::RewriteTrigger::Manual {
+                    instructions: argument,
+                };
+                match rt.rewrite_history(trigger).await {
+                    Ok(true) => {
+                        let state = rt.export_state();
+                        history.clear();
+                        history.extend(state.messages.clone());
+                        app.blocks = projected_blocks_from_state(
+                            &state.messages,
+                            &state.tool_calls,
+                            &app.ui_resume_state(),
+                        );
+                        app.invalidate_height_cache();
+                        app.scroll_to_bottom();
+                        push_system_message(app, "Compaction summary inserted.");
+                    }
+                    Ok(false) => push_system_message(
+                        app,
+                        "Nothing to compact yet — the conversation is still short.",
+                    ),
+                    Err(err) => push_system_message(app, format!("Compaction failed: {err}")),
+                }
+                return Ok(false);
+            }
+            let plugin_session = runtime.as_ref().and_then(|rt| rt.plugin_session());
+            let Some(plugin_session) = plugin_session else {
+                push_system_message(
+                    app,
+                    format!("Plugin command `{name}` is unavailable (no active session)."),
+                );
+                return Ok(false);
+            };
+            match plugin_session
+                .invoke_command(&name, argument, Arc::clone(session_manager))
+                .await
+            {
+                Ok(lash::CommandOutcome::Handled) => {}
+                Ok(lash::CommandOutcome::Message(msg)) => push_system_message(app, msg),
+                Ok(lash::CommandOutcome::Error(msg)) => {
+                    push_system_message(app, format!("Plugin command `{name}` failed: {msg}"));
+                }
+                Err(err) => {
+                    push_system_message(app, format!("Plugin command `{name}` error: {err}"));
+                }
             }
         }
     }

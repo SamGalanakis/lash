@@ -18,15 +18,15 @@ use crate::provider::Provider;
 use crate::sansio::{Effect, LlmCallError, Response, TurnMachine, TurnMachineConfig};
 use crate::session_model::{
     DurableTurnSnapshot, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
-    SessionPolicy, TokenUsage, build_execution_preamble, context::build_context,
-    finalize_prompt_context, make_error_event, transport_stream_events,
+    SessionPolicy, TokenUsage, build_execution_preamble, finalize_prompt_context, fresh_message_id,
+    make_error_event, plugin_message_to_message, reassign_part_ids, transport_stream_events,
 };
 use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call};
 use crate::{
-    CheckpointKind, ContextStrategy, ExecutionMode, ExternalInvokeError, PluginSessionSnapshot,
-    PromptHookContext, PromptRenderer, PromptSectionOverride, RuntimeServices, SandboxMessage,
-    Session, SessionCreateRequest, SessionError, SessionHandle, SessionManager, SessionSnapshot,
-    SessionStartPoint, ToolCallRecord,
+    CheckpointKind, ExecutionMode, ExternalInvokeError, PromptHookContext, PromptRenderer,
+    PromptSectionOverride, RuntimeServices, SandboxMessage, Session, SessionCreateRequest,
+    SessionError, SessionHandle, SessionManager, SessionSnapshot, SessionStartPoint,
+    ToolCallRecord,
 };
 
 /// Runtime execution mode for a turn.
@@ -73,46 +73,14 @@ pub struct PromptUsage {
     pub context_budget_tokens: usize,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionTaskStatus {
-    Running,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SessionTaskState {
-    LiveResume {
-        status: SessionTaskStatus,
-        saved_at: String,
-    },
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct ReplayManifest {
-    pub version: u8,
-    pub saved_at: String,
-    pub provider: String,
-    pub configured_model: String,
-    pub resolved_model: String,
-    pub context_window: u64,
-    pub execution_mode: ExecutionMode,
-    pub context_strategy: ContextStrategy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_variant: Option<String>,
-    pub toolset_hash: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_hash: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot_hash: Option<String>,
-}
-
 /// Serializable host-owned session envelope.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SessionStateEnvelope {
     pub session_id: String,
     #[serde(default)]
     pub policy: SessionPolicy,
+    #[serde(default)]
+    pub session_graph: crate::SessionGraph,
     #[serde(default)]
     pub messages: Vec<Message>,
     #[serde(default)]
@@ -123,12 +91,6 @@ pub struct SessionStateEnvelope {
     pub token_usage: TokenUsage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt_usage: Option<PromptUsage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_state: Option<SessionTaskState>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replay_manifest: Option<ReplayManifest>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plugin_snapshot: Option<PluginSessionSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_state_snapshot: Option<Vec<u8>>,
 }
@@ -317,17 +279,84 @@ impl Default for SessionStateEnvelope {
         Self {
             session_id: "root".to_string(),
             policy: SessionPolicy::default(),
+            session_graph: crate::SessionGraph::default(),
             messages: Vec::new(),
             tool_calls: Vec::new(),
             iteration: 0,
             token_usage: TokenUsage::default(),
             last_prompt_usage: None,
-            task_state: None,
-            replay_manifest: None,
-            plugin_snapshot: None,
             execution_state_snapshot: None,
         }
     }
+}
+
+fn normalize_session_graph(state: &mut SessionStateEnvelope) {
+    if state.session_graph.nodes.is_empty() {
+        state.session_graph =
+            crate::SessionGraph::from_projection(&state.messages, &state.tool_calls);
+    } else if !state.messages.is_empty() || !state.tool_calls.is_empty() {
+        state
+            .session_graph
+            .merge_active_projection(&state.messages, &state.tool_calls);
+    }
+    if let Some(config) = state.session_graph.latest_session_config() {
+        apply_persisted_session_config(&mut state.policy, &config);
+    }
+    if let Some(turn_state) = state.session_graph.latest_turn_state() {
+        state.iteration = turn_state.iteration;
+        state.token_usage = turn_state.token_usage;
+        state.last_prompt_usage = turn_state.last_prompt_usage;
+    }
+    if let Some(execution_state_snapshot) = state.session_graph.latest_execution_state() {
+        state.execution_state_snapshot = execution_state_snapshot;
+    }
+    state.messages = state.session_graph.project_messages();
+    state.tool_calls = state.session_graph.project_tool_calls();
+}
+
+fn persisted_session_config(policy: &SessionPolicy) -> crate::PersistedSessionConfig {
+    crate::PersistedSessionConfig {
+        provider_id: policy.provider.id().to_string(),
+        configured_model: policy.model.clone(),
+        context_window: policy.max_context_tokens.unwrap_or_default() as u64,
+        execution_mode: policy.execution_mode,
+        model_variant: policy.model_variant.clone(),
+    }
+}
+
+fn apply_persisted_session_config(
+    policy: &mut SessionPolicy,
+    config: &crate::PersistedSessionConfig,
+) {
+    if !config.configured_model.is_empty() {
+        policy.model = config.configured_model.clone();
+    }
+    if config.context_window > 0 {
+        policy.max_context_tokens = Some(config.context_window as usize);
+    }
+    policy.execution_mode = config.execution_mode;
+    policy.model_variant = config.model_variant.clone();
+}
+
+fn stamp_session_graph_runtime_state(
+    state: &mut SessionStateEnvelope,
+    plugin_snapshot: Option<crate::PluginSessionSnapshot>,
+    dynamic_state: Option<crate::DynamicStateSnapshot>,
+) {
+    state
+        .session_graph
+        .merge_active_projection(&state.messages, &state.tool_calls);
+    state.session_graph.record_runtime_state(
+        &persisted_session_config(&state.policy),
+        &crate::PersistedTurnState {
+            iteration: state.iteration,
+            token_usage: state.token_usage.clone(),
+            last_prompt_usage: state.last_prompt_usage.clone(),
+        },
+        dynamic_state.as_ref(),
+        plugin_snapshot.as_ref(),
+        state.execution_state_snapshot.as_deref(),
+    );
 }
 
 /// Canonical assistant output payload.
@@ -705,6 +734,7 @@ pub struct LashRuntime {
     session: Option<Session>,
     policy: SessionPolicy,
     host: RuntimeHostConfig,
+    services: RuntimeServices,
     state: SessionStateEnvelope,
     llm_factory: LlmFactory,
     managed_sessions: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
@@ -824,16 +854,18 @@ impl RuntimeSessionManager {
         mut base: SessionSnapshot,
         policy: &SessionPolicy,
     ) -> SessionSnapshot {
+        normalize_session_graph(&mut base);
         base.session_id = session_id;
         base.policy = policy.clone();
-        let existing_messages = base.messages.clone();
         let appended = request
             .initial_messages
             .iter()
-            .enumerate()
-            .map(|(idx, message)| plugin_message_to_message(&existing_messages, idx, message))
+            .map(|message| plugin_message_to_message(message, None))
             .collect::<Vec<_>>();
         base.messages.extend(appended);
+        base.session_graph
+            .merge_active_projection(&base.messages, &base.tool_calls);
+        normalize_session_graph(&mut base);
         base
     }
 
@@ -965,14 +997,10 @@ impl SessionManager for RuntimeSessionManager {
             );
         }
         if let Some(store) = &session_store {
+            let mut persisted_state = runtime.export_state();
+            normalize_session_graph(&mut persisted_state);
             store
-                .save_turn_checkpoint(crate::store::TurnCheckpoint {
-                    session_state: persisted_session_state(&runtime.state),
-                    transcript_keyspaces: crate::store::semantic_transcript_keyspaces(
-                        &runtime.state.messages,
-                        &runtime.state.tool_calls,
-                    ),
-                })
+                .save_turn_checkpoint(persisted_state.session_graph.clone())
                 .await;
         }
         self.registry
@@ -1117,57 +1145,6 @@ async fn emit_session_events(
     }
 }
 
-fn plugin_message_to_message(
-    existing: &[Message],
-    idx: usize,
-    plugin_message: &PluginMessage,
-) -> Message {
-    let msg_idx = existing.len() + idx;
-    let mut parts = if plugin_message.parts.is_empty() {
-        vec![Part {
-            id: format!("m{msg_idx}.p0"),
-            kind: PartKind::Text,
-            content: plugin_message.content.clone(),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            prune_state: PruneState::Intact,
-        }]
-    } else {
-        plugin_message.parts.clone()
-    };
-    let has_image_parts = parts
-        .iter()
-        .any(|part| matches!(part.kind, PartKind::Image));
-    if matches!(plugin_message.role, MessageRole::User) && !has_image_parts {
-        parts.extend(plugin_message.images.iter().map(|bytes| Part {
-            id: String::new(),
-            kind: PartKind::Image,
-            content: String::new(),
-            attachment: Some(crate::session_model::message::PartAttachment {
-                mime: "image/png".to_string(),
-                url: crate::session_model::message::data_url_for_bytes("image/png", bytes),
-                filename: None,
-            }),
-            tool_call_id: None,
-            tool_name: None,
-            prune_state: PruneState::Intact,
-        }));
-    }
-    for (part_idx, part) in parts.iter_mut().enumerate() {
-        part.id = format!("m{msg_idx}.p{part_idx}");
-    }
-    Message {
-        id: format!("m{msg_idx}"),
-        role: plugin_message.role,
-        parts,
-        user_input: None,
-        origin: Some(crate::MessageOrigin::Plugin {
-            plugin_id: "plugin".to_string(),
-        }),
-    }
-}
-
 impl LashRuntime {
     fn has_overflow_error(assembled: &AssembledTurn) -> bool {
         assembled.errors.iter().any(|issue| {
@@ -1212,15 +1189,26 @@ impl LashRuntime {
         if state.policy == SessionPolicy::default() {
             state.policy = policy.clone();
         }
+        normalize_session_graph(&mut state);
         if policy.max_context_tokens.is_none() {
             return Err(SessionError::Protocol(
                 "session policy missing max_context_tokens; hosts must supply explicit model metadata"
                     .to_string(),
             ));
         }
-        let mut session =
-            Session::new(services, &state.session_id, state.policy.execution_mode).await?;
-        if let Some(snapshot) = state.plugin_snapshot.clone() {
+        let mut session = Session::new(
+            services.clone(),
+            &state.session_id,
+            state.policy.execution_mode,
+        )
+        .await?;
+        if let Some(dynamic_state) = state.session_graph.latest_dynamic_state()
+            && let Some(dynamic_tools) = session.plugins().dynamic_tools()
+            && let Err(err) = dynamic_tools.apply_state(dynamic_state)
+        {
+            tracing::warn!("failed to restore dynamic tool state from graph: {err}");
+        }
+        if let Some(snapshot) = state.session_graph.latest_plugin_snapshot() {
             session
                 .plugins()
                 .restore(&snapshot)
@@ -1231,11 +1219,15 @@ impl LashRuntime {
         {
             session.restore_execution_state(&snapshot).await?;
         }
-        session.plugins().on_session_restored(&state).await;
+        session
+            .plugins()
+            .emit_runtime_event(crate::PluginRuntimeEvent::SessionRestored(state.clone()))
+            .await;
         Ok(Self {
             session: Some(session),
             policy,
             host,
+            services,
             state,
             llm_factory: default_llm_factory(),
             managed_sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -1248,8 +1240,16 @@ impl LashRuntime {
     pub fn export_state(&self) -> SessionStateEnvelope {
         let mut state = self.state.clone();
         if let Some(session) = self.session.as_ref() {
-            state.plugin_snapshot = session.plugins().snapshot().ok();
+            stamp_session_graph_runtime_state(
+                &mut state,
+                session.plugins().snapshot().ok(),
+                session
+                    .plugins()
+                    .dynamic_tools()
+                    .map(|tools| tools.export_state()),
+            );
         }
+        normalize_session_graph(&mut state);
         state
     }
 
@@ -1266,6 +1266,48 @@ impl LashRuntime {
 
     pub fn session_manager(&self) -> Result<Arc<dyn SessionManager>, ExternalInvokeError> {
         self.runtime_session_manager()
+    }
+
+    /// The plugin session bound to the currently active runtime session, if any.
+    pub fn plugin_session(&self) -> Option<Arc<crate::PluginSession>> {
+        self.session.as_ref().map(|s| Arc::clone(s.plugins()))
+    }
+
+    /// Run the registered history rewrite pipeline against the current
+    /// state, applying the resulting messages back onto the runtime.
+    /// Returns true when at least one rewriter produced a summary or
+    /// otherwise mutated the message list.
+    pub async fn rewrite_history(
+        &mut self,
+        trigger: crate::RewriteTrigger,
+    ) -> Result<bool, ExternalInvokeError> {
+        let manager = self.runtime_session_manager()?;
+        let Some(plugin_session) = self.session.as_ref().map(|s| Arc::clone(s.plugins())) else {
+            return Err(ExternalInvokeError::Unknown(
+                "runtime session not available".to_string(),
+            ));
+        };
+        let ctx = crate::RewriteContext {
+            session_id: self.state.session_id.clone(),
+            trigger,
+            state: self.state.clone(),
+            host: manager,
+        };
+        let input = crate::HistoryState::from_state(&self.state);
+        let baseline_messages = input.messages.len();
+        let outcome = plugin_session
+            .rewrite_history(&ctx, input)
+            .await
+            .map_err(|err| {
+                ExternalInvokeError::Unknown(format!("rewrite_history failed: {err}"))
+            })?;
+        let mutated =
+            outcome.metadata.produced_summary || outcome.messages.len() != baseline_messages;
+        if mutated {
+            self.state.messages = outcome.messages;
+            self.state.tool_calls = outcome.tool_calls;
+        }
+        Ok(mutated)
     }
 
     fn session_policy(&self) -> SessionPolicy {
@@ -1285,12 +1327,14 @@ impl LashRuntime {
         };
         session
             .plugins()
-            .on_session_config_changed(SessionConfigChangedContext {
-                session_id: self.state.session_id.clone(),
-                previous,
-                current,
-                host,
-            })
+            .emit_runtime_event(crate::PluginRuntimeEvent::SessionConfigChanged(
+                SessionConfigChangedContext {
+                    session_id: self.state.session_id.clone(),
+                    previous,
+                    current,
+                    host,
+                },
+            ))
             .await;
     }
 
@@ -1317,18 +1361,49 @@ impl LashRuntime {
                 self.state.clone(),
             )
             .await;
+        normalize_session_graph(&mut self.state);
     }
 
     /// Replace the host-owned state envelope.
     pub fn set_state(&mut self, state: SessionStateEnvelope) {
+        let mut state = state;
+        normalize_session_graph(&mut state);
         if let Some(session) = self.session.as_ref() {
-            let snapshot = state.plugin_snapshot.clone().unwrap_or_default();
+            let snapshot = state
+                .session_graph
+                .latest_plugin_snapshot()
+                .unwrap_or_default();
             if let Err(err) = session.plugins().restore(&snapshot) {
                 tracing::warn!("failed to restore plugin snapshot in set_state: {err}");
             }
         }
         self.policy = state.policy.clone();
         self.state = state;
+    }
+
+    pub async fn branch_to_node(
+        &mut self,
+        node_id: Option<String>,
+    ) -> Result<SessionStateEnvelope, SessionError> {
+        let mut state = self.export_state();
+        state.session_graph.branch_to(node_id);
+        normalize_session_graph(&mut state);
+
+        let policy = state.policy.clone();
+        let host = self.host.clone();
+        let services = self.services.clone();
+        let llm_factory = Arc::clone(&self.llm_factory);
+        let managed_sessions = Arc::clone(&self.managed_sessions);
+        let managed_turns = Arc::clone(&self.managed_turns);
+
+        let mut rebuilt = Self::from_state(policy, host, services, state).await?;
+        rebuilt.llm_factory = llm_factory;
+        rebuilt.managed_sessions = managed_sessions;
+        rebuilt.managed_turns = managed_turns;
+
+        let exported = rebuilt.export_state();
+        *self = rebuilt;
+        Ok(exported)
     }
 
     /// Update model on the runtime config.
@@ -1361,19 +1436,12 @@ impl LashRuntime {
         self.state.policy.session_id = self.policy.session_id.clone();
     }
 
-    /// Update context strategy on the runtime and persisted envelope.
-    pub fn set_context_strategy(&mut self, context_strategy: ContextStrategy) {
-        self.policy.context_strategy = context_strategy;
-        self.state.policy.context_strategy = context_strategy;
-    }
-
     pub async fn update_session_config(
         &mut self,
         provider: Option<Provider>,
         model: Option<String>,
         model_variant: Option<Option<String>>,
         max_context_tokens: Option<usize>,
-        context_strategy: Option<ContextStrategy>,
     ) {
         let previous = self.session_policy();
         if let Some(provider) = provider {
@@ -1388,26 +1456,14 @@ impl LashRuntime {
         if let Some(max_context_tokens) = max_context_tokens {
             self.policy.max_context_tokens = Some(max_context_tokens);
         }
-        if let Some(context_strategy) = context_strategy {
-            self.policy.context_strategy = context_strategy;
-        }
         self.state.policy = self.policy.clone();
         // Eagerly compact messages if the context window shrunk.
         let new_max = self.policy.max_context_tokens;
         let old_max = previous.max_context_tokens;
-        if (new_max < old_max || (new_max.is_some() && old_max.is_none()))
-            && let Ok(manager) = self.runtime_session_manager()
-            && let Ok(Some(compacted)) = crate::session_model::context::compact_messages_if_needed(
-                &self.state.session_id,
-                &self.state,
-                &self.state.messages,
-                self.state.last_prompt_usage.clone(),
-                new_max,
-                manager,
-            )
-            .await
-        {
-            self.state.messages = compacted;
+        if new_max < old_max || (new_max.is_some() && old_max.is_none()) {
+            let _ = self
+                .rewrite_history(crate::RewriteTrigger::WindowShrink { old_max, new_max })
+                .await;
         }
         self.apply_session_config_mutations(previous.clone()).await;
         self.notify_session_config_changed(previous).await;
@@ -1495,19 +1551,9 @@ impl LashRuntime {
             self.state.messages = saved_messages;
             self.state.last_prompt_usage = saved_prompt_usage;
             // Force-compact: strip images, prune, summarize.
-            if let Ok(manager) = self.runtime_session_manager() {
-                let max = self.policy.max_context_tokens;
-                let session_id = self.state.session_id.clone();
-                let state_snapshot = self.state.clone();
-                let _ = crate::session_model::context::force_compact_messages(
-                    &session_id,
-                    &state_snapshot,
-                    &mut self.state.messages,
-                    max,
-                    manager,
-                )
+            let _ = self
+                .rewrite_history(crate::RewriteTrigger::OverflowRecovery)
                 .await;
-            }
             let retry = self.stream_turn_inner(input, events, cancel).await?;
             self.overflow_recovery_attempted = false;
             return Ok(retry);
@@ -1559,7 +1605,7 @@ impl LashRuntime {
             RunMode::Normal => None,
         };
         if let Some(content) = mode_msg {
-            let sys_id = format!("m{}", messages.len());
+            let sys_id = fresh_message_id();
             messages.push(Message {
                 id: sys_id.clone(),
                 role: MessageRole::System,
@@ -1577,7 +1623,7 @@ impl LashRuntime {
             });
         }
 
-        let user_id = format!("m{}", messages.len());
+        let user_id = fresh_message_id();
         let mut user_parts: Vec<Part> = Vec::new();
         for item in normalized {
             match item {
@@ -1626,6 +1672,7 @@ impl LashRuntime {
                 prune_state: PruneState::Intact,
             });
         }
+        reassign_part_ids(&user_id, &mut user_parts);
         messages.push(Message {
             id: user_id.clone(),
             role: MessageRole::User,
@@ -1638,19 +1685,34 @@ impl LashRuntime {
             code: "plugin_session_manager".to_string(),
             message: err.to_string(),
         })?;
-        let prepared_context = build_context(crate::session_model::context::ContextBuildRequest {
+        let plugin_session = self
+            .session
+            .as_ref()
+            .map(|s| Arc::clone(s.plugins()))
+            .ok_or_else(|| RuntimeError {
+                code: "context_prepare_turn".to_string(),
+                message: "runtime session not available".to_string(),
+            })?;
+        let turn_ctx = crate::TurnTransformContext {
             session_id: self.state.session_id.clone(),
             state: self.export_state(),
-            messages,
             prompt_usage: previous_prompt_usage.clone(),
             max_context_tokens: Some(LashRuntime::max_context_tokens(self)),
             host: Arc::clone(&manager),
-        })
-        .await
-        .map_err(|err| RuntimeError {
-            code: "context_prepare_turn".to_string(),
-            message: err.to_string(),
-        })?;
+        };
+        let prepared_context = plugin_session
+            .prepare_turn_context(
+                &turn_ctx,
+                crate::session_model::context::PreparedContext {
+                    messages,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|err| RuntimeError {
+                code: "context_prepare_turn".to_string(),
+                message: err.to_string(),
+            })?;
         let messages = prepared_context.messages;
         if let Some(session) = self.session.as_mut() {
             session.set_context_surface(
@@ -1900,36 +1962,33 @@ impl LashRuntime {
                 .as_ref()
                 .and_then(|session| session.history_store())
             {
+                let mut persisted_state = finalized.turn.state.clone();
+                persisted_state.session_graph.merge_active_projection(
+                    &persisted_state.messages,
+                    &persisted_state.tool_calls,
+                );
+                normalize_session_graph(&mut persisted_state);
                 store
-                    .save_turn_checkpoint(crate::store::TurnCheckpoint {
-                        session_state: persisted_session_state(&finalized.turn.state),
-                        transcript_keyspaces: crate::store::semantic_transcript_keyspaces(
-                            &finalized.turn.state.messages,
-                            &finalized.turn.state.tool_calls,
-                        ),
-                    })
+                    .save_turn_checkpoint(persisted_state.session_graph.clone())
                     .await;
             }
             emit_session_events_to_sink(events, finalized.events).await;
-            self.state = finalized.turn.state.clone();
+            let mut next_state = finalized.turn.state.clone();
+            next_state
+                .session_graph
+                .merge_active_projection(&next_state.messages, &next_state.tool_calls);
+            normalize_session_graph(&mut next_state);
+            self.state = next_state;
             Ok(finalized.turn)
         } else {
-            self.state = assembled.state.clone();
+            let mut next_state = assembled.state.clone();
+            next_state
+                .session_graph
+                .merge_active_projection(&next_state.messages, &next_state.tool_calls);
+            normalize_session_graph(&mut next_state);
+            self.state = next_state;
             Ok(assembled)
         }
-    }
-}
-
-fn persisted_session_state(state: &SessionStateEnvelope) -> crate::store::SessionState {
-    crate::store::SessionState {
-        iteration: state.iteration,
-        token_usage: state.token_usage.clone(),
-        last_prompt_usage: state.last_prompt_usage.clone(),
-        task_state: state.task_state.clone(),
-        replay_manifest: state.replay_manifest.clone(),
-        plugin_snapshot: state.plugin_snapshot.clone(),
-        dynamic_state: None,
-        execution_state_snapshot: state.execution_state_snapshot.clone(),
     }
 }
 
@@ -2202,14 +2261,12 @@ impl RuntimeTurnDriver {
         SessionStateEnvelope {
             session_id: self.session_id.clone(),
             policy: self.policy.clone(),
+            session_graph: crate::SessionGraph::from_projection(messages, &self.tool_calls),
             messages: messages.to_vec(),
             tool_calls: self.tool_calls.clone(),
             iteration,
             token_usage: TokenUsage::default(),
             last_prompt_usage: None,
-            task_state: None,
-            replay_manifest: None,
-            plugin_snapshot: self.session.plugins().snapshot().ok(),
             execution_state_snapshot: None,
         }
     }
@@ -2375,7 +2432,6 @@ impl RuntimeTurnDriver {
     ) -> TurnMachineConfig {
         TurnMachineConfig {
             execution_mode,
-            context_strategy: self.policy.context_strategy,
             model: preamble.model,
             max_turns: self.policy.max_turns,
             model_variant: self.policy.model_variant.clone(),
@@ -3264,7 +3320,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingStore {
-        transcript: Mutex<Vec<crate::store::TranscriptEntry>>,
+        session_graph: Mutex<Option<crate::SessionGraph>>,
     }
 
     #[async_trait::async_trait]
@@ -3277,50 +3333,21 @@ mod tests {
             None
         }
 
-        async fn save_session_state(&self, _state: crate::store::SessionState) {}
+        async fn save_session_graph(&self, graph: crate::SessionGraph) {
+            *self.session_graph.lock().expect("lock store") = Some(graph);
+        }
 
-        async fn load_session_state(&self) -> Option<crate::store::SessionState> {
+        async fn load_session_graph(&self) -> Option<crate::SessionGraph> {
+            self.session_graph.lock().expect("lock store").clone()
+        }
+
+        async fn save_live_session_graph(&self, _graph: crate::SessionGraph) {}
+
+        async fn load_live_session_graph(&self) -> Option<crate::SessionGraph> {
             None
         }
 
-        async fn save_live_session_snapshot(&self, _snapshot: crate::store::LiveSessionSnapshot) {}
-
-        async fn load_live_session_snapshot(&self) -> Option<crate::store::LiveSessionSnapshot> {
-            None
-        }
-
-        async fn clear_live_session_snapshot(&self) {}
-
-        async fn transcript_clear(&self) {
-            self.transcript.lock().expect("lock store").clear();
-        }
-
-        async fn transcript_load(&self) -> Vec<crate::store::TranscriptEntry> {
-            self.transcript.lock().expect("lock store").clone()
-        }
-
-        async fn transcript_replace_keyspaces(
-            &self,
-            keyspaces: Vec<crate::store::TranscriptKeyspace>,
-        ) {
-            let grouped = keyspaces
-                .into_iter()
-                .flat_map(|keyspace| {
-                    keyspace
-                        .entries
-                        .into_iter()
-                        .map(move |entry| crate::store::TranscriptEntry {
-                            keyspace: keyspace.keyspace.clone(),
-                            stable_key: entry.stable_key,
-                            sort_index: entry.sort_index,
-                            message_role: entry.message_role,
-                            payload_json: entry.payload_json,
-                            search_text: entry.search_text,
-                        })
-                })
-                .collect();
-            *self.transcript.lock().expect("lock store") = grouped;
-        }
+        async fn clear_live_session_graph(&self) {}
 
         async fn save_session_meta(&self, _meta: crate::store::SessionMeta) {}
 
@@ -3681,8 +3708,7 @@ mod tests {
             crate::ToolResultProjectionHook,
             crate::plugin::ToolResultProjector,
         )>,
-        turn_committed: Option<crate::plugin::TurnCommittedHook>,
-        session_config_changed: Option<crate::plugin::SessionConfigChangedHook>,
+        runtime_event: Option<crate::plugin::PluginRuntimeEventHook>,
         external_registrar: Option<Arc<RuntimeExternalRegistrar>>,
     }
 
@@ -3701,11 +3727,8 @@ mod tests {
             for (hook, projector) in &self.tool_result_projectors {
                 reg.tool_results().projector(*hook, Arc::clone(projector))?;
             }
-            if let Some(hook) = &self.turn_committed {
-                reg.turn().committed(Arc::clone(hook));
-            }
-            if let Some(hook) = &self.session_config_changed {
-                reg.session().config_changed(Arc::clone(hook));
+            if let Some(hook) = &self.runtime_event {
+                reg.session().on_event(Arc::clone(hook));
             }
             if let Some(register) = &self.external_registrar {
                 register(reg)?;
@@ -3804,11 +3827,14 @@ mod tests {
                     before_turn: None,
                     checkpoint: None,
                     tool_result_projectors: Vec::new(),
-                    turn_committed: None,
-                    session_config_changed: Some(Arc::new(move |ctx| {
+                    runtime_event: Some(Arc::new(move |event| {
                         let observed = Arc::clone(&observed);
                         Box::pin(async move {
-                            observed.lock().await.push((ctx.previous, ctx.current));
+                            if let crate::plugin::PluginRuntimeEvent::SessionConfigChanged(ctx) =
+                                event
+                            {
+                                observed.lock().await.push((ctx.previous, ctx.current));
+                            }
                             Ok(())
                         })
                     })),
@@ -3831,7 +3857,6 @@ mod tests {
                 Some("gpt-5.4".to_string()),
                 Some(None),
                 Some(123_456),
-                None,
             )
             .await;
 
@@ -3873,8 +3898,7 @@ mod tests {
                     })),
                     checkpoint: None,
                     tool_result_projectors: Vec::new(),
-                    turn_committed: None,
-                    session_config_changed: None,
+                    runtime_event: None,
                     external_registrar: None,
                 }))
             }),
@@ -4200,8 +4224,7 @@ mod tests {
                         })
                     })),
                     tool_result_projectors: Vec::new(),
-                    turn_committed: None,
-                    session_config_changed: None,
+                    runtime_event: None,
                     external_registrar: None,
                 }))
             }),
@@ -4262,8 +4285,7 @@ mod tests {
                     before_turn: None,
                     checkpoint: None,
                     tool_result_projectors: Vec::new(),
-                    turn_committed: None,
-                    session_config_changed: None,
+                    runtime_event: None,
                     external_registrar: Some(Arc::new(|reg| {
                         reg.external().op(
                             crate::ExternalOpDef {
@@ -4480,15 +4502,15 @@ mod tests {
         assert_eq!(handle.session_id, "child-store");
         let stores = factory.stores();
         assert_eq!(stores.len(), 1);
-        let persisted = stores[0].load_session_state().expect("session state");
-        assert_eq!(persisted.iteration, 3);
         let meta = stores[0].load_session_meta().expect("session meta");
         assert_eq!(meta.session_id, "child-store");
         assert_eq!(meta.parent_session_id.as_deref(), Some("root"));
-        let entries = stores[0].transcript_load();
-        let messages = crate::transcript_messages(&entries);
+        let graph = stores[0].load_session_graph().expect("session graph");
+        let messages = graph.project_messages();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].parts[0].content, "parent hello");
+        let turn_state = graph.latest_turn_state().expect("turn state");
+        assert_eq!(turn_state.iteration, 3);
     }
 
     struct MemoryProbeTool;
@@ -5257,10 +5279,13 @@ mod tests {
         let store = Arc::new(crate::store::Store::memory().expect("store"));
         let base_provider: Arc<dyn crate::ToolProvider> = Arc::new(crate::tools::StateStore::new());
         let base_provider_factory = Arc::clone(&base_provider);
-        let plugin_host = crate::PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
-            "base_tools",
-            crate::PluginSpec::new().with_tool_provider(Arc::clone(&base_provider_factory)),
-        ))]);
+        let plugin_host = crate::PluginHost::new(vec![
+            Arc::new(crate::BuiltinRollingHistoryPluginFactory::default()),
+            Arc::new(StaticPluginFactory::new(
+                "base_tools",
+                crate::PluginSpec::new().with_tool_provider(Arc::clone(&base_provider_factory)),
+            )),
+        ]);
         let plugins = plugin_host
             .build_standard_session("root", None)
             .expect("plugins");
@@ -5278,7 +5303,6 @@ mod tests {
             session_id: "root".to_string(),
             policy: SessionPolicy {
                 execution_mode: ExecutionMode::Standard,
-                context_strategy: crate::ContextStrategy::RollingContext,
                 ..runtime.policy.clone()
             },
             messages: vec![
@@ -5375,24 +5399,25 @@ mod tests {
                             }),
                         ),
                     ],
-                    turn_committed: Some(Arc::new(move |turn| {
+                    runtime_event: Some(Arc::new(move |event| {
                         let committed_results = Arc::clone(&committed_results);
                         Box::pin(async move {
-                            committed_results.lock().await.push((
-                                turn.tool_calls
-                                    .first()
-                                    .map(|call| call.result.clone())
-                                    .unwrap_or(serde_json::Value::Null),
-                                turn.state
-                                    .tool_calls
-                                    .first()
-                                    .map(|call| call.result.clone())
-                                    .unwrap_or(serde_json::Value::Null),
-                            ));
+                            if let crate::plugin::PluginRuntimeEvent::TurnCommitted(turn) = event {
+                                committed_results.lock().await.push((
+                                    turn.tool_calls
+                                        .first()
+                                        .map(|call| call.result.clone())
+                                        .unwrap_or(serde_json::Value::Null),
+                                    turn.state
+                                        .tool_calls
+                                        .first()
+                                        .map(|call| call.result.clone())
+                                        .unwrap_or(serde_json::Value::Null),
+                                ));
+                            }
                             Ok(())
                         })
                     })),
-                    session_config_changed: None,
                     external_registrar: None,
                 }))
             }),
@@ -5597,8 +5622,11 @@ mod tests {
             .await
             .expect("turn");
 
-        let items = store.transcript_load().await;
-        let messages = crate::store::transcript_messages(&items);
+        let messages = store
+            .load_session_graph()
+            .await
+            .expect("session graph")
+            .project_messages();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, MessageRole::User);
         assert_eq!(messages[0].parts[0].content, "where did this go?");
@@ -5608,7 +5636,7 @@ mod tests {
 
     #[cfg(feature = "sqlite-store")]
     #[tokio::test]
-    async fn completed_turns_are_persisted_for_transcript_export() {
+    async fn completed_turns_are_persisted_in_session_graph() {
         let transport = MockTransport::new(vec![MockCall {
             stream_events: vec![LlmStreamEvent::Delta("Stored answer".to_string())],
             response: Ok(LlmResponse {
@@ -5656,8 +5684,10 @@ mod tests {
             .await
             .expect("turn");
 
-        let items = store.transcript_load();
-        let messages = crate::store::transcript_messages(&items);
+        let messages = store
+            .load_session_graph()
+            .expect("session graph")
+            .project_messages();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].parts[0].content, "where did this go?");
         assert_eq!(messages[1].parts[0].content, "Stored answer");
@@ -5685,10 +5715,13 @@ mod tests {
         let store = Arc::new(crate::store::Store::memory().expect("store"));
         let base_provider: Arc<dyn crate::ToolProvider> = Arc::new(crate::tools::StateStore::new());
         let base_provider_factory = Arc::clone(&base_provider);
-        let plugin_host = crate::PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
-            "base_tools",
-            crate::PluginSpec::new().with_tool_provider(Arc::clone(&base_provider_factory)),
-        ))]);
+        let plugin_host = crate::PluginHost::new(vec![
+            Arc::new(crate::BuiltinRollingHistoryPluginFactory::default()),
+            Arc::new(StaticPluginFactory::new(
+                "base_tools",
+                crate::PluginSpec::new().with_tool_provider(Arc::clone(&base_provider_factory)),
+            )),
+        ]);
         let plugins = plugin_host
             .build_standard_session("root", None)
             .expect("plugins");
@@ -5701,7 +5734,6 @@ mod tests {
                 session_id: "root".to_string(),
                 policy: SessionPolicy {
                     execution_mode: ExecutionMode::Standard,
-                    context_strategy: crate::ContextStrategy::RollingContext,
                     ..Default::default()
                 },
                 messages: vec![
@@ -5741,7 +5773,6 @@ mod tests {
                 Some("gemini-2.5-flash-image".to_string()),
                 None,
                 Some(32_768),
-                None,
             )
             .await;
 

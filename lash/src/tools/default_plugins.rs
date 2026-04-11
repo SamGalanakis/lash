@@ -27,6 +27,7 @@ pub fn default_tool_plugin_factories(
 
     let mut factories: Vec<Arc<dyn PluginFactory>> = vec![
         Arc::new(crate::BuiltinToolResultProjectionPluginFactory::default()),
+        Arc::new(crate::BuiltinRollingHistoryPluginFactory::default()),
         Arc::new(StaticPluginFactory::new(
             "shell",
             PluginSpec::new()
