@@ -414,6 +414,13 @@ impl App {
         &self.editor.input
     }
 
+    /// True when the editor has pending images or large-paste payloads
+    /// attached, even if `input()` is empty. Used by the input render
+    /// snapshot to decide whether to show the idle placeholder hint.
+    pub fn has_pending_input_payload(&self) -> bool {
+        !self.editor.pending_images.is_empty() || !self.editor.pending_large_pastes.is_empty()
+    }
+
     pub fn set_input(&mut self, input: String) {
         self.editor.input = input;
         self.editor.cursor_pos = self.editor.input.len();

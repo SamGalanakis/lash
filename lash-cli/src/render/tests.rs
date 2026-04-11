@@ -30,20 +30,19 @@ fn skill_catalog_with(names: &[(&str, &str)]) -> SkillCatalog {
 }
 
 #[test]
-fn exploration_detail_lines_are_indented_under_summary() {
-    let activity = ActivityBlock {
-        kind: ActivityKind::Exploration,
-        status: ActivityStatus::Completed,
-        tool_name: "search".into(),
-        summary: "EXPLORE · 1 step".into(),
-        detail_lines: vec!["Read README.md".into()],
-        duration_ms: 0,
-        args: Value::Null,
-        result: Value::Null,
-        artifact: None,
-        children: Vec::new(),
-        extra: None,
-    };
+fn exploration_multi_op_shows_explored_header_with_ops_below() {
+    // Multi-op exploration: "Explored" header + op list indented below.
+    // No step counter — the list makes the count redundant.
+    let activity = ActivityBlock::new(
+        ActivityKind::Exploration,
+        "search",
+        Value::Null,
+        "Explored",
+        ActivityStatus::Completed,
+        Value::Null,
+        0,
+    )
+    .with_detail_lines(vec!["Read README.md".into(), "Read Cargo.toml".into()]);
     let blocks = vec![DisplayBlock::Activity(Box::new(activity))];
     let rendered = render_block(&blocks, 0, 1, 80, 20)
         .into_iter()
@@ -55,8 +54,37 @@ fn exploration_detail_lines_are_indented_under_summary() {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(rendered[0], "· EXPLORE · 1 step");
+    assert_eq!(rendered[0], "· Explored");
     assert_eq!(rendered[1], "    Read README.md");
+    assert_eq!(rendered[2], "    Read Cargo.toml");
+}
+
+#[test]
+fn single_op_exploration_renders_as_one_line() {
+    // Solo exploration tool calls (1 read, 1 grep, etc.) render as a
+    // single top-level bullet — no `EXPLORE` wrapper, no `1 step` body,
+    // no indented detail line duplicating the header.
+    let mut state = crate::activity::ActivityState::default();
+    let blocks = state.blocks_for_tool_call(
+        "read_file",
+        serde_json::json!({ "path": "README.md" }),
+        Value::Null,
+        true,
+        0,
+    );
+    let display_blocks = vec![DisplayBlock::Activity(Box::new(blocks[0].clone()))];
+    let rendered = render_block(&display_blocks, 0, 1, 80, 20)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered[0], "· Read README.md");
+    assert_eq!(rendered.len(), 1, "single-op should not emit detail lines");
 }
 
 #[test]
@@ -256,8 +284,10 @@ fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
     let blocks =
         projected_blocks_from_state(&[message], &[], &crate::app::UiResumeState::default());
 
+    // blocks[0] is the TurnStart marker emitted before the user input.
+    assert!(matches!(blocks.first(), Some(DisplayBlock::TurnStart(_))));
     assert!(matches!(
-        blocks.first(),
+        blocks.get(1),
         Some(DisplayBlock::UserInput(text)) if text == "Use /wholehog"
     ));
     assert!(!blocks.iter().any(|block| match block {
@@ -309,16 +339,17 @@ fn snippet_preview_renders_line_numbered_code_block() {
 
 #[test]
 fn activity_block_renders_snippet_preview_at_default_expand_level() {
-    let activity = ActivityBlock {
-        kind: ActivityKind::GenericTool,
-        status: ActivityStatus::Completed,
-        tool_name: "show_snippet_to_user".into(),
-        summary: "show README.md:1-3 to user".into(),
-        detail_lines: Vec::new(),
-        duration_ms: 0,
-        args: Value::Null,
-        result: Value::Null,
-        artifact: Some(ActivityArtifact::SnippetPreview(SnippetPreviewArtifact {
+    let activity = ActivityBlock::new(
+        ActivityKind::GenericTool,
+        "show_snippet_to_user",
+        Value::Null,
+        "show README.md:1-3 to user",
+        ActivityStatus::Completed,
+        Value::Null,
+        0,
+    )
+    .with_artifact(Some(ActivityArtifact::SnippetPreview(
+        SnippetPreviewArtifact {
             title: Some("README".into()),
             path: "README.md".into(),
             start_line: 1,
@@ -326,10 +357,8 @@ fn activity_block_renders_snippet_preview_at_default_expand_level() {
             content: "# Title".into(),
             render_mode: SnippetRenderMode::Markdown,
             language: Some("markdown".into()),
-        })),
-        children: Vec::new(),
-        extra: None,
-    };
+        },
+    )));
 
     let blocks = vec![DisplayBlock::Activity(Box::new(activity))];
     let rendered = render_block(&blocks, 0, 1, 80, 24)
@@ -353,16 +382,17 @@ fn activity_block_renders_snippet_preview_at_default_expand_level() {
 
 #[test]
 fn activity_block_indents_show_snippet_to_user_preview_under_summary() {
-    let activity = ActivityBlock {
-        kind: ActivityKind::GenericTool,
-        status: ActivityStatus::Completed,
-        tool_name: "show_snippet_to_user".into(),
-        summary: "show lash/src/plugin_builtin/plan_mode.rs:780-786 to user".into(),
-        detail_lines: Vec::new(),
-        duration_ms: 0,
-        args: Value::Null,
-        result: Value::Null,
-        artifact: Some(ActivityArtifact::SnippetPreview(SnippetPreviewArtifact {
+    let activity = ActivityBlock::new(
+        ActivityKind::GenericTool,
+        "show_snippet_to_user",
+        Value::Null,
+        "show lash/src/plugin_builtin/plan_mode.rs:780-786 to user",
+        ActivityStatus::Completed,
+        Value::Null,
+        0,
+    )
+    .with_artifact(Some(ActivityArtifact::SnippetPreview(
+        SnippetPreviewArtifact {
             title: Some("plan-modes blocked tool message".into()),
             path: "lash/src/plugin_builtin/plan_mode.rs".into(),
             start_line: 780,
@@ -370,10 +400,8 @@ fn activity_block_indents_show_snippet_to_user_preview_under_summary() {
             content: "if ctx.tool_name != \"plan_exit\" {\n    return Ok(());\n}".into(),
             render_mode: SnippetRenderMode::Code,
             language: Some("rs".into()),
-        })),
-        children: Vec::new(),
-        extra: None,
-    };
+        },
+    )));
 
     let blocks = vec![DisplayBlock::Activity(Box::new(activity))];
     let rendered = render_block(&blocks, 0, 1, 100, 24)
@@ -631,19 +659,18 @@ fn queue_preview_highlights_multiple_detected_slash_commands() {
 #[test]
 fn shell_activity_renders_live_output_inline_under_tool() {
     let mut app = App::new("test-model".into(), "test".into());
-    app.blocks = vec![DisplayBlock::Activity(Box::new(ActivityBlock {
-        kind: ActivityKind::ShellCommand,
-        status: ActivityStatus::Completed,
-        tool_name: "exec_command".into(),
-        summary: "started cargo check".into(),
-        detail_lines: vec!["Handle shell-1".into()],
-        duration_ms: 0,
-        args: Value::Null,
-        result: Value::Null,
-        artifact: None,
-        children: Vec::new(),
-        extra: None,
-    }))];
+    app.blocks = vec![DisplayBlock::Activity(Box::new(
+        ActivityBlock::new(
+            ActivityKind::ShellCommand,
+            "exec_command",
+            Value::Null,
+            "started cargo check",
+            ActivityStatus::Completed,
+            Value::Null,
+            0,
+        )
+        .with_detail_lines(vec!["Handle shell-1".into()]),
+    ))];
     let now = std::time::Instant::now();
     app.running = true;
     app.live_turn = Some(crate::app::LiveTurnState {

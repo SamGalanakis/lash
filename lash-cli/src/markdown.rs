@@ -496,9 +496,9 @@ impl MdRenderer {
         }
 
         let header_style = Style::default()
-            .fg(theme::SODIUM)
+            .fg(theme::brand())
             .add_modifier(Modifier::Bold);
-        let rule_style = Style::default().fg(theme::ASH_MID);
+        let rule_style = Style::default().fg(theme::border_dim());
         let cell_style = theme::assistant_text();
         let gap = " ".repeat(column_gap);
 
@@ -583,8 +583,13 @@ impl MdRenderer {
             }
 
             // ── Heading ──
+            // Since headings no longer use brand color, their hierarchy
+            // comes from weight + the blank line above and below. compact_lines()
+            // collapses runs of blank lines and trims leading blanks, so this
+            // stays safe at document boundaries and adjacent to other blocks.
             Event::Start(Tag::Heading { level, .. }) => {
                 self.flush_line();
+                self.blank_line();
                 let style = match level {
                     HeadingLevel::H1 | HeadingLevel::H2 => theme::heading(),
                     _ => theme::subheading(),
@@ -594,6 +599,7 @@ impl MdRenderer {
             Event::End(TagEnd::Heading(_)) => {
                 self.flush_line();
                 self.pop_style();
+                self.blank_line();
             }
 
             // ── Paragraph ──
@@ -745,7 +751,10 @@ mod tests {
 
     #[test]
     fn render_heading() {
-        let lines = render_markdown("# Title", 80);
+        let lines = render_markdown_compact("# Title", 80);
+        // Headings render with surrounding blank lines (space is what gives
+        // hierarchy now that brand color is off); compact trims leading and
+        // trailing blanks, so a standalone "# Title" collapses to one line.
         assert_eq!(lines.len(), 1);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("Title"));
@@ -958,32 +967,41 @@ mod tests {
     }
 
     #[test]
-    fn render_markdown_compact_keeps_heading_tight() {
+    fn render_markdown_compact_spaces_headings() {
         let lines = render_markdown_compact("Intro\n\n## Heading\n\nBody", 80);
         let rendered: Vec<String> = lines
             .iter()
             .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
 
+        // Headings must have a blank line above and below. Without brand
+        // color, space + weight is the only thing that makes a heading
+        // read as a section boundary rather than a slightly bold
+        // paragraph line.
         assert_eq!(
             rendered,
             vec![
                 "Intro".to_string(),
                 "".to_string(),
                 "Heading".to_string(),
+                "".to_string(),
                 "Body".to_string(),
             ]
         );
     }
 
     #[test]
-    fn render_markdown_compact_keeps_rule_tight() {
+    fn render_markdown_compact_spaces_rule_and_heading() {
         let lines = render_markdown_compact("Above\n\n---\n\n## Heading\n\nBelow", 80);
         let rendered: Vec<String> = lines
             .iter()
             .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
 
+        // A horizontal rule and a following heading are both section
+        // boundaries and each one claims its own breathing room: rule,
+        // blank, heading, blank, body. The rule does not steal the
+        // heading's leading blank.
         let rule_idx = rendered
             .iter()
             .position(|line| line.contains('\u{2500}'))
@@ -993,13 +1011,14 @@ mod tests {
             .position(|line| line == "Heading")
             .expect("heading line");
 
-        assert_eq!(rule_idx + 1, heading_idx);
-        assert_eq!(rendered[heading_idx + 1], "Below");
+        assert!(rule_idx < heading_idx);
         assert!(
-            !rendered
-                .windows(2)
-                .any(|pair| pair[0].contains('\u{2500}') && pair[1].is_empty()),
-            "rule should not force a blank line after itself: {rendered:#?}"
+            rendered[rule_idx + 1..heading_idx]
+                .iter()
+                .all(|line| line.is_empty()),
+            "rule should be followed by blanks before the heading: {rendered:#?}"
         );
+        assert_eq!(rendered[heading_idx + 1], "");
+        assert_eq!(rendered[heading_idx + 2], "Below");
     }
 }

@@ -41,6 +41,21 @@ pub(crate) fn push_system_message_block_if_new(blocks: &mut Vec<DisplayBlock>, m
     blocks.push(DisplayBlock::SystemMessage(message));
 }
 
+/// Emit a `TurnStart` marker before a `UserInput` block. The marker is the
+/// data-driven source of truth for the horizontal rule between turns. The
+/// first turn in the stream (nothing above it, or only a `Splash` above
+/// it) does not show a separator — the rule is a *between* signal, not a
+/// *leading* ornament.
+pub(crate) fn push_user_turn_start(blocks: &mut Vec<DisplayBlock>) {
+    let show_separator = match blocks.last() {
+        None => false,
+        Some(DisplayBlock::Splash) => false,
+        Some(DisplayBlock::TurnStart(_)) => false,
+        Some(_) => true,
+    };
+    blocks.push(DisplayBlock::TurnStart(Turn::user(show_separator)));
+}
+
 pub(crate) fn blocks_from_transcript(
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
@@ -75,19 +90,19 @@ pub(crate) fn latest_assistant_text_from_messages(messages: &[Message]) -> Optio
 
 pub(crate) fn append_activity_block(blocks: &mut Vec<DisplayBlock>, activity: ActivityBlock) {
     if let Some(DisplayBlock::Activity(existing)) = blocks.last_mut()
-        && existing.kind == ActivityKind::Exploration
-        && activity.kind == ActivityKind::Exploration
-        && existing.status == ActivityStatus::Completed
-        && activity.status == ActivityStatus::Completed
+        && existing.call.kind == ActivityKind::Exploration
+        && activity.call.kind == ActivityKind::Exploration
+        && existing.result.status == ActivityStatus::Completed
+        && activity.result.status == ActivityStatus::Completed
         && merge_exploration_activity(existing, activity.clone())
     {
         return;
     }
     if let Some(DisplayBlock::Activity(existing)) = blocks.last_mut()
-        && existing.kind == ActivityKind::Edit
-        && activity.kind == ActivityKind::Edit
-        && existing.status == ActivityStatus::Completed
-        && activity.status == ActivityStatus::Completed
+        && existing.call.kind == ActivityKind::Edit
+        && activity.call.kind == ActivityKind::Edit
+        && existing.result.status == ActivityStatus::Completed
+        && activity.result.status == ActivityStatus::Completed
         && merge_edit_activity(existing, activity.clone())
     {
         return;
@@ -232,6 +247,7 @@ fn append_transcript_blocks(
                     .map(|user_input| user_input.display_text.clone())
                     .unwrap_or_else(|| rendered_message_text(message));
                 if !text.is_empty() {
+                    push_user_turn_start(blocks);
                     blocks.push(DisplayBlock::UserInput(text));
                 }
             }

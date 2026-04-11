@@ -32,14 +32,17 @@ pub(crate) fn prompt_section_label(text: &str, inner_w: usize) -> Line<'static> 
     let mut spans = vec![Span::styled(
         text.to_string(),
         Style::default()
-            .fg(theme::SODIUM)
+            .fg(theme::brand())
             .add_modifier(Modifier::Bold),
     )];
     if fill_width > 0 {
-        spans.push(Span::styled(" ", Style::default().fg(theme::ASH)));
+        spans.push(Span::styled(
+            " ",
+            Style::default().fg(theme::border_faint()),
+        ));
         spans.push(Span::styled(
             "─".repeat(fill_width),
-            Style::default().fg(theme::ASH),
+            Style::default().fg(theme::border_faint()),
         ));
     }
     Line::from(spans)
@@ -124,7 +127,10 @@ fn prompt_help_line(prompt: &PromptState) -> Line<'static> {
     let mut spans = Vec::new();
     for (idx, (key, desc)) in prompt_help_items(prompt).into_iter().enumerate() {
         if idx > 0 {
-            spans.push(Span::styled(" · ", Style::default().fg(theme::ASH)));
+            spans.push(Span::styled(
+                " · ",
+                Style::default().fg(theme::border_faint()),
+            ));
         }
         spans.push(Span::styled(key.to_string(), theme::help_key()));
         spans.push(Span::styled(format!(" {desc}"), theme::help_desc()));
@@ -246,7 +252,7 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
             &mut lines,
             &prompt.request.question,
             inner_w,
-            Style::default().fg(theme::CHALK),
+            Style::default().fg(theme::text_primary()),
         );
     }
     if !lines.is_empty() && (has_options || show_text_input) {
@@ -266,20 +272,22 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
             let active = prompt.selected_option_idx() == Some(idx);
             let marked = prompt.option_marked(idx);
             let text_style = if active {
-                Style::default().fg(theme::CHALK).bg(theme::FORM_RAISED)
+                Style::default()
+                    .fg(theme::text_primary())
+                    .bg(theme::surface_raised())
             } else if marked {
-                Style::default().fg(theme::CHALK_MID)
+                Style::default().fg(theme::text_muted())
             } else {
-                Style::default().fg(theme::CHALK_DIM)
+                Style::default().fg(theme::text_subtle())
             };
             let prefix_style = if active {
                 Style::default()
-                    .fg(theme::SODIUM)
-                    .bg(theme::FORM_RAISED)
+                    .fg(theme::brand())
+                    .bg(theme::surface_raised())
                     .add_modifier(Modifier::Bold)
             } else if marked {
                 Style::default()
-                    .fg(theme::LICHEN)
+                    .fg(theme::state_ok())
                     .add_modifier(Modifier::Bold)
             } else {
                 text_style
@@ -326,14 +334,14 @@ fn prompt_content_lines(prompt: &PromptState, inner_w: usize) -> Vec<Line<'stati
                 if prompt.is_text_entry() {
                     theme::prompt()
                 } else {
-                    Style::default().fg(theme::ASH)
+                    Style::default().fg(theme::border_faint())
                 },
             ),
-            Span::styled("   ", Style::default().fg(theme::ASH)),
+            Span::styled("   ", Style::default().fg(theme::border_faint())),
             if is_placeholder {
-                Style::default().fg(theme::ASH)
+                Style::default().fg(theme::border_faint())
             } else {
-                Style::default().fg(theme::CHALK)
+                Style::default().fg(theme::text_primary())
             },
         );
     }

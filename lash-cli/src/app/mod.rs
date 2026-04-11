@@ -234,9 +234,48 @@ impl PreparedTurn {
     }
 }
 
+/// Who owns this turn. Used by the renderer and later by any feature that
+/// wants to address turns directly (fold, jump, collapse).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TurnRole {
+    /// Initiated by user input (typed message, image paste, slash command).
+    User,
+    /// Standalone system chatter — /help output, resume notices, etc. —
+    /// that isn't part of a user-initiated exchange.
+    System,
+}
+
+/// A first-class turn marker carried inline in the block stream. The
+/// renderer reads this to decide whether to draw a separator above the
+/// turn's content. Turns are not nested containers yet (the flat storage
+/// is preserved so scroll, height-cache, and push sites don't churn) —
+/// but the Turn struct owns all the turn-level metadata, so future
+/// features can address them by scanning between `TurnStart` markers.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Turn {
+    pub role: TurnRole,
+    /// Whether this turn wants a horizontal rule drawn above it. The
+    /// first real turn after startup is `false`; every subsequent user
+    /// turn is `true`; mid-session system turns are `false`.
+    pub show_separator: bool,
+}
+
+impl Turn {
+    pub fn user(show_separator: bool) -> Self {
+        Self {
+            role: TurnRole::User,
+            show_separator,
+        }
+    }
+}
+
 /// A renderable block in the scrollable history.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DisplayBlock {
+    /// Turn boundary. Carries the Turn metadata and is the source of
+    /// truth for the separator rule (which used to be a peephole in
+    /// the renderer that checked "is the next block a UserInput?").
+    TurnStart(Turn),
     UserInput(String),
     AssistantText(String),
     Activity(Box<ActivityBlock>),
@@ -569,7 +608,10 @@ impl App {
     }
 
     fn activity_renders_prompt_response_inline(activity: &ActivityBlock) -> bool {
-        matches!(activity.artifact, Some(ActivityArtifact::QuestionPanel(_)))
+        matches!(
+            activity.result.artifact,
+            Some(ActivityArtifact::QuestionPanel(_))
+        )
     }
 
     fn push_prompt_response_user_block(&mut self, display: String) {
@@ -795,7 +837,10 @@ impl App {
         }
 
         match self.blocks.last() {
-            Some(DisplayBlock::AssistantText(_) | DisplayBlock::Splash) | None => 0,
+            Some(
+                DisplayBlock::AssistantText(_) | DisplayBlock::Splash | DisplayBlock::TurnStart(_),
+            )
+            | None => 0,
             _ => 1,
         }
     }
@@ -821,7 +866,7 @@ impl App {
             .find_map(|(idx, block)| match block {
                 DisplayBlock::Activity(activity)
                     if matches!(
-                        activity.kind,
+                        activity.call.kind,
                         ActivityKind::ShellCommand
                             | ActivityKind::ShellInteraction
                             | ActivityKind::Delegate
@@ -1053,8 +1098,8 @@ impl App {
                     self.push_prompt_response_user_block(display);
                 }
                 if let Some(activity) = activities.last() {
-                    let detail = activity.detail_lines.first().cloned();
-                    self.set_status(activity.summary.clone(), detail, true);
+                    let detail = activity.result.detail_lines.first().cloned();
+                    self.set_status(activity.call.summary.clone(), detail, true);
                 } else {
                     self.set_status(name.clone(), None, true);
                 }

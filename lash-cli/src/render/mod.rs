@@ -46,11 +46,10 @@ const INPUT_HORIZONTAL_PADDING: u16 = 1;
 const PROMPT_HORIZONTAL_PADDING: u16 = 1;
 const MIN_HISTORY_HEIGHT: u16 = 3;
 const MAX_INPUT_HEIGHT: u16 = 10;
-const COMPACT_ACTIVITY_FEED_MAX_ITEMS: usize = 5;
+const COMPACT_ACTIVITY_FEED_MAX_ITEMS: usize = 10;
 const COMPACT_ACTIVITY_FEED_MAX_ROWS_PER_ITEM: usize = 2;
 const COMPACT_PATCH_PREVIEW_MAX_FILES: usize = 5;
 const STREAMING_OUTPUT_INLINE_MAX_ROWS: usize = 4;
-const SCROLL_INDICATOR_HIDE_TAIL_ROWS: usize = 2;
 const SCROLL_INDICATOR_MIN_HEIGHT: usize = 2;
 const QUEUE_SECTION_ITEM_LIMIT: usize = 2;
 const QUEUE_SECTION_WRAP_LIMIT: usize = 2;
@@ -137,20 +136,6 @@ fn input_content_area_from_frame(area: Rect) -> Rect {
     )
 }
 
-#[cfg(test)]
-pub fn rendered_block_height(
-    blocks: &[DisplayBlock],
-    idx: usize,
-    expand_level: u8,
-    viewport_width: usize,
-    viewport_height: usize,
-) -> usize {
-    let mut app = App::new("test-model".into(), "test".into());
-    app.blocks = blocks.to_vec();
-    app.expand_level = expand_level;
-    render_block_lines(&app, idx, viewport_width, viewport_height).len()
-}
-
 pub(crate) fn extract_history_selection_text(
     app: &App,
     frame_width: u16,
@@ -201,24 +186,35 @@ pub(crate) fn input_render_snapshot(app: &App, area: Rect) -> InputRenderSnapsho
     let total_width = padded_content_width(area.width, INPUT_HORIZONTAL_PADDING);
     let prefix_w = 2;
 
-    for (i, logical_line) in app.input().split('\n').enumerate() {
-        let segments = wrap_line(logical_line, prefix_w, prefix_w, total_width);
-        for (j, &(seg_start, seg_end)) in segments.iter().enumerate() {
-            let seg_spans = styled_input_segment(
-                logical_line,
-                seg_start,
-                seg_end,
-                &image_markers,
-                &app.skills,
-            );
-            let prefix = if i == 0 && j == 0 {
-                Span::styled(format!("{} ", theme::PROMPT_CHAR), theme::prompt())
-            } else {
-                Span::styled("  ", Style::default().fg(theme::ASH))
-            };
-            let mut spans = vec![prefix];
-            spans.extend(seg_spans);
-            lines.push(Line::from(spans));
+    // Idle placeholder: when the input is empty and there's no pending
+    // paste/image payload, render a faint hint that teaches the two
+    // primary actions (type to chat, type `/` for commands). Disappears
+    // on first keystroke because the render walks `app.input()` directly.
+    if app.input().is_empty() && !app.has_pending_input_payload() {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} ", theme::PROMPT_CHAR), theme::prompt()),
+            Span::styled("Message · / for commands", theme::text_faint_style()),
+        ]));
+    } else {
+        for (i, logical_line) in app.input().split('\n').enumerate() {
+            let segments = wrap_line(logical_line, prefix_w, prefix_w, total_width);
+            for (j, &(seg_start, seg_end)) in segments.iter().enumerate() {
+                let seg_spans = styled_input_segment(
+                    logical_line,
+                    seg_start,
+                    seg_end,
+                    &image_markers,
+                    &app.skills,
+                );
+                let prefix = if i == 0 && j == 0 {
+                    Span::styled(format!("{} ", theme::PROMPT_CHAR), theme::prompt())
+                } else {
+                    Span::styled("  ", Style::default().fg(theme::border_faint()))
+                };
+                let mut spans = vec![prefix];
+                spans.extend(seg_spans);
+                lines.push(Line::from(spans));
+            }
         }
     }
 
@@ -521,16 +517,22 @@ fn build_input_badge(app: &App) -> Option<Line<'static>> {
     if !badge_labels.is_empty() {
         for (idx, label) in badge_labels.iter().enumerate() {
             if idx > 0 {
-                spans.push(Span::styled(" · ", Style::default().fg(theme::ASH)));
+                spans.push(Span::styled(
+                    " · ",
+                    Style::default().fg(theme::border_faint()),
+                ));
             }
             spans.push(Span::styled(
                 (*label).to_string(),
                 Style::default()
-                    .fg(theme::SODIUM)
+                    .fg(theme::brand())
                     .add_modifier(Modifier::Bold),
             ));
         }
-        spans.push(Span::styled(" · ", Style::default().fg(theme::ASH)));
+        spans.push(Span::styled(
+            " · ",
+            Style::default().fg(theme::border_faint()),
+        ));
     }
 
     let location_label = app
@@ -540,7 +542,7 @@ fn build_input_badge(app: &App) -> Option<Line<'static>> {
         .unwrap_or_else(|| app.cwd.clone());
     spans.push(text_display::sanitize_span(
         location_label,
-        Style::default().fg(theme::ASH_TEXT),
+        Style::default().fg(theme::text_faint()),
     ));
     Some(Line::from(spans))
 }
@@ -731,8 +733,8 @@ fn render_block_into(
     let blocks = &app.blocks;
     let expand_level = app.expand_level;
     match &blocks[idx] {
-        DisplayBlock::UserInput(text) => {
-            if idx > 0 && !matches!(blocks[idx - 1], DisplayBlock::Splash) {
+        DisplayBlock::TurnStart(turn) => {
+            if turn.show_separator {
                 let rule_width = (viewport_width * 2 / 5).max(8).min(viewport_width);
                 let pad_left = (viewport_width.saturating_sub(rule_width)) / 2;
                 lines.push(Line::from(""));
@@ -746,8 +748,13 @@ fn render_block_into(
                 ));
                 lines.push(Line::from(spans));
             }
-
-            let marker_style = Style::default().fg(theme::SODIUM);
+            // Turns with `show_separator: false` contribute no visible
+            // lines — the marker is purely structural, letting later
+            // features (turn folding, turn addressing) scan between
+            // `TurnStart` markers without changing the renderer.
+        }
+        DisplayBlock::UserInput(text) => {
+            let marker_style = Style::default().fg(theme::brand());
             let prefix_w = 2;
             let cap = viewport_width.saturating_sub(prefix_w);
             let mut first = true;
@@ -779,7 +786,9 @@ fn render_block_into(
             let add_spacing_before = idx > 0
                 && !matches!(
                     blocks[idx - 1],
-                    DisplayBlock::AssistantText(_) | DisplayBlock::Splash
+                    DisplayBlock::AssistantText(_)
+                        | DisplayBlock::Splash
+                        | DisplayBlock::TurnStart(_)
                 );
             lines.extend(assistant_text::render_assistant_text_block(
                 text,
@@ -790,7 +799,7 @@ fn render_block_into(
         DisplayBlock::Activity(activity) => {
             render_activity_block(activity, expand_level, lines, viewport_width);
             if app.live_tool_output_anchor_block_index() == Some(idx) {
-                render_live_tool_output_inline(lines, app, &activity.kind, viewport_width);
+                render_live_tool_output_inline(lines, app, &activity.call.kind, viewport_width);
             }
         }
         DisplayBlock::ShellOutput {
@@ -926,7 +935,7 @@ fn render_splash(
     fullscreen: bool,
 ) {
     let chalk = theme::assistant_text();
-    let sodium = Style::default().fg(theme::SODIUM);
+    let sodium = Style::default().fg(theme::brand());
     let content_width = 30;
     let content_height = SPLASH_CONTENT_HEIGHT;
     let cx = viewport_width.saturating_sub(content_width) / 2;
@@ -961,8 +970,8 @@ fn render_splash(
     )));
     lines.push(Line::from(vec![
         Span::styled(format!("{pad}──────────"), sodium),
-        Span::styled("──────────", Style::default().fg(theme::ASH_MID)),
-        Span::styled("──────────", Style::default().fg(theme::ASH)),
+        Span::styled("──────────", Style::default().fg(theme::border_dim())),
+        Span::styled("──────────", Style::default().fg(theme::border_faint())),
     ]));
     lines.push(Line::from(""));
 
@@ -1048,9 +1057,9 @@ fn render_live_tool_output_inline(
         (
             "    │ ",
             Style::default()
-                .fg(theme::SODIUM)
+                .fg(theme::brand())
                 .add_modifier(Modifier::Bold),
-            Style::default().fg(theme::CHALK_MID),
+            Style::default().fg(theme::text_muted()),
         )
     } else {
         ("    │ ", theme::code_chrome(), theme::system_output())
@@ -1078,9 +1087,12 @@ pub(crate) fn history_scroll_indicator(app: &App, area: Rect) -> Option<(u16, u1
         return None;
     }
     let scroll_offset = app.scroll_offset.min(max_scroll);
-    if max_scroll.saturating_sub(scroll_offset) <= SCROLL_INDICATOR_HIDE_TAIL_ROWS {
-        return None;
-    }
+    // Show the bar whenever there is scrollable content above or below the
+    // viewport. The old behavior hid it within 2 rows of the bottom — which
+    // is exactly where the "there is more history above you" signal is
+    // needed most, because the app starts in follow-mode pinned to the end
+    // of a long session. Without the bar at the bottom, a user opening
+    // their 300-turn conversation sees no hint that the scrollback exists.
 
     let min_height = if viewport_height >= 4 {
         SCROLL_INDICATOR_MIN_HEIGHT

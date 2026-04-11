@@ -31,14 +31,17 @@ fn wait_section_label(text: &str, inner_w: usize) -> Line<'static> {
     let mut spans = vec![Span::styled(
         text.to_string(),
         Style::default()
-            .fg(theme::SODIUM)
+            .fg(theme::brand())
             .add_modifier(Modifier::Bold),
     )];
     if fill_width > 0 {
-        spans.push(Span::styled(" ", Style::default().fg(theme::ASH)));
+        spans.push(Span::styled(
+            " ",
+            Style::default().fg(theme::border_faint()),
+        ));
         spans.push(Span::styled(
             "─".repeat(fill_width),
-            Style::default().fg(theme::ASH),
+            Style::default().fg(theme::border_faint()),
         ));
     }
     Line::from(spans)
@@ -101,7 +104,10 @@ fn wait_help_line() -> Line<'static> {
     let mut spans = Vec::new();
     for (idx, (key, desc)) in items.into_iter().enumerate() {
         if idx > 0 {
-            spans.push(Span::styled(" · ", Style::default().fg(theme::ASH)));
+            spans.push(Span::styled(
+                " · ",
+                Style::default().fg(theme::border_faint()),
+            ));
         }
         spans.push(Span::styled(key.to_string(), theme::help_key()));
         spans.push(Span::styled(format!(" {desc}"), theme::help_desc()));
@@ -133,7 +139,7 @@ fn wait_content_lines(
             &mut lines,
             &wait.question,
             inner_w,
-            Style::default().fg(theme::CHALK_MID),
+            Style::default().fg(theme::text_muted()),
         );
         lines.push(Line::from(""));
     }
@@ -149,13 +155,13 @@ fn wait_content_lines(
         Span::styled(
             "● ".to_string(),
             Style::default()
-                .fg(theme::SODIUM)
+                .fg(theme::brand())
                 .add_modifier(Modifier::Bold),
         ),
         Span::styled(
             status,
             Style::default()
-                .fg(theme::CHALK)
+                .fg(theme::text_primary())
                 .add_modifier(Modifier::Bold),
         ),
     ]));
@@ -165,7 +171,7 @@ fn wait_content_lines(
             &mut lines,
             "The run continues automatically when the timer ends.",
             inner_w,
-            Style::default().fg(theme::ASH_TEXT),
+            Style::default().fg(theme::text_faint()),
         );
     }
 

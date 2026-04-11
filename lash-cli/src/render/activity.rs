@@ -8,8 +8,32 @@ fn activity_style(status: ActivityStatus) -> Style {
     }
 }
 
+/// True if the activity has content that the current `expand_level` is
+/// NOT rendering. Drives the `▸` indicator on the call line so the reader
+/// can tell when they're looking at a compact view.
+fn has_hidden_content_at(activity: &ActivityBlock, expand_level: u8) -> bool {
+    if expand_level >= 2 {
+        return false;
+    }
+    if expand_level == 0 {
+        return !activity.result.detail_lines.is_empty() || activity.result.artifact.is_some();
+    }
+    // Level 1 shows detail lines and the compact artifact path for
+    // PatchPreview / SnippetPreview / QuestionPanel. Other artifact
+    // kinds (DiffPreview, TextPreview, SourceList) only appear at
+    // level 2 — those are what we need to signal as hidden.
+    matches!(
+        activity.result.artifact.as_ref(),
+        Some(
+            ActivityArtifact::DiffPreview { .. }
+                | ActivityArtifact::TextPreview { .. }
+                | ActivityArtifact::SourceList { .. }
+        )
+    )
+}
+
 fn activity_prefix(activity: &ActivityBlock) -> (&'static str, Style, Style) {
-    match activity.kind {
+    match activity.call.kind {
         ActivityKind::Exploration => ("· ", theme::explore_marker(), theme::explore_label()),
         ActivityKind::Edit => (
             "· ",
@@ -20,21 +44,25 @@ fn activity_prefix(activity: &ActivityBlock) -> (&'static str, Style, Style) {
             "◆ ",
             theme::delegate_marker(),
             Style::default()
-                .fg(theme::SODIUM)
+                .fg(theme::brand())
                 .add_modifier(Modifier::Bold),
         ),
         ActivityKind::Delegate => (
             "◆ ",
             theme::delegate_marker(),
-            Style::default().fg(theme::CHALK_MID),
+            Style::default().fg(theme::text_muted()),
         ),
-        _ => match activity.status {
-            ActivityStatus::Completed => {
-                ("· ", theme::tool_success(), activity_style(activity.status))
-            }
-            ActivityStatus::Failed => {
-                ("× ", theme::tool_failure(), activity_style(activity.status))
-            }
+        _ => match activity.result.status {
+            ActivityStatus::Completed => (
+                "· ",
+                theme::tool_success(),
+                activity_style(activity.result.status),
+            ),
+            ActivityStatus::Failed => (
+                "× ",
+                theme::tool_failure(),
+                activity_style(activity.result.status),
+            ),
         },
     }
 }
@@ -45,9 +73,9 @@ pub(super) fn render_activity_block(
     lines: &mut Vec<Line<'static>>,
     viewport_width: usize,
 ) {
-    if activity.kind == ActivityKind::Hidden {
+    if activity.call.kind == ActivityKind::Hidden {
         if expand_level >= 2
-            && let Some(artifact) = &activity.artifact
+            && let Some(artifact) = &activity.result.artifact
         {
             render_activity_artifact(lines, artifact, viewport_width, "    ");
         }
@@ -55,7 +83,7 @@ pub(super) fn render_activity_block(
     }
 
     if expand_level >= 1
-        && let Some(ActivityArtifact::QuestionPanel(panel)) = activity.artifact.as_ref()
+        && let Some(ActivityArtifact::QuestionPanel(panel)) = activity.result.artifact.as_ref()
     {
         render_question_panel_artifact(panel, lines, viewport_width);
         return;
@@ -63,68 +91,102 @@ pub(super) fn render_activity_block(
 
     let (prefix, prefix_style, summary_style) = activity_prefix(activity);
     let prefix_width = UnicodeWidthStr::width(prefix);
-    let summary = if let Some(duration_text) =
-        crate::util::format_duration_ms_if_visible(activity.duration_ms)
-    {
-        format!("{} · {}", activity.summary, duration_text)
-    } else {
-        activity.summary.clone()
-    };
-    lines.push(Line::from(vec![
-        Span::styled(prefix.to_string(), prefix_style),
-        Span::styled(
-            truncate_to_display_width(&summary, viewport_width.saturating_sub(prefix_width)),
-            summary_style,
-        ),
-    ]));
+    let duration_text = crate::util::format_duration_ms_if_visible(activity.duration_ms);
+    let hidden_content = has_hidden_content_at(activity, expand_level);
+    // Call line is composed from up to six independently styled regions:
+    //   [sigil] [tag] · [summary body] · [duration] [▸]
+    // The tag ("EXPLORE", etc.) used to be glued into the summary via a
+    // flat ` · ` separator. It's now a structured `ActivityCall::tag`
+    // field so the renderer can style it in brand weight while the body
+    // stays in subtle text, and the ` · ` separators are rendered as
+    // faint spans instead of being characters in a string.
+    let tag_text = activity.call.tag.as_deref();
+    let tag_width = tag_text.map(UnicodeWidthStr::width).unwrap_or(0);
+    let tag_separator_width = if tag_text.is_some() { 3 } else { 0 };
+    let duration_width = duration_text
+        .as_deref()
+        .map(UnicodeWidthStr::width)
+        .unwrap_or(0);
+    let duration_separator_width = if duration_text.is_some() { 3 } else { 0 };
+    let hidden_marker_width = if hidden_content { 2 } else { 0 };
+    let available = viewport_width
+        .saturating_sub(prefix_width)
+        .saturating_sub(tag_width + tag_separator_width)
+        .saturating_sub(duration_width + duration_separator_width)
+        .saturating_sub(hidden_marker_width);
+    let mut spans = vec![Span::styled(prefix.to_string(), prefix_style)];
+    if let Some(tag) = tag_text {
+        spans.push(Span::styled(
+            tag.to_string(),
+            Style::default()
+                .fg(theme::brand())
+                .add_modifier(Modifier::Bold),
+        ));
+        spans.push(Span::styled(" · ", theme::text_faint_style()));
+    }
+    spans.push(Span::styled(
+        truncate_to_display_width(&activity.call.summary, available),
+        summary_style,
+    ));
+    if let Some(duration_text) = duration_text {
+        spans.push(Span::styled(" · ", theme::text_faint_style()));
+        spans.push(Span::styled(duration_text, theme::text_subtle_style()));
+    }
+    if hidden_content {
+        // Subtle right-pointing triangle tells the reader there's more
+        // content folded under this activity — details, diff, text preview,
+        // or source list that the current expand level isn't showing.
+        spans.push(Span::styled(" ▸", theme::text_faint_style()));
+    }
+    lines.push(Line::from(spans));
 
     let detail_prefix = "    ";
     let detail_prefix_width = UnicodeWidthStr::width(detail_prefix);
 
     if expand_level >= 1 {
-        if activity.kind == ActivityKind::Exploration {
+        if activity.call.kind == ActivityKind::Exploration {
             render_recent_activity_feed_lines(
                 lines,
-                &activity.detail_lines,
+                &activity.result.detail_lines,
                 viewport_width,
                 detail_prefix,
                 theme::explore_marker(),
                 "exploration step",
             );
         } else {
-            for detail in &activity.detail_lines {
+            for detail in &activity.result.detail_lines {
                 push_wrapped_prefixed(
                     lines,
                     detail_prefix.to_string(),
                     detail_prefix.to_string(),
                     detail,
-                    Style::default().fg(theme::ASH_TEXT),
+                    Style::default().fg(theme::text_faint()),
                     viewport_width.saturating_sub(detail_prefix_width) + detail_prefix_width,
                 );
             }
         }
 
-        if activity.kind == ActivityKind::Parallel {
+        if activity.call.kind == ActivityKind::Parallel {
             for child in &activity.children {
                 push_wrapped_prefixed(
                     lines,
                     "      ".to_string(),
                     "      ".to_string(),
-                    &child.summary,
-                    activity_style(child.status),
+                    &child.call.summary,
+                    activity_style(child.result.status),
                     viewport_width,
                 );
             }
         }
 
-        if activity.kind == ActivityKind::Delegate {
+        if activity.call.kind == ActivityKind::Delegate {
             for child in &activity.children {
                 push_wrapped_prefixed(
                     lines,
                     detail_prefix.to_string(),
                     detail_prefix.to_string(),
-                    &child.summary,
-                    if child.status == ActivityStatus::Failed {
+                    &child.call.summary,
+                    if child.result.status == ActivityStatus::Failed {
                         theme::error()
                     } else {
                         theme::delegate_child()
@@ -135,7 +197,7 @@ pub(super) fn render_activity_block(
         }
 
         if expand_level == 1
-            && let Some(artifact) = &activity.artifact
+            && let Some(artifact) = &activity.result.artifact
         {
             match artifact {
                 ActivityArtifact::PatchPreview { files, .. } => {
@@ -162,7 +224,7 @@ pub(super) fn render_activity_block(
     }
 
     if expand_level >= 2
-        && let Some(artifact) = &activity.artifact
+        && let Some(artifact) = &activity.result.artifact
     {
         match artifact {
             ActivityArtifact::PatchPreview { files, .. } => {
@@ -183,7 +245,7 @@ fn render_recent_activity_feed_lines(
 ) {
     let prefix_width = UnicodeWidthStr::width(prefix);
     let available = viewport_width.saturating_sub(prefix_width);
-    let detail_style = Style::default().fg(theme::ASH_TEXT);
+    let detail_style = Style::default().fg(theme::text_faint());
     let hidden_count = detail_lines
         .len()
         .saturating_sub(COMPACT_ACTIVITY_FEED_MAX_ITEMS);
@@ -309,7 +371,7 @@ fn render_patch_preview(
                     "… {hidden_count} earlier file change{} hidden …",
                     if hidden_count == 1 { "" } else { "s" }
                 ),
-                Style::default().fg(theme::ASH_TEXT),
+                Style::default().fg(theme::text_faint()),
             ),
         ]));
     }

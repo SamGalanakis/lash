@@ -14,7 +14,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         return;
     }
 
-    frame.clear(bg(theme::FORM));
+    frame.clear(bg(theme::surface_base()));
 
     let history = render::history_area(app, area.width, area.height);
     let turn_height = if app.live_turn.is_some() { 1 } else { 0 };
@@ -36,11 +36,17 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         draw_turn_status(frame, app, turn_area);
     }
     if queue_height > 0 {
-        draw_lines_region(frame, queue_area, &queue_lines, bg(theme::FORM_RAISED));
+        draw_lines_region(frame, queue_area, &queue_lines, bg(theme::surface_raised()));
     }
     if app.has_wait() {
+        // History reads as inactive while we're waiting on an auto-resume.
+        // Dimming it distinguishes "input is blocked, please wait" from
+        // "the app is idle and you can type" — the second-pass critique's
+        // "user might try to type during a scheduled wait" concern.
+        draw_overlay_scrim(frame, history);
         draw_wait(frame, app, input_area);
     } else if app.has_prompt() {
+        draw_overlay_scrim(frame, history);
         draw_prompt(frame, app, input_area);
     } else {
         draw_input(frame, app, input_area);
@@ -50,41 +56,208 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     draw_skill_picker(frame, app, history);
 }
 
-fn draw_status_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    frame.fill(area, ' ', bg(theme::FORM_RAISED));
-    let left = status_bar_left_line(app);
-    let right = status_bar_right_text(app);
-    let right_width = display_width(&right) as u16;
-    let max_left_width = if !right.is_empty() && right_width < area.width {
-        area.width.saturating_sub(right_width + 1)
-    } else {
-        area.width
-    };
+// ─── Status bar slot grammar ─────────────────────────────────────────────────
+//
+// The status bar is built from labeled slots, each with a `priority`. When
+// the window is too narrow to fit every slot, the lowest-priority slots are
+// dropped first until the remainder fits. There is no character-level
+// truncation: a slot either renders in full or not at all. This keeps the
+// bar's shape legible at every width and makes it obvious which information
+// is load-bearing (brand, model) versus decorative (variant, context meter).
 
-    if left.width() as u16 <= max_left_width {
-        frame.write_line(0, 0, &left, max_left_width);
-    } else {
-        frame.write_text(
-            0,
-            0,
-            &truncate_to_display_width(&status_bar_left_text(app), max_left_width as usize),
-            fg(theme::SODIUM).add_modifier(Modifier::Bold),
-            max_left_width,
-        );
-    }
-    if !right.is_empty() && right_width < area.width {
-        frame.write_text(
-            area.width - right_width,
-            0,
-            &right,
-            fg(theme::CHALK_DIM),
-            right_width,
-        );
+#[derive(Clone)]
+struct StatusSlot {
+    spans: Vec<Span<'static>>,
+    /// Higher = more important. Dropped last under width pressure.
+    priority: u8,
+}
+
+impl StatusSlot {
+    fn width(&self) -> usize {
+        self.spans
+            .iter()
+            .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+            .sum()
     }
 }
 
+/// Greedy knapsack by descending priority. Returns the slots that fit,
+/// preserving their original order.
+fn fit_slots(slots: &[StatusSlot], budget: usize) -> Vec<Span<'static>> {
+    if budget == 0 || slots.is_empty() {
+        return Vec::new();
+    }
+    let mut indices: Vec<usize> = (0..slots.len()).collect();
+    indices.sort_by(|a, b| slots[*b].priority.cmp(&slots[*a].priority));
+
+    let mut included = vec![false; slots.len()];
+    let mut used = 0usize;
+    for idx in indices {
+        let width = slots[idx].width();
+        if width == 0 {
+            continue;
+        }
+        if used + width <= budget {
+            included[idx] = true;
+            used += width;
+        }
+    }
+
+    let mut spans = Vec::new();
+    for (idx, slot) in slots.iter().enumerate() {
+        if included[idx] {
+            spans.extend(slot.spans.iter().cloned());
+        }
+    }
+    spans
+}
+
+fn draw_status_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    frame.fill(area, ' ', bg(theme::surface_raised()));
+    if area.width == 0 {
+        return;
+    }
+
+    let (left, right) = build_status_slots(app);
+    let total = area.width as usize;
+
+    // Right gets first refusal with up to half the bar. Whatever it leaves
+    // (minus one column for visual breathing room) becomes the left budget.
+    let right_spans = fit_slots(&right, total / 2);
+    let right_width: usize = right_spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum();
+    let gap = if right_width > 0 { 1 } else { 0 };
+    let left_budget = total.saturating_sub(right_width + gap);
+    let left_spans = fit_slots(&left, left_budget);
+
+    if !left_spans.is_empty() {
+        let line = Line::from(left_spans);
+        let width = line.width() as u16;
+        frame.write_line(0, 0, &line, width);
+    }
+    if !right_spans.is_empty() {
+        let line = Line::from(right_spans);
+        let width = line.width() as u16;
+        let x = area.width.saturating_sub(width);
+        frame.write_line(x, 0, &line, width);
+    }
+}
+
+fn build_status_slots(app: &App) -> (Vec<StatusSlot>, Vec<StatusSlot>) {
+    let sep_style = theme::text_faint_style();
+
+    // LEFT side: brand · model · variant
+    let mut left = Vec::new();
+    left.push(StatusSlot {
+        spans: vec![
+            Span::raw(" "),
+            Span::styled(
+                "lash",
+                Style::default()
+                    .fg(theme::brand())
+                    .add_modifier(Modifier::Bold),
+            ),
+        ],
+        priority: 100, // always keep — identity anchor
+    });
+    if !app.model.is_empty() {
+        left.push(StatusSlot {
+            spans: vec![
+                Span::styled(" · ", sep_style),
+                Span::styled(app.model.clone(), theme::text_subtle_style()),
+            ],
+            priority: 80,
+        });
+    }
+    if let Some(variant) = app
+        .model_variant
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        left.push(StatusSlot {
+            spans: vec![
+                Span::styled(" · ", sep_style),
+                Span::styled(
+                    variant.to_string(),
+                    Style::default()
+                        .fg(theme::brand())
+                        .add_modifier(Modifier::Bold),
+                ),
+            ],
+            priority: 40, // drop before model under pressure
+        });
+    }
+
+    // RIGHT side: context-window meter. The expand keybind is discoverable
+    // via `/controls` and the `▸` marker on tool activities — no teaching
+    // slot needed in the status bar.
+    let mut right = Vec::new();
+    if let Some(ctx) = status_bar_context_spans(app) {
+        right.push(ctx);
+    }
+
+    (left, right)
+}
+
+fn status_bar_context_spans(app: &App) -> Option<StatusSlot> {
+    let Some(context_window) = app.context_window else {
+        let total = app.token_usage.input_tokens
+            + app.token_usage.output_tokens
+            + app.live_output_tokens_estimate;
+        if total <= 0 {
+            return None;
+        }
+        return Some(StatusSlot {
+            spans: vec![
+                Span::styled(format_tokens(total), theme::text_subtle_style()),
+                Span::raw(" "),
+            ],
+            priority: 70,
+        });
+    };
+
+    let used = current_context_budget_tokens(app)
+        .or_else(|| {
+            app.last_prompt_usage
+                .as_ref()
+                .map(|usage| usage.context_budget_tokens as i64)
+                .filter(|used| *used > 0)
+        })
+        .unwrap_or_else(|| {
+            (app.token_usage.input_tokens
+                + app.token_usage.output_tokens
+                + app.live_output_tokens_estimate)
+                .max(0)
+        });
+
+    let pct = if context_window == 0 {
+        0.0
+    } else {
+        used as f64 / context_window as f64 * 100.0
+    };
+
+    // The old layout was `3.4k / 1.1M (9.3%)` — three representations of the
+    // same number: tokens used, total window, and the derived percentage.
+    // The percentage is the only thing you can act on (it tells you how close
+    // you are to the wall); the raw token count is useful for debugging.
+    // Keep just those two, separated by the faint middle-dot used elsewhere
+    // in the bar. Integer percentage — `9.3%` vs `9%` is false precision at
+    // this scale.
+    Some(StatusSlot {
+        spans: vec![
+            Span::styled(format_tokens(used), theme::text_subtle_style()),
+            Span::styled(" · ", theme::text_faint_style()),
+            Span::styled(format!("{pct:.0}%"), theme::text_subtle_style()),
+            Span::raw(" "),
+        ],
+        priority: 70,
+    })
+}
+
 fn draw_history(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    frame.fill(area, ' ', bg(theme::FORM));
+    frame.fill(area, ' ', bg(theme::surface_base()));
     let viewport_height = area.height as usize;
     let viewport_width = area.width as usize;
     let scroll = app.scroll_offset;
@@ -133,7 +306,7 @@ fn draw_history(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     if let Some((x, y, height)) = render::history_scroll_indicator(app, area) {
         for offset in 0..height {
-            frame.write_text(x, y + offset, "│", fg(theme::CHALK_DIM), 1);
+            frame.write_text(x, y + offset, "│", fg(theme::text_subtle()), 1);
         }
     }
 }
@@ -188,7 +361,7 @@ fn draw_turn_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(turn) = app.live_turn.as_ref() else {
         return;
     };
-    frame.fill(area, ' ', bg(theme::FORM_RAISED));
+    frame.fill(area, ' ', bg(theme::surface_raised()));
     let label = if turn.status_text == "error" {
         "Error"
     } else if app.has_wait() {
@@ -225,42 +398,6 @@ fn draw_turn_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.write_line(x, area.y, &line, area.width.saturating_sub(x));
 }
 
-fn status_bar_left_text(app: &App) -> String {
-    let mut left = format!(" lash · {}", app.model);
-    if let Some(variant) = app
-        .model_variant
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        left.push_str(" · ");
-        left.push_str(variant);
-    }
-    left
-}
-
-fn status_bar_left_line(app: &App) -> Line<'static> {
-    let mut spans = vec![
-        Span::styled(
-            " lash".to_string(),
-            fg(theme::SODIUM).add_modifier(Modifier::Bold),
-        ),
-        Span::styled(" · ".to_string(), fg(theme::ASH_TEXT)),
-        Span::styled(app.model.clone(), fg(theme::CHALK_DIM)),
-    ];
-    if let Some(variant) = app
-        .model_variant
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        spans.push(Span::styled(" · ".to_string(), fg(theme::ASH_TEXT)));
-        spans.push(Span::styled(
-            variant.to_string(),
-            fg(theme::SODIUM).add_modifier(Modifier::Bold),
-        ));
-    }
-    Line::from(spans)
-}
-
 fn current_context_budget_tokens(app: &App) -> Option<i64> {
     if !app.running {
         return None;
@@ -276,69 +413,6 @@ fn current_context_budget_tokens(app: &App) -> Option<i64> {
     } else {
         (input - cached).max(0) + output + cached
     })
-}
-
-fn status_bar_right_text(app: &App) -> String {
-    let Some(context_window) = app.context_window else {
-        let total = app.token_usage.input_tokens
-            + app.token_usage.output_tokens
-            + app.live_output_tokens_estimate;
-        return if total > 0 {
-            format_tokens(total)
-        } else {
-            String::new()
-        };
-    };
-
-    let used = current_context_budget_tokens(app)
-        .or_else(|| {
-            app.last_prompt_usage
-                .as_ref()
-                .map(|usage| usage.context_budget_tokens as i64)
-                .filter(|used| *used > 0)
-        })
-        .unwrap_or_else(|| {
-            (app.token_usage.input_tokens
-                + app.token_usage.output_tokens
-                + app.live_output_tokens_estimate)
-                .max(0)
-        });
-
-    let pct = if context_window == 0 {
-        0.0
-    } else {
-        used as f64 / context_window as f64 * 100.0
-    };
-    format!(
-        "{} / {} ({pct:.1}%)",
-        format_tokens(used),
-        format_tokens(context_window as i64),
-    )
-}
-
-fn truncate_to_display_width(text: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    if display_width(text) <= max_width {
-        return text.to_string();
-    }
-    if max_width == 1 {
-        return "…".to_string();
-    }
-    let target = max_width.saturating_sub(1);
-    let mut out = String::new();
-    let mut width = 0usize;
-    for ch in text.chars() {
-        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + ch_width > target {
-            break;
-        }
-        out.push(ch);
-        width += ch_width;
-    }
-    out.push('…');
-    out
 }
 
 fn animated_lash_word(elapsed: std::time::Duration) -> Vec<Span<'static>> {
@@ -375,7 +449,7 @@ fn draw_input(frame: &mut Frame<'_>, app: &App, area: Rect) {
         area.height.saturating_sub(2),
     );
 
-    draw_top_bottom_rule(frame, area, fg(theme::ASH));
+    draw_top_bottom_rule(frame, area, fg(theme::border_faint()));
     for (idx, line) in snapshot
         .lines
         .iter()
@@ -411,7 +485,7 @@ fn draw_prompt(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if area.width < 2 || area.height < 1 {
         return;
     }
-    frame.fill(area, ' ', bg(theme::FORM_DEEP));
+    frame.fill(area, ' ', bg(theme::surface_deep()));
     let inner_width = area
         .width
         .saturating_sub(PROMPT_HORIZONTAL_PADDING.saturating_mul(2)) as usize;
@@ -441,7 +515,7 @@ fn draw_wait(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if area.width < 2 || area.height < 1 {
         return;
     }
-    frame.fill(area, ' ', bg(theme::FORM_DEEP));
+    frame.fill(area, ' ', bg(theme::surface_deep()));
     let inner_width = area
         .width
         .saturating_sub(PROMPT_HORIZONTAL_PADDING.saturating_mul(2)) as usize;
@@ -482,13 +556,17 @@ fn draw_suggestions(frame: &mut Frame<'_>, app: &App, input_area: Rect) {
         width,
         height,
     );
-    frame.draw_box(popup, fg(theme::ASH), Some(bg(theme::FORM_DEEP)));
+    frame.draw_box(
+        popup,
+        fg(theme::border_faint()),
+        Some(bg(theme::surface_deep())),
+    );
     for (idx, (name, desc)) in app.suggestions().iter().take(max_visible).enumerate() {
         let selected = idx == app.suggestion_idx();
         let style = if selected {
-            fg(theme::CHALK).bg(theme::FORM_RAISED)
+            fg(theme::text_primary()).bg(theme::surface_raised())
         } else {
-            fg(theme::CHALK_DIM)
+            fg(theme::text_subtle())
         };
         let row = format!(" {:<width$} {}", name, desc, width = name_col);
         frame.write_text(
@@ -501,71 +579,116 @@ fn draw_suggestions(frame: &mut Frame<'_>, app: &App, input_area: Rect) {
     }
 }
 
+/// Dim every cell in `area` so a popup drawn afterwards reads as a modal
+/// overlay rather than a box floating on top of unchanged history. The
+/// popup's own `draw_box` call replaces the style of the cells it covers,
+/// so only the surrounding scrim remains dimmed.
+fn draw_overlay_scrim(frame: &mut Frame<'_>, area: Rect) {
+    for y in 0..area.height {
+        frame.patch_row_style_range(area.x, area.y + y, area.width, |style| {
+            style.add_modifier(Modifier::Dim)
+        });
+    }
+}
+
 fn draw_session_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
     let Some(picker) = app.session_picker_state() else {
         return;
     };
     let width = 80u16.min(history_area.width.saturating_sub(4));
-    let visible = picker.items.len().min(15) as u16;
-    let height = visible + 2;
+    // Empty state still gets a visible row so the popup isn't a hollow box,
+    // plus a footer row with the dismissal hint.
+    let list_height = picker.items.len().min(15).max(1) as u16;
+    let height = list_height + 3; // title + list + footer
     if width < 4 || history_area.height < height {
         return;
     }
+    draw_overlay_scrim(frame, history_area);
     let popup = centered_rect(history_area, width, height);
-    frame.draw_box(popup, fg(theme::ASH), Some(bg(theme::FORM_DEEP)));
+    frame.draw_box(
+        popup,
+        fg(theme::border_faint()),
+        Some(bg(theme::surface_deep())),
+    );
     frame.write_text(
         popup.x + 2,
         popup.y,
         &format!("Sessions ({})", picker.items.len()),
-        fg(theme::SODIUM).add_modifier(Modifier::Bold),
+        fg(theme::brand()).add_modifier(Modifier::Bold),
         popup.width.saturating_sub(4),
     );
-    let scroll = picker.selected.saturating_sub(visible as usize - 1);
-    let visible_items: Vec<_> = picker
-        .items
-        .iter()
-        .skip(scroll)
-        .take(visible as usize)
-        .collect();
-    let time_col = visible_items
-        .iter()
-        .map(|s| display_width(&s.relative_time()))
-        .max()
-        .unwrap_or(6)
-        .max(6);
-    let count_col = visible_items
-        .iter()
-        .map(|s| display_width(&s.message_count.to_string()))
-        .max()
-        .unwrap_or(2)
-        .max(2);
-    for (row, session) in visible_items.iter().enumerate() {
-        let selected = scroll + row == picker.selected;
-        let prefix = if selected { "> " } else { "  " };
-        let preview = session.first_message.replace('\n', " ");
-        let cwd = session.cwd_label().unwrap_or_default();
-        let line = format!(
-            "{prefix}{:<time_col$} {:>count_col$} {}{}",
-            session.relative_time(),
-            session.message_count,
-            preview,
-            if cwd.is_empty() {
-                String::new()
-            } else {
-                format!(" {cwd}")
-            },
-        );
-        let style = if selected {
-            fg(theme::CHALK).bg(theme::FORM_RAISED)
-        } else {
-            fg(theme::CHALK_DIM)
-        };
+
+    if picker.items.is_empty() {
         frame.write_text(
-            popup.x + 1,
-            popup.y + 1 + row as u16,
-            &line,
-            style,
-            popup.width.saturating_sub(2),
+            popup.x + 2,
+            popup.y + 1,
+            "No sessions yet — type a message to begin",
+            theme::text_faint_style(),
+            popup.width.saturating_sub(4),
+        );
+    } else {
+        let scroll = picker.selected.saturating_sub(list_height as usize - 1);
+        let visible_items: Vec<_> = picker
+            .items
+            .iter()
+            .skip(scroll)
+            .take(list_height as usize)
+            .collect();
+        let time_col = visible_items
+            .iter()
+            .map(|s| display_width(&s.relative_time()))
+            .max()
+            .unwrap_or(6)
+            .max(6);
+        let count_col = visible_items
+            .iter()
+            .map(|s| display_width(&s.message_count.to_string()))
+            .max()
+            .unwrap_or(2)
+            .max(2);
+        for (row, session) in visible_items.iter().enumerate() {
+            let selected = scroll + row == picker.selected;
+            let prefix = if selected { "> " } else { "  " };
+            let preview = session.first_message.replace('\n', " ");
+            let cwd = session.cwd_label().unwrap_or_default();
+            let line = format!(
+                "{prefix}{:<time_col$} {:>count_col$} {}{}",
+                session.relative_time(),
+                session.message_count,
+                preview,
+                if cwd.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {cwd}")
+                },
+            );
+            let style = if selected {
+                fg(theme::text_primary()).bg(theme::surface_raised())
+            } else {
+                fg(theme::text_subtle())
+            };
+            frame.write_text(
+                popup.x + 1,
+                popup.y + 1 + row as u16,
+                &line,
+                style,
+                popup.width.saturating_sub(2),
+            );
+        }
+    }
+
+    // Dismissal hint in the bottom border row. The overlay is a centered
+    // box drawn on top of history with no scrim; the user needs at least
+    // one explicit signal that it's modal and how to close it.
+    let hint = "esc close · ↑↓ choose · enter open";
+    let hint_width = display_width(hint) as u16;
+    if popup.width > hint_width + 4 {
+        frame.write_text(
+            popup.x + popup.width - hint_width - 2,
+            popup.y + popup.height - 1,
+            hint,
+            theme::text_faint_style(),
+            hint_width,
         );
     }
 }
@@ -575,48 +698,76 @@ fn draw_skill_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
         return;
     };
     let width = 60u16.min(history_area.width.saturating_sub(4));
-    let visible = picker.items.len().min(15) as u16;
-    let height = visible + 2;
+    let list_height = picker.items.len().min(15).max(1) as u16;
+    let height = list_height + 3; // title + list + footer
     if width < 4 || history_area.height < height {
         return;
     }
+    draw_overlay_scrim(frame, history_area);
     let popup = centered_rect(history_area, width, height);
-    frame.draw_box(popup, fg(theme::ASH), Some(bg(theme::FORM_DEEP)));
+    frame.draw_box(
+        popup,
+        fg(theme::border_faint()),
+        Some(bg(theme::surface_deep())),
+    );
     frame.write_text(
         popup.x + 2,
         popup.y,
         &format!("Skills ({})", picker.items.len()),
-        fg(theme::SODIUM).add_modifier(Modifier::Bold),
+        fg(theme::brand()).add_modifier(Modifier::Bold),
         popup.width.saturating_sub(4),
     );
-    let scroll = picker.selected.saturating_sub(visible as usize - 1);
-    let visible_items: Vec<_> = picker
-        .items
-        .iter()
-        .skip(scroll)
-        .take(visible as usize)
-        .collect();
-    let name_col = visible_items
-        .iter()
-        .map(|(name, _)| display_width(name))
-        .max()
-        .unwrap_or(8)
-        .max(8);
-    for (row, (name, desc)) in visible_items.iter().enumerate() {
-        let selected = scroll + row == picker.selected;
-        let prefix = if selected { "> " } else { "  " };
-        let line = format!("{prefix}{:<width$} {}", name, desc, width = name_col);
-        let style = if selected {
-            fg(theme::CHALK).bg(theme::FORM_RAISED)
-        } else {
-            fg(theme::CHALK_DIM)
-        };
+
+    if picker.items.is_empty() {
         frame.write_text(
-            popup.x + 1,
-            popup.y + 1 + row as u16,
-            &line,
-            style,
-            popup.width.saturating_sub(2),
+            popup.x + 2,
+            popup.y + 1,
+            "No skills installed",
+            theme::text_faint_style(),
+            popup.width.saturating_sub(4),
+        );
+    } else {
+        let scroll = picker.selected.saturating_sub(list_height as usize - 1);
+        let visible_items: Vec<_> = picker
+            .items
+            .iter()
+            .skip(scroll)
+            .take(list_height as usize)
+            .collect();
+        let name_col = visible_items
+            .iter()
+            .map(|(name, _)| display_width(name))
+            .max()
+            .unwrap_or(8)
+            .max(8);
+        for (row, (name, desc)) in visible_items.iter().enumerate() {
+            let selected = scroll + row == picker.selected;
+            let prefix = if selected { "> " } else { "  " };
+            let line = format!("{prefix}{:<width$} {}", name, desc, width = name_col);
+            let style = if selected {
+                fg(theme::text_primary()).bg(theme::surface_raised())
+            } else {
+                fg(theme::text_subtle())
+            };
+            frame.write_text(
+                popup.x + 1,
+                popup.y + 1 + row as u16,
+                &line,
+                style,
+                popup.width.saturating_sub(2),
+            );
+        }
+    }
+
+    let hint = "esc close · ↑↓ choose · enter insert";
+    let hint_width = display_width(hint) as u16;
+    if popup.width > hint_width + 4 {
+        frame.write_text(
+            popup.x + popup.width - hint_width - 2,
+            popup.y + popup.height - 1,
+            hint,
+            theme::text_faint_style(),
+            hint_width,
         );
     }
 }
@@ -702,7 +853,10 @@ mod tests {
         let snapshot = lash_tui::render_snapshot(80, 4, |frame| draw(frame, &mut app));
         let top = snapshot.visible_line_trimmed(0);
         assert!(top.contains("lash · gpt-5.4 · high"));
-        assert!(top.contains("7.0k / 1.1M (0.6%)"));
+        // Context meter: tokens used + integer percent, separated by a
+        // middle dot. The old representation was `7.0k / 1.1M (0.6%)`,
+        // which gave three renderings of the same number.
+        assert!(top.contains("7.0k · 1%"));
     }
 
     #[test]

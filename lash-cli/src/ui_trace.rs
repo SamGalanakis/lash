@@ -145,64 +145,6 @@ pub(crate) enum TracePromptRequest {
 }
 
 impl TracePromptRequest {
-    #[cfg(test)]
-    pub(crate) fn into_request(self) -> PromptRequest {
-        match self {
-            Self::Freeform {
-                question,
-                wait_seconds,
-                panel,
-            } => {
-                let mut request = PromptRequest::freeform(question);
-                if let Some(wait_seconds) = wait_seconds {
-                    request = request.with_wait(wait_seconds);
-                }
-                if let Some(panel) = panel {
-                    request = request.with_markdown_panel(panel.title, panel.markdown);
-                }
-                request
-            }
-            Self::Single {
-                question,
-                options,
-                allow_note,
-                wait_seconds,
-                panel,
-            } => {
-                let mut request = PromptRequest::single(question, options);
-                if allow_note {
-                    request = request.with_optional_note();
-                }
-                if let Some(wait_seconds) = wait_seconds {
-                    request = request.with_wait(wait_seconds);
-                }
-                if let Some(panel) = panel {
-                    request = request.with_markdown_panel(panel.title, panel.markdown);
-                }
-                request
-            }
-            Self::Multi {
-                question,
-                options,
-                allow_note,
-                wait_seconds,
-                panel,
-            } => {
-                let mut request = PromptRequest::multi(question, options);
-                if allow_note {
-                    request = request.with_optional_note();
-                }
-                if let Some(wait_seconds) = wait_seconds {
-                    request = request.with_wait(wait_seconds);
-                }
-                if let Some(panel) = panel {
-                    request = request.with_markdown_panel(panel.title, panel.markdown);
-                }
-                request
-            }
-        }
-    }
-
     pub(crate) fn from_request(request: &PromptRequest) -> Self {
         if request.is_freeform() {
             Self::Freeform {
@@ -275,47 +217,6 @@ pub(crate) enum TraceSessionEvent {
 }
 
 impl TraceSessionEvent {
-    #[cfg(test)]
-    pub(crate) fn into_event(self) -> SessionEvent {
-        match self {
-            Self::TextDelta { content } => SessionEvent::TextDelta { content },
-            Self::ToolCall {
-                call_id,
-                name,
-                args,
-                result,
-                success,
-                duration_ms,
-            } => SessionEvent::ToolCall {
-                call_id,
-                name,
-                args,
-                result,
-                success,
-                duration_ms,
-            },
-            Self::Message { text, kind } => SessionEvent::Message { text, kind },
-            Self::LlmRequest {
-                iteration,
-                message_count,
-                tool_list,
-            } => SessionEvent::LlmRequest {
-                iteration,
-                message_count,
-                tool_list,
-            },
-            Self::Error { message } => SessionEvent::Error {
-                message,
-                envelope: None,
-            },
-            Self::Done => SessionEvent::Done,
-            Self::PluginEvent { plugin_id, event } => SessionEvent::PluginEvent {
-                plugin_id,
-                event: event.into_event(),
-            },
-        }
-    }
-
     pub(crate) fn from_session_event(event: &SessionEvent) -> Option<Self> {
         match event {
             SessionEvent::TextDelta { content } => Some(Self::TextDelta {
@@ -392,27 +293,6 @@ pub(crate) enum TracePluginSurfaceEvent {
 }
 
 impl TracePluginSurfaceEvent {
-    #[cfg(test)]
-    pub(crate) fn into_event(self) -> PluginSurfaceEvent {
-        match self {
-            Self::ModeIndicatorUpsert { key, label } => {
-                PluginSurfaceEvent::ModeIndicatorUpsert { key, label }
-            }
-            Self::ModeIndicatorClear { key } => PluginSurfaceEvent::ModeIndicatorClear { key },
-            Self::PanelUpsert {
-                key,
-                title,
-                content,
-            } => PluginSurfaceEvent::PanelUpsert {
-                key,
-                title,
-                content,
-            },
-            Self::PanelAppend { key, content } => PluginSurfaceEvent::PanelAppend { key, content },
-            Self::PanelClear { key } => PluginSurfaceEvent::PanelClear { key },
-        }
-    }
-
     pub(crate) fn from_event(event: &PluginSurfaceEvent) -> Self {
         match event {
             PluginSurfaceEvent::ModeIndicatorUpsert { key, label } => Self::ModeIndicatorUpsert {
@@ -462,56 +342,6 @@ pub(crate) fn render_screen_text(app: &mut App, width: u16, height: u16) -> Stri
     render_screen_snapshot(app, width, height)
         .visible_lines_trimmed()
         .join("\n")
-}
-
-#[cfg(test)]
-pub(crate) fn read_ui_trace_fixture(path: &Path) -> UiTraceFixture {
-    let text = fs::read_to_string(path)
-        .unwrap_or_else(|err| panic!("failed to read ui trace fixture {}: {err}", path.display()));
-    serde_json::from_str(&text)
-        .unwrap_or_else(|err| panic!("failed to parse ui trace fixture {}: {err}", path.display()))
-}
-
-#[cfg(test)]
-pub(crate) fn assert_snapshot_text(snapshot_path: &Path, actual: &str) {
-    use std::io;
-    let normalized_actual = if actual.ends_with('\n') {
-        actual.to_string()
-    } else {
-        format!("{actual}\n")
-    };
-    let accept = std::env::var_os("LASH_ACCEPT_UI_SNAPSHOTS").is_some();
-    if accept {
-        if let Some(parent) = snapshot_path.parent() {
-            fs::create_dir_all(parent).unwrap_or_else(|err| {
-                panic!(
-                    "failed to create snapshot directory {}: {err}",
-                    parent.display()
-                )
-            });
-        }
-        fs::write(snapshot_path, normalized_actual).unwrap_or_else(|err| {
-            panic!(
-                "failed to write snapshot {}: {err}",
-                snapshot_path.display()
-            )
-        });
-        return;
-    }
-
-    let expected = fs::read_to_string(snapshot_path).unwrap_or_else(|err| match err.kind() {
-        io::ErrorKind::NotFound => panic!(
-            "missing snapshot {} (re-run with LASH_ACCEPT_UI_SNAPSHOTS=1 to create it)",
-            snapshot_path.display()
-        ),
-        _ => panic!("failed to read snapshot {}: {err}", snapshot_path.display()),
-    });
-    assert_eq!(
-        expected,
-        normalized_actual,
-        "snapshot mismatch for {}",
-        snapshot_path.display()
-    );
 }
 
 pub(crate) struct UiTraceRecorder {

@@ -652,15 +652,7 @@ pub async fn fork_current_session(
         );
     } else {
         child_logger.clone_history_from(logger.filename())?;
-        child_store.save_session_state(lash::SessionState {
-            iteration: parent_state.iteration,
-            config_json: parent_state.config_json.clone(),
-            execution_state_snapshot: parent_state.execution_state_snapshot.clone(),
-            input_tokens: parent_state.input_tokens,
-            output_tokens: parent_state.output_tokens,
-            cached_input_tokens: parent_state.cached_input_tokens,
-            reasoning_tokens: parent_state.reasoning_tokens,
-        });
+        child_store.save_session_state(parent_state.clone());
         if let Some(snapshot) = parent_live_snapshot {
             child_store.save_live_session_snapshot(snapshot);
         }
@@ -712,12 +704,21 @@ mod fork_tests {
         .expect("parent logger");
         parent_store.save_session_state(lash::SessionState {
             iteration: 1,
-            config_json: r#"{"task_state":{"kind":"live_resume","status":"running"}}"#.to_string(),
+            token_usage: lash::TokenUsage {
+                input_tokens: 10,
+                output_tokens: 3,
+                cached_input_tokens: 1,
+                reasoning_tokens: 2,
+            },
+            last_prompt_usage: None,
+            task_state: Some(lash::SessionTaskState::LiveResume {
+                status: lash::SessionTaskStatus::Running,
+                saved_at: "2026-04-11T00:00:00Z".to_string(),
+            }),
+            replay_manifest: None,
+            plugin_snapshot: None,
+            dynamic_state: None,
             execution_state_snapshot: None,
-            input_tokens: 10,
-            output_tokens: 3,
-            cached_input_tokens: 1,
-            reasoning_tokens: 2,
         });
         let messages = vec![lash::Message {
             id: "u1".to_string(),
@@ -761,10 +762,10 @@ mod fork_tests {
 
         let child_state = child_store.load_session_state().expect("child root state");
         assert_eq!(child_state.iteration, 1);
-        assert_eq!(
-            child_state.config_json,
-            r#"{"task_state":{"kind":"live_resume","status":"running"}}"#
-        );
+        assert!(matches!(
+            child_state.task_state,
+            Some(lash::SessionTaskState::LiveResume { .. })
+        ));
         assert!(child_store.load_live_session_snapshot().is_none());
 
         let child_entries = child_store.transcript_load();
@@ -793,12 +794,18 @@ mod fork_tests {
         .expect("parent logger");
         parent_store.save_session_state(lash::SessionState {
             iteration: 1,
-            config_json: r#"{"saved":"root"}"#.to_string(),
+            token_usage: lash::TokenUsage {
+                input_tokens: 10,
+                output_tokens: 3,
+                cached_input_tokens: 1,
+                reasoning_tokens: 2,
+            },
+            last_prompt_usage: None,
+            task_state: None,
+            replay_manifest: None,
+            plugin_snapshot: None,
+            dynamic_state: None,
             execution_state_snapshot: None,
-            input_tokens: 10,
-            output_tokens: 3,
-            cached_input_tokens: 1,
-            reasoning_tokens: 2,
         });
         let base_messages = vec![lash::Message {
             id: "u1".to_string(),
@@ -857,16 +864,24 @@ mod fork_tests {
                     reasoning_tokens: 0,
                 },
                 last_prompt_usage: None,
-                task_state: Some(serde_json::json!({
-                    "kind": "live_resume",
-                    "status": "running"
-                })),
-                replay_manifest: Some(serde_json::json!({
-                    "configured_model": "gpt-test",
-                    "context_window": 1024,
-                    "execution_mode": "standard",
-                    "context_strategy": {"type": "rolling_context"}
-                })),
+                task_state: Some(lash::SessionTaskState::LiveResume {
+                    status: lash::SessionTaskStatus::Running,
+                    saved_at: "2026-04-11T00:00:00Z".to_string(),
+                }),
+                replay_manifest: Some(lash::ReplayManifest {
+                    version: 3,
+                    saved_at: "2026-04-11T00:00:00Z".to_string(),
+                    provider: dummy_provider().id().to_string(),
+                    configured_model: "gpt-test".to_string(),
+                    resolved_model: dummy_provider().resolve_model("gpt-test"),
+                    context_window: 1024,
+                    execution_mode: lash::ExecutionMode::Standard,
+                    context_strategy: lash::ContextStrategy::RollingContext,
+                    model_variant: None,
+                    toolset_hash: "toolhash".to_string(),
+                    prompt_hash: None,
+                    snapshot_hash: None,
+                }),
                 plugin_snapshot: None,
                 execution_state_snapshot: None,
             },
