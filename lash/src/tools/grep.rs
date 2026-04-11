@@ -5,7 +5,9 @@ use std::path::{Component, Path};
 
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
-use super::require_str;
+use super::{
+    GitignoreMode, configure_walk_builder, parse_gitignore_mode, parse_optional_bool, require_str,
+};
 
 /// Search file contents using regex patterns.
 #[derive(Default)]
@@ -21,7 +23,7 @@ impl ToolProvider for Grep {
         vec![ToolDefinition {
             name: "grep".into(),
             description: format!(
-                "Search file contents with a ripgrep-style regex. Returns up to {} `file:line:text` matches.",
+                "Search file contents with a ripgrep-style regex. By default this includes hidden files and honors `.gitignore` only inside Git repos. Returns up to {} `file:line:text` matches.",
                 MAX_RESULTS
             ),
             params: vec![
@@ -39,6 +41,20 @@ impl ToolProvider for Grep {
                     r#type: "str".into(),
                     description: "Glob pattern to filter files (e.g. \"*.rs\", \"*.py\")".into(),
                     default_value: None,
+                    required: false,
+                },
+                ToolParam {
+                    name: "include_hidden".into(),
+                    r#type: "bool".into(),
+                    description: "Include dotfiles and dot-directories. Default: true.".into(),
+                    default_value: Some(serde_json::json!(true)),
+                    required: false,
+                },
+                ToolParam {
+                    name: "gitignore_mode".into(),
+                    r#type: "str".into(),
+                    description: "How `.gitignore` should behave. Use `repo_only` (default: only honor `.gitignore` inside Git repos) or `always` (honor local `.gitignore` files even outside Git repos).".into(),
+                    default_value: Some(serde_json::json!("repo_only")),
                     required: false,
                 },
             ],
@@ -60,6 +76,15 @@ impl ToolProvider for Grep {
         let base_dir = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         let include = args.get("include").and_then(|v| v.as_str());
+        let include_hidden = match parse_optional_bool(args, "include_hidden", true) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let gitignore_mode =
+            match parse_gitignore_mode(args, "gitignore_mode", GitignoreMode::RepoOnly) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
 
         let re = match regex::Regex::new(pattern) {
             Ok(r) => r,
@@ -91,10 +116,9 @@ impl ToolProvider for Grep {
             return ToolResult::err_fmt(format_args!("Not a file or directory: {base_dir}"));
         }
 
-        let walker = ignore::WalkBuilder::new(base)
-            .hidden(false)
-            .git_ignore(true)
-            .build();
+        let mut builder = ignore::WalkBuilder::new(base);
+        configure_walk_builder(&mut builder, include_hidden, gitignore_mode, None);
+        let walker = builder.build();
 
         let mut all_entries: Vec<GrepHit> = Vec::new();
         let mut total_matches: usize = 0;
@@ -362,5 +386,47 @@ mod tests {
         assert!(text.iter().any(|l| l.contains(":1:hello world")));
         assert!(text.iter().any(|l| l.contains(":3:hello again")));
         assert!(!text.iter().any(|l| l.contains("git internals")));
+    }
+
+    #[tokio::test]
+    async fn test_grep_includes_hidden_by_default() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".hidden.txt"), "needle\n").unwrap();
+        let tool = Grep;
+        let result = tool
+            .execute(
+                "grep",
+                &json!({"pattern": "needle", "path": dir.path().to_str().unwrap()}),
+            )
+            .await;
+        assert!(result.success);
+        let text: Vec<&str> = result
+            .result
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap_or(""))
+            .collect();
+        assert!(text.iter().any(|line| line.contains(".hidden.txt")));
+    }
+
+    #[tokio::test]
+    async fn test_grep_gitignore_mode_always_honors_gitignore_outside_repo() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(dir.path().join("ignored.txt"), "needle\n").unwrap();
+        let tool = Grep;
+        let result = tool
+            .execute(
+                "grep",
+                &json!({
+                    "pattern": "needle",
+                    "path": dir.path().to_str().unwrap(),
+                    "gitignore_mode": "always"
+                }),
+            )
+            .await;
+        assert!(result.success);
+        assert!(result.result.as_array().unwrap().is_empty());
     }
 }

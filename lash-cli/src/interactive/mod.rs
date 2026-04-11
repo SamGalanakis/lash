@@ -37,11 +37,11 @@ use crate::{Args, scratch_tui, setup};
 use crate::{
     apply_ui_host_effects, controls_text, copy_binding, ensure_supported_execution_mode,
     execution_mode_label, execution_mode_usage, hash12, help_text, info_text,
-    latest_user_prompt_hash, normalize_prepared_turn_for_dispatch, parse_execution_mode,
-    parse_model_selection, persist_live_runtime_snapshot, persist_root_session_state,
-    push_system_message, queued_turn_edit_binding, resolve_model_selection, resolve_model_variant,
-    shell_escape_command, sync_ui_extensions, turn_has_visible_output, validate_model_selection,
-    variant_lines, version_text,
+    normalize_prepared_turn_for_dispatch, parse_execution_mode, parse_model_selection,
+    persist_live_runtime_snapshot, persist_root_session_state, push_system_message,
+    queued_turn_edit_binding, resolve_model_selection, resolve_model_variant, shell_escape_command,
+    sync_ui_extensions, turn_has_visible_output, validate_model_selection, variant_lines,
+    version_text,
 };
 
 use self::commands::{
@@ -196,7 +196,6 @@ async fn apply_ui_host_effect(
     runtime: &mut Option<LashRuntime>,
     turn_counter: &mut usize,
     current_execution_mode: &mut ExecutionMode,
-    current_context_strategy: &mut ContextStrategy,
     provider: &Provider,
     current_model_variant: &mut Option<String>,
     dynamic_tools: &Arc<DynamicToolProvider>,
@@ -215,7 +214,6 @@ async fn apply_ui_host_effect(
                 runtime,
                 turn_counter,
                 current_execution_mode,
-                current_context_strategy,
                 provider,
                 current_model_variant,
                 dynamic_tools,
@@ -334,6 +332,9 @@ pub(crate) async fn run_app(
             .map_err(|err| anyhow::anyhow!("failed to build UI extensions: {err}"))?,
     );
     app.set_ui_extensions(Arc::clone(&ui_extensions));
+    if let Some(plugin_session) = runtime.plugin_session() {
+        app.plugin_commands = plugin_session.command_catalog();
+    }
     app.context_window = Some(initial_context_window);
     app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
     let mut current_model_variant = initial_model_variant.or_else(|| {
@@ -350,10 +351,6 @@ pub(crate) async fn run_app(
         .session_manager()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let mut runtime = Some(runtime);
-    let mut current_context_strategy = runtime
-        .as_ref()
-        .map(|rt| rt.export_state().policy.context_strategy)
-        .unwrap_or_else(lash::default_context_strategy);
     let mut desired_dynamic = dynamic_tools.export_state();
     let mut pending_reconfigure = false;
     let mut ui_trace = args.debug_ui_trace.as_ref().map(|path| {
@@ -466,7 +463,6 @@ pub(crate) async fn run_app(
             &mut runtime,
             &mut turn_counter,
             &mut current_execution_mode,
-            &mut current_context_strategy,
             &provider,
             &mut current_model_variant,
             &dynamic_tools,
@@ -601,7 +597,6 @@ pub(crate) async fn run_app(
                 &mut provider,
                 &mut current_model_variant,
                 &mut current_execution_mode,
-                &mut current_context_strategy,
                 &mut session_manager,
                 &mut desired_dynamic,
                 &mut pending_reconfigure,
@@ -693,7 +688,7 @@ pub(crate) async fn run_app(
                     }
 
                     // Snapshot execution-mode-local state after each completed turn so resume can restore exact state.
-                    let snapshot_hash = if interrupted {
+                    let _snapshot_hash = if interrupted {
                         None
                     } else if let Some(rt) = runtime.as_mut() {
                         match rt.snapshot_execution_state().await {
@@ -722,7 +717,6 @@ pub(crate) async fn run_app(
                     turn_counter = state.iteration;
                     app.token_usage = state.token_usage.clone();
                     app.last_prompt_usage = state.last_prompt_usage.clone();
-                    current_context_strategy = state.policy.context_strategy;
                     tracing::debug!(
                         stream_id = done.stream_id,
                         iteration = state.iteration,
@@ -735,7 +729,6 @@ pub(crate) async fn run_app(
                         "reconciling completed runtime turn"
                     );
                     let persisted_execution_mode = state.policy.execution_mode;
-                    let persisted_context_strategy = state.policy.context_strategy;
                     let persisted_dynamic_state = dynamic_tools.export_state();
 
                     if interrupted {
@@ -748,6 +741,7 @@ pub(crate) async fn run_app(
                         if let Some(context_window) = app.context_window {
                             persist_live_runtime_snapshot(
                                 &store,
+                                store.load_session_graph(),
                                 DurableTurnSnapshot {
                                     messages: state.messages.clone(),
                                     tool_calls: state.tool_calls.clone(),
@@ -755,13 +749,14 @@ pub(crate) async fn run_app(
                                 },
                                 &ui_resume_state,
                                 &persisted_dynamic_state,
-                                &provider,
-                                &app.model,
-                                context_window,
-                                persisted_execution_mode,
-                                persisted_context_strategy,
-                                current_model_variant.as_deref(),
-                                &toolset_hash,
+                                &lash::SessionPolicy {
+                                    provider: provider.clone(),
+                                    model: app.model.clone(),
+                                    model_variant: current_model_variant.clone(),
+                                    execution_mode: persisted_execution_mode,
+                                    max_context_tokens: Some(context_window as usize),
+                                    ..lash::SessionPolicy::default()
+                                },
                                 app.token_usage.clone(),
                                 app.last_prompt_usage.clone(),
                             );
@@ -810,7 +805,6 @@ pub(crate) async fn run_app(
                             &mut provider,
                             &mut current_model_variant,
                             &mut current_execution_mode,
-                            &mut current_context_strategy,
                             &mut session_manager,
                             &mut desired_dynamic,
                             &mut pending_reconfigure,
@@ -823,7 +817,6 @@ pub(crate) async fn run_app(
                         continue;
                     }
 
-                    state.task_state = None;
                     let final_output = app::latest_assistant_text_from_messages(&state.messages)
                         .or_else(|| {
                             (!done.result.assistant_output.safe_text.is_empty())
@@ -836,16 +829,6 @@ pub(crate) async fn run_app(
                         &mut state,
                         &ui_resume_state,
                         &persisted_dynamic_state,
-                        &provider,
-                        &app.model,
-                        app.context_window
-                            .expect("app context_window must be set before persisting state"),
-                        persisted_execution_mode,
-                        persisted_context_strategy,
-                        current_model_variant.as_deref(),
-                        &toolset_hash,
-                        latest_user_prompt_hash(&history),
-                        snapshot_hash,
                     );
                     if let Some(rt) = runtime.as_mut() {
                         rt.set_state(state.clone());
@@ -885,7 +868,6 @@ pub(crate) async fn run_app(
                         &mut provider,
                         &mut current_model_variant,
                         &mut current_execution_mode,
-                        &mut current_context_strategy,
                         &mut session_manager,
                         &mut desired_dynamic,
                         &mut pending_reconfigure,
@@ -1111,6 +1093,44 @@ pub(crate) async fn run_app(
                     continue;
                 }
 
+                // CTRL+SHIFT+Z: redo the most recently undone edit.
+                // Matched before plain CTRL+Z so modern terminals that
+                // deliver both modifiers route redo, not undo.
+                if !app.has_wait()
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.modifiers.contains(KeyModifiers::SHIFT)
+                    && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'z'))
+                {
+                    if app.editor_redo() {
+                        app.update_suggestions();
+                    }
+                    continue;
+                }
+
+                // CTRL+Z: undo the most recent edit to the input draft.
+                if !app.has_wait()
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::SHIFT)
+                    && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'z'))
+                {
+                    if app.editor_undo() {
+                        app.update_suggestions();
+                    }
+                    continue;
+                }
+
+                // ALT+Z: redo fallback for terminals that swallow
+                // CTRL+SHIFT+Z (legacy xterm, some tmux configs).
+                if !app.has_wait()
+                    && key.modifiers.contains(KeyModifiers::ALT)
+                    && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'z'))
+                {
+                    if app.editor_redo() {
+                        app.update_suggestions();
+                    }
+                    continue;
+                }
+
                 // CTRL+Y / CTRL+SHIFT+C: copy current selection when present,
                 // otherwise the last assistant response.
                 if copy_shortcut {
@@ -1184,6 +1204,8 @@ pub(crate) async fn run_app(
                             recorder.record_prompt_dismiss();
                         }
                         app.dismiss_prompt();
+                    } else if app.has_tree() {
+                        let _ = apply_terminal_action(&mut app, &terminal, UiAction::DismissTree);
                     } else if app.has_skill_picker() {
                         let _ = apply_terminal_action(
                             &mut app,
@@ -1427,7 +1449,6 @@ pub(crate) async fn run_app(
                                     &mut runtime,
                                     &mut turn_counter,
                                     &mut current_execution_mode,
-                                    &mut current_context_strategy,
                                     &provider,
                                     &mut current_model_variant,
                                     &dynamic_tools,
@@ -1470,6 +1491,82 @@ pub(crate) async fn run_app(
                             }
                         }
                         _ => {} // ignore other keys while picker is open
+                    }
+                    continue;
+                }
+
+                // ── Tree overlay key handling ──
+                if app.has_tree() {
+                    match key.code {
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            let _ = apply_terminal_action(&mut app, &terminal, UiAction::TreeUp);
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            let _ = apply_terminal_action(&mut app, &terminal, UiAction::TreeDown);
+                        }
+                        KeyCode::Left | KeyCode::Right
+                            if key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        {
+                            let action = if key.code == KeyCode::Left {
+                                UiAction::TreePrevBranch
+                            } else {
+                                UiAction::TreeNextBranch
+                            };
+                            let _ = apply_terminal_action(&mut app, &terminal, action);
+                        }
+                        KeyCode::Enter => {
+                            if let UiActionOutcome::TreePicked(Some(selection)) =
+                                apply_terminal_action(&mut app, &terminal, UiAction::SubmitTree)
+                            {
+                                let current_dynamic_state = dynamic_tools.export_state();
+                                let Some(rt) = runtime.as_mut() else {
+                                    push_system_message(
+                                        &mut app,
+                                        "Branch navigation is unavailable while a turn is running.",
+                                    );
+                                    continue;
+                                };
+                                match crate::tree::switch_to_tree_selection(
+                                    rt,
+                                    logger,
+                                    &mut app,
+                                    &mut history,
+                                    selection,
+                                    &current_dynamic_state,
+                                )
+                                .await
+                                {
+                                    Ok(()) => {
+                                        match rt.session_manager() {
+                                            Ok(manager) => session_manager = manager,
+                                            Err(err) => push_system_message(
+                                                &mut app,
+                                                format!(
+                                                    "Failed to refresh session manager: {}",
+                                                    err
+                                                ),
+                                            ),
+                                        }
+                                        sync_ui_extensions(
+                                            &mut app,
+                                            ui_extensions.as_ref(),
+                                            &plugin_host,
+                                            Arc::clone(&session_manager),
+                                        )
+                                        .await;
+                                    }
+                                    Err(err) => {
+                                        push_system_message(
+                                            &mut app,
+                                            format!("Branch switch failed: {err}"),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                     continue;
                 }
@@ -1612,6 +1709,7 @@ pub(crate) async fn run_app(
                             &queued.display_text,
                             &app.skills,
                             ui_extensions.as_ref(),
+                            &app.plugin_commands,
                         );
                         let is_host_slash_command = parsed_command.is_some();
                         if queued.is_empty()
@@ -1623,7 +1721,10 @@ pub(crate) async fn run_app(
                         }
                         if app.running {
                             if let Some(cmd) = parsed_command
-                                && slash_command_runs_out_of_band_while_running(&cmd)
+                                && slash_command_runs_out_of_band_while_running(
+                                    &cmd,
+                                    &app.plugin_commands,
+                                )
                             {
                                 if let Some(recorder) = ui_trace.as_mut() {
                                     recorder.record_slash_command(queued.display_text.clone());
@@ -1648,7 +1749,6 @@ pub(crate) async fn run_app(
                                     &mut provider,
                                     &mut current_model_variant,
                                     &mut current_execution_mode,
-                                    &mut current_context_strategy,
                                     &mut session_manager,
                                     &mut desired_dynamic,
                                     &mut pending_reconfigure,
@@ -1752,12 +1852,16 @@ pub(crate) async fn run_app(
                             &queued.display_text,
                             &app.skills,
                             ui_extensions.as_ref(),
+                            &app.plugin_commands,
                         );
                         let is_host_slash_command = parsed_command.is_some();
 
                         if app.running {
                             if let Some(cmd) = parsed_command
-                                && slash_command_runs_out_of_band_while_running(&cmd)
+                                && slash_command_runs_out_of_band_while_running(
+                                    &cmd,
+                                    &app.plugin_commands,
+                                )
                             {
                                 if let Some(recorder) = ui_trace.as_mut() {
                                     recorder.record_slash_command(queued.display_text.clone());
@@ -1782,7 +1886,6 @@ pub(crate) async fn run_app(
                                     &mut provider,
                                     &mut current_model_variant,
                                     &mut current_execution_mode,
-                                    &mut current_context_strategy,
                                     &mut session_manager,
                                     &mut desired_dynamic,
                                     &mut pending_reconfigure,
@@ -1902,6 +2005,7 @@ pub(crate) async fn run_app(
                             &queued.display_text,
                             &app.skills,
                             ui_extensions.as_ref(),
+                            &app.plugin_commands,
                         ) {
                             if let Some(recorder) = ui_trace.as_mut() {
                                 recorder.record_slash_command(queued.display_text.clone());
@@ -1926,7 +2030,6 @@ pub(crate) async fn run_app(
                                 &mut provider,
                                 &mut current_model_variant,
                                 &mut current_execution_mode,
-                                &mut current_context_strategy,
                                 &mut session_manager,
                                 &mut desired_dynamic,
                                 &mut pending_reconfigure,
@@ -2283,16 +2386,18 @@ pub(crate) async fn run_app(
                     {
                         persist_live_runtime_snapshot(
                             &store,
+                            store.load_session_graph(),
                             snapshot,
                             &app.ui_resume_state(),
                             &desired_dynamic,
-                            &provider,
-                            &app.model,
-                            context_window,
-                            current_execution_mode,
-                            current_context_strategy,
-                            current_model_variant.as_deref(),
-                            &toolset_hash,
+                            &lash::SessionPolicy {
+                                provider: provider.clone(),
+                                model: app.model.clone(),
+                                model_variant: current_model_variant.clone(),
+                                execution_mode: current_execution_mode,
+                                max_context_tokens: Some(context_window as usize),
+                                ..lash::SessionPolicy::default()
+                            },
                             app.token_usage.clone(),
                             app.last_prompt_usage.clone(),
                         );
@@ -2353,7 +2458,6 @@ pub(crate) async fn run_app(
                             &mut runtime,
                             &mut turn_counter,
                             &mut current_execution_mode,
-                            &mut current_context_strategy,
                             &provider,
                             &mut current_model_variant,
                             &dynamic_tools,

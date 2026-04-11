@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lash::session_model::{MessageRole, Part, PartKind, PruneState};
+use lash::session_model::{MessageRole, Part, PartKind, PruneState, fresh_message_id};
 use lash::{PluginMessage, *};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -29,7 +29,7 @@ pub(super) fn make_turn_input(
 }
 
 fn append_turn_input_message(messages: &mut Vec<Message>, turn_input: &TurnInput) {
-    let user_id = format!("m{}", messages.len());
+    let user_id = fresh_message_id();
     let mut image_ids = Vec::new();
     let mut user_parts = Vec::new();
 
@@ -420,7 +420,7 @@ pub(super) fn send_user_message(
     app_tx: &mpsc::UnboundedSender<AppEvent>,
     provider: &Provider,
     dynamic_state: &DynamicStateSnapshot,
-    toolset_hash: &str,
+    _toolset_hash: &str,
 ) {
     let mut ui_trace = ui_trace;
     if !prepared_turn.display_text.is_empty() {
@@ -452,17 +452,22 @@ pub(super) fn send_user_message(
     let persisted_state = rt.export_state();
     persist_live_runtime_snapshot(
         logger.store().as_ref(),
+        Some(persisted_state.session_graph.clone()),
         pending_turn_snapshot(&persisted_state, &turn_input),
         &app.ui_resume_state(),
         dynamic_state,
-        provider,
-        &app.model,
-        app.context_window
-            .expect("app context_window must be set before dispatching a turn"),
-        persisted_state.policy.execution_mode,
-        persisted_state.policy.context_strategy,
-        app.model_variant.as_deref(),
-        toolset_hash,
+        &lash::SessionPolicy {
+            provider: provider.clone(),
+            model: app.model.clone(),
+            model_variant: app.model_variant.clone(),
+            execution_mode: persisted_state.policy.execution_mode,
+            max_context_tokens: Some(
+                app.context_window
+                    .expect("app context_window must be set before dispatching a turn")
+                    as usize,
+            ),
+            ..lash::SessionPolicy::default()
+        },
         persisted_state.token_usage.clone(),
         persisted_state.last_prompt_usage.clone(),
     );

@@ -406,6 +406,8 @@ pub struct App {
     pub streaming_output_partial: String,
     /// Loaded skills registry.
     pub skills: SkillCatalog,
+    /// Slash commands contributed by plugins in the current session.
+    pub plugin_commands: Vec<lash::CommandDef>,
     /// Priority follow-ups entered with Enter while a turn is running.
     pub pending_steers: VecDeque<PreparedTurn>,
     /// FIFO drafts explicitly queued for later turns.
@@ -663,6 +665,7 @@ impl App {
             streaming_output_hidden: 0,
             streaming_output_partial: String::new(),
             skills: SkillCatalog::load(),
+            plugin_commands: Vec::new(),
             pending_steers: VecDeque::new(),
             queued_turns: VecDeque::new(),
             pending_option_prompt_response: None,

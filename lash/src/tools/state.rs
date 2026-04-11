@@ -351,120 +351,17 @@ impl ToolProvider for StateStore {
 mod tests {
     use super::*;
 
-    struct MockSessionManager {
-        catalog: Vec<serde_json::Value>,
-    }
-
-    #[async_trait::async_trait]
-    impl crate::SessionManager for MockSessionManager {
-        async fn snapshot_current(&self) -> Result<crate::SessionSnapshot, crate::PluginError> {
-            Ok(crate::SessionStateEnvelope::default())
-        }
-
-        async fn snapshot_session(
-            &self,
-            _session_id: &str,
-        ) -> Result<crate::SessionSnapshot, crate::PluginError> {
-            Ok(crate::SessionStateEnvelope::default())
-        }
-
-        async fn tool_catalog(
-            &self,
-            _session_id: &str,
-        ) -> Result<Vec<serde_json::Value>, crate::PluginError> {
-            Ok(self.catalog.clone())
-        }
-
-        async fn create_session(
-            &self,
-            request: crate::SessionCreateRequest,
-        ) -> Result<crate::SessionHandle, crate::PluginError> {
-            Ok(crate::SessionHandle {
-                session_id: request.session_id.unwrap_or_else(|| "child".to_string()),
-                parent_session_id: request.parent_session_id,
-                policy: crate::SessionPolicy {
-                    provider: crate::Provider::OpenAiGeneric {
-                        api_key: String::new(),
-                        base_url: "https://example.invalid/v1".to_string(),
-                        options: crate::ProviderOptions::default(),
-                    },
-                    model: "mock-model".to_string(),
-                    execution_mode: ExecutionMode::Standard,
-                    context_strategy: crate::default_context_strategy(),
-                    ..Default::default()
-                },
-            })
-        }
-
-        async fn close_session(&self, _session_id: &str) -> Result<(), crate::PluginError> {
-            Ok(())
-        }
-
-        async fn start_turn_stream(
-            &self,
-            session_id: &str,
-            _input: crate::TurnInput,
-        ) -> Result<crate::plugin::SessionTurnHandle, crate::PluginError> {
-            let (_tx, rx) = tokio::sync::mpsc::channel(1);
-            Ok(crate::plugin::SessionTurnHandle {
-                turn_id: format!("{session_id}-turn"),
-                session_id: session_id.to_string(),
-                policy: crate::SessionPolicy {
-                    provider: crate::Provider::OpenAiGeneric {
-                        api_key: String::new(),
-                        base_url: "https://example.invalid/v1".to_string(),
-                        options: crate::ProviderOptions::default(),
-                    },
-                    model: "mock-model".to_string(),
-                    execution_mode: ExecutionMode::Standard,
-                    context_strategy: crate::default_context_strategy(),
-                    ..Default::default()
-                },
-                events: rx,
-            })
-        }
-
-        async fn await_turn(
-            &self,
-            _turn_id: &str,
-        ) -> Result<crate::AssembledTurn, crate::PluginError> {
-            Ok(crate::AssembledTurn {
-                state: crate::SessionStateEnvelope::default(),
-                status: crate::TurnStatus::Completed,
-                assistant_output: crate::AssistantOutput {
-                    safe_text: String::new(),
-                    raw_text: String::new(),
-                    state: crate::OutputState::Usable,
-                },
-                has_plugin_visible_output: false,
-                done_reason: crate::DoneReason::ModelStop,
-                execution: crate::ExecutionSummary {
-                    mode: ExecutionMode::Standard,
-                    had_tool_calls: false,
-                    had_code_execution: false,
-                },
-                token_usage: crate::TokenUsage::default(),
-                tool_calls: Vec::new(),
-                errors: Vec::new(),
-            })
-        }
-
-        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), crate::PluginError> {
-            Ok(())
-        }
-    }
+    use crate::test_support::MockSessionManager;
 
     #[tokio::test]
     async fn search_tools_lists_all_without_query() {
         let store = StateStore::new();
         let context = ToolExecutionContext {
             session_id: "root".to_string(),
-            host: Arc::new(MockSessionManager {
-                catalog: vec![
-                    json!({"name":"read_file","description":"Read files","enabled":true,"injected":true,"examples":[]}),
-                    json!({"name":"apply_patch","description":"Apply patches","enabled":true,"injected":true,"examples":[]}),
-                ],
-            }),
+            host: Arc::new(MockSessionManager::default().with_tool_catalog(vec![
+                json!({"name":"read_file","description":"Read files","enabled":true,"injected":true,"examples":[]}),
+                json!({"name":"apply_patch","description":"Apply patches","enabled":true,"injected":true,"examples":[]}),
+            ])),
         };
 
         let result = store
@@ -489,11 +386,9 @@ mod tests {
         let store = StateStore::new();
         let context = ToolExecutionContext {
             session_id: "root".to_string(),
-            host: Arc::new(MockSessionManager {
-                catalog: vec![
-                    json!({"name":"ask","description":"Pause and ask the user a targeted question.","enabled":true,"injected":true,"examples":[]}),
-                ],
-            }),
+            host: Arc::new(MockSessionManager::default().with_tool_catalog(vec![
+                json!({"name":"ask","description":"Pause and ask the user a targeted question.","enabled":true,"injected":true,"examples":[]}),
+            ])),
         };
 
         let result = store

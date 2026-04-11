@@ -10,7 +10,7 @@ use rusqlite::{Connection, OpenFlags, params};
 #[cfg(feature = "sqlite-store")]
 use sha2::{Digest, Sha256};
 
-/// SQLite-backed store for archive, runtime state, and canonical transcript rows.
+/// SQLite-backed store for archive, runtime state, and the canonical session graph.
 #[cfg(feature = "sqlite-store")]
 pub struct Store {
     conn: Mutex<Connection>,
@@ -26,26 +26,9 @@ CREATE TABLE IF NOT EXISTS archive (
     content TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS session_state (
-    singleton             INTEGER PRIMARY KEY CHECK (singleton = 1),
-    iteration             INTEGER NOT NULL DEFAULT 0,
-    last_prompt_usage_json          TEXT,
-    task_state_json                 TEXT,
-    replay_manifest_json            TEXT,
-    plugin_snapshot_json            TEXT,
-    dynamic_state_json              TEXT,
-    execution_state_snapshot         BLOB,
-    input_tokens          INTEGER NOT NULL DEFAULT 0,
-    output_tokens         INTEGER NOT NULL DEFAULT 0,
-    cached_input_tokens   INTEGER NOT NULL DEFAULT 0,
-    reasoning_tokens      INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS live_session_snapshot (
+CREATE TABLE IF NOT EXISTS live_session_graph (
     singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
-    state_json     TEXT NOT NULL DEFAULT '{}',
-    dynamic_state_json TEXT NOT NULL DEFAULT '{}',
-    execution_state_snapshot  BLOB
+    graph_json     TEXT NOT NULL DEFAULT '{\"nodes\":[],\"leaf_node_id\":null}'
 );
 
 CREATE TABLE IF NOT EXISTS ui_resume_state (
@@ -53,19 +36,10 @@ CREATE TABLE IF NOT EXISTS ui_resume_state (
     state_json     TEXT NOT NULL DEFAULT '{}'
 );
 
-CREATE TABLE IF NOT EXISTS transcript_entries (
-    keyspace       TEXT NOT NULL,
-    stable_key     TEXT NOT NULL,
-    sort_index     INTEGER NOT NULL DEFAULT 0,
-    message_role   TEXT,
-    payload_json   TEXT NOT NULL,
-    search_text    TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (keyspace, stable_key)
+CREATE TABLE IF NOT EXISTS session_graph (
+    singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
+    graph_json     TEXT NOT NULL DEFAULT '{\"nodes\":[],\"leaf_node_id\":null}'
 );
-CREATE INDEX IF NOT EXISTS idx_transcript_entries_keyspace_sort
-ON transcript_entries(keyspace, sort_index, stable_key);
-CREATE INDEX IF NOT EXISTS idx_transcript_entries_picker
-ON transcript_entries(keyspace, message_role, sort_index);
 
 CREATE TABLE IF NOT EXISTS session_meta (
     singleton        INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -79,7 +53,7 @@ CREATE TABLE IF NOT EXISTS session_meta (
 ";
 
 #[cfg(feature = "sqlite-store")]
-const SCHEMA_VERSION: i32 = 6;
+const SCHEMA_VERSION: i32 = 8;
 
 #[cfg(feature = "sqlite-store")]
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -110,82 +84,6 @@ fn apply_pragmas(conn: &Connection, backing: StoreBacking) -> rusqlite::Result<(
     Ok(())
 }
 
-/// Persisted session runtime state for snapshot/resume.
-#[derive(Clone, Debug)]
-pub struct SessionState {
-    pub iteration: usize,
-    pub token_usage: crate::TokenUsage,
-    pub last_prompt_usage: Option<crate::PromptUsage>,
-    pub task_state: Option<crate::SessionTaskState>,
-    pub replay_manifest: Option<crate::ReplayManifest>,
-    pub plugin_snapshot: Option<crate::PluginSessionSnapshot>,
-    pub dynamic_state: Option<crate::DynamicStateSnapshot>,
-    pub execution_state_snapshot: Option<Vec<u8>>,
-}
-
-#[derive(Clone, Debug)]
-pub struct LiveSessionSnapshot {
-    pub state: crate::SessionStateEnvelope,
-    pub dynamic_state: crate::DynamicStateSnapshot,
-    pub execution_state_snapshot: Option<Vec<u8>>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TranscriptEntry {
-    pub keyspace: String,
-    pub stable_key: String,
-    pub sort_index: i64,
-    pub message_role: Option<String>,
-    pub payload_json: String,
-    pub search_text: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TranscriptEntryPayload {
-    pub stable_key: String,
-    pub sort_index: i64,
-    pub message_role: Option<String>,
-    pub payload_json: String,
-    pub search_text: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TranscriptKeyspace {
-    pub keyspace: String,
-    pub entries: Vec<TranscriptEntryPayload>,
-}
-
-impl TranscriptEntryPayload {
-    pub fn new(stable_key: impl Into<String>, sort_index: i64, payload_json: String) -> Self {
-        Self {
-            stable_key: stable_key.into(),
-            sort_index,
-            message_role: None,
-            payload_json,
-            search_text: String::new(),
-        }
-    }
-
-    pub fn with_message_role(mut self, message_role: Option<String>) -> Self {
-        self.message_role = message_role;
-        self
-    }
-
-    pub fn with_search_text(mut self, search_text: impl Into<String>) -> Self {
-        self.search_text = search_text.into();
-        self
-    }
-}
-
-impl TranscriptKeyspace {
-    pub fn new(keyspace: impl Into<String>, entries: Vec<TranscriptEntryPayload>) -> Self {
-        Self {
-            keyspace: keyspace.into(),
-            entries,
-        }
-    }
-}
-
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SessionMeta {
     pub session_id: String,
@@ -206,167 +104,34 @@ pub struct SessionPickerInfo {
     pub user_message_count: usize,
 }
 
-#[derive(Clone, Debug)]
-pub struct TurnCheckpoint {
-    pub session_state: SessionState,
-    pub transcript_keyspaces: Vec<TranscriptKeyspace>,
-}
-
-pub const TRANSCRIPT_KEYSPACE_MESSAGES: &str = "message";
-pub const TRANSCRIPT_KEYSPACE_TOOL_CALLS: &str = "tool_call";
-
-/// Persistence backend for archived content, runtime snapshots, and transcript rows.
+/// Persistence backend for archived content, committed session graphs, and live graphs.
 #[async_trait::async_trait]
 pub trait RuntimeStore: Send + Sync {
     async fn store_archive(&self, content: &str) -> String;
     async fn get_archive(&self, hash: &str) -> Option<String>;
-    async fn save_session_state(&self, state: SessionState);
-    async fn load_session_state(&self) -> Option<SessionState>;
-    async fn save_live_session_snapshot(&self, snapshot: LiveSessionSnapshot);
-    async fn load_live_session_snapshot(&self) -> Option<LiveSessionSnapshot>;
-    async fn clear_live_session_snapshot(&self);
-    async fn transcript_clear(&self);
-    async fn transcript_load(&self) -> Vec<TranscriptEntry>;
-    async fn transcript_replace_keyspaces(&self, keyspaces: Vec<TranscriptKeyspace>);
+    async fn save_session_graph(&self, graph: crate::SessionGraph);
+    async fn load_session_graph(&self) -> Option<crate::SessionGraph>;
+    async fn save_live_session_graph(&self, graph: crate::SessionGraph);
+    async fn load_live_session_graph(&self) -> Option<crate::SessionGraph>;
+    async fn clear_live_session_graph(&self);
     async fn save_session_meta(&self, meta: SessionMeta);
     async fn load_session_meta(&self) -> Option<SessionMeta>;
 
-    async fn save_turn_checkpoint(&self, checkpoint: TurnCheckpoint) {
-        let TurnCheckpoint {
-            session_state,
-            transcript_keyspaces,
-        } = checkpoint;
-        self.save_session_state(session_state).await;
-        self.transcript_replace_keyspaces(transcript_keyspaces)
-            .await;
-        self.clear_live_session_snapshot().await;
+    async fn save_turn_checkpoint(&self, graph: crate::SessionGraph) {
+        self.save_session_graph(graph).await;
+        self.clear_live_session_graph().await;
     }
 
-    async fn transcript_replace_all(&self, entries: Vec<TranscriptEntry>) {
-        self.transcript_clear().await;
-        self.transcript_replace_keyspaces(group_transcript_entries(entries))
-            .await;
+    async fn graph_copy_from_store(&self, source: &(dyn RuntimeStore + '_)) {
+        if let Some(graph) = source.load_session_graph().await {
+            self.save_session_graph(graph).await;
+        }
     }
-
-    async fn transcript_copy_from_store(&self, source: &(dyn RuntimeStore + '_)) {
-        let entries = source.transcript_load().await;
-        self.transcript_replace_all(entries).await;
-    }
-}
-
-pub fn group_transcript_entries(entries: Vec<TranscriptEntry>) -> Vec<TranscriptKeyspace> {
-    let mut grouped = std::collections::BTreeMap::<String, Vec<TranscriptEntryPayload>>::new();
-    for entry in entries {
-        grouped
-            .entry(entry.keyspace)
-            .or_default()
-            .push(TranscriptEntryPayload {
-                stable_key: entry.stable_key,
-                sort_index: entry.sort_index,
-                message_role: entry.message_role,
-                payload_json: entry.payload_json,
-                search_text: entry.search_text,
-            });
-    }
-    grouped
-        .into_iter()
-        .map(|(keyspace, mut entries)| {
-            entries.sort_by(|a, b| {
-                a.sort_index
-                    .cmp(&b.sort_index)
-                    .then_with(|| a.stable_key.cmp(&b.stable_key))
-            });
-            TranscriptKeyspace { keyspace, entries }
-        })
-        .collect()
-}
-
-pub fn semantic_transcript_keyspaces(
-    messages: &[crate::Message],
-    tool_calls: &[crate::ToolCallRecord],
-) -> Vec<TranscriptKeyspace> {
-    let message_entries = messages
-        .iter()
-        .enumerate()
-        .map(|(idx, message)| {
-            let payload_json =
-                serde_json::to_string(message).unwrap_or_else(|_| "null".to_string());
-            TranscriptEntryPayload::new(idx.to_string(), idx as i64, payload_json)
-                .with_message_role(Some(transcript_message_role(message)))
-                .with_search_text(transcript_message_search_text(message))
-        })
-        .collect();
-    let tool_call_entries = tool_calls
-        .iter()
-        .enumerate()
-        .map(|(idx, record)| {
-            let stable_key = record
-                .call_id
-                .clone()
-                .filter(|call_id| !call_id.is_empty())
-                .unwrap_or_else(|| idx.to_string());
-            let payload_json = serde_json::to_string(record).unwrap_or_else(|_| "null".to_string());
-            TranscriptEntryPayload::new(stable_key, idx as i64, payload_json)
-        })
-        .collect();
-    vec![
-        TranscriptKeyspace::new(TRANSCRIPT_KEYSPACE_MESSAGES, message_entries),
-        TranscriptKeyspace::new(TRANSCRIPT_KEYSPACE_TOOL_CALLS, tool_call_entries),
-    ]
-}
-
-pub fn transcript_messages(entries: &[TranscriptEntry]) -> Vec<crate::Message> {
-    entries
-        .iter()
-        .filter(|entry| entry.keyspace == TRANSCRIPT_KEYSPACE_MESSAGES)
-        .filter_map(|entry| serde_json::from_str(&entry.payload_json).ok())
-        .collect()
-}
-
-pub fn transcript_tool_calls(entries: &[TranscriptEntry]) -> Vec<crate::ToolCallRecord> {
-    entries
-        .iter()
-        .filter(|entry| entry.keyspace == TRANSCRIPT_KEYSPACE_TOOL_CALLS)
-        .filter_map(|entry| serde_json::from_str(&entry.payload_json).ok())
-        .collect()
 }
 
 #[cfg(feature = "sqlite-store")]
 fn encode_json<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string(value).expect("persisted state should serialize")
-}
-
-#[cfg(feature = "sqlite-store")]
-fn encode_optional_json<T: serde::Serialize>(value: Option<&T>) -> Option<String> {
-    value.map(encode_json)
-}
-
-#[cfg(feature = "sqlite-store")]
-fn decode_optional_json<T: serde::de::DeserializeOwned>(value: Option<String>) -> Option<T> {
-    value.and_then(|value| serde_json::from_str(&value).ok())
-}
-
-fn transcript_message_role(message: &crate::Message) -> String {
-    match message.role {
-        crate::MessageRole::User => "user".to_string(),
-        crate::MessageRole::Assistant => "assistant".to_string(),
-        crate::MessageRole::System => "system".to_string(),
-    }
-}
-
-fn transcript_message_search_text(message: &crate::Message) -> String {
-    message
-        .parts
-        .iter()
-        .filter_map(|part| match part.kind {
-            crate::PartKind::ToolCall | crate::PartKind::ToolResult => None,
-            crate::PartKind::Image => Some("[Image attached]".to_string()),
-            _ => (!part.content.trim().is_empty()).then(|| part.content.clone()),
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-        .trim()
-        .to_string()
 }
 
 #[cfg(feature = "sqlite-store")]
@@ -393,7 +158,7 @@ impl Store {
         })
     }
 
-    /// Fast picker info: session_meta + first user prompt + user turn count from transcript rows.
+    /// Fast picker info: session_meta + first user prompt + user turn count from the persisted graph.
     pub fn load_picker_info(&self) -> Option<SessionPickerInfo> {
         let conn = self.conn.lock().unwrap();
         let meta = conn
@@ -411,34 +176,21 @@ impl Store {
             )
             .ok()?;
 
-        let turn_count: usize = conn
+        let graph_json: String = conn
             .query_row(
-                "SELECT COUNT(*) FROM transcript_entries
-                 WHERE keyspace = 'message'
-                   AND message_role = 'user'",
+                "SELECT graph_json FROM session_graph WHERE singleton = 1",
                 [],
                 |row| row.get(0),
             )
-            .unwrap_or(0);
-
-        let first_msg: String = conn
-            .query_row(
-                "SELECT search_text FROM transcript_entries
-                 WHERE keyspace = 'message'
-                   AND message_role = 'user'
-                 ORDER BY sort_index ASC, stable_key ASC
-                 LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or_default();
+            .unwrap_or_else(|_| "{\"nodes\":[],\"leaf_node_id\":null}".to_string());
+        let graph = serde_json::from_str::<crate::SessionGraph>(&graph_json).unwrap_or_default();
 
         Some(SessionPickerInfo {
             session_id: meta.0,
             cwd: meta.1,
             parent_session_id: meta.2,
-            first_user_message: first_msg,
-            user_message_count: turn_count,
+            first_user_message: graph.first_user_message(),
+            user_message_count: graph.user_message_count(),
         })
     }
 
@@ -478,132 +230,33 @@ impl Store {
     }
 
     /// Save or update the session runtime state in the store.
-    pub fn save_session_state(&self, state: SessionState) {
+    pub fn save_live_session_graph(&self, graph: crate::SessionGraph) {
         let conn = self.conn.lock().unwrap();
+        let graph_json = encode_json(&graph);
         conn.execute(
-            "INSERT OR REPLACE INTO session_state (
-                singleton, iteration, last_prompt_usage_json, task_state_json,
-                replay_manifest_json, plugin_snapshot_json, dynamic_state_json,
-                execution_state_snapshot,
-                input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
-             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                state.iteration as i64,
-                encode_optional_json(state.last_prompt_usage.as_ref()),
-                encode_optional_json(state.task_state.as_ref()),
-                encode_optional_json(state.replay_manifest.as_ref()),
-                encode_optional_json(state.plugin_snapshot.as_ref()),
-                encode_optional_json(state.dynamic_state.as_ref()),
-                state.execution_state_snapshot,
-                state.token_usage.input_tokens,
-                state.token_usage.output_tokens,
-                state.token_usage.cached_input_tokens,
-                state.token_usage.reasoning_tokens
-            ],
+            "INSERT OR REPLACE INTO live_session_graph (singleton, graph_json)
+             VALUES (1, ?1)",
+            params![graph_json],
         )
         .unwrap();
     }
 
-    /// Load the persisted session runtime state.
-    pub fn load_session_state(&self) -> Option<SessionState> {
+    pub fn load_live_session_graph(&self) -> Option<crate::SessionGraph> {
         let conn = self.conn.lock().unwrap();
-        let (
-            iteration,
-            last_prompt_usage_json,
-            task_state_json,
-            replay_manifest_json,
-            plugin_snapshot_json,
-            dynamic_state_json,
-            execution_state_snapshot,
-            input_tokens,
-            output_tokens,
-            cached_input_tokens,
-            reasoning_tokens,
-        ) = conn
+        let graph_json: String = conn
             .query_row(
-                "SELECT iteration, last_prompt_usage_json, task_state_json,
-                    replay_manifest_json, plugin_snapshot_json, dynamic_state_json,
-                    execution_state_snapshot, input_tokens, output_tokens,
-                    cached_input_tokens, reasoning_tokens
-             FROM session_state WHERE singleton = 1",
+                "SELECT graph_json FROM live_session_graph WHERE singleton = 1",
                 [],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                        row.get::<_, Option<Vec<u8>>>(6)?,
-                        row.get::<_, i64>(7)?,
-                        row.get::<_, i64>(8)?,
-                        row.get::<_, i64>(9)?,
-                        row.get::<_, i64>(10)?,
-                    ))
-                },
+                |row| row.get(0),
             )
             .ok()?;
-        Some(SessionState {
-            iteration: usize::try_from(iteration).ok()?,
-            token_usage: crate::TokenUsage {
-                input_tokens,
-                output_tokens,
-                cached_input_tokens,
-                reasoning_tokens,
-            },
-            last_prompt_usage: decode_optional_json(last_prompt_usage_json),
-            task_state: decode_optional_json(task_state_json),
-            replay_manifest: decode_optional_json(replay_manifest_json),
-            plugin_snapshot: decode_optional_json(plugin_snapshot_json),
-            dynamic_state: decode_optional_json(dynamic_state_json),
-            execution_state_snapshot,
-        })
+        serde_json::from_str(&graph_json).ok()
     }
 
-    pub fn save_live_session_snapshot(&self, snapshot: LiveSessionSnapshot) {
+    pub fn clear_live_session_graph(&self) {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO live_session_snapshot (
-                singleton, state_json, dynamic_state_json, execution_state_snapshot
-             ) VALUES (1, ?1, ?2, ?3)",
-            params![
-                encode_json(&snapshot.state),
-                encode_json(&snapshot.dynamic_state),
-                snapshot.execution_state_snapshot
-            ],
-        )
-        .unwrap();
-    }
-
-    pub fn load_live_session_snapshot(&self) -> Option<LiveSessionSnapshot> {
-        let conn = self.conn.lock().unwrap();
-        let (state_json, dynamic_state_json, execution_state_snapshot) = conn
-            .query_row(
-                "SELECT state_json, dynamic_state_json, execution_state_snapshot
-             FROM live_session_snapshot WHERE singleton = 1",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<Vec<u8>>>(2)?,
-                    ))
-                },
-            )
-            .ok()?;
-        Some(LiveSessionSnapshot {
-            state: serde_json::from_str(&state_json).ok()?,
-            dynamic_state: serde_json::from_str(&dynamic_state_json).ok()?,
-            execution_state_snapshot,
-        })
-    }
-
-    pub fn clear_live_session_snapshot(&self) {
-        let conn = self.conn.lock().unwrap();
-        if let Err(err) = conn.execute("DELETE FROM live_session_snapshot WHERE singleton = 1", [])
-        {
-            tracing::warn!(error = %err, "failed to clear live session snapshot");
+        if let Err(err) = conn.execute("DELETE FROM live_session_graph WHERE singleton = 1", []) {
+            tracing::warn!(error = %err, "failed to clear live session graph");
         }
     }
 
@@ -637,97 +290,34 @@ impl Store {
         serde_json::from_str(&state_json).ok()
     }
 
-    pub fn transcript_clear(&self) {
+    pub fn save_session_graph(&self, graph: crate::SessionGraph) {
         let conn = self.conn.lock().unwrap();
-        if let Err(err) = conn.execute("DELETE FROM transcript_entries", []) {
-            tracing::warn!(error = %err, "failed to clear transcript rows");
-        }
-    }
-
-    pub fn transcript_load(&self) -> Vec<TranscriptEntry> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = match conn.prepare(
-            "SELECT keyspace, stable_key, sort_index, message_role, payload_json, search_text
-             FROM transcript_entries
-             ORDER BY keyspace, sort_index, stable_key",
+        let graph_json = encode_json(&graph);
+        if let Err(err) = conn.execute(
+            "INSERT OR REPLACE INTO session_graph (singleton, graph_json)
+             VALUES (1, ?1)",
+            params![graph_json],
         ) {
-            Ok(stmt) => stmt,
-            Err(_) => return Vec::new(),
-        };
-        let rows = match stmt.query_map([], |row| {
-            Ok(TranscriptEntry {
-                keyspace: row.get(0)?,
-                stable_key: row.get(1)?,
-                sort_index: row.get(2)?,
-                message_role: row.get(3)?,
-                payload_json: row.get(4)?,
-                search_text: row.get(5)?,
-            })
-        }) {
-            Ok(rows) => rows,
-            Err(_) => return Vec::new(),
-        };
-
-        rows.filter_map(|row| row.ok()).collect()
-    }
-
-    pub fn transcript_replace_keyspaces(&self, keyspaces: &[TranscriptKeyspace]) {
-        let mut conn = self.conn.lock().unwrap();
-        let tx = match conn.transaction() {
-            Ok(tx) => tx,
-            Err(err) => {
-                tracing::warn!(error = %err, "failed to open transcript transaction");
-                return;
-            }
-        };
-
-        for keyspace in keyspaces {
-            if let Err(err) = tx.execute(
-                "DELETE FROM transcript_entries
-                 WHERE keyspace = ?1",
-                params![keyspace.keyspace],
-            ) {
-                tracing::warn!(
-                    error = %err,
-                    keyspace = keyspace.keyspace,
-                    "failed to clear transcript keyspace"
-                );
-                continue;
-            }
-
-            for entry in &keyspace.entries {
-                if let Err(err) = tx.execute(
-                    "INSERT INTO transcript_entries (
-                        keyspace, stable_key, sort_index, message_role, payload_json, search_text
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        keyspace.keyspace,
-                        entry.stable_key,
-                        entry.sort_index,
-                        entry.message_role,
-                        entry.payload_json,
-                        entry.search_text
-                    ],
-                ) {
-                    tracing::warn!(
-                        error = %err,
-                        keyspace = keyspace.keyspace,
-                        stable_key = entry.stable_key,
-                        "failed to persist transcript entry"
-                    );
-                }
-            }
-        }
-
-        if let Err(err) = tx.commit() {
-            tracing::warn!(error = %err, "failed to commit transcript transaction");
+            tracing::warn!(error = %err, "failed to persist session graph");
         }
     }
 
-    pub fn transcript_copy_from_store(&self, source: &Store) {
-        let entries = source.transcript_load();
-        self.transcript_clear();
-        self.transcript_replace_keyspaces(&group_transcript_entries(entries));
+    pub fn load_session_graph(&self) -> Option<crate::SessionGraph> {
+        let conn = self.conn.lock().unwrap();
+        let graph_json: String = conn
+            .query_row(
+                "SELECT graph_json FROM session_graph WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .ok()?;
+        serde_json::from_str(&graph_json).ok()
+    }
+
+    pub fn graph_copy_from_store(&self, source: &Store) {
+        if let Some(graph) = source.load_session_graph() {
+            self.save_session_graph(graph);
+        }
     }
 
     pub fn save_session_meta(&self, meta: SessionMeta) {
@@ -785,36 +375,24 @@ impl RuntimeStore for Store {
         Self::get_archive(self, hash)
     }
 
-    async fn save_session_state(&self, state: SessionState) {
-        Self::save_session_state(self, state);
+    async fn save_session_graph(&self, graph: crate::SessionGraph) {
+        Self::save_session_graph(self, graph);
     }
 
-    async fn load_session_state(&self) -> Option<SessionState> {
-        Self::load_session_state(self)
+    async fn load_session_graph(&self) -> Option<crate::SessionGraph> {
+        Self::load_session_graph(self)
     }
 
-    async fn save_live_session_snapshot(&self, snapshot: LiveSessionSnapshot) {
-        Self::save_live_session_snapshot(self, snapshot);
+    async fn save_live_session_graph(&self, graph: crate::SessionGraph) {
+        Self::save_live_session_graph(self, graph);
     }
 
-    async fn load_live_session_snapshot(&self) -> Option<LiveSessionSnapshot> {
-        Self::load_live_session_snapshot(self)
+    async fn load_live_session_graph(&self) -> Option<crate::SessionGraph> {
+        Self::load_live_session_graph(self)
     }
 
-    async fn clear_live_session_snapshot(&self) {
-        Self::clear_live_session_snapshot(self);
-    }
-
-    async fn transcript_clear(&self) {
-        Self::transcript_clear(self);
-    }
-
-    async fn transcript_load(&self) -> Vec<TranscriptEntry> {
-        Self::transcript_load(self)
-    }
-
-    async fn transcript_replace_keyspaces(&self, keyspaces: Vec<TranscriptKeyspace>) {
-        Self::transcript_replace_keyspaces(self, &keyspaces);
+    async fn clear_live_session_graph(&self) {
+        Self::clear_live_session_graph(self);
     }
 
     async fn save_session_meta(&self, meta: SessionMeta) {
@@ -868,26 +446,27 @@ fn unsupported_schema_message() -> String {
 #[cfg(all(test, feature = "sqlite-store"))]
 mod tests {
     use super::*;
+    use crate::session_model::{Message, MessageRole, Part, PartKind, PruneState};
     use rusqlite::Connection;
-    use std::collections::{BTreeMap, BTreeSet};
-
     fn mem() -> Store {
         Store::memory().unwrap()
     }
 
-    fn transcript_entry(
-        keyspace: &str,
-        stable_key: &str,
-        sort_index: i64,
-        payload_json: &str,
-    ) -> TranscriptEntry {
-        TranscriptEntry {
-            keyspace: keyspace.to_string(),
-            stable_key: stable_key.to_string(),
-            sort_index,
-            message_role: None,
-            payload_json: payload_json.to_string(),
-            search_text: String::new(),
+    fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
+        Message {
+            id: id.to_string(),
+            role,
+            parts: vec![Part {
+                id: format!("{id}.p0"),
+                kind: PartKind::Text,
+                content: content.to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: PruneState::Intact,
+            }],
+            user_input: None,
+            origin: None,
         }
     }
 
@@ -932,159 +511,68 @@ mod tests {
     }
 
     #[test]
-    fn transcript_copy_from_store_round_trip() {
+    fn graph_copy_from_store_round_trip() {
         let source = mem();
-        source.transcript_replace_keyspaces(&[TranscriptKeyspace::new(
-            "message",
-            vec![
-                TranscriptEntryPayload::new("0", 0, r#"{"text":"hello"}"#.to_string())
-                    .with_message_role(Some("user".to_string()))
-                    .with_search_text("hello"),
-                TranscriptEntryPayload::new("1", 1, r#"{"text":"world"}"#.to_string())
-                    .with_message_role(Some("assistant".to_string())),
+        source.save_session_graph(crate::SessionGraph::from_projection(
+            &[
+                text_message("u0", MessageRole::User, "hello"),
+                text_message("a0", MessageRole::Assistant, "world"),
             ],
-        )]);
+            &[],
+        ));
 
         let target = mem();
-        target.transcript_copy_from_store(&source);
+        target.graph_copy_from_store(&source);
 
-        let entries = target.transcript_load();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].payload_json, r#"{"text":"hello"}"#);
-        assert_eq!(entries[1].payload_json, r#"{"text":"world"}"#);
+        let graph = target.load_session_graph().expect("session graph");
+        let messages = graph.project_messages();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].parts[0].content, "hello");
+        assert_eq!(messages[1].parts[0].content, "world");
     }
 
     #[test]
-    fn transcript_replace_keyspace_rewrites_existing_rows() {
+    fn save_session_graph_rewrites_existing_snapshot() {
         let store = mem();
-        store.transcript_replace_keyspaces(&[TranscriptKeyspace::new(
-            "runtime_state",
-            vec![TranscriptEntryPayload::new(
-                "state",
-                0,
-                r#"{"blocks":["old"]}"#.to_string(),
-            )],
-        )]);
-
-        store.transcript_replace_keyspaces(&[TranscriptKeyspace::new(
-            "runtime_state",
-            vec![TranscriptEntryPayload::new(
-                "state",
-                0,
-                r#"{"blocks":["updated"]}"#.to_string(),
-            )],
-        )]);
-
-        let entries = store.transcript_load();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].payload_json, r#"{"blocks":["updated"]}"#);
-    }
-
-    #[test]
-    fn save_session_state_rewrites_existing_snapshot() {
-        let store = mem();
-        store.save_session_state(SessionState {
-            iteration: 0,
-            token_usage: crate::TokenUsage::default(),
-            last_prompt_usage: None,
-            task_state: None,
-            replay_manifest: None,
-            plugin_snapshot: None,
-            dynamic_state: None,
-            execution_state_snapshot: None,
-        });
-
-        store.save_session_state(SessionState {
-            iteration: 7,
-            token_usage: crate::TokenUsage {
-                input_tokens: 5,
-                output_tokens: 2,
-                cached_input_tokens: 1,
-                reasoning_tokens: 0,
-            },
-            last_prompt_usage: Some(crate::PromptUsage {
-                prompt_context_tokens: 11,
-                input_tokens: 10,
-                cached_input_tokens: 1,
-                context_budget_tokens: 11,
-            }),
-            task_state: Some(crate::SessionTaskState::LiveResume {
-                status: crate::SessionTaskStatus::Running,
-                saved_at: "2026-04-11T00:00:00Z".to_string(),
-            }),
-            replay_manifest: Some(crate::ReplayManifest {
-                version: 3,
-                saved_at: "2026-04-11T00:00:00Z".to_string(),
-                provider: "test".to_string(),
-                configured_model: "gpt-5".to_string(),
-                resolved_model: "gpt-5".to_string(),
-                context_window: 1024,
-                execution_mode: crate::ExecutionMode::Standard,
-                context_strategy: crate::ContextStrategy::RollingContext,
-                model_variant: None,
-                toolset_hash: "hash".to_string(),
-                prompt_hash: None,
-                snapshot_hash: None,
-            }),
-            plugin_snapshot: Some(crate::PluginSessionSnapshot::default()),
-            dynamic_state: Some(crate::DynamicStateSnapshot {
-                base_generation: 1,
-                tools: BTreeMap::new(),
-                enabled_tools: BTreeSet::new(),
-            }),
-            execution_state_snapshot: None,
-        });
-
-        let state = store.load_session_state().expect("session state");
-        assert_eq!(state.iteration, 7);
-        assert_eq!(state.token_usage.input_tokens, 5);
-        assert!(matches!(
-            state.task_state,
-            Some(crate::SessionTaskState::LiveResume { .. })
+        store.save_session_graph(crate::SessionGraph::from_projection(
+            &[text_message("u0", MessageRole::User, "old")],
+            &[],
         ));
-        assert!(state.replay_manifest.is_some());
-        assert!(state.dynamic_state.is_some());
+
+        store.save_session_graph(crate::SessionGraph::from_projection(
+            &[text_message("u1", MessageRole::User, "updated")],
+            &[],
+        ));
+
+        let graph = store.load_session_graph().expect("session graph");
+        let messages = graph.project_messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].parts[0].content, "updated");
     }
 
     #[test]
-    fn live_session_snapshot_rewrites_and_clears() {
+    fn live_session_graph_rewrites_and_clears() {
         let store = mem();
-        store.save_live_session_snapshot(LiveSessionSnapshot {
-            state: crate::SessionStateEnvelope {
-                iteration: 1,
-                ..crate::SessionStateEnvelope::default()
-            },
-            dynamic_state: crate::DynamicStateSnapshot {
-                base_generation: 1,
-                tools: BTreeMap::new(),
-                enabled_tools: BTreeSet::new(),
-            },
-            execution_state_snapshot: Some(vec![1, 2, 3]),
-        });
-        store.save_live_session_snapshot(LiveSessionSnapshot {
-            state: crate::SessionStateEnvelope {
-                iteration: 2,
-                ..crate::SessionStateEnvelope::default()
-            },
-            dynamic_state: crate::DynamicStateSnapshot {
-                base_generation: 2,
-                tools: BTreeMap::new(),
-                enabled_tools: BTreeSet::new(),
-            },
-            execution_state_snapshot: None,
-        });
+        store.save_live_session_graph(crate::SessionGraph::from_projection(
+            &[text_message("u0", MessageRole::User, "first")],
+            &[],
+        ));
+        store.save_live_session_graph(crate::SessionGraph::from_projection(
+            &[text_message("u1", MessageRole::User, "second")],
+            &[],
+        ));
 
-        let snapshot = store.load_live_session_snapshot().expect("live snapshot");
-        assert_eq!(snapshot.state.iteration, 2);
-        assert_eq!(snapshot.dynamic_state.base_generation, 2);
-        assert_eq!(snapshot.execution_state_snapshot, None);
+        let graph = store.load_live_session_graph().expect("live session graph");
+        let messages = graph.project_messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].parts[0].content, "second");
 
-        store.clear_live_session_snapshot();
-        assert!(store.load_live_session_snapshot().is_none());
+        store.clear_live_session_graph();
+        assert!(store.load_live_session_graph().is_none());
     }
 
     #[test]
-    fn load_picker_info_reads_message_transcript() {
+    fn load_picker_info_reads_message_graph() {
         let store = mem();
         store.save_session_meta(SessionMeta {
             session_id: "s1".to_string(),
@@ -1094,38 +582,18 @@ mod tests {
             cwd: Some("/tmp/demo".to_string()),
             parent_session_id: None,
         });
-        store.transcript_replace_keyspaces(&[TranscriptKeyspace::new(
-            "message",
-            vec![
-                TranscriptEntryPayload::new("0", 0, r#"{"id":"u0"}"#.to_string())
-                    .with_message_role(Some("user".to_string()))
-                    .with_search_text("hello there"),
-                TranscriptEntryPayload::new("1", 1, r#"{"id":"a0"}"#.to_string())
-                    .with_message_role(Some("assistant".to_string())),
-                TranscriptEntryPayload::new("2", 2, r#"{"id":"u1"}"#.to_string())
-                    .with_message_role(Some("user".to_string()))
-                    .with_search_text("follow up"),
+        store.save_session_graph(crate::SessionGraph::from_projection(
+            &[
+                text_message("u0", MessageRole::User, "hello there"),
+                text_message("a0", MessageRole::Assistant, "response"),
+                text_message("u1", MessageRole::User, "follow up"),
             ],
-        )]);
+            &[],
+        ));
 
         let info = store.load_picker_info().expect("picker info");
         assert_eq!(info.session_id, "s1");
         assert_eq!(info.first_user_message, "hello there");
         assert_eq!(info.user_message_count, 2);
-    }
-
-    #[test]
-    fn group_transcript_entries_groups_by_keyspace_and_preserves_sort_order() {
-        let grouped = group_transcript_entries(vec![
-            transcript_entry("panel", "1", 1, r#"{"kind":"assistant"}"#),
-            transcript_entry("message", "0", 0, r#"{"role":"user"}"#),
-            transcript_entry("panel", "0", 0, r#"{"kind":"user"}"#),
-        ]);
-
-        assert_eq!(grouped.len(), 2);
-        assert_eq!(grouped[0].keyspace, "message");
-        assert_eq!(grouped[1].keyspace, "panel");
-        assert_eq!(grouped[1].entries[0].stable_key, "0");
-        assert_eq!(grouped[1].entries[1].stable_key, "1");
     }
 }

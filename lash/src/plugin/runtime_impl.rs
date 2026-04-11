@@ -5,7 +5,8 @@ use std::sync::{Mutex as StdMutex, Weak};
 use tokio::task::JoinSet;
 
 use super::*;
-use crate::{Message, MessageOrigin, Part, PartKind, PruneState, SessionEvent};
+use crate::session_model::{fresh_message_id, plugin_message_to_message, reassign_part_ids};
+use crate::{Message, Part, PartKind, PruneState};
 
 #[derive(Clone)]
 struct RegisteredHook<T> {
@@ -17,6 +18,13 @@ struct RegisteredHook<T> {
 struct RegisteredExclusiveHook<T> {
     plugin_id: String,
     hook: T,
+}
+
+#[derive(Clone)]
+pub(crate) struct RegisteredCommand {
+    pub plugin_id: String,
+    pub def: CommandDef,
+    pub handler: CommandHandler,
 }
 
 fn current_plugin_id(registering_plugin_id: &Option<String>) -> String {
@@ -116,63 +124,11 @@ where
     Ok(out)
 }
 
-fn plugin_message_to_message(
-    existing: &[Message],
-    idx: usize,
-    plugin_message: &PluginMessage,
-) -> Message {
-    let msg_idx = existing.len() + idx;
-    let mut parts = if plugin_message.parts.is_empty() {
-        vec![Part {
-            id: format!("m{msg_idx}.p0"),
-            kind: PartKind::Text,
-            content: plugin_message.content.clone(),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            prune_state: PruneState::Intact,
-        }]
-    } else {
-        plugin_message.parts.clone()
-    };
-    let has_image_parts = parts
-        .iter()
-        .any(|part| matches!(part.kind, PartKind::Image));
-    if matches!(plugin_message.role, MessageRole::User) && !has_image_parts {
-        parts.extend(plugin_message.images.iter().map(|bytes| Part {
-            id: String::new(),
-            kind: PartKind::Image,
-            content: String::new(),
-            attachment: Some(lash_sansio::session_model::message::PartAttachment {
-                mime: "image/png".to_string(),
-                url: lash_sansio::session_model::message::data_url_for_bytes("image/png", bytes),
-                filename: None,
-            }),
-            tool_call_id: None,
-            tool_name: None,
-            prune_state: PruneState::Intact,
-        }));
-    }
-    for (part_idx, part) in parts.iter_mut().enumerate() {
-        part.id = format!("m{msg_idx}.p{part_idx}");
-    }
-    Message {
-        id: format!("m{msg_idx}"),
-        role: plugin_message.role,
-        parts,
-        user_input: plugin_message.user_input.clone(),
-        origin: Some(MessageOrigin::Plugin {
-            plugin_id: "plugin".to_string(),
-        }),
-    }
-}
-
 fn append_plugin_messages(messages: &mut Vec<Message>, plugin_messages: &[PluginMessage]) {
     let new_messages = plugin_messages
         .iter()
         .filter(|message| matches!(message.role, MessageRole::User | MessageRole::System))
-        .enumerate()
-        .map(|(idx, message)| plugin_message_to_message(messages, idx, message))
+        .map(|message| plugin_message_to_message(message, message.user_input.clone()))
         .collect::<Vec<_>>();
     messages.extend(new_messages);
 }
@@ -226,7 +182,7 @@ mod tests {
             user_input: None,
         };
 
-        let message = plugin_message_to_message(&[], 0, &plugin_message);
+        let message = plugin_message_to_message(&plugin_message, plugin_message.user_input.clone());
 
         assert_eq!(message.parts.len(), 3);
         assert!(matches!(message.parts[1].kind, PartKind::Image));
@@ -237,8 +193,10 @@ mod tests {
 }
 
 fn normalize_message_ids(messages: &mut [Message]) {
-    for (msg_idx, message) in messages.iter_mut().enumerate() {
-        message.id = format!("m{msg_idx}");
+    for message in messages.iter_mut() {
+        if message.id.is_empty() {
+            message.id = fresh_message_id();
+        }
         if message.parts.is_empty() {
             message.parts.push(Part {
                 id: String::new(),
@@ -254,20 +212,8 @@ fn normalize_message_ids(messages: &mut [Message]) {
             message.user_input = None;
         }
         let message_id = message.id.clone();
-        for (part_idx, part) in message.parts.iter_mut().enumerate() {
-            part.id = format!("{message_id}.p{part_idx}");
-        }
+        reassign_part_ids(&message_id, &mut message.parts);
     }
-}
-
-fn plugin_surface_events(plugin_id: &str, events: Vec<PluginSurfaceEvent>) -> Vec<SessionEvent> {
-    events
-        .into_iter()
-        .map(|event| SessionEvent::PluginEvent {
-            plugin_id: plugin_id.to_string(),
-            event,
-        })
-        .collect()
 }
 
 pub struct PluginRegistrar {
@@ -285,11 +231,12 @@ pub struct PluginRegistrar {
     assistant_response_hooks: Vec<RegisteredHook<AssistantResponseHook>>,
     tool_result_projectors:
         BTreeMap<ToolResultProjectionHook, RegisteredExclusiveHook<ToolResultProjector>>,
-    turn_committed_hooks: Vec<TurnCommittedHook>,
-    session_restored_hooks: Vec<SessionRestoredHook>,
+    runtime_event_hooks: Vec<PluginRuntimeEventHook>,
     session_config_mutators: Vec<SessionConfigMutator>,
-    session_config_changed_hooks: Vec<SessionConfigChangedHook>,
     external_ops: BTreeMap<String, RegisteredExternalOp>,
+    commands: BTreeMap<String, RegisteredCommand>,
+    turn_context_transforms: Vec<(i32, Arc<dyn TurnContextTransform>)>,
+    history_rewriters: Vec<(i32, Arc<dyn HistoryRewriter>)>,
     registering_plugin_id: Option<String>,
 }
 
@@ -343,10 +290,6 @@ impl TurnRegistrations<'_> {
     pub fn checkpoint(self, hook: CheckpointHook) {
         self.reg.add_checkpoint_hook(hook);
     }
-
-    pub fn committed(self, hook: TurnCommittedHook) {
-        self.reg.turn_committed_hooks.push(hook);
-    }
 }
 
 pub struct ToolCallRegistrations<'a> {
@@ -396,16 +339,12 @@ pub struct SessionRegistrations<'a> {
 }
 
 impl SessionRegistrations<'_> {
-    pub fn restored(self, hook: SessionRestoredHook) {
-        self.reg.session_restored_hooks.push(hook);
+    pub fn on_event(self, hook: PluginRuntimeEventHook) {
+        self.reg.runtime_event_hooks.push(hook);
     }
 
     pub fn config_mutator(self, hook: SessionConfigMutator) {
         self.reg.session_config_mutators.push(hook);
-    }
-
-    pub fn config_changed(self, hook: SessionConfigChangedHook) {
-        self.reg.session_config_changed_hooks.push(hook);
     }
 }
 
@@ -416,6 +355,32 @@ pub struct ExternalRegistrations<'a> {
 impl ExternalRegistrations<'_> {
     pub fn op(self, def: ExternalOpDef, handler: ExternalInvokeHandler) -> Result<(), PluginError> {
         self.reg.add_external_op(def, handler)
+    }
+}
+
+pub struct CommandRegistrations<'a> {
+    reg: &'a mut PluginRegistrar,
+}
+
+impl CommandRegistrations<'_> {
+    pub fn register(self, def: CommandDef, handler: CommandHandler) -> Result<(), PluginError> {
+        self.reg.add_command(def, handler)
+    }
+}
+
+pub struct HistoryRegistrations<'a> {
+    reg: &'a mut PluginRegistrar,
+}
+
+impl HistoryRegistrations<'_> {
+    /// Register a per-turn context transform. Higher priority runs first.
+    pub fn prepare_turn(self, priority: i32, transform: Arc<dyn TurnContextTransform>) {
+        self.reg.turn_context_transforms.push((priority, transform));
+    }
+
+    /// Register a permanent history rewriter. Higher priority runs first.
+    pub fn rewrite(self, priority: i32, rewriter: Arc<dyn HistoryRewriter>) {
+        self.reg.history_rewriters.push((priority, rewriter));
     }
 }
 
@@ -437,11 +402,12 @@ impl PluginRegistrar {
             assistant_stream_hooks: Vec::new(),
             assistant_response_hooks: Vec::new(),
             tool_result_projectors: BTreeMap::new(),
-            turn_committed_hooks: Vec::new(),
-            session_restored_hooks: Vec::new(),
+            runtime_event_hooks: Vec::new(),
             session_config_mutators: Vec::new(),
-            session_config_changed_hooks: Vec::new(),
             external_ops: BTreeMap::new(),
+            commands: BTreeMap::new(),
+            turn_context_transforms: Vec::new(),
+            history_rewriters: Vec::new(),
             registering_plugin_id: None,
         }
     }
@@ -480,6 +446,14 @@ impl PluginRegistrar {
 
     pub fn external(&mut self) -> ExternalRegistrations<'_> {
         ExternalRegistrations { reg: self }
+    }
+
+    pub fn commands(&mut self) -> CommandRegistrations<'_> {
+        CommandRegistrations { reg: self }
+    }
+
+    pub fn history(&mut self) -> HistoryRegistrations<'_> {
+        HistoryRegistrations { reg: self }
     }
 
     fn add_tool_provider(&mut self, provider: Arc<dyn ToolProvider>) -> Result<(), PluginError> {
@@ -603,6 +577,28 @@ impl PluginRegistrar {
         }
         self.external_ops
             .insert(def.name.clone(), RegisteredExternalOp { def, handler });
+        Ok(())
+    }
+
+    fn add_command(&mut self, def: CommandDef, handler: CommandHandler) -> Result<(), PluginError> {
+        let key = def.name.to_string();
+        if let Some(existing) = self.commands.get(&key) {
+            return Err(PluginError::Registration(format!(
+                "duplicate slash command `{}`: `{}` conflicts with `{}`",
+                def.name,
+                current_plugin_id(&self.registering_plugin_id),
+                existing.plugin_id,
+            )));
+        }
+        let plugin_id = current_plugin_id(&self.registering_plugin_id);
+        self.commands.insert(
+            key,
+            RegisteredCommand {
+                plugin_id,
+                def,
+                handler,
+            },
+        );
         Ok(())
     }
 }
@@ -748,11 +744,20 @@ impl PluginHost {
             assistant_stream_hooks: reg.assistant_stream_hooks,
             assistant_response_hooks: reg.assistant_response_hooks,
             tool_result_projectors: reg.tool_result_projectors,
-            turn_committed_hooks: reg.turn_committed_hooks,
-            session_restored_hooks: reg.session_restored_hooks,
+            runtime_event_hooks: reg.runtime_event_hooks,
             session_config_mutators: reg.session_config_mutators,
-            session_config_changed_hooks: reg.session_config_changed_hooks,
             external_ops: reg.external_ops,
+            commands: reg.commands,
+            turn_context_transforms: {
+                let mut list = reg.turn_context_transforms;
+                list.sort_by(|a, b| b.0.cmp(&a.0));
+                list.into_iter().map(|(_, t)| t).collect()
+            },
+            history_rewriters: {
+                let mut list = reg.history_rewriters;
+                list.sort_by(|a, b| b.0.cmp(&a.0));
+                list.into_iter().map(|(_, r)| r).collect()
+            },
         });
         self.register_session(&session_id, &session)?;
         let ready = SessionReadyContext {
@@ -852,11 +857,12 @@ pub struct PluginSession {
     assistant_response_hooks: Vec<RegisteredHook<AssistantResponseHook>>,
     tool_result_projectors:
         BTreeMap<ToolResultProjectionHook, RegisteredExclusiveHook<ToolResultProjector>>,
-    turn_committed_hooks: Vec<TurnCommittedHook>,
-    session_restored_hooks: Vec<SessionRestoredHook>,
+    runtime_event_hooks: Vec<PluginRuntimeEventHook>,
     session_config_mutators: Vec<SessionConfigMutator>,
-    session_config_changed_hooks: Vec<SessionConfigChangedHook>,
     external_ops: BTreeMap<String, RegisteredExternalOp>,
+    commands: BTreeMap<String, RegisteredCommand>,
+    turn_context_transforms: Vec<Arc<dyn TurnContextTransform>>,
+    history_rewriters: Vec<Arc<dyn HistoryRewriter>>,
 }
 
 impl PluginSession {
@@ -978,6 +984,63 @@ impl PluginSession {
             .collect()
     }
 
+    /// Catalog of slash commands contributed by plugins registered on this session.
+    pub fn command_catalog(&self) -> Vec<CommandDef> {
+        self.commands.values().map(|cmd| cmd.def.clone()).collect()
+    }
+
+    /// Invoke a plugin-registered slash command.
+    pub async fn invoke_command(
+        &self,
+        name: &str,
+        argument: Option<String>,
+        host: Arc<dyn SessionManager>,
+    ) -> Result<CommandOutcome, PluginError> {
+        let Some(cmd) = self.commands.get(name).cloned() else {
+            return Err(PluginError::Session(format!(
+                "unknown plugin command `{name}`"
+            )));
+        };
+        (cmd.handler)(CommandInvocation {
+            name: name.to_string(),
+            argument,
+            session_id: self.session_id.clone(),
+            host,
+        })
+        .await
+    }
+
+    /// Chain registered turn-context transforms, piping each one's output
+    /// into the next in priority order.
+    pub async fn prepare_turn_context(
+        &self,
+        ctx: &TurnTransformContext,
+        input: crate::session_model::context::PreparedContext,
+    ) -> Result<crate::session_model::context::PreparedContext, HistoryError> {
+        let mut current = input;
+        for transform in &self.turn_context_transforms {
+            current = transform.transform(ctx, current).await?;
+        }
+        Ok(current)
+    }
+
+    /// Chain registered history rewriters, skipping any that opt out of
+    /// the current trigger via `accepts()`.
+    pub async fn rewrite_history(
+        &self,
+        ctx: &RewriteContext,
+        input: HistoryState,
+    ) -> Result<HistoryState, HistoryError> {
+        let mut current = input;
+        for rewriter in &self.history_rewriters {
+            if !rewriter.accepts(&ctx.trigger) {
+                continue;
+            }
+            current = rewriter.rewrite(ctx, current).await?;
+        }
+        Ok(current)
+    }
+
     pub async fn collect_prompt_contributions(
         &self,
         ctx: PromptHookContext,
@@ -1039,7 +1102,10 @@ impl PluginSession {
                         .map_err(|err| PluginError::Session(err.to_string()))?;
                 }
                 PluginDirective::EmitEvents { events: surface } => {
-                    events.extend(plugin_surface_events(&emitted.plugin_id, surface));
+                    events.extend(crate::plugin::plugin_surface_session_events(
+                        &emitted.plugin_id,
+                        surface,
+                    ));
                 }
                 PluginDirective::ReplaceToolArgs { .. }
                 | PluginDirective::ShortCircuitTool { .. } => {
@@ -1108,7 +1174,10 @@ impl PluginSession {
                     abort = Some(PluginAbort { code, message });
                 }
                 PluginDirective::EmitEvents { events: surface } => {
-                    events.extend(plugin_surface_events(&emitted.plugin_id, surface));
+                    events.extend(crate::plugin::plugin_surface_session_events(
+                        &emitted.plugin_id,
+                        surface,
+                    ));
                 }
                 PluginDirective::ReplaceToolArgs { .. }
                 | PluginDirective::ShortCircuitTool { .. } => {
@@ -1220,53 +1289,19 @@ impl PluginSession {
         (projector.hook)(ctx).await
     }
 
-    pub async fn on_turn_committed(&self, turn: &AssembledTurn) {
+    pub async fn emit_runtime_event(&self, event: PluginRuntimeEvent) {
         let mut tasks = JoinSet::new();
-        for hook in &self.turn_committed_hooks {
+        for hook in &self.runtime_event_hooks {
             let hook = Arc::clone(hook);
-            let turn = turn.clone();
-            tasks.spawn(async move { hook(turn).await });
+            let event = event.clone();
+            tasks.spawn(async move { hook(event).await });
         }
 
         while let Some(result) = tasks.join_next().await {
             match result {
                 Ok(Ok(())) => {}
-                Ok(Err(err)) => tracing::warn!("plugin turn hook failed: {err}"),
-                Err(err) => tracing::warn!("plugin turn hook task failed: {err}"),
-            }
-        }
-    }
-
-    pub async fn on_session_restored(&self, state: &SessionStateEnvelope) {
-        let mut tasks = JoinSet::new();
-        for hook in &self.session_restored_hooks {
-            let hook = Arc::clone(hook);
-            let state = state.clone();
-            tasks.spawn(async move { hook(state).await });
-        }
-
-        while let Some(result) = tasks.join_next().await {
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => tracing::warn!("plugin restore hook failed: {err}"),
-                Err(err) => tracing::warn!("plugin restore hook task failed: {err}"),
-            }
-        }
-    }
-
-    pub async fn on_session_config_changed(&self, ctx: SessionConfigChangedContext) {
-        let mut tasks = JoinSet::new();
-        for hook in &self.session_config_changed_hooks {
-            let hook = Arc::clone(hook);
-            let ctx = ctx.clone();
-            tasks.spawn(async move { hook(ctx).await });
-        }
-
-        while let Some(result) = tasks.join_next().await {
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => tracing::warn!("plugin config hook failed: {err}"),
-                Err(err) => tracing::warn!("plugin config hook task failed: {err}"),
+                Ok(Err(err)) => tracing::warn!("plugin runtime event hook failed: {err}"),
+                Err(err) => tracing::warn!("plugin runtime event hook task failed: {err}"),
             }
         }
     }
@@ -1348,8 +1383,8 @@ impl PluginSession {
             tool_call.result = projected.result;
             tool_call.success = projected.success;
         }
-        self.on_turn_committed(&committed_turn).await;
-        turn.state.plugin_snapshot = self.snapshot().ok();
+        self.emit_runtime_event(PluginRuntimeEvent::TurnCommitted(committed_turn))
+            .await;
 
         Ok(TurnFinalization {
             turn,

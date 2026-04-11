@@ -392,10 +392,8 @@ fn outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::{
-        PluginError, PluginHost, SessionHandle, SessionSnapshot, StaticPluginFactory,
-    };
-    use crate::{ExecutionMode, SessionPolicy, SessionStateEnvelope, ToolProvider, TurnInput};
+    use crate::plugin::{PluginHost, StaticPluginFactory};
+    use crate::{ExecutionMode, ToolProvider};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Barrier;
@@ -500,108 +498,7 @@ mod tests {
         .expect("plugin session")
     }
 
-    struct MockSessionManager;
-
-    #[async_trait::async_trait]
-    impl SessionManager for MockSessionManager {
-        async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
-            Ok(dummy_snapshot())
-        }
-
-        async fn snapshot_session(
-            &self,
-            _session_id: &str,
-        ) -> Result<SessionSnapshot, PluginError> {
-            Ok(dummy_snapshot())
-        }
-
-        async fn tool_catalog(
-            &self,
-            _session_id: &str,
-        ) -> Result<Vec<serde_json::Value>, PluginError> {
-            Ok(Vec::new())
-        }
-
-        async fn create_session(
-            &self,
-            _request: crate::SessionCreateRequest,
-        ) -> Result<SessionHandle, PluginError> {
-            Ok(SessionHandle {
-                session_id: "s".to_string(),
-                parent_session_id: None,
-                policy: SessionPolicy {
-                    provider: crate::Provider::OpenAiGeneric {
-                        api_key: String::new(),
-                        base_url: "https://example.invalid/v1".to_string(),
-                        options: crate::ProviderOptions::default(),
-                    },
-                    model: "mock-model".to_string(),
-                    execution_mode: ExecutionMode::Standard,
-                    context_strategy: crate::default_context_strategy(),
-                    ..Default::default()
-                },
-            })
-        }
-
-        async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
-            Ok(())
-        }
-
-        async fn start_turn_stream(
-            &self,
-            session_id: &str,
-            _input: TurnInput,
-        ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
-            let (_tx, rx) = mpsc::channel(1);
-            Ok(crate::plugin::SessionTurnHandle {
-                turn_id: "turn".to_string(),
-                session_id: session_id.to_string(),
-                policy: SessionPolicy {
-                    provider: crate::Provider::OpenAiGeneric {
-                        api_key: String::new(),
-                        base_url: "https://example.invalid/v1".to_string(),
-                        options: crate::ProviderOptions::default(),
-                    },
-                    model: "mock-model".to_string(),
-                    execution_mode: ExecutionMode::Standard,
-                    context_strategy: crate::default_context_strategy(),
-                    ..Default::default()
-                },
-                events: rx,
-            })
-        }
-
-        async fn await_turn(
-            &self,
-            _turn_id: &str,
-        ) -> Result<crate::runtime::AssembledTurn, PluginError> {
-            Err(PluginError::Invoke("unused".to_string()))
-        }
-
-        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
-            Ok(())
-        }
-    }
-
-    fn dummy_snapshot() -> SessionSnapshot {
-        SessionStateEnvelope {
-            session_id: "root".to_string(),
-            policy: SessionPolicy {
-                execution_mode: ExecutionMode::Standard,
-                context_strategy: crate::default_context_strategy(),
-                ..Default::default()
-            },
-            messages: Vec::new(),
-            tool_calls: Vec::new(),
-            iteration: 0,
-            token_usage: crate::TokenUsage::default(),
-            last_prompt_usage: None,
-            task_state: None,
-            replay_manifest: None,
-            plugin_snapshot: None,
-            execution_state_snapshot: None,
-        }
-    }
+    use crate::test_support::MockSessionManager;
 
     fn dispatch_context() -> ToolDispatchContext {
         let (event_tx, _event_rx) = mpsc::channel(8);
@@ -612,7 +509,7 @@ mod tests {
             plugins,
             tools,
             surface,
-            host: Arc::new(MockSessionManager),
+            host: Arc::new(MockSessionManager::default()),
             session_id: "session".to_string(),
             execution_mode: ExecutionMode::Standard,
             event_tx,
@@ -632,7 +529,7 @@ mod tests {
             plugins,
             tools,
             surface,
-            host: Arc::new(MockSessionManager),
+            host: Arc::new(MockSessionManager::default()),
             session_id: "session".to_string(),
             execution_mode: ExecutionMode::Standard,
             event_tx,

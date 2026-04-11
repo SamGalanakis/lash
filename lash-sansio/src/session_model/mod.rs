@@ -316,7 +316,7 @@ impl TurnTerminationPolicyState {
         if iteration < run_offset + max {
             return;
         }
-        let sys_id = format!("m{}", msgs.len());
+        let sys_id = fresh_message_id();
         msgs.push(Message {
             id: sys_id.clone(),
             role: MessageRole::System,
@@ -498,6 +498,16 @@ pub fn build_assistant_parts(
     }
 
     parts
+}
+
+pub fn fresh_message_id() -> String {
+    format!("m{}", uuid::Uuid::new_v4().simple())
+}
+
+pub fn reassign_part_ids(message_id: &str, parts: &mut [Part]) {
+    for (idx, part) in parts.iter_mut().enumerate() {
+        part.id = format!("{message_id}.p{idx}");
+    }
 }
 
 pub struct FenceLineParse {

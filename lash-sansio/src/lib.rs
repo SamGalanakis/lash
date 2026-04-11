@@ -40,24 +40,6 @@ pub fn default_execution_mode() -> ExecutionMode {
     ExecutionMode::default()
 }
 
-/// Strategy for selecting and rendering session context into the next turn.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ContextStrategy {
-    #[default]
-    RollingContext,
-}
-
-impl ContextStrategy {
-    pub fn validate(self) -> Result<Self, String> {
-        Ok(self)
-    }
-}
-
-pub fn default_context_strategy() -> ContextStrategy {
-    ContextStrategy::default()
-}
-
 /// A typed parameter for a tool definition.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct ToolParam {

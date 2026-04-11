@@ -677,7 +677,11 @@ fn slash_command_slash_ranges(text: &str, skills: &SkillCatalog) -> Vec<(usize, 
     let trimmed = text.trim_start();
     if trimmed.starts_with('/') {
         let slash_start = text.len() - trimmed.len();
-        if crate::command::parse(trimmed, skills).is_some()
+        // Rendering only inspects the slash-character glyph — plugin commands are
+        // treated the same way as builtins regardless, so passing an empty catalog
+        // is sufficient here and avoids threading the app-level catalog through
+        // the rendering layer.
+        if crate::command::parse(trimmed, skills, &[]).is_some()
             || crate::command::slash_skill_prompt(trimmed, skills).is_some()
         {
             ranges.push((slash_start, slash_start + 1));

@@ -15,25 +15,30 @@ use crate::plugin::{
 use crate::session_model::PromptSectionName;
 use crate::tools::StateToolsPluginFactory;
 use crate::{
-    AssembledTurn, AssistantOutput, DoneReason, ExecutionMode, MessageRole, OutputState,
-    PluginHost, PluginSurfaceEvent, SessionCreateRequest, SessionHandle, SessionManager,
-    SessionPolicy, SessionSnapshot, SessionStateEnvelope, TokenUsage, ToolDefinition, ToolResult,
-    TurnHookContext, TurnInput, TurnResultHookContext, TurnStatus,
+    AssembledTurn, ExecutionMode, MessageRole, PluginHost, PluginSurfaceEvent,
+    SessionCreateRequest, SessionHandle, SessionManager, SessionPolicy, SessionSnapshot,
+    SessionStateEnvelope, ToolDefinition, ToolResult, TurnHookContext, TurnInput,
+    TurnResultHookContext,
 };
 
-struct MockSessionManager;
+use crate::test_support::{MockSessionManager, mock_assembled_turn};
 
 fn mock_snapshot(run_session_id: &str) -> SessionSnapshot {
     SessionStateEnvelope {
         session_id: "root".to_string(),
         policy: SessionPolicy {
             execution_mode: ExecutionMode::Standard,
-            context_strategy: crate::ContextStrategy::RollingContext,
             session_id: Some(run_session_id.to_string()),
             ..Default::default()
         },
         ..Default::default()
     }
+}
+
+fn mock_session_manager(run_session_id: &str) -> MockSessionManager {
+    MockSessionManager::default()
+        .with_snapshot(mock_snapshot(run_session_id))
+        .with_turn(mock_assembled_turn(run_session_id, ""))
 }
 
 struct StaticInstructionSource {
@@ -104,114 +109,15 @@ impl InstructionSource for StaticInstructionSource {
     }
 }
 
-#[async_trait::async_trait]
-impl SessionManager for MockSessionManager {
-    async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
-        Ok(mock_snapshot("run-session"))
-    }
-
-    async fn snapshot_session(&self, _session_id: &str) -> Result<SessionSnapshot, PluginError> {
-        Ok(mock_snapshot("run-session"))
-    }
-
-    async fn tool_catalog(&self, _session_id: &str) -> Result<Vec<serde_json::Value>, PluginError> {
-        Ok(Vec::new())
-    }
-
-    async fn create_session(
-        &self,
-        request: SessionCreateRequest,
-    ) -> Result<SessionHandle, PluginError> {
-        Ok(SessionHandle {
-            session_id: request.session_id.unwrap_or_else(|| "child".to_string()),
-            parent_session_id: request.parent_session_id,
-            policy: crate::SessionPolicy {
-                provider: crate::Provider::OpenAiGeneric {
-                    api_key: String::new(),
-                    base_url: "https://example.invalid/v1".to_string(),
-                    options: crate::ProviderOptions::default(),
-                },
-                model: "mock-model".to_string(),
-                execution_mode: ExecutionMode::Standard,
-                context_strategy: crate::ContextStrategy::RollingContext,
-                ..Default::default()
-            },
-        })
-    }
-
-    async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
-        Ok(())
-    }
-
-    async fn start_turn_stream(
-        &self,
-        session_id: &str,
-        _input: TurnInput,
-    ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
-        let (_tx, rx) = tokio::sync::mpsc::channel(1);
-        Ok(crate::plugin::SessionTurnHandle {
-            turn_id: format!("{session_id}-turn"),
-            session_id: session_id.to_string(),
-            policy: crate::SessionPolicy {
-                provider: crate::Provider::OpenAiGeneric {
-                    api_key: String::new(),
-                    base_url: "https://example.invalid/v1".to_string(),
-                    options: crate::ProviderOptions::default(),
-                },
-                model: "mock-model".to_string(),
-                execution_mode: ExecutionMode::Standard,
-                context_strategy: crate::ContextStrategy::RollingContext,
-                session_id: Some("run-session".to_string()),
-                ..Default::default()
-            },
-            events: rx,
-        })
-    }
-
-    async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError> {
-        Ok(empty_turn(turn_id.trim_end_matches("-turn")))
-    }
-
-    async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
-        Ok(())
-    }
-}
-
 fn empty_turn(session_id: &str) -> AssembledTurn {
-    AssembledTurn {
-        state: SessionStateEnvelope {
-            session_id: session_id.to_string(),
-            policy: SessionPolicy {
-                execution_mode: ExecutionMode::Standard,
-                context_strategy: crate::ContextStrategy::RollingContext,
-                ..Default::default()
-            },
-            ..Default::default()
-        },
-        status: TurnStatus::Completed,
-        assistant_output: AssistantOutput {
-            safe_text: String::new(),
-            raw_text: String::new(),
-            state: OutputState::Usable,
-        },
-        has_plugin_visible_output: false,
-        done_reason: DoneReason::ModelStop,
-        execution: crate::ExecutionSummary {
-            mode: ExecutionMode::Standard,
-            had_tool_calls: false,
-            had_code_execution: false,
-        },
-        token_usage: TokenUsage::default(),
-        tool_calls: Vec::new(),
-        errors: Vec::new(),
-    }
+    mock_assembled_turn(session_id, "")
 }
 
 #[tokio::test]
 async fn ui_activity_plugin_emits_done_notification_surface_event() {
     let host = PluginHost::new(vec![Arc::new(BuiltinUiActivityPluginFactory)]);
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
+    let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
 
     let events = session
         .after_turn(TurnResultHookContext {
@@ -241,7 +147,7 @@ async fn ui_activity_plugin_emits_done_notification_surface_event() {
 async fn ui_activity_plugin_skips_wait_prompt_notifications() {
     let host = PluginHost::new(vec![Arc::new(BuiltinUiActivityPluginFactory)]);
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
+    let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
 
     let events = session
         .on_prompt_request(PromptRequestHookContext {
@@ -260,7 +166,7 @@ async fn ui_activity_plugin_skips_wait_prompt_notifications() {
 async fn ui_activity_plugin_emits_prompt_notification_surface_event() {
     let host = PluginHost::new(vec![Arc::new(BuiltinUiActivityPluginFactory)]);
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
+    let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
 
     let events = session
         .on_prompt_request(PromptRequestHookContext {
@@ -297,7 +203,7 @@ async fn prompt_context_plugin_contributes_environment_and_project_instruction_s
     let contributions = session
         .collect_prompt_contributions(PromptHookContext {
             session_id: "root".to_string(),
-            host: Arc::new(MockSessionManager),
+            host: Arc::new(mock_session_manager("run-session")),
             prompt: crate::PromptContext::default(),
             state: SessionStateEnvelope::default(),
         })
@@ -471,7 +377,7 @@ async fn plan_mode_plugin_toggle_and_status_round_trip() {
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
+    let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
 
     let status = session
         .invoke_external(
@@ -538,7 +444,7 @@ async fn plan_mode_plugin_toggle_and_status_round_trip() {
             json!({}),
             None,
             true,
-            Arc::new(MockSessionManager),
+            Arc::new(mock_session_manager("run-session")),
         )
         .await
         .expect("status");
@@ -555,7 +461,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
+    let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
 
     session
         .invoke_external(
@@ -865,7 +771,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
+    let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
 
     session
         .invoke_external(
@@ -921,7 +827,7 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
         PlanModePluginConfig::default().with_allowed_tools(["apply_patch", "read_file"]),
     ))]);
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
+    let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
 
     session
         .invoke_external(
@@ -1003,12 +909,12 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             &self,
             request: SessionCreateRequest,
         ) -> Result<SessionHandle, PluginError> {
-            let base = MockSessionManager;
+            let base = mock_session_manager("run-session");
             base.create_session(request).await
         }
 
         async fn close_session(&self, session_id: &str) -> Result<(), PluginError> {
-            let base = MockSessionManager;
+            let base = mock_session_manager("run-session");
             base.close_session(session_id).await
         }
 
@@ -1017,17 +923,17 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             session_id: &str,
             input: TurnInput,
         ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
-            let base = MockSessionManager;
+            let base = mock_session_manager("run-session");
             base.start_turn_stream(session_id, input).await
         }
 
         async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError> {
-            let base = MockSessionManager;
+            let base = mock_session_manager("run-session");
             base.await_turn(turn_id).await
         }
 
         async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError> {
-            let base = MockSessionManager;
+            let base = mock_session_manager("run-session");
             base.cancel_turn(turn_id).await
         }
 
@@ -1158,12 +1064,12 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
             &self,
             request: SessionCreateRequest,
         ) -> Result<SessionHandle, PluginError> {
-            let base = MockSessionManager;
+            let base = mock_session_manager("run-session");
             base.create_session(request).await
         }
 
         async fn close_session(&self, session_id: &str) -> Result<(), PluginError> {
-            let base = MockSessionManager;
+            let base = mock_session_manager("run-session");
             base.close_session(session_id).await
         }
 
@@ -1172,17 +1078,17 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
             session_id: &str,
             input: TurnInput,
         ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
-            let base = MockSessionManager;
+            let base = mock_session_manager("run-session");
             base.start_turn_stream(session_id, input).await
         }
 
         async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError> {
-            let base = MockSessionManager;
+            let base = mock_session_manager("run-session");
             base.await_turn(turn_id).await
         }
 
         async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError> {
-            let base = MockSessionManager;
+            let base = mock_session_manager("run-session");
             base.cancel_turn(turn_id).await
         }
 
@@ -1287,12 +1193,12 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
             &self,
             request: SessionCreateRequest,
         ) -> Result<SessionHandle, PluginError> {
-            let base = MockSessionManager;
+            let base = mock_session_manager("run-session");
             base.create_session(request).await
         }
 
         async fn close_session(&self, session_id: &str) -> Result<(), PluginError> {
-            let base = MockSessionManager;
+            let base = mock_session_manager("run-session");
             base.close_session(session_id).await
         }
 
@@ -1301,17 +1207,17 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
             session_id: &str,
             input: TurnInput,
         ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
-            let base = MockSessionManager;
+            let base = mock_session_manager("run-session");
             base.start_turn_stream(session_id, input).await
         }
 
         async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError> {
-            let base = MockSessionManager;
+            let base = mock_session_manager("run-session");
             base.await_turn(turn_id).await
         }
 
         async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError> {
-            let base = MockSessionManager;
+            let base = mock_session_manager("run-session");
             base.cancel_turn(turn_id).await
         }
 
@@ -1502,7 +1408,7 @@ async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = PluginHost::new(vec![Arc::new(PlanModePluginFactory::default())]);
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn SessionManager> = Arc::new(MockSessionManager);
+    let manager: Arc<dyn SessionManager> = Arc::new(mock_session_manager("run-session"));
 
     session
         .invoke_external(

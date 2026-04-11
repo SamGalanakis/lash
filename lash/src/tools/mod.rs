@@ -205,6 +205,121 @@ pub(crate) fn parse_optional_usize_arg(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GitignoreMode {
+    RepoOnly,
+    Always,
+}
+
+impl GitignoreMode {
+    fn requires_git(self) -> bool {
+        matches!(self, Self::RepoOnly)
+    }
+}
+
+pub(crate) fn parse_gitignore_mode(
+    args: &serde_json::Value,
+    key: &str,
+    default: GitignoreMode,
+) -> Result<GitignoreMode, ToolResult> {
+    match args.get(key) {
+        None => Ok(default),
+        Some(v) if v.is_null() => Ok(default),
+        Some(v) => match v.as_str() {
+            Some("repo_only") => Ok(GitignoreMode::RepoOnly),
+            Some("always") => Ok(GitignoreMode::Always),
+            _ => Err(ToolResult::err_fmt(format_args!(
+                "Invalid {key}: expected \"repo_only\" or \"always\""
+            ))),
+        },
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IgnoreProfile {
+    None,
+    Common,
+}
+
+pub(crate) fn parse_ignore_profile(
+    args: &serde_json::Value,
+    key: &str,
+    default: IgnoreProfile,
+) -> Result<IgnoreProfile, ToolResult> {
+    match args.get(key) {
+        None => Ok(default),
+        Some(v) if v.is_null() => Ok(default),
+        Some(v) => match v.as_str() {
+            Some("none") => Ok(IgnoreProfile::None),
+            Some("common") => Ok(IgnoreProfile::Common),
+            _ => Err(ToolResult::err_fmt(format_args!(
+                "Invalid {key}: expected \"common\" or \"none\""
+            ))),
+        },
+    }
+}
+
+pub(crate) const DEFAULT_LS_IGNORE_GLOBS: &[&str] = &[
+    "!**/node_modules",
+    "!**/node_modules/**",
+    "!**/__pycache__",
+    "!**/__pycache__/**",
+    "!**/.git",
+    "!**/.git/**",
+    "!**/dist",
+    "!**/dist/**",
+    "!**/build",
+    "!**/build/**",
+    "!**/target",
+    "!**/target/**",
+    "!**/vendor",
+    "!**/vendor/**",
+    "!**/bin",
+    "!**/bin/**",
+    "!**/obj",
+    "!**/obj/**",
+    "!**/.idea",
+    "!**/.idea/**",
+    "!**/.vscode",
+    "!**/.vscode/**",
+    "!**/.zig-cache",
+    "!**/.zig-cache/**",
+    "!**/zig-out",
+    "!**/zig-out/**",
+    "!**/.coverage*",
+    "!**/coverage",
+    "!**/coverage/**",
+    "!**/tmp",
+    "!**/tmp/**",
+    "!**/temp",
+    "!**/temp/**",
+    "!**/.cache",
+    "!**/.cache/**",
+    "!**/cache",
+    "!**/cache/**",
+    "!**/logs",
+    "!**/logs/**",
+    "!**/.venv",
+    "!**/.venv/**",
+    "!**/venv",
+    "!**/venv/**",
+    "!**/env",
+    "!**/env/**",
+];
+
+pub(crate) fn configure_walk_builder(
+    builder: &mut ignore::WalkBuilder,
+    include_hidden: bool,
+    gitignore_mode: GitignoreMode,
+    max_depth: Option<usize>,
+) {
+    builder
+        .hidden(!include_hidden)
+        .git_ignore(true)
+        .require_git(gitignore_mode.requires_git())
+        .max_depth(max_depth);
+}
+
 pub(crate) fn project_tool_catalog(
     definitions: impl IntoIterator<Item = crate::ToolDefinition>,
 ) -> Vec<serde_json::Value> {

@@ -1,16 +1,45 @@
-use lash::store::LiveSessionSnapshot;
-use lash::{DynamicStateSnapshot, SessionStateEnvelope, Store};
+#[cfg(test)]
+use lash::{DynamicStateSnapshot, SessionStateEnvelope};
+use lash::{SessionGraph, Store};
 
 use crate::app::UiResumeState;
 use crate::ui_resume;
 
 #[derive(Clone, Debug)]
 pub(crate) struct LoadedLiveResumeSnapshot {
-    pub(crate) state: SessionStateEnvelope,
-    pub(crate) dynamic_state: DynamicStateSnapshot,
+    pub(crate) graph: SessionGraph,
     pub(crate) ui_state: UiResumeState,
 }
 
+#[cfg(test)]
+fn stamp_live_graph(
+    mut graph: SessionGraph,
+    state: &SessionStateEnvelope,
+    dynamic_state: &DynamicStateSnapshot,
+) -> SessionGraph {
+    graph.merge_active_projection(&state.messages, &state.tool_calls);
+    let plugin_snapshot = graph.latest_plugin_snapshot();
+    graph.record_runtime_state(
+        &lash::PersistedSessionConfig {
+            provider_id: state.policy.provider.id().to_string(),
+            configured_model: state.policy.model.clone(),
+            context_window: state.policy.max_context_tokens.unwrap_or_default() as u64,
+            execution_mode: state.policy.execution_mode,
+            model_variant: state.policy.model_variant.clone(),
+        },
+        &lash::PersistedTurnState {
+            iteration: state.iteration,
+            token_usage: state.token_usage.clone(),
+            last_prompt_usage: state.last_prompt_usage.clone(),
+        },
+        Some(dynamic_state),
+        plugin_snapshot.as_ref(),
+        state.execution_state_snapshot.as_deref(),
+    );
+    graph
+}
+
+#[cfg(test)]
 pub(crate) fn save_live_resume_snapshot(
     store: &Store,
     state: &SessionStateEnvelope,
@@ -20,29 +49,20 @@ pub(crate) fn save_live_resume_snapshot(
     if !lash::messages_are_live_resume_safe(&state.messages) {
         return Ok(());
     }
-    let execution_state_snapshot = state.execution_state_snapshot.clone();
-    let mut stored_state = state.clone();
-    stored_state.execution_state_snapshot = None;
     ui_resume::save_ui_resume_state(store, ui_state);
-    store.save_live_session_snapshot(LiveSessionSnapshot {
-        state: stored_state,
-        dynamic_state: dynamic_state.clone(),
-        execution_state_snapshot,
-    });
+    let graph = stamp_live_graph(state.session_graph.clone(), state, dynamic_state);
+    store.save_live_session_graph(graph);
     Ok(())
 }
 
 pub(crate) fn load_live_resume_snapshot(store: &Store) -> Option<LoadedLiveResumeSnapshot> {
-    let stored = store.load_live_session_snapshot()?;
-    if !lash::messages_are_live_resume_safe(&stored.state.messages) {
-        store.clear_live_session_snapshot();
+    let graph = store.load_live_session_graph()?;
+    if !lash::messages_are_live_resume_safe(&graph.project_messages()) {
+        store.clear_live_session_graph();
         return None;
     }
-    let mut state = stored.state;
-    state.execution_state_snapshot = stored.execution_state_snapshot;
     Some(LoadedLiveResumeSnapshot {
-        state,
-        dynamic_state: stored.dynamic_state,
+        graph,
         ui_state: ui_resume::load_ui_resume_state(store),
     })
 }
@@ -93,6 +113,8 @@ mod tests {
     fn snapshot_state(messages: Vec<Message>) -> SessionStateEnvelope {
         SessionStateEnvelope {
             session_id: "root".to_string(),
+            policy: lash::SessionPolicy::default(),
+            session_graph: lash::SessionGraph::from_projection(&messages, &[]),
             messages,
             ..SessionStateEnvelope::default()
         }
@@ -120,7 +142,8 @@ mod tests {
             .expect("skip unsafe snapshot");
 
         let loaded = load_live_resume_snapshot(&store).expect("safe snapshot still present");
-        assert_eq!(loaded.state.messages.len(), 1);
-        assert_eq!(loaded.state.messages[0].parts[0].content, "hello");
+        let messages = loaded.graph.project_messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].parts[0].content, "hello");
     }
 }
