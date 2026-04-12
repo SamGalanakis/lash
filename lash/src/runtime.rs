@@ -440,6 +440,13 @@ pub struct AssembledTurn {
     pub tool_calls: Vec<ToolCallRecord>,
     #[serde(default)]
     pub errors: Vec<TurnIssue>,
+    /// When the session was started in typed REPL termination mode AND
+    /// the lashlang program ended with `finish <expr>`, this is the
+    /// captured (and schema-validated, if a schema was supplied) value.
+    /// `None` for chat-style sessions and for typed sessions that
+    /// timed out without finishing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typed_finish: Option<serde_json::Value>,
 }
 
 /// Runtime error for unexpected failures.
@@ -521,6 +528,19 @@ pub trait SessionStoreFactory: Send + Sync {
     ) -> Result<Arc<dyn crate::store::RuntimeStore>, String>;
 }
 
+fn repl_termination_to_sansio(
+    termination: &crate::ReplTermination,
+) -> crate::sansio::ReplTermination {
+    match termination {
+        crate::ReplTermination::ProseWithoutFence => {
+            crate::sansio::ReplTermination::ProseWithoutFence
+        }
+        crate::ReplTermination::Finish { schema } => crate::sansio::ReplTermination::Finish {
+            schema: schema.clone(),
+        },
+    }
+}
+
 fn default_llm_factory() -> LlmFactory {
     Arc::new(|provider| adapter_for(provider))
 }
@@ -566,6 +586,7 @@ struct TurnAssembler {
     saw_done: bool,
     saw_tool_failure: bool,
     has_plugin_visible_output: bool,
+    typed_finish: Option<serde_json::Value>,
 }
 
 impl TurnAssembler {
@@ -618,6 +639,9 @@ impl TurnAssembler {
             SessionEvent::Done => {
                 self.saw_done = true;
             }
+            SessionEvent::TypedFinish { value } => {
+                self.typed_finish = Some(value.clone());
+            }
             SessionEvent::PluginEvent { event, .. } => {
                 if plugin_surface_event_renders_visible_output(event) {
                     self.has_plugin_visible_output = true;
@@ -628,7 +652,7 @@ impl TurnAssembler {
     }
 
     fn finish(
-        self,
+        mut self,
         state: SessionStateEnvelope,
         interrupted: bool,
         force_runtime_error: Option<TurnIssue>,
@@ -689,6 +713,7 @@ impl TurnAssembler {
             token_usage: self.token_usage,
             tool_calls: self.tool_calls,
             errors: issues,
+            typed_finish: self.typed_finish.take(),
         }
     }
 
@@ -740,6 +765,10 @@ pub struct LashRuntime {
     managed_sessions: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
     managed_turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
     overflow_recovery_attempted: bool,
+    /// REPL termination contract for this session. Top-level chat
+    /// sessions use the default `ProseWithoutFence`. Typed sub-sessions
+    /// spawned via `predict` flip to `Finish { schema }`.
+    repl_termination: crate::ReplTermination,
 }
 
 struct ManagedSessionTurn {
@@ -989,6 +1018,9 @@ impl SessionManager for RuntimeSessionManager {
                 .await
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?;
         runtime.llm_factory = Arc::clone(&self.llm_factory);
+        if let crate::ModeExtras::Repl(extras) = &request.mode_extras {
+            runtime.set_repl_termination(extras.termination.clone());
+        }
         if let Some(session) = runtime.session.as_mut() {
             session.set_context_surface(
                 request.context_surface.tool_providers.clone(),
@@ -1233,7 +1265,16 @@ impl LashRuntime {
             managed_sessions: Arc::new(Mutex::new(HashMap::new())),
             managed_turns: Arc::new(Mutex::new(HashMap::new())),
             overflow_recovery_attempted: false,
+            repl_termination: crate::ReplTermination::default(),
         })
+    }
+
+    /// Override the REPL termination contract for this session. Defaults
+    /// to `ProseWithoutFence` (today's chat-style behavior). Sub-sessions
+    /// spawned via the typed `predict` path call this with
+    /// `Finish { schema }` to require typed termination.
+    pub(crate) fn set_repl_termination(&mut self, termination: crate::ReplTermination) {
+        self.repl_termination = termination;
     }
 
     /// Export current host-owned state envelope.
@@ -1888,6 +1929,7 @@ impl LashRuntime {
             llm_factory: Arc::clone(&self.llm_factory),
             session_manager: manager,
             prompt_bridge,
+            repl_termination: self.repl_termination.clone(),
         };
         let run_offset = self.state.iteration;
         let run_task = tokio::spawn(async move {
@@ -2002,6 +2044,7 @@ struct RuntimeTurnDriver {
     llm_factory: LlmFactory,
     session_manager: Arc<dyn SessionManager>,
     prompt_bridge: HostPromptBridge,
+    repl_termination: crate::ReplTermination,
 }
 
 impl RuntimeTurnDriver {
@@ -2442,6 +2485,7 @@ impl RuntimeTurnDriver {
             prompt_overrides: self.host.prompt_overrides.clone(),
             session_id: self.session_id.clone(),
             emit_llm_debug_log: self.host.llm_log_path.is_some(),
+            repl_termination: repl_termination_to_sansio(&self.repl_termination),
         }
     }
 
@@ -2466,9 +2510,10 @@ impl RuntimeTurnDriver {
             }
         });
         let manager = Arc::clone(&self.session_manager);
+        let accept_finish = matches!(self.repl_termination, crate::ReplTermination::Finish { .. });
         let result = self
             .session
-            .run_code(&self.session_id, manager, event_tx, code)
+            .run_code(&self.session_id, manager, event_tx, code, accept_finish)
             .await
             .map_err(|e| e.to_string());
         self.session.clear_message_sender();
@@ -4312,6 +4357,7 @@ mod tests {
                                             )],
                                             context_surface: crate::SessionContextSurface::default(
                                             ),
+                                            mode_extras: crate::ModeExtras::default(),
                                         })
                                         .await
                                         .map_err(|err| crate::ToolResult::err_fmt(err.to_string()));
@@ -4415,6 +4461,7 @@ mod tests {
                 plugin_mode: crate::SessionPluginMode::InheritCurrent,
                 initial_messages: Vec::new(),
                 context_surface: crate::SessionContextSurface::default(),
+                mode_extras: crate::ModeExtras::default(),
             })
             .await
             .expect("child session");
@@ -4495,6 +4542,7 @@ mod tests {
                 plugin_mode: crate::SessionPluginMode::InheritCurrent,
                 initial_messages: Vec::new(),
                 context_surface: crate::SessionContextSurface::default(),
+                mode_extras: crate::ModeExtras::default(),
             })
             .await
             .expect("child session");
@@ -4557,6 +4605,7 @@ mod tests {
                         "memory child",
                     )],
                 },
+                mode_extras: crate::ModeExtras::default(),
             })
             .await
             .expect("child session");

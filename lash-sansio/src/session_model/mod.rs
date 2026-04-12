@@ -118,6 +118,14 @@ pub enum SessionEvent {
         #[serde(skip)]
         snapshot: DurableTurnSnapshot,
     },
+    /// Emitted when a typed REPL session terminates via `finish <expr>`.
+    /// The `value` is the captured (and schema-validated) result.
+    /// Hosts that want the typed shape back (e.g. the parent of a
+    /// `predict` call) listen for this event on the child's stream;
+    /// it is also stamped onto `AssembledTurn::typed_finish` for
+    /// non-streaming consumers.
+    #[serde(rename = "typed_finish")]
+    TypedFinish { value: serde_json::Value },
     #[serde(rename = "done")]
     Done,
     #[serde(rename = "error")]

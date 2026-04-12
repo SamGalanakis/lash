@@ -20,8 +20,8 @@ use sha2::{Digest, Sha256};
 use crate::plugin::{
     CommandDef, CommandHandler, CommandInvocation, CommandOutcome,
     DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES, DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES,
-    HistoryError, HistoryRewriter, HistoryState, PluginError, PluginFactory, PluginRegistrar,
-    PluginSessionContext, RewriteContext, RewriteTrigger, SessionContextSurface,
+    HistoryError, HistoryRewriter, HistoryState, ModeExtras, PluginError, PluginFactory,
+    PluginRegistrar, PluginSessionContext, RewriteContext, RewriteTrigger, SessionContextSurface,
     SessionCreateRequest, SessionManager, SessionPlugin, SessionPluginMode, SessionStartPoint,
     TurnContextTransform, TurnTransformContext,
 };
@@ -551,6 +551,7 @@ async fn summarize_compaction_prefix(
                 tool_providers: Vec::new(),
                 prompt_contributions: Vec::new(),
             },
+            mode_extras: ModeExtras::default(),
         })
         .await
         .map_err(HistoryError::from)?;

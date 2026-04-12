@@ -13,7 +13,7 @@ pub(crate) fn batch_tool_definition() -> ToolDefinition {
         }],
         returns: "dict".to_string(),
         examples: vec![
-            r#"batch(tool_calls=[{"tool":"read_file","parameters":{"path":"src/main.rs"}},{"tool":"grep","parameters":{"pattern":"ToolProvider","path":"lash/src"}}])"#.to_string(),
+            r#"batch(tool_calls=[{"tool":"read_file","parameters":{"path":"src/main.rs"}},{"tool":"grep","parameters":{"query":"ToolProvider lash/src/"}}])"#.to_string(),
         ],
         enabled: true,
         injected: true,

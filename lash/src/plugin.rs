@@ -250,6 +250,67 @@ pub struct SessionCreateRequest {
     pub initial_messages: Vec<PluginMessage>,
     #[serde(skip)]
     pub context_surface: SessionContextSurface,
+    /// Per-execution-mode "extras" that configure mode-specific
+    /// behavior at session-creation time. The base request stays
+    /// mode-agnostic; each `ExecutionMode` defines its own struct.
+    #[serde(default)]
+    pub mode_extras: ModeExtras,
+}
+
+/// Per-execution-mode configuration carried on a `SessionCreateRequest`.
+/// Each variant matches an `ExecutionMode` value and carries the
+/// settings only that mode cares about. Adding a new mode means adding
+/// a new variant with its own struct — no mode-specific fields ever
+/// leak into the base request.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ModeExtras {
+    Standard(StandardCreateExtras),
+    Repl(ReplCreateExtras),
+}
+
+impl Default for ModeExtras {
+    fn default() -> Self {
+        Self::Standard(StandardCreateExtras::default())
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct StandardCreateExtras {}
+
+/// REPL-mode session config. Carries the choice of how the model
+/// terminates the session (prose vs `finish`-with-optional-schema).
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ReplCreateExtras {
+    #[serde(default)]
+    pub termination: ReplTermination,
+}
+
+/// How a REPL session ends. Top-level chat sessions use
+/// `ProseWithoutFence` (today's behavior); typed sub-sessions spawned
+/// via `predict` use `Finish` so the captured value is the terminal
+/// result.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Default)]
+pub enum ReplTermination {
+    /// Terminate when the model writes prose with no fenced lashlang
+    /// block. The prose IS the assistant's final reply. lashlang
+    /// `finish` inside a fenced block continues to be an error in this
+    /// mode (the model shouldn't end the session from inside the
+    /// language).
+    #[default]
+    ProseWithoutFence,
+    /// Terminate when the model calls `finish <expr>` from inside a
+    /// fenced lashlang block. The captured value is the terminal
+    /// result. Prose-without-fence becomes a soft error that loops the
+    /// model with a "you must call finish" reminder. When `schema` is
+    /// `Some`, the captured value is validated against the JSON Schema
+    /// before being accepted; mismatches loop with an explanation.
+    Finish {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<serde_json::Value>,
+    },
 }
 
 #[derive(Clone, Debug)]

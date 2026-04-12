@@ -1495,7 +1495,7 @@ fn handle_tool_call_merges_contiguous_exploration_activity() {
     app.handle_session_event(SessionEvent::ToolCall {
         call_id: Some("tc3".into()),
         name: "grep".into(),
-        args: serde_json::json!({"pattern": "ctx", "path": "lash-cli/src"}),
+        args: serde_json::json!({"query": "ctx"}),
         result: serde_json::json!("match"),
         success: true,
         duration_ms: 10,
@@ -1522,7 +1522,7 @@ fn handle_tool_call_merges_contiguous_exploration_activity() {
             assert_eq!(
                 activity.result.detail_lines,
                 vec![
-                    "Search \"ctx\" in lash-cli/src".to_string(),
+                    "Search \"ctx\"".to_string(),
                     "Read lash-cli/src/render/mod.rs".to_string(),
                 ]
             );

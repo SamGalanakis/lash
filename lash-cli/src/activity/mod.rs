@@ -393,7 +393,7 @@ mod tests {
             json!({
                 "tool_calls": [
                     {"tool": "read_file", "parameters": {"path": "a.rs"}},
-                    {"tool": "grep", "parameters": {"pattern": "foo", "path": "."}}
+                    {"tool": "grep", "parameters": {"query": "foo"}}
                 ]
             }),
             json!({
@@ -415,7 +415,7 @@ mod tests {
         assert_eq!(blocks[0].call.summary, "Read a.rs");
         assert!(blocks[0].result.detail_lines.is_empty());
         assert_eq!(blocks[1].call.tool_name, "grep");
-        assert_eq!(blocks[1].call.summary, "Search \"foo\" in .");
+        assert_eq!(blocks[1].call.summary, "Search \"foo\"");
         assert!(blocks[1].result.detail_lines.is_empty());
         assert_ne!(blocks[0].call.tool_name, "batch");
         assert_ne!(blocks[1].call.tool_name, "batch");
@@ -429,7 +429,7 @@ mod tests {
             json!({
                 "tool_calls": [
                     {"tool": "functions.read_file", "parameters": {"path": "a.rs"}},
-                    {"tool": "functions.grep", "parameters": {"pattern": "foo", "path": "."}}
+                    {"tool": "functions.grep", "parameters": {"query": "foo"}}
                 ]
             }),
             json!({
@@ -446,7 +446,7 @@ mod tests {
         assert_eq!(blocks[0].call.tool_name, "read_file");
         assert_eq!(blocks[0].call.summary, "Read a.rs");
         assert_eq!(blocks[1].call.tool_name, "grep");
-        assert_eq!(blocks[1].call.summary, "Search \"foo\" in .");
+        assert_eq!(blocks[1].call.summary, "Search \"foo\"");
     }
 
     #[test]
@@ -457,7 +457,7 @@ mod tests {
             json!({
                 "tool_calls": [
                     {"tool": "functions.read_file", "parameters": {"path": "a.rs"}},
-                    {"tool": "functions.grep", "parameters": {"pattern": "foo", "path": "."}}
+                    {"tool": "functions.grep", "parameters": {"query": "foo"}}
                 ]
             }),
             json!({

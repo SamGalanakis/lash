@@ -212,12 +212,19 @@ impl Session {
     }
 
     /// Execute code in the persistent lashlang REPL.
+    ///
+    /// `accept_finish` controls how `lashlang::ExecutionOutcome::Finished`
+    /// is treated: when true, the captured value flows back through
+    /// `ExecResponse::terminal_finish`; when false (today's chat-style
+    /// REPL contract), it surfaces as an error telling the model to
+    /// terminate via prose instead.
     pub async fn run_code(
         &mut self,
         session_id: &str,
         host: Arc<dyn SessionManager>,
         event_tx: &tokio::sync::mpsc::Sender<SessionEvent>,
         code: &str,
+        accept_finish: bool,
     ) -> Result<ExecResponse, SessionError> {
         self.tool_calls.clear();
         self.tool_images.clear();
@@ -242,6 +249,7 @@ impl Session {
         self.runtime()?.send(LashlangRequest::Exec {
             id: id.clone(),
             code: clean_code,
+            accept_finish,
         })?;
 
         // Read messages until we get exec_result.
@@ -314,6 +322,7 @@ impl Session {
                     output,
                     observations,
                     error,
+                    terminal_finish,
                 } => {
                     tracing::info!(
                         "PARALLEL: ExecResult received at t+{:.3}s ({} handles)",
@@ -349,6 +358,7 @@ impl Session {
                         images: std::mem::take(&mut self.tool_images),
                         error,
                         duration_ms: start.elapsed().as_millis() as u64,
+                        terminal_finish,
                     });
                 }
                 LashlangResponse::Ready => {
@@ -621,6 +631,24 @@ mod tests {
     use crate::tools::UpdatePlanTool;
     use crate::{PluginError, PluginHost, PluginSpec, SessionHandle, SessionSnapshot, TurnInput};
 
+    struct CurrentDirGuard {
+        original: std::path::PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let original = std::env::current_dir().expect("current dir");
+            std::env::set_current_dir(path).expect("set current dir");
+            Self { original }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.original).expect("restore current dir");
+        }
+    }
+
     struct NoopManager;
 
     #[async_trait::async_trait]
@@ -710,6 +738,7 @@ call update_plan {
 }
 finish "ok"
 "#,
+                false,
             )
             .await
             .expect("exec response");
@@ -730,6 +759,7 @@ finish "ok"
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("alpha.txt"), "hello\n").expect("write alpha");
         std::fs::write(temp.path().join("beta.rs"), "fn main() {}\n").expect("write beta");
+        let _cwd = CurrentDirGuard::set(temp.path());
 
         let deps = crate::DefaultToolPluginDeps {
             enable_user_prompts: true,
@@ -760,15 +790,13 @@ finish "ok"
                 &event_tx,
                 &format!(
                     r#"
-cwd = {:?}
-files = call ls {{ path: cwd }}
-match = call grep {{ path: {:?}, pattern: "fn main" }}
+files = call ls {{ path: "." }}
+match = call grep {{ query: "fn main" }}
 observe files
 observe match
 "#,
-                    temp.path(),
-                    temp.path()
                 ),
+                false,
             )
             .await
             .expect("exec response");

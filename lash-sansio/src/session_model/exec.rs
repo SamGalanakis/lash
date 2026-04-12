@@ -4,7 +4,12 @@ pub(crate) struct ExecAccumulator {
     pub images: Vec<crate::ToolImage>,
     pub combined_output: String,
     pub exec_error: Option<String>,
-    pub had_failure: bool,
+    /// Set when the lashlang program ended with `finish <expr>` AND
+    /// the surrounding session was started in a typed termination
+    /// mode that accepts that as the terminal result. The dispatch
+    /// loop reads this in `process_repl_result` to terminate the turn
+    /// cleanly with the captured value.
+    pub terminal_finish: Option<serde_json::Value>,
 }
 
 impl ExecAccumulator {
@@ -14,7 +19,7 @@ impl ExecAccumulator {
             images: Vec::new(),
             combined_output: String::new(),
             exec_error: None,
-            had_failure: false,
+            terminal_finish: None,
         }
     }
 }

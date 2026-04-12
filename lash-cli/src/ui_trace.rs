@@ -263,7 +263,8 @@ impl TraceSessionEvent {
             | SessionEvent::LlmResponse { .. }
             | SessionEvent::TokenUsage { .. }
             | SessionEvent::RetryStatus { .. }
-            | SessionEvent::InjectedMessagesCommitted { .. } => None,
+            | SessionEvent::InjectedMessagesCommitted { .. }
+            | SessionEvent::TypedFinish { .. } => None,
         }
     }
 }
