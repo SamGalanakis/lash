@@ -50,7 +50,8 @@ pub fn default_tool_plugin_factories(
         )),
         Arc::new(StaticPluginFactory::new(
             "grep",
-            PluginSpec::new().with_tool_provider(Arc::new(super::Grep) as Arc<dyn ToolProvider>),
+            PluginSpec::new()
+                .with_tool_provider(Arc::new(super::Grep::new()) as Arc<dyn ToolProvider>),
         )),
         Arc::new(StaticPluginFactory::new(
             "ls",

@@ -1,9 +1,9 @@
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use super::{
-    DEFAULT_LS_IGNORE_GLOBS, GitignoreMode, IgnoreProfile, build_path_entry,
-    configure_walk_builder, filesystem_entries_result, parse_gitignore_mode, parse_ignore_profile,
-    parse_optional_bool, parse_optional_usize_arg,
+    build_path_entry, filesystem_entries_result, parse_optional_bool, parse_optional_usize_arg,
+    rg_file_list, run_blocking,
 };
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
@@ -20,7 +20,7 @@ impl ToolProvider for Ls {
         vec![ToolDefinition {
             name: "ls".into(),
             description: format!(
-                "List filesystem entries. By default this includes hidden files, honors `.gitignore` only inside Git repos, and applies the `common` ignore profile for typical build/cache/vendor directories. Returns a record with `items` sorted by path. Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: depth={}, limit={}, with_lines=false, include_hidden=true, gitignore_mode=\"repo_only\", ignore_profile=\"common\".",
+                "List filesystem entries. By default this includes hidden files and respects `.gitignore` only inside Git repos. Returns a record with `items` sorted by path. Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: depth={}, limit={}, with_lines=false, include_hidden=true, respect_gitignore=true.",
                 DEFAULT_DEPTH, MAX_ENTRIES
             ),
             params: vec![
@@ -34,7 +34,7 @@ impl ToolProvider for Ls {
                 ToolParam {
                     name: "ignore".into(),
                     r#type: "list".into(),
-                    description: "Additional patterns to ignore".into(),
+                    description: "Additional glob patterns to ignore.".into(),
                     default_value: None,
                     required: false,
                 },
@@ -74,17 +74,10 @@ impl ToolProvider for Ls {
                     required: false,
                 },
                 ToolParam {
-                    name: "gitignore_mode".into(),
-                    r#type: "str".into(),
-                    description: "How `.gitignore` should behave. Use `repo_only` (default: only honor `.gitignore` inside Git repos) or `always` (honor local `.gitignore` files even outside Git repos).".into(),
-                    default_value: Some(serde_json::json!("repo_only")),
-                    required: false,
-                },
-                ToolParam {
-                    name: "ignore_profile".into(),
-                    r#type: "str".into(),
-                    description: "Built-in ignore set to apply before your custom `ignore` globs. Use `common` (default: skips common build/cache/vendor dirs like `node_modules/`, `dist/`, `target/`) or `none`.".into(),
-                    default_value: Some(serde_json::json!("common")),
+                    name: "respect_gitignore".into(),
+                    r#type: "bool".into(),
+                    description: "Respect `.gitignore` and related ignore files. When true (default), `.gitignore` is honored only inside Git repos. When false, ignore-file processing is fully disabled.".into(),
+                    default_value: Some(serde_json::json!(true)),
                     required: false,
                 },
             ],
@@ -120,66 +113,44 @@ impl ToolProvider for Ls {
             Ok(v) => v,
             Err(e) => return e,
         };
-        let gitignore_mode =
-            match parse_gitignore_mode(args, "gitignore_mode", GitignoreMode::RepoOnly) {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
-        let ignore_profile =
-            match parse_ignore_profile(args, "ignore_profile", IgnoreProfile::Common) {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
+        let respect_gitignore = match parse_optional_bool(args, "respect_gitignore", true) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let base = PathBuf::from(base_dir);
+        let ignore_patterns = ignore_patterns
+            .into_iter()
+            .map(|pattern| pattern.to_string())
+            .collect::<Vec<_>>();
 
-        let base = Path::new(base_dir);
-        if !base.is_dir() {
-            return ToolResult::err_fmt(format_args!("Not a directory: {base_dir}"));
-        }
-
-        let mut builder = ignore::WalkBuilder::new(base);
-        configure_walk_builder(&mut builder, include_hidden, gitignore_mode, max_depth);
-
-        // Add custom ignore patterns
-        let mut overrides = ignore::overrides::OverrideBuilder::new(base);
-        if matches!(ignore_profile, IgnoreProfile::Common) {
-            for pat in DEFAULT_LS_IGNORE_GLOBS {
-                let _ = overrides.add(pat);
-            }
-        }
-        for pat in &ignore_patterns {
-            let _ = overrides.add(&format!("!{}", pat));
-        }
-        if let Ok(ov) = overrides.build() {
-            builder.overrides(ov);
-        }
-
-        let walker = builder.build();
-        let mut entries: Vec<super::PathEntry> = Vec::new();
-
-        for entry in walker {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-
-            let path = entry.path();
-            let rel_path = path.strip_prefix(base).unwrap_or(path);
-            let depth = rel_path.components().count();
-
-            if depth == 0 {
-                continue; // Skip the root itself
+        run_blocking(move || {
+            if !base.is_dir() {
+                return ToolResult::err_fmt(format_args!("Not a directory: {}", base.display()));
             }
 
-            let (entry, _) = build_path_entry(path, with_lines);
-            entries.push(entry);
-        }
+            let globs = ignore_patterns
+                .into_iter()
+                .map(|pattern| format!("!{pattern}"))
+                .collect::<Vec<_>>();
 
-        entries.sort_by(|a, b| a.path.cmp(&b.path));
-        let total_entries = entries.len();
-        if let Some(limit) = limit {
-            entries.truncate(limit);
-        }
-        ToolResult::ok(filesystem_entries_result(entries, total_entries))
+            let files = match rg_file_list(&base, include_hidden, respect_gitignore, None, &globs) {
+                Ok(files) => files,
+                Err(err) => return err,
+            };
+
+            let all_paths = collect_ls_paths(&base, &files, max_depth);
+            let total_entries = all_paths.len();
+            let shown_paths = match limit {
+                Some(limit) => all_paths.into_iter().take(limit).collect::<Vec<_>>(),
+                None => all_paths.into_iter().collect::<Vec<_>>(),
+            };
+            let items = shown_paths
+                .into_iter()
+                .map(|path| build_path_entry(&path, with_lines).0)
+                .collect();
+            ToolResult::ok(filesystem_entries_result(items, total_entries))
+        })
+        .await
     }
 }
 
@@ -189,6 +160,33 @@ fn parse_depth(args: &serde_json::Value) -> Result<Option<usize>, ToolResult> {
 
 fn parse_limit(args: &serde_json::Value) -> Result<Option<usize>, ToolResult> {
     parse_optional_usize_arg(args, "limit", Some(MAX_ENTRIES), true, 1)
+}
+
+fn collect_ls_paths(base: &Path, files: &[PathBuf], max_depth: Option<usize>) -> BTreeSet<PathBuf> {
+    let mut entries = BTreeSet::new();
+    for file in files {
+        let Ok(rel_path) = file.strip_prefix(base) else {
+            continue;
+        };
+        let components = rel_path.components().collect::<Vec<_>>();
+        if components.is_empty() {
+            continue;
+        }
+
+        let max_file_depth = max_depth.unwrap_or(usize::MAX);
+        if components.len() <= max_file_depth {
+            entries.insert(file.clone());
+        }
+
+        let dir_depth = components.len().saturating_sub(1);
+        let dirs_to_include = max_depth.map_or(dir_depth, |depth| depth.min(dir_depth));
+        let mut current = PathBuf::new();
+        for component in components.iter().take(dirs_to_include) {
+            current.push(component.as_os_str());
+            entries.insert(base.join(&current));
+        }
+    }
+    entries
 }
 
 #[cfg(test)]
@@ -329,7 +327,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ls_gitignore_mode_repo_only_does_not_apply_gitignore_outside_repo() {
+    async fn test_ls_respect_gitignore_default_does_not_apply_gitignore_outside_repo() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
         std::fs::write(dir.path().join("ignored.txt"), "").unwrap();
@@ -346,8 +344,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ls_gitignore_mode_always_honors_gitignore_outside_repo() {
+    async fn test_ls_respect_gitignore_false_disables_repo_gitignore() {
         let dir = TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
         std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
         std::fs::write(dir.path().join("ignored.txt"), "").unwrap();
         let tool = Ls;
@@ -356,7 +359,34 @@ mod tests {
                 "ls",
                 &json!({
                     "path": dir.path().to_str().unwrap(),
-                    "gitignore_mode": "always"
+                    "respect_gitignore": false
+                }),
+            )
+            .await;
+        assert!(result.success);
+        let paths: Vec<&str> = items(&result)
+            .iter()
+            .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
+            .collect();
+        assert!(paths.iter().any(|p| p.ends_with("/ignored.txt")));
+    }
+
+    #[tokio::test]
+    async fn test_ls_respect_gitignore_true_hides_repo_ignored_files() {
+        let dir = TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(dir.path().join("ignored.txt"), "").unwrap();
+        let tool = Ls;
+        let result = tool
+            .execute(
+                "ls",
+                &json!({
+                    "path": dir.path().to_str().unwrap()
                 }),
             )
             .await;
@@ -369,7 +399,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ls_common_ignore_profile_is_default() {
+    async fn test_ls_no_longer_hides_dot_git_entries_by_default() {
+        let dir = TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        let tool = Ls;
+        let result = tool
+            .execute("ls", &json!({"path": dir.path().to_str().unwrap()}))
+            .await;
+        assert!(result.success);
+        let paths: Vec<&str> = items(&result)
+            .iter()
+            .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
+            .collect();
+        assert!(paths.iter().any(|p| p.ends_with("/.git")));
+        assert!(paths.iter().any(|p| p.contains("/.git/")));
+    }
+
+    #[tokio::test]
+    async fn test_ls_does_not_hide_node_modules_by_default() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
         std::fs::write(dir.path().join("node_modules/pkg/index.js"), "").unwrap();
@@ -382,11 +433,11 @@ mod tests {
             .iter()
             .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
             .collect();
-        assert!(!paths.iter().any(|p| p.contains("node_modules")));
+        assert!(paths.iter().any(|p| p.contains("node_modules")));
     }
 
     #[tokio::test]
-    async fn test_ls_ignore_profile_none_disables_builtin_ignores() {
+    async fn test_ls_ignore_parameter_excludes_matching_paths() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
         std::fs::write(dir.path().join("node_modules/pkg/index.js"), "").unwrap();
@@ -396,7 +447,7 @@ mod tests {
                 "ls",
                 &json!({
                     "path": dir.path().to_str().unwrap(),
-                    "ignore_profile": "none"
+                    "ignore": ["**/node_modules/**", "**/node_modules"]
                 }),
             )
             .await;
@@ -405,6 +456,6 @@ mod tests {
             .iter()
             .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
             .collect();
-        assert!(paths.iter().any(|p| p.contains("node_modules")));
+        assert!(!paths.iter().any(|p| p.contains("node_modules")));
     }
 }

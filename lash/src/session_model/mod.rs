@@ -113,13 +113,11 @@ pub(crate) struct ExecutionPreamble {
 }
 
 fn repl_model_tool_specs() -> Vec<LlmToolSpec> {
-    let tool = crate::tools::repl_execute_lashlang_tool_definition().model_tool();
-    vec![LlmToolSpec {
-        name: tool.name,
-        description: tool.description,
-        input_schema: tool.input_schema,
-        output_schema: tool.output_schema,
-    }]
+    // REPL mode no longer uses native tool calling for the action call.
+    // The model writes lashlang inside a fenced ```lashlang block in its
+    // prose response and the dispatch loop extracts it via regex. See
+    // `lash_sansio::sansio::handle_repl_llm_success`.
+    Vec::new()
 }
 
 pub(crate) fn transport_stream_events(

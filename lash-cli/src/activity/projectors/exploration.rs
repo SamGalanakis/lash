@@ -74,12 +74,7 @@ pub(crate) fn exploration_op_for(
 }
 
 pub(crate) fn grep_label(args: &Value) -> String {
-    let pattern = tool_arg_str(args, "pattern").unwrap_or("pattern");
-    if let Some(path) = tool_arg_str(args, "path") {
-        format!("{:?} in {}", pattern, compact_path_display(path))
-    } else {
-        format!("{:?}", pattern)
-    }
+    format!("{:?}", tool_arg_str(args, "query").unwrap_or("query"))
 }
 
 pub(crate) fn glob_label(args: &Value) -> String {
@@ -215,7 +210,7 @@ mod tests {
             .join("lash-cli/src/render/mod.rs");
         let blocks = state.blocks_for_tool_call(
             "grep",
-            json!({ "pattern": "render_activity_block", "path": path }),
+            json!({ "query": format!("{} render_activity_block", path.display()) }),
             json!("match"),
             true,
             4,
@@ -223,7 +218,10 @@ mod tests {
 
         assert_eq!(
             blocks[0].call.summary,
-            "Search \"render_activity_block\" in lash-cli/src/render/mod.rs"
+            format!(
+                "Search {:?}",
+                format!("{} render_activity_block", path.display())
+            )
         );
         assert!(blocks[0].result.detail_lines.is_empty());
     }

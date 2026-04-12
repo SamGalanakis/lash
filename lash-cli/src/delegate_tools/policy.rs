@@ -133,7 +133,7 @@ impl DelegateTools {
             .collect()
     }
 
-    fn tier_context_surface(&self, tier: &Tier) -> SessionContextSurface {
+    pub(super) fn tier_context_surface(&self, tier: &Tier) -> SessionContextSurface {
         SessionContextSurface {
             include_base_tools: false,
             tool_providers: vec![Arc::new(FilteredToolProvider::new(
@@ -172,6 +172,7 @@ impl DelegateTools {
             plugin_mode: SessionPluginMode::InheritCurrent,
             initial_messages: Vec::new(),
             context_surface: self.tier_context_surface(tier),
+            mode_extras: lash::ModeExtras::default(),
         }
     }
 }
@@ -270,5 +271,56 @@ pub(super) fn delegate_tool_definitions(
             input_schema_override: None,
             output_schema_override: None,
         },
+        ToolDefinition {
+            name: "predict".into(),
+            description: predict_tool_description(execution_mode),
+            params: vec![
+                ToolParam::typed("task", "str"),
+                ToolParam {
+                    name: "vars".into(),
+                    r#type: "dict".into(),
+                    description: "Named inputs forwarded to the child session. Each key/value becomes a seeded variable in the child's lashlang state and is described in the child's initial prompt.".into(),
+                    default_value: None,
+                    required: false,
+                },
+                ToolParam {
+                    name: "output".into(),
+                    r#type: "dict".into(),
+                    description: "Declarative output schema. A record whose keys are field names and values are type descriptors: \"str\", \"int\", \"float\", \"bool\", \"list[<scalar>]\", or \"record\". The child must terminate via `finish { ... }` with a value matching this shape.".into(),
+                    default_value: None,
+                    required: true,
+                },
+            ],
+            returns: "dict".into(),
+            examples: predict_tool_examples(execution_mode),
+            enabled: true,
+            injected: true,
+            input_schema_override: None,
+            output_schema_override: None,
+        },
     ]
+}
+
+fn predict_tool_description(execution_mode: lash::ExecutionMode) -> String {
+    let prefix = "Spawn a typed sub-session that runs the given task with seeded inputs and returns a record matching the declared `output` schema. The child runs in REPL mode and must terminate by calling `finish { ... }` with a value matching the schema; mismatches loop with a validation error so the child can retry.";
+    match execution_mode {
+        lash::ExecutionMode::Repl => format!(
+            "{prefix}\n\nUse this for scoped extraction and perception sub-tasks where you want a known-shape result back instead of freeform prose.",
+        ),
+        lash::ExecutionMode::Standard => format!(
+            "{prefix}\n\nUse this for scoped extraction and perception sub-tasks where you want a known-shape result back instead of freeform prose. The child session runs in REPL mode regardless of the parent's execution mode.",
+        ),
+    }
+}
+
+fn predict_tool_examples(execution_mode: lash::ExecutionMode) -> Vec<String> {
+    match execution_mode {
+        lash::ExecutionMode::Repl => vec![
+            r#"r = call predict { task: "Extract the longest line and its length", vars: { path: "src/main.rs" }, output: { line: "str", length: "int" } }"#.into(),
+            r#"observe r.line"#.into(),
+        ],
+        lash::ExecutionMode::Standard => vec![
+            r#"r = predict(task="Extract the longest line and its length", vars={"path": "src/main.rs"}, output={"line": "str", "length": "int"})"#.into(),
+        ],
+    }
 }

@@ -34,15 +34,14 @@ pub use web_search::WebSearch;
 
 use crate::ToolResult;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NativeTool {
     Batch,
 }
-
-pub(crate) const REPL_EXECUTE_LASHLANG_TOOL_NAME: &str = "execute_lashlang";
 
 impl NativeTool {
     pub(crate) fn name(self) -> &'static str {
@@ -62,28 +61,6 @@ pub(crate) fn native_tools(mode: crate::ExecutionMode) -> &'static [NativeTool] 
     match mode {
         crate::ExecutionMode::Standard => &[NativeTool::Batch],
         crate::ExecutionMode::Repl => &[],
-    }
-}
-
-pub(crate) fn repl_execute_lashlang_tool_definition() -> crate::ToolDefinition {
-    crate::ToolDefinition {
-        name: REPL_EXECUTE_LASHLANG_TOOL_NAME.to_string(),
-        description: "Execute one lashlang work step inside the persistent REPL runtime. Use this for inspection, editing, validation, and other actions. Put lashlang source in `code`; it can call the Available Tools listed in the prompt via `call tool_name { ... }`. Reply in plain prose instead of calling this tool when the task is complete.".to_string(),
-        params: vec![crate::ToolParam {
-            name: "code".to_string(),
-            r#type: "str".to_string(),
-            description: "lashlang source code to execute in the persistent REPL state".to_string(),
-            default_value: None,
-            required: true,
-        }],
-        returns: "dict".to_string(),
-        examples: vec![
-            r#"execute_lashlang(code="files = call ls { path: \".\" }\nobserve files")"#.to_string(),
-        ],
-        enabled: true,
-        injected: true,
-        input_schema_override: None,
-        output_schema_override: None,
     }
 }
 
@@ -205,121 +182,6 @@ pub(crate) fn parse_optional_usize_arg(
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum GitignoreMode {
-    RepoOnly,
-    Always,
-}
-
-impl GitignoreMode {
-    fn requires_git(self) -> bool {
-        matches!(self, Self::RepoOnly)
-    }
-}
-
-pub(crate) fn parse_gitignore_mode(
-    args: &serde_json::Value,
-    key: &str,
-    default: GitignoreMode,
-) -> Result<GitignoreMode, ToolResult> {
-    match args.get(key) {
-        None => Ok(default),
-        Some(v) if v.is_null() => Ok(default),
-        Some(v) => match v.as_str() {
-            Some("repo_only") => Ok(GitignoreMode::RepoOnly),
-            Some("always") => Ok(GitignoreMode::Always),
-            _ => Err(ToolResult::err_fmt(format_args!(
-                "Invalid {key}: expected \"repo_only\" or \"always\""
-            ))),
-        },
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IgnoreProfile {
-    None,
-    Common,
-}
-
-pub(crate) fn parse_ignore_profile(
-    args: &serde_json::Value,
-    key: &str,
-    default: IgnoreProfile,
-) -> Result<IgnoreProfile, ToolResult> {
-    match args.get(key) {
-        None => Ok(default),
-        Some(v) if v.is_null() => Ok(default),
-        Some(v) => match v.as_str() {
-            Some("none") => Ok(IgnoreProfile::None),
-            Some("common") => Ok(IgnoreProfile::Common),
-            _ => Err(ToolResult::err_fmt(format_args!(
-                "Invalid {key}: expected \"common\" or \"none\""
-            ))),
-        },
-    }
-}
-
-pub(crate) const DEFAULT_LS_IGNORE_GLOBS: &[&str] = &[
-    "!**/node_modules",
-    "!**/node_modules/**",
-    "!**/__pycache__",
-    "!**/__pycache__/**",
-    "!**/.git",
-    "!**/.git/**",
-    "!**/dist",
-    "!**/dist/**",
-    "!**/build",
-    "!**/build/**",
-    "!**/target",
-    "!**/target/**",
-    "!**/vendor",
-    "!**/vendor/**",
-    "!**/bin",
-    "!**/bin/**",
-    "!**/obj",
-    "!**/obj/**",
-    "!**/.idea",
-    "!**/.idea/**",
-    "!**/.vscode",
-    "!**/.vscode/**",
-    "!**/.zig-cache",
-    "!**/.zig-cache/**",
-    "!**/zig-out",
-    "!**/zig-out/**",
-    "!**/.coverage*",
-    "!**/coverage",
-    "!**/coverage/**",
-    "!**/tmp",
-    "!**/tmp/**",
-    "!**/temp",
-    "!**/temp/**",
-    "!**/.cache",
-    "!**/.cache/**",
-    "!**/cache",
-    "!**/cache/**",
-    "!**/logs",
-    "!**/logs/**",
-    "!**/.venv",
-    "!**/.venv/**",
-    "!**/venv",
-    "!**/venv/**",
-    "!**/env",
-    "!**/env/**",
-];
-
-pub(crate) fn configure_walk_builder(
-    builder: &mut ignore::WalkBuilder,
-    include_hidden: bool,
-    gitignore_mode: GitignoreMode,
-    max_depth: Option<usize>,
-) {
-    builder
-        .hidden(!include_hidden)
-        .git_ignore(true)
-        .require_git(gitignore_mode.requires_git())
-        .max_depth(max_depth);
-}
-
 pub(crate) fn project_tool_catalog(
     definitions: impl IntoIterator<Item = crate::ToolDefinition>,
 ) -> Vec<serde_json::Value> {
@@ -397,6 +259,59 @@ pub(crate) fn build_path_entry(path: &Path, with_lines: bool) -> (PathEntry, Sys
         modified_at: format_time_rfc3339(mtime),
     };
     (entry, mtime)
+}
+
+pub(crate) fn rg_file_list(
+    base: &Path,
+    include_hidden: bool,
+    respect_gitignore: bool,
+    max_depth: Option<usize>,
+    globs: &[String],
+) -> Result<Vec<PathBuf>, ToolResult> {
+    let mut cmd = Command::new("rg");
+    cmd.arg("--files").arg("--null").arg("--no-config");
+    if include_hidden {
+        cmd.arg("--hidden");
+    }
+    if !respect_gitignore {
+        cmd.arg("--no-ignore").arg("--no-ignore-parent");
+    }
+    if let Some(depth) = max_depth {
+        cmd.arg(format!("--max-depth={depth}"));
+    }
+    for glob in globs {
+        cmd.arg("--glob").arg(glob);
+    }
+    cmd.current_dir(base);
+
+    let output = cmd.output().map_err(|e| {
+        ToolResult::err_fmt(format_args!("failed to run rg for {}: {e}", base.display()))
+    })?;
+
+    if !output.status.success() {
+        if output.status.code() == Some(1) && output.stdout.is_empty() {
+            return Ok(Vec::new());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let message = stderr.trim();
+        return Err(ToolResult::err_fmt(format_args!(
+            "rg --files failed for {}: {}",
+            base.display(),
+            if message.is_empty() {
+                "unknown error"
+            } else {
+                message
+            }
+        )));
+    }
+
+    let files = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|chunk| !chunk.is_empty())
+        .map(|chunk| base.join(String::from_utf8_lossy(chunk).as_ref()))
+        .collect();
+    Ok(files)
 }
 
 /// Build the standard result envelope returned by filesystem listing tools.

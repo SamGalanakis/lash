@@ -197,7 +197,8 @@ impl AutonomousRenderer {
             | SessionEvent::TokenUsage { .. }
             | SessionEvent::InjectedMessagesCommitted { .. }
             | SessionEvent::LlmResponse { .. }
-            | SessionEvent::DurableSnapshot { .. } => {}
+            | SessionEvent::DurableSnapshot { .. }
+            | SessionEvent::TypedFinish { .. } => {}
         }
         Ok(())
     }

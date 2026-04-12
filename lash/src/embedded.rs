@@ -18,6 +18,11 @@ pub enum LashlangRequest {
     Exec {
         id: String,
         code: String,
+        /// When true, a `finish <expr>` from inside the lashlang
+        /// program is captured (instead of being treated as an error
+        /// like the chat-style contract). The captured value flows
+        /// back through `LashlangResponse::ExecResult::terminal_finish`.
+        accept_finish: bool,
     },
     Snapshot {
         id: String,
@@ -53,6 +58,10 @@ pub enum LashlangResponse {
         output: String,
         observations: Vec<String>,
         error: Option<String>,
+        /// `Some(value)` only when the surrounding session was started
+        /// with `accept_finish: true` AND the lashlang program ended
+        /// with `finish <expr>`. The value is JSON-encoded.
+        terminal_finish: Option<Value>,
     },
     SnapshotResult {
         id: String,
@@ -165,13 +174,18 @@ fn runtime_thread_main(
                 state.config.apply(&tools_json, session_id);
                 let _ = response_tx.send(LashlangResponse::Ready);
             }
-            LashlangRequest::Exec { id, code } => {
-                let result = execute_code(&mut state, &code, &response_tx);
+            LashlangRequest::Exec {
+                id,
+                code,
+                accept_finish,
+            } => {
+                let result = execute_code(&mut state, &code, accept_finish, &response_tx);
                 let _ = response_tx.send(LashlangResponse::ExecResult {
                     id,
                     output: result.output,
                     observations: result.observations,
                     error: result.error,
+                    terminal_finish: result.terminal_finish,
                 });
             }
             LashlangRequest::Snapshot { id } => {
@@ -193,6 +207,7 @@ fn runtime_thread_main(
                     output: String::new(),
                     observations: Vec::new(),
                     error,
+                    terminal_finish: None,
                 });
             }
             LashlangRequest::Reset { id } => {
@@ -225,11 +240,13 @@ struct ExecOutcome {
     output: String,
     observations: Vec<String>,
     error: Option<String>,
+    terminal_finish: Option<Value>,
 }
 
 fn execute_code(
     state: &mut RuntimeState,
     code: &str,
+    accept_finish: bool,
     response_tx: &std_mpsc::Sender<LashlangResponse>,
 ) -> ExecOutcome {
     let observations = Mutex::new(Vec::new());
@@ -240,27 +257,42 @@ fn execute_code(
     };
 
     match lashlang::execute(code, &mut state.repl, &host) {
-        Ok(ExecutionOutcome::Finished(_)) => ExecOutcome {
-            output: String::new(),
-            observations: observations.into_inner().unwrap_or_default(),
-            error: Some(
-                "This lashlang step tried to terminate the task directly. End the task by replying in plain prose instead of calling `execute_lashlang` again.".to_string(),
-            ),
-        },
+        Ok(ExecutionOutcome::Finished(value)) => {
+            if accept_finish {
+                ExecOutcome {
+                    output: String::new(),
+                    observations: observations.into_inner().unwrap_or_default(),
+                    error: None,
+                    terminal_finish: Some(flow_to_json_value(&value)),
+                }
+            } else {
+                ExecOutcome {
+                    output: String::new(),
+                    observations: observations.into_inner().unwrap_or_default(),
+                    error: Some(
+                        "This lashlang step tried to terminate the task directly. End the task by replying in plain prose instead of calling `execute_lashlang` again.".to_string(),
+                    ),
+                    terminal_finish: None,
+                }
+            }
+        }
         Ok(ExecutionOutcome::Continued) => ExecOutcome {
             output: String::new(),
             observations: observations.into_inner().unwrap_or_default(),
             error: None,
+            terminal_finish: None,
         },
         Err(ExecuteError::Parse(err)) => ExecOutcome {
             output: String::new(),
             observations: observations.into_inner().unwrap_or_default(),
             error: Some(format_parse_error(code, &err)),
+            terminal_finish: None,
         },
         Err(ExecuteError::Runtime(err)) => ExecOutcome {
             output: String::new(),
             observations: observations.into_inner().unwrap_or_default(),
             error: Some(err.to_string()),
+            terminal_finish: None,
         },
     }
 }
@@ -509,7 +541,7 @@ mod tests {
                 .expect("tool result should be delivered");
         });
 
-        let result = execute_code(&mut state, code, &tx);
+        let result = execute_code(&mut state, code, false, &tx);
         tool_thread.join().expect("tool thread should finish");
         result
     }
@@ -589,7 +621,7 @@ mod tests {
         let mut state = RuntimeState::new();
         let (tx, _rx) = std_mpsc::channel();
 
-        let result = execute_code(&mut state, "value = 1 finish value.name", &tx);
+        let result = execute_code(&mut state, "value = 1 finish value.name", false, &tx);
 
         assert_eq!(
             result.error,
@@ -607,6 +639,7 @@ mod tests {
             r#"
             observe { ok: true, count: 2 }
             "#,
+            false,
             &tx,
         );
 
@@ -628,6 +661,7 @@ mod tests {
             r#"
             observe null
             "#,
+            false,
             &tx,
         );
 
@@ -668,11 +702,11 @@ mod tests {
     }
 
     #[test]
-    fn finish_is_rejected_with_guidance() {
+    fn finish_is_rejected_with_guidance_in_chat_mode() {
         let mut state = RuntimeState::new();
         let (tx, _rx) = std_mpsc::channel();
 
-        let result = execute_code(&mut state, "finish \"\"", &tx);
+        let result = execute_code(&mut state, "finish \"\"", false, &tx);
 
         assert_eq!(
             result.error,
@@ -680,6 +714,45 @@ mod tests {
                 "This lashlang step tried to terminate the task directly. End the task by replying in plain prose instead of calling `execute_lashlang` again.".to_string()
             )
         );
+        assert!(result.terminal_finish.is_none());
+    }
+
+    #[test]
+    fn finish_is_captured_in_typed_mode() {
+        let mut state = RuntimeState::new();
+        let (tx, _rx) = std_mpsc::channel();
+
+        let result = execute_code(
+            &mut state,
+            r#"finish { answer: "yes", confidence: 0.9 }"#,
+            true,
+            &tx,
+        );
+
+        assert_eq!(result.error, None);
+        let captured = result.terminal_finish.expect("typed finish");
+        assert_eq!(captured["answer"], serde_json::json!("yes"));
+        assert_eq!(captured["confidence"], serde_json::json!(0.9));
+    }
+
+    #[test]
+    fn typed_finish_with_string_value_round_trips() {
+        let mut state = RuntimeState::new();
+        let (tx, _rx) = std_mpsc::channel();
+
+        let result = execute_code(&mut state, r#"finish "all done""#, true, &tx);
+        assert_eq!(result.error, None);
+        assert_eq!(result.terminal_finish, Some(serde_json::json!("all done")));
+    }
+
+    #[test]
+    fn typed_mode_continues_when_program_doesnt_finish() {
+        let mut state = RuntimeState::new();
+        let (tx, _rx) = std_mpsc::channel();
+
+        let result = execute_code(&mut state, "x = 1", true, &tx);
+        assert_eq!(result.error, None);
+        assert!(result.terminal_finish.is_none());
     }
 
     #[test]

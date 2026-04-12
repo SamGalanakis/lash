@@ -389,24 +389,34 @@ const CORE_GUIDANCE_SECTION: &str = r#"- Be clear, direct, and natural. Avoid fi
 - Prefer the simplest correct solution over cleverness or unnecessary abstraction.
 - Keep final answers focused and well-written. Use short numbered next steps only when there are real next steps."#;
 
-const REPL_EXECUTION_SECTION: &str = r#"Use the `execute_lashlang` tool for all execution and work steps in this mode.
+const REPL_EXECUTION_SECTION: &str = r#"In this mode you write `lashlang` code inside your prose response and the runtime executes it. There is no native tool-call envelope — you embed code directly.
 
-- If the task needs inspection, file edits, commands, validation, or any other action, call `execute_lashlang` with lashlang source in `code`.
-- Work iteratively: inspect, act, observe, continue.
-- Most tasks take multiple lashlang executions, not one large step.
-- Use `observe` for intermediate results, inspection, and progress that should continue.
-- After each `execute_lashlang` result, decide whether to call it again or finish in prose.
-- When the task is complete, do not call `execute_lashlang`; reply in plain prose to finalize the turn.
-- Verify the concrete end state before replying in prose when possible.
+Format every work step like this:
+
+````
+Brief reasoning here in plain prose (one or two sentences is fine).
+
+```lashlang
+files = call ls { path: "." }
+observe files
+```
+````
+
+- Wrap each work step in **exactly one** ` ```lashlang ` fenced block. Only the first block runs per turn — additional blocks are ignored.
+- Plain prose alongside the block becomes your reasoning trace; keep it short.
+- After each execution result, decide whether to write another fenced block (more work to do) or finish the turn in pure prose with no fenced block (task complete).
+- When the task is complete, reply with prose only — no fenced lashlang block — and that ends the turn.
+- Work iteratively: inspect, act, observe, continue. Most tasks take multiple lashlang steps, not one large step.
+- Verify the concrete end state before finalizing in prose when possible.
 - Do not describe what you would do instead of doing it.
 
 ### REPL Language
 
-The `execute_lashlang` tool runs `lashlang`, a small workflow language for tool orchestration.
+`lashlang` is a small workflow language for tool orchestration.
 
 - Values are null, booleans, numbers, strings, lists, and records.
 - List and record literals use comma-separated entries: `[a, b]`, `{ a: 1, b: 2 }`. Tool-argument records follow the same rule.
-- Assign with `name = expr`.
+- Assign with `name = expr`. Variables persist across iterations — anything you bind in one fenced block is still in scope on the next.
 - Bare expressions are valid statements. In `parallel { ... }`, a bare-expression branch contributes that value to the result list.
 - Call tools with `call tool_name { arg: expr }`.
 - Use `parallel { ... }` only for independent tool calls. If one call needs another call's output, do not put them in the same `parallel { ... }`.
@@ -415,8 +425,7 @@ The `execute_lashlang` tool runs `lashlang`, a small workflow language for tool 
 - Control flow is limited to statement `if` and `for`.
 - Boolean negation supports both `!cond` and `not cond`.
 - Use `observe expr` to inspect a value and continue execution.
-- End a work step by letting execution finish naturally.
-- `observe` output and tool results are fed back into the next turn (your context), so inspect first and refine on the next step if needed.
+- `observe` output and tool results are fed back into the next iteration (your context), so inspect first and refine on the next step if needed.
 - You must explicitly use `observe` to inspect values and make progress based on them. Do not rely on implicit inspection through tool results or execution errors."#;
 
 const STANDARD_EXECUTION_SECTION: &str = r#"Use direct tool calls when execution is needed.

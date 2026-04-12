@@ -148,6 +148,30 @@ pub struct TurnMachineConfig {
     pub prompt_overrides: Vec<PromptSectionOverride>,
     pub session_id: String,
     pub emit_llm_debug_log: bool,
+    /// REPL termination contract for this session. Only meaningful when
+    /// `execution_mode == Repl`. Defaults to `ProseWithoutFence`.
+    pub repl_termination: ReplTermination,
+}
+
+/// How a REPL session terminates. Mirrors `lash::ReplTermination`;
+/// duplicated here so the sans-io layer doesn't depend on the lash
+/// host crate.
+#[derive(Clone, Debug, Default)]
+pub enum ReplTermination {
+    /// Today's behavior — terminate when the model writes prose with
+    /// no fenced lashlang block. The prose IS the assistant's final
+    /// reply.
+    #[default]
+    ProseWithoutFence,
+    /// Terminate when the model calls `finish <expr>` from inside a
+    /// fenced lashlang block. The captured value is the terminal
+    /// result. Prose-without-fence becomes a soft error that loops the
+    /// model. When `schema` is `Some`, the captured value is validated
+    /// against the JSON Schema before being accepted; mismatches loop
+    /// with an explanation.
+    Finish {
+        schema: Option<serde_json::Value>,
+    },
 }
 
 // ─── Internal state ───
@@ -156,8 +180,6 @@ pub struct TurnMachineConfig {
 struct ReplState {
     acc: ExecAccumulator,
     latest_usage: LlmUsage,
-    execute_call_id: Option<String>,
-    execute_args: Option<Value>,
 }
 
 impl ReplState {
@@ -165,8 +187,6 @@ impl ReplState {
         Self {
             acc: ExecAccumulator::new(),
             latest_usage: LlmUsage::default(),
-            execute_call_id: None,
-            execute_args: None,
         }
     }
 }
@@ -1040,7 +1060,6 @@ impl TurnMachine {
         });
 
         let mut assistant_text = String::new();
-        let mut tool_calls: Vec<(String, String, String)> = Vec::new();
         let response_parts = if llm_response.parts.is_empty() && !llm_response.full_text.is_empty()
         {
             vec![LlmOutputPart::Text {
@@ -1050,140 +1069,134 @@ impl TurnMachine {
             llm_response.parts.clone()
         };
 
+        // Native tool calls have no place in REPL mode anymore — the model
+        // writes lashlang inside a fenced block in its prose. If a provider
+        // somehow returns a tool call here we just drop it; the absence of
+        // a fence will surface as the existing "no work step" error path.
         for part in response_parts {
-            match part {
-                LlmOutputPart::Text { text } => {
-                    append_assistant_text_part(&mut assistant_text, &text)
-                }
-                LlmOutputPart::ToolCall {
-                    call_id,
-                    tool_name,
-                    input_json,
-                } => tool_calls.push((call_id, tool_name, input_json)),
+            if let LlmOutputPart::Text { text } = part {
+                append_assistant_text_part(&mut assistant_text, &text);
             }
         }
 
-        if tool_calls.is_empty() {
-            if assistant_text.trim().is_empty() {
-                self.emit(make_error_event(
-                    "llm_provider",
-                    Some("empty_response"),
-                    "Model returned no assistant text or tool calls.",
-                    None,
-                ));
-                self.finish();
-                return;
-            }
-            let mid = fresh_message_id();
-            self.messages.push(Message {
-                id: mid.clone(),
-                role: MessageRole::Assistant,
-                parts: vec![Part {
-                    id: format!("{}.p0", mid),
-                    kind: PartKind::Prose,
-                    content: assistant_text,
-                    attachment: None,
-                    tool_call_id: None,
-                    tool_name: None,
-                    prune_state: PruneState::Intact,
-                }],
-                user_input: None,
-                origin: None,
-            });
-            self.request_checkpoint(CheckpointKind::BeforeCompletion, CheckpointResume::Finish);
-            return;
-        }
-
-        let mut exec_call: Option<(String, String)> = None;
-        for (call_id, tool_name, input_json) in tool_calls {
-            if tool_name != "execute_lashlang" {
-                self.emit(make_error_event(
-                    "llm_provider",
-                    Some("invalid_tool_call"),
-                    format!("REPL mode only supports `execute_lashlang`, got `{tool_name}`."),
-                    Some(input_json),
-                ));
-                self.finish();
-                return;
-            }
-            if exec_call.is_some() {
-                self.emit(make_error_event(
-                    "llm_provider",
-                    Some("multiple_repl_tool_calls"),
-                    "REPL mode allows at most one `execute_lashlang` tool call per turn.",
-                    None,
-                ));
-                self.finish();
-                return;
-            }
-            exec_call = Some((call_id, input_json));
-        }
-
-        let (call_id, input_json) = exec_call.expect("checked above");
-        let args: Value = match serde_json::from_str(&input_json) {
-            Ok(value) => value,
-            Err(err) => {
-                self.emit(make_error_event(
-                    "llm_provider",
-                    Some("invalid_tool_args"),
-                    format!("Invalid execute_lashlang arguments: {err}"),
-                    Some(input_json),
-                ));
-                self.finish();
-                return;
-            }
-        };
-        let Some(code) = args.get("code").and_then(Value::as_str) else {
+        if assistant_text.trim().is_empty() {
             self.emit(make_error_event(
                 "llm_provider",
-                Some("invalid_tool_args"),
-                "`execute_lashlang` requires a string `code` argument.",
-                Some(args.to_string()),
+                Some("empty_response"),
+                "Model returned no assistant text.",
+                None,
             ));
             self.finish();
             return;
+        }
+
+        let extraction = extract_first_lashlang_fence(&assistant_text);
+        let Some(fence) = extraction else {
+            // No fenced lashlang block. What happens next depends on
+            // the session's termination contract:
+            // - `ProseWithoutFence` (default): the prose IS the
+            //   terminal response. Persist and finish the turn.
+            // - `Finish { .. }`: prose-only is invalid. The model must
+            //   call `finish <expr>` from inside a fenced block. Push
+            //   the prose into history and inject a system reminder
+            //   before looping.
+            match &self.config.repl_termination {
+                ReplTermination::ProseWithoutFence => {
+                    let mid = fresh_message_id();
+                    self.messages.push(Message {
+                        id: mid.clone(),
+                        role: MessageRole::Assistant,
+                        parts: vec![Part {
+                            id: format!("{}.p0", mid),
+                            kind: PartKind::Prose,
+                            content: assistant_text,
+                            attachment: None,
+                            tool_call_id: None,
+                            tool_name: None,
+                            prune_state: PruneState::Intact,
+                        }],
+                        user_input: None,
+                        origin: None,
+                    });
+                    self.request_checkpoint(
+                        CheckpointKind::BeforeCompletion,
+                        CheckpointResume::Finish,
+                    );
+                }
+                ReplTermination::Finish { .. } => {
+                    let asst_id = fresh_message_id();
+                    self.messages.push(Message {
+                        id: asst_id.clone(),
+                        role: MessageRole::Assistant,
+                        parts: vec![Part {
+                            id: format!("{}.p0", asst_id),
+                            kind: PartKind::Prose,
+                            content: assistant_text,
+                            attachment: None,
+                            tool_call_id: None,
+                            tool_name: None,
+                            prune_state: PruneState::Intact,
+                        }],
+                        user_input: None,
+                        origin: None,
+                    });
+                    let reminder_id = fresh_message_id();
+                    self.messages.push(Message {
+                        id: reminder_id.clone(),
+                        role: MessageRole::User,
+                        parts: vec![Part {
+                            id: format!("{}.p0", reminder_id),
+                            kind: PartKind::Text,
+                            content: "[runtime] You're in a typed REPL session. End by emitting a fenced ```lashlang block that calls `finish <expr>` with a value matching the required output schema. Prose-only replies are not accepted as the final answer here.".to_string(),
+                            attachment: None,
+                            tool_call_id: None,
+                            tool_name: None,
+                            prune_state: PruneState::Intact,
+                        }],
+                        user_input: None,
+                        origin: None,
+                    });
+                    self.iteration += 1;
+                    self.request_checkpoint(
+                        CheckpointKind::AfterWork,
+                        CheckpointResume::PrepareIteration,
+                    );
+                }
+            }
+            return;
         };
 
+        // Multiple fenced blocks: only the first runs. The prompt
+        // already instructs the model to consolidate; if it forgets, the
+        // next iteration's results implicitly tell it. Intentionally no
+        // warning event — keeping the protocol minimal.
+        let _ = fence.had_extra_fences;
+
         let asst_id = fresh_message_id();
-        let mut parts = Vec::new();
-        if !assistant_text.trim().is_empty() {
-            parts.push(Part {
-                id: format!("{}.p{}", asst_id, parts.len()),
+        self.messages.push(Message {
+            id: asst_id.clone(),
+            role: MessageRole::Assistant,
+            parts: vec![Part {
+                id: format!("{}.p0", asst_id),
                 kind: PartKind::Prose,
                 content: assistant_text,
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
                 prune_state: PruneState::Intact,
-            });
-        }
-        parts.push(Part {
-            id: format!("{}.p{}", asst_id, parts.len()),
-            kind: PartKind::ToolCall,
-            content: input_json.clone(),
-            attachment: None,
-            tool_call_id: Some(call_id.clone()),
-            tool_name: Some("execute_lashlang".to_string()),
-            prune_state: PruneState::Intact,
-        });
-        self.messages.push(Message {
-            id: asst_id,
-            role: MessageRole::Assistant,
-            parts,
+            }],
             user_input: None,
             origin: None,
         });
 
         let exec_id = self.next_id();
-        let mut repl = repl;
-        repl.execute_call_id = Some(call_id);
-        repl.execute_args = Some(args.clone());
+        let repl = repl;
         self.state = MachineState::WaitingExec {
             repl: ReplTurnState { state: repl },
         };
         self.pending_effects.push_back(Effect::ExecCode {
             id: exec_id,
-            code: code.to_string(),
+            code: fence.code,
         });
     }
 
@@ -1228,12 +1241,13 @@ impl TurnMachine {
                 }
                 if let Some(raw_error) = r.error {
                     repl.state.acc.exec_error = Some(raw_error);
-                    repl.state.acc.had_failure = true;
+                }
+                if let Some(finish_value) = r.terminal_finish {
+                    repl.state.acc.terminal_finish = Some(finish_value);
                 }
             }
             Err(e) => {
                 repl.state.acc.exec_error = Some(e);
-                repl.state.acc.had_failure = true;
             }
         }
 
@@ -1252,10 +1266,80 @@ impl TurnMachine {
 
         let repl_state = repl.state;
         let next_tool_images = repl_state.acc.images.clone();
-        let result_call_id = repl_state
-            .execute_call_id
-            .clone()
-            .unwrap_or_else(|| format!("repl_exec_{}", self.iteration));
+        let result_call_id = format!("repl_exec_{}", self.iteration);
+
+        // Typed-mode terminal finish: when the lashlang program ended
+        // with `finish <expr>` AND the session uses
+        // `ReplTermination::Finish`, validate the captured value
+        // against the schema (if any) and terminate cleanly. On
+        // validation failure, feed the error back so the model can
+        // retry with a corrected `finish` call.
+        if let Some(finish_value) = &repl_state.acc.terminal_finish {
+            if let ReplTermination::Finish { schema } = &self.config.repl_termination {
+                if let Some(schema) = schema {
+                    if let Err(error_text) = validate_finish_value(finish_value, schema) {
+                        let asst_id = fresh_message_id();
+                        self.messages.push(Message {
+                            id: asst_id.clone(),
+                            role: MessageRole::User,
+                            parts: vec![Part {
+                                id: format!("{}.p0", asst_id),
+                                kind: PartKind::Text,
+                                content: format!(
+                                    "[runtime] Your `finish` value didn't match the required output schema:\n{error_text}\n\nFix the value and call `finish <corrected>` from another fenced ```lashlang block."
+                                ),
+                                attachment: None,
+                                tool_call_id: None,
+                                tool_name: None,
+                                prune_state: PruneState::Intact,
+                            }],
+                            user_input: None,
+                            origin: None,
+                        });
+                        self.iteration += 1;
+                        self.request_checkpoint(
+                            CheckpointKind::AfterWork,
+                            CheckpointResume::PrepareIteration,
+                        );
+                        return;
+                    }
+                }
+
+                // Validation passed (or no schema). Terminate the turn
+                // with the captured value as the assistant's final
+                // structured response.
+                let mid = fresh_message_id();
+                let rendered = match finish_value {
+                    serde_json::Value::String(text) => text.clone(),
+                    other => serde_json::to_string_pretty(other)
+                        .unwrap_or_else(|_| other.to_string()),
+                };
+                self.messages.push(Message {
+                    id: mid.clone(),
+                    role: MessageRole::Assistant,
+                    parts: vec![Part {
+                        id: format!("{}.p0", mid),
+                        kind: PartKind::Prose,
+                        content: rendered,
+                        attachment: None,
+                        tool_call_id: None,
+                        tool_name: None,
+                        prune_state: PruneState::Intact,
+                    }],
+                    user_input: None,
+                    origin: None,
+                });
+                self.emit(SessionEvent::TypedFinish {
+                    value: finish_value.clone(),
+                });
+                self.request_checkpoint(
+                    CheckpointKind::BeforeCompletion,
+                    CheckpointResume::Finish,
+                );
+                return;
+            }
+        }
+
         let mut result_payload = serde_json::json!({
             "observations": repl_state.acc.combined_output,
             "tool_calls": repl_state.acc.tool_calls,
@@ -1276,26 +1360,28 @@ impl TurnMachine {
         let success = result_payload
             .get("error")
             .is_none_or(|value| value.is_null());
-        let execute_args = repl_state
-            .execute_args
-            .clone()
-            .unwrap_or_else(|| serde_json::json!({}));
+        // Telemetry only — surfaced as a synthetic tool_call event so the
+        // host UI keeps rendering "execute_lashlang" runs in the activity
+        // panel without changing the wire-format-visible message history.
         self.emit(SessionEvent::ToolCall {
-            call_id: Some(result_call_id.clone()),
+            call_id: Some(result_call_id),
             name: "execute_lashlang".to_string(),
-            args: execute_args,
+            args: serde_json::json!({}),
             result: result_payload.clone(),
             success,
             duration_ms: 0,
         });
+        // Render the exec result as a plain user text message — there is
+        // no longer a preceding native tool call for it to reference.
         let user_id = fresh_message_id();
+        let result_text = format_repl_result_text(success, &result_payload);
         let mut result_parts = vec![Part {
             id: format!("{}.p0", user_id),
-            kind: PartKind::ToolResult,
-            content: format_tool_result_content(success, &result_payload),
+            kind: PartKind::Text,
+            content: result_text,
             attachment: None,
-            tool_call_id: Some(result_call_id.clone()),
-            tool_name: Some("execute_lashlang".to_string()),
+            tool_call_id: None,
+            tool_name: None,
             prune_state: PruneState::Intact,
         }];
         for (image_offset, img) in next_tool_images.iter().enumerate() {
@@ -1380,6 +1466,227 @@ impl TurnMachine {
     }
 }
 
+/// Outcome of pulling the first ` ```lashlang ` (or ` ```repl `) fenced
+/// block out of an assistant prose response.
+struct FenceExtraction {
+    code: String,
+    /// True when the prose contained more than one matching fenced block.
+    /// The dispatch loop only runs the first; this signals "tell the
+    /// model to consolidate next time."
+    had_extra_fences: bool,
+}
+
+/// Find the first ` ```lashlang ` or ` ```repl ` fenced block in `text`
+/// and return its code body. Both language tags are accepted as aliases.
+/// `None` ⇒ no recognized fence ⇒ caller treats the prose as a "finish
+/// in prose" terminal response.
+fn extract_first_lashlang_fence(text: &str) -> Option<FenceExtraction> {
+    fn find_fence(text: &str) -> Option<(usize, usize, usize)> {
+        // Returns (open_byte, body_start, body_end_open_fence_byte). The
+        // open fence is exactly three backticks followed by a recognized
+        // language tag and a newline. The closing fence is three
+        // backticks at the start of a line. Trailing characters on the
+        // closing line are tolerated.
+        let mut search_from = 0usize;
+        while let Some(rel) = text[search_from..].find("```") {
+            let open = search_from + rel;
+            // Require either start-of-string or a newline immediately
+            // before the opening fence so we don't match inline triple
+            // backticks inside prose.
+            let preceded_by_newline =
+                open == 0 || text.as_bytes().get(open - 1).copied() == Some(b'\n');
+            if !preceded_by_newline {
+                search_from = open + 3;
+                continue;
+            }
+            let after_open = open + 3;
+            let rest = &text[after_open..];
+            let lang_end = rest.find('\n').unwrap_or(rest.len());
+            let lang = rest[..lang_end].trim();
+            if !matches!(lang, "lashlang" | "repl") {
+                search_from = after_open;
+                continue;
+            }
+            let body_start = after_open + lang_end + 1;
+            if body_start > text.len() {
+                return None;
+            }
+            // Find a closing fence at the start of a line.
+            let mut cursor = body_start;
+            loop {
+                let Some(rel) = text[cursor..].find("```") else {
+                    // No closing fence ⇒ treat the rest of the buffer as
+                    // the code body. Forgiving for partial responses.
+                    return Some((open, body_start, text.len()));
+                };
+                let close = cursor + rel;
+                let preceded_by_newline =
+                    close == 0 || text.as_bytes().get(close - 1).copied() == Some(b'\n');
+                if preceded_by_newline {
+                    return Some((open, body_start, close));
+                }
+                cursor = close + 3;
+            }
+        }
+        None
+    }
+
+    let (_open, body_start, body_end) = find_fence(text)?;
+    let code = text[body_start..body_end]
+        .trim_end_matches('\n')
+        .to_string();
+
+    // Look for any *additional* fenced block past the closing fence so
+    // we can tell the model only the first ran.
+    let after_close = (body_end + 3).min(text.len());
+    let had_extra_fences = find_fence(&text[after_close..]).is_some();
+
+    Some(FenceExtraction {
+        code,
+        had_extra_fences,
+    })
+}
+
+/// Validate a `finish` value against the JSON Schema embedded in the
+/// session's `ReplTermination::Finish { schema }`. Returns `Ok(())` on
+/// success or a human-readable error string on mismatch. Supports the
+/// subset of JSON Schema that `predict` generates: `type` (string,
+/// number, integer, boolean, array, object, null), nested object
+/// `properties` with `required`, and `items` for arrays. Unsupported
+/// keywords are ignored (permissive).
+fn validate_finish_value(value: &Value, schema: &Value) -> Result<(), String> {
+    fn matches_type(value: &Value, expected: &str) -> bool {
+        match expected {
+            "string" => value.is_string(),
+            "number" => value.is_number(),
+            "integer" => value
+                .as_f64()
+                .is_some_and(|n| n.is_finite() && n.fract() == 0.0),
+            "boolean" => value.is_boolean(),
+            "array" => value.is_array(),
+            "object" => value.is_object(),
+            "null" => value.is_null(),
+            _ => true, // unknown ⇒ permissive
+        }
+    }
+
+    fn type_name(value: &Value) -> &'static str {
+        match value {
+            Value::Null => "null",
+            Value::Bool(_) => "boolean",
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+        }
+    }
+
+    fn check(value: &Value, schema: &Value, path: &str) -> Result<(), String> {
+        let Some(schema_obj) = schema.as_object() else {
+            return Ok(());
+        };
+
+        if let Some(ty) = schema_obj.get("type").and_then(Value::as_str)
+            && !matches_type(value, ty)
+        {
+            return Err(format!(
+                "{path}: expected {ty}, got {}",
+                type_name(value)
+            ));
+        }
+
+        if let Some(properties) = schema_obj.get("properties").and_then(Value::as_object)
+            && let Some(obj) = value.as_object()
+        {
+            // Required fields
+            if let Some(required) = schema_obj.get("required").and_then(Value::as_array) {
+                for required_field in required {
+                    if let Some(name) = required_field.as_str()
+                        && !obj.contains_key(name)
+                    {
+                        return Err(format!(
+                            "{path}: missing required field `{name}`"
+                        ));
+                    }
+                }
+            }
+            for (name, sub_schema) in properties {
+                if let Some(sub_value) = obj.get(name) {
+                    let sub_path = if path.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{path}.{name}")
+                    };
+                    check(sub_value, sub_schema, &sub_path)?;
+                }
+            }
+        }
+
+        if let Some(items_schema) = schema_obj.get("items")
+            && let Some(arr) = value.as_array()
+        {
+            for (idx, item) in arr.iter().enumerate() {
+                let sub_path = format!("{path}[{idx}]");
+                check(item, items_schema, &sub_path)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    check(value, schema, "")
+}
+
+/// Render the lashlang exec result as a plain user-message text body.
+/// Mirrors the JSON shape `format_tool_result_content` produced for the
+/// legacy `execute_lashlang` tool result, but without the
+/// tool-result-message envelope.
+fn format_repl_result_text(success: bool, result_payload: &Value) -> String {
+    let mut sections: Vec<String> = Vec::new();
+    sections.push("[Lashlang execution result]".to_string());
+    if !success {
+        sections.push("status: error".to_string());
+    }
+    if let Some(observations) = result_payload
+        .get("observations")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        sections.push(format!("observations:\n{observations}"));
+    }
+    if let Some(tool_calls) = result_payload
+        .get("tool_calls")
+        .filter(|value| !value.is_null())
+    {
+        if let Some(arr) = tool_calls.as_array() {
+            if !arr.is_empty() {
+                sections.push(format!(
+                    "tool_calls: {}",
+                    serde_json::to_string(arr).unwrap_or_else(|_| "[]".into())
+                ));
+            }
+        }
+    }
+    if let Some(error) = result_payload
+        .get("error")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        sections.push(format!("error:\n{error}"));
+    }
+    if let Some(images) = result_payload
+        .get("images")
+        .and_then(Value::as_array)
+        .filter(|arr| !arr.is_empty())
+    {
+        sections.push(format!(
+            "images: {}",
+            serde_json::to_string(images).unwrap_or_else(|_| "[]".into())
+        ));
+    }
+    sections.join("\n\n")
+}
+
 fn token_usage_from_llm_usage(usage: &LlmUsage) -> TokenUsage {
     TokenUsage {
         input_tokens: usage.input_tokens,
@@ -1435,6 +1742,7 @@ mod tests {
             prompt_overrides: Vec::new(),
             session_id: "test".to_string(),
             emit_llm_debug_log: false,
+            repl_termination: ReplTermination::default(),
         }
     }
 
@@ -2147,31 +2455,26 @@ mod tests {
     }
 
     #[test]
-    fn repl_execute_lashlang_tool_call_runs_exec_and_continues() {
-        let mut config = test_config(ExecutionMode::Repl);
-        config.tool_specs = vec![LlmToolSpec {
-            name: "execute_lashlang".to_string(),
-            description: "run lashlang".to_string(),
-            input_schema: serde_json::json!({"type":"object"}),
-            output_schema: serde_json::json!({"type":"object"}),
-        }];
+    fn repl_fenced_lashlang_block_runs_exec_and_continues() {
+        let config = test_config(ExecutionMode::Repl);
         let msgs = vec![user_message("run some code")];
         let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).expect("llm call");
         let request = find_llm_request(&effects).expect("request");
-        assert_eq!(request.tools.len(), 1);
-        assert_eq!(request.tools[0].name, "execute_lashlang");
+        assert!(
+            request.tools.is_empty(),
+            "REPL mode no longer advertises native tool specs",
+        );
 
         machine.handle_response(Response::LlmComplete {
             id: llm_id,
             text_streamed: false,
             result: Ok(LlmResponse {
-                parts: vec![LlmOutputPart::ToolCall {
-                    call_id: "repl_1".to_string(),
-                    tool_name: "execute_lashlang".to_string(),
-                    input_json: r#"{"code":"print('hi')"}"#.to_string(),
+                full_text: "Quick check.\n\n```lashlang\nobserve \"hi\"\n```\n".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "Quick check.\n\n```lashlang\nobserve \"hi\"\n```\n".to_string(),
                 }],
                 usage: LlmUsage {
                     input_tokens: 100,
@@ -2190,7 +2493,7 @@ mod tests {
         });
         assert_eq!(
             exec_effect.as_ref().map(|(_, code)| code.as_str()),
-            Some("print('hi')")
+            Some("observe \"hi\"")
         );
 
         machine.handle_response(Response::ExecResult {
@@ -2202,6 +2505,7 @@ mod tests {
                 images: Vec::new(),
                 error: None,
                 duration_ms: 1,
+                terminal_finish: None,
             }),
         });
 
@@ -2219,13 +2523,7 @@ mod tests {
 
     #[test]
     fn repl_prose_after_exec_finishes_turn() {
-        let mut config = test_config(ExecutionMode::Repl);
-        config.tool_specs = vec![LlmToolSpec {
-            name: "execute_lashlang".to_string(),
-            description: "run lashlang".to_string(),
-            input_schema: serde_json::json!({"type":"object"}),
-            output_schema: serde_json::json!({"type":"object"}),
-        }];
+        let config = test_config(ExecutionMode::Repl);
         let msgs = vec![user_message("run code then summarize")];
         let mut machine = TurnMachine::new(config, msgs, 0);
 
@@ -2236,10 +2534,9 @@ mod tests {
             id: llm_id,
             text_streamed: false,
             result: Ok(LlmResponse {
-                parts: vec![LlmOutputPart::ToolCall {
-                    call_id: "repl_1".to_string(),
-                    tool_name: "execute_lashlang".to_string(),
-                    input_json: r#"{"code":"print('hi')"}"#.to_string(),
+                full_text: "Let me check.\n\n```lashlang\nobserve \"hi\"\n```\n".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "Let me check.\n\n```lashlang\nobserve \"hi\"\n```\n".to_string(),
                 }],
                 ..LlmResponse::default()
             }),
@@ -2263,6 +2560,7 @@ mod tests {
                 images: Vec::new(),
                 error: None,
                 duration_ms: 5,
+                terminal_finish: None,
             }),
         });
 
@@ -2301,63 +2599,55 @@ mod tests {
     }
 
     #[test]
-    fn repl_rejects_non_execute_lashlang_tool_calls() {
-        let mut config = test_config(ExecutionMode::Repl);
-        config.tool_specs = vec![LlmToolSpec {
-            name: "execute_lashlang".to_string(),
-            description: "run lashlang".to_string(),
-            input_schema: serde_json::json!({"type":"object"}),
-            output_schema: serde_json::json!({"type":"object"}),
-        }];
+    fn repl_takes_first_fenced_block_when_multiple_present() {
+        let config = test_config(ExecutionMode::Repl);
         let msgs = vec![user_message("run some code")];
         let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).unwrap();
+
+        let response_text = "Step 1.\n\n```lashlang\nobserve \"first\"\n```\n\nStep 2.\n\n```lashlang\nobserve \"second\"\n```\n";
         machine.handle_response(Response::LlmComplete {
             id: llm_id,
             text_streamed: false,
             result: Ok(LlmResponse {
-                parts: vec![LlmOutputPart::ToolCall {
-                    call_id: "tc1".to_string(),
-                    tool_name: "read_file".to_string(),
-                    input_json: r#"{"path":"foo.txt"}"#.to_string(),
+                full_text: response_text.to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: response_text.to_string(),
                 }],
                 ..LlmResponse::default()
             }),
         });
 
         let effects = drain_effects(&mut machine);
-        assert!(has_error_event(
-            &effects,
-            "only supports `execute_lashlang`"
-        ));
-        assert!(find_done(&effects).is_some());
+        let exec = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::ExecCode { code, .. } => Some(code.clone()),
+                _ => None,
+            })
+            .expect("exec effect");
+        assert_eq!(exec, "observe \"first\"");
     }
 
     #[test]
-    fn repl_debug_log_preserves_tool_call_only_responses() {
+    fn repl_debug_log_preserves_text_only_responses() {
         let mut config = test_config(ExecutionMode::Repl);
         config.emit_llm_debug_log = true;
-        config.tool_specs = vec![LlmToolSpec {
-            name: "execute_lashlang".to_string(),
-            description: "run lashlang".to_string(),
-            input_schema: serde_json::json!({"type":"object"}),
-            output_schema: serde_json::json!({"type":"object"}),
-        }];
         let msgs = vec![user_message("run code")];
         let mut machine = TurnMachine::new(config, msgs, 0);
 
         let effects = drain_effects(&mut machine);
         let llm_id = *find_llm_call(&effects).expect("llm call");
+        let response_text = "Working on it.\n\n```lashlang\nobserve \"hi\"\n```\n";
         machine.handle_response(Response::LlmComplete {
             id: llm_id,
             text_streamed: false,
             result: Ok(LlmResponse {
-                parts: vec![LlmOutputPart::ToolCall {
-                    call_id: "repl_1".to_string(),
-                    tool_name: "execute_lashlang".to_string(),
-                    input_json: r#"{"code":"print('hi')"}"#.to_string(),
+                full_text: response_text.to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: response_text.to_string(),
                 }],
                 usage: LlmUsage {
                     input_tokens: 321,
@@ -2370,22 +2660,12 @@ mod tests {
         });
 
         let effects = drain_effects(&mut machine);
-        let (debug_usage, response_text, response_parts) =
-            find_llm_debug(&effects).expect("llm debug");
+        let (debug_usage, debug_text, _debug_parts) = find_llm_debug(&effects).expect("llm debug");
         assert_eq!(debug_usage.input_tokens, 321);
         assert_eq!(debug_usage.output_tokens, 123);
         assert_eq!(debug_usage.cached_input_tokens, 45);
         assert_eq!(debug_usage.reasoning_tokens, 67);
-        assert!(response_text.is_empty());
-        assert_eq!(
-            response_parts,
-            Some(Value::Array(vec![serde_json::json!({
-                "type": "tool_call",
-                "call_id": "repl_1",
-                "tool_name": "execute_lashlang",
-                "input_json": r#"{"code":"print('hi')"}"#,
-            })]))
-        );
+        assert_eq!(debug_text, response_text);
     }
 
     #[test]
@@ -2424,5 +2704,101 @@ mod tests {
                 "input_json": r#"{"path":"foo.txt"}"#,
             })]))
         );
+    }
+
+    #[test]
+    fn fence_extractor_handles_lashlang_and_repl_aliases() {
+        let lashlang = "Plan.\n\n```lashlang\nfoo = 1\n```\n";
+        let extracted = super::extract_first_lashlang_fence(lashlang).expect("fence");
+        assert_eq!(extracted.code, "foo = 1");
+        assert!(!extracted.had_extra_fences);
+
+        let repl_alias = "```repl\nbar = 2\n```";
+        let extracted = super::extract_first_lashlang_fence(repl_alias).expect("fence");
+        assert_eq!(extracted.code, "bar = 2");
+    }
+
+    #[test]
+    fn fence_extractor_returns_none_for_pure_prose() {
+        assert!(super::extract_first_lashlang_fence("All done!").is_none());
+        // Other languages don't count.
+        assert!(super::extract_first_lashlang_fence("```python\nprint('x')\n```").is_none(),);
+        // Inline triple-backticks in prose don't fool it either.
+        assert!(super::extract_first_lashlang_fence("see ```lashlang inline``` here").is_none(),);
+    }
+
+    #[test]
+    fn fence_extractor_flags_extra_blocks() {
+        let two_blocks = "first\n\n```lashlang\na = 1\n```\n\nbridge\n\n```lashlang\nb = 2\n```\n";
+        let extracted = super::extract_first_lashlang_fence(two_blocks).expect("fence");
+        assert_eq!(extracted.code, "a = 1");
+        assert!(extracted.had_extra_fences);
+    }
+
+    #[test]
+    fn finish_value_validator_accepts_matching_record() {
+        let value = serde_json::json!({"answer": "yes", "confidence": 0.92});
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": {"type": "string"},
+                "confidence": {"type": "number"}
+            },
+            "required": ["answer", "confidence"]
+        });
+        assert!(super::validate_finish_value(&value, &schema).is_ok());
+    }
+
+    #[test]
+    fn finish_value_validator_flags_missing_required_field() {
+        let value = serde_json::json!({"answer": "yes"});
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": {"type": "string"},
+                "confidence": {"type": "number"}
+            },
+            "required": ["answer", "confidence"]
+        });
+        let err = super::validate_finish_value(&value, &schema).expect_err("missing field");
+        assert!(err.contains("missing required field `confidence`"), "{err}");
+    }
+
+    #[test]
+    fn finish_value_validator_flags_type_mismatch() {
+        let value = serde_json::json!({"answer": "yes", "confidence": "high"});
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": {"type": "string"},
+                "confidence": {"type": "number"}
+            },
+            "required": ["answer", "confidence"]
+        });
+        let err = super::validate_finish_value(&value, &schema).expect_err("type mismatch");
+        assert!(err.contains("confidence"), "{err}");
+        assert!(err.contains("number"), "{err}");
+    }
+
+    #[test]
+    fn finish_value_validator_recurses_into_array_items() {
+        let value = serde_json::json!({"items": ["a", 2, "c"]});
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "items": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["items"]
+        });
+        let err = super::validate_finish_value(&value, &schema).expect_err("inner type mismatch");
+        assert!(err.contains("items[1]"), "{err}");
+    }
+
+    #[test]
+    fn fence_extractor_takes_unterminated_remainder_when_no_close() {
+        let unterminated = "loading...\n\n```lashlang\nx = 1\nobserve x\n";
+        let extracted = super::extract_first_lashlang_fence(unterminated).expect("fence");
+        assert_eq!(extracted.code, "x = 1\nobserve x");
+        assert!(!extracted.had_extra_fences);
     }
 }

@@ -435,6 +435,7 @@ mod tests {
             token_usage: TokenUsage::default(),
             tool_calls: Vec::new(),
             errors: Vec::new(),
+            typed_finish: None,
         };
 
         assert!(turn_has_visible_output(&turn));

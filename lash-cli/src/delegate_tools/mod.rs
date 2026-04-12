@@ -157,6 +157,7 @@ impl ToolProvider for DelegateTools {
     async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
         match name {
             "agent_call" => ToolResult::err_fmt("agent_call requires session context"),
+            "predict" => ToolResult::err_fmt("predict requires session context"),
             "agent_result" => {
                 let id = match require_str(args, "id") {
                     Ok(id) => id,
@@ -192,6 +193,7 @@ impl ToolProvider for DelegateTools {
                 self.agent_result(id, timeout, progress).await
             }
             "agent_call" => ToolResult::err_fmt("agent_call requires session context"),
+            "predict" => ToolResult::err_fmt("predict requires session context"),
             _ => self.execute(name, args).await,
         }
     }
@@ -204,6 +206,7 @@ impl ToolProvider for DelegateTools {
     ) -> ToolResult {
         match name {
             "agent_call" => self.spawn_agent(args, context).await,
+            "predict" => self.spawn_predict(args, context).await,
             _ => self.execute(name, args).await,
         }
     }
@@ -217,6 +220,7 @@ impl ToolProvider for DelegateTools {
     ) -> ToolResult {
         match name {
             "agent_call" => self.spawn_agent(args, context).await,
+            "predict" => self.spawn_predict(args, context).await,
             "agent_result" => {
                 let id = match require_str(args, "id") {
                     Ok(id) => id,
@@ -548,6 +552,7 @@ mod tests {
                     duration_ms: 5,
                 }],
                 errors: Vec::new(),
+                typed_finish: None,
             })
         }
 

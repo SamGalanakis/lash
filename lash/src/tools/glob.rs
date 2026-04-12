@@ -1,10 +1,11 @@
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 use crate::{ToolDefinition, ToolParam, ToolProvider, ToolResult};
 
 use super::{
-    GitignoreMode, build_path_entry, configure_walk_builder, filesystem_entries_result,
-    parse_gitignore_mode, parse_optional_bool, parse_optional_usize_arg, require_str,
+    build_path_entry, filesystem_entries_result, parse_optional_bool, parse_optional_usize_arg,
+    require_str, rg_file_list, run_blocking,
 };
 
 /// Find files by glob pattern.
@@ -19,7 +20,7 @@ impl ToolProvider for Glob {
         vec![ToolDefinition {
             name: "glob".into(),
             description: format!(
-                "Find filesystem entries by glob. By default this includes hidden files and honors `.gitignore` only inside Git repos. Returns a record with `items` sorted by `modified_at` (newest first). Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: limit={}, with_lines=false, include_hidden=true, gitignore_mode=\"repo_only\".",
+                "Find filesystem entries by glob. By default this includes hidden files and respects `.gitignore` only inside Git repos. Returns a record with `items` sorted by `modified_at` (newest first). Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: limit={}, with_lines=false, include_hidden=true, respect_gitignore=true.",
                 MAX_RESULTS
             ),
             params: vec![
@@ -57,10 +58,10 @@ impl ToolProvider for Glob {
                     required: false,
                 },
                 ToolParam {
-                    name: "gitignore_mode".into(),
-                    r#type: "str".into(),
-                    description: "How `.gitignore` should behave. Use `repo_only` (default: only honor `.gitignore` inside Git repos) or `always` (honor local `.gitignore` files even outside Git repos).".into(),
-                    default_value: Some(serde_json::json!("repo_only")),
+                    name: "respect_gitignore".into(),
+                    r#type: "bool".into(),
+                    description: "Respect `.gitignore` and related ignore files. When true (default), `.gitignore` is honored only inside Git repos. When false, ignore-file processing is fully disabled.".into(),
+                    default_value: Some(serde_json::json!(true)),
                     required: false,
                 },
             ],
@@ -91,73 +92,78 @@ impl ToolProvider for Glob {
             Ok(v) => v,
             Err(e) => return e,
         };
-        let gitignore_mode =
-            match parse_gitignore_mode(args, "gitignore_mode", GitignoreMode::RepoOnly) {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
-
-        let base = Path::new(base_dir);
-        if !base.exists() {
-            return ToolResult::err_fmt(format_args!("Path does not exist: {base_dir}"));
-        }
-        if !base.is_dir() {
-            return ToolResult::err_fmt(format_args!(
-                "{base_dir} is a file, not a directory. Pass the parent directory as path and use the pattern to match files."
-            ));
-        }
-
-        // Build the glob matcher
-        let glob = match globset::GlobBuilder::new(pattern)
-            .literal_separator(false)
-            .build()
-        {
-            Ok(g) => g,
-            Err(e) => {
-                return ToolResult::err_fmt(format_args!("Invalid glob pattern: {e}"));
-            }
+        let respect_gitignore = match parse_optional_bool(args, "respect_gitignore", true) {
+            Ok(v) => v,
+            Err(e) => return e,
         };
+        let pattern = pattern.to_string();
+        let base = PathBuf::from(base_dir);
 
-        let matcher = match globset::GlobSetBuilder::new().add(glob).build() {
-            Ok(m) => m,
-            Err(e) => {
-                return ToolResult::err_fmt(format_args!("Failed to build glob matcher: {e}"));
+        run_blocking(move || {
+            if !base.exists() {
+                return ToolResult::err_fmt(format_args!("Path does not exist: {}", base.display()));
             }
-        };
+            if !base.is_dir() {
+                return ToolResult::err_fmt(format_args!(
+                    "{} is a file, not a directory. Pass the parent directory as path and use the pattern to match files.",
+                    base.display()
+                ));
+            }
 
-        let mut builder = ignore::WalkBuilder::new(base);
-        configure_walk_builder(&mut builder, include_hidden, gitignore_mode, None);
-        let walker = builder.build();
-
-        let mut matches: Vec<(super::PathEntry, std::time::SystemTime)> = Vec::new();
-
-        for entry in walker {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
+            let glob = match globset::GlobBuilder::new(&pattern)
+                .literal_separator(false)
+                .build()
+            {
+                Ok(glob) => glob,
+                Err(err) => return ToolResult::err_fmt(format_args!("Invalid glob pattern: {err}")),
+            };
+            let matcher = match globset::GlobSetBuilder::new().add(glob).build() {
+                Ok(matcher) => matcher,
+                Err(err) => {
+                    return ToolResult::err_fmt(format_args!("Failed to build glob matcher: {err}"));
+                }
             };
 
-            let path = entry.path();
-            // Match against relative path from base
-            let rel_path = match path.strip_prefix(base) {
-                Ok(r) => r,
-                Err(_) => continue,
+            let files = match rg_file_list(&base, include_hidden, respect_gitignore, None, &[]) {
+                Ok(files) => files,
+                Err(err) => return err,
             };
 
-            if matcher.is_match(rel_path) {
-                matches.push(build_path_entry(path, with_lines));
+            let mut matched_paths = BTreeSet::new();
+            for file in files {
+                let Ok(rel_path) = file.strip_prefix(&base) else {
+                    continue;
+                };
+                if matcher.is_match(rel_path) {
+                    matched_paths.insert(file.clone());
+                }
+                let components = rel_path.components().collect::<Vec<_>>();
+                if components.len() <= 1 {
+                    continue;
+                }
+                let mut current = PathBuf::new();
+                for component in components.iter().take(components.len() - 1) {
+                    current.push(component.as_os_str());
+                    if matcher.is_match(&current) {
+                        matched_paths.insert(base.join(&current));
+                    }
+                }
             }
-        }
 
-        // Sort by mtime, newest first
-        matches.sort_by(|a, b| b.1.cmp(&a.1));
-        let total_matches = matches.len();
-        if let Some(limit) = limit {
-            matches.truncate(limit);
-        }
+            let mut matches = matched_paths
+                .into_iter()
+                .map(|path| build_path_entry(&path, with_lines))
+                .collect::<Vec<_>>();
+            matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.path.cmp(&b.0.path)));
+            let total_matches = matches.len();
+            if let Some(limit) = limit {
+                matches.truncate(limit);
+            }
 
-        let items: Vec<super::PathEntry> = matches.into_iter().map(|(entry, _)| entry).collect();
-        ToolResult::ok(filesystem_entries_result(items, total_matches))
+            let items = matches.into_iter().map(|(entry, _)| entry).collect();
+            ToolResult::ok(filesystem_entries_result(items, total_matches))
+        })
+        .await
     }
 }
 
@@ -336,8 +342,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_glob_gitignore_mode_always_honors_gitignore_outside_repo() {
+    async fn test_glob_respect_gitignore_false_disables_repo_gitignore() {
         let dir = TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
         std::fs::write(dir.path().join(".gitignore"), "ignored.rs\n").unwrap();
         std::fs::write(dir.path().join("ignored.rs"), "").unwrap();
         let tool = Glob;
@@ -347,7 +358,35 @@ mod tests {
                 &json!({
                     "pattern": "*.rs",
                     "path": dir.path().to_str().unwrap(),
-                    "gitignore_mode": "always"
+                    "respect_gitignore": false
+                }),
+            )
+            .await;
+        assert!(result.success);
+        let paths: Vec<&str> = items(&result)
+            .iter()
+            .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
+            .collect();
+        assert!(paths.iter().any(|p| p.ends_with("/ignored.rs")));
+    }
+
+    #[tokio::test]
+    async fn test_glob_respect_gitignore_true_hides_repo_ignored_files() {
+        let dir = TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "ignored.rs\n").unwrap();
+        std::fs::write(dir.path().join("ignored.rs"), "").unwrap();
+        let tool = Glob;
+        let result = tool
+            .execute(
+                "glob",
+                &json!({
+                    "pattern": "*.rs",
+                    "path": dir.path().to_str().unwrap()
                 }),
             )
             .await;
@@ -357,5 +396,28 @@ mod tests {
             .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
             .collect();
         assert!(!paths.iter().any(|p| p.ends_with("/ignored.rs")));
+    }
+
+    #[tokio::test]
+    async fn test_glob_no_longer_hides_dot_git_entries_by_default() {
+        let dir = TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        let tool = Glob;
+        let result = tool
+            .execute(
+                "glob",
+                &json!({"pattern": ".git/**", "path": dir.path().to_str().unwrap()}),
+            )
+            .await;
+        assert!(result.success);
+        let paths: Vec<&str> = items(&result)
+            .iter()
+            .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
+            .collect();
+        assert!(paths.iter().any(|p| p.contains("/.git/")));
     }
 }

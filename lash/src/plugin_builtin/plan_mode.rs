@@ -750,6 +750,8 @@ impl SessionPlugin for PlanModePlugin {
                                 plugin_mode: SessionPluginMode::Fresh,
                                 initial_messages: vec![PluginMessage::text(MessageRole::User, seed)],
                                 context_surface: SessionContextSurface::default(),
+                                mode_extras: crate::ModeExtras::default(),
+
                             }),
                         });
                         directives.push(PluginDirective::short_circuit(ToolResult::ok(json!({

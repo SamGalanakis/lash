@@ -524,6 +524,7 @@ pub(super) fn send_user_message(
                     code: Some(e.code),
                     message: e.message,
                 }],
+                typed_finish: None,
             },
         };
         tracing::debug!(stream_id, status = ?result.status, "runtime turn task returning runtime");
