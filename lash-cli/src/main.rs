@@ -18,6 +18,7 @@ mod overlay;
 mod plugin_surface;
 mod prompt_overrides;
 mod render;
+mod repl_stream_mask;
 mod repo_status;
 mod resume;
 mod resume_snapshot;

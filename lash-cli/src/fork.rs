@@ -6,7 +6,6 @@ use anyhow::{Context, Result, anyhow};
 use lash::DynamicStateSnapshot;
 
 use crate::app::UiResumeState;
-use crate::resume_snapshot;
 use crate::session_log::{self, SessionLogger};
 
 #[allow(clippy::too_many_arguments)]
@@ -514,15 +513,43 @@ pub fn spawn_in_new_terminal(exe: &Path, args: &[String]) -> Result<()> {
     spawn_in_new_terminal_platform(exe, args)
 }
 
+fn forkable_live_graph(graph: &lash::SessionGraph) -> lash::SessionGraph {
+    let mut prefix = Vec::new();
+    let mut last_safe = lash::SessionGraph::default();
+    let mut saw_safe_prefix = false;
+
+    for node in graph.active_path_nodes() {
+        prefix.push(node.clone());
+        let candidate = lash::SessionGraph {
+            nodes: prefix.clone(),
+            leaf_node_id: prefix.last().map(|record| record.node_id.clone()),
+        };
+        if lash::messages_are_live_resume_safe(&candidate.project_messages()) {
+            last_safe = candidate;
+            saw_safe_prefix = true;
+        }
+    }
+
+    if saw_safe_prefix {
+        last_safe
+    } else {
+        lash::SessionGraph::default()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-fn materialize_child_from_live_snapshot(
+fn materialize_child_from_graph(
     child_store: &lash::Store,
-    live: &resume_snapshot::LoadedLiveResumeSnapshot,
+    graph: &lash::SessionGraph,
+    ui_state: &UiResumeState,
+    persist_live_graph: bool,
 ) {
-    let child_graph = live.graph.fork_current_path();
+    let child_graph = graph.fork_current_path();
     child_store.save_session_graph(child_graph.clone());
-    crate::ui_resume::save_ui_resume_state(child_store, &live.ui_state);
-    child_store.save_live_session_graph(child_graph);
+    crate::ui_resume::save_ui_resume_state(child_store, ui_state);
+    if persist_live_graph {
+        child_store.save_live_session_graph(child_graph);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -537,8 +564,11 @@ pub async fn fork_current_session(
     _toolset_hash: &str,
     dynamic_state: &DynamicStateSnapshot,
 ) -> Result<(String, String)> {
-    let live_snapshot_for_fork = if runtime.is_none() {
-        resume_snapshot::load_live_resume_snapshot(logger.store().as_ref())
+    let live_graph_for_fork = if runtime.is_none() {
+        logger
+            .store()
+            .load_live_session_graph()
+            .map(|graph| forkable_live_graph(&graph))
     } else {
         None
     };
@@ -546,9 +576,7 @@ pub async fn fork_current_session(
         persist_parent_root_snapshot(runtime, logger.store().as_ref(), ui_state, dynamic_state)
             .await?;
     }
-    let parent_graph = logger.store().load_session_graph().ok_or_else(|| {
-        anyhow!("No persisted snapshot available to fork yet. Try again in a moment.")
-    })?;
+    let parent_graph = logger.store().load_session_graph().unwrap_or_default();
 
     let sessions_dir = session_log::sessions_dir();
     let child_session_name = crate::generate_session_name(&sessions_dir);
@@ -563,8 +591,8 @@ pub async fn fork_current_session(
         child_session_name.clone(),
     )?;
     child_logger.mark_as_child_of(&logger.session_id)?;
-    if let Some(live_snapshot) = live_snapshot_for_fork.as_ref() {
-        materialize_child_from_live_snapshot(child_store.as_ref(), live_snapshot);
+    if let Some(live_graph) = live_graph_for_fork.as_ref() {
+        materialize_child_from_graph(child_store.as_ref(), live_graph, ui_state, true);
     } else {
         child_store.save_session_graph(parent_graph.fork_current_path());
     }
@@ -620,6 +648,42 @@ mod fork_tests {
             None,
         );
         graph
+    }
+
+    fn text_message(id: &str, role: lash::MessageRole, content: &str) -> lash::Message {
+        lash::Message {
+            id: id.to_string(),
+            role,
+            parts: vec![lash::Part {
+                id: format!("{id}.p0"),
+                kind: lash::PartKind::Text,
+                content: content.to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: lash::PruneState::Intact,
+            }],
+            user_input: None,
+            origin: None,
+        }
+    }
+
+    fn unsafe_tool_call_message(id: &str, call_id: &str) -> lash::Message {
+        lash::Message {
+            id: id.to_string(),
+            role: lash::MessageRole::Assistant,
+            parts: vec![lash::Part {
+                id: format!("{id}.p0"),
+                kind: lash::PartKind::ToolCall,
+                content: "{}".to_string(),
+                attachment: None,
+                tool_call_id: Some(call_id.to_string()),
+                tool_name: Some("read_file".to_string()),
+                prune_state: lash::PruneState::Intact,
+            }],
+            user_input: None,
+            origin: None,
+        }
     }
 
     #[tokio::test]
@@ -797,5 +861,60 @@ mod fork_tests {
         let child_messages = child_graph.project_messages();
         assert_eq!(child_messages.len(), 2);
         assert_eq!(child_messages[1].parts[0].content, "latest coherent output");
+    }
+
+    #[tokio::test]
+    async fn fork_without_runtime_uses_live_graph_even_when_resume_snapshot_is_unsafe() {
+        let _env_guard = env_lock().lock().await;
+        let temp = TempDirGuard::new("lash-fork-unsafe-live-graph");
+        let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
+        std::fs::create_dir_all(session_log::sessions_dir()).expect("sessions dir");
+
+        let parent_filename = "parent.db".to_string();
+        let parent_path = session_log::sessions_dir().join(&parent_filename);
+        let parent_store = Arc::new(lash::Store::open(&parent_path).expect("parent store"));
+        let parent_logger = SessionLogger::new(
+            Arc::clone(&parent_store),
+            parent_filename.clone(),
+            "gpt-test",
+            Some("parent-session".into()),
+            "parent".into(),
+        )
+        .expect("parent logger");
+
+        let mut live_graph = persisted_graph(
+            vec![text_message("u1", lash::MessageRole::User, "hello")],
+            1,
+        );
+        live_graph.merge_active_projection(
+            &[
+                text_message("u1", lash::MessageRole::User, "hello"),
+                unsafe_tool_call_message("a1", "call-1"),
+            ],
+            &[],
+        );
+        parent_store.save_live_session_graph(live_graph);
+
+        let (child_filename, _child_session_name) = fork_current_session(
+            None,
+            &parent_logger,
+            &UiResumeState::default(),
+            &dummy_provider(),
+            "gpt-test",
+            1024,
+            None,
+            "toolhash",
+            &empty_dynamic_state(),
+        )
+        .await
+        .expect("fork should succeed");
+
+        let child_store = lash::Store::open(&session_log::sessions_dir().join(&child_filename))
+            .expect("child store");
+        let child_graph = child_store.load_session_graph().expect("child root graph");
+        let child_messages = child_graph.project_messages();
+        assert_eq!(child_messages.len(), 1);
+        assert_eq!(child_messages[0].parts[0].content, "hello");
+        assert!(child_store.load_live_session_graph().is_some());
     }
 }

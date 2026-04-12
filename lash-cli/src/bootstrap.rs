@@ -271,6 +271,7 @@ pub(crate) async fn run(
         Arc::new(BuiltinPlanTrackerPluginFactory),
         Arc::new(BuiltinPlanModePluginFactory::new(Default::default())),
         Arc::new(lash::BuiltinUiActivityPluginFactory),
+        Arc::new(crate::repl_stream_mask::ReplStreamMaskPluginFactory),
         Arc::new(DelegateToolsPluginFactory::new(
             session_policy.clone(),
             delegate_tool_config,
