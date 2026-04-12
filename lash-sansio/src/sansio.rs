@@ -169,9 +169,7 @@ pub enum ReplTermination {
     /// model. When `schema` is `Some`, the captured value is validated
     /// against the JSON Schema before being accepted; mismatches loop
     /// with an explanation.
-    Finish {
-        schema: Option<serde_json::Value>,
-    },
+    Finish { schema: Option<serde_json::Value> },
 }
 
 // ─── Internal state ───
@@ -1190,7 +1188,8 @@ impl TurnMachine {
         });
 
         let exec_id = self.next_id();
-        let repl = repl;
+        let mut repl = repl;
+        repl.acc.executed_code = Some(fence.code.clone());
         self.state = MachineState::WaitingExec {
             repl: ReplTurnState { state: repl },
         };
@@ -1311,8 +1310,9 @@ impl TurnMachine {
                 let mid = fresh_message_id();
                 let rendered = match finish_value {
                     serde_json::Value::String(text) => text.clone(),
-                    other => serde_json::to_string_pretty(other)
-                        .unwrap_or_else(|_| other.to_string()),
+                    other => {
+                        serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string())
+                    }
                 };
                 self.messages.push(Message {
                     id: mid.clone(),
@@ -1332,10 +1332,7 @@ impl TurnMachine {
                 self.emit(SessionEvent::TypedFinish {
                     value: finish_value.clone(),
                 });
-                self.request_checkpoint(
-                    CheckpointKind::BeforeCompletion,
-                    CheckpointResume::Finish,
-                );
+                self.request_checkpoint(CheckpointKind::BeforeCompletion, CheckpointResume::Finish);
                 return;
             }
         }
@@ -1363,10 +1360,16 @@ impl TurnMachine {
         // Telemetry only — surfaced as a synthetic tool_call event so the
         // host UI keeps rendering "execute_lashlang" runs in the activity
         // panel without changing the wire-format-visible message history.
+        let execute_args = repl_state
+            .acc
+            .executed_code
+            .as_ref()
+            .map(|code| serde_json::json!({"code": code}))
+            .unwrap_or_else(|| serde_json::json!({}));
         self.emit(SessionEvent::ToolCall {
             call_id: Some(result_call_id),
             name: "execute_lashlang".to_string(),
-            args: serde_json::json!({}),
+            args: execute_args,
             result: result_payload.clone(),
             success,
             duration_ms: 0,
@@ -1589,10 +1592,7 @@ fn validate_finish_value(value: &Value, schema: &Value) -> Result<(), String> {
         if let Some(ty) = schema_obj.get("type").and_then(Value::as_str)
             && !matches_type(value, ty)
         {
-            return Err(format!(
-                "{path}: expected {ty}, got {}",
-                type_name(value)
-            ));
+            return Err(format!("{path}: expected {ty}, got {}", type_name(value)));
         }
 
         if let Some(properties) = schema_obj.get("properties").and_then(Value::as_object)
@@ -1604,9 +1604,7 @@ fn validate_finish_value(value: &Value, schema: &Value) -> Result<(), String> {
                     if let Some(name) = required_field.as_str()
                         && !obj.contains_key(name)
                     {
-                        return Err(format!(
-                            "{path}: missing required field `{name}`"
-                        ));
+                        return Err(format!("{path}: missing required field `{name}`"));
                     }
                 }
             }
