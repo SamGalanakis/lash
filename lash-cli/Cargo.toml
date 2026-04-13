@@ -7,6 +7,7 @@ license.workspace = true
 [features]
 default = []
 dhat-heap = ["dep:dhat"]
+fff-zlob = ["lash/fff-zlob"]
 
 [[bin]]
 name = "lash"

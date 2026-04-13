@@ -15,6 +15,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  LASH_CI_ZIG_VERSION: 0.15.1
 
 jobs:
   test:
@@ -29,6 +30,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.LASH_CI_ZIG_VERSION }}
+
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
 
@@ -41,13 +47,13 @@ jobs:
         run: cargo test -p lash-sansio --locked
 
       - name: Test lash core
-        run: cargo test -p lash --locked
+        run: cargo test -p lash --locked --features fff-zlob
 
       - name: Test first-party default tools
-        run: cargo test -p lash-default-tools --locked
+        run: cargo test -p lash-default-tools --locked --features fff-zlob
 
       - name: Test lash CLI
-        run: cargo test -p lash-cli --locked
+        run: cargo test -p lash-cli --locked --features fff-zlob
 
   build-release-assets:
     name: Build (${{ matrix.target }})
@@ -103,6 +109,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.LASH_CI_ZIG_VERSION }}
+
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
 
@@ -119,7 +130,7 @@ jobs:
       - name: Build release binary
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
-        run: cargo build --locked --release -p lash-cli --target ${{ matrix.target }}
+        run: cargo build --locked --release -p lash-cli --features fff-zlob --target ${{ matrix.target }}
 
       - name: Package release artifact
         if: matrix.package_asset
@@ -144,6 +155,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.LASH_CI_ZIG_VERSION }}
+
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
 
@@ -154,7 +170,7 @@ jobs:
 
       - name: Run synthetic UI performance benchmark
         run: |
-          python3 scripts/profile_ui.py --build --release --runs 5 --warmups 1 --out .benchmarks/ui-perf/ci.json
+          python3 scripts/profile_ui.py --build --release --cargo-feature fff-zlob --runs 5 --warmups 1 --out .benchmarks/ui-perf/ci.json
 
       - name: Publish UI performance summary
         run: |
@@ -209,6 +225,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.LASH_CI_ZIG_VERSION }}
+
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
 
@@ -219,7 +240,7 @@ jobs:
 
       - name: Run synthetic runtime performance benchmark
         run: |
-          python3 scripts/profile_runtime.py --release --runs 5 --warmups 1 --out .benchmarks/runtime-perf/ci.json
+          python3 scripts/profile_runtime.py --release --cargo-feature fff-zlob --runs 5 --warmups 1 --out .benchmarks/runtime-perf/ci.json
 
       - name: Publish runtime performance summary
         run: |

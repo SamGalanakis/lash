@@ -71,6 +71,12 @@ def parse_args() -> argparse.Namespace:
         default=16,
         help="Trim dhat backtraces to this many frames (default: 16).",
     )
+    parser.add_argument(
+        "--cargo-feature",
+        action="append",
+        default=[],
+        help="Enable one or more Cargo features when building lash-cli.",
+    )
     return parser.parse_args()
 
 
@@ -82,13 +88,21 @@ def resolve_binary(args: argparse.Namespace, repo_root: Path) -> Path:
 
 
 def maybe_build(
-    binary: Path, release: bool, repo_root: Path, force: bool, dhat: bool
+    binary: Path,
+    release: bool,
+    repo_root: Path,
+    force: bool,
+    dhat: bool,
+    cargo_features: list[str],
 ) -> None:
     if not force and binary.exists():
         return
     cmd = ["cargo", "build", "-q", "-p", "lash-cli"]
+    feature_list = list(cargo_features)
     if dhat:
-        cmd.extend(["--features", "dhat-heap"])
+        feature_list.append("dhat-heap")
+    if feature_list:
+        cmd.extend(["--features", ",".join(feature_list)])
     if release:
         cmd.append("--release")
     env = None
@@ -108,7 +122,14 @@ def main() -> int:
     args = parse_args()
     repo_root = Path(__file__).resolve().parents[1]
     binary = resolve_binary(args, repo_root)
-    maybe_build(binary, args.release, repo_root, args.build, args.dhat)
+    maybe_build(
+        binary,
+        args.release,
+        repo_root,
+        args.build,
+        args.dhat,
+        args.cargo_feature,
+    )
     if not binary.exists():
         raise SystemExit(f"error: binary not found: {binary}")
 
