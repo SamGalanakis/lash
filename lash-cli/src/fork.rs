@@ -631,6 +631,7 @@ mod fork_tests {
                 configured_model: "gpt-test".to_string(),
                 context_window: 1024,
                 execution_mode: lash::ExecutionMode::Standard,
+                context_approach: lash::ContextApproach::default(),
                 model_variant: None,
             },
             &lash::PersistedTurnState {
@@ -646,6 +647,7 @@ mod fork_tests {
             Some(&empty_dynamic_state()),
             None,
             None,
+            &[],
         );
         graph
     }
@@ -826,6 +828,7 @@ mod fork_tests {
                 },
                 last_prompt_usage: None,
                 execution_state_snapshot: None,
+                token_ledger: Vec::new(),
             },
             &UiResumeState::default(),
             &empty_dynamic_state(),

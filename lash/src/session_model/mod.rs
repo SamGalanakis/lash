@@ -4,7 +4,6 @@ pub use lash_sansio::session_model::prompt;
 
 use tokio::sync::mpsc;
 
-use crate::ExecutionMode;
 use crate::PromptContext;
 use crate::ToolDefinition;
 use crate::llm::factory::adapter_for;
@@ -12,6 +11,7 @@ use crate::llm::types::{LlmEventSender, LlmStreamEvent, LlmToolSpec};
 use crate::plugin::{PluginMessage, PromptContribution};
 use crate::provider::Provider;
 use crate::session::Session;
+use crate::{ContextApproach, ExecutionMode};
 
 pub use lash_sansio::session_model::{
     DefaultPromptRenderer, DurableTurnSnapshot, ErrorEnvelope, LLM_MAX_RETRIES, LLM_RETRY_DELAYS,
@@ -72,6 +72,7 @@ pub(crate) fn plugin_message_to_message(
         user_input,
         origin: Some(crate::MessageOrigin::Plugin {
             plugin_id: "plugin".to_string(),
+            transient: false,
         }),
     }
 }
@@ -86,6 +87,8 @@ pub struct SessionPolicy {
     pub session_id: Option<String>,
     pub max_turns: Option<usize>,
     pub execution_mode: ExecutionMode,
+    #[serde(default)]
+    pub context_approach: ContextApproach,
 }
 
 impl Default for SessionPolicy {
@@ -102,6 +105,7 @@ impl Default for SessionPolicy {
             session_id: None,
             max_turns: None,
             execution_mode: crate::default_execution_mode(),
+            context_approach: ContextApproach::default(),
         }
     }
 }
@@ -112,8 +116,8 @@ pub(crate) struct ExecutionPreamble {
     pub(crate) prompt: PromptContext,
 }
 
-fn repl_model_tool_specs() -> Vec<LlmToolSpec> {
-    // REPL mode no longer uses native tool calling for the action call.
+fn rlm_model_tool_specs() -> Vec<LlmToolSpec> {
+    // RLM mode no longer uses native tool calling for the action call.
     // The model writes lashlang inside a fenced ```lashlang block in its
     // prose response and the dispatch loop extracts it via regex. See
     // `lash_sansio::sansio::handle_repl_llm_success`.
@@ -156,7 +160,7 @@ pub(crate) fn build_execution_preamble(
     let surface = session.execution_surface(session_id, mode);
     let enabled_tools = surface.enabled_tools();
     let prompt_tools = surface.prompt_tools();
-    let (tool_list, omitted_tool_count) = if matches!(mode, ExecutionMode::Repl) {
+    let (tool_list, omitted_tool_count) = if matches!(mode, ExecutionMode::Rlm) {
         let mut tool_list = ToolDefinition::format_tool_docs(&prompt_tools);
         let omitted_tool_count = count_prompt_omitted_tools(&enabled_tools);
         for note in &surface.tool_list_notes {
@@ -171,7 +175,7 @@ pub(crate) fn build_execution_preamble(
         ExecutionMode::Standard if !enabled_tools.is_empty() => {
             lash_sansio::session_model::model_tool_specs(&enabled_tools)
         }
-        ExecutionMode::Repl => repl_model_tool_specs(),
+        ExecutionMode::Rlm => rlm_model_tool_specs(),
         _ => Vec::new(),
     };
     let tool_names: Vec<String> = enabled_tools.iter().map(|t| t.name.clone()).collect();

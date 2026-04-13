@@ -1,134 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lash::session_model::{MessageRole, Part, PartKind, PruneState, fresh_message_id};
+use lash::session_model::{Part, PartKind, PruneState};
 use lash::{PluginMessage, *};
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 use super::*;
-
-/// Returned by the spawned runtime task so we can reclaim ownership.
-pub(super) struct RuntimeRunResult {
-    pub(super) stream_id: u64,
-    pub(super) runtime: LashRuntime,
-    pub(super) result: AssembledTurn,
-}
-
-pub(super) fn make_turn_input(
-    turn: &PreparedTurn,
-    items: Vec<InputItem>,
-    image_blobs: HashMap<String, Vec<u8>>,
-) -> TurnInput {
-    TurnInput {
-        items,
-        image_blobs,
-        user_input: Some(turn.input_provenance.clone()),
-        mode: Some(RunMode::Normal),
-    }
-}
-
-fn append_turn_input_message(messages: &mut Vec<Message>, turn_input: &TurnInput) {
-    let user_id = fresh_message_id();
-    let mut image_ids = Vec::new();
-    let mut user_parts = Vec::new();
-
-    for item in &turn_input.items {
-        match item {
-            InputItem::Text { text } => {
-                if text.is_empty() {
-                    continue;
-                }
-                user_parts.push(Part {
-                    id: format!("{}.p{}", user_id, user_parts.len()),
-                    kind: PartKind::Text,
-                    content: text.clone(),
-                    attachment: None,
-                    tool_call_id: None,
-                    tool_name: None,
-                    prune_state: PruneState::Intact,
-                });
-            }
-            InputItem::FileRef { path } => {
-                user_parts.push(Part {
-                    id: format!("{}.p{}", user_id, user_parts.len()),
-                    kind: PartKind::Text,
-                    content: format!("[file: {path}]"),
-                    attachment: None,
-                    tool_call_id: None,
-                    tool_name: None,
-                    prune_state: PruneState::Intact,
-                });
-            }
-            InputItem::DirRef { path } => {
-                user_parts.push(Part {
-                    id: format!("{}.p{}", user_id, user_parts.len()),
-                    kind: PartKind::Text,
-                    content: format!("[directory: {}]", path.trim_end_matches('/')),
-                    attachment: None,
-                    tool_call_id: None,
-                    tool_name: None,
-                    prune_state: PruneState::Intact,
-                });
-            }
-            InputItem::ImageRef { id } => {
-                let Some(bytes) = turn_input.image_blobs.get(id) else {
-                    continue;
-                };
-                if image_ids.iter().any(|candidate| candidate == id) {
-                    continue;
-                }
-                image_ids.push(id.clone());
-                user_parts.push(Part {
-                    id: format!("{}.p{}", user_id, user_parts.len()),
-                    kind: PartKind::Image,
-                    content: String::new(),
-                    attachment: Some(lash::session_model::message::PartAttachment {
-                        mime: "image/png".to_string(),
-                        url: lash::session_model::message::data_url_for_bytes("image/png", bytes),
-                        filename: None,
-                    }),
-                    tool_call_id: None,
-                    tool_name: None,
-                    prune_state: PruneState::Intact,
-                });
-            }
-        }
-    }
-
-    if user_parts.is_empty() {
-        user_parts.push(Part {
-            id: format!("{user_id}.p0"),
-            kind: PartKind::Text,
-            content: String::new(),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            prune_state: PruneState::Intact,
-        });
-    }
-
-    messages.push(Message {
-        id: user_id,
-        role: MessageRole::User,
-        parts: user_parts,
-        user_input: turn_input.user_input.clone(),
-        origin: None,
-    });
-}
-
-fn pending_turn_snapshot(
-    state: &SessionStateEnvelope,
-    turn_input: &TurnInput,
-) -> DurableTurnSnapshot {
-    let mut messages = state.messages.clone();
-    append_turn_input_message(&mut messages, turn_input);
-    DurableTurnSnapshot {
-        messages,
-        tool_calls: state.tool_calls.clone(),
-        iteration: state.iteration,
-    }
-}
+use crate::input_items::build_items_from_editor_input;
+#[cfg(test)]
+use crate::turn_runner::pending_turn_snapshot;
+use crate::turn_runner::{RuntimeRunResult, persist_pending_turn, spawn_runtime_turn};
 
 pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage {
     let (items, image_blobs) =
@@ -314,59 +194,6 @@ pub(super) fn register_builtin_tool(
     Ok(def)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use lash::{SkillCatalog, UserInputProvenance};
-
-    #[test]
-    fn pending_turn_snapshot_preserves_user_input_provenance() {
-        let turn = PreparedTurn::prepare("/yolopush".into(), Vec::new(), &SkillCatalog::default());
-        let (items, image_blobs) =
-            build_items_from_editor_input(&turn.effective_text, turn.images.clone());
-        let turn_input = make_turn_input(&turn, items, image_blobs);
-        let snapshot = pending_turn_snapshot(&SessionStateEnvelope::default(), &turn_input);
-
-        let user_message = snapshot.messages.last().expect("user message");
-        assert_eq!(
-            user_message
-                .user_input
-                .as_ref()
-                .map(|input| input.display_text.as_str()),
-            Some("/yolopush")
-        );
-    }
-
-    #[test]
-    fn pending_turn_snapshot_keeps_explicit_user_input_provenance() {
-        let turn_input = TurnInput {
-            items: vec![InputItem::Text {
-                text: "/localref\n\n<skill>\nbody\n</skill>".into(),
-            }],
-            image_blobs: HashMap::new(),
-            user_input: Some(UserInputProvenance {
-                display_text: "/localref".into(),
-                effective_text: "/localref\n\n<skill>\nbody\n</skill>".into(),
-                transforms: vec![lash::UserInputTransform::SkillBlockAppend {
-                    skill_name: "localref".into(),
-                    skill_path: "/tmp/localref/SKILL.md".into(),
-                }],
-            }),
-            mode: Some(RunMode::Normal),
-        };
-        let snapshot = pending_turn_snapshot(&SessionStateEnvelope::default(), &turn_input);
-
-        let user_message = snapshot.messages.last().expect("user message");
-        assert_eq!(
-            user_message
-                .user_input
-                .as_ref()
-                .map(|input| input.display_text.as_str()),
-            Some("/localref")
-        );
-    }
-}
-
 pub(super) async fn apply_pending_reconfigure(
     dynamic_tools: &Arc<DynamicToolProvider>,
     desired_dynamic: &mut DynamicStateSnapshot,
@@ -418,9 +245,7 @@ pub(super) fn send_user_message(
     cancel_token: &mut Option<CancellationToken>,
     active_stream_id: &mut u64,
     app_tx: &mpsc::UnboundedSender<AppEvent>,
-    provider: &Provider,
     dynamic_state: &DynamicStateSnapshot,
-    _toolset_hash: &str,
 ) {
     let mut ui_trace = ui_trace;
     if !prepared_turn.display_text.is_empty() {
@@ -446,30 +271,15 @@ pub(super) fn send_user_message(
         "send_user_message taking runtime for dispatch"
     );
 
-    let mut rt = runtime
+    let rt = runtime
         .take()
         .expect("runtime should be available when not running");
-    let persisted_state = rt.export_state();
-    persist_live_runtime_snapshot(
+    persist_pending_turn(
         logger.store().as_ref(),
-        Some(persisted_state.session_graph.clone()),
-        pending_turn_snapshot(&persisted_state, &turn_input),
+        &rt,
+        &turn_input,
         &app.ui_resume_state(),
         dynamic_state,
-        &lash::SessionPolicy {
-            provider: provider.clone(),
-            model: app.model.clone(),
-            model_variant: app.model_variant.clone(),
-            execution_mode: persisted_state.policy.execution_mode,
-            max_context_tokens: Some(
-                app.context_window
-                    .expect("app context_window must be set before dispatching a turn")
-                    as usize,
-            ),
-            ..lash::SessionPolicy::default()
-        },
-        persisted_state.token_usage.clone(),
-        persisted_state.last_prompt_usage.clone(),
     );
     tracing::info!(
         mode = ?turn_input.mode,
@@ -477,11 +287,6 @@ pub(super) fn send_user_message(
         images = turn_input.image_blobs.len(),
         "dispatching runtime turn"
     );
-    let (return_tx, return_rx) = tokio::sync::oneshot::channel();
-    *runtime_return_rx = Some(return_rx);
-
-    let cancel = CancellationToken::new();
-    *cancel_token = Some(cancel.clone());
     *active_stream_id = active_stream_id.wrapping_add(1);
     let stream_id = *active_stream_id;
 
@@ -494,46 +299,13 @@ pub(super) fn send_user_message(
     );
 
     let sink_tx = app_tx.clone();
-    tokio::spawn(async move {
-        tracing::debug!(stream_id, "runtime turn task spawned");
-        let sink = AppEventSink {
-            tx: sink_tx,
-            stream_id,
-        };
-        let result = match rt.stream_turn(turn_input, &sink, cancel).await {
-            Ok(turn) => turn,
-            Err(e) => AssembledTurn {
-                state: rt.export_state(),
-                status: TurnStatus::Failed,
-                assistant_output: AssistantOutput {
-                    safe_text: String::new(),
-                    raw_text: String::new(),
-                    state: OutputState::EmptyOutput,
-                },
-                has_plugin_visible_output: false,
-                done_reason: DoneReason::RuntimeError,
-                execution: ExecutionSummary {
-                    mode: rt.export_state().policy.execution_mode,
-                    had_tool_calls: false,
-                    had_code_execution: false,
-                },
-                token_usage: TokenUsage::default(),
-                tool_calls: Vec::new(),
-                errors: vec![TurnIssue {
-                    kind: "runtime".to_string(),
-                    code: Some(e.code),
-                    message: e.message,
-                }],
-                typed_finish: None,
-            },
-        };
-        tracing::debug!(stream_id, status = ?result.status, "runtime turn task returning runtime");
-        let _ = return_tx.send(RuntimeRunResult {
-            stream_id,
-            runtime: rt,
-            result,
-        });
-    });
+    let sink = AppEventSink {
+        tx: sink_tx,
+        stream_id,
+    };
+    let (cancel, return_rx) = spawn_runtime_turn(rt, turn_input, sink, stream_id);
+    *cancel_token = Some(cancel);
+    *runtime_return_rx = Some(return_rx);
 }
 
 pub(crate) fn notify_desktop(title: &str, body: &str) {
@@ -678,5 +450,56 @@ pub(super) fn copy_selected_text_or_last_response(app: &App, terminal_size: Opti
         }
     } else {
         tracing::debug!("copy path had no selected or fallback text");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lash::{SkillCatalog, UserInputProvenance};
+
+    #[test]
+    fn pending_turn_snapshot_preserves_user_input_provenance() {
+        let turn = PreparedTurn::prepare("/yolopush".into(), Vec::new(), &SkillCatalog::default());
+        let turn_input = crate::turn_runner::make_turn_input(&turn);
+        let snapshot = pending_turn_snapshot(&SessionStateEnvelope::default(), &turn_input);
+
+        let user_message = snapshot.messages.last().expect("user message");
+        assert_eq!(
+            user_message
+                .user_input
+                .as_ref()
+                .map(|input| input.display_text.as_str()),
+            Some("/yolopush")
+        );
+    }
+
+    #[test]
+    fn pending_turn_snapshot_keeps_explicit_user_input_provenance() {
+        let turn_input = TurnInput {
+            items: vec![InputItem::Text {
+                text: "/localref\n\n<skill>\nbody\n</skill>".into(),
+            }],
+            image_blobs: HashMap::new(),
+            user_input: Some(UserInputProvenance {
+                display_text: "/localref".into(),
+                effective_text: "/localref\n\n<skill>\nbody\n</skill>".into(),
+                transforms: vec![lash::UserInputTransform::SkillBlockAppend {
+                    skill_name: "localref".into(),
+                    skill_path: "/tmp/localref/SKILL.md".into(),
+                }],
+            }),
+            mode: Some(RunMode::Normal),
+        };
+        let snapshot = pending_turn_snapshot(&SessionStateEnvelope::default(), &turn_input);
+
+        let user_message = snapshot.messages.last().expect("user message");
+        assert_eq!(
+            user_message
+                .user_input
+                .as_ref()
+                .map(|input| input.display_text.as_str()),
+            Some("/localref")
+        );
     }
 }

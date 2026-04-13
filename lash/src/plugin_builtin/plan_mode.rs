@@ -73,9 +73,13 @@ fn plan_display_path(path: &Path) -> String {
 
 fn plan_exit_next_turn_input(display: &str, note: Option<&str>) -> String {
     if let Some(note) = note.filter(|note| !note.trim().is_empty()) {
-        format!("Execute the plan in `{display}`.\n\nUser note: {note}")
+        format!(
+            "The user approved the plan. Execute the plan in `{display}` now — start immediately, do not ask for confirmation.\n\nUser note: {note}"
+        )
     } else {
-        format!("Execute the plan in `{display}`.")
+        format!(
+            "The user approved the plan. Execute the plan in `{display}` now — start immediately, do not ask for confirmation."
+        )
     }
 }
 
@@ -748,10 +752,12 @@ impl SessionPlugin for PlanModePlugin {
                                 start: SessionStartPoint::Empty,
                                 policy: None,
                                 plugin_mode: SessionPluginMode::Fresh,
-                                initial_messages: vec![PluginMessage::text(MessageRole::User, seed)],
+                                initial_nodes: vec![crate::SessionAppendNode::message(
+                                    PluginMessage::text(MessageRole::User, seed),
+                                )],
                                 context_surface: SessionContextSurface::default(),
                                 mode_extras: crate::ModeExtras::default(),
-
+                                usage_source: Some("plan_execution".to_string()),
                             }),
                         });
                         directives.push(PluginDirective::short_circuit(ToolResult::ok(json!({
@@ -991,11 +997,11 @@ mod tests {
                 ".lash/plans/run-session.md",
                 Some("start with the safe slice"),
             ),
-            "Execute the plan in `.lash/plans/run-session.md`.\n\nUser note: start with the safe slice"
+            "The user approved the plan. Execute the plan in `.lash/plans/run-session.md` now — start immediately, do not ask for confirmation.\n\nUser note: start with the safe slice"
         );
         assert_eq!(
             plan_exit_next_turn_input(".lash/plans/run-session.md", Some("   ")),
-            "Execute the plan in `.lash/plans/run-session.md`."
+            "The user approved the plan. Execute the plan in `.lash/plans/run-session.md` now — start immediately, do not ask for confirmation."
         );
     }
 

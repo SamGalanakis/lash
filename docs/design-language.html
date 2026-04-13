@@ -1,0 +1,1344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>lash TUI Design System</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Azeret+Mono:wght@400;500;700;800&family=Chivo+Mono:wght@300;400;500;700&family=Spectral:wght@400;500;600;700&display=swap');
+
+  :root {
+    --form: #0e0d0b;
+    --form-deep: #080807;
+    --form-raised: #141412;
+    --ghost-bar: #322818;
+
+    --ash: #2a2a28;
+    --ash-light: #3a3a34;
+    --ash-mid: #4a4a44;
+    --ash-text: #5a5a50;
+
+    --chalk-dim: #7a7a70;
+    --chalk-mid: #c8c4b8;
+    --chalk: #e8e4d0;
+
+    --sodium: #e8a33c;
+    --lichen: #8a9e6c;
+    --error: #cc4444;
+    --info: #8ca0b4;
+
+    --line: rgba(232, 228, 208, 0.12);
+    --line-strong: rgba(232, 163, 60, 0.28);
+    --panel: rgba(20, 20, 18, 0.82);
+    --shadow: 0 28px 80px rgba(0, 0, 0, 0.42);
+
+    --font-display: "Azeret Mono", monospace;
+    --font-ui: "Chivo Mono", monospace;
+    --font-body: "Spectral", serif;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    color: var(--chalk);
+    background:
+      radial-gradient(circle at top left, rgba(232, 163, 60, 0.12), transparent 26rem),
+      radial-gradient(circle at bottom right, rgba(138, 158, 108, 0.08), transparent 24rem),
+      linear-gradient(180deg, var(--form-deep), var(--form));
+    font-family: var(--font-ui);
+    overflow-x: hidden;
+  }
+
+  body::before,
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  body::before {
+    background:
+      repeating-linear-gradient(
+        -58deg,
+        transparent 0,
+        transparent 96px,
+        rgba(232, 163, 60, 0.035) 96px,
+        rgba(232, 163, 60, 0.035) 97px
+      );
+    opacity: 0.8;
+  }
+
+  body::after {
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 320 320' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.08'/%3E%3C/svg%3E");
+    mix-blend-mode: overlay;
+    opacity: 0.46;
+  }
+
+  .page {
+    position: relative;
+    z-index: 1;
+    max-width: 1500px;
+    margin: 0 auto;
+    padding: 36px;
+  }
+
+  .frame {
+    border: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(14, 13, 11, 0.94), rgba(8, 8, 7, 0.98));
+    box-shadow: var(--shadow);
+    overflow: clip;
+  }
+
+  .hero {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1.2fr 0.8fr;
+    gap: 40px;
+    padding: 56px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .hero::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(90deg, transparent 0, transparent 58%, rgba(232, 163, 60, 0.04) 100%);
+    pointer-events: none;
+  }
+
+  .eyebrow,
+  .micro-label {
+    text-transform: uppercase;
+    letter-spacing: 0.28em;
+    font-size: 11px;
+    color: var(--ash-text);
+  }
+
+  .hero h1 {
+    margin: 18px 0 14px;
+    font-family: var(--font-display);
+    font-size: clamp(3rem, 8vw, 6.6rem);
+    line-height: 0.9;
+    letter-spacing: -0.06em;
+    text-transform: uppercase;
+  }
+
+  .hero .slash {
+    color: var(--sodium);
+  }
+
+  .hero p {
+    max-width: 68ch;
+    margin: 0;
+    color: var(--chalk-mid);
+    font-family: var(--font-body);
+    font-size: 1.15rem;
+    line-height: 1.68;
+  }
+
+  .hero-meta {
+    display: grid;
+    gap: 16px;
+    align-content: start;
+  }
+
+  .meta-card,
+  .panel,
+  .swatch,
+  .specimen,
+  .mock,
+  .principle {
+    border: 1px solid var(--line);
+    background: var(--panel);
+    backdrop-filter: blur(8px);
+  }
+
+  .meta-card {
+    padding: 18px 20px;
+  }
+
+  .meta-card strong {
+    display: block;
+    margin-top: 10px;
+    color: var(--chalk);
+    font-size: 1.05rem;
+  }
+
+  .meta-card span {
+    color: var(--chalk-dim);
+    font-size: 0.95rem;
+    line-height: 1.55;
+  }
+
+  .tabs {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 18px 24px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(8, 8, 7, 0.92);
+    backdrop-filter: blur(14px);
+  }
+
+  .tab-button {
+    appearance: none;
+    border: 1px solid var(--line);
+    background: rgba(20, 20, 18, 0.86);
+    color: var(--chalk-dim);
+    padding: 11px 14px;
+    font: 600 0.76rem/1 var(--font-ui);
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: 180ms ease;
+  }
+
+  .tab-button:hover,
+  .tab-button:focus-visible {
+    color: var(--chalk);
+    border-color: var(--line-strong);
+    outline: none;
+    transform: translateY(-1px);
+  }
+
+  .tab-button.active {
+    color: var(--form-deep);
+    background: var(--sodium);
+    border-color: var(--sodium);
+    box-shadow: 0 0 0 1px rgba(232, 163, 60, 0.18);
+  }
+
+  .tab-panel {
+    display: none;
+    padding: 32px 32px 40px;
+    animation: panel-in 220ms ease;
+  }
+
+  .tab-panel.active {
+    display: block;
+  }
+
+  @keyframes panel-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .section-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 24px;
+    align-items: end;
+    margin-bottom: 28px;
+  }
+
+  .section-head h2 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: clamp(1.5rem, 3.8vw, 2.4rem);
+    letter-spacing: -0.05em;
+    text-transform: uppercase;
+  }
+
+  .section-head p {
+    margin: 0;
+    max-width: 42rem;
+    color: var(--chalk-mid);
+    font-family: var(--font-body);
+    font-size: 1.02rem;
+    line-height: 1.62;
+  }
+
+  .grid-2,
+  .grid-3 {
+    display: grid;
+    gap: 18px;
+  }
+
+  .grid-2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .grid-3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .panel {
+    padding: 22px;
+  }
+
+  .panel h3,
+  .panel h4 {
+    margin: 0 0 12px;
+    font-size: 0.88rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--sodium);
+  }
+
+  .panel p,
+  .panel li {
+    color: var(--chalk-mid);
+    font-family: var(--font-body);
+    font-size: 1rem;
+    line-height: 1.62;
+  }
+
+  .panel ul {
+    margin: 0;
+    padding-left: 1.1rem;
+  }
+
+  .brand-mark {
+    position: relative;
+    display: inline-block;
+    font-family: var(--font-display);
+    font-size: clamp(5rem, 14vw, 10rem);
+    line-height: 0.88;
+    letter-spacing: -0.08em;
+    text-transform: uppercase;
+  }
+
+  .brand-mark::after {
+    content: "";
+    position: absolute;
+    left: 57%;
+    top: -10%;
+    width: 10px;
+    height: 120%;
+    background: linear-gradient(180deg, #f3b85b 0%, var(--sodium) 100%);
+    transform: skew(-15deg);
+    box-shadow: 0 0 18px rgba(232, 163, 60, 0.28);
+  }
+
+  .identity-stack {
+    display: grid;
+    gap: 16px;
+  }
+
+  .slogan {
+    display: inline-flex;
+    gap: 12px;
+    align-items: center;
+    padding-top: 10px;
+    color: var(--ash-text);
+    font-size: 0.8rem;
+    letter-spacing: 0.42em;
+    text-transform: uppercase;
+  }
+
+  .slogan::before {
+    content: "";
+    display: inline-block;
+    width: 130px;
+    height: 2px;
+    background: linear-gradient(90deg, var(--sodium), transparent);
+  }
+
+  .pill-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .pill {
+    border: 1px solid var(--line);
+    padding: 8px 10px;
+    color: var(--chalk-dim);
+    font-size: 0.76rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  .swatch-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 16px;
+  }
+
+  .swatch {
+    overflow: hidden;
+  }
+
+  .swatch-chip {
+    height: 112px;
+  }
+
+  .swatch-meta {
+    display: grid;
+    gap: 6px;
+    padding: 14px 16px 16px;
+  }
+
+  .swatch-meta strong {
+    color: var(--chalk);
+    font-size: 0.9rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  .swatch-meta span {
+    color: var(--chalk-dim);
+    font-size: 0.82rem;
+  }
+
+  .specimen {
+    padding: 22px;
+  }
+
+  .specimen .sample {
+    margin: 10px 0 16px;
+  }
+
+  .specimen .display-sample {
+    font-family: var(--font-display);
+    font-size: clamp(2.2rem, 6vw, 4.8rem);
+    letter-spacing: -0.08em;
+    line-height: 0.94;
+  }
+
+  .specimen .body-sample {
+    font-family: var(--font-body);
+    font-size: 1.18rem;
+    line-height: 1.8;
+    color: var(--chalk-mid);
+  }
+
+  .specimen .mono-sample {
+    font-family: var(--font-ui);
+    font-size: 0.98rem;
+    line-height: 1.7;
+    color: var(--chalk-dim);
+  }
+
+  .mock-grid {
+    display: grid;
+    grid-template-columns: 1.2fr 0.8fr;
+    gap: 18px;
+  }
+
+  .mock {
+    overflow: hidden;
+  }
+
+  .mock-bar {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 10px 14px;
+    background: var(--form-raised);
+    border-bottom: 1px solid var(--line);
+    color: var(--chalk-dim);
+    font-size: 0.76rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .mock-bar .accent {
+    color: var(--sodium);
+    font-weight: 700;
+  }
+
+  .mock-body {
+    padding: 18px 18px 20px;
+    display: grid;
+    gap: 14px;
+    background: linear-gradient(180deg, rgba(14, 13, 11, 0.95), rgba(8, 8, 7, 0.98));
+  }
+
+  .history-line,
+  .task-row,
+  .status-line {
+    display: flex;
+    gap: 12px;
+    align-items: start;
+  }
+
+  .caret,
+  .marker,
+  .status-accent {
+    color: var(--sodium);
+    font-weight: 700;
+  }
+
+  .history-copy {
+    color: var(--chalk-mid);
+    line-height: 1.55;
+  }
+
+  .lane-stack {
+    display: grid;
+    gap: 10px;
+  }
+
+  .lane-row {
+    display: flex;
+    gap: 12px;
+    align-items: start;
+  }
+
+  .lane-marker {
+    min-width: 18px;
+    font-weight: 700;
+  }
+
+  .lane-marker.shell,
+  .lane-marker.edit {
+    color: var(--sodium);
+  }
+
+  .lane-marker.delegate,
+  .lane-marker.task {
+    color: var(--lichen);
+  }
+
+  .lane-marker.web {
+    color: var(--chalk-dim);
+  }
+
+  .lane-copy {
+    display: grid;
+    gap: 3px;
+  }
+
+  .lane-copy strong {
+    color: var(--chalk);
+    font-size: 0.94rem;
+    font-weight: 600;
+  }
+
+  .lane-copy span {
+    color: var(--chalk-dim);
+    line-height: 1.48;
+    font-size: 0.86rem;
+  }
+
+  .plan-box,
+  .task-box {
+    border: 1px solid var(--line);
+    background: rgba(20, 20, 18, 0.92);
+  }
+
+  .plan-box header,
+  .task-box header {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--line);
+    color: var(--sodium);
+    font-size: 0.74rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+  }
+
+  .plan-box ol,
+  .task-box ul {
+    margin: 0;
+    padding: 16px 20px 18px 34px;
+    color: var(--chalk-mid);
+    line-height: 1.7;
+  }
+
+  .task-box ul {
+    list-style: none;
+    padding-left: 18px;
+  }
+
+  .task-box li {
+    display: flex;
+    gap: 10px;
+    padding: 7px 0;
+  }
+
+  .task-box li::before {
+    content: "◆";
+    color: var(--sodium);
+  }
+
+  .texture-card {
+    min-height: 220px;
+    display: grid;
+    place-items: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .texture-card.scribe {
+    background:
+      linear-gradient(90deg, rgba(232, 163, 60, 0.18), transparent 42%),
+      linear-gradient(180deg, rgba(20, 20, 18, 0.95), rgba(8, 8, 7, 0.96));
+  }
+
+  .texture-card.score {
+    background:
+      repeating-linear-gradient(
+        -58deg,
+        rgba(20, 20, 18, 0.9),
+        rgba(20, 20, 18, 0.9) 40px,
+        rgba(232, 163, 60, 0.08) 40px,
+        rgba(232, 163, 60, 0.08) 41px
+      );
+  }
+
+  .texture-card.grain {
+    background:
+      radial-gradient(circle at 30% 30%, rgba(232, 163, 60, 0.12), transparent 30%),
+      linear-gradient(180deg, rgba(14, 13, 11, 0.96), rgba(8, 8, 7, 0.98));
+  }
+
+  .texture-caption {
+    position: absolute;
+    bottom: 14px;
+    left: 14px;
+    right: 14px;
+    color: var(--chalk-dim);
+    font-size: 0.8rem;
+    line-height: 1.55;
+  }
+
+  .glyph-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+  }
+
+  .glyph {
+    min-height: 130px;
+    display: grid;
+    place-items: center;
+    text-align: center;
+    padding: 18px;
+  }
+
+  .glyph .shape {
+    font-size: 2.2rem;
+    color: var(--sodium);
+    margin-bottom: 10px;
+  }
+
+  .glyph strong {
+    display: block;
+    font-size: 0.82rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  .glyph span {
+    color: var(--chalk-dim);
+    font-size: 0.86rem;
+    line-height: 1.45;
+  }
+
+  .principles-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+  }
+
+  .principle {
+    padding: 20px;
+  }
+
+  .principle strong {
+    display: block;
+    margin-bottom: 10px;
+    color: var(--sodium);
+    font-size: 0.82rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+
+  .principle p {
+    margin: 0;
+    color: var(--chalk-mid);
+    font-family: var(--font-body);
+    font-size: 1rem;
+    line-height: 1.66;
+  }
+
+  .mermaid-wrap {
+    border: 1px solid var(--line);
+    background: rgba(20, 20, 18, 0.92);
+    padding: 14px;
+    overflow: auto;
+  }
+
+  .footer {
+    padding: 20px 32px 30px;
+    border-top: 1px solid var(--line);
+    color: var(--ash-text);
+    font-size: 0.82rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  @media (max-width: 1100px) {
+    .hero,
+    .mock-grid,
+    .grid-2,
+    .grid-3,
+    .principles-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .swatch-grid,
+    .glyph-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .section-head {
+      flex-direction: column;
+      align-items: start;
+    }
+  }
+
+  @media (max-width: 760px) {
+    .page {
+      padding: 14px;
+    }
+
+    .hero,
+    .tab-panel {
+      padding: 22px;
+    }
+
+    .tabs {
+      padding: 12px;
+    }
+
+    .swatch-grid,
+    .glyph-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      primaryColor: '#141412',
+      primaryTextColor: '#e8e4d0',
+      primaryBorderColor: '#e8a33c',
+      lineColor: '#7a7a70',
+      secondaryColor: '#2a2a28',
+      tertiaryColor: '#0e0d0b',
+      background: '#141412',
+      mainBkg: '#141412',
+      nodeBorder: '#e8a33c',
+      clusterBkg: '#0e0d0b',
+      clusterBorder: '#4a4a44',
+      fontFamily: 'Chivo Mono'
+    }
+  });
+
+  window.addEventListener('DOMContentLoaded', () => {
+    const buttons = [...document.querySelectorAll('.tab-button')];
+    const panels = [...document.querySelectorAll('.tab-panel')];
+
+    function activate(id) {
+      buttons.forEach((button) => {
+        const active = button.dataset.tab === id;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-selected', String(active));
+      });
+      panels.forEach((panel) => {
+        panel.classList.toggle('active', panel.id === id);
+      });
+      mermaid.run({
+        nodes: document.querySelectorAll(`#${id} .mermaid`)
+      });
+    }
+
+    buttons.forEach((button) => {
+      button.addEventListener('click', () => activate(button.dataset.tab));
+    });
+
+    activate('identity');
+  });
+</script>
+</head>
+<body>
+  <div class="page">
+    <div class="frame">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">lash / terminal interface dossier</div>
+          <h1>Warm Iron <span class="slash">/</span> Fast Amber</h1>
+          <p>
+            The lash TUI is not a glossy desktop app. It behaves like a workshop console:
+            warm-black surfaces, sodium-orange intent markers, ash-grey structure, and just
+            enough ornament to make progress feel tactile. The goal is disciplined terminal
+            presence, not fake skeuomorphism.
+          </p>
+        </div>
+        <div class="hero-meta">
+          <div class="meta-card">
+            <div class="micro-label">Tone</div>
+            <strong>industrial editorial terminal</strong>
+            <span>More field notebook than dashboard. More control panel than chat bubble UI.</span>
+          </div>
+          <div class="meta-card">
+            <div class="micro-label">Current UI cues</div>
+            <strong>sodium, ash, chalk, scribe lines</strong>
+            <span>Status chrome and plan/task structures are the strongest recurring visual vocabulary.</span>
+          </div>
+          <div class="meta-card">
+            <div class="micro-label">Updated for</div>
+            <strong>plugin-owned plan mode surface</strong>
+            <span>The UI now distinguishes planning-only turns from `update_plan` checklist tracking, with plugin badges and bordered proposal panels.</span>
+          </div>
+        </div>
+      </header>
+
+      <nav class="tabs" aria-label="Design system tabs">
+        <button class="tab-button active" data-tab="identity" aria-selected="true">Identity</button>
+        <button class="tab-button" data-tab="color" aria-selected="false">Color</button>
+        <button class="tab-button" data-tab="type" aria-selected="false">Typography</button>
+        <button class="tab-button" data-tab="elements" aria-selected="false">Elements</button>
+        <button class="tab-button" data-tab="texture" aria-selected="false">Texture</button>
+        <button class="tab-button" data-tab="iconography" aria-selected="false">Iconography</button>
+        <button class="tab-button" data-tab="principles" aria-selected="false">Principles</button>
+      </nav>
+
+      <section class="tab-panel active" id="identity">
+        <div class="section-head">
+          <div>
+            <div class="eyebrow">01</div>
+            <h2>Identity</h2>
+          </div>
+          <p>
+            lash should read as an operator tool with style, not a toy terminal skin. The logo,
+            language, and layout all lean on cut metal, scoring marks, and measured contrast.
+          </p>
+        </div>
+        <div class="grid-2">
+          <div class="panel identity-stack">
+            <div class="brand-mark">LASH</div>
+            <div class="slogan">Agent Runtime</div>
+            <div class="pill-row">
+              <span class="pill">sharp intent</span>
+              <span class="pill">quiet chrome</span>
+              <span class="pill">progress first</span>
+              <span class="pill">terminal-native</span>
+            </div>
+          </div>
+          <div class="panel">
+            <h3>Brand character</h3>
+            <p>
+              The interface is terse but not sterile. Sodium is used for decisions, activation,
+              and directional markers. Chalk carries the readable body text. Ash builds the rails,
+              separators, and containers. Everything should feel sturdy enough to hold a long work
+              session without becoming noisy.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="color">
+        <div class="section-head">
+          <div>
+            <div class="eyebrow">02</div>
+            <h2>Color</h2>
+          </div>
+          <p>
+            The palette is intentionally narrow. Almost every screen is warm black and chalk until
+            sodium appears to signal intent, mode, or the active edge of work.
+          </p>
+        </div>
+        <div class="swatch-grid">
+          <article class="swatch">
+            <div class="swatch-chip" style="background:#0e0d0b"></div>
+            <div class="swatch-meta">
+              <strong>FORM</strong>
+              <span>#0E0D0B · history background, dominant field</span>
+            </div>
+          </article>
+          <article class="swatch">
+            <div class="swatch-chip" style="background:#141412"></div>
+            <div class="swatch-meta">
+              <strong>FORM_RAISED</strong>
+              <span>#141412 · status bar, framed surfaces, overlays</span>
+            </div>
+          </article>
+          <article class="swatch">
+            <div class="swatch-chip" style="background:#2a2a28"></div>
+            <div class="swatch-meta">
+              <strong>ASH</strong>
+              <span>#2A2A28 · borders, dividers, structural lines</span>
+            </div>
+          </article>
+          <article class="swatch">
+            <div class="swatch-chip" style="background:#4a4a44"></div>
+            <div class="swatch-meta">
+              <strong>ASH_MID</strong>
+              <span>#4A4A44 · separators, passive labels, thin chrome</span>
+            </div>
+          </article>
+          <article class="swatch">
+            <div class="swatch-chip" style="background:#e8e4d0"></div>
+            <div class="swatch-meta">
+              <strong>CHALK</strong>
+              <span>#E8E4D0 · assistant prose, key readable text</span>
+            </div>
+          </article>
+          <article class="swatch">
+            <div class="swatch-chip" style="background:#e8a33c"></div>
+            <div class="swatch-meta">
+              <strong>SODIUM</strong>
+              <span>#E8A33C · prompt, logo slash, plan/mode indicators</span>
+            </div>
+          </article>
+          <article class="swatch">
+            <div class="swatch-chip" style="background:#8a9e6c"></div>
+            <div class="swatch-meta">
+              <strong>LICHEN</strong>
+              <span>#8A9E6C · completion or quiet success accents</span>
+            </div>
+          </article>
+          <article class="swatch">
+            <div class="swatch-chip" style="background:#cc4444"></div>
+            <div class="swatch-meta">
+              <strong>ERROR</strong>
+              <span>#CC4444 · failures, dangerous edges, interrupt warnings</span>
+            </div>
+          </article>
+          <article class="swatch">
+            <div class="swatch-chip" style="background:#322818"></div>
+            <div class="swatch-meta">
+              <strong>GHOST_BAR</strong>
+              <span>#322818 · assistant bar, subtle live-work trace</span>
+            </div>
+          </article>
+        </div>
+        <div class="panel" style="margin-top:18px">
+          <h3>Token cascade</h3>
+          <div class="mermaid-wrap">
+            <div class="mermaid">
+flowchart LR
+  A[FORM / FORM_DEEP] --> B[ASH rail system]
+  B --> C[CHALK text hierarchy]
+  A --> D[SODIUM activation]
+  A --> E[LICHEN completion]
+  A --> F[ERROR failure]
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="type">
+        <div class="section-head">
+          <div>
+            <div class="eyebrow">03</div>
+            <h2>Typography</h2>
+          </div>
+          <p>
+            lash’s design language benefits from type contrast: monospaced command authority for
+            chrome, and a calmer reading voice for explanations and documentation.
+          </p>
+        </div>
+        <div class="grid-3">
+          <article class="specimen">
+            <div class="micro-label">Display / headers</div>
+            <div class="sample display-sample">LASH / STATUS / PLAN</div>
+            <div class="mono-sample">Azeret Mono, heavy tracking compression, uppercase only.</div>
+          </article>
+          <article class="specimen">
+            <div class="micro-label">Body / editorial copy</div>
+            <div class="sample body-sample">
+              Warm-black terminals can get visually dry. A more literary body face softens design
+              documentation without contaminating the TUI itself.
+            </div>
+            <div class="mono-sample">Spectral, medium weight, long-line friendly.</div>
+          </article>
+          <article class="specimen">
+            <div class="micro-label">UI / terminal notation</div>
+            <div class="sample mono-sample">
+              model · plan · cwd<br>
+              ◆ active task<br>
+              [x] completed step<br>
+              ❯ live prompt
+            </div>
+            <div class="mono-sample">Chivo Mono, compact and readable under dense chrome.</div>
+          </article>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="elements">
+        <div class="section-head">
+          <div>
+            <div class="eyebrow">04</div>
+            <h2>Elements</h2>
+          </div>
+          <p>
+            The TUI is defined less by cards and more by stacked terminal zones: a compact status
+            strip, uninterrupted history, framed plan/plugin blocks, and an input area with
+            mode context pinned on the lower edge.
+          </p>
+        </div>
+        <div class="mock-grid">
+          <article class="mock">
+            <div class="mock-bar">
+              <span><span class="accent">lash</span> · compact-model</span>
+              <span>64k / 128k</span>
+            </div>
+            <div class="mock-body">
+              <div class="history-line">
+                <span class="caret">❯</span>
+                <div class="history-copy">Use one native checklist tool for substantial multi-step work.</div>
+              </div>
+              <div class="status-line">
+                <span class="status-accent">│</span>
+                <div class="history-copy">Inspecting plugin/runtime seam and current TUI plan rendering.</div>
+              </div>
+              <div class="plan-box">
+                <header>Current Plan</header>
+                <ol>
+                  <li><strong>[x]</strong> Inspect planning architecture</li>
+                  <li><strong>[-]</strong> Tighten checklist rendering</li>
+                  <li><strong>[ ]</strong> Refresh TUI docs</li>
+                </ol>
+              </div>
+              <div class="plan-box" style="margin-top:14px">
+                <header>Proposed Plan</header>
+                <ol>
+                  <li>Expose generic plugin stream hooks</li>
+                  <li>Emit plugin panel events during drafting</li>
+                  <li>Strip tagged plan prose from the transcript</li>
+                </ol>
+              </div>
+            </div>
+          </article>
+          <div class="grid-2">
+            <article class="mock">
+              <div class="mock-bar">
+                <span>queue lanes</span>
+                <span class="accent">checkpoint-aware</span>
+              </div>
+              <div class="mock-body">
+                <div class="task-box">
+                  <header>Queued Input</header>
+                  <ul>
+                    <li>After next tool/result</li>
+                    <li>Next full turn</li>
+                  </ul>
+                </div>
+              </div>
+            </article>
+            <article class="mock">
+              <div class="mock-bar">
+                <span>transcript lanes</span>
+                <span class="accent">semantic first</span>
+              </div>
+              <div class="mock-body">
+                <div class="lane-stack">
+                  <div class="lane-row">
+                    <span class="lane-marker" style="color: var(--sodium); opacity: 0.6;">◆</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--chalk-dim); font-size: 0.82rem;">wholehog</span>
+                      <span>Skill badge — a compact, single-line indicator that replaces the verbose "Model saw transformed input" message. Uses ◆ marker in dimmed sodium with skill name in chalk-dim.</span>
+                    </div>
+                  </div>
+                  <div class="lane-row">
+                    <span class="lane-marker shell">+</span>
+                    <div class="lane-copy">
+                      <strong>cargo test -p lash-cli</strong>
+                      <span>Shell command rows keep the command itself on the primary line and drop repeated chrome like workdir and exit code.</span>
+                    </div>
+                  </div>
+                  <div class="lane-row">
+                    <span class="lane-marker delegate">├─</span>
+                    <div class="lane-copy">
+                      <strong>delegate done · inspect queue rendering · 4.2s</strong>
+                      <span>Delegate results use tree connectors (├─/╰─) to show the child agent's tool call activity as nested items beneath the summary rail.</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">│</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--ash-text);">claude-sonnet · 3 iterations · 5 tool calls</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">├─</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--chalk-dim);">read_file · 12ms</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">╰─</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--chalk-dim);">exec_command · 340ms</span>
+                    </div>
+                  </div>
+                  <div class="lane-row">
+                    <span class="lane-marker web">+</span>
+                    <div class="lane-copy">
+                      <strong>web "queue preview renderer"</strong>
+                      <span>Web rows keep the query in the headline and reserve expansion for sources or fetched content.</span>
+                    </div>
+                  </div>
+                  <div class="lane-row">
+                    <span class="lane-marker edit">╭─</span>
+                    <div class="lane-copy">
+                      <strong>edited lash-cli/src/render/mod.rs (+3 -1)</strong>
+                      <span>Edit rows should feel like revision slates: a calm rail, count-led file copy, then the diff opens beneath it as a separate inspection layer.</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </article>
+            <article class="mock">
+              <div class="mock-bar">
+                <span>revision slate</span>
+                <span class="accent">durable artifact</span>
+              </div>
+              <div class="mock-body">
+                <div class="lane-stack">
+                  <div class="lane-row">
+                    <span class="lane-marker edit">╭─</span>
+                    <div class="lane-copy">
+                      <strong>edited lash-cli/src/render/mod.rs (+3 -1)</strong>
+                      <span>The first line carries the meaningful outcome, not the transport wrapper.</span>
+                    </div>
+                  </div>
+                  <div class="lane-row">
+                    <span class="lane-marker edit">├</span>
+                    <div class="lane-copy">
+                      <strong>edited lash-cli/src/render/mod.rs (+3 -1)</strong>
+                      <span>File rows act like a compact revision ledger. Renames should use arrows, counts should sit on the same line, and status words stay lowercase and precise.</span>
+                    </div>
+                  </div>
+                  <div class="lane-row">
+                    <span class="lane-marker edit">│</span>
+                    <div class="lane-copy">
+                      <strong>╎ @@ queue preview</strong>
+                      <span>Patch text lives one level deeper on a scribed inset so scanning the transcript does not collapse into a wall of unified diff noise.</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </article>
+            <article class="mock" style="grid-column: 1 / -1;">
+              <div class="mock-bar">
+                <span>delegate lifecycle</span>
+                <span class="accent">agent tree</span>
+              </div>
+              <div class="mock-body">
+                <div class="lane-stack">
+                  <div class="lane-row">
+                    <span class="lane-marker delegate">◆</span>
+                    <div class="lane-copy">
+                      <strong>delegate · inspect queue rendering · 52ms</strong>
+                      <span>The spawn event uses a filled diamond (◆) when standalone, or a tree connector (├─) when child details follow. Model and tier are shown as detail lines.</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">│</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--ash-text);">claude-sonnet (medium)</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="margin-top: 8px;">
+                    <span class="lane-marker delegate">├─</span>
+                    <div class="lane-copy">
+                      <strong>delegate done · inspect queue rendering · 4.2s</strong>
+                      <span>The result block shows a summary stats line (model · iterations · tool calls), then renders each child tool call as a nested tree branch.</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">│</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--ash-text);">claude-sonnet · 3 iterations · 5 tool calls</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">├─</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--chalk-dim);">read_file · 12ms</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">├─</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--chalk-dim);">exec_command · 340ms</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">├─</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--chalk-dim);">search_files · 89ms</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">├─</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--chalk-dim);">read_file · 8ms</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="padding-left: 22px;">
+                    <span class="lane-marker delegate" style="opacity: 0.7;">╰─</span>
+                    <div class="lane-copy">
+                      <span style="color: var(--chalk-dim);">edit_file · 45ms</span>
+                    </div>
+                  </div>
+                  <div class="lane-row" style="margin-top: 8px;">
+                    <span class="lane-marker delegate" style="color: var(--error);">◆</span>
+                    <div class="lane-copy">
+                      <strong style="color: var(--error);">delegate stopped · inspect queue rendering · 1.8s</strong>
+                      <span>Kill events use the standalone diamond and the error color to signal forced interruption.</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </article>
+          </div>
+        </div>
+        <div class="panel" style="margin-top:18px">
+          <h3>Layout stack</h3>
+          <div class="mermaid-wrap">
+            <div class="mermaid">
+flowchart TD
+  A[Status Bar] --> B[History Stream]
+  B --> C[Strike Zone while running]
+  C --> D[Task Tray]
+  D --> E[Pending Input Preview]
+  E --> F[Input / Prompt Area]
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="texture">
+        <div class="section-head">
+          <div>
+            <div class="eyebrow">05</div>
+            <h2>Texture</h2>
+          </div>
+          <p>
+            lash should never feel flat. The background field is deep and quiet, then layered with
+            scored diagonals, soft noise, and sodium scribe strokes that suggest motion without
+            becoming decorative clutter.
+          </p>
+        </div>
+        <div class="grid-3">
+          <div class="texture-card scribe">
+            <div class="texture-caption">Scribe gradients are used sparingly to give active rails and headers a sense of drag across the page.</div>
+          </div>
+          <div class="texture-card score">
+            <div class="texture-caption">Diagonal scoring keeps the background from collapsing into pure black emptiness.</div>
+          </div>
+          <div class="texture-card grain">
+            <div class="texture-caption">Subtle grain prevents perfect digital cleanliness and helps the UI feel worked-in.</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="iconography">
+        <div class="section-head">
+          <div>
+            <div class="eyebrow">06</div>
+            <h2>Iconography</h2>
+          </div>
+          <p>
+            lash does not need a full icon set. A handful of repeated terminal-native marks do the
+            job: the slash, the prompt spear, the diamond task marker, and the boxed plan/task rails.
+          </p>
+        </div>
+        <div class="glyph-grid">
+          <article class="glyph panel">
+            <div class="shape">/</div>
+            <strong>slash</strong>
+            <span>The brand cut. Use as a decisive interruption, not decoration.</span>
+          </article>
+          <article class="glyph panel">
+            <div class="shape">❯</div>
+            <strong>prompt spear</strong>
+            <span>The warm-sodium signifier for live input and active agency.</span>
+          </article>
+          <article class="glyph panel">
+            <div class="shape">◆</div>
+            <strong>task diamond</strong>
+            <span>Denotes active task pressure better than a generic dot.</span>
+          </article>
+          <article class="glyph panel">
+            <div class="shape">│ ┌ ┐</div>
+            <strong>terminal rails</strong>
+            <span>Plan blocks and trays should feel framed, not carded.</span>
+          </article>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="principles">
+        <div class="section-head">
+          <div>
+            <div class="eyebrow">07</div>
+            <h2>Principles</h2>
+          </div>
+          <p>
+            These rules keep the TUI coherent as new surfaces get added. If a future component
+            breaks one of these, the component should probably change instead of the system.
+          </p>
+        </div>
+        <div class="principles-grid">
+          <article class="principle">
+            <strong>Accent Means Action</strong>
+            <p>Sodium is reserved for the active edge: prompts, plan mode, key labels, plan updates, and headings that genuinely matter. Info (cool steel blue) is for ambient metadata: scroll position, expansion level, and status indicators that inform without demanding attention.</p>
+          </article>
+          <article class="principle">
+            <strong>Structure Before Ornament</strong>
+            <p>Every line, rail, and box should clarify hierarchy before it tries to look good. Beauty comes from discipline.</p>
+          </article>
+          <article class="principle">
+            <strong>Terminal Native, Not Faux Desktop</strong>
+            <p>Use borders, glyphs, spacing, and dense text rhythm. Avoid pretending the interface is a web dashboard squeezed into a terminal.</p>
+          </article>
+          <article class="principle">
+            <strong>Mode Separation Should Be Visible</strong>
+            <p>Plan mode and `update_plan` are different concepts. The UI should signal planning-only turns as a badge, checklist tracking as a durable block, and plugin-authored proposals as their own framed history panels.</p>
+          </article>
+          <article class="principle">
+            <strong>Long Sessions Must Stay Calm</strong>
+            <p>The palette and typography should survive hours of reading. No high-saturation backgrounds, no fragile thin text, no ornamental overload.</p>
+          </article>
+          <article class="principle">
+            <strong>Every Surface Should Earn Its Height</strong>
+            <p>Status strips stay compressed. Task trays summarize. Plan blocks are framed because they are durable reference artifacts, not transient chatter.</p>
+          </article>
+          <article class="principle">
+            <strong>Semantic First, Transport on Demand</strong>
+            <p>The first line should name the user-meaningful action: command, query, delegate task, task transition, patch result. Transport details belong in expansion or failure states, not as default transcript filler.</p>
+          </article>
+          <article class="principle">
+            <strong>Edits Should Read Like Revisions</strong>
+            <p>Patch output is durable evidence, not a transient tool side effect. Successful edits use lichen green lane rails to visually separate them from explorations (amber) and shell commands (dim chalk). Diff surfaces should feel inspectable rather than dumped.</p>
+          </article>
+        </div>
+      </section>
+
+      <footer class="footer">
+        lash TUI design system · derived from current `theme.rs`, `render.rs`, `scratch_tui.rs`, and live terminal behaviors
+      </footer>
+    </div>
+  </div>
+</body>
+</html>

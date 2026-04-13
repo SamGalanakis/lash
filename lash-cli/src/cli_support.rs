@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lash::provider::Provider;
-use lash::session_model::Message;
 use lash::*;
 use lash_ui::{UiContext, UiExtensions, UiHostEffect};
 use sha2::{Digest, Sha256};
@@ -233,17 +232,133 @@ fn parse_variant_input(input: &str) -> Result<String, String> {
 pub(crate) fn parse_execution_mode(input: &str) -> Result<ExecutionMode, String> {
     match input.trim().to_ascii_lowercase().as_str() {
         "" => Err("Execution mode cannot be empty.".to_string()),
-        "repl" => Ok(ExecutionMode::Repl),
+        "rlm" => Ok(ExecutionMode::Rlm),
         "standard" | "tools" => Ok(ExecutionMode::Standard),
         other => Err(format!(
-            "Unknown execution mode `{other}`. Expected `repl` or `standard`."
+            "Unknown execution mode `{other}`. Expected `rlm` or `standard`."
         )),
     }
 }
 
+pub(crate) fn parse_context_approach(input: &str) -> Result<lash::ContextApproach, String> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" => Err("Context approach cannot be empty.".to_string()),
+        "rolling" | "rolling-history" | "rolling_history" => {
+            Ok(lash::ContextApproach::RollingHistory(Default::default()))
+        }
+        "om" | "observational" | "observational-memory" | "observational_memory" => Ok(
+            lash::ContextApproach::ObservationalMemory(Default::default()),
+        ),
+        other => Err(format!(
+            "Unknown context approach `{other}`. Expected `rolling_history` or `observational_memory`."
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_context_approach_overrides(
+    mut approach: lash::ContextApproach,
+    om_observation_message_tokens: Option<usize>,
+    om_observation_buffer_tokens: Option<usize>,
+    om_observation_block_after_tokens: Option<usize>,
+    om_observation_max_tokens_per_batch: Option<usize>,
+    om_previous_observer_tokens: Option<usize>,
+    om_reflection_observation_tokens: Option<usize>,
+    om_reflection_buffer_activation_percent: Option<u16>,
+    om_reflection_block_after_tokens: Option<usize>,
+) -> Result<lash::ContextApproach, String> {
+    let has_om_overrides = om_observation_message_tokens.is_some()
+        || om_observation_buffer_tokens.is_some()
+        || om_observation_block_after_tokens.is_some()
+        || om_observation_max_tokens_per_batch.is_some()
+        || om_previous_observer_tokens.is_some()
+        || om_reflection_observation_tokens.is_some()
+        || om_reflection_buffer_activation_percent.is_some()
+        || om_reflection_block_after_tokens.is_some();
+    if !has_om_overrides {
+        return Ok(approach);
+    }
+
+    let lash::ContextApproach::ObservationalMemory(config) = &mut approach else {
+        return Err(
+            "OM tuning flags require `--context-approach observational_memory`.".to_string(),
+        );
+    };
+
+    if let Some(value) = om_observation_message_tokens {
+        if value == 0 {
+            return Err("`--om-observation-message-tokens` must be greater than 0.".to_string());
+        }
+        config.observation_message_tokens = value;
+    }
+    if let Some(value) = om_observation_buffer_tokens {
+        config.observation_buffer_tokens = value;
+    }
+    if let Some(value) = om_observation_block_after_tokens {
+        if value == 0 {
+            return Err(
+                "`--om-observation-block-after-tokens` must be greater than 0.".to_string(),
+            );
+        }
+        config.observation_block_after_tokens = value;
+    }
+    if let Some(value) = om_observation_max_tokens_per_batch {
+        if value == 0 {
+            return Err(
+                "`--om-observation-max-tokens-per-batch` must be greater than 0.".to_string(),
+            );
+        }
+        config.observation_max_tokens_per_batch = value;
+    }
+    if let Some(value) = om_previous_observer_tokens {
+        config.previous_observer_tokens = value;
+    }
+    if let Some(value) = om_reflection_observation_tokens {
+        if value == 0 {
+            return Err("`--om-reflection-observation-tokens` must be greater than 0.".to_string());
+        }
+        config.reflection_observation_tokens = value;
+    }
+    if let Some(value) = om_reflection_buffer_activation_percent {
+        if value > 100 {
+            return Err(
+                "`--om-reflection-buffer-activation-percent` must be between 0 and 100."
+                    .to_string(),
+            );
+        }
+        config.reflection_buffer_activation_bps = value.saturating_mul(100);
+    }
+    if let Some(value) = om_reflection_block_after_tokens {
+        if value == 0 {
+            return Err("`--om-reflection-block-after-tokens` must be greater than 0.".to_string());
+        }
+        config.reflection_block_after_tokens = value;
+    }
+
+    if config.observation_buffer_tokens >= config.observation_block_after_tokens {
+        return Err(
+            "`--om-observation-buffer-tokens` must be smaller than `--om-observation-block-after-tokens`."
+                .to_string(),
+        );
+    }
+    if config.observation_activation_tokens() == 0 {
+        return Err(
+            "`--om-observation-buffer-tokens` must be smaller than `--om-observation-message-tokens`."
+                .to_string(),
+        );
+    }
+    if config.reflection_buffer_activation_bps > 10_000 {
+        return Err(
+            "`--om-reflection-buffer-activation-percent` must be between 0 and 100.".to_string(),
+        );
+    }
+
+    Ok(approach)
+}
+
 pub(crate) fn execution_mode_usage() -> &'static str {
-    if lash::execution_mode_supported(ExecutionMode::Repl) {
-        "<repl|standard>"
+    if lash::execution_mode_supported(ExecutionMode::Rlm) {
+        "<rlm|standard>"
     } else {
         "<standard>"
     }
@@ -256,7 +371,7 @@ pub(crate) fn ensure_supported_execution_mode(
         Ok(mode)
     } else {
         Err(match mode {
-            ExecutionMode::Repl => "REPL mode is not available in this build.".to_string(),
+            ExecutionMode::Rlm => "RLM mode is not available in this build.".to_string(),
             ExecutionMode::Standard => "Execution mode is not available.".to_string(),
         })
     }
@@ -264,7 +379,7 @@ pub(crate) fn ensure_supported_execution_mode(
 
 pub(crate) fn execution_mode_label(mode: ExecutionMode) -> &'static str {
     match mode {
-        ExecutionMode::Repl => "repl",
+        ExecutionMode::Rlm => "rlm",
         ExecutionMode::Standard => "standard",
     }
 }
@@ -357,59 +472,13 @@ pub(crate) fn hash12(bytes: &[u8]) -> String {
     format!("{:x}", digest)[..12].to_string()
 }
 
-fn persisted_session_config(policy: &lash::SessionPolicy) -> lash::PersistedSessionConfig {
-    lash::PersistedSessionConfig {
-        provider_id: policy.provider.id().to_string(),
-        configured_model: policy.model.clone(),
-        context_window: policy.max_context_tokens.unwrap_or_default() as u64,
-        execution_mode: policy.execution_mode,
-        model_variant: policy.model_variant.clone(),
-    }
-}
-
-fn stamp_runtime_graph_state(
-    graph: &mut lash::SessionGraph,
-    messages: &[Message],
-    tool_calls: &[ToolCallRecord],
-    policy: &lash::SessionPolicy,
-    iteration: usize,
-    token_usage: TokenUsage,
-    last_prompt_usage: Option<PromptUsage>,
-    dynamic_state: &DynamicStateSnapshot,
-    execution_state_snapshot: Option<&[u8]>,
-) {
-    graph.merge_active_projection(messages, tool_calls);
-    let plugin_snapshot = graph.latest_plugin_snapshot();
-    graph.record_runtime_state(
-        &persisted_session_config(policy),
-        &lash::PersistedTurnState {
-            iteration,
-            token_usage,
-            last_prompt_usage,
-        },
-        Some(dynamic_state),
-        plugin_snapshot.as_ref(),
-        execution_state_snapshot,
-    );
-}
-
 pub(crate) fn persist_root_session_state(
     store: &Store,
     state: &mut SessionStateEnvelope,
     ui_state: &UiResumeState,
     dynamic_state: &DynamicStateSnapshot,
 ) {
-    stamp_runtime_graph_state(
-        &mut state.session_graph,
-        &state.messages,
-        &state.tool_calls,
-        &state.policy,
-        state.iteration,
-        state.token_usage.clone(),
-        state.last_prompt_usage.clone(),
-        dynamic_state,
-        state.execution_state_snapshot.as_deref(),
-    );
+    state.stamp_runtime_state(Some(dynamic_state), None);
     tracing::debug!(
         iteration = state.iteration,
         messages = state.messages.len(),
@@ -435,27 +504,30 @@ pub(crate) fn persist_live_runtime_snapshot(
     policy: &lash::SessionPolicy,
     token_usage: TokenUsage,
     last_prompt_usage: Option<PromptUsage>,
+    token_ledger: &[lash::TokenLedgerEntry],
 ) {
     let mut graph = seed_graph
         .or_else(|| store.load_live_session_graph())
         .or_else(|| store.load_session_graph())
         .unwrap_or_default();
-    let execution_state_snapshot = graph.latest_execution_state().unwrap_or(None);
-    stamp_runtime_graph_state(
-        &mut graph,
-        &snapshot.messages,
-        &snapshot.tool_calls,
-        policy,
-        snapshot.iteration,
+    let mut state = SessionStateEnvelope {
+        session_graph: graph.clone(),
+        messages: snapshot.messages,
+        tool_calls: snapshot.tool_calls,
+        policy: policy.clone(),
+        iteration: snapshot.iteration,
         token_usage,
         last_prompt_usage,
-        dynamic_state,
-        execution_state_snapshot.as_deref(),
-    );
+        token_ledger: token_ledger.to_vec(),
+        execution_state_snapshot: graph.latest_execution_state().unwrap_or(None),
+        ..SessionStateEnvelope::default()
+    };
+    state.stamp_runtime_state(Some(dynamic_state), None);
+    graph = state.session_graph;
     tracing::debug!(
-        iteration = snapshot.iteration,
-        messages = snapshot.messages.len(),
-        tool_calls = snapshot.tool_calls.len(),
+        iteration = state.iteration,
+        messages = state.messages.len(),
+        tool_calls = state.tool_calls.len(),
         plugin_mode_indicators = ui_state.plugin_mode_indicators.len(),
         plugin_panels = ui_state.plugin_panels.len(),
         "persisting live runtime snapshot"
@@ -496,6 +568,13 @@ pub(crate) fn info_text_unconfigured(execution_mode: ExecutionMode, cwd: &str) -
         "configured model: (not configured)".to_string(),
         "resolved model: (not configured)".to_string(),
         format!("execution mode: {}", execution_mode_label(execution_mode)),
+        format!(
+            "context approach: {}",
+            match lash::ContextApproach::default() {
+                lash::ContextApproach::RollingHistory(_) => "rolling_history",
+                lash::ContextApproach::ObservationalMemory(_) => "observational_memory",
+            }
+        ),
         "context window: unknown".to_string(),
         format!("cwd: {}", cwd),
         "session: (not started)".to_string(),
@@ -512,6 +591,7 @@ pub(crate) fn info_text(
     configured_model: &str,
     model_variant: Option<&str>,
     execution_mode: ExecutionMode,
+    context_approach: &lash::ContextApproach,
     context_window: Option<u64>,
     tool_count: usize,
     toolset_hash: &str,
@@ -526,6 +606,13 @@ pub(crate) fn info_text(
         format!("configured model: {}", configured_model),
         format!("resolved model: {}", resolved_model),
         format!("execution mode: {}", execution_mode_label(execution_mode)),
+        format!(
+            "context approach: {}",
+            match context_approach {
+                lash::ContextApproach::RollingHistory(_) => "rolling_history",
+                lash::ContextApproach::ObservationalMemory(_) => "observational_memory",
+            }
+        ),
     ];
 
     if let Some(variant) = model_variant {
@@ -790,5 +877,46 @@ mod tests {
             queued_turn_edit_binding_from_hints(None, false, true),
             QueuedTurnEditBinding::ShiftLeft
         );
+    }
+
+    #[test]
+    fn observational_memory_overrides_apply_to_context_approach() {
+        let approach = apply_context_approach_overrides(
+            lash::ContextApproach::ObservationalMemory(Default::default()),
+            Some(45_000),
+            Some(8_000),
+            None,
+            Some(12_000),
+            Some(3_000),
+            None,
+            Some(60),
+            None,
+        )
+        .expect("overrides");
+        let lash::ContextApproach::ObservationalMemory(config) = approach else {
+            panic!("expected observational_memory");
+        };
+        assert_eq!(config.observation_message_tokens, 45_000);
+        assert_eq!(config.observation_buffer_tokens, 8_000);
+        assert_eq!(config.observation_max_tokens_per_batch, 12_000);
+        assert_eq!(config.previous_observer_tokens, 3_000);
+        assert_eq!(config.reflection_buffer_activation_bps, 6_000);
+    }
+
+    #[test]
+    fn observational_memory_overrides_require_om_context_approach() {
+        let err = apply_context_approach_overrides(
+            lash::ContextApproach::RollingHistory(Default::default()),
+            Some(45_000),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("expected validation error");
+        assert!(err.contains("observational_memory"));
     }
 }

@@ -227,6 +227,7 @@ async fn apply_graph_resume_state(
             token_usage: app.token_usage.clone(),
             last_prompt_usage: app.last_prompt_usage.clone(),
             execution_state_snapshot,
+            token_ledger: Vec::new(),
         });
     }
 
@@ -430,6 +431,7 @@ mod tests {
                 configured_model: "gpt-5".to_string(),
                 context_window: 200_000,
                 execution_mode: ExecutionMode::Standard,
+                context_approach: lash::ContextApproach::default(),
                 model_variant: None,
             },
             &lash::PersistedTurnState {
@@ -444,6 +446,7 @@ mod tests {
             }),
             None,
             None,
+            &[],
         );
         graph
     }
@@ -648,6 +651,7 @@ mod tests {
                 token_usage: TokenUsage::default(),
                 last_prompt_usage: None,
                 execution_state_snapshot: None,
+                token_ledger: Vec::new(),
             },
             &crate::app::UiResumeState::default(),
             &DynamicStateSnapshot {

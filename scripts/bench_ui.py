@@ -16,7 +16,7 @@ from terminalbench_results import delete_run, load_run, load_run_summaries
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--results-dir", type=Path, default=Path(".benchmarks/terminalbench"))
+    parser.add_argument("--results-dir", type=Path, default=Path(".benchmarks/terminalbench2"))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--open", action="store_true")

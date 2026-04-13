@@ -1,6 +1,7 @@
-use super::runtime::{parse_kv_args, register_builtin_tool};
+use super::runtime::{parse_kv_args, register_builtin_tool, send_user_message};
 use super::*;
 use crate::app::projected_blocks_from_state;
+use crate::turn_runner::make_turn_input;
 
 #[derive(Clone)]
 pub(super) enum ParsedSlashCommand {
@@ -169,9 +170,7 @@ pub(super) async fn dispatch_next_queued_turn(
         *toolset_hash = hash12(
             &serde_json::to_vec(&dynamic_tools.definitions()).unwrap_or_else(|_| b"[]".to_vec()),
         );
-        let (items, image_blobs) =
-            build_items_from_editor_input(&queued.effective_text, queued.images.clone());
-        let turn_input = make_turn_input(&queued, items, image_blobs);
+        let turn_input = make_turn_input(&queued);
         let current_dynamic_state = dynamic_tools.export_state();
         send_user_message(
             queued.clone(),
@@ -185,9 +184,7 @@ pub(super) async fn dispatch_next_queued_turn(
             cancel_token,
             active_stream_id,
             app_tx,
-            provider,
             &current_dynamic_state,
-            toolset_hash,
         );
         *last_turn = Some(TurnReplayPayload {
             prepared_turn: queued,
@@ -319,6 +316,7 @@ async fn handle_slash_command(
                     token_usage: app.token_usage.clone(),
                     last_prompt_usage: None,
                     execution_state_snapshot: None,
+                    token_ledger: Vec::new(),
                 });
                 match rt.session_manager() {
                     Ok(manager) => *session_manager = manager,
@@ -348,6 +346,10 @@ async fn handle_slash_command(
             let context_window = app.context_window;
             let cwd = app.cwd.clone();
             let session_name = app.session_name.clone();
+            let context_approach = runtime
+                .as_ref()
+                .map(|rt| rt.export_state().policy.context_approach)
+                .unwrap_or_default();
             push_system_message(
                 app,
                 info_text(
@@ -355,6 +357,7 @@ async fn handle_slash_command(
                     &model,
                     current_model_variant.as_deref(),
                     *current_execution_mode,
+                    &context_approach,
                     context_window,
                     dynamic_tools.definitions().len(),
                     toolset_hash,
@@ -741,9 +744,7 @@ async fn handle_slash_command(
                     cancel_token,
                     active_stream_id,
                     app_tx,
-                    provider,
                     &current_dynamic_state,
-                    toolset_hash,
                 );
             } else {
                 push_system_message(app, "No previous turn payload to retry yet.");

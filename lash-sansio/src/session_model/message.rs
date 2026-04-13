@@ -28,7 +28,11 @@ pub enum MessageRole {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MessageOrigin {
-    Plugin { plugin_id: String },
+    Plugin {
+        plugin_id: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        transient: bool,
+    },
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -134,6 +138,16 @@ impl Message {
         self.user_input_provenance()
             .map(|user_input| user_input.effective_text.as_str())
     }
+
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self.origin,
+            Some(MessageOrigin::Plugin {
+                transient: true,
+                ..
+            })
+        )
+    }
 }
 
 pub fn data_url_for_bytes(mime: &str, bytes: &[u8]) -> String {
@@ -228,7 +242,7 @@ struct TranscriptTurn {
 
 pub fn render_prompt(msgs: &[Message], mode: ExecutionMode) -> RenderedPrompt {
     match mode {
-        ExecutionMode::Repl => render_structured_prompt(msgs),
+        ExecutionMode::Rlm => render_structured_prompt(msgs),
         ExecutionMode::Standard => render_structured_prompt(msgs),
     }
 }
@@ -565,7 +579,7 @@ mod tests {
             },
         ];
 
-        let rendered = render_prompt(&msgs, ExecutionMode::Repl);
+        let rendered = render_prompt(&msgs, ExecutionMode::Rlm);
         assert_eq!(rendered.messages.len(), 4);
         assert_eq!(rendered.messages[0].content, "first");
         assert!(rendered.messages[1].content.contains("reply one"));

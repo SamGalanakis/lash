@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 PRESET_TASKS: dict[str, tuple[str, ...]] = {
     "trivial": ("log-summary-date-ranges",),
@@ -1032,7 +1032,7 @@ class ExportArgs:
     preset: str | None
     requested_model: str | None
     variant: str | None
-    context_strategy: str | None
+    context_approach: str | None
     harbor_env: str
     registry_url: str
     n_concurrent: int
@@ -1376,7 +1376,7 @@ def build_trial_record(
             "requested_model": args.requested_model,
             "resolved_models": resolved_models,
             "variant": args.variant or None,
-            "context_strategy": args.context_strategy or None,
+            "context_approach": args.context_approach or None,
             "provider": provider_metadata,
             "task_path": ((result.get("task_id") or {}).get("path")),
             "task_git_url": ((result.get("task_id") or {}).get("git_url")),
@@ -1559,7 +1559,7 @@ def export_run(args: ExportArgs) -> Path:
             "preset_source": preset_source,
             "requested_model": args.requested_model,
             "variant": args.variant or None,
-            "context_strategy": args.context_strategy or None,
+            "context_approach": args.context_approach or None,
             "provider": load_provider_metadata(args.provider_config),
             "harbor_env": args.harbor_env,
             "registry_url": args.registry_url,
@@ -1654,7 +1654,7 @@ def load_run_summaries(results_dir: Path) -> list[dict[str, Any]]:
                 "preset": params.get("preset"),
                 "requested_model": params.get("requested_model"),
                 "variant": params.get("variant"),
-                "context_strategy": params.get("context_strategy"),
+                "context_approach": params.get("context_approach") or params.get("context_strategy"),
                 "provider": (params.get("provider") or {}).get("active_provider"),
                 "requested_task_count": ((params.get("task_scope") or {}).get("requested_task_count")),
                 "executed_task_count": ((params.get("task_scope") or {}).get("executed_task_count")),

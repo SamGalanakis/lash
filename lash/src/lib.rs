@@ -1,3 +1,4 @@
+pub mod context_approach;
 pub mod direct;
 pub mod dynamic;
 pub mod embedded;
@@ -77,6 +78,7 @@ pub fn default_skill_dirs() -> Vec<PathBuf> {
 }
 
 // Re-exports
+pub use context_approach::{ContextApproach, ObservationalMemoryConfig, RollingHistoryConfig};
 pub use direct::{
     DirectJsonSchema, DirectLlmClient, DirectLlmError, DirectMessage, DirectOutputSpec, DirectPart,
     DirectRequest, DirectRole,
@@ -104,19 +106,23 @@ pub use model_info::{
     ModelCatalogSource, ModelCatalogStore, ModelInfo, ModelsDevHttpSource, ResolvedModelSpec,
 };
 pub use model_variant::VariantRequestConfig;
+pub use plugin::ObservationalMemoryPluginFactory as BuiltinObservationalMemoryPluginFactory;
+pub use plugin::RollingHistoryPluginFactory as BuiltinRollingHistoryPluginFactory;
 pub use plugin::{
-    AssistantResponseHookContext, AssistantResponseTransform, AssistantStreamHookContext,
-    AssistantStreamTransform, BuiltinToolResultProjectionPluginFactory, CheckpointHookContext,
-    CommandDef, CommandHandler, CommandInvocation, CommandOutcome, CommandRegistrations,
+    AppendSessionNodesRequest, AppendSessionNodesResult, AssistantResponseHookContext,
+    AssistantResponseTransform, AssistantStreamHookContext, AssistantStreamTransform,
+    BuiltinToolResultProjectionPluginFactory, CheckpointHookContext, CommandDef, CommandHandler,
+    CommandInvocation, CommandOutcome, CommandRegistrations, DirectCompletion,
     ExternalInvokeContext, ExternalInvokeError, ExternalOpDef, ExternalOpKind, HistoryError,
     HistoryRegistrations, HistoryRewriteMetadata, HistoryRewriter, HistoryState, ModeExtras,
     PluginDirective, PluginError, PluginFactory, PluginHost, PluginOwned, PluginRegistrar,
     PluginRuntimeEvent, PluginRuntimeEventHook, PluginSession, PluginSessionContext,
     PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta,
-    PluginSpec, PluginSpecFactory, PromptHookContext, PromptRequestHookContext, ReplCreateExtras,
-    ReplTermination, RewriteContext, RewriteTrigger, RuntimeServices, SessionContextSurface,
-    SessionCreateRequest, SessionHandle, SessionManager, SessionParam, SessionPlugin,
-    SessionPluginMode, SessionSnapshot, SessionStartPoint, SessionTurnHandle, SnapshotReader,
+    PluginSpec, PluginSpecFactory, PromptHookContext, PromptRequestHookContext, RewriteContext,
+    RewriteTrigger, RlmCreateExtras, RlmTermination, RuntimeServices, SessionAppendNode,
+    SessionConfigChangedContext, SessionContextSurface, SessionCreateRequest, SessionHandle,
+    SessionManager, SessionParam, SessionPlugin, SessionPluginMode, SessionSnapshot,
+    SessionStartPoint, SessionStateChangedContext, SessionTurnHandle, SnapshotReader,
     SnapshotWriter, StandardCreateExtras, ToolResultProjectionContext, ToolResultProjectionHook,
     ToolResultProjectionMode, ToolResultProjectionPluginConfig, ToolResultProjector,
     ToolSurfaceContribution, TurnContextTransform, TurnHookContext, TurnResultHookContext,
@@ -127,24 +133,24 @@ pub use plugin::{
     BuiltinPlanModePluginFactory, BuiltinPlanTrackerPluginFactory,
     BuiltinPromptContextPluginFactory, BuiltinUiActivityPluginFactory, PromptContextPluginConfig,
 };
-pub use plugin::{
-    RollingHistoryConfig, RollingHistoryPluginFactory as BuiltinRollingHistoryPluginFactory,
-};
 pub use provider::{LashConfig, Provider, ProviderOptions, RequestTimeout};
 pub use runtime::{
     AssembledTurn, AssistantOutput, CodeOutputRecord, DoneReason, EventSink, ExecutionSummary,
     HostProfile, InputItem, LashRuntime, NoopEventSink, OutputState, PathResolver, PromptUsage,
     RunMode, RuntimeError, RuntimeHostConfig, SanitizerPolicy, SessionStateEnvelope,
-    SessionStoreCreateRequest, SessionStoreFactory, TerminationPolicy, TurnInput, TurnIssue,
-    TurnStatus,
+    SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport, TerminationPolicy,
+    TokenLedgerEntry, TurnInput, TurnIssue, TurnStatus, UsageReportRow, UsageTotals,
+    diff_token_ledger,
 };
 pub use session::{Session, SessionError, TurnInjectionBridge};
 pub use session_graph::{
     ExecutionStatePluginBody, INTERNAL_DYNAMIC_STATE_PLUGIN_TYPE,
     INTERNAL_EXECUTION_STATE_PLUGIN_TYPE, INTERNAL_PLUGIN_SNAPSHOT_PLUGIN_TYPE,
-    INTERNAL_SESSION_CONFIG_PLUGIN_TYPE, INTERNAL_TOOL_CALL_PLUGIN_TYPE,
-    INTERNAL_TURN_STATE_PLUGIN_TYPE, PersistedSessionConfig, PersistedTurnState, SessionGraph,
-    SessionMessageTreeNode, SessionNodePayload, SessionNodeRecord, ToolCallPluginBody,
+    INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE, INTERNAL_SESSION_CONFIG_PLUGIN_TYPE,
+    INTERNAL_TOKEN_LEDGER_PLUGIN_TYPE, INTERNAL_TOOL_CALL_PLUGIN_TYPE,
+    INTERNAL_TURN_STATE_PLUGIN_TYPE, PersistedSessionConfig, PersistedTurnState,
+    RlmGlobalsPatchPluginBody, SessionGraph, SessionMessageTreeNode, SessionNodePayload,
+    SessionNodeRecord, ToolCallPluginBody,
 };
 pub use session_model::SessionPolicy;
 pub use session_model::context::PreparedContext;

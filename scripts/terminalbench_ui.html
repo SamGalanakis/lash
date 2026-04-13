@@ -1214,7 +1214,7 @@
       { id: "agentFilter", key: "agent", label: "Agent", allLabel: "all agents" },
       { id: "executionModeFilter", key: "execution_mode", label: "Mode", allLabel: "all modes" },
       { id: "variantFilter", key: "variant", label: "Variant", allLabel: "all variants" },
-      { id: "contextFilter", key: "context_strategy", label: "Context", allLabel: "all contexts" },
+      { id: "contextFilter", key: "context_approach", label: "Context", allLabel: "all contexts" },
       { id: "providerFilter", key: "provider", label: "Provider", allLabel: "all providers" },
     ];
     const state = {
@@ -1427,7 +1427,7 @@
             run.preset,
             run.requested_model,
             run.variant,
-            run.context_strategy,
+            run.context_approach,
             run.provider,
           ].filter(Boolean).join(" ").toLowerCase();
           if (!haystack.includes(filters.query)) {
@@ -1765,7 +1765,7 @@
           <div class="compare-tag-grid">
             <span class="run-tag tag-model">${escapeHtml(modelShort(d.params))}</span>
             ${d.params.execution_mode ? `<span class="run-tag tag-mode">${escapeHtml(d.params.execution_mode)}</span>` : ""}
-            ${d.params.context_strategy ? `<span class="run-tag tag-context">${escapeHtml(d.params.context_strategy)}</span>` : ""}
+            ${(d.params.context_approach || d.params.context_strategy) ? `<span class="run-tag tag-context">${escapeHtml(d.params.context_approach || d.params.context_strategy)}</span>` : ""}
           </div>
           <div class="compare-tag-grid">
             ${d.params.dataset ? `<span class="run-tag tag-dataset">${escapeHtml(d.params.dataset)}</span>` : ""}
@@ -1797,7 +1797,7 @@
       const codeHeaders = runData.map((d, i) => {
         const letter = CODE_LETTERS[i] || String(i);
         const cls = codeClasses[i % codeClasses.length];
-        const parts = [modelShort(d.params), d.params.execution_mode, d.params.context_strategy].filter(Boolean);
+        const parts = [modelShort(d.params), d.params.execution_mode, d.params.context_approach || d.params.context_strategy].filter(Boolean);
         return `<th><span class="run-code ${cls}" style="width:16px;height:16px;font-size:9px;display:inline-flex;vertical-align:middle;margin-right:4px">${letter}</span>${agentIcon(d.params.agent)} ${escapeHtml(parts.join(" · "))}</th>`;
       });
 
@@ -1969,7 +1969,7 @@
         statCard("Reward Mean", fmtFixed(stats.reward_mean)),
         statCard("Errors", fmtInt(stats.trials_errors)),
       ].join("");
-      metaRoot.innerHTML = `${escapeHtml(run.job_name)} · ${escapeHtml(params.dataset || "-")} · ${escapeHtml(params.agent || "-")} · provider ${escapeHtml((params.provider || {}).active_provider || "-")} · model ${escapeHtml(params.requested_model || "resolved in trial")} · variant ${escapeHtml(params.variant || "default")} · ${escapeHtml(scopeSummaryText(activeScope))}${activeScope.mismatch ? ` <span class="chip fail">scope mismatch</span>` : ""} <span class="chip mode" style="margin-left:6px">${escapeHtml(params.execution_mode || "default")}</span> <span class="chip context">${escapeHtml(params.context_strategy || "default")}</span>${params.preset ? ` <span class="chip preset">${escapeHtml(params.preset)}</span>` : ""}`;
+      metaRoot.innerHTML = `${escapeHtml(run.job_name)} · ${escapeHtml(params.dataset || "-")} · ${escapeHtml(params.agent || "-")} · provider ${escapeHtml((params.provider || {}).active_provider || "-")} · model ${escapeHtml(params.requested_model || "resolved in trial")} · variant ${escapeHtml(params.variant || "default")} · ${escapeHtml(scopeSummaryText(activeScope))}${activeScope.mismatch ? ` <span class="chip fail">scope mismatch</span>` : ""} <span class="chip mode" style="margin-left:6px">${escapeHtml(params.execution_mode || "default")}</span> <span class="chip context">${escapeHtml(params.context_approach || params.context_strategy || "default")}</span>${params.preset ? ` <span class="chip preset">${escapeHtml(params.preset)}</span>` : ""}`;
 
       renderTasksTable(run.task_rollups || [], run.trials || []);
       renderTrialDetail();

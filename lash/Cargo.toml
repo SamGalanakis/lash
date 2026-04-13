@@ -5,7 +5,7 @@ edition = "2024"
 license.workspace = true
 
 [features]
-# Keep core portable by default. The lashlang-backed `repl` runtime is always on.
+# Keep core portable by default. The lashlang-backed `rlm` runtime is always on.
 default = []
 sqlite-store = ["dep:rusqlite"]
 # Convenience umbrella for first-party consumers (e.g. lash-cli).

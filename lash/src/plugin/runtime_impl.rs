@@ -641,26 +641,25 @@ impl PluginHost {
         session_id: impl Into<String>,
         snapshot: Option<&PluginSessionSnapshot>,
     ) -> Result<Arc<PluginSession>, PluginError> {
-        self.build_session(session_id, ExecutionMode::Standard, snapshot)
-    }
-
-    pub fn build_repl_session(
-        &self,
-        session_id: impl Into<String>,
-        snapshot: Option<&PluginSessionSnapshot>,
-    ) -> Result<Arc<PluginSession>, PluginError> {
-        self.build_session(session_id, ExecutionMode::Repl, snapshot)
+        self.build_session(
+            session_id,
+            ExecutionMode::Standard,
+            crate::ContextApproach::default(),
+            snapshot,
+        )
     }
 
     pub fn build_session(
         &self,
         session_id: impl Into<String>,
         execution_mode: ExecutionMode,
+        context_approach: crate::ContextApproach,
         snapshot: Option<&PluginSessionSnapshot>,
     ) -> Result<Arc<PluginSession>, PluginError> {
         self.build_session_with_surface(
             session_id,
             execution_mode,
+            context_approach,
             snapshot,
             ToolSurfaceContribution::default(),
             None,
@@ -671,6 +670,7 @@ impl PluginHost {
         &self,
         session_id: impl Into<String>,
         execution_mode: ExecutionMode,
+        context_approach: crate::ContextApproach,
         snapshot: Option<&PluginSessionSnapshot>,
         tool_surface_overlay: ToolSurfaceContribution,
         tool_snapshot: Option<crate::DynamicStateSnapshot>,
@@ -678,6 +678,7 @@ impl PluginHost {
         let ctx = PluginSessionContext {
             session_id: session_id.into(),
             execution_mode,
+            context_approach: context_approach.clone(),
         };
         let session_id = ctx.session_id.clone();
         let mut plugins = Vec::new();
@@ -763,6 +764,7 @@ impl PluginHost {
         let ready = SessionReadyContext {
             session_id: session.session_id.clone(),
             execution_mode,
+            context_approach,
             host: self.clone(),
         };
         for plugin in &session.plugins {
@@ -1431,11 +1433,13 @@ impl PluginSession {
         &self,
         session_id: impl Into<String>,
         execution_mode: ExecutionMode,
+        context_approach: crate::ContextApproach,
     ) -> Result<Arc<PluginSession>, PluginError> {
         let snapshot = self.snapshot()?;
         self.host.build_session_with_surface(
             session_id,
             execution_mode,
+            context_approach,
             Some(&snapshot),
             self.tool_surface_overlay.clone(),
             self.tools.dynamic_snapshot(),
@@ -1446,12 +1450,14 @@ impl PluginSession {
         &self,
         session_id: impl Into<String>,
         execution_mode: ExecutionMode,
+        context_approach: crate::ContextApproach,
         tool_surface_overlay: ToolSurfaceContribution,
     ) -> Result<Arc<PluginSession>, PluginError> {
         let snapshot = self.snapshot()?;
         self.host.build_session_with_surface(
             session_id,
             execution_mode,
+            context_approach,
             Some(&snapshot),
             tool_surface_overlay,
             self.tools.dynamic_snapshot(),

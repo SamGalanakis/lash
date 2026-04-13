@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use fff_search::git::format_git_status_opt;
@@ -26,8 +26,8 @@ const MAX_FIRST_MATCH_EXPAND: usize = 8;
 
 /// Search file contents using an indexed fff-search backend.
 pub struct Grep {
-    picker: SharedPicker,
-    init_error: Option<String>,
+    base_path: Result<PathBuf, String>,
+    backend: OnceLock<Result<GrepBackend, String>>,
     cursor_store: Mutex<CursorStore>,
 }
 
@@ -43,44 +43,53 @@ impl Grep {
 
     fn with_init_error(message: String) -> Self {
         Self {
-            picker: SharedPicker::default(),
-            init_error: Some(message),
+            base_path: Err(message),
+            backend: OnceLock::new(),
             cursor_store: Mutex::new(CursorStore::new()),
         }
     }
 
     fn with_base_path(base_path: PathBuf) -> Self {
-        let picker = SharedPicker::default();
-        let init_error = FilePicker::new_with_shared_state(
-            picker.clone(),
-            SharedFrecency::default(),
-            FilePickerOptions {
-                base_path: base_path.to_string_lossy().into_owned(),
-                warmup_mmap_cache: true,
-                mode: FFFMode::Ai,
-                cache_budget: None,
-                watch: true,
-            },
-        )
-        .err()
-        .map(|err| format!("failed to initialize indexed grep backend: {err}"));
         Self {
-            picker,
-            init_error,
+            base_path: Ok(base_path),
+            backend: OnceLock::new(),
             cursor_store: Mutex::new(CursorStore::new()),
         }
     }
 
-    fn ensure_ready(&self) -> Result<(), ToolResult> {
-        if let Some(err) = &self.init_error {
-            return Err(ToolResult::err_fmt(format_args!("{err}")));
-        }
-        if !self.picker.wait_for_scan(Duration::from_secs(30)) {
+    fn ensure_ready(&self) -> Result<&GrepBackend, ToolResult> {
+        let backend = self
+            .backend
+            .get_or_init(|| self.initialize_backend())
+            .as_ref()
+            .map_err(|err| ToolResult::err_fmt(format_args!("{err}")))?;
+        if !backend.picker.wait_for_scan(Duration::from_secs(30)) {
             return Err(ToolResult::err_fmt(format_args!(
                 "fff-search initial scan timed out"
             )));
         }
-        Ok(())
+        Ok(backend)
+    }
+
+    fn initialize_backend(&self) -> Result<GrepBackend, String> {
+        let base_path = self.base_path.as_ref().map_err(Clone::clone)?;
+        let picker = SharedPicker::default();
+        FilePicker::new_with_shared_state(
+            picker.clone(),
+            SharedFrecency::default(),
+            FilePickerOptions {
+                base_path: base_path.to_string_lossy().into_owned(),
+                // Keep the indexed backend lightweight until it is actually
+                // used. Long-lived sessions should not pay for watcher or mmap
+                // state just because the grep tool exists in the catalog.
+                warmup_mmap_cache: false,
+                mode: FFFMode::Ai,
+                cache_budget: None,
+                watch: false,
+            },
+        )
+        .map_err(|err| format!("failed to initialize indexed grep backend: {err}"))?;
+        Ok(GrepBackend { picker })
     }
 
     fn lock_cursors(&self) -> Result<MutexGuard<'_, CursorStore>, ToolResult> {
@@ -91,6 +100,7 @@ impl Grep {
 
     fn perform_grep(
         &self,
+        backend: &GrepBackend,
         query: &str,
         mode: GrepMode,
         max_results: usize,
@@ -104,7 +114,7 @@ impl Grep {
         let (options, auto_expand) = make_grep_options(output_mode, mode, file_offset);
         let show_context = options.before_context > 0;
 
-        let guard = self.picker.read().map_err(|err| {
+        let guard = backend.picker.read().map_err(|err| {
             ToolResult::err_fmt(format_args!("Failed to acquire picker lock: {err}"))
         })?;
         let picker = guard
@@ -301,9 +311,10 @@ impl ToolProvider for Grep {
         let cursor = args.get("cursor").and_then(|value| value.as_str());
         let output_mode = OutputMode::new(args.get("output_mode").and_then(|value| value.as_str()));
 
-        if let Err(err) = self.ensure_ready() {
-            return err;
-        }
+        let backend = match self.ensure_ready() {
+            Ok(backend) => backend,
+            Err(err) => return err,
+        };
 
         let grep_text = QueryParser::new(AiGrepConfig).parse(query).grep_text();
         let mode = if has_regex_metacharacters(&grep_text) {
@@ -312,11 +323,15 @@ impl ToolProvider for Grep {
             GrepMode::PlainText
         };
 
-        match self.perform_grep(query, mode, max_results, cursor, output_mode) {
+        match self.perform_grep(backend, query, mode, max_results, cursor, output_mode) {
             Ok(text) => ToolResult::ok(json!(text)),
             Err(err) => err,
         }
     }
+}
+
+struct GrepBackend {
+    picker: SharedPicker,
 }
 
 fn parse_max_results(args: &serde_json::Value) -> Result<usize, ToolResult> {
@@ -947,5 +962,18 @@ mod tests {
         assert!(result.success);
         let text = result.result.as_str().unwrap_or("");
         assert!(text.contains("alpha.rs: 2"));
+    }
+
+    #[tokio::test]
+    async fn test_grep_initializes_backend_lazily() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("alpha.rs"), "ctx\n").unwrap();
+
+        let tool = Grep::with_base_path(dir.path().to_path_buf());
+        assert!(tool.backend.get().is_none());
+
+        let result = tool.execute("grep", &json!({"query": "ctx"})).await;
+        assert!(result.success);
+        assert!(tool.backend.get().is_some());
     }
 }

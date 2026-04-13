@@ -4,43 +4,18 @@ use std::sync::Arc;
 
 use lash::*;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 use crate::app::{PreparedTurn, UiResumeState};
-use crate::input_items::build_items_from_editor_input;
-use crate::persist_root_session_state;
+use crate::turn_runner::{
+    make_turn_input, persist_pending_turn, persist_runtime_turn_state, spawn_runtime_turn,
+};
 use crate::{plugin_surface, util};
 
 pub(crate) struct AutonomousPersistenceContext {
     pub(crate) store: Arc<Store>,
     pub(crate) dynamic_state: DynamicStateSnapshot,
-}
-
-async fn persist_autonomous_runtime_state(
-    runtime: &mut LashRuntime,
-    persistence: &AutonomousPersistenceContext,
-    _state: SessionStateEnvelope,
-) {
-    let execution_state_snapshot = match runtime.snapshot_execution_state().await {
-        Ok(Some(blob)) => Some(blob),
-        Ok(None) => None,
-        Err(err) => {
-            tracing::warn!(
-                "failed to snapshot execution state during autonomous persistence: {err}"
-            );
-            None
-        }
-    };
-    let mut state = runtime.export_state();
-    state.execution_state_snapshot = execution_state_snapshot;
-    let ui_state = UiResumeState::default();
-    persist_root_session_state(
-        &persistence.store,
-        &mut state,
-        &ui_state,
-        &persistence.dynamic_state,
-    );
-    runtime.set_state(state);
+    pub(crate) await_background_work: bool,
+    pub(crate) turn_usage_json: Option<std::path::PathBuf>,
 }
 
 struct AutonomousChannelSink {
@@ -256,14 +231,25 @@ impl AutonomousRenderer {
 
 /// Run the session autonomously: send prompt, consume events, print final response to stdout.
 pub(crate) async fn run_autonomous(
-    mut runtime: LashRuntime,
+    runtime: LashRuntime,
     prompt: String,
     skills: SkillCatalog,
     persistence: AutonomousPersistenceContext,
 ) -> anyhow::Result<()> {
+    let before_ledger = runtime.export_state().token_ledger;
     let prepared = PreparedTurn::prepare(prompt, Vec::new(), &skills);
-    let (items, image_blobs) = build_items_from_editor_input(&prepared.effective_text, Vec::new());
-    let cancel = CancellationToken::new();
+    let turn_input = make_turn_input(&prepared);
+    let ui_state = UiResumeState::default();
+    persist_pending_turn(
+        persistence.store.as_ref(),
+        &runtime,
+        &turn_input,
+        &ui_state,
+        &persistence.dynamic_state,
+    );
+    let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(100);
+    let sink = AutonomousChannelSink { tx: event_tx };
+    let (cancel, return_rx) = spawn_runtime_turn(runtime, turn_input, sink, 1);
     #[cfg(unix)]
     {
         let cancel = cancel.clone();
@@ -275,26 +261,10 @@ pub(crate) async fn run_autonomous(
             }
         });
     }
-    let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(100);
-    let mut task = tokio::spawn(async move {
-        let sink = AutonomousChannelSink { tx: event_tx };
-        let result = runtime
-            .stream_turn(
-                TurnInput {
-                    items,
-                    image_blobs,
-                    user_input: None,
-                    mode: Some(RunMode::Normal),
-                },
-                &sink,
-                cancel.clone(),
-            )
-            .await;
-        (runtime, result, cancel)
-    });
+    let mut task = tokio::spawn(async move { (return_rx.await, cancel) });
 
     let mut renderer = AutonomousRenderer::new();
-    let (mut runtime, result, cancel) = loop {
+    let (done, cancel) = loop {
         tokio::select! {
             Some(event) = event_rx.recv() => {
                 if let Err(err) = renderer.handle(event) {
@@ -310,10 +280,60 @@ pub(crate) async fn run_autonomous(
             }
         }
     };
+    let mut done =
+        done.map_err(|err| anyhow::anyhow!("autonomous turn task channel failed: {err}"))?;
+    let interrupted = matches!(done.result.status, TurnStatus::Interrupted);
+    if persistence.await_background_work {
+        done.runtime.await_background_work().await?;
+        done.result.state = done.runtime.export_state();
+    }
+    persist_runtime_turn_state(
+        &mut done.runtime,
+        &mut done.result.state,
+        interrupted,
+        persistence.store.as_ref(),
+        &ui_state,
+        &persistence.dynamic_state,
+    )
+    .await;
+    let persisted_state = done.runtime.export_state();
+    if let Some(path) = &persistence.turn_usage_json {
+        let (delta_entries, delta_error, delta_is_fallback) = match lash::diff_token_ledger(
+            &before_ledger,
+            &persisted_state.token_ledger,
+        ) {
+            Ok(entries) => (entries, None, false),
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    "failed to diff token ledger for autonomous turn; falling back to assembled turn usage"
+                );
+                let fallback = if done.result.token_usage.total() > 0 {
+                    vec![lash::TokenLedgerEntry {
+                        source: "turn".to_string(),
+                        model: persisted_state.policy.model.clone(),
+                        usage: done.result.token_usage.clone(),
+                    }]
+                } else {
+                    Vec::new()
+                };
+                (fallback, Some(err), true)
+            }
+        };
+        let usage_artifact = serde_json::json!({
+            "delta_entries": delta_entries,
+            "delta": lash::SessionUsageReport::from_entries(&delta_entries),
+            "delta_error": delta_error,
+            "delta_is_fallback": delta_is_fallback,
+            "cumulative_entries": persisted_state.token_ledger,
+            "cumulative": persisted_state.usage_report(),
+        });
+        std::fs::write(path, serde_json::to_vec_pretty(&usage_artifact)?)?;
+    }
 
-    match result {
-        Ok(turn) => {
-            persist_autonomous_runtime_state(&mut runtime, &persistence, turn.state.clone()).await;
+    match done.result.status {
+        TurnStatus::Completed => {
+            let turn = &done.result;
             if !turn.assistant_output.safe_text.is_empty() {
                 renderer.finish_output(&turn.assistant_output.safe_text);
             } else if turn.has_plugin_visible_output {
@@ -340,10 +360,13 @@ pub(crate) async fn run_autonomous(
                 std::process::exit(1);
             }
         }
-        Err(e) => {
-            let state = runtime.export_state();
-            persist_autonomous_runtime_state(&mut runtime, &persistence, state).await;
-            eprintln!("error: {}", e);
+        _ => {
+            for issue in &done.result.errors {
+                eprintln!("error: {}", issue.message);
+            }
+            if done.result.errors.is_empty() {
+                eprintln!("error: autonomous turn failed");
+            }
             std::process::exit(1);
         }
     }

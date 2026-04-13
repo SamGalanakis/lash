@@ -23,10 +23,11 @@ use crate::app::{self, App, DisplayBlock, PreparedTurn};
 use crate::command;
 use crate::event::AppEvent;
 use crate::fork;
-use crate::input_items::{build_items_from_editor_input, insert_inline_marker};
+use crate::input_items::insert_inline_marker;
 use crate::render;
 use crate::resume;
 use crate::session_log::{self, SessionLogger};
+use crate::turn_runner::{RuntimeRunResult, make_turn_input, persist_runtime_turn_state};
 use crate::ui_action::{UiAction, UiActionContext, UiActionOutcome, apply_ui_action};
 use crate::ui_trace::{
     UiTraceRecorder, disable_aux_op_recording, drain_aux_ops_into, enable_aux_op_recording,
@@ -38,10 +39,9 @@ use crate::{
     apply_ui_host_effects, controls_text, copy_binding, ensure_supported_execution_mode,
     execution_mode_label, execution_mode_usage, hash12, help_text, info_text,
     normalize_prepared_turn_for_dispatch, parse_execution_mode, parse_model_selection,
-    persist_live_runtime_snapshot, persist_root_session_state, push_system_message,
-    queued_turn_edit_binding, resolve_model_selection, resolve_model_variant, shell_escape_command,
-    sync_ui_extensions, turn_has_visible_output, validate_model_selection, variant_lines,
-    version_text,
+    persist_live_runtime_snapshot, push_system_message, queued_turn_edit_binding,
+    resolve_model_selection, resolve_model_variant, shell_escape_command, sync_ui_extensions,
+    turn_has_visible_output, validate_model_selection, variant_lines, version_text,
 };
 
 use self::commands::{
@@ -51,8 +51,7 @@ use self::commands::{
 #[cfg(test)]
 pub(crate) use self::runtime::injected_image_part_indices;
 use self::runtime::{
-    RuntimeRunResult, apply_pending_reconfigure, copy_selected_text_or_last_response,
-    make_turn_input, send_user_message,
+    apply_pending_reconfigure, copy_selected_text_or_last_response, send_user_message,
 };
 pub(crate) use self::runtime::{
     generate_session_name, make_injected_plugin_message, notify_desktop,
@@ -521,9 +520,7 @@ pub(crate) async fn run_app(
                         .unwrap_or_else(|_| b"[]".to_vec()),
                 );
                 let prepared = PreparedTurn::prepare(prompt.to_string(), Vec::new(), &app.skills);
-                let (items, image_blobs) =
-                    build_items_from_editor_input(&prepared.effective_text, Vec::new());
-                let turn_input = make_turn_input(&prepared, items, image_blobs);
+                let turn_input = make_turn_input(&prepared);
                 let current_dynamic_state = dynamic_tools.export_state();
                 send_user_message(
                     prepared.clone(),
@@ -537,9 +534,7 @@ pub(crate) async fn run_app(
                     &mut cancel_token,
                     &mut active_stream_id,
                     &app_tx,
-                    &provider,
                     &current_dynamic_state,
-                    &toolset_hash,
                 );
                 last_turn = Some(TurnReplayPayload {
                     prepared_turn: prepared,
@@ -687,32 +682,6 @@ pub(crate) async fn run_app(
                         }
                     }
 
-                    // Snapshot execution-mode-local state after each completed turn so resume can restore exact state.
-                    let _snapshot_hash = if interrupted {
-                        None
-                    } else if let Some(rt) = runtime.as_mut() {
-                        match rt.snapshot_execution_state().await {
-                            Ok(Some(blob)) => {
-                                let snapshot_hash = hash12(&blob);
-                                state.execution_state_snapshot = Some(blob);
-                                Some(snapshot_hash)
-                            }
-                            Ok(None) => None,
-                            Err(e) => {
-                                push_system_message(
-                                    &mut app,
-                                    format!(
-                                        "Warning: failed to snapshot execution state for resume: {}",
-                                        e
-                                    ),
-                                );
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    };
-
                     history = state.messages.clone();
                     turn_counter = state.iteration;
                     app.token_usage = state.token_usage.clone();
@@ -728,7 +697,6 @@ pub(crate) async fn run_app(
                         running = app.running,
                         "reconciling completed runtime turn"
                     );
-                    let persisted_execution_mode = state.policy.execution_mode;
                     let persisted_dynamic_state = dynamic_tools.export_state();
 
                     if interrupted {
@@ -738,31 +706,16 @@ pub(crate) async fn run_app(
                                 if message == crate::util::manual_interrupt_message()
                         );
                         let ui_resume_state = app.ui_resume_state();
-                        if let Some(context_window) = app.context_window {
-                            persist_live_runtime_snapshot(
+                        if let Some(rt) = runtime.as_mut() {
+                            persist_runtime_turn_state(
+                                rt,
+                                &mut state,
+                                true,
                                 &store,
-                                store.load_session_graph(),
-                                DurableTurnSnapshot {
-                                    messages: state.messages.clone(),
-                                    tool_calls: state.tool_calls.clone(),
-                                    iteration: state.iteration,
-                                },
                                 &ui_resume_state,
                                 &persisted_dynamic_state,
-                                &lash::SessionPolicy {
-                                    provider: provider.clone(),
-                                    model: app.model.clone(),
-                                    model_variant: current_model_variant.clone(),
-                                    execution_mode: persisted_execution_mode,
-                                    max_context_tokens: Some(context_window as usize),
-                                    ..lash::SessionPolicy::default()
-                                },
-                                app.token_usage.clone(),
-                                app.last_prompt_usage.clone(),
-                            );
-                        }
-                        if let Some(rt) = runtime.as_mut() {
-                            rt.set_state(state.clone());
+                            )
+                            .await;
                         }
                         let interrupted_message = if had_manual_interrupt_message {
                             crate::util::manual_interrupt_message().to_string()
@@ -824,14 +777,16 @@ pub(crate) async fn run_app(
                         });
                     let ui_resume_state =
                         app.finish_turn_for_resume_with_output(final_output.as_deref());
-                    persist_root_session_state(
-                        &store,
-                        &mut state,
-                        &ui_resume_state,
-                        &persisted_dynamic_state,
-                    );
                     if let Some(rt) = runtime.as_mut() {
-                        rt.set_state(state.clone());
+                        persist_runtime_turn_state(
+                            rt,
+                            &mut state,
+                            false,
+                            &store,
+                            &ui_resume_state,
+                            &persisted_dynamic_state,
+                        )
+                        .await;
                     }
                     runtime_return_rx = None;
                     cancel_token = None;
@@ -1585,13 +1540,13 @@ pub(crate) async fn run_app(
                                 UiAction::PromptToggleNoteFocus,
                             );
                         }
-                        KeyCode::Up if !editing_text && app.prompt_supports_note() => {
+                        KeyCode::Up if !editing_text => {
                             if let Some(recorder) = ui_trace.as_mut() {
                                 recorder.record_prompt_up();
                             }
                             let _ = apply_terminal_action(&mut app, &terminal, UiAction::PromptUp);
                         }
-                        KeyCode::Down if !editing_text && app.prompt_supports_note() => {
+                        KeyCode::Down if !editing_text => {
                             if let Some(recorder) = ui_trace.as_mut() {
                                 recorder.record_prompt_down();
                             }
@@ -1779,11 +1734,7 @@ pub(crate) async fn run_app(
                             continue;
                         }
 
-                        let (items, image_blobs) = build_items_from_editor_input(
-                            &queued.effective_text,
-                            queued.images.clone(),
-                        );
-                        let turn_input = make_turn_input(&queued, items, image_blobs);
+                        let turn_input = make_turn_input(&queued);
                         let current_dynamic_state = dynamic_tools.export_state();
                         send_user_message(
                             queued.clone(),
@@ -1797,9 +1748,7 @@ pub(crate) async fn run_app(
                             &mut cancel_token,
                             &mut active_stream_id,
                             &app_tx,
-                            &provider,
                             &current_dynamic_state,
-                            &toolset_hash,
                         );
                         last_turn = Some(TurnReplayPayload {
                             prepared_turn: queued,
@@ -2072,11 +2021,7 @@ pub(crate) async fn run_app(
                             &serde_json::to_vec(&dynamic_tools.definitions())
                                 .unwrap_or_else(|_| b"[]".to_vec()),
                         );
-                        let (items, image_blobs) = build_items_from_editor_input(
-                            &queued.effective_text,
-                            queued.images.clone(),
-                        );
-                        let turn_input = make_turn_input(&queued, items, image_blobs);
+                        let turn_input = make_turn_input(&queued);
                         let current_dynamic_state = dynamic_tools.export_state();
                         send_user_message(
                             queued.clone(),
@@ -2090,9 +2035,7 @@ pub(crate) async fn run_app(
                             &mut cancel_token,
                             &mut active_stream_id,
                             &app_tx,
-                            &provider,
                             &current_dynamic_state,
-                            &toolset_hash,
                         );
                         last_turn = Some(TurnReplayPayload {
                             prepared_turn: queued,
@@ -2400,6 +2343,7 @@ pub(crate) async fn run_app(
                             },
                             app.token_usage.clone(),
                             app.last_prompt_usage.clone(),
+                            &[],
                         );
                     }
                     continue;

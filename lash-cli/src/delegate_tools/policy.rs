@@ -141,6 +141,7 @@ impl DelegateTools {
                 self.tier_allowed_tools(tier),
             )) as Arc<dyn ToolProvider>],
             prompt_contributions: Vec::new(),
+            prompt_overrides: Vec::new(),
         }
     }
 
@@ -170,9 +171,10 @@ impl DelegateTools {
             start: SessionStartPoint::Empty,
             policy: Some(self.build_session_policy(tier)),
             plugin_mode: SessionPluginMode::InheritCurrent,
-            initial_messages: Vec::new(),
+            initial_nodes: Vec::new(),
             context_surface: self.tier_context_surface(tier),
             mode_extras: lash::ModeExtras::default(),
+            usage_source: Some("agent_call".to_string()),
         }
     }
 }
@@ -198,12 +200,12 @@ pub(super) fn delegate_tool_definitions(
 ) -> Vec<ToolDefinition> {
     let low_tier_summary = match low_tier_execution_mode {
         lash::ExecutionMode::Standard => "by default, low runs in standard mode",
-        lash::ExecutionMode::Repl => "in this session, low runs in repl mode",
+        lash::ExecutionMode::Rlm => "in this session, low runs in rlm mode",
     };
     let (agent_call_description, agent_call_examples) = match execution_mode {
-        lash::ExecutionMode::Repl => (
+        lash::ExecutionMode::Rlm => (
             format!(
-                "Spawn a child session for a scoped sub-task and return a handle. Choose `intelligence` based on the delegation guidance above. In REPL mode, use `call agent_result {{ id: handle.value.id }}` or `call agent_kill {{ id: handle.value.id }}` with the returned id; {}. Medium/high inherit the parent execution mode.",
+                "Spawn a child session for a scoped sub-task and return a handle. Choose `intelligence` based on the delegation guidance above. In RLM mode, use `call agent_result {{ id: handle.value.id }}` or `call agent_kill {{ id: handle.value.id }}` with the returned id; {}. Medium/high inherit the parent execution mode.",
                 low_tier_summary
             ),
             vec![
@@ -279,7 +281,7 @@ pub(super) fn delegate_tool_definitions(
                 ToolParam {
                     name: "vars".into(),
                     r#type: "dict".into(),
-                    description: "Named inputs forwarded to the child session. Each key/value becomes a seeded variable in the child's lashlang state and is described in the child's initial prompt.".into(),
+                    description: "Named inputs forwarded to the child session. Each key/value becomes a bound variable in the child's lashlang state and is surfaced in the prompt as a bound variable.".into(),
                     default_value: None,
                     required: false,
                 },
@@ -302,20 +304,20 @@ pub(super) fn delegate_tool_definitions(
 }
 
 fn predict_tool_description(execution_mode: lash::ExecutionMode) -> String {
-    let prefix = "Spawn a typed sub-session that runs the given task with seeded inputs and returns a record matching the declared `output` schema. The child runs in REPL mode and must terminate by calling `finish { ... }` with a value matching the schema; mismatches loop with a validation error so the child can retry.";
+    let prefix = "Spawn a typed sub-session that runs the given task with bound inputs and returns a record matching the declared `output` schema. The child runs in RLM mode and must terminate by calling `finish { ... }` with a value matching the schema; mismatches loop with a validation error so the child can retry.";
     match execution_mode {
-        lash::ExecutionMode::Repl => format!(
+        lash::ExecutionMode::Rlm => format!(
             "{prefix}\n\nUse this for scoped extraction and perception sub-tasks where you want a known-shape result back instead of freeform prose.",
         ),
         lash::ExecutionMode::Standard => format!(
-            "{prefix}\n\nUse this for scoped extraction and perception sub-tasks where you want a known-shape result back instead of freeform prose. The child session runs in REPL mode regardless of the parent's execution mode.",
+            "{prefix}\n\nUse this for scoped extraction and perception sub-tasks where you want a known-shape result back instead of freeform prose. The child session runs in RLM mode regardless of the parent's execution mode.",
         ),
     }
 }
 
 fn predict_tool_examples(execution_mode: lash::ExecutionMode) -> Vec<String> {
     match execution_mode {
-        lash::ExecutionMode::Repl => vec![
+        lash::ExecutionMode::Rlm => vec![
             r#"r = call predict { task: "Extract the longest line and its length", vars: { path: "src/main.rs" }, output: { line: "str", length: "int" } }"#.into(),
             r#"observe r.line"#.into(),
         ],
