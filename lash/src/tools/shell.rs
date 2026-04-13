@@ -30,7 +30,7 @@ struct ShellProcess {
     output_notify: Arc<Notify>,
 }
 
-pub(crate) fn shell_prompt_contributions() -> Vec<PromptContribution> {
+pub fn shell_prompt_contributions() -> Vec<PromptContribution> {
     vec![
         PromptContribution::guidance(
             "command_execution",
@@ -914,7 +914,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_command_returns_handle_id_for_running_process() {
-        let shell = StandardShell::default();
+        let shell = StandardShell::new().with_cwd("/");
         let result = shell
             .execute(
                 "exec_command",
@@ -932,7 +932,7 @@ mod tests {
         let open = shell
             .execute(
                 "exec_command",
-                &json!({"cmd": "read line; echo got:$line", "yield_time_ms": 10}),
+                &json!({"cmd": "read line; echo got:$line", "yield_time_ms": 10, "login": false}),
             )
             .await;
         let session_id = open.result["session_id"].as_i64().unwrap();
@@ -959,11 +959,11 @@ mod tests {
         let shell = StandardShell::default();
         for _ in 0..16 {
             let open = shell
-                .execute(
-                    "exec_command",
-                    &json!({"cmd": "read line; echo got:$line", "yield_time_ms": 10}),
-                )
-                .await;
+                    .execute(
+                        "exec_command",
+                    &json!({"cmd": "read line; echo got:$line", "yield_time_ms": 10, "login": false}),
+                    )
+                    .await;
             assert!(open.success);
             let session_id = open.result["session_id"].as_i64().unwrap();
 
@@ -993,7 +993,10 @@ mod tests {
     async fn write_stdin_can_close_stdin_to_send_eof() {
         let shell = StandardShell::default();
         let open = shell
-            .execute("exec_command", &json!({"cmd": "cat", "yield_time_ms": 10}))
+            .execute(
+                "exec_command",
+                &json!({"cmd": "cat", "yield_time_ms": 10, "login": false}),
+            )
             .await;
         assert!(open.success);
         let session_id = open.result["session_id"].as_i64().unwrap();

@@ -172,7 +172,6 @@ impl AutonomousRenderer {
             | SessionEvent::TokenUsage { .. }
             | SessionEvent::InjectedMessagesCommitted { .. }
             | SessionEvent::LlmResponse { .. }
-            | SessionEvent::DurableSnapshot { .. }
             | SessionEvent::TypedFinish { .. } => {}
         }
         Ok(())
@@ -236,7 +235,7 @@ pub(crate) async fn run_autonomous(
     skills: SkillCatalog,
     persistence: AutonomousPersistenceContext,
 ) -> anyhow::Result<()> {
-    let before_ledger = runtime.export_state().token_ledger;
+    let before_usage = runtime.usage_report();
     let prepared = PreparedTurn::prepare(prompt, Vec::new(), &skills);
     let turn_input = make_turn_input(&prepared);
     let ui_state = UiResumeState::default();
@@ -296,11 +295,11 @@ pub(crate) async fn run_autonomous(
         &persistence.dynamic_state,
     )
     .await;
-    let persisted_state = done.runtime.export_state();
+    let cumulative_usage = done.runtime.usage_report();
     if let Some(path) = &persistence.turn_usage_json {
-        let (delta_entries, delta_error, delta_is_fallback) = match lash::diff_token_ledger(
-            &before_ledger,
-            &persisted_state.token_ledger,
+        let (delta_entries, delta_error, delta_is_fallback) = match lash::diff_usage_reports(
+            &before_usage,
+            &cumulative_usage,
         ) {
             Ok(entries) => (entries, None, false),
             Err(err) => {
@@ -311,7 +310,7 @@ pub(crate) async fn run_autonomous(
                 let fallback = if done.result.token_usage.total() > 0 {
                     vec![lash::TokenLedgerEntry {
                         source: "turn".to_string(),
-                        model: persisted_state.policy.model.clone(),
+                        model: done.result.state.policy.model.clone(),
                         usage: done.result.token_usage.clone(),
                     }]
                 } else {
@@ -325,8 +324,8 @@ pub(crate) async fn run_autonomous(
             "delta": lash::SessionUsageReport::from_entries(&delta_entries),
             "delta_error": delta_error,
             "delta_is_fallback": delta_is_fallback,
-            "cumulative_entries": persisted_state.token_ledger,
-            "cumulative": persisted_state.usage_report(),
+            "cumulative_rows": cumulative_usage.by_source_model,
+            "cumulative": cumulative_usage,
         });
         std::fs::write(path, serde_json::to_vec_pretty(&usage_artifact)?)?;
     }

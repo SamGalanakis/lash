@@ -34,10 +34,12 @@ async fn drain_standard_stream_queue(
 
 use super::*;
 use serde_json::json;
+use sha2::Digest;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::llm::transport::LlmTransport;
 use crate::llm::transport::LlmTransportError;
 use crate::llm::types::{LlmRequest, LlmUsage};
 use crate::plugin::StaticPluginFactory;
@@ -48,6 +50,26 @@ use tokio_util::sync::CancellationToken;
 
 fn default_state() -> SessionStateEnvelope {
     SessionStateEnvelope::default()
+}
+
+fn projected_messages(state: &SessionStateEnvelope) -> &[Message] {
+    state.projected_messages()
+}
+
+fn projected_tool_calls(state: &SessionStateEnvelope) -> &[ToolCallRecord] {
+    state.projected_tool_calls()
+}
+
+fn set_projection(
+    state: &mut SessionStateEnvelope,
+    messages: &[Message],
+    tool_calls: &[ToolCallRecord],
+) {
+    state.replace_projection(messages, tool_calls);
+}
+
+fn append_message(state: &mut SessionStateEnvelope, message: Message) {
+    state.session_graph.append_message(message);
 }
 
 #[cfg(feature = "sqlite-store")]
@@ -89,34 +111,77 @@ impl RecordingSink {
 
 #[derive(Default)]
 struct RecordingStore {
-    session_graph: Mutex<Option<crate::SessionGraph>>,
+    blobs: Mutex<HashMap<String, Vec<u8>>>,
+    session_head_meta: Mutex<Option<crate::SessionHeadMeta>>,
+    session_graph: Mutex<crate::SessionGraph>,
+    live_resume: Mutex<Option<crate::LiveResumeSnapshot>>,
+    usage_deltas: Mutex<Vec<crate::TokenLedgerEntry>>,
 }
 
 #[async_trait::async_trait]
 impl crate::store::RuntimeStore for RecordingStore {
-    async fn store_archive(&self, content: &str) -> String {
-        format!("archive:{}", content.len())
+    async fn put_blob(&self, content: &[u8]) -> crate::BlobRef {
+        let hash = format!("{:x}", sha2::Sha256::digest(content));
+        self.blobs
+            .lock()
+            .expect("lock blobs")
+            .insert(hash.clone(), content.to_vec());
+        crate::BlobRef(hash)
     }
 
-    async fn get_archive(&self, _hash: &str) -> Option<String> {
-        None
+    async fn get_blob(&self, blob_ref: &crate::BlobRef) -> Option<Vec<u8>> {
+        self.blobs
+            .lock()
+            .expect("lock blobs")
+            .get(blob_ref.as_str())
+            .cloned()
     }
 
-    async fn save_session_graph(&self, graph: crate::SessionGraph) {
-        *self.session_graph.lock().expect("lock store") = Some(graph);
+    async fn append_usage_deltas(&self, entries: &[crate::TokenLedgerEntry]) {
+        self.usage_deltas
+            .lock()
+            .expect("lock usage deltas")
+            .extend(entries.iter().cloned());
     }
 
-    async fn load_session_graph(&self) -> Option<crate::SessionGraph> {
-        self.session_graph.lock().expect("lock store").clone()
+    async fn load_usage_deltas(&self) -> Vec<crate::TokenLedgerEntry> {
+        self.usage_deltas.lock().expect("lock usage deltas").clone()
     }
 
-    async fn save_live_session_graph(&self, _graph: crate::SessionGraph) {}
-
-    async fn load_live_session_graph(&self) -> Option<crate::SessionGraph> {
-        None
+    async fn save_session_head_meta(&self, meta: crate::SessionHeadMeta) {
+        *self.session_head_meta.lock().expect("lock store") = Some(meta);
     }
 
-    async fn clear_live_session_graph(&self) {}
+    async fn load_session_head_meta(&self) -> Option<crate::SessionHeadMeta> {
+        self.session_head_meta.lock().expect("lock store").clone()
+    }
+
+    async fn replace_session_graph(&self, graph: &crate::SessionGraph) {
+        *self.session_graph.lock().expect("lock graph") = graph.clone();
+    }
+
+    async fn append_session_graph_nodes(&self, nodes: &[crate::SessionNodeRecord]) {
+        self.session_graph
+            .lock()
+            .expect("lock graph")
+            .extend_node_records(nodes.iter().cloned());
+    }
+
+    async fn load_session_graph(&self) -> crate::SessionGraph {
+        self.session_graph.lock().expect("lock graph").clone()
+    }
+
+    async fn save_live_resume(&self, snapshot: crate::LiveResumeSnapshot) {
+        *self.live_resume.lock().expect("lock live resume") = Some(snapshot);
+    }
+
+    async fn load_live_resume(&self) -> Option<crate::LiveResumeSnapshot> {
+        self.live_resume.lock().expect("lock live resume").clone()
+    }
+
+    async fn clear_live_resume(&self) {
+        self.live_resume.lock().expect("lock live resume").take();
+    }
 
     async fn save_session_meta(&self, _meta: crate::store::SessionMeta) {}
 
@@ -198,14 +263,12 @@ fn standard_test_policy() -> SessionPolicy {
     }
 }
 
-fn test_host_config() -> RuntimeHostConfig {
-    RuntimeHostConfig::default()
+fn test_host_config() -> EmbeddedRuntimeHost {
+    EmbeddedRuntimeHost::new(RuntimeCoreConfig::default())
 }
 
-fn test_host_config_with_llm_log_path(path: PathBuf) -> RuntimeHostConfig {
-    let mut host = test_host_config();
-    host.llm_log_path = Some(path);
-    host
+fn test_host_config_with_llm_log_path(path: PathBuf) -> EmbeddedRuntimeHost {
+    EmbeddedRuntimeHost::new(RuntimeCoreConfig::default().with_llm_log_path(Some(path)))
 }
 
 #[cfg(feature = "sqlite-store")]
@@ -261,9 +324,57 @@ fn plugin_session_with_tools(
 fn default_tool_session(
     session_id: &str,
     mode: ExecutionMode,
-    deps: crate::DefaultToolPluginDeps,
+    enable_user_prompts: bool,
 ) -> Arc<crate::PluginSession> {
-    crate::PluginHost::new(crate::default_tool_plugin_factories(mode, deps))
+    let mut factories: Vec<Arc<dyn crate::PluginFactory>> = vec![
+        Arc::new(crate::BuiltinToolResultProjectionPluginFactory::default()),
+        Arc::new(crate::BuiltinRollingHistoryPluginFactory::default()),
+        Arc::new(crate::BuiltinObservationalMemoryPluginFactory),
+        Arc::new(StaticPluginFactory::new(
+            "shell",
+            crate::PluginSpec::new()
+                .with_tool_provider(Arc::new(crate::tools::StandardShell::new()))
+                .with_prompt_contributor(Arc::new(move |_ctx| {
+                    Box::pin(async move { Ok(crate::tools::shell_prompt_contributions()) })
+                })),
+        )),
+        Arc::new(StaticPluginFactory::new(
+            "apply_patch",
+            crate::PluginSpec::new().with_tool_provider(Arc::new(crate::tools::ApplyPatchTool)),
+        )),
+        Arc::new(crate::tools::ReadFilePluginFactory::new(None)),
+        Arc::new(StaticPluginFactory::new(
+            "glob",
+            crate::PluginSpec::new().with_tool_provider(Arc::new(crate::tools::Glob)),
+        )),
+        Arc::new(StaticPluginFactory::new(
+            "grep",
+            crate::PluginSpec::new().with_tool_provider(Arc::new(crate::tools::Grep::new())),
+        )),
+        Arc::new(StaticPluginFactory::new(
+            "ls",
+            crate::PluginSpec::new().with_tool_provider(Arc::new(crate::tools::Ls)),
+        )),
+    ];
+    if enable_user_prompts {
+        factories.push(Arc::new(StaticPluginFactory::new(
+            "ask",
+            crate::PluginSpec::new().with_tool_provider(Arc::new(crate::tools::AskTool::new())),
+        )));
+        factories.push(Arc::new(StaticPluginFactory::new(
+            "wait",
+            crate::PluginSpec::new().with_tool_provider(Arc::new(crate::tools::WaitTool::new())),
+        )));
+        factories.push(Arc::new(StaticPluginFactory::new(
+            "show_snippet_to_user",
+            crate::PluginSpec::new()
+                .with_tool_provider(Arc::new(crate::tools::ShowSnippetToUser::new())),
+        )));
+    }
+    if matches!(mode, ExecutionMode::Rlm) {
+        factories.push(Arc::new(crate::tools::StateToolsPluginFactory::new()));
+    }
+    crate::PluginHost::new(factories)
         .build_session(session_id, mode, crate::ContextApproach::default(), None)
         .expect("plugins")
 }
@@ -283,7 +394,7 @@ impl crate::ToolProvider for EmptyTools {
 
 async fn standard_runtime_with_transport(transport: MockTransport) -> LashRuntime {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
-    let mut runtime = LashRuntime::from_state(
+    let mut runtime = LashRuntime::from_embedded_state(
         standard_test_policy(),
         test_host_config(),
         crate::RuntimeServices::new(plugin_session_with_tools(
@@ -299,12 +410,57 @@ async fn standard_runtime_with_transport(transport: MockTransport) -> LashRuntim
     runtime
 }
 
+#[test]
+fn plugin_host_rejects_observational_memory_without_supporting_plugin() {
+    let host = crate::PluginHost::new(vec![Arc::new(
+        crate::BuiltinRollingHistoryPluginFactory::default(),
+    )]);
+    let result = host.build_session(
+        "root",
+        ExecutionMode::Standard,
+        crate::ContextApproach::ObservationalMemory(crate::ObservationalMemoryConfig::default()),
+        None,
+    );
+    let err = match result {
+        Ok(_) => panic!("OM should require supporting plugin"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains(
+            "context approach `observational_memory` requires a supporting plugin factory"
+        ),
+        "unexpected error: {err}"
+    );
+}
+
+async fn standard_runtime_with_transport_and_background(transport: MockTransport) -> LashRuntime {
+    let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
+    let host = BackgroundRuntimeHost::new(
+        test_host_config(),
+        Arc::new(TokioBackgroundExecutor::default()),
+    );
+    let mut runtime = LashRuntime::from_background_state(
+        standard_test_policy(),
+        host,
+        crate::RuntimeServices::new(plugin_session_with_tools(
+            "root",
+            ExecutionMode::Standard,
+            tools,
+        )),
+        SessionStateEnvelope::default(),
+    )
+    .await
+    .expect("runtime");
+    runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
+    runtime
+}
+
 async fn standard_runtime_with_transport_and_host(
     transport: MockTransport,
-    host: RuntimeHostConfig,
+    host: EmbeddedRuntimeHost,
 ) -> LashRuntime {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
-    let mut runtime = LashRuntime::from_state(
+    let mut runtime = LashRuntime::from_embedded_state(
         standard_test_policy(),
         host,
         crate::RuntimeServices::new(plugin_session_with_tools(
@@ -323,7 +479,7 @@ async fn standard_runtime_with_transport_and_host(
 #[tokio::test]
 async fn runtime_requires_explicit_max_context_tokens() {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
-    let result = LashRuntime::from_state(
+    let result = LashRuntime::from_embedded_state(
         SessionPolicy {
             execution_mode: ExecutionMode::Standard,
             provider: Provider::OpenAiGeneric {
@@ -368,15 +524,8 @@ fn rlm_test_policy() -> SessionPolicy {
 }
 
 async fn rlm_runtime_with_transport(transport: MockTransport) -> LashRuntime {
-    let plugins = default_tool_session(
-        "root",
-        ExecutionMode::Rlm,
-        crate::DefaultToolPluginDeps {
-            enable_user_prompts: true,
-            ..Default::default()
-        },
-    );
-    let mut runtime = LashRuntime::from_state(
+    let plugins = default_tool_session("root", ExecutionMode::Rlm, true);
+    let mut runtime = LashRuntime::from_embedded_state(
         rlm_test_policy(),
         test_host_config(),
         crate::RuntimeServices::new_with_bridges(plugins, crate::TurnInjectionBridge::new()),
@@ -398,15 +547,8 @@ async fn rlm_runtime_with_transport_and_store(
     transport: MockTransport,
     store: Arc<dyn crate::store::RuntimeStore>,
 ) -> LashRuntime {
-    let plugins = default_tool_session(
-        "root",
-        ExecutionMode::Rlm,
-        crate::DefaultToolPluginDeps {
-            enable_user_prompts: true,
-            ..Default::default()
-        },
-    );
-    let mut runtime = LashRuntime::from_state(
+    let plugins = default_tool_session("root", ExecutionMode::Rlm, true);
+    let mut runtime = LashRuntime::from_embedded_state(
         rlm_test_policy(),
         test_host_config(),
         crate::RuntimeServices::new_with_bridges(plugins, crate::TurnInjectionBridge::new())
@@ -427,14 +569,10 @@ async fn rlm_runtime_with_transport_and_store(
 
 #[tokio::test]
 async fn active_tool_catalog_uses_runtime_execution_mode() {
-    let runtime = LashRuntime::from_state(
+    let runtime = LashRuntime::from_embedded_state(
         rlm_test_policy(),
         test_host_config(),
-        crate::RuntimeServices::new(default_tool_session(
-            "root",
-            ExecutionMode::Rlm,
-            crate::DefaultToolPluginDeps::default(),
-        )),
+        crate::RuntimeServices::new(default_tool_session("root", ExecutionMode::Rlm, false)),
         SessionStateEnvelope {
             policy: SessionPolicy {
                 execution_mode: ExecutionMode::Rlm,
@@ -461,7 +599,7 @@ async fn standard_runtime_with_bridge(
     turn_injection_bridge: crate::TurnInjectionBridge,
 ) -> LashRuntime {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
-    let mut runtime = LashRuntime::from_state(
+    let mut runtime = LashRuntime::from_embedded_state(
         standard_test_policy(),
         test_host_config(),
         crate::RuntimeServices::new_with_bridges(
@@ -560,7 +698,7 @@ async fn runtime_with_plugins_and_tools_and_host(
     plugins: Vec<Arc<dyn crate::PluginFactory>>,
     tools: Arc<dyn crate::ToolProvider>,
     transport: MockTransport,
-    host: RuntimeHostConfig,
+    host: EmbeddedRuntimeHost,
 ) -> LashRuntime {
     let mut factories = plugins;
     let tools = Arc::clone(&tools);
@@ -572,7 +710,7 @@ async fn runtime_with_plugins_and_tools_and_host(
     let plugin_session = plugin_host
         .build_standard_session("root", None)
         .expect("plugins");
-    let mut runtime = LashRuntime::from_state(
+    let mut runtime = LashRuntime::from_embedded_state(
         standard_test_policy(),
         host,
         crate::RuntimeServices::new(plugin_session),
@@ -721,7 +859,7 @@ async fn plugin_before_turn_can_abort_and_inject_messages() {
     assert_eq!(turn.status, TurnStatus::Failed);
     assert_eq!(turn.done_reason, DoneReason::RuntimeError);
     assert!(turn.errors.iter().any(|issue| issue.kind == "plugin"));
-    assert!(turn.state.messages.iter().any(|message| {
+    assert!(projected_messages(&turn.state).iter().any(|message| {
         message
             .parts
             .iter()
@@ -767,7 +905,7 @@ async fn normal_turn_preserves_user_input_provenance_in_state() {
 
     let user_message = turn
         .state
-        .messages
+        .projected_messages()
         .iter()
         .find(|message| message.role == MessageRole::User)
         .expect("user message");
@@ -898,14 +1036,14 @@ async fn bridge_checkpoint_injection_continues_standard_turn() {
         .await
         .expect("turn");
 
-    assert!(turn.state.messages.iter().any(|message| {
+    assert!(projected_messages(&turn.state).iter().any(|message| {
         message.role == MessageRole::User
             && message
                 .parts
                 .iter()
                 .any(|part| part.content == "one more thing")
     }));
-    assert!(turn.state.messages.iter().any(|message| {
+    assert!(projected_messages(&turn.state).iter().any(|message| {
         message.role == MessageRole::Assistant
             && message
                 .parts
@@ -991,7 +1129,7 @@ async fn bridge_checkpoint_injection_preserves_images() {
         .await
         .expect("turn");
 
-    assert!(turn.state.messages.iter().any(|message| {
+    assert!(projected_messages(&turn.state).iter().any(|message| {
         message.role == MessageRole::User
             && message
                 .parts
@@ -1065,7 +1203,7 @@ async fn checkpoint_hook_can_inject_messages() {
         .await
         .expect("turn");
 
-    assert!(turn.state.messages.iter().any(|message| {
+    assert!(projected_messages(&turn.state).iter().any(|message| {
         message.role == MessageRole::System
             && message
                 .parts
@@ -1127,7 +1265,7 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
                                         match snapshot {
                                             Ok(snapshot) => crate::ToolResult::ok(json!({
                                                 "session_id": handle.session_id,
-                                                "message_count": snapshot.messages.len(),
+                                                "message_count": snapshot.projected_messages().len(),
                                             })),
                                             Err(err) => err,
                                         }
@@ -1144,21 +1282,24 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
     let transport = MockTransport::new(Vec::new());
     let mut runtime = runtime_with_plugins(vec![plugin], transport).await;
 
-    runtime.state.messages.push(Message {
-        id: "m0".to_string(),
-        role: MessageRole::User,
-        parts: vec![Part {
-            id: "m0.p0".to_string(),
-            kind: PartKind::Text,
-            content: "root msg".to_string(),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            prune_state: PruneState::Intact,
-        }],
-        user_input: None,
-        origin: None,
-    });
+    append_message(
+        &mut runtime.state,
+        Message {
+            id: "m0".to_string(),
+            role: MessageRole::User,
+            parts: vec![Part {
+                id: "m0.p0".to_string(),
+                kind: PartKind::Text,
+                content: "root msg".to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: PruneState::Intact,
+            }],
+            user_input: None,
+            origin: None,
+        },
+    );
 
     let result = runtime
         .invoke_external("test.spawn", json!({}), None)
@@ -1261,8 +1402,7 @@ async fn session_manager_can_stream_and_await_child_session_turns() {
 #[tokio::test]
 async fn session_manager_persists_child_sessions_in_separate_store() {
     let factory = RecordingSessionStoreFactory::default();
-    let mut host = test_host_config();
-    host.session_store_factory = Some(Arc::new(factory.clone()));
+    let host = test_host_config().with_session_store_factory(Arc::new(factory.clone()));
     let mut runtime = runtime_with_plugins_and_tools_and_host(
         Vec::new(),
         Arc::new(EmptyTools),
@@ -1270,21 +1410,24 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
         host,
     )
     .await;
-    runtime.state.messages.push(Message {
-        id: "u1".to_string(),
-        role: MessageRole::User,
-        parts: vec![Part {
-            id: "u1.p0".to_string(),
-            kind: PartKind::Text,
-            content: "parent hello".to_string(),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            prune_state: PruneState::Intact,
-        }],
-        user_input: None,
-        origin: None,
-    });
+    append_message(
+        &mut runtime.state,
+        Message {
+            id: "u1".to_string(),
+            role: MessageRole::User,
+            parts: vec![Part {
+                id: "u1.p0".to_string(),
+                kind: PartKind::Text,
+                content: "parent hello".to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: PruneState::Intact,
+            }],
+            user_input: None,
+            origin: None,
+        },
+    );
     runtime.state.iteration = 3;
 
     let manager = runtime.session_manager().expect("session manager");
@@ -1309,11 +1452,17 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
     let meta = stores[0].load_session_meta().expect("session meta");
     assert_eq!(meta.session_id, "child-store");
     assert_eq!(meta.parent_session_id.as_deref(), Some("root"));
-    let graph = stores[0].load_session_graph().expect("session graph");
+    let head = stores[0].load_session_head().expect("session head");
+    let graph = head.graph;
     let messages = graph.project_messages();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].parts[0].content, "parent hello");
-    let turn_state = graph.latest_turn_state().expect("turn state");
+    let checkpoint = head
+        .checkpoint_ref
+        .as_ref()
+        .and_then(|blob_ref| stores[0].get_checkpoint(blob_ref))
+        .expect("checkpoint");
+    let turn_state = checkpoint.turn_state;
     assert_eq!(turn_state.iteration, 3);
 }
 
@@ -1408,21 +1557,24 @@ fn assembler_prefers_final_message() {
 #[test]
 fn assembler_falls_back_to_last_assistant_message_when_stream_output_is_empty() {
     let mut state = default_state();
-    state.messages.push(Message {
-        id: "m0".to_string(),
-        role: MessageRole::Assistant,
-        parts: vec![Part {
-            id: "m0.p0".to_string(),
-            kind: PartKind::Prose,
-            content: "stored".to_string(),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            prune_state: PruneState::Intact,
-        }],
-        user_input: None,
-        origin: None,
-    });
+    append_message(
+        &mut state,
+        Message {
+            id: "m0".to_string(),
+            role: MessageRole::Assistant,
+            parts: vec![Part {
+                id: "m0.p0".to_string(),
+                kind: PartKind::Prose,
+                content: "stored".to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: PruneState::Intact,
+            }],
+            user_input: None,
+            origin: None,
+        },
+    );
     let mut assembler = TurnAssembler::default();
     assembler.push(&SessionEvent::Done);
     let out = assembler.finish(
@@ -1442,21 +1594,24 @@ fn assembler_falls_back_to_last_assistant_message_when_stream_output_is_empty() 
 #[test]
 fn assembler_prefers_state_output_when_streamed_text_is_a_truncated_prefix() {
     let mut state = default_state();
-    state.messages.push(Message {
-        id: "m0".to_string(),
-        role: MessageRole::Assistant,
-        parts: vec![Part {
-            id: "m0.p0".to_string(),
-            kind: PartKind::Prose,
-            content: "You graduated with a degree in Business Administration.".to_string(),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            prune_state: PruneState::Intact,
-        }],
-        user_input: None,
-        origin: None,
-    });
+    append_message(
+        &mut state,
+        Message {
+            id: "m0".to_string(),
+            role: MessageRole::Assistant,
+            parts: vec![Part {
+                id: "m0.p0".to_string(),
+                kind: PartKind::Prose,
+                content: "You graduated with a degree in Business Administration.".to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: PruneState::Intact,
+            }],
+            user_input: None,
+            origin: None,
+        },
+    );
     let mut assembler = TurnAssembler::default();
     assembler.push(&SessionEvent::TextDelta {
         content: "You graduated with a degree in Business".to_string(),
@@ -1528,21 +1683,24 @@ fn assembler_marks_missing_done_as_failure() {
 #[test]
 fn assembler_detects_max_turn_message() {
     let mut state = default_state();
-    state.messages.push(Message {
-        id: "m0".to_string(),
-        role: MessageRole::System,
-        parts: vec![Part {
-            id: "m0.p0".to_string(),
-            kind: PartKind::Text,
-            content: "Turn limit reached (5).".to_string(),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            prune_state: PruneState::Intact,
-        }],
-        user_input: None,
-        origin: None,
-    });
+    append_message(
+        &mut state,
+        Message {
+            id: "m0".to_string(),
+            role: MessageRole::System,
+            parts: vec![Part {
+                id: "m0.p0".to_string(),
+                kind: PartKind::Text,
+                content: "Turn limit reached (5).".to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: PruneState::Intact,
+            }],
+            user_input: None,
+            origin: None,
+        },
+    );
     let mut assembler = TurnAssembler::default();
     assembler.push(&SessionEvent::Done);
     let out = assembler.finish(
@@ -1622,7 +1780,9 @@ fn normalize_items_resolves_relative_paths_with_base_dir() {
             path: "sub".to_string(),
         },
     ];
-    let out = normalize_input_items(&items, &HashMap::new(), tmp.path(), None).expect("normalized");
+    let resolver = DefaultPathResolver;
+    let out =
+        normalize_input_items(&items, &HashMap::new(), tmp.path(), &resolver).expect("normalized");
     assert_eq!(out.len(), 1);
     match &out[0] {
         NormalizedItem::Text(text) => {
@@ -1787,10 +1947,13 @@ async fn standard_runtime_executes_streamed_tool_call_when_final_response_is_emp
         .expect("turn");
 
     assert_eq!(turn.assistant_output.safe_text, "done");
-    assert_eq!(turn.state.tool_calls.len(), 1);
-    assert_eq!(turn.state.tool_calls[0].call_id.as_deref(), Some("tool-1"));
+    assert_eq!(projected_tool_calls(&turn.state).len(), 1);
     assert_eq!(
-        turn.state.tool_calls[0].result,
+        projected_tool_calls(&turn.state)[0].call_id.as_deref(),
+        Some("tool-1")
+    );
+    assert_eq!(
+        projected_tool_calls(&turn.state)[0].result,
         serde_json::json!({
             "payload": "raw:sample"
         })
@@ -2168,7 +2331,7 @@ async fn history_plugin_compacts_using_previous_prompt_usage_across_turns() {
     let plugins = plugin_host
         .build_standard_session("root", None)
         .expect("plugins");
-    let mut runtime = LashRuntime::from_state(
+    let mut runtime = LashRuntime::from_embedded_state(
         standard_test_policy(),
         test_host_config(),
         crate::RuntimeServices::new(Arc::clone(&plugins))
@@ -2178,22 +2341,22 @@ async fn history_plugin_compacts_using_previous_prompt_usage_across_turns() {
     .await
     .expect("runtime");
     runtime.llm_factory = Arc::new(move |_| Box::new(transport.clone()));
-    runtime.set_state(SessionStateEnvelope {
+    let history = vec![
+        text_message("u1", MessageRole::User, &"oldest user".repeat(20)),
+        text_message("a1", MessageRole::Assistant, &"oldest assistant".repeat(20)),
+        text_message("u2", MessageRole::User, &"older user".repeat(20)),
+        text_message("a2", MessageRole::Assistant, &"older assistant".repeat(20)),
+        text_message("u3", MessageRole::User, &"recent user".repeat(20)),
+        text_message("a3", MessageRole::Assistant, &"recent assistant".repeat(20)),
+        text_message("u4", MessageRole::User, &"latest user".repeat(20)),
+        text_message("a4", MessageRole::Assistant, &"latest assistant".repeat(20)),
+    ];
+    let mut state = SessionStateEnvelope {
         session_id: "root".to_string(),
         policy: SessionPolicy {
             execution_mode: ExecutionMode::Standard,
             ..runtime.policy.clone()
         },
-        messages: vec![
-            text_message("u1", MessageRole::User, &"oldest user".repeat(20)),
-            text_message("a1", MessageRole::Assistant, &"oldest assistant".repeat(20)),
-            text_message("u2", MessageRole::User, &"older user".repeat(20)),
-            text_message("a2", MessageRole::Assistant, &"older assistant".repeat(20)),
-            text_message("u3", MessageRole::User, &"recent user".repeat(20)),
-            text_message("a3", MessageRole::Assistant, &"recent assistant".repeat(20)),
-            text_message("u4", MessageRole::User, &"latest user".repeat(20)),
-            text_message("a4", MessageRole::Assistant, &"latest assistant".repeat(20)),
-        ],
         iteration: 4,
         token_usage: TokenUsage::default(),
         last_prompt_usage: Some(PromptUsage {
@@ -2203,7 +2366,9 @@ async fn history_plugin_compacts_using_previous_prompt_usage_across_turns() {
             context_budget_tokens: 70,
         }),
         ..SessionStateEnvelope::default()
-    });
+    };
+    set_projection(&mut state, &history, &[]);
+    runtime.set_state(state);
     runtime.policy.max_context_tokens = Some(100);
     runtime.state.policy.max_context_tokens = Some(100);
 
@@ -2222,13 +2387,13 @@ async fn history_plugin_compacts_using_previous_prompt_usage_across_turns() {
         .await
         .expect("turn");
 
-    assert!(!turn.state.messages.iter().any(|message| {
+    assert!(!projected_messages(&turn.state).iter().any(|message| {
         message
             .parts
             .iter()
             .any(|part| part.content.contains("oldest user"))
     }));
-    assert!(turn.state.messages.iter().any(|message| {
+    assert!(projected_messages(&turn.state).iter().any(|message| {
         message
             .parts
             .iter()
@@ -2288,7 +2453,7 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
                                     .map(|call| call.result.clone())
                                     .unwrap_or(serde_json::Value::Null),
                                 turn.state
-                                    .tool_calls
+                                    .projected_tool_calls()
                                     .first()
                                     .map(|call| call.result.clone())
                                     .unwrap_or(serde_json::Value::Null),
@@ -2347,7 +2512,7 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
         .await
         .expect("turn");
 
-    assert!(turn.state.messages.iter().any(|message| {
+    assert!(projected_messages(&turn.state).iter().any(|message| {
         message.parts.iter().any(|part| {
             part.content.contains("model projection") && matches!(part.kind, PartKind::ToolResult)
         })
@@ -2360,102 +2525,21 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
             serde_json::json!("history projection"),
         )]
     );
-    assert_eq!(turn.state.tool_calls.len(), 1);
-    assert_eq!(turn.state.tool_calls[0].call_id.as_deref(), Some("tool-1"));
+    assert_eq!(projected_tool_calls(&turn.state).len(), 1);
+    assert_eq!(
+        projected_tool_calls(&turn.state)[0].call_id.as_deref(),
+        Some("tool-1")
+    );
     assert_eq!(turn.tool_calls.len(), 1);
     assert_eq!(turn.tool_calls[0].call_id.as_deref(), Some("tool-1"));
     assert_eq!(
-        turn.state.tool_calls[0].result,
+        projected_tool_calls(&turn.state)[0].result,
         serde_json::json!("state projection")
     );
     assert_eq!(
         turn.tool_calls[0].result,
         serde_json::json!("state projection")
     );
-}
-
-#[tokio::test]
-async fn stream_turn_emits_durable_snapshots_at_turn_boundaries() {
-    let transport = MockTransport::new(vec![
-        MockCall {
-            stream_events: Vec::new(),
-            response: Ok(LlmResponse {
-                parts: vec![
-                    LlmOutputPart::Text {
-                        text: "checking tool".to_string(),
-                    },
-                    LlmOutputPart::ToolCall {
-                        call_id: "tool-1".to_string(),
-                        tool_name: "echo_tool".to_string(),
-                        input_json: r#"{"value":"sample"}"#.to_string(),
-                    },
-                ],
-                ..LlmResponse::default()
-            }),
-        },
-        MockCall {
-            stream_events: Vec::new(),
-            response: Ok(LlmResponse {
-                full_text: "done".to_string(),
-                parts: vec![LlmOutputPart::Text {
-                    text: "done".to_string(),
-                }],
-                ..LlmResponse::default()
-            }),
-        },
-    ]);
-    let tools: Arc<dyn crate::ToolProvider> = Arc::new(EchoTool);
-    let mut runtime = runtime_with_plugins_and_tools(Vec::new(), tools, transport).await;
-    let sink = RecordingSink::default();
-
-    let _ = runtime
-        .stream_turn(
-            TurnInput {
-                items: vec![InputItem::Text {
-                    text: "run the tool".to_string(),
-                }],
-                image_blobs: HashMap::new(),
-                user_input: None,
-                mode: None,
-            },
-            &sink,
-            CancellationToken::new(),
-        )
-        .await
-        .expect("turn");
-
-    let snapshots: Vec<DurableTurnSnapshot> = sink
-        .snapshot()
-        .into_iter()
-        .filter_map(|event| match event {
-            SessionEvent::DurableSnapshot { snapshot } => Some(snapshot),
-            _ => None,
-        })
-        .collect();
-
-    assert!(
-        snapshots.len() >= 3,
-        "expected live snapshots across the turn lifecycle"
-    );
-    assert!(snapshots.iter().any(|snapshot| {
-        snapshot.messages.iter().any(|message| {
-            message.role == MessageRole::User
-                && message
-                    .parts
-                    .iter()
-                    .any(|part| part.content == "run the tool")
-        })
-    }));
-    assert!(snapshots.iter().any(|snapshot| {
-        snapshot.tool_calls.iter().any(|call| {
-            call.call_id.as_deref() == Some("tool-1")
-                && call.tool == "echo_tool"
-                && call.result
-                    == serde_json::json!({
-                        "payload": "raw:sample"
-                    })
-        })
-    }));
 }
 
 #[tokio::test]
@@ -2479,7 +2563,7 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
 
     let store = Arc::new(RecordingStore::default());
     let plugins = plugin_session_with_tools("root", ExecutionMode::Standard, Arc::new(EmptyTools));
-    let mut runtime = LashRuntime::from_state(
+    let mut runtime = LashRuntime::from_embedded_state(
         standard_test_policy(),
         test_host_config(),
         crate::RuntimeServices::new(Arc::clone(&plugins))
@@ -2506,9 +2590,10 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
         .expect("turn");
 
     let messages = store
-        .load_session_graph()
+        .load_session_head()
         .await
-        .expect("session graph")
+        .expect("session head")
+        .graph
         .project_messages();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].role, MessageRole::User);
@@ -2555,7 +2640,7 @@ async fn completed_turns_are_persisted_in_session_graph() {
     let plugins = plugin_host
         .build_standard_session("root", None)
         .expect("plugins");
-    let mut runtime = LashRuntime::from_state(
+    let mut runtime = LashRuntime::from_embedded_state(
         standard_test_policy(),
         test_host_config(),
         crate::RuntimeServices::new(Arc::clone(&plugins))
@@ -2581,12 +2666,18 @@ async fn completed_turns_are_persisted_in_session_graph() {
         .await
         .expect("turn");
 
-    let graph = store.load_session_graph().expect("session graph");
+    let head = store.load_session_head().expect("session head");
+    let graph = head.graph;
     let messages = graph.project_messages();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].parts[0].content, "where did this go?");
     assert_eq!(messages[1].parts[0].content, "Stored answer");
-    let ledger = graph.latest_token_ledger().expect("token ledger");
+    let _checkpoint = head
+        .checkpoint_ref
+        .as_ref()
+        .and_then(|blob_ref| store.get_checkpoint(blob_ref))
+        .expect("checkpoint");
+    let ledger = head.token_ledger;
     assert_eq!(ledger.len(), 1);
     assert_eq!(ledger[0].source, "turn");
     assert_eq!(ledger[0].model, standard_test_policy().model);
@@ -2665,19 +2756,17 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
     assert_eq!(first_turn.token_usage.cached_input_tokens, 1);
     assert_eq!(first_turn.token_usage.reasoning_tokens, 2);
 
-    let resumed_graph = store.load_session_graph().expect("resumed graph");
-    let mut resumed = LashRuntime::from_state(
+    let resumed_head = store.load_session_head().expect("resumed head");
+    let resumed_checkpoint = resumed_head
+        .checkpoint_ref
+        .as_ref()
+        .and_then(|blob_ref| store.get_checkpoint(blob_ref))
+        .expect("resumed checkpoint");
+    let mut resumed = LashRuntime::from_embedded_state(
         rlm_test_policy(),
         test_host_config(),
         crate::RuntimeServices::new_with_bridges(
-            default_tool_session(
-                "root",
-                ExecutionMode::Rlm,
-                crate::DefaultToolPluginDeps {
-                    enable_user_prompts: true,
-                    ..Default::default()
-                },
-            ),
+            default_tool_session("root", ExecutionMode::Rlm, true),
             crate::TurnInjectionBridge::new(),
         )
         .with_store(store.clone() as Arc<dyn crate::store::RuntimeStore>),
@@ -2686,7 +2775,21 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
                 execution_mode: ExecutionMode::Rlm,
                 ..Default::default()
             },
-            session_graph: resumed_graph,
+            session_graph: resumed_head.graph,
+            iteration: resumed_checkpoint.turn_state.iteration,
+            token_usage: resumed_checkpoint.turn_state.token_usage.clone(),
+            last_prompt_usage: resumed_checkpoint.turn_state.last_prompt_usage.clone(),
+            dynamic_state_ref: resumed_checkpoint.dynamic_state_ref.clone(),
+            dynamic_state_generation: resumed_checkpoint
+                .dynamic_state
+                .as_ref()
+                .map(|snapshot| snapshot.base_generation),
+            dynamic_state_snapshot: resumed_checkpoint.dynamic_state.clone(),
+            plugin_snapshot_ref: resumed_checkpoint.plugin_snapshot_ref.clone(),
+            plugin_snapshot: resumed_checkpoint.plugin_snapshot.clone(),
+            execution_state_snapshot: None,
+            token_ledger: resumed_head.token_ledger.clone(),
+            checkpoint_ref: resumed_head.checkpoint_ref.clone(),
             ..SessionStateEnvelope::default()
         },
     )
@@ -2713,14 +2816,19 @@ async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
     assert_eq!(second_turn.token_usage.cached_input_tokens, 5);
     assert_eq!(second_turn.token_usage.reasoning_tokens, 6);
 
-    let graph = store.load_session_graph().expect("session graph");
-    let turn_state = graph.latest_turn_state().expect("turn state");
+    let head = store.load_session_head().expect("session head");
+    let checkpoint = head
+        .checkpoint_ref
+        .as_ref()
+        .and_then(|blob_ref| store.get_checkpoint(blob_ref))
+        .expect("checkpoint");
+    let turn_state = checkpoint.turn_state;
     assert_eq!(turn_state.token_usage.input_tokens, 30);
     assert_eq!(turn_state.token_usage.output_tokens, 7);
     assert_eq!(turn_state.token_usage.cached_input_tokens, 5);
     assert_eq!(turn_state.token_usage.reasoning_tokens, 6);
 
-    let ledger = graph.latest_token_ledger().expect("token ledger");
+    let ledger = head.token_ledger;
     assert_eq!(ledger.len(), 1);
     assert_eq!(ledger[0].source, "turn");
     assert_eq!(ledger[0].usage.input_tokens, 42);
@@ -2799,7 +2907,8 @@ fn session_usage_report_aggregates_sources_and_models() {
 
 #[tokio::test]
 async fn await_background_work_waits_for_registered_jobs() {
-    let runtime = standard_runtime_with_transport(MockTransport::new(Vec::new())).await;
+    let runtime =
+        standard_runtime_with_transport_and_background(MockTransport::new(Vec::new())).await;
     let manager = runtime.session_manager().expect("session manager");
     let observed = Arc::new(AtomicBool::new(false));
     let observed_task = Arc::clone(&observed);
@@ -2857,18 +2966,13 @@ async fn history_plugin_compacts_messages_when_model_change_shrinks_context_wind
     let plugins = plugin_host
         .build_standard_session("root", None)
         .expect("plugins");
-    let mut runtime = LashRuntime::from_state(
+    let mut runtime = LashRuntime::from_embedded_state(
         standard_test_policy(),
         test_host_config(),
         crate::RuntimeServices::new(Arc::clone(&plugins))
             .with_store(store.clone() as Arc<dyn crate::store::RuntimeStore>),
-        SessionStateEnvelope {
-            session_id: "root".to_string(),
-            policy: SessionPolicy {
-                execution_mode: ExecutionMode::Standard,
-                ..Default::default()
-            },
-            messages: vec![
+        {
+            let history = vec![
                 text_message("u1", MessageRole::User, &"oldest user".repeat(20)),
                 text_message("a1", MessageRole::Assistant, &"oldest assistant".repeat(20)),
                 text_message("u2", MessageRole::User, &"older user".repeat(20)),
@@ -2877,16 +2981,25 @@ async fn history_plugin_compacts_messages_when_model_change_shrinks_context_wind
                 text_message("a3", MessageRole::Assistant, &"recent assistant".repeat(20)),
                 text_message("u4", MessageRole::User, &"latest user".repeat(20)),
                 text_message("a4", MessageRole::Assistant, &"latest assistant".repeat(20)),
-            ],
-            iteration: 4,
-            token_usage: TokenUsage::default(),
-            last_prompt_usage: Some(PromptUsage {
-                prompt_context_tokens: 70_000,
-                input_tokens: 70_000,
-                cached_input_tokens: 0,
-                context_budget_tokens: 70_000,
-            }),
-            ..SessionStateEnvelope::default()
+            ];
+            let mut state = SessionStateEnvelope {
+                session_id: "root".to_string(),
+                policy: SessionPolicy {
+                    execution_mode: ExecutionMode::Standard,
+                    ..Default::default()
+                },
+                iteration: 4,
+                token_usage: TokenUsage::default(),
+                last_prompt_usage: Some(PromptUsage {
+                    prompt_context_tokens: 70_000,
+                    input_tokens: 70_000,
+                    cached_input_tokens: 0,
+                    context_budget_tokens: 70_000,
+                }),
+                ..SessionStateEnvelope::default()
+            };
+            set_projection(&mut state, &history, &[]);
+            state
         },
     )
     .await
@@ -2908,7 +3021,7 @@ async fn history_plugin_compacts_messages_when_model_change_shrinks_context_wind
         )
         .await;
 
-    assert!(!runtime.state.messages.iter().any(|message| {
+    assert!(!projected_messages(&runtime.state).iter().any(|message| {
         message
             .parts
             .iter()
@@ -2959,7 +3072,7 @@ async fn set_state_syncs_runtime_policy_with_restored_state_policy() {
     let plugins = crate::PluginHost::new(Vec::new())
         .build_standard_session("root", None)
         .expect("plugins");
-    let mut runtime = LashRuntime::from_state(
+    let mut runtime = LashRuntime::from_embedded_state(
         standard_test_policy(),
         test_host_config(),
         crate::RuntimeServices::new(plugins),

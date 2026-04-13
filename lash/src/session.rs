@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde_json::json;
 use tokio::sync::mpsc::UnboundedSender;
@@ -9,10 +9,109 @@ use crate::embedded::{LashlangRequest, LashlangResponse, LashlangRuntime};
 use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call};
 use crate::{
     ExecResponse, PluginMessage, PromptContribution, RuntimeServices, SandboxMessage, SessionEvent,
-    SessionManager, ToolCallRecord, ToolImage, ToolProvider,
+    SessionManager, ToolCallRecord, ToolDefinition, ToolImage, ToolProvider,
 };
 
 const REPL_SNAPSHOT_VERSION: u32 = 3;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExecutionSurfaceCacheKey {
+    mode: crate::ExecutionMode,
+    include_base_tools: bool,
+    context_surface_revision: u64,
+    dynamic_generation: u64,
+    plugin_revision: u64,
+}
+
+#[derive(Debug, Default)]
+struct ExecutionSurfaceDerived {
+    catalog: OnceLock<Arc<Vec<serde_json::Value>>>,
+    standard_tool_specs: OnceLock<Arc<Vec<crate::llm::types::LlmToolSpec>>>,
+    tool_names: OnceLock<Arc<Vec<String>>>,
+    rlm_tool_list: OnceLock<Arc<String>>,
+    rlm_omitted_tool_count: OnceLock<usize>,
+    rlm_tools_json: OnceLock<Arc<String>>,
+}
+
+#[derive(Debug)]
+struct ExecutionSurfaceCacheEntry {
+    surface: Arc<crate::plugin::ExecutionSurface>,
+    enabled_tools: Arc<Vec<ToolDefinition>>,
+    prompt_tools: Arc<Vec<ToolDefinition>>,
+    derived: ExecutionSurfaceDerived,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ExecutionSurfaceHandle(Arc<ExecutionSurfaceCacheEntry>);
+
+impl ExecutionSurfaceHandle {
+    fn surface(&self) -> Arc<crate::plugin::ExecutionSurface> {
+        Arc::clone(&self.0.surface)
+    }
+
+    fn catalog(&self) -> Arc<Vec<serde_json::Value>> {
+        Arc::clone(self.0.derived.catalog.get_or_init(|| {
+            Arc::new(crate::tools::project_tool_catalog(
+                self.0.enabled_tools.iter().cloned(),
+            ))
+        }))
+    }
+
+    fn standard_tool_specs(&self) -> Arc<Vec<crate::llm::types::LlmToolSpec>> {
+        Arc::clone(self.0.derived.standard_tool_specs.get_or_init(|| {
+            Arc::new(lash_sansio::session_model::model_tool_specs(
+                self.0.enabled_tools.as_slice(),
+            ))
+        }))
+    }
+
+    fn tool_names(&self) -> Arc<Vec<String>> {
+        Arc::clone(self.0.derived.tool_names.get_or_init(|| {
+            Arc::new(
+                self.0
+                    .enabled_tools
+                    .iter()
+                    .map(|tool| tool.name.clone())
+                    .collect(),
+            )
+        }))
+    }
+
+    fn rlm_tool_list(&self) -> Arc<String> {
+        Arc::clone(self.0.derived.rlm_tool_list.get_or_init(|| {
+            let mut tool_list = ToolDefinition::format_tool_docs(self.0.prompt_tools.as_slice());
+            for note in &self.0.surface.tool_list_notes {
+                if !tool_list.is_empty() {
+                    tool_list.push_str("\n\n");
+                }
+                tool_list.push_str(note);
+            }
+            Arc::new(tool_list)
+        }))
+    }
+
+    fn rlm_omitted_tool_count(&self) -> usize {
+        *self.0.derived.rlm_omitted_tool_count.get_or_init(|| {
+            crate::session_model::count_prompt_omitted_tools(self.0.enabled_tools.as_slice())
+        })
+    }
+
+    fn rlm_tools_json(&self) -> Arc<String> {
+        Arc::clone(self.0.derived.rlm_tools_json.get_or_init(|| {
+            Arc::new(
+                serde_json::to_string(self.catalog().as_ref()).unwrap_or_else(|_| "[]".to_string()),
+            )
+        }))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ExecutionPreambleData {
+    pub(crate) tool_specs: Arc<Vec<crate::llm::types::LlmToolSpec>>,
+    pub(crate) tool_names: Arc<Vec<String>>,
+    pub(crate) tool_list: Arc<String>,
+    pub(crate) omitted_tool_count: usize,
+}
 
 #[derive(Clone, Default)]
 pub struct TurnInjectionBridge {
@@ -62,6 +161,7 @@ pub struct Session {
     last_repl_tools_json: Option<String>,
     services: RuntimeServices,
     include_base_tools: bool,
+    context_surface_revision: u64,
     context_tools: Vec<Arc<dyn ToolProvider>>,
     context_prompt_contributions: Vec<PromptContribution>,
     context_prompt_overrides: Vec<crate::PromptSectionOverride>,
@@ -69,6 +169,8 @@ pub struct Session {
     tool_images: Vec<ToolImage>,
     message_tx: Option<UnboundedSender<SandboxMessage>>,
     scratch_dir: tempfile::TempDir,
+    execution_surface_cache:
+        std::sync::Mutex<Vec<(ExecutionSurfaceCacheKey, ExecutionSurfaceHandle)>>,
 }
 
 impl Session {
@@ -85,6 +187,7 @@ impl Session {
             last_repl_tools_json: None,
             services,
             include_base_tools: true,
+            context_surface_revision: 0,
             context_tools: Vec::new(),
             context_prompt_contributions: Vec::new(),
             context_prompt_overrides: Vec::new(),
@@ -92,6 +195,7 @@ impl Session {
             tool_images: Vec::new(),
             message_tx: None,
             scratch_dir,
+            execution_surface_cache: std::sync::Mutex::new(Vec::new()),
         };
 
         if matches!(execution_mode, crate::ExecutionMode::Rlm) {
@@ -140,9 +244,14 @@ impl Session {
         include_base_tools: bool,
     ) {
         self.include_base_tools = include_base_tools;
+        self.context_surface_revision = self.context_surface_revision.wrapping_add(1);
         self.context_tools = tool_providers;
         self.context_prompt_contributions = prompt_contributions;
         self.context_prompt_overrides = prompt_overrides;
+        self.execution_surface_cache
+            .lock()
+            .expect("execution surface cache lock")
+            .clear();
     }
 
     pub fn context_prompt_contributions(&self) -> &[PromptContribution] {
@@ -157,11 +266,21 @@ impl Session {
         self.services.store.clone()
     }
 
-    pub fn execution_surface(
+    fn execution_surface_cache_key(&self, mode: crate::ExecutionMode) -> ExecutionSurfaceCacheKey {
+        ExecutionSurfaceCacheKey {
+            mode,
+            include_base_tools: self.include_base_tools,
+            context_surface_revision: self.context_surface_revision,
+            dynamic_generation: self.tools().dynamic_generation().unwrap_or(0),
+            plugin_revision: self.plugins().snapshot_revision_fingerprint(),
+        }
+    }
+
+    fn build_execution_surface_entry(
         &self,
         session_id: &str,
         mode: crate::ExecutionMode,
-    ) -> crate::plugin::ExecutionSurface {
+    ) -> ExecutionSurfaceHandle {
         let mut tools = self.tools().definitions();
         if self.include_base_tools {
             tools.extend(
@@ -171,7 +290,8 @@ impl Session {
                     .map(crate::tools::NativeTool::definition),
             );
         }
-        self.plugins()
+        let surface = self
+            .plugins()
             .resolve_tool_surface(crate::plugin::ToolSurfaceContext {
                 session_id: session_id.to_string(),
                 mode,
@@ -180,7 +300,76 @@ impl Session {
             .unwrap_or_else(|err| {
                 tracing::warn!("failed to resolve tool surface: {err}");
                 crate::plugin::ExecutionSurface::from_tools(tools)
-            })
+            });
+        let surface = Arc::new(surface);
+        let enabled_tools = Arc::new(surface.enabled_tools());
+        let prompt_tools = Arc::new(surface.prompt_tools());
+        ExecutionSurfaceHandle(Arc::new(ExecutionSurfaceCacheEntry {
+            surface,
+            enabled_tools,
+            prompt_tools,
+            derived: ExecutionSurfaceDerived::default(),
+        }))
+    }
+
+    fn execution_surface_cache_entry(
+        &self,
+        session_id: &str,
+        mode: crate::ExecutionMode,
+    ) -> ExecutionSurfaceHandle {
+        let key = self.execution_surface_cache_key(mode);
+        let mut cache = self
+            .execution_surface_cache
+            .lock()
+            .expect("execution surface cache lock");
+        if let Some((_, entry)) = cache.iter().find(|(entry_key, _)| *entry_key == key) {
+            return entry.clone();
+        }
+        let entry = self.build_execution_surface_entry(session_id, mode);
+        cache.push((key, entry.clone()));
+        entry
+    }
+
+    pub fn execution_surface(
+        &self,
+        session_id: &str,
+        mode: crate::ExecutionMode,
+    ) -> crate::plugin::ExecutionSurface {
+        self.execution_surface_cache_entry(session_id, mode)
+            .surface()
+            .as_ref()
+            .clone()
+    }
+
+    pub(crate) fn shared_tool_catalog(
+        &self,
+        session_id: &str,
+        mode: crate::ExecutionMode,
+    ) -> Arc<Vec<serde_json::Value>> {
+        self.execution_surface_cache_entry(session_id, mode)
+            .catalog()
+    }
+
+    pub(crate) fn execution_preamble_data(
+        &self,
+        session_id: &str,
+        mode: crate::ExecutionMode,
+    ) -> ExecutionPreambleData {
+        let entry = self.execution_surface_cache_entry(session_id, mode);
+        match mode {
+            crate::ExecutionMode::Standard => ExecutionPreambleData {
+                tool_specs: entry.standard_tool_specs(),
+                tool_names: entry.tool_names(),
+                tool_list: Arc::new(String::new()),
+                omitted_tool_count: 0,
+            },
+            crate::ExecutionMode::Rlm => ExecutionPreambleData {
+                tool_specs: Arc::new(Vec::new()),
+                tool_names: entry.tool_names(),
+                tool_list: entry.rlm_tool_list(),
+                omitted_tool_count: entry.rlm_omitted_tool_count(),
+            },
+        }
     }
 
     pub fn tool_catalog(
@@ -188,11 +377,12 @@ impl Session {
         session_id: &str,
         mode: crate::ExecutionMode,
     ) -> Vec<serde_json::Value> {
-        crate::tools::project_tool_catalog(self.execution_surface(session_id, mode).enabled_tools())
+        self.shared_tool_catalog(session_id, mode).as_ref().clone()
     }
 
     fn rlm_tools_json(&self, session_id: &str) -> String {
-        let catalog = self.tool_catalog(session_id, crate::ExecutionMode::Rlm);
+        let entry = self.execution_surface_cache_entry(session_id, crate::ExecutionMode::Rlm);
+        let catalog = entry.catalog();
         tracing::debug!(
             session_id,
             tool_count = catalog.len(),
@@ -202,7 +392,7 @@ impl Session {
                 .collect::<Vec<_>>(),
             "serializing RLM tool catalog"
         );
-        serde_json::to_string(&catalog).unwrap_or_else(|_| "[]".to_string())
+        entry.rlm_tools_json().as_ref().clone()
     }
 
     pub fn turn_injection_bridge(&self) -> &TurnInjectionBridge {
@@ -420,6 +610,10 @@ impl Session {
         }
 
         self.last_repl_tools_json = None;
+        self.execution_surface_cache
+            .lock()
+            .expect("execution surface cache lock")
+            .clear();
         Ok(())
     }
 
@@ -808,14 +1002,16 @@ finish "ok"
         std::fs::write(temp.path().join("beta.rs"), "fn main() {}\n").expect("write beta");
         let _cwd = CurrentDirGuard::set(temp.path());
 
-        let deps = crate::DefaultToolPluginDeps {
-            enable_user_prompts: true,
-            ..Default::default()
-        };
-        let plugin_host = PluginHost::new(crate::default_tool_plugin_factories(
-            crate::ExecutionMode::Rlm,
-            deps,
-        ));
+        let plugin_host = PluginHost::new(vec![
+            Arc::new(StaticPluginFactory::new(
+                "ls",
+                PluginSpec::new().with_tool_provider(Arc::new(crate::tools::Ls)),
+            )),
+            Arc::new(StaticPluginFactory::new(
+                "grep",
+                PluginSpec::new().with_tool_provider(Arc::new(crate::tools::Grep::new())),
+            )),
+        ]);
         let plugin_session = plugin_host
             .build_session(
                 "root",

@@ -14,12 +14,15 @@ pub struct PlanItem {
 pub struct PlanSnapshot {
     explanation: Option<String>,
     plan: Vec<PlanItem>,
+    #[serde(default)]
+    generation: u64,
 }
 
 #[derive(Default)]
 struct PlanState {
     explanation: Option<String>,
     items: Vec<PlanItem>,
+    generation: u64,
 }
 
 pub struct UpdatePlanTool {
@@ -41,6 +44,7 @@ impl UpdatePlanTool {
         Ok(PlanSnapshot {
             explanation: guard.explanation.clone(),
             plan: guard.items.clone(),
+            generation: guard.generation,
         })
     }
 
@@ -51,7 +55,22 @@ impl UpdatePlanTool {
             .map_err(|_| "plan state poisoned".to_string())?;
         guard.explanation = snapshot.explanation;
         guard.items = snapshot.plan;
+        guard.generation = snapshot.generation;
         Ok(())
+    }
+
+    pub fn generation(&self) -> Result<u64, String> {
+        let guard = self
+            .state
+            .lock()
+            .map_err(|_| "plan state poisoned".to_string())?;
+        Ok(guard.generation)
+    }
+}
+
+impl PlanSnapshot {
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 }
 
@@ -153,6 +172,7 @@ fn execute_update_plan(state: &Arc<Mutex<PlanState>>, args: &serde_json::Value) 
     let mut guard = state.lock().unwrap();
     guard.explanation = explanation.clone();
     guard.items = items.clone();
+    guard.generation = guard.generation.wrapping_add(1).max(1);
     ToolResult::ok(json!("Plan updated"))
 }
 
@@ -237,6 +257,7 @@ mod tests {
                 step: "Inspect renderer".to_string(),
                 status: "completed".to_string(),
             }],
+            generation: 1,
         })
         .expect("restore");
         let snapshot = tool.snapshot().expect("snapshot");
@@ -248,6 +269,7 @@ mod tests {
                     step: "Inspect renderer".to_string(),
                     status: "completed".to_string(),
                 }],
+                generation: 1,
             }
         );
     }

@@ -479,10 +479,12 @@ pub(crate) fn persist_root_session_state(
     dynamic_state: &DynamicStateSnapshot,
 ) {
     state.stamp_runtime_state(Some(dynamic_state), None);
+    let message_count = state.projected_messages().len();
+    let tool_call_count = state.projected_tool_calls().len();
     tracing::debug!(
         iteration = state.iteration,
-        messages = state.messages.len(),
-        tool_calls = state.tool_calls.len(),
+        messages = message_count,
+        tool_calls = tool_call_count,
         plugin_panels = ui_state.plugin_panels.len(),
         input_tokens = state.token_usage.input_tokens,
         output_tokens = state.token_usage.output_tokens,
@@ -491,49 +493,115 @@ pub(crate) fn persist_root_session_state(
         "persisting root session state"
     );
     ui_resume::save_ui_resume_state(store, ui_state);
-    store.save_session_graph(state.session_graph.clone());
-    store.clear_live_session_graph();
+    let checkpoint = lash::HydratedSessionCheckpoint {
+        turn_state: lash::PersistedTurnState {
+            iteration: state.iteration,
+            token_usage: state.token_usage.clone(),
+            last_prompt_usage: state.last_prompt_usage.clone(),
+        },
+        dynamic_state_ref: state.dynamic_state_ref.clone(),
+        dynamic_state: state.dynamic_state_snapshot.clone(),
+        plugin_snapshot_ref: state.plugin_snapshot_ref.clone(),
+        plugin_snapshot_revision: state.plugin_snapshot_revision,
+        plugin_snapshot: state.plugin_snapshot.clone(),
+    };
+    let stored_checkpoint = store.put_checkpoint(&checkpoint);
+    state.checkpoint_ref = Some(stored_checkpoint.checkpoint_ref.clone());
+    state.dynamic_state_ref = stored_checkpoint.manifest.dynamic_state_ref;
+    state.dynamic_state_generation = state
+        .dynamic_state_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.base_generation);
+    state.plugin_snapshot_ref = stored_checkpoint.manifest.plugin_snapshot_ref;
+    state.execution_state_snapshot = None;
+    state.dynamic_state_snapshot = None;
+    state.plugin_snapshot = None;
+    let node_count = state.session_graph.nodes.len();
+    if state.graph_replace_required || state.persisted_graph_node_count > node_count {
+        store.replace_session_graph(&state.session_graph);
+    } else if state.persisted_graph_node_count < node_count {
+        store.append_session_graph_nodes(
+            &state.session_graph.nodes[state.persisted_graph_node_count..],
+        );
+    }
+    store.save_session_head_meta(lash::SessionHeadMeta {
+        config: lash::PersistedSessionConfig {
+            provider_id: state.policy.provider.id().to_string(),
+            configured_model: state.policy.model.clone(),
+            context_window: state.policy.max_context_tokens.unwrap_or_default() as u64,
+            execution_mode: state.policy.execution_mode,
+            context_approach: state.policy.context_approach.clone(),
+            model_variant: state.policy.model_variant.clone(),
+        },
+        checkpoint_ref: Some(stored_checkpoint.checkpoint_ref),
+        leaf_node_id: state.session_graph.leaf_node_id.clone(),
+        graph_node_count: state.session_graph.nodes.len(),
+        token_ledger: state.token_ledger.clone(),
+    });
+    state.persisted_graph_node_count = node_count;
+    state.graph_replace_required = false;
+    store.clear_live_resume();
 }
 
 pub(crate) fn persist_live_runtime_snapshot(
     store: &Store,
     seed_graph: Option<lash::SessionGraph>,
-    snapshot: DurableTurnSnapshot,
+    live_graph: lash::SessionGraph,
     ui_state: &UiResumeState,
     dynamic_state: &DynamicStateSnapshot,
     policy: &lash::SessionPolicy,
-    token_usage: TokenUsage,
-    last_prompt_usage: Option<PromptUsage>,
+    turn_state: lash::PersistedTurnState,
     token_ledger: &[lash::TokenLedgerEntry],
+    plugin_snapshot: Option<&lash::PluginSessionSnapshot>,
+    execution_state_snapshot: Option<&[u8]>,
 ) {
-    let mut graph = seed_graph
-        .or_else(|| store.load_live_session_graph())
-        .or_else(|| store.load_session_graph())
-        .unwrap_or_default();
-    let mut state = SessionStateEnvelope {
-        session_graph: graph.clone(),
-        messages: snapshot.messages,
-        tool_calls: snapshot.tool_calls,
-        policy: policy.clone(),
-        iteration: snapshot.iteration,
-        token_usage,
-        last_prompt_usage,
-        token_ledger: token_ledger.to_vec(),
-        execution_state_snapshot: graph.latest_execution_state().unwrap_or(None),
-        ..SessionStateEnvelope::default()
-    };
-    state.stamp_runtime_state(Some(dynamic_state), None);
-    graph = state.session_graph;
+    let base = store
+        .load_live_resume()
+        .map(|snapshot| (snapshot.graph, snapshot.checkpoint_ref))
+        .or_else(|| {
+            store
+                .load_session_head()
+                .map(|head| (head.graph, head.checkpoint_ref))
+        });
+    let (graph, checkpoint_ref) = base.unwrap_or_else(|| (seed_graph.unwrap_or_default(), None));
+    if !lash::messages_are_live_resume_safe(&live_graph.project_messages()) {
+        tracing::debug!(
+            iteration = turn_state.iteration,
+            graph_nodes = live_graph.nodes.len(),
+            "skipping unsafe live runtime snapshot"
+        );
+        return;
+    }
     tracing::debug!(
-        iteration = state.iteration,
-        messages = state.messages.len(),
-        tool_calls = state.tool_calls.len(),
+        iteration = turn_state.iteration,
+        graph_nodes = live_graph.nodes.len(),
         plugin_mode_indicators = ui_state.plugin_mode_indicators.len(),
         plugin_panels = ui_state.plugin_panels.len(),
         "persisting live runtime snapshot"
     );
     ui_resume::save_ui_resume_state(store, ui_state);
-    store.save_live_session_graph(graph);
+    let delta_ref = store.put_typed_blob(&lash::LiveResumeDelta {
+        appended_graph_nodes: live_graph.nodes[graph.nodes.len()..].to_vec(),
+        leaf_node_id: live_graph.leaf_node_id.clone(),
+        turn_state,
+        dynamic_state: Some(dynamic_state.clone()),
+        plugin_snapshot: plugin_snapshot.cloned(),
+        execution_state_snapshot: execution_state_snapshot.map(ToOwned::to_owned),
+        token_ledger: token_ledger.to_vec(),
+    });
+    store.save_live_resume(lash::LiveResumeSnapshot {
+        graph,
+        config: lash::PersistedSessionConfig {
+            provider_id: policy.provider.id().to_string(),
+            configured_model: policy.model.clone(),
+            context_window: policy.max_context_tokens.unwrap_or_default() as u64,
+            execution_mode: policy.execution_mode,
+            context_approach: policy.context_approach.clone(),
+            model_variant: policy.model_variant.clone(),
+        },
+        checkpoint_ref,
+        delta_ref: Some(delta_ref),
+    });
 }
 
 pub(crate) fn push_system_message(app: &mut App, msg: impl Into<String>) {

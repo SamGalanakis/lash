@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::llm::types::LlmResponse;
 use crate::runtime::AssembledTurn;
@@ -88,10 +88,257 @@ pub struct HistoryState {
 impl HistoryState {
     pub fn from_state(state: &SessionStateEnvelope) -> Self {
         Self {
-            messages: state.messages.clone(),
-            tool_calls: state.tool_calls.clone(),
+            messages: state.project_messages(),
+            tool_calls: state.project_tool_calls(),
             metadata: HistoryRewriteMetadata::default(),
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SessionReadView(Arc<SessionReadState>);
+
+#[derive(Debug)]
+struct SessionReadState {
+    meta: SessionReadMeta,
+    graph: SessionReadGraph,
+    messages: Arc<Vec<crate::Message>>,
+    tool_calls: Arc<Vec<crate::ToolCallRecord>>,
+    projected_rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
+}
+
+#[derive(Clone, Debug)]
+struct SessionReadMeta {
+    session_id: String,
+    policy: SessionPolicy,
+    iteration: usize,
+    token_usage: crate::TokenUsage,
+    last_prompt_usage: Option<crate::runtime::PromptUsage>,
+    dynamic_state_ref: Option<crate::store::BlobRef>,
+    dynamic_state_generation: Option<u64>,
+    checkpoint_ref: Option<crate::store::BlobRef>,
+    token_ledger: Arc<Vec<crate::runtime::TokenLedgerEntry>>,
+}
+
+impl SessionReadMeta {
+    fn from_state_ref(state: &SessionStateEnvelope) -> Self {
+        Self {
+            session_id: state.session_id.clone(),
+            policy: state.policy.clone(),
+            iteration: state.iteration,
+            token_usage: state.token_usage.clone(),
+            last_prompt_usage: state.last_prompt_usage.clone(),
+            dynamic_state_ref: state.dynamic_state_ref.clone(),
+            dynamic_state_generation: state.dynamic_state_generation,
+            checkpoint_ref: state.checkpoint_ref.clone(),
+            token_ledger: Arc::new(state.token_ledger.clone()),
+        }
+    }
+
+    fn from_state_owned(state: SessionStateEnvelope) -> Self {
+        Self {
+            session_id: state.session_id,
+            policy: state.policy,
+            iteration: state.iteration,
+            token_usage: state.token_usage,
+            last_prompt_usage: state.last_prompt_usage,
+            dynamic_state_ref: state.dynamic_state_ref,
+            dynamic_state_generation: state.dynamic_state_generation,
+            checkpoint_ref: state.checkpoint_ref,
+            token_ledger: Arc::new(state.token_ledger),
+        }
+    }
+
+    fn to_owned_state(&self, session_graph: crate::SessionGraph) -> SessionStateEnvelope {
+        SessionStateEnvelope {
+            session_id: self.session_id.clone(),
+            policy: self.policy.clone(),
+            session_graph,
+            iteration: self.iteration,
+            token_usage: self.token_usage.clone(),
+            last_prompt_usage: self.last_prompt_usage.clone(),
+            dynamic_state_ref: self.dynamic_state_ref.clone(),
+            dynamic_state_generation: self.dynamic_state_generation,
+            dynamic_state_snapshot: None,
+            plugin_snapshot_ref: None,
+            plugin_snapshot_revision: None,
+            plugin_snapshot: None,
+            execution_state_snapshot: None,
+            token_ledger: self.token_ledger.as_ref().clone(),
+            checkpoint_ref: self.checkpoint_ref.clone(),
+            persisted_graph_node_count: 0,
+            graph_replace_required: false,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum SessionReadGraph {
+    Owned(Arc<crate::SessionGraph>),
+    Derived {
+        cache: OnceLock<Arc<crate::SessionGraph>>,
+        base_graph: Option<Arc<crate::SessionGraph>>,
+        messages: Arc<Vec<crate::Message>>,
+        tool_calls: Arc<Vec<crate::ToolCallRecord>>,
+    },
+}
+
+impl SessionReadView {
+    pub fn new(state: SessionStateEnvelope) -> Self {
+        let mut state = state;
+        let graph = Arc::new(std::mem::take(&mut state.session_graph));
+        let messages = graph.shared_projected_messages();
+        let tool_calls = graph.shared_projected_tool_calls();
+        Self(Arc::new(SessionReadState {
+            meta: SessionReadMeta::from_state_owned(state),
+            graph: SessionReadGraph::Owned(Arc::clone(&graph)),
+            messages,
+            tool_calls,
+            projected_rlm_globals: graph.shared_projected_rlm_globals(),
+        }))
+    }
+
+    pub fn from_projection_state(
+        mut state: SessionStateEnvelope,
+        messages: Arc<Vec<crate::Message>>,
+        tool_calls: Arc<Vec<crate::ToolCallRecord>>,
+    ) -> Self {
+        Self(Arc::new(SessionReadState {
+            meta: SessionReadMeta::from_state_owned({
+                state.session_graph = crate::SessionGraph::default();
+                state
+            }),
+            graph: SessionReadGraph::Derived {
+                cache: OnceLock::new(),
+                base_graph: None,
+                messages: Arc::clone(&messages),
+                tool_calls: Arc::clone(&tool_calls),
+            },
+            messages,
+            tool_calls,
+            projected_rlm_globals: Arc::new(serde_json::Map::new()),
+        }))
+    }
+
+    pub fn from_graph_projection(
+        state: &SessionStateEnvelope,
+        base_graph: crate::SessionGraph,
+        messages: Arc<Vec<crate::Message>>,
+        tool_calls: Arc<Vec<crate::ToolCallRecord>>,
+    ) -> Self {
+        Self(Arc::new(SessionReadState {
+            meta: SessionReadMeta::from_state_ref(state),
+            graph: SessionReadGraph::Derived {
+                cache: OnceLock::new(),
+                base_graph: Some(Arc::new(base_graph.clone())),
+                messages: Arc::clone(&messages),
+                tool_calls: Arc::clone(&tool_calls),
+            },
+            messages,
+            tool_calls,
+            projected_rlm_globals: base_graph.shared_projected_rlm_globals(),
+        }))
+    }
+
+    pub fn from_runtime_state(state: &SessionStateEnvelope) -> Self {
+        Self(Arc::new(SessionReadState {
+            meta: SessionReadMeta::from_state_ref(state),
+            graph: SessionReadGraph::Owned(Arc::new(state.session_graph.clone())),
+            messages: state.session_graph.shared_projected_messages(),
+            tool_calls: state.session_graph.shared_projected_tool_calls(),
+            projected_rlm_globals: state.session_graph.shared_projected_rlm_globals(),
+        }))
+    }
+
+    fn graph_arc(&self) -> &Arc<crate::SessionGraph> {
+        match &self.0.graph {
+            SessionReadGraph::Owned(graph) => graph,
+            SessionReadGraph::Derived {
+                cache,
+                base_graph,
+                messages,
+                tool_calls,
+            } => cache.get_or_init(|| {
+                let mut graph = base_graph
+                    .as_ref()
+                    .map(|graph| graph.as_ref().clone())
+                    .unwrap_or_default();
+                graph.merge_active_projection(messages.as_slice(), tool_calls.as_slice());
+                Arc::new(graph)
+            }),
+        }
+    }
+
+    fn messages_arc(&self) -> &Arc<Vec<crate::Message>> {
+        &self.0.messages
+    }
+
+    fn tool_calls_arc(&self) -> &Arc<Vec<crate::ToolCallRecord>> {
+        &self.0.tool_calls
+    }
+
+    fn projected_rlm_globals_arc(&self) -> &Arc<serde_json::Map<String, serde_json::Value>> {
+        &self.0.projected_rlm_globals
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.0.meta.session_id
+    }
+
+    pub fn policy(&self) -> &SessionPolicy {
+        &self.0.meta.policy
+    }
+
+    pub fn session_graph(&self) -> &crate::SessionGraph {
+        self.graph_arc().as_ref()
+    }
+
+    pub fn messages(&self) -> &[crate::Message] {
+        self.messages_arc().as_slice()
+    }
+
+    pub fn tool_calls(&self) -> &[crate::ToolCallRecord] {
+        self.tool_calls_arc().as_slice()
+    }
+
+    pub fn projected_rlm_globals(&self) -> &serde_json::Map<String, serde_json::Value> {
+        self.projected_rlm_globals_arc().as_ref()
+    }
+
+    pub fn iteration(&self) -> usize {
+        self.0.meta.iteration
+    }
+
+    pub fn token_usage(&self) -> &crate::TokenUsage {
+        &self.0.meta.token_usage
+    }
+
+    pub fn last_prompt_usage(&self) -> Option<&crate::runtime::PromptUsage> {
+        self.0.meta.last_prompt_usage.as_ref()
+    }
+
+    pub fn dynamic_state_ref(&self) -> Option<&crate::store::BlobRef> {
+        self.0.meta.dynamic_state_ref.as_ref()
+    }
+
+    pub fn dynamic_state_generation(&self) -> Option<u64> {
+        self.0.meta.dynamic_state_generation
+    }
+
+    pub fn checkpoint_ref(&self) -> Option<&crate::store::BlobRef> {
+        self.0.meta.checkpoint_ref.as_ref()
+    }
+
+    pub fn token_ledger(&self) -> &[crate::runtime::TokenLedgerEntry] {
+        self.0.meta.token_ledger.as_slice()
+    }
+
+    pub fn usage_report(&self) -> crate::runtime::SessionUsageReport {
+        crate::runtime::SessionUsageReport::from_entries(self.token_ledger())
+    }
+
+    pub fn to_owned_state(&self) -> SessionStateEnvelope {
+        self.0.meta.to_owned_state(self.session_graph().clone())
     }
 }
 
@@ -99,7 +346,7 @@ impl HistoryState {
 #[derive(Clone)]
 pub struct TurnTransformContext {
     pub session_id: String,
-    pub state: SessionStateEnvelope,
+    pub state: SessionReadView,
     pub prompt_usage: Option<crate::runtime::PromptUsage>,
     pub max_context_tokens: Option<usize>,
     pub host: Arc<dyn SessionManager>,
@@ -110,7 +357,7 @@ pub struct TurnTransformContext {
 pub struct RewriteContext {
     pub session_id: String,
     pub trigger: RewriteTrigger,
-    pub state: SessionStateEnvelope,
+    pub state: SessionReadView,
     pub host: Arc<dyn SessionManager>,
 }
 
@@ -414,7 +661,7 @@ pub struct PluginAbort {
 
 #[derive(Clone, Debug, Default)]
 pub struct TurnPreparation {
-    pub messages: Vec<crate::Message>,
+    pub messages: crate::MessageSequence,
     pub events: Vec<crate::SessionEvent>,
     pub abort: Option<PluginAbort>,
 }
@@ -422,8 +669,8 @@ pub struct TurnPreparation {
 #[derive(Clone)]
 pub struct PrepareTurnRequest {
     pub session_id: String,
-    pub state: SessionStateEnvelope,
-    pub messages: Vec<crate::Message>,
+    pub state: SessionReadView,
+    pub messages: crate::MessageSequence,
     pub host: Arc<dyn SessionManager>,
 }
 
@@ -627,7 +874,7 @@ pub struct PromptHookContext {
     pub session_id: String,
     pub host: Arc<dyn SessionManager>,
     pub prompt: crate::PromptContext,
-    pub state: SessionSnapshot,
+    pub state: SessionReadView,
 }
 
 #[derive(Clone)]
@@ -640,7 +887,7 @@ pub struct PromptRequestHookContext {
 #[derive(Clone)]
 pub struct TurnHookContext {
     pub session_id: String,
-    pub state: SessionSnapshot,
+    pub state: SessionReadView,
     pub host: Arc<dyn SessionManager>,
 }
 
@@ -655,16 +902,45 @@ pub struct SessionConfigChangedContext {
 #[derive(Clone)]
 pub struct SessionStateChangedContext {
     pub session_id: String,
-    pub state: SessionStateEnvelope,
+    pub state: SessionReadView,
     pub host: Arc<dyn SessionManager>,
 }
 
 #[derive(Clone)]
 pub enum PluginRuntimeEvent {
-    TurnCommitted(AssembledTurn),
+    TurnCommitted(Arc<AssembledTurn>),
     TurnPersisted(SessionStateChangedContext),
-    SessionRestored(SessionStateEnvelope),
+    SessionRestored(SessionReadView),
     SessionConfigChanged(SessionConfigChangedContext),
+}
+
+#[derive(Clone, Debug)]
+pub struct TurnResultSummary {
+    pub status: crate::TurnStatus,
+    pub assistant_output: crate::runtime::AssistantOutput,
+    pub has_plugin_visible_output: bool,
+    pub done_reason: crate::runtime::DoneReason,
+    pub execution: crate::runtime::ExecutionSummary,
+    pub token_usage: crate::TokenUsage,
+    pub tool_calls: Arc<Vec<crate::ToolCallRecord>>,
+    pub errors: Arc<Vec<crate::runtime::TurnIssue>>,
+    pub typed_finish: Option<serde_json::Value>,
+}
+
+impl TurnResultSummary {
+    pub fn from_assembled(turn: &AssembledTurn) -> Self {
+        Self {
+            status: turn.status.clone(),
+            assistant_output: turn.assistant_output.clone(),
+            has_plugin_visible_output: turn.has_plugin_visible_output,
+            done_reason: turn.done_reason.clone(),
+            execution: turn.execution.clone(),
+            token_usage: turn.token_usage.clone(),
+            tool_calls: Arc::new(turn.tool_calls.clone()),
+            errors: Arc::new(turn.errors.clone()),
+            typed_finish: turn.typed_finish.clone(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -717,7 +993,7 @@ pub struct ToolResultProjectionContext {
 #[derive(Clone)]
 pub struct TurnResultHookContext {
     pub session_id: String,
-    pub turn: AssembledTurn,
+    pub turn: Arc<TurnResultSummary>,
     pub host: Arc<dyn SessionManager>,
 }
 
@@ -725,7 +1001,7 @@ pub struct TurnResultHookContext {
 pub struct CheckpointHookContext {
     pub session_id: String,
     pub checkpoint: CheckpointKind,
-    pub state: SessionSnapshot,
+    pub state: SessionReadView,
     pub host: Arc<dyn SessionManager>,
 }
 
@@ -806,6 +1082,8 @@ pub struct PluginSnapshotEntry {
 pub struct PluginSnapshotMeta {
     pub plugin_id: String,
     pub plugin_version: String,
+    #[serde(default)]
+    pub revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<serde_json::Value>,
 }
@@ -1056,8 +1334,13 @@ pub trait SessionPlugin: Send + Sync {
         Ok(PluginSnapshotMeta {
             plugin_id: self.id().to_string(),
             plugin_version: self.version().to_string(),
+            revision: self.snapshot_revision(),
             state: None,
         })
+    }
+
+    fn snapshot_revision(&self) -> u64 {
+        0
     }
 
     fn restore(
@@ -1075,6 +1358,9 @@ pub trait SessionPlugin: Send + Sync {
 
 pub trait PluginFactory: Send + Sync {
     fn id(&self) -> &'static str;
+    fn supports_context_approach(&self, _approach: &crate::ContextApproach) -> bool {
+        false
+    }
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError>;
 }
 
@@ -1342,6 +1628,7 @@ mod tests {
             Ok(PluginSnapshotMeta {
                 plugin_id: self.id().to_string(),
                 plugin_version: self.version().to_string(),
+                revision: self.snapshot_revision(),
                 state: Some(json!({"session_id": self.session_id})),
             })
         }
@@ -1357,7 +1644,7 @@ mod tests {
                 session_id: "root".to_string(),
                 host: Arc::new(MockSessionManager::default()),
                 prompt: crate::PromptContext::default(),
-                state: SessionStateEnvelope::default(),
+                state: SessionReadView::new(SessionStateEnvelope::default()),
             })
             .await
             .expect("prompt contributions");

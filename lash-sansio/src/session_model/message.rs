@@ -3,6 +3,7 @@ use crate::llm::types::{LlmAttachment, LlmMessage, LlmRole};
 use crate::plugin::UserInputProvenance;
 use base64::Engine;
 use std::collections::HashSet;
+use std::sync::{Arc, OnceLock};
 
 // ─── Structured message types for context-aware pruning ───
 
@@ -234,6 +235,198 @@ pub struct RenderedPrompt {
     pub attachments: Vec<LlmAttachment>,
 }
 
+#[derive(Debug)]
+pub struct MessageSequence {
+    base: Arc<Vec<Message>>,
+    delta: Vec<Message>,
+    owned: Option<Vec<Message>>,
+    materialized: OnceLock<Arc<Vec<Message>>>,
+    base_rendered_prompt: Option<Arc<RenderedPrompt>>,
+}
+
+impl Clone for MessageSequence {
+    fn clone(&self) -> Self {
+        Self {
+            base: Arc::clone(&self.base),
+            delta: self.delta.clone(),
+            owned: self.owned.clone(),
+            materialized: OnceLock::new(),
+            base_rendered_prompt: self.base_rendered_prompt.clone(),
+        }
+    }
+}
+
+impl Default for MessageSequence {
+    fn default() -> Self {
+        Self::from_owned(Vec::new())
+    }
+}
+
+impl From<Vec<Message>> for MessageSequence {
+    fn from(messages: Vec<Message>) -> Self {
+        Self::from_owned(messages)
+    }
+}
+
+impl std::ops::Deref for MessageSequence {
+    type Target = [Message];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl MessageSequence {
+    pub fn from_owned(messages: Vec<Message>) -> Self {
+        Self {
+            base: Arc::new(Vec::new()),
+            delta: Vec::new(),
+            owned: Some(messages),
+            materialized: OnceLock::new(),
+            base_rendered_prompt: None,
+        }
+    }
+
+    pub fn from_base(base: Arc<Vec<Message>>) -> Self {
+        Self {
+            base,
+            delta: Vec::new(),
+            owned: None,
+            materialized: OnceLock::new(),
+            base_rendered_prompt: None,
+        }
+    }
+
+    pub fn from_base_and_delta(base: Arc<Vec<Message>>, delta: Vec<Message>) -> Self {
+        Self {
+            base,
+            delta,
+            owned: None,
+            materialized: OnceLock::new(),
+            base_rendered_prompt: None,
+        }
+    }
+
+    pub fn with_base_rendered_prompt(mut self, rendered: Option<Arc<RenderedPrompt>>) -> Self {
+        self.base_rendered_prompt = rendered;
+        self
+    }
+
+    pub fn len(&self) -> usize {
+        match &self.owned {
+            Some(owned) => owned.len(),
+            None => self.base.len() + self.delta.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn as_slice(&self) -> &[Message] {
+        if let Some(owned) = &self.owned {
+            return owned.as_slice();
+        }
+        if self.delta.is_empty() {
+            return self.base.as_slice();
+        }
+        self.materialized
+            .get_or_init(|| {
+                let mut combined = Vec::with_capacity(self.base.len() + self.delta.len());
+                combined.extend(self.base.iter().cloned());
+                combined.extend(self.delta.iter().cloned());
+                Arc::new(combined)
+            })
+            .as_slice()
+    }
+
+    pub fn shared(&self) -> Arc<Vec<Message>> {
+        if let Some(owned) = &self.owned {
+            return Arc::clone(self.materialized.get_or_init(|| Arc::new(owned.clone())));
+        }
+        if self.delta.is_empty() {
+            return Arc::clone(&self.base);
+        }
+        Arc::clone(self.materialized.get_or_init(|| {
+            let mut combined = Vec::with_capacity(self.base.len() + self.delta.len());
+            combined.extend(self.base.iter().cloned());
+            combined.extend(self.delta.iter().cloned());
+            Arc::new(combined)
+        }))
+    }
+
+    pub fn make_mut(&mut self) -> &mut Vec<Message> {
+        if self.owned.is_none() {
+            let owned = if self.delta.is_empty() {
+                Arc::unwrap_or_clone(Arc::clone(&self.base))
+            } else if let Some(materialized) = self.materialized.get() {
+                Arc::unwrap_or_clone(Arc::clone(materialized))
+            } else {
+                let mut combined = Vec::with_capacity(self.base.len() + self.delta.len());
+                combined.extend(self.base.iter().cloned());
+                combined.extend(self.delta.iter().cloned());
+                combined
+            };
+            self.owned = Some(owned);
+            self.base = Arc::new(Vec::new());
+            self.delta.clear();
+        }
+        self.materialized = OnceLock::new();
+        self.base_rendered_prompt = None;
+        self.owned.as_mut().expect("message sequence owned state")
+    }
+
+    pub fn push(&mut self, message: Message) {
+        self.make_mut().push(message);
+    }
+
+    pub fn extend(&mut self, messages: Vec<Message>) {
+        self.make_mut().extend(messages);
+    }
+
+    pub fn replace(&mut self, messages: Vec<Message>) {
+        self.base = Arc::new(Vec::new());
+        self.delta.clear();
+        self.owned = Some(messages);
+        self.materialized = OnceLock::new();
+        self.base_rendered_prompt = None;
+    }
+
+    pub fn into_vec(self) -> Vec<Message> {
+        if let Some(owned) = self.owned {
+            return owned;
+        }
+        if self.delta.is_empty() {
+            return Arc::unwrap_or_clone(self.base);
+        }
+        if let Some(materialized) = self.materialized.into_inner() {
+            return Arc::unwrap_or_clone(materialized);
+        }
+        let mut combined = Vec::with_capacity(self.base.len() + self.delta.len());
+        combined.extend(self.base.iter().cloned());
+        combined.extend(self.delta);
+        combined
+    }
+
+    pub fn render_prompt(&self, mode: ExecutionMode) -> RenderedPrompt {
+        if let Some(owned) = &self.owned {
+            return render_prompt(owned.as_slice(), mode);
+        }
+        if self.base.is_empty() {
+            return render_prompt(self.delta.as_slice(), mode);
+        }
+        let mut rendered = self
+            .base_rendered_prompt
+            .as_ref()
+            .map(|prompt| prompt.as_ref().clone())
+            .unwrap_or_else(|| render_prompt(self.base.as_slice(), mode));
+        if !self.delta.is_empty() {
+            append_rendered_prompt(&mut rendered, self.delta.as_slice(), mode);
+        }
+        rendered
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct TranscriptTurn {
     user: Vec<String>,
@@ -241,10 +434,9 @@ struct TranscriptTurn {
 }
 
 pub fn render_prompt(msgs: &[Message], mode: ExecutionMode) -> RenderedPrompt {
-    match mode {
-        ExecutionMode::Rlm => render_structured_prompt(msgs),
-        ExecutionMode::Standard => render_structured_prompt(msgs),
-    }
+    let mut rendered = RenderedPrompt::default();
+    append_rendered_prompt(&mut rendered, msgs, mode);
+    rendered
 }
 
 pub fn messages_are_live_resume_safe(messages: &[Message]) -> bool {
@@ -373,15 +565,45 @@ pub fn render_transcript_prompt(msgs: &[Message]) -> RenderedPrompt {
     }
 }
 
+pub fn append_rendered_prompt(
+    rendered: &mut RenderedPrompt,
+    msgs: &[Message],
+    mode: ExecutionMode,
+) {
+    match mode {
+        ExecutionMode::Rlm | ExecutionMode::Standard => append_structured_prompt(rendered, msgs),
+    }
+}
+
+#[cfg(test)]
 fn render_structured_prompt(msgs: &[Message]) -> RenderedPrompt {
-    let mut attachments = Vec::new();
-    let mut messages = Vec::new();
+    let mut rendered = RenderedPrompt::default();
+    append_structured_prompt(&mut rendered, msgs);
+    rendered
+}
+
+fn append_structured_prompt(rendered: &mut RenderedPrompt, msgs: &[Message]) {
+    let mut attachment_count = 0usize;
+    let mut message_count = 0usize;
+    for msg in msgs {
+        for part in &msg.parts {
+            message_count += 1;
+            if matches!(msg.role, MessageRole::User)
+                && matches!(part.kind, PartKind::Image)
+                && part.attachment.is_some()
+            {
+                attachment_count += 1;
+            }
+        }
+    }
+    rendered.attachments.reserve(attachment_count);
+    rendered.messages.reserve(message_count);
 
     for msg in msgs {
         for part in &msg.parts {
             match part.kind {
                 PartKind::ToolCall => {
-                    messages.push(LlmMessage {
+                    rendered.messages.push(LlmMessage {
                         role: LlmRole::Assistant,
                         content: part.content.clone(),
                         kind: "tool_call".to_string(),
@@ -391,10 +613,10 @@ fn render_structured_prompt(msgs: &[Message]) -> RenderedPrompt {
                     });
                 }
                 PartKind::ToolResult => {
-                    let rendered = part.render();
-                    messages.push(LlmMessage {
+                    let text = part.render();
+                    rendered.messages.push(LlmMessage {
                         role: llm_role_for_message(msg.role),
-                        content: rendered,
+                        content: text,
                         kind: "tool_result".to_string(),
                         image_idx: -1,
                         tool_call_id: part.tool_call_id.clone(),
@@ -405,9 +627,9 @@ fn render_structured_prompt(msgs: &[Message]) -> RenderedPrompt {
                     if let Some(attachment) = attachment_from_part(part)
                         && matches!(msg.role, MessageRole::User)
                     {
-                        let image_idx = attachments.len();
-                        attachments.push(attachment);
-                        messages.push(LlmMessage {
+                        let image_idx = rendered.attachments.len();
+                        rendered.attachments.push(attachment);
+                        rendered.messages.push(LlmMessage {
                             role: LlmRole::User,
                             content: String::new(),
                             kind: "image".to_string(),
@@ -418,18 +640,18 @@ fn render_structured_prompt(msgs: &[Message]) -> RenderedPrompt {
                         continue;
                     }
 
-                    let mut rendered = render_part_for_chat(msg.role, part);
-                    if rendered.trim().is_empty() {
+                    let mut text = render_part_for_chat(msg.role, part);
+                    if text.trim().is_empty() {
                         continue;
                     }
 
                     if matches!(msg.role, MessageRole::System) {
-                        rendered = format!("Runtime note:\n{rendered}");
+                        text = format!("Runtime note:\n{text}");
                     }
 
-                    messages.push(LlmMessage {
+                    rendered.messages.push(LlmMessage {
                         role: llm_role_for_message(msg.role),
-                        content: rendered,
+                        content: text,
                         kind: "text".to_string(),
                         image_idx: -1,
                         tool_call_id: None,
@@ -438,11 +660,6 @@ fn render_structured_prompt(msgs: &[Message]) -> RenderedPrompt {
                 }
             }
         }
-    }
-
-    RenderedPrompt {
-        messages,
-        attachments,
     }
 }
 

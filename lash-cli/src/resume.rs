@@ -79,6 +79,38 @@ fn normalized_last_prompt_usage(last_prompt_usage: Option<PromptUsage>) -> Optio
     Some(usage)
 }
 
+fn merged_resume_checkpoint(
+    checkpoint: Option<lash::HydratedSessionCheckpoint>,
+    live_delta: Option<&lash::LiveResumeDelta>,
+) -> Option<lash::HydratedSessionCheckpoint> {
+    match (checkpoint, live_delta) {
+        (Some(mut checkpoint), Some(delta)) => {
+            checkpoint.turn_state = delta.turn_state.clone();
+            if delta.dynamic_state.is_some() {
+                checkpoint.dynamic_state = delta.dynamic_state.clone();
+                checkpoint.dynamic_state_ref = None;
+            }
+            if delta.plugin_snapshot.is_some() {
+                checkpoint.plugin_snapshot = delta.plugin_snapshot.clone();
+                checkpoint.plugin_snapshot_ref = None;
+            }
+            if delta.plugin_snapshot.is_some() {
+                checkpoint.plugin_snapshot_revision = None;
+            }
+            Some(checkpoint)
+        }
+        (None, Some(delta)) => Some(lash::HydratedSessionCheckpoint {
+            turn_state: delta.turn_state.clone(),
+            dynamic_state_ref: None,
+            dynamic_state: delta.dynamic_state.clone(),
+            plugin_snapshot_ref: None,
+            plugin_snapshot_revision: None,
+            plugin_snapshot: delta.plugin_snapshot.clone(),
+        }),
+        (checkpoint, None) => checkpoint,
+    }
+}
+
 async fn restore_model_from_graph_config(
     config: Option<&PersistedSessionConfig>,
     app: &mut App,
@@ -133,6 +165,11 @@ async fn restore_model_from_graph_config(
 #[allow(clippy::too_many_arguments)]
 async fn apply_graph_resume_state(
     graph: lash::SessionGraph,
+    config: Option<lash::PersistedSessionConfig>,
+    token_ledger: Vec<lash::TokenLedgerEntry>,
+    checkpoint: Option<lash::HydratedSessionCheckpoint>,
+    live_delta: Option<lash::LiveResumeDelta>,
+    checkpoint_ref: Option<lash::BlobRef>,
     history: &mut Vec<Message>,
     runtime: &mut Option<LashRuntime>,
     app: &mut App,
@@ -152,28 +189,31 @@ async fn apply_graph_resume_state(
     if graph.heal_orphaned_leaf() {
         tracing::warn!("session graph leaf was orphaned on resume; healed to most recent message");
     }
+    let checkpoint = merged_resume_checkpoint(checkpoint, live_delta.as_ref());
     let messages = graph.project_messages();
     let tool_calls = graph.project_tool_calls();
     *history = messages.clone();
 
-    if let Some(dynamic_state) = graph.latest_dynamic_state() {
+    if let Some(dynamic_state) = checkpoint
+        .as_ref()
+        .and_then(|checkpoint| checkpoint.dynamic_state.clone())
+    {
         let _ = dynamic_tools.apply_state(dynamic_state);
         *desired_dynamic = dynamic_tools.export_state();
     }
 
-    let turn_state = graph.latest_turn_state();
+    let turn_state = checkpoint.as_ref().map(|checkpoint| &checkpoint.turn_state);
     *turn_counter = turn_state
         .as_ref()
         .map(|state| state.iteration)
         .unwrap_or(0);
-    app.token_usage = restored_token_usage(turn_state.as_ref()).unwrap_or_default();
+    app.token_usage = restored_token_usage(turn_state).unwrap_or_default();
     app.last_prompt_usage = normalized_last_prompt_usage(
         turn_state
             .as_ref()
             .and_then(|state| state.last_prompt_usage.clone()),
     );
 
-    let config = graph.latest_session_config();
     restore_model_from_graph_config(config.as_ref(), app, runtime, provider, model_catalog).await?;
 
     *current_model_variant = config
@@ -201,7 +241,11 @@ async fn apply_graph_resume_state(
         )));
     }
 
-    let execution_state_snapshot = graph.latest_execution_state().unwrap_or(None);
+    let execution_state_snapshot = checkpoint.as_ref().and_then(|_| {
+        live_delta
+            .as_ref()
+            .and_then(|delta| delta.execution_state_snapshot.clone())
+    });
     restore_execution_state_if_present(runtime, app, history, execution_state_snapshot.as_deref())
         .await;
 
@@ -217,18 +261,39 @@ async fn apply_graph_resume_state(
         if let Some(context_window) = app.context_window {
             restored_policy.max_context_tokens = Some(context_window as usize);
         }
-        rt.set_state(SessionStateEnvelope {
+        let persisted_graph_node_count = graph.nodes.len();
+        let mut restored_state = SessionStateEnvelope {
             session_id: crate::ROOT_SESSION_ID.to_string(),
             policy: restored_policy,
             session_graph: graph,
-            messages,
-            tool_calls,
             iteration: *turn_counter,
             token_usage: app.token_usage.clone(),
             last_prompt_usage: app.last_prompt_usage.clone(),
-            execution_state_snapshot,
-            token_ledger: Vec::new(),
-        });
+            dynamic_state_ref: checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.dynamic_state_ref.clone()),
+            dynamic_state_generation: checkpoint.as_ref().and_then(|checkpoint| {
+                checkpoint
+                    .dynamic_state
+                    .as_ref()
+                    .map(|snapshot| snapshot.base_generation)
+            }),
+            dynamic_state_snapshot: None,
+            plugin_snapshot_ref: checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.plugin_snapshot_ref.clone()),
+            plugin_snapshot_revision: checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.plugin_snapshot_revision),
+            plugin_snapshot: None,
+            execution_state_snapshot: None,
+            token_ledger,
+            checkpoint_ref,
+            persisted_graph_node_count,
+            graph_replace_required: false,
+        };
+        restored_state.replace_projection(&messages, &tool_calls);
+        rt.set_state(restored_state);
     }
 
     Ok(())
@@ -359,8 +424,27 @@ pub async fn restore_session_state(
         app.blocks.push(DisplayBlock::SystemMessage(
             "Interrupted runtime state restored from a live snapshot.".to_string(),
         ));
+        let checkpoint = live
+            .snapshot
+            .checkpoint_ref
+            .as_ref()
+            .and_then(|blob_ref| resume_store.get_checkpoint(blob_ref));
         return apply_graph_resume_state(
             live.graph,
+            Some(live.snapshot.config),
+            live.snapshot
+                .checkpoint_ref
+                .as_ref()
+                .and_then(|blob_ref| {
+                    resume_store.load_session_head().and_then(|head| {
+                        (head.checkpoint_ref.as_ref() == Some(blob_ref))
+                            .then_some(head.token_ledger)
+                    })
+                })
+                .unwrap_or_default(),
+            checkpoint,
+            live.delta,
+            live.snapshot.checkpoint_ref,
             history,
             runtime,
             app,
@@ -375,9 +459,18 @@ pub async fn restore_session_state(
         .await;
     }
 
-    if let Some(graph) = resume_store.load_session_graph() {
+    if let Some(head) = resume_store.load_session_head() {
+        let checkpoint = head
+            .checkpoint_ref
+            .as_ref()
+            .and_then(|blob_ref| resume_store.get_checkpoint(blob_ref));
         return apply_graph_resume_state(
-            graph,
+            head.graph,
+            Some(head.config),
+            head.token_ledger,
+            checkpoint,
+            None,
+            head.checkpoint_ref,
             history,
             runtime,
             app,
@@ -405,28 +498,21 @@ mod tests {
     use crate::ui_resume;
 
     use lash::{
-        MemoryModelCatalogStore, PluginHost, PluginSpecFactory, RuntimeHostConfig, RuntimeServices,
-        ToolProvider,
+        EmbeddedRuntimeHost, MemoryModelCatalogStore, PluginHost, PluginSpecFactory,
+        RuntimeCoreConfig, RuntimeServices, ToolProvider,
     };
 
-    fn persist_session_graph(
+    fn persist_session_head(
         store: &Store,
         graph: lash::SessionGraph,
+        checkpoint: lash::HydratedSessionCheckpoint,
         ui_state: crate::app::UiResumeState,
     ) {
         ui_resume::save_ui_resume_state(store, &ui_state);
-        store.save_session_graph(graph);
-    }
-
-    fn graph_with_state(
-        messages: Vec<Message>,
-        iteration: usize,
-        token_usage: TokenUsage,
-        last_prompt_usage: Option<PromptUsage>,
-    ) -> lash::SessionGraph {
-        let mut graph = lash::SessionGraph::from_projection(&messages, &[]);
-        graph.record_runtime_state(
-            &lash::PersistedSessionConfig {
+        let checkpoint_ref = store.put_checkpoint(&checkpoint).checkpoint_ref;
+        store.save_session_head(lash::SessionHead {
+            graph,
+            config: lash::PersistedSessionConfig {
                 provider_id: "openai_generic".to_string(),
                 configured_model: "gpt-5".to_string(),
                 context_window: 200_000,
@@ -434,21 +520,36 @@ mod tests {
                 context_approach: lash::ContextApproach::default(),
                 model_variant: None,
             },
-            &lash::PersistedTurnState {
-                iteration,
-                token_usage,
-                last_prompt_usage,
+            checkpoint_ref: Some(checkpoint_ref),
+            token_ledger: Vec::new(),
+        });
+    }
+
+    fn state_with_graph(
+        messages: Vec<Message>,
+        iteration: usize,
+        token_usage: TokenUsage,
+        last_prompt_usage: Option<PromptUsage>,
+    ) -> (lash::SessionGraph, lash::HydratedSessionCheckpoint) {
+        (
+            lash::SessionGraph::from_projection(&messages, &[]),
+            lash::HydratedSessionCheckpoint {
+                turn_state: lash::PersistedTurnState {
+                    iteration,
+                    token_usage,
+                    last_prompt_usage,
+                },
+                dynamic_state_ref: None,
+                dynamic_state: Some(DynamicStateSnapshot {
+                    base_generation: 0,
+                    tools: std::collections::BTreeMap::new(),
+                    enabled_tools: std::collections::BTreeSet::new(),
+                }),
+                plugin_snapshot_ref: None,
+                plugin_snapshot_revision: None,
+                plugin_snapshot: None,
             },
-            Some(&DynamicStateSnapshot {
-                base_generation: 0,
-                tools: std::collections::BTreeMap::new(),
-                enabled_tools: std::collections::BTreeSet::new(),
-            }),
-            None,
-            None,
-            &[],
-        );
-        graph
+        )
     }
 
     fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
@@ -506,7 +607,7 @@ mod tests {
         let dynamic_tools = plugins.dynamic_tools().expect("dynamic tools");
         let desired_dynamic = dynamic_tools.export_state();
         let runtime_services = RuntimeServices::new(plugins);
-        let runtime = LashRuntime::from_state(
+        let runtime = LashRuntime::from_embedded_state(
             lash::SessionPolicy {
                 execution_mode: ExecutionMode::Standard,
                 provider: provider.clone(),
@@ -514,7 +615,7 @@ mod tests {
                 max_context_tokens: Some(200_000),
                 ..lash::SessionPolicy::default()
             },
-            RuntimeHostConfig::default(),
+            EmbeddedRuntimeHost::new(RuntimeCoreConfig::default()),
             runtime_services,
             SessionStateEnvelope::default(),
         )
@@ -533,24 +634,26 @@ mod tests {
 
         let db_path = sessions_dir.join("resume-usage.db");
         let store = Store::open(&db_path).expect("store");
-        persist_session_graph(
+        let (graph, checkpoint) = state_with_graph(
+            Vec::new(),
+            7,
+            TokenUsage {
+                input_tokens: 1200,
+                output_tokens: 340,
+                cached_input_tokens: 80,
+                reasoning_tokens: 55,
+            },
+            Some(PromptUsage {
+                prompt_context_tokens: 4096,
+                input_tokens: 3900,
+                cached_input_tokens: 196,
+                context_budget_tokens: 0,
+            }),
+        );
+        persist_session_head(
             &store,
-            graph_with_state(
-                Vec::new(),
-                7,
-                TokenUsage {
-                    input_tokens: 1200,
-                    output_tokens: 340,
-                    cached_input_tokens: 80,
-                    reasoning_tokens: 55,
-                },
-                Some(PromptUsage {
-                    prompt_context_tokens: 4096,
-                    input_tokens: 3900,
-                    cached_input_tokens: 196,
-                    context_budget_tokens: 0,
-                }),
-            ),
+            graph,
+            checkpoint,
             crate::app::UiResumeState::default(),
         );
 
@@ -611,18 +714,20 @@ mod tests {
 
         let db_path = sessions_dir.join("resume-live.db");
         let store = Store::open(&db_path).expect("store");
-        persist_session_graph(
+        let (graph, checkpoint) = state_with_graph(
+            vec![text_message(
+                "old",
+                MessageRole::User,
+                "canonical history message",
+            )],
+            1,
+            TokenUsage::default(),
+            None,
+        );
+        persist_session_head(
             &store,
-            graph_with_state(
-                vec![text_message(
-                    "old",
-                    MessageRole::User,
-                    "canonical history message",
-                )],
-                1,
-                TokenUsage::default(),
-                None,
-            ),
+            graph,
+            checkpoint,
             crate::app::UiResumeState::default(),
         );
 
@@ -631,28 +736,22 @@ mod tests {
             MessageRole::User,
             "live snapshot message",
         )];
+        let mut live_state = SessionStateEnvelope {
+            session_id: crate::ROOT_SESSION_ID.to_string(),
+            policy: lash::SessionPolicy {
+                execution_mode: ExecutionMode::Standard,
+                ..lash::SessionPolicy::default()
+            },
+            session_graph: state_with_graph(live_messages.clone(), 2, TokenUsage::default(), None)
+                .0,
+            iteration: 2,
+            token_usage: TokenUsage::default(),
+            ..SessionStateEnvelope::default()
+        };
+        live_state.replace_projection(&live_messages, &[]);
         crate::resume_snapshot::save_live_resume_snapshot(
             &store,
-            &SessionStateEnvelope {
-                session_id: crate::ROOT_SESSION_ID.to_string(),
-                policy: lash::SessionPolicy {
-                    execution_mode: ExecutionMode::Standard,
-                    ..lash::SessionPolicy::default()
-                },
-                session_graph: graph_with_state(
-                    live_messages.clone(),
-                    2,
-                    TokenUsage::default(),
-                    None,
-                ),
-                messages: live_messages.clone(),
-                tool_calls: Vec::new(),
-                iteration: 2,
-                token_usage: TokenUsage::default(),
-                last_prompt_usage: None,
-                execution_state_snapshot: None,
-                token_ledger: Vec::new(),
-            },
+            &live_state,
             &crate::app::UiResumeState::default(),
             &DynamicStateSnapshot {
                 base_generation: 0,
@@ -697,9 +796,9 @@ mod tests {
         assert_eq!(history[0].parts[0].content, "live snapshot message");
         let restored_runtime = runtime.expect("runtime").export_state();
         assert_eq!(restored_runtime.iteration, 2);
-        assert_eq!(restored_runtime.messages.len(), 1);
+        assert_eq!(restored_runtime.projected_messages().len(), 1);
         assert_eq!(
-            restored_runtime.messages[0].parts[0].content,
+            restored_runtime.projected_messages()[0].parts[0].content,
             "live snapshot message"
         );
     }
@@ -715,14 +814,16 @@ mod tests {
         let filename = "resume-ui.db";
         let db_path = sessions_dir.join(filename);
         let store = Store::open(&db_path).expect("store");
-        persist_session_graph(
+        let (graph, checkpoint) = state_with_graph(
+            vec![text_message("m0", MessageRole::User, "hello")],
+            1,
+            TokenUsage::default(),
+            None,
+        );
+        persist_session_head(
             &store,
-            graph_with_state(
-                vec![text_message("m0", MessageRole::User, "hello")],
-                1,
-                TokenUsage::default(),
-                None,
-            ),
+            graph,
+            checkpoint,
             crate::app::UiResumeState {
                 streaming_output: vec!["started git status --short".to_string()],
                 streaming_output_hidden: 1,

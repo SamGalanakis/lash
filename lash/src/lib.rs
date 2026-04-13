@@ -90,15 +90,15 @@ pub use dynamic::{
 pub use instructions::InstructionLoaderConfig;
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
 pub use lash_sansio::{
-    CheckpointKind, DefaultPromptRenderer, DurableTurnSnapshot, Effect, EffectId, ErrorEnvelope,
-    ExecResponse, ExecutionMode, LlmCallError, Message, MessageOrigin, MessageRole, Part, PartKind,
-    PluginMessage, PluginSurfaceEvent, PromptContext, PromptContribution, PromptOverrideMode,
-    PromptPanel, PromptRenderer, PromptRequest, PromptResponse, PromptSectionName,
-    PromptSectionOverride, PromptSelectionMode, PruneState, Response, SessionEvent, TokenUsage,
-    ToolCallRecord, ToolDefinition, ToolImage, ToolParam, ToolResult, TurnMachine,
-    TurnMachineConfig, UserInputProvenance, UserInputTransform, WAIT_PROMPT_RESUME_EARLY_TOKEN,
-    WAIT_PROMPT_TIMEOUT_TOKEN, default_execution_mode, default_prompt_renderer,
-    execution_mode_supported, messages_are_live_resume_safe,
+    CheckpointKind, DefaultPromptRenderer, Effect, EffectId, ErrorEnvelope, ExecResponse,
+    ExecutionMode, LlmCallError, Message, MessageOrigin, MessageRole, MessageSequence, Part,
+    PartKind, PluginMessage, PluginSurfaceEvent, PromptContext, PromptContribution,
+    PromptOverrideMode, PromptPanel, PromptRenderer, PromptRequest, PromptResponse,
+    PromptSectionName, PromptSectionOverride, PromptSelectionMode, PruneState, RenderedPrompt,
+    Response, SessionEvent, TokenUsage, ToolCallRecord, ToolDefinition, ToolImage, ToolParam,
+    ToolResult, TurnMachine, TurnMachineConfig, UserInputProvenance, UserInputTransform,
+    WAIT_PROMPT_RESUME_EARLY_TOKEN, WAIT_PROMPT_TIMEOUT_TOKEN, default_execution_mode,
+    default_prompt_renderer, execution_mode_supported, messages_are_live_resume_safe,
 };
 pub use mcp::{McpError, McpServerConfig, McpToolExecutionAdapter, attach_mcp_servers};
 pub use model_info::{
@@ -121,12 +121,13 @@ pub use plugin::{
     PluginSpec, PluginSpecFactory, PromptHookContext, PromptRequestHookContext, RewriteContext,
     RewriteTrigger, RlmCreateExtras, RlmTermination, RuntimeServices, SessionAppendNode,
     SessionConfigChangedContext, SessionContextSurface, SessionCreateRequest, SessionHandle,
-    SessionManager, SessionParam, SessionPlugin, SessionPluginMode, SessionSnapshot,
-    SessionStartPoint, SessionStateChangedContext, SessionTurnHandle, SnapshotReader,
-    SnapshotWriter, StandardCreateExtras, ToolResultProjectionContext, ToolResultProjectionHook,
-    ToolResultProjectionMode, ToolResultProjectionPluginConfig, ToolResultProjector,
-    ToolSurfaceContribution, TurnContextTransform, TurnHookContext, TurnResultHookContext,
-    TurnTransformContext, plugin_surface_event_renders_visible_output,
+    SessionManager, SessionParam, SessionPlugin, SessionPluginMode, SessionReadView,
+    SessionSnapshot, SessionStartPoint, SessionStateChangedContext, SessionTurnHandle,
+    SnapshotReader, SnapshotWriter, StandardCreateExtras, ToolResultProjectionContext,
+    ToolResultProjectionHook, ToolResultProjectionMode, ToolResultProjectionPluginConfig,
+    ToolResultProjector, ToolSurfaceContribution, TurnContextTransform, TurnHookContext,
+    TurnResultHookContext, TurnResultSummary, TurnTransformContext,
+    plugin_surface_event_renders_visible_output,
 };
 #[cfg(feature = "sqlite-store")]
 pub use plugin::{
@@ -135,22 +136,19 @@ pub use plugin::{
 };
 pub use provider::{LashConfig, Provider, ProviderOptions, RequestTimeout};
 pub use runtime::{
-    AssembledTurn, AssistantOutput, CodeOutputRecord, DoneReason, EventSink, ExecutionSummary,
-    HostProfile, InputItem, LashRuntime, NoopEventSink, OutputState, PathResolver, PromptUsage,
-    RunMode, RuntimeError, RuntimeHostConfig, SanitizerPolicy, SessionStateEnvelope,
-    SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport, TerminationPolicy,
-    TokenLedgerEntry, TurnInput, TurnIssue, TurnStatus, UsageReportRow, UsageTotals,
-    diff_token_ledger,
+    AssembledTurn, AssistantOutput, BackgroundExecutor, BackgroundRuntimeHost, CodeOutputRecord,
+    DefaultPathResolver, DoneReason, EmbeddedRuntimeHost, EventSink, ExecutionSummary, InputItem,
+    LashRuntime, NoopEventSink, OutputState, PathResolver, PromptUsage, RunMode, RuntimeCoreConfig,
+    RuntimeError, SanitizerPolicy, SessionStateEnvelope, SessionStoreCreateRequest,
+    SessionStoreFactory, SessionUsageReport, TerminationPolicy, TokenLedgerEntry,
+    TokioBackgroundExecutor, TurnInput, TurnIssue, TurnStatus, UsageReportRow, UsageTotals,
+    diff_token_ledger, diff_usage_reports,
 };
 pub use session::{Session, SessionError, TurnInjectionBridge};
 pub use session_graph::{
-    ExecutionStatePluginBody, INTERNAL_DYNAMIC_STATE_PLUGIN_TYPE,
-    INTERNAL_EXECUTION_STATE_PLUGIN_TYPE, INTERNAL_PLUGIN_SNAPSHOT_PLUGIN_TYPE,
-    INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE, INTERNAL_SESSION_CONFIG_PLUGIN_TYPE,
-    INTERNAL_TOKEN_LEDGER_PLUGIN_TYPE, INTERNAL_TOOL_CALL_PLUGIN_TYPE,
-    INTERNAL_TURN_STATE_PLUGIN_TYPE, PersistedSessionConfig, PersistedTurnState,
-    RlmGlobalsPatchPluginBody, SessionGraph, SessionMessageTreeNode, SessionNodePayload,
-    SessionNodeRecord, ToolCallPluginBody,
+    INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE, INTERNAL_TOOL_CALL_PLUGIN_TYPE, PersistedSessionConfig,
+    PersistedTurnState, RlmGlobalsPatchPluginBody, SessionGraph, SessionMessageTreeNode,
+    SessionNodePayload, SessionNodeRecord, ToolCallPluginBody,
 };
 pub use session_model::SessionPolicy;
 pub use session_model::context::PreparedContext;
@@ -158,10 +156,13 @@ pub use skill_catalog::{LoadedSkill, SkillCatalog};
 pub use skill_prompt::{
     append_skill_blocks, collect_skill_mentions, collect_skill_mentions_with_ranges,
 };
-pub use store::{RuntimeStore, SessionMeta, SessionPickerInfo};
+pub use store::{
+    BlobRef, HydratedSessionCheckpoint, LiveResumeDelta, LiveResumeSnapshot, RuntimeStore,
+    SessionCheckpoint, SessionHead, SessionHeadMeta, SessionMeta, SessionPickerInfo,
+    materialize_live_resume_graph,
+};
 #[cfg(feature = "sqlite-store")]
 pub use store::{SqliteStore, Store};
-pub use tools::{DefaultToolPluginDeps, default_tool_plugin_factories};
 
 /// A message sent from the sandbox to the host during execution.
 #[derive(Clone, Debug)]

@@ -7,7 +7,7 @@ use lash::{PluginMessage, *};
 use super::*;
 use crate::input_items::build_items_from_editor_input;
 #[cfg(test)]
-use crate::turn_runner::pending_turn_snapshot;
+use crate::turn_runner::pending_turn_graph;
 use crate::turn_runner::{RuntimeRunResult, persist_pending_turn, spawn_runtime_turn};
 
 pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage {
@@ -459,12 +459,13 @@ mod tests {
     use lash::{SkillCatalog, UserInputProvenance};
 
     #[test]
-    fn pending_turn_snapshot_preserves_user_input_provenance() {
+    fn pending_turn_graph_preserves_user_input_provenance() {
         let turn = PreparedTurn::prepare("/yolopush".into(), Vec::new(), &SkillCatalog::default());
         let turn_input = crate::turn_runner::make_turn_input(&turn);
-        let snapshot = pending_turn_snapshot(&SessionStateEnvelope::default(), &turn_input);
+        let graph = pending_turn_graph(&SessionStateEnvelope::default(), &turn_input);
 
-        let user_message = snapshot.messages.last().expect("user message");
+        let messages = graph.project_messages();
+        let user_message = messages.last().expect("user message");
         assert_eq!(
             user_message
                 .user_input
@@ -475,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_turn_snapshot_keeps_explicit_user_input_provenance() {
+    fn pending_turn_graph_keeps_explicit_user_input_provenance() {
         let turn_input = TurnInput {
             items: vec![InputItem::Text {
                 text: "/localref\n\n<skill>\nbody\n</skill>".into(),
@@ -491,9 +492,10 @@ mod tests {
             }),
             mode: Some(RunMode::Normal),
         };
-        let snapshot = pending_turn_snapshot(&SessionStateEnvelope::default(), &turn_input);
+        let graph = pending_turn_graph(&SessionStateEnvelope::default(), &turn_input);
 
-        let user_message = snapshot.messages.last().expect("user message");
+        let messages = graph.project_messages();
+        let user_message = messages.last().expect("user message");
         assert_eq!(
             user_message
                 .user_input

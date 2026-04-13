@@ -245,7 +245,7 @@ pub(crate) fn rlm_state_prompt_contributions(context: &PromptContext) -> Vec<Pro
 }
 
 fn rlm_bound_variables_prompt_contributions(ctx: &PromptHookContext) -> Vec<PromptContribution> {
-    let globals = ctx.state.session_graph.projected_rlm_globals();
+    let globals = ctx.state.projected_rlm_globals();
     if globals.is_empty() {
         return Vec::new();
     }
@@ -253,11 +253,11 @@ fn rlm_bound_variables_prompt_contributions(ctx: &PromptHookContext) -> Vec<Prom
     let mut lines = vec![
         "These variables are already bound in lashlang. Access them directly in fenced `lashlang` code; do not recreate them manually.".to_string(),
     ];
-    let mut entries = globals.into_iter().collect::<Vec<_>>();
-    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut entries = globals.iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(right.0));
     for (name, value) in entries {
-        let ty = json_value_type_label(&value);
-        let preview = preview_value(&value, 200);
+        let ty = json_value_type_label(value);
+        let preview = preview_value(value, 200);
         lines.push(format!("- `{name}`: {ty} = {preview}"));
     }
 
@@ -493,7 +493,7 @@ mod tests {
             session_id: "root".to_string(),
             host: Arc::new(MockSessionManager::default()),
             prompt: PromptContext::default(),
-            state: snapshot,
+            state: crate::SessionReadView::new(snapshot),
         };
 
         let contributions = rlm_bound_variables_prompt_contributions(&ctx);

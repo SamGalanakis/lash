@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LlmToolSpec {
     pub name: String,
@@ -167,7 +165,7 @@ pub struct LlmRequest {
     pub model: String,
     pub messages: Vec<LlmMessage>,
     pub attachments: Vec<LlmAttachment>,
-    pub tools: Vec<LlmToolSpec>,
+    pub tools: Arc<Vec<LlmToolSpec>>,
     pub tool_choice: LlmToolChoice,
     pub model_variant: Option<String>,
     pub session_id: Option<String>,
@@ -227,3 +225,4 @@ pub struct ModelSelection {
     pub model: &'static str,
     pub variant: Option<&'static str>,
 }
+use std::sync::Arc;

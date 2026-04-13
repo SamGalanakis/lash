@@ -14,8 +14,9 @@ full = ["sqlite-store"]
 [dependencies]
 lash-sansio = { path = "../lash-sansio" }
 tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
+rmp-serde = "1"
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"

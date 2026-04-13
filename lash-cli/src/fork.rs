@@ -520,10 +520,10 @@ fn forkable_live_graph(graph: &lash::SessionGraph) -> lash::SessionGraph {
 
     for node in graph.active_path_nodes() {
         prefix.push(node.clone());
-        let candidate = lash::SessionGraph {
-            nodes: prefix.clone(),
-            leaf_node_id: prefix.last().map(|record| record.node_id.clone()),
-        };
+        let candidate = lash::SessionGraph::from_nodes(
+            prefix.clone(),
+            prefix.last().map(|record| record.node_id.clone()),
+        );
         if lash::messages_are_live_resume_safe(&candidate.project_messages()) {
             last_safe = candidate;
             saw_safe_prefix = true;
@@ -540,15 +540,36 @@ fn forkable_live_graph(graph: &lash::SessionGraph) -> lash::SessionGraph {
 #[allow(clippy::too_many_arguments)]
 fn materialize_child_from_graph(
     child_store: &lash::Store,
+    parent_store: &lash::Store,
     graph: &lash::SessionGraph,
+    config: &lash::PersistedSessionConfig,
+    checkpoint_ref: Option<&lash::BlobRef>,
     ui_state: &UiResumeState,
     persist_live_graph: bool,
 ) {
     let child_graph = graph.fork_current_path();
-    child_store.save_session_graph(child_graph.clone());
+    let child_checkpoint_ref = checkpoint_ref.and_then(|blob_ref| {
+        parent_store
+            .get_checkpoint(blob_ref)
+            .map(|checkpoint| child_store.put_checkpoint(&checkpoint).checkpoint_ref)
+    });
+    child_store.save_session_head(lash::SessionHead {
+        graph: child_graph.clone(),
+        config: config.clone(),
+        checkpoint_ref: child_checkpoint_ref.clone(),
+        token_ledger: parent_store
+            .load_session_head()
+            .map(|head| head.token_ledger)
+            .unwrap_or_default(),
+    });
     crate::ui_resume::save_ui_resume_state(child_store, ui_state);
     if persist_live_graph {
-        child_store.save_live_session_graph(child_graph);
+        child_store.save_live_resume(lash::LiveResumeSnapshot {
+            graph: child_graph,
+            config: config.clone(),
+            checkpoint_ref: child_checkpoint_ref,
+            delta_ref: None,
+        });
     }
 }
 
@@ -564,11 +585,20 @@ pub async fn fork_current_session(
     _toolset_hash: &str,
     dynamic_state: &DynamicStateSnapshot,
 ) -> Result<(String, String)> {
-    let live_graph_for_fork = if runtime.is_none() {
-        logger
-            .store()
-            .load_live_session_graph()
-            .map(|graph| forkable_live_graph(&graph))
+    let live_snapshot_for_fork = if runtime.is_none() {
+        logger.store().load_live_resume().map(|snapshot| {
+            let delta = snapshot.delta_ref.as_ref().and_then(|blob_ref| {
+                logger
+                    .store()
+                    .get_typed_blob::<lash::LiveResumeDelta>(blob_ref)
+            });
+            let graph = lash::materialize_live_resume_graph(&snapshot, delta.as_ref());
+            lash::LiveResumeSnapshot {
+                graph: forkable_live_graph(&graph),
+                delta_ref: None,
+                ..snapshot
+            }
+        })
     } else {
         None
     };
@@ -576,7 +606,22 @@ pub async fn fork_current_session(
         persist_parent_root_snapshot(runtime, logger.store().as_ref(), ui_state, dynamic_state)
             .await?;
     }
-    let parent_graph = logger.store().load_session_graph().unwrap_or_default();
+    let parent_head = logger
+        .store()
+        .load_session_head()
+        .unwrap_or(lash::SessionHead {
+            graph: lash::SessionGraph::default(),
+            config: lash::PersistedSessionConfig {
+                provider_id: _provider.id().to_string(),
+                configured_model: configured_model.to_string(),
+                context_window: _context_window,
+                execution_mode: lash::ExecutionMode::Standard,
+                context_approach: lash::ContextApproach::default(),
+                model_variant: _model_variant.map(str::to_string),
+            },
+            checkpoint_ref: None,
+            token_ledger: Vec::new(),
+        });
 
     let sessions_dir = session_log::sessions_dir();
     let child_session_name = crate::generate_session_name(&sessions_dir);
@@ -591,10 +636,26 @@ pub async fn fork_current_session(
         child_session_name.clone(),
     )?;
     child_logger.mark_as_child_of(&logger.session_id)?;
-    if let Some(live_graph) = live_graph_for_fork.as_ref() {
-        materialize_child_from_graph(child_store.as_ref(), live_graph, ui_state, true);
+    if let Some(live_snapshot) = live_snapshot_for_fork.as_ref() {
+        materialize_child_from_graph(
+            child_store.as_ref(),
+            logger.store().as_ref(),
+            &live_snapshot.graph,
+            &live_snapshot.config,
+            live_snapshot.checkpoint_ref.as_ref(),
+            ui_state,
+            true,
+        );
     } else {
-        child_store.save_session_graph(parent_graph.fork_current_path());
+        materialize_child_from_graph(
+            child_store.as_ref(),
+            logger.store().as_ref(),
+            &parent_head.graph,
+            &parent_head.config,
+            parent_head.checkpoint_ref.as_ref(),
+            ui_state,
+            false,
+        );
     }
 
     Ok((child_filename, child_session_name))
@@ -623,18 +684,13 @@ mod fork_tests {
         }
     }
 
-    fn persisted_graph(messages: Vec<lash::Message>, iteration: usize) -> lash::SessionGraph {
-        let mut graph = lash::SessionGraph::from_projection(&messages, &[]);
-        graph.record_runtime_state(
-            &lash::PersistedSessionConfig {
-                provider_id: dummy_provider().id().to_string(),
-                configured_model: "gpt-test".to_string(),
-                context_window: 1024,
-                execution_mode: lash::ExecutionMode::Standard,
-                context_approach: lash::ContextApproach::default(),
-                model_variant: None,
-            },
-            &lash::PersistedTurnState {
+    fn persisted_graph(messages: Vec<lash::Message>, _iteration: usize) -> lash::SessionGraph {
+        lash::SessionGraph::from_projection(&messages, &[])
+    }
+
+    fn persisted_checkpoint(iteration: usize) -> lash::HydratedSessionCheckpoint {
+        lash::HydratedSessionCheckpoint {
+            turn_state: lash::PersistedTurnState {
                 iteration,
                 token_usage: lash::TokenUsage {
                     input_tokens: 10,
@@ -644,12 +700,31 @@ mod fork_tests {
                 },
                 last_prompt_usage: None,
             },
-            Some(&empty_dynamic_state()),
-            None,
-            None,
-            &[],
-        );
-        graph
+            dynamic_state_ref: None,
+            dynamic_state: Some(empty_dynamic_state()),
+            plugin_snapshot_ref: None,
+            plugin_snapshot_revision: None,
+            plugin_snapshot: None,
+        }
+    }
+
+    fn save_persisted_root(store: &lash::Store, graph: lash::SessionGraph, iteration: usize) {
+        let checkpoint_ref = store
+            .put_checkpoint(&persisted_checkpoint(iteration))
+            .checkpoint_ref;
+        store.save_session_head(lash::SessionHead {
+            graph,
+            config: lash::PersistedSessionConfig {
+                provider_id: dummy_provider().id().to_string(),
+                configured_model: "gpt-test".to_string(),
+                context_window: 1024,
+                execution_mode: lash::ExecutionMode::Standard,
+                context_approach: lash::ContextApproach::default(),
+                model_variant: None,
+            },
+            checkpoint_ref: Some(checkpoint_ref),
+            token_ledger: Vec::new(),
+        });
     }
 
     fn text_message(id: &str, role: lash::MessageRole, content: &str) -> lash::Message {
@@ -721,7 +796,7 @@ mod fork_tests {
             user_input: None,
             origin: None,
         }];
-        parent_store.save_session_graph(persisted_graph(messages, 1));
+        save_persisted_root(parent_store.as_ref(), persisted_graph(messages, 1), 1);
 
         let (child_filename, _child_session_name) = fork_current_session(
             None,
@@ -745,10 +820,16 @@ mod fork_tests {
             Some("parent-session")
         );
 
-        let child_graph = child_store.load_session_graph().expect("child graph");
-        let child_turn = child_graph.latest_turn_state().expect("child turn state");
+        let child_head = child_store.load_session_head().expect("child head");
+        let child_graph = child_head.graph;
+        let child_turn = child_head
+            .checkpoint_ref
+            .as_ref()
+            .and_then(|blob_ref| child_store.get_checkpoint(blob_ref))
+            .expect("child checkpoint")
+            .turn_state;
         assert_eq!(child_turn.iteration, 1);
-        assert!(child_store.load_live_session_graph().is_none());
+        assert!(child_store.load_live_resume().is_none());
 
         let child_messages = child_graph.project_messages();
         assert_eq!(child_messages.len(), 1);
@@ -788,7 +869,11 @@ mod fork_tests {
             user_input: None,
             origin: None,
         }];
-        parent_store.save_session_graph(persisted_graph(base_messages.clone(), 1));
+        save_persisted_root(
+            parent_store.as_ref(),
+            persisted_graph(base_messages.clone(), 1),
+            1,
+        );
 
         let live_messages = vec![
             base_messages[0].clone(),
@@ -808,28 +893,26 @@ mod fork_tests {
                 origin: None,
             },
         ];
+        let mut live_state = lash::SessionStateEnvelope {
+            session_id: crate::ROOT_SESSION_ID.to_string(),
+            policy: lash::SessionPolicy {
+                execution_mode: lash::ExecutionMode::Standard,
+                ..lash::SessionPolicy::default()
+            },
+            session_graph: persisted_graph(live_messages.clone(), 2),
+            iteration: 2,
+            token_usage: lash::TokenUsage {
+                input_tokens: 12,
+                output_tokens: 7,
+                cached_input_tokens: 1,
+                reasoning_tokens: 0,
+            },
+            ..lash::SessionStateEnvelope::default()
+        };
+        live_state.replace_projection(&live_messages, &[]);
         crate::resume_snapshot::save_live_resume_snapshot(
             &parent_store,
-            &lash::SessionStateEnvelope {
-                session_id: crate::ROOT_SESSION_ID.to_string(),
-                policy: lash::SessionPolicy {
-                    execution_mode: lash::ExecutionMode::Standard,
-                    ..lash::SessionPolicy::default()
-                },
-                session_graph: persisted_graph(live_messages.clone(), 2),
-                messages: live_messages.clone(),
-                tool_calls: Vec::new(),
-                iteration: 2,
-                token_usage: lash::TokenUsage {
-                    input_tokens: 12,
-                    output_tokens: 7,
-                    cached_input_tokens: 1,
-                    reasoning_tokens: 0,
-                },
-                last_prompt_usage: None,
-                execution_state_snapshot: None,
-                token_ledger: Vec::new(),
-            },
+            &live_state,
             &UiResumeState::default(),
             &empty_dynamic_state(),
         )
@@ -851,15 +934,19 @@ mod fork_tests {
 
         let child_store = lash::Store::open(&session_log::sessions_dir().join(&child_filename))
             .expect("child store");
-        let child_graph = child_store.load_session_graph().expect("child root graph");
+        let child_head = child_store.load_session_head().expect("child root head");
+        let child_graph = child_head.graph;
         assert_eq!(
-            child_graph
-                .latest_turn_state()
-                .expect("child turn state")
+            child_head
+                .checkpoint_ref
+                .as_ref()
+                .and_then(|blob_ref| child_store.get_checkpoint(blob_ref))
+                .expect("child checkpoint")
+                .turn_state
                 .iteration,
             2
         );
-        assert!(child_store.load_live_session_graph().is_some());
+        assert!(child_store.load_live_resume().is_some());
 
         let child_messages = child_graph.project_messages();
         assert_eq!(child_messages.len(), 2);
@@ -896,7 +983,23 @@ mod fork_tests {
             ],
             &[],
         );
-        parent_store.save_live_session_graph(live_graph);
+        parent_store.save_live_resume(lash::LiveResumeSnapshot {
+            graph: live_graph,
+            config: lash::PersistedSessionConfig {
+                provider_id: dummy_provider().id().to_string(),
+                configured_model: "gpt-test".to_string(),
+                context_window: 1024,
+                execution_mode: lash::ExecutionMode::Standard,
+                context_approach: lash::ContextApproach::default(),
+                model_variant: None,
+            },
+            checkpoint_ref: Some(
+                parent_store
+                    .put_checkpoint(&persisted_checkpoint(1))
+                    .checkpoint_ref,
+            ),
+            delta_ref: None,
+        });
 
         let (child_filename, _child_session_name) = fork_current_session(
             None,
@@ -914,10 +1017,13 @@ mod fork_tests {
 
         let child_store = lash::Store::open(&session_log::sessions_dir().join(&child_filename))
             .expect("child store");
-        let child_graph = child_store.load_session_graph().expect("child root graph");
+        let child_graph = child_store
+            .load_session_head()
+            .expect("child root head")
+            .graph;
         let child_messages = child_graph.project_messages();
         assert_eq!(child_messages.len(), 1);
         assert_eq!(child_messages[0].parts[0].content, "hello");
-        assert!(child_store.load_live_session_graph().is_some());
+        assert!(child_store.load_live_resume().is_some());
     }
 }

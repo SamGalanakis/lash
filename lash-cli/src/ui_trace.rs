@@ -259,7 +259,6 @@ impl TraceSessionEvent {
                 event: TracePluginSurfaceEvent::from_event(event),
             }),
             SessionEvent::Prompt { .. }
-            | SessionEvent::DurableSnapshot { .. }
             | SessionEvent::LlmResponse { .. }
             | SessionEvent::TokenUsage { .. }
             | SessionEvent::RetryStatus { .. }

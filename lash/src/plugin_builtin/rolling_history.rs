@@ -6,7 +6,7 @@
 //! for `/compact`, overflow recovery, and window-shrink events.
 //!
 //! Registered as a default plugin by
-//! [`default_tool_plugin_factories`](crate::default_tool_plugin_factories),
+//! the first-party default tool bundles from `lash-default-tools`,
 //! so standard lash sessions pick it up automatically.
 
 use std::collections::{HashMap, HashSet};
@@ -516,22 +516,25 @@ async fn summarize_compaction_prefix(
     }
 
     let mut snapshot = state.clone();
-    snapshot.messages = prefix_messages;
     snapshot.policy.execution_mode = ExecutionMode::Standard;
     snapshot.policy.max_turns = Some(1);
-    strip_all_image_attachments(&mut snapshot.messages, COMPACTED_IMAGE_PLACEHOLDER);
+    let mut messages = prefix_messages;
+    strip_all_image_attachments(&mut messages, COMPACTED_IMAGE_PLACEHOLDER);
     snapshot.execution_state_snapshot = None;
     snapshot.last_prompt_usage = None;
-    let previous_summary = extract_previous_summary(&snapshot.messages);
-    let referenced = referenced_tool_call_ids(&snapshot.messages);
-    snapshot.tool_calls.retain(|record| {
-        record
-            .call_id
-            .as_ref()
-            .is_some_and(|call_id| referenced.contains(call_id))
-    });
-    snapshot.session_graph =
-        crate::SessionGraph::from_projection(&snapshot.messages, &snapshot.tool_calls);
+    let previous_summary = extract_previous_summary(&messages);
+    let referenced = referenced_tool_call_ids(&messages);
+    let tool_calls = state
+        .project_tool_calls()
+        .into_iter()
+        .filter(|record| {
+            record
+                .call_id
+                .as_ref()
+                .is_some_and(|call_id| referenced.contains(call_id))
+        })
+        .collect::<Vec<_>>();
+    snapshot.replace_projection(&messages, &tool_calls);
 
     let compaction_session_id = format!("{session_id}-compaction");
     let mut policy = snapshot.policy.clone();
@@ -659,6 +662,10 @@ impl PluginFactory for RollingHistoryPluginFactory {
         ROLLING_HISTORY_PLUGIN_ID
     }
 
+    fn supports_context_approach(&self, approach: &ContextApproach) -> bool {
+        matches!(approach, ContextApproach::RollingHistory(_))
+    }
+
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         if !matches!(ctx.context_approach, ContextApproach::RollingHistory(_)) {
             return Ok(Arc::new(DisabledRollingHistoryPlugin));
@@ -737,33 +744,48 @@ impl TurnContextTransform for RollingTurnTransform {
         let max_context_tokens = ctx.max_context_tokens;
         let host = Arc::clone(&ctx.host);
 
-        let tool_calls = tool_record_map(&state.tool_calls);
-        hydrate_tool_result_parts(&ctx.session_id, &mut input.messages, &tool_calls);
-
-        if pruning_needed(prompt_usage, max_context_tokens) {
-            prune_old_tool_results(&mut input.messages, &tool_calls);
-            prune_old_images(&mut input.messages);
-        }
-
-        if !compaction_needed(prompt_usage, max_context_tokens) {
+        let tool_calls = tool_record_map(state.tool_calls());
+        let needs_pruning = pruning_needed(prompt_usage, max_context_tokens);
+        let needs_compaction = compaction_needed(prompt_usage, max_context_tokens);
+        if tool_calls.is_empty() && !needs_pruning && !needs_compaction {
             return Ok(input);
         }
 
-        let prefix_len = leading_system_prefix_len(&input.messages);
-        let cut_point = find_compaction_cut_point(&input.messages, prefix_len);
+        let messages = input.messages.make_mut();
+        hydrate_tool_result_parts(&ctx.session_id, messages, &tool_calls);
+
+        if needs_pruning {
+            prune_old_tool_results(messages, &tool_calls);
+            prune_old_images(messages);
+        }
+
+        if !needs_compaction {
+            return Ok(input);
+        }
+
+        let messages = input.messages.as_slice();
+        let prefix_len = leading_system_prefix_len(messages);
+        let cut_point = find_compaction_cut_point(messages, prefix_len);
         if cut_point <= prefix_len {
             return Ok(input);
         }
 
-        let prefix_messages = input.messages[prefix_len..cut_point].to_vec();
-        let Some(summary) =
-            summarize_compaction_prefix(&ctx.session_id, state, prefix_messages, None, host)
-                .await?
+        let prefix_messages = messages[prefix_len..cut_point].to_vec();
+        let Some(summary) = summarize_compaction_prefix(
+            &ctx.session_id,
+            &state.to_owned_state(),
+            prefix_messages,
+            None,
+            host,
+        )
+        .await?
         else {
             return Ok(input);
         };
 
-        input.messages = apply_compaction_summary(&input.messages, &summary, cut_point);
+        input
+            .messages
+            .replace(apply_compaction_summary(messages, &summary, cut_point));
         Ok(input)
     }
 }
@@ -794,7 +816,7 @@ impl HistoryRewriter for RollingHistoryRewriter {
             RewriteTrigger::Manual { instructions } => {
                 if let Some(compacted) = compact_messages_core(
                     &session_id,
-                    &ctx.state,
+                    &ctx.state.to_owned_state(),
                     &input.messages,
                     instructions.as_deref(),
                     host,
@@ -812,14 +834,19 @@ impl HistoryRewriter for RollingHistoryRewriter {
                 strip_all_image_attachments(&mut input.messages, COMPACTED_IMAGE_PLACEHOLDER);
                 let tool_calls = tool_record_map(&input.tool_calls);
                 prune_old_tool_results(&mut input.messages, &tool_calls);
-                if let Some(compacted) =
-                    compact_messages_core(&session_id, &ctx.state, &input.messages, None, host)
-                        .await?
+                if let Some(compacted) = compact_messages_core(
+                    &session_id,
+                    &ctx.state.to_owned_state(),
+                    &input.messages,
+                    None,
+                    host,
+                )
+                .await?
                 {
                     input.metadata.produced_summary = true;
                     input.messages = compacted;
                 }
-                if let Some(max) = ctx.state.policy.max_context_tokens {
+                if let Some(max) = ctx.state.policy().max_context_tokens {
                     let total: usize = input
                         .messages
                         .iter()
@@ -850,14 +877,19 @@ impl HistoryRewriter for RollingHistoryRewriter {
             }
             RewriteTrigger::WindowShrink { .. } => {
                 if !compaction_needed(
-                    ctx.state.last_prompt_usage.as_ref(),
-                    ctx.state.policy.max_context_tokens,
+                    ctx.state.last_prompt_usage(),
+                    ctx.state.policy().max_context_tokens,
                 ) {
                     return Ok(input);
                 }
-                if let Some(compacted) =
-                    compact_messages_core(&session_id, &ctx.state, &input.messages, None, host)
-                        .await?
+                if let Some(compacted) = compact_messages_core(
+                    &session_id,
+                    &ctx.state.to_owned_state(),
+                    &input.messages,
+                    None,
+                    host,
+                )
+                .await?
                 {
                     input.metadata.produced_summary = true;
                     input.messages = compacted;
@@ -888,7 +920,7 @@ async fn handle_compact_command(
         trigger: RewriteTrigger::Manual {
             instructions: argument,
         },
-        state: state.clone(),
+        state: state.read_view(),
         host: Arc::clone(&host),
     };
     // Run only the rolling rewriter for now — invoking the full chain
@@ -1015,7 +1047,7 @@ mod tests {
     ) -> TurnTransformContext {
         TurnTransformContext {
             session_id: session_id.to_string(),
-            state,
+            state: state.read_view(),
             prompt_usage,
             max_context_tokens,
             host,
@@ -1064,11 +1096,11 @@ mod tests {
         messages.push(text_message("u2", MessageRole::User, "recent"));
         messages.push(text_message("u3", MessageRole::User, "latest"));
 
-        let state = SessionStateEnvelope {
+        let mut state = SessionStateEnvelope {
             policy: SessionPolicy::default(),
-            tool_calls,
             ..Default::default()
         };
+        state.replace_projection(&messages, &tool_calls);
         let transform = RollingTurnTransform::new(RollingHistoryConfig);
         let host: Arc<dyn SessionManager> = Arc::new(mock_manager());
         let ctx = build_turn_ctx(
@@ -1084,7 +1116,7 @@ mod tests {
             host,
         );
         let prepared = PreparedContext {
-            messages,
+            messages: messages.into(),
             ..Default::default()
         };
         let built = transform
@@ -1125,7 +1157,7 @@ mod tests {
             host,
         );
         let prepared = PreparedContext {
-            messages,
+            messages: messages.into(),
             ..Default::default()
         };
         let built = transform
@@ -1170,7 +1202,8 @@ mod tests {
                 text_message("u1", MessageRole::User, "old work"),
                 text_message("a1", MessageRole::Assistant, "assistant old"),
                 text_message("u2", MessageRole::User, "latest request"),
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
         let built = transform

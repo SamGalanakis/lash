@@ -15,9 +15,9 @@ use crate::llm::types::{
 use crate::session_model::exec::ExecAccumulator;
 use crate::session_model::message::{MessageOrigin, PartAttachment, data_url_for_bytes};
 use crate::session_model::{
-    LLM_MAX_RETRIES, LLM_RETRY_DELAYS, Message, MessageRole, Part, PartKind, PromptSectionOverride,
+    LLM_MAX_RETRIES, LLM_RETRY_DELAYS, Message, MessageRole, MessageSequence, Part, PartKind,
     PruneState, SessionEvent, TokenUsage, TurnTerminationPolicyState, format_tool_result_content,
-    fresh_message_id, make_error_envelope, make_error_event, reassign_part_ids, render_prompt,
+    fresh_message_id, make_error_envelope, make_error_event, reassign_part_ids,
 };
 use crate::{CheckpointKind, ExecutionMode, PluginMessage, ToolCallRecord, ToolResult};
 
@@ -87,7 +87,7 @@ pub enum Effect {
     Emit(SessionEvent),
     /// Turn is done.
     Done {
-        messages: Vec<Message>,
+        messages: MessageSequence,
         iteration: usize,
     },
 }
@@ -142,10 +142,8 @@ pub struct TurnMachineConfig {
     pub max_turns: Option<usize>,
     pub model_variant: Option<String>,
     pub run_session_id: Option<String>,
-    pub tool_specs: Vec<LlmToolSpec>,
-    pub prompt: crate::PromptContext,
-    pub prompt_renderer: std::sync::Arc<dyn crate::PromptRenderer>,
-    pub prompt_overrides: Vec<PromptSectionOverride>,
+    pub tool_specs: Arc<Vec<LlmToolSpec>>,
+    pub system_prompt: String,
     pub session_id: String,
     pub emit_llm_debug_log: bool,
     /// RLM termination contract for this session. Only meaningful when
@@ -249,7 +247,7 @@ pub struct TurnMachine {
     state: MachineState,
     pending_effects: VecDeque<Effect>,
     next_effect_id: u64,
-    messages: Vec<Message>,
+    messages: MessageSequence,
     iteration: usize,
     run_offset: usize,
     cumulative_usage: TokenUsage,
@@ -259,6 +257,14 @@ pub struct TurnMachine {
 impl TurnMachine {
     /// Create a new machine in `PrepareIteration` state.
     pub fn new(config: TurnMachineConfig, messages: Vec<Message>, run_offset: usize) -> Self {
+        Self::new_shared(config, MessageSequence::from_owned(messages), run_offset)
+    }
+
+    pub fn new_shared(
+        config: TurnMachineConfig,
+        messages: MessageSequence,
+        run_offset: usize,
+    ) -> Self {
         Self {
             config,
             state: MachineState::PreparingMode,
@@ -277,8 +283,12 @@ impl TurnMachine {
         matches!(self.state, MachineState::Finished)
     }
 
-    pub fn messages(&self) -> &[Message] {
-        &self.messages
+    pub fn messages(&self) -> Arc<Vec<Message>> {
+        self.messages.shared()
+    }
+
+    pub fn materialized_messages(&self) -> Arc<Vec<Message>> {
+        self.messages.shared()
     }
 
     pub fn iteration(&self) -> usize {
@@ -348,22 +358,17 @@ impl TurnMachine {
     }
 
     fn prepare_iteration(&mut self) {
-        let system_prompt = self
-            .config
-            .prompt_renderer
-            .render(&self.config.prompt, &self.config.prompt_overrides);
-
-        let rendered_prompt = render_prompt(&self.messages, self.config.execution_mode);
+        let rendered_prompt = self.messages.render_prompt(self.config.execution_mode);
 
         let use_tools = !self.config.tool_specs.is_empty();
         let attachments: Vec<LlmAttachment> = rendered_prompt.attachments;
         let mut messages = rendered_prompt.messages;
-        if !system_prompt.trim().is_empty() {
+        if !self.config.system_prompt.trim().is_empty() {
             messages.insert(
                 0,
                 crate::llm::types::LlmMessage {
                     role: crate::llm::types::LlmRole::System,
-                    content: system_prompt,
+                    content: self.config.system_prompt.clone(),
                     kind: "text".to_string(),
                     image_idx: -1,
                     tool_call_id: None,
@@ -377,9 +382,9 @@ impl TurnMachine {
             messages,
             attachments,
             tools: if use_tools {
-                self.config.tool_specs.clone()
+                Arc::clone(&self.config.tool_specs)
             } else {
-                Vec::new()
+                Arc::new(Vec::new())
             },
             tool_choice: if use_tools {
                 LlmToolChoice::Auto
@@ -400,10 +405,17 @@ impl TurnMachine {
         retry_attempt: usize,
         rlm: Option<RlmState>,
     ) {
+        let tool_list = self
+            .config
+            .tool_specs
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         self.emit(SessionEvent::LlmRequest {
             iteration: self.iteration,
             message_count: self.messages.len(),
-            tool_list: self.config.prompt.tool_list.clone(),
+            tool_list,
         });
 
         let id = self.next_id();
@@ -531,7 +543,9 @@ impl TurnMachine {
                 }
             })
             .collect::<Vec<_>>();
-        self.messages.extend(appended);
+        if !appended.is_empty() {
+            self.messages.extend(appended);
+        }
     }
 
     fn handle_checkpoint(&mut self, id: EffectId, messages: Vec<PluginMessage>) {
@@ -568,7 +582,7 @@ impl TurnMachine {
                     self.iteration,
                     self.run_offset,
                     self.config.max_turns,
-                    &mut self.messages,
+                    self.messages.make_mut(),
                 );
             }
             self.state = MachineState::PrepareIteration;
@@ -1394,7 +1408,7 @@ impl TurnMachine {
             self.iteration,
             self.run_offset,
             self.config.max_turns,
-            &mut self.messages,
+            self.messages.make_mut(),
         );
 
         self.request_checkpoint(
@@ -1440,3 +1454,4 @@ use helpers::*;
 
 #[cfg(test)]
 mod tests;
+use std::sync::Arc;

@@ -8,15 +8,15 @@
 
 use std::sync::Arc;
 
+use crate::ToolProvider;
 use crate::plugin::PromptContribution;
-use crate::{Message, ToolProvider};
 
 /// Output of the per-turn context transform pipeline — the messages,
 /// prompt contributions, and tool providers the runtime hands to the
 /// LLM call.
 #[derive(Clone)]
 pub struct PreparedContext {
-    pub messages: Vec<Message>,
+    pub messages: crate::MessageSequence,
     pub prompt_contributions: Vec<PromptContribution>,
     pub tool_providers: Vec<Arc<dyn ToolProvider>>,
     pub include_base_tools: bool,
@@ -25,7 +25,7 @@ pub struct PreparedContext {
 impl Default for PreparedContext {
     fn default() -> Self {
         Self {
-            messages: Vec::new(),
+            messages: crate::MessageSequence::default(),
             prompt_contributions: Vec::new(),
             tool_providers: Vec::new(),
             include_base_tools: true,

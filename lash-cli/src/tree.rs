@@ -6,11 +6,7 @@ use crate::persist_root_session_state;
 use crate::session_log::SessionLogger;
 
 pub fn current_message_tree(runtime: &LashRuntime) -> Vec<SessionMessageTreeNode> {
-    let mut state = runtime.export_state();
-    state
-        .session_graph
-        .merge_active_projection(&state.messages, &state.tool_calls);
-    state.session_graph.message_tree()
+    runtime.export_state().session_graph.message_tree()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -53,11 +49,16 @@ pub async fn switch_to_tree_selection(
         .branch_to_node(target_leaf)
         .await
         .map_err(|err| err.to_string())?;
-    *history = state.messages.clone();
+    *history = state.project_messages();
 
     app.stop_turn();
-    app.blocks =
-        projected_blocks_from_state(&state.messages, &state.tool_calls, &app.ui_resume_state());
+    let projected_messages = state.project_messages();
+    let projected_tool_calls = state.project_tool_calls();
+    app.blocks = projected_blocks_from_state(
+        &projected_messages,
+        &projected_tool_calls,
+        &app.ui_resume_state(),
+    );
     app.token_usage = state.token_usage.clone();
     app.last_prompt_usage = state.last_prompt_usage.clone();
     // Branching to a different leaf means the handle maps from the

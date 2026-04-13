@@ -1288,7 +1288,6 @@ impl App {
             SessionEvent::InjectedMessagesCommitted { messages, .. } => {
                 self.commit_injected_messages(&messages);
             }
-            SessionEvent::DurableSnapshot { .. } => {}
             SessionEvent::TypedFinish { .. } => {}
             SessionEvent::LlmResponse { .. } => {}
             SessionEvent::Prompt { .. } => {
