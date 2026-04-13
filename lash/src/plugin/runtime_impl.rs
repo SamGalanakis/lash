@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::{Mutex as StdMutex, Weak};
 
+use sha2::{Digest, Sha256};
 use tokio::task::JoinSet;
 
 use super::*;
@@ -124,13 +125,18 @@ where
     Ok(out)
 }
 
-fn append_plugin_messages(messages: &mut Vec<Message>, plugin_messages: &[PluginMessage]) {
+fn append_plugin_messages(
+    messages: &mut crate::MessageSequence,
+    plugin_messages: &[PluginMessage],
+) {
     let new_messages = plugin_messages
         .iter()
         .filter(|message| matches!(message.role, MessageRole::User | MessageRole::System))
         .map(|message| plugin_message_to_message(message, message.user_input.clone()))
         .collect::<Vec<_>>();
-    messages.extend(new_messages);
+    if !new_messages.is_empty() {
+        messages.extend(new_messages);
+    }
 }
 
 #[cfg(test)]
@@ -636,6 +642,12 @@ impl PluginHost {
         self.factories.as_ref().as_slice()
     }
 
+    pub fn supports_context_approach(&self, context_approach: &crate::ContextApproach) -> bool {
+        self.factories()
+            .iter()
+            .any(|factory| factory.supports_context_approach(context_approach))
+    }
+
     pub fn build_standard_session(
         &self,
         session_id: impl Into<String>,
@@ -675,6 +687,16 @@ impl PluginHost {
         tool_surface_overlay: ToolSurfaceContribution,
         tool_snapshot: Option<crate::DynamicStateSnapshot>,
     ) -> Result<Arc<PluginSession>, PluginError> {
+        if matches!(
+            context_approach,
+            crate::ContextApproach::ObservationalMemory(_)
+        ) && !self.supports_context_approach(&context_approach)
+        {
+            return Err(PluginError::Registration(format!(
+                "context approach `{}` requires a supporting plugin factory on this plugin host",
+                context_approach.label()
+            )));
+        }
         let ctx = PluginSessionContext {
             session_id: session_id.into(),
             execution_mode,
@@ -1079,7 +1101,7 @@ impl PluginSession {
     async fn apply_turn_directives(
         &self,
         directives: Vec<PluginOwned<PluginDirective>>,
-        mut messages: Vec<Message>,
+        mut messages: crate::MessageSequence,
         host: Arc<dyn SessionManager>,
         allow_abort: bool,
         invalid_context: &'static str,
@@ -1116,7 +1138,7 @@ impl PluginSession {
             }
         }
 
-        normalize_message_ids(&mut messages);
+        normalize_message_ids(messages.make_mut());
         Ok(TurnPreparation {
             messages,
             events,
@@ -1130,17 +1152,14 @@ impl PluginSession {
     ) -> Result<TurnPreparation, PluginError> {
         let PrepareTurnRequest {
             session_id,
-            mut state,
+            state,
             messages,
             host,
         } = request;
-        state.messages = messages.clone();
-        let mut hook_state = state;
-        hook_state.messages = messages.clone();
         let directives = self
             .before_turn(TurnHookContext {
                 session_id,
-                state: hook_state,
+                state,
                 host: Arc::clone(&host),
             })
             .await?;
@@ -1308,6 +1327,10 @@ impl PluginSession {
         }
     }
 
+    pub fn has_runtime_event_hooks(&self) -> bool {
+        !self.runtime_event_hooks.is_empty()
+    }
+
     pub async fn mutate_session_config(
         &self,
         ctx: SessionConfigChangedContext,
@@ -1331,67 +1354,96 @@ impl PluginSession {
         let directives = self
             .after_turn(TurnResultHookContext {
                 session_id: session_id.clone(),
-                turn: turn.clone(),
+                turn: Arc::new(crate::plugin::TurnResultSummary::from_assembled(&turn)),
                 host: Arc::clone(&host),
             })
             .await?;
-        let prepared = self
-            .apply_turn_directives(
-                directives,
-                turn.state.messages.clone(),
-                Arc::clone(&host),
-                false,
-                "only message enqueue and session creation are valid in after_turn",
-            )
-            .await?;
-        turn.state.messages = prepared.messages;
-
-        let mut committed_turn = turn.clone();
-        for tool_call in &mut committed_turn.tool_calls {
-            let projected = self
-                .project_tool_result(ToolResultProjectionContext {
-                    hook: ToolResultProjectionHook::BeforeHistory,
-                    session_id: session_id.clone(),
-                    tool_name: tool_call.tool.clone(),
-                    args: tool_call.args.clone(),
-                    result: ToolResult {
-                        success: tool_call.success,
-                        result: tool_call.result.clone(),
-                        images: Vec::new(),
-                    },
-                    duration_ms: tool_call.duration_ms,
-                    host: Arc::clone(&host),
-                })
-                .await?;
-            tool_call.result = projected.result;
-            tool_call.success = projected.success;
+        let mut events = Vec::new();
+        let mut updated_messages: Option<crate::MessageSequence> = None;
+        for emitted in directives {
+            match emitted.value {
+                PluginDirective::AbortTurn { .. } => {
+                    return Err(PluginError::Session(
+                        "only message enqueue and session creation are valid in after_turn"
+                            .to_string(),
+                    ));
+                }
+                PluginDirective::EnqueueMessages {
+                    messages: plugin_messages,
+                } => {
+                    let messages = updated_messages.get_or_insert_with(|| {
+                        crate::MessageSequence::from_base(
+                            turn.state.session_graph.shared_projected_messages(),
+                        )
+                    });
+                    append_plugin_messages(messages, &plugin_messages);
+                }
+                PluginDirective::CreateSession { request } => {
+                    host.create_session(*request)
+                        .await
+                        .map_err(|err| PluginError::Session(err.to_string()))?;
+                }
+                PluginDirective::EmitEvents { events: surface } => {
+                    events.extend(crate::plugin::plugin_surface_session_events(
+                        &emitted.plugin_id,
+                        surface,
+                    ));
+                }
+                PluginDirective::ReplaceToolArgs { .. }
+                | PluginDirective::ShortCircuitTool { .. } => {
+                    return Err(PluginError::Session(
+                        "only message enqueue and session creation are valid in after_turn"
+                            .to_string(),
+                    ));
+                }
+            }
         }
-        for tool_call in &mut committed_turn.state.tool_calls {
-            let projected = self
-                .project_tool_result(ToolResultProjectionContext {
-                    hook: ToolResultProjectionHook::BeforeHistory,
-                    session_id: session_id.clone(),
-                    tool_name: tool_call.tool.clone(),
-                    args: tool_call.args.clone(),
-                    result: ToolResult {
-                        success: tool_call.success,
-                        result: tool_call.result.clone(),
-                        images: Vec::new(),
-                    },
-                    duration_ms: tool_call.duration_ms,
-                    host: Arc::clone(&host),
-                })
-                .await?;
-            tool_call.result = projected.result;
-            tool_call.success = projected.success;
+        if let Some(messages) = updated_messages.as_mut() {
+            normalize_message_ids(messages.make_mut());
+            let tool_calls = turn.state.projected_tool_calls().to_vec();
+            turn.state
+                .replace_projection(messages.as_slice(), &tool_calls);
         }
-        self.emit_runtime_event(PluginRuntimeEvent::TurnCommitted(committed_turn))
-            .await;
 
-        Ok(TurnFinalization {
-            turn,
-            events: prepared.events,
-        })
+        if self.has_runtime_event_hooks() {
+            let mut history_tool_calls = turn.state.project_tool_calls();
+            let mut history_changed = false;
+            for tool_call in &mut history_tool_calls {
+                let projected = self
+                    .project_tool_result(ToolResultProjectionContext {
+                        hook: ToolResultProjectionHook::BeforeHistory,
+                        session_id: session_id.clone(),
+                        tool_name: tool_call.tool.clone(),
+                        args: tool_call.args.clone(),
+                        result: ToolResult {
+                            success: tool_call.success,
+                            result: tool_call.result.clone(),
+                            images: Vec::new(),
+                        },
+                        duration_ms: tool_call.duration_ms,
+                        host: Arc::clone(&host),
+                    })
+                    .await?;
+                history_changed |=
+                    projected.success != tool_call.success || projected.result != tool_call.result;
+                tool_call.result = projected.result;
+                tool_call.success = projected.success;
+            }
+            let committed_turn = if history_changed {
+                let mut committed_turn = turn.clone();
+                committed_turn
+                    .state
+                    .replace_tool_call_projection(&history_tool_calls);
+                committed_turn.tool_calls = history_tool_calls;
+                Arc::new(committed_turn)
+            } else {
+                Arc::new(turn.clone())
+            };
+            self.emit_runtime_event(PluginRuntimeEvent::TurnCommitted(committed_turn))
+                .await;
+        }
+
+        Ok(TurnFinalization { turn, events })
     }
 
     pub fn snapshot(&self) -> Result<PluginSessionSnapshot, PluginError> {
@@ -1410,6 +1462,40 @@ impl PluginSession {
         Ok(PluginSessionSnapshot { plugins })
     }
 
+    pub fn snapshot_is_current(&self, previous: Option<&PluginSessionSnapshot>) -> bool {
+        let Some(previous) = previous else {
+            return false;
+        };
+        if previous.plugins.len() != self.plugins.len() {
+            return false;
+        }
+        for plugin in &self.plugins {
+            let Some(entry) = previous.plugins.get(plugin.id()) else {
+                return false;
+            };
+            if entry.meta.plugin_version != plugin.version()
+                || entry.meta.revision != plugin.snapshot_revision()
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn snapshot_revision_fingerprint(&self) -> u64 {
+        let mut hasher = Sha256::new();
+        for plugin in &self.plugins {
+            hasher.update(plugin.id().as_bytes());
+            hasher.update([0]);
+            hasher.update(plugin.version().as_bytes());
+            hasher.update([0]);
+            hasher.update(plugin.snapshot_revision().to_le_bytes());
+            hasher.update([0xff]);
+        }
+        let digest = hasher.finalize();
+        u64::from_le_bytes(digest[..8].try_into().expect("digest prefix"))
+    }
+
     pub fn restore(&self, snapshot: &PluginSessionSnapshot) -> Result<(), PluginError> {
         for plugin in &self.plugins {
             if let Some(entry) = snapshot.plugins.get(plugin.id()) {
@@ -1420,6 +1506,7 @@ impl PluginSession {
                     &PluginSnapshotMeta {
                         plugin_id: plugin.id().to_string(),
                         plugin_version: plugin.version().to_string(),
+                        revision: plugin.snapshot_revision(),
                         state: None,
                     },
                     &EmptySnapshotReader,

@@ -58,6 +58,7 @@ impl SessionPlugin for PlanTrackerPlugin {
         Ok(PluginSnapshotMeta {
             plugin_id: self.id().to_string(),
             plugin_version: self.version().to_string(),
+            revision: snapshot.generation(),
             state: Some(
                 serde_json::to_value(snapshot)
                     .map_err(|err| PluginError::Snapshot(err.to_string()))?,
@@ -81,5 +82,9 @@ impl SessionPlugin for PlanTrackerPlugin {
             .restore(snapshot)
             .map_err(PluginError::Snapshot)?;
         Ok(())
+    }
+
+    fn snapshot_revision(&self) -> u64 {
+        self.tools.generation().unwrap_or_default()
     }
 }

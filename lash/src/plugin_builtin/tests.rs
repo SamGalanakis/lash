@@ -16,8 +16,8 @@ use crate::session_model::PromptSectionName;
 use crate::tools::StateToolsPluginFactory;
 use crate::{
     AssembledTurn, ExecutionMode, MessageRole, PluginHost, PluginSurfaceEvent,
-    SessionCreateRequest, SessionHandle, SessionManager, SessionPolicy, SessionSnapshot,
-    SessionStateEnvelope, ToolDefinition, ToolResult, TurnHookContext, TurnInput,
+    SessionCreateRequest, SessionHandle, SessionManager, SessionPolicy, SessionReadView,
+    SessionSnapshot, SessionStateEnvelope, ToolDefinition, ToolResult, TurnHookContext, TurnInput,
     TurnResultHookContext,
 };
 
@@ -122,7 +122,9 @@ async fn ui_activity_plugin_emits_done_notification_surface_event() {
     let events = session
         .after_turn(TurnResultHookContext {
             session_id: "root".to_string(),
-            turn: empty_turn("root"),
+            turn: Arc::new(crate::TurnResultSummary::from_assembled(&empty_turn(
+                "root",
+            ))),
             host: manager,
         })
         .await
@@ -205,7 +207,7 @@ async fn prompt_context_plugin_contributes_environment_and_project_instruction_s
             session_id: "root".to_string(),
             host: Arc::new(mock_session_manager("run-session")),
             prompt: crate::PromptContext::default(),
-            state: SessionStateEnvelope::default(),
+            state: SessionReadView::new(SessionStateEnvelope::default()),
         })
         .await
         .expect("prompt contributions");
@@ -477,7 +479,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     let before_turn = session
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
-            state: mock_snapshot("run-session"),
+            state: SessionReadView::new(mock_snapshot("run-session")),
             host: Arc::clone(&manager),
         })
         .await
@@ -740,7 +742,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         .at_checkpoint(crate::CheckpointHookContext {
             session_id: "root".to_string(),
             checkpoint: crate::CheckpointKind::AfterWork,
-            state: mock_snapshot("run-session"),
+            state: SessionReadView::new(mock_snapshot("run-session")),
             host: Arc::clone(&manager),
         })
         .await
@@ -757,7 +759,9 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     session
         .after_turn(TurnResultHookContext {
             session_id: "root".to_string(),
-            turn: empty_turn("root"),
+            turn: Arc::new(crate::TurnResultSummary::from_assembled(&empty_turn(
+                "root",
+            ))),
             host: manager,
         })
         .await
@@ -787,7 +791,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
     let first_before_turn = session
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
-            state: mock_snapshot("run-session"),
+            state: SessionReadView::new(mock_snapshot("run-session")),
             host: Arc::clone(&manager),
         })
         .await
@@ -801,7 +805,9 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
     session
         .after_turn(TurnResultHookContext {
             session_id: "root".to_string(),
-            turn: empty_turn("root"),
+            turn: Arc::new(crate::TurnResultSummary::from_assembled(&empty_turn(
+                "root",
+            ))),
             host: Arc::clone(&manager),
         })
         .await
@@ -810,7 +816,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
     let second_before_turn = session
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
-            state: mock_snapshot("run-session"),
+            state: SessionReadView::new(mock_snapshot("run-session")),
             host: Arc::clone(&manager),
         })
         .await
@@ -987,7 +993,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
     session
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
-            state: mock_snapshot("run-session"),
+            state: SessionReadView::new(mock_snapshot("run-session")),
             host: Arc::clone(&manager),
         })
         .await
@@ -1133,7 +1139,7 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
     session
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
-            state: mock_snapshot("run-session"),
+            state: SessionReadView::new(mock_snapshot("run-session")),
             host: Arc::clone(&manager),
         })
         .await
@@ -1255,7 +1261,7 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
     session
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
-            state: mock_snapshot("run-session"),
+            state: SessionReadView::new(mock_snapshot("run-session")),
             host: Arc::clone(&manager),
         })
         .await

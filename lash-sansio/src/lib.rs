@@ -14,11 +14,11 @@ pub use sansio::{Effect, EffectId, LlmCallError, Response, TurnMachine, TurnMach
 pub use session::ExecResponse;
 pub use session_model::message::MessageOrigin;
 pub use session_model::{
-    DefaultPromptRenderer, DurableTurnSnapshot, ErrorEnvelope, Message, MessageRole, Part,
-    PartKind, PromptOverrideMode, PromptPanel, PromptRenderer, PromptRequest, PromptResponse,
-    PromptSectionName, PromptSectionOverride, PromptSelectionMode, PruneState, SessionEvent,
-    TokenUsage, WAIT_PROMPT_RESUME_EARLY_TOKEN, WAIT_PROMPT_TIMEOUT_TOKEN, default_prompt_renderer,
-    messages_are_live_resume_safe,
+    DefaultPromptRenderer, ErrorEnvelope, Message, MessageRole, MessageSequence, Part, PartKind,
+    PromptOverrideMode, PromptPanel, PromptRenderer, PromptRequest, PromptResponse,
+    PromptSectionName, PromptSectionOverride, PromptSelectionMode, PruneState, RenderedPrompt,
+    SessionEvent, TokenUsage, WAIT_PROMPT_RESUME_EARLY_TOKEN, WAIT_PROMPT_TIMEOUT_TOKEN,
+    default_prompt_renderer, messages_are_live_resume_safe,
 };
 
 /// Execution backend for session turns.
@@ -366,7 +366,7 @@ pub struct ToolCallRecord {
     pub duration_ms: u64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct PromptContext {
     pub mode: ExecutionMode,
     pub tool_list: String,

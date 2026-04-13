@@ -601,7 +601,7 @@ impl SessionPlugin for PlanModePlugin {
                     if !should_inject {
                         return Ok(Vec::new());
                     }
-                    state.ensure_plan_path_from_state(&ctx.state)?
+                    state.ensure_plan_path_from_state(&ctx.state.to_owned_state())?
                 };
                 seed_plan_template(&plan_path).map_err(PluginError::Session)?;
                 let report = read_plan_report(&plan_path).map_err(PluginError::Session)?;
@@ -634,7 +634,7 @@ impl SessionPlugin for PlanModePlugin {
                     if !should_inject {
                         return Ok(Vec::new());
                     }
-                    state.ensure_plan_path_from_state(&ctx.state)?
+                    state.ensure_plan_path_from_state(&ctx.state.to_owned_state())?
                 };
                 seed_plan_template(&plan_path).map_err(PluginError::Session)?;
                 let report = read_plan_report(&plan_path).map_err(PluginError::Session)?;
@@ -956,6 +956,7 @@ impl SessionPlugin for PlanModePlugin {
         Ok(PluginSnapshotMeta {
             plugin_id: self.id().to_string(),
             plugin_version: self.version().to_string(),
+            revision: snapshot.generation,
             state: Some(json!({
                 "enabled": snapshot.enabled,
                 "generation": snapshot.generation,
@@ -981,6 +982,13 @@ impl SessionPlugin for PlanModePlugin {
             .map_err(|_| PluginError::Snapshot("plan mode state poisoned".to_string()))?
             .restore_snapshot(snapshot);
         Ok(())
+    }
+
+    fn snapshot_revision(&self) -> u64 {
+        self.state
+            .lock()
+            .map(|state| state.generation)
+            .unwrap_or_default()
     }
 }
 

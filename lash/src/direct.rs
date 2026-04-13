@@ -166,7 +166,11 @@ impl DirectLlmClient {
     }
 }
 
-fn build_llm_request(provider: &Provider, request: DirectRequest, model: String) -> LlmRequest {
+pub(crate) fn build_llm_request(
+    provider: &Provider,
+    request: DirectRequest,
+    model: String,
+) -> LlmRequest {
     let stream_events = transport_stream_events_for_direct(provider, request.stream_events);
     let DirectRequest {
         model: _,
@@ -227,7 +231,7 @@ fn build_llm_request(provider: &Provider, request: DirectRequest, model: String)
         model,
         messages: llm_messages,
         attachments,
-        tools: Vec::new(),
+        tools: Vec::new().into(),
         tool_choice: LlmToolChoice::None,
         model_variant,
         session_id,

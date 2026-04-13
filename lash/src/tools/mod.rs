@@ -1,7 +1,7 @@
 mod apply_patch;
 mod ask;
 mod batch;
-mod default_plugins;
+mod composite;
 mod fetch_url;
 mod glob;
 mod grep;
@@ -18,14 +18,14 @@ pub use apply_patch::ApplyPatchTool;
 #[cfg(feature = "sqlite-store")]
 pub(crate) use apply_patch::{PatchAction, inspect_patch_ops};
 pub use ask::AskTool;
-pub(crate) use default_plugins::CompositeToolProvider;
-pub use default_plugins::{DefaultToolPluginDeps, default_tool_plugin_factories};
+pub(crate) use composite::CompositeToolProvider;
 pub use fetch_url::FetchUrl;
 pub use glob::Glob;
 pub use grep::Grep;
 pub use ls::Ls;
 pub use read_file::{ReadFile, ReadFilePluginFactory};
 pub use shell::StandardShell;
+pub use shell::shell_prompt_contributions;
 pub use show_snippet_to_user::ShowSnippetToUser;
 pub use state::{StateStore, StateToolsPluginFactory};
 pub use update_plan::UpdatePlanTool;

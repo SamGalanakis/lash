@@ -39,9 +39,9 @@ use crate::{
     apply_ui_host_effects, controls_text, copy_binding, ensure_supported_execution_mode,
     execution_mode_label, execution_mode_usage, hash12, help_text, info_text,
     normalize_prepared_turn_for_dispatch, parse_execution_mode, parse_model_selection,
-    persist_live_runtime_snapshot, push_system_message, queued_turn_edit_binding,
-    resolve_model_selection, resolve_model_variant, shell_escape_command, sync_ui_extensions,
-    turn_has_visible_output, validate_model_selection, variant_lines, version_text,
+    push_system_message, queued_turn_edit_binding, resolve_model_selection, resolve_model_variant,
+    shell_escape_command, sync_ui_extensions, turn_has_visible_output, validate_model_selection,
+    variant_lines, version_text,
 };
 
 use self::commands::{
@@ -682,7 +682,7 @@ pub(crate) async fn run_app(
                         }
                     }
 
-                    history = state.messages.clone();
+                    history = state.project_messages();
                     turn_counter = state.iteration;
                     app.token_usage = state.token_usage.clone();
                     app.last_prompt_usage = state.last_prompt_usage.clone();
@@ -691,7 +691,7 @@ pub(crate) async fn run_app(
                         iteration = state.iteration,
                         status = ?done.result.status,
                         reason = ?done.result.done_reason,
-                        messages = state.messages.len(),
+                        messages = state.projected_messages().len(),
                         blocks = app.blocks.len(),
                         had_live_turn = app.live_turn.is_some(),
                         running = app.running,
@@ -727,9 +727,11 @@ pub(crate) async fn run_app(
                         if app.has_queued_messages() {
                             push_system_message(&mut app, interrupted_message);
                         } else {
+                            let projected_messages = state.project_messages();
+                            let projected_tool_calls = state.project_tool_calls();
                             app.blocks = app::project_interrupted_blocks(
-                                &state.messages,
-                                &state.tool_calls,
+                                &projected_messages,
+                                &projected_tool_calls,
                                 &ui_resume_state,
                                 interrupted_message,
                             );
@@ -770,11 +772,14 @@ pub(crate) async fn run_app(
                         continue;
                     }
 
-                    let final_output = app::latest_assistant_text_from_messages(&state.messages)
-                        .or_else(|| {
-                            (!done.result.assistant_output.safe_text.is_empty())
-                                .then(|| done.result.assistant_output.safe_text.clone())
-                        });
+                    let projected_messages = state.project_messages();
+                    let final_output = app::latest_assistant_text_from_messages(
+                        &projected_messages,
+                    )
+                    .or_else(|| {
+                        (!done.result.assistant_output.safe_text.is_empty())
+                            .then(|| done.result.assistant_output.safe_text.clone())
+                    });
                     let ui_resume_state =
                         app.finish_turn_for_resume_with_output(final_output.as_deref());
                     if let Some(rt) = runtime.as_mut() {
@@ -2323,31 +2328,6 @@ pub(crate) async fn run_app(
                     continue;
                 }
                 app.dirty = true;
-                if let SessionEvent::DurableSnapshot { snapshot } = event {
-                    if runtime_return_rx.is_some()
-                        && let Some(context_window) = app.context_window
-                    {
-                        persist_live_runtime_snapshot(
-                            &store,
-                            store.load_session_graph(),
-                            snapshot,
-                            &app.ui_resume_state(),
-                            &desired_dynamic,
-                            &lash::SessionPolicy {
-                                provider: provider.clone(),
-                                model: app.model.clone(),
-                                model_variant: current_model_variant.clone(),
-                                execution_mode: current_execution_mode,
-                                max_context_tokens: Some(context_window as usize),
-                                ..lash::SessionPolicy::default()
-                            },
-                            app.token_usage.clone(),
-                            app.last_prompt_usage.clone(),
-                            &[],
-                        );
-                    }
-                    continue;
-                }
                 // Intercept Prompt events — set up dialog state instead of passing to handle_session_event
                 if let SessionEvent::Prompt {
                     request,

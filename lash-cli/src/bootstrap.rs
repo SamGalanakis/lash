@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use lash::provider::{LashConfig, Provider};
 use lash::*;
+use lash_default_tools::{DefaultToolBundle, DefaultToolPluginOptions, tool_plugin_factories};
 use lash_tui::Terminal;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -20,7 +21,7 @@ use crate::{
 fn plugin_factories_for_surface(
     autonomous: bool,
     execution_mode: ExecutionMode,
-    store: Arc<Store>,
+    _store: Arc<Store>,
     tavily_key: String,
     instruction_source: Arc<dyn InstructionSource>,
     session_policy: SessionPolicy,
@@ -33,19 +34,20 @@ fn plugin_factories_for_surface(
             .unwrap_or(ExecutionMode::Standard),
     };
 
-    let mut plugin_factories = default_tool_plugin_factories(
+    let mut bundles = DefaultToolBundle::background_surface(execution_mode, !autonomous);
+    if !tavily_key.is_empty() {
+        bundles.push(DefaultToolBundle::Web);
+    }
+    let mut plugin_factories = tool_plugin_factories(DefaultToolPluginOptions {
         execution_mode,
-        DefaultToolPluginDeps {
-            store: Some(store as Arc<dyn RuntimeStore>),
-            tavily_api_key: if tavily_key.is_empty() {
-                None
-            } else {
-                Some(tavily_key)
-            },
-            enable_user_prompts: !autonomous,
-            instruction_source: Some(Arc::clone(&instruction_source)),
+        bundles,
+        tavily_api_key: if tavily_key.is_empty() {
+            None
+        } else {
+            Some(tavily_key)
         },
-    );
+        instruction_source: Some(Arc::clone(&instruction_source)),
+    });
     plugin_factories.push(Arc::new(BuiltinPromptContextPluginFactory::new(
         Arc::clone(&instruction_source),
         PromptContextPluginConfig::default(),
@@ -357,9 +359,7 @@ pub(crate) async fn run(
     // Standard-mode bootstrap would fail to start the lashlang thread
     // and would build plugins with the wrong mode.
     let persisted_session_config = if args.resume.is_some() {
-        store
-            .load_session_graph()
-            .and_then(|graph| graph.latest_session_config())
+        store.load_session_head().map(|head| head.config)
     } else {
         None
     };
@@ -416,14 +416,10 @@ pub(crate) async fn run(
         context_approach: configured_context_approach.clone(),
         ..Default::default()
     };
-    let host_config = RuntimeHostConfig {
-        user_prompts_enabled: !autonomous,
-        session_store_factory: Some(Arc::new(DbSessionStoreFactory::new(sessions_dir.clone()))),
-        prompt_renderer: default_prompt_renderer(),
-        prompt_overrides,
-        llm_log_path,
-        ..RuntimeHostConfig::default()
-    };
+    let host_core = RuntimeCoreConfig::default()
+        .with_prompt_renderer(default_prompt_renderer())
+        .with_prompt_overrides(prompt_overrides)
+        .with_llm_log_path(llm_log_path);
 
     let tavily_key = lash_config.tavily_api_key().unwrap_or_default().to_string();
     let turn_injection_bridge = TurnInjectionBridge::new();
@@ -497,21 +493,28 @@ pub(crate) async fn run(
         )?
     };
     let initial_graph = if args.resume.is_some() {
-        store.load_session_graph().unwrap_or_default()
+        store
+            .load_session_head()
+            .map(|head| head.graph)
+            .unwrap_or_default()
     } else {
         lash::SessionGraph::default()
     };
-    let mut runtime = LashRuntime::from_state(
+    let services = RuntimeServices::new_with_bridges(root_plugins, turn_injection_bridge.clone())
+        .with_store(store.clone() as Arc<dyn RuntimeStore>);
+    let state = SessionStateEnvelope {
+        session_id: "root".to_string(),
+        policy: session_policy.clone(),
+        session_graph: initial_graph,
+        ..SessionStateEnvelope::default()
+    };
+    let embedded_host = EmbeddedRuntimeHost::new(host_core)
+        .with_session_store_factory(Arc::new(DbSessionStoreFactory::new(sessions_dir.clone())));
+    let mut runtime = LashRuntime::from_background_state(
         session_policy.clone(),
-        host_config,
-        RuntimeServices::new_with_bridges(root_plugins, turn_injection_bridge.clone())
-            .with_store(store.clone() as Arc<dyn RuntimeStore>),
-        SessionStateEnvelope {
-            session_id: "root".to_string(),
-            policy: session_policy.clone(),
-            session_graph: initial_graph,
-            ..SessionStateEnvelope::default()
-        },
+        BackgroundRuntimeHost::new(embedded_host, Arc::new(TokioBackgroundExecutor::default())),
+        services,
+        state,
     )
     .await?;
     if let Some(patch) = rlm_globals_patch {

@@ -3,8 +3,8 @@ pub mod message;
 pub mod prompt;
 
 pub use message::{
-    Message, MessageRole, Part, PartKind, PruneState, messages_are_live_resume_safe, render_prompt,
-    render_transcript_prompt,
+    Message, MessageRole, MessageSequence, Part, PartKind, PruneState, RenderedPrompt,
+    append_rendered_prompt, messages_are_live_resume_safe, render_prompt, render_transcript_prompt,
 };
 pub use prompt::{
     DefaultPromptRenderer, PromptOverrideMode, PromptRenderer, PromptSectionName,
@@ -46,13 +46,6 @@ pub struct ErrorEnvelope {
     pub user_message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct DurableTurnSnapshot {
-    pub messages: Vec<Message>,
-    pub tool_calls: Vec<crate::ToolCallRecord>,
-    pub iteration: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -108,11 +101,6 @@ pub enum SessionEvent {
     PluginEvent {
         plugin_id: String,
         event: PluginSurfaceEvent,
-    },
-    #[serde(rename = "durable_snapshot")]
-    DurableSnapshot {
-        #[serde(skip)]
-        snapshot: DurableTurnSnapshot,
     },
     /// Emitted when a typed RLM session terminates via `finish <expr>`.
     /// The `value` is the captured (and schema-validated) result.

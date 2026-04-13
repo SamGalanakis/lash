@@ -1,24 +1,49 @@
 use super::*;
+use crate::llm::transport::LlmTransport;
+use sha2::{Digest, Sha256};
+
+async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: SessionEvent) {
+    if !event_tx.is_closed() {
+        let _ = event_tx.send(RuntimeStreamEvent::Session(event)).await;
+    }
+}
+
+async fn emit_plugin_surface_events_runtime(
+    event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+    plugin_id: &str,
+    events: Vec<crate::PluginSurfaceEvent>,
+) {
+    for event in crate::plugin::plugin_surface_session_events(plugin_id, events) {
+        send_session_event(event_tx, event).await;
+    }
+}
 
 pub(super) struct RuntimeTurnDriver {
     pub(super) session: Session,
     pub(super) policy: SessionPolicy,
-    pub(super) host: RuntimeHostConfig,
+    pub(super) host: RuntimeHost,
     pub(super) session_id: String,
-    pub(super) tool_calls: Vec<ToolCallRecord>,
+    pub(super) base_graph: crate::SessionGraph,
+    pub(super) tool_calls: Arc<Vec<ToolCallRecord>>,
     pub(super) llm_stream_summaries: HashMap<usize, LlmStreamSummary>,
     pub(super) llm_factory: LlmFactory,
     pub(super) session_manager: Arc<dyn SessionManager>,
     pub(super) prompt_bridge: HostPromptBridge,
     pub(super) rlm_termination: crate::RlmTermination,
+    pub(super) prompt_render_cache: Arc<std::sync::Mutex<PromptRenderCache>>,
+    pub(super) turn_phase_probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
 }
 
 impl RuntimeTurnDriver {
-    fn durable_snapshot(&self, messages: &[Message], iteration: usize) -> DurableTurnSnapshot {
-        DurableTurnSnapshot {
-            messages: messages.to_vec(),
-            tool_calls: self.tool_calls.clone(),
-            iteration,
+    fn mark_phase_begin(&self, phase: RuntimeTurnPhase) {
+        if let Some(probe) = self.turn_phase_probe.as_ref() {
+            probe.begin(phase);
+        }
+    }
+
+    fn mark_phase_end(&self, phase: RuntimeTurnPhase) {
+        if let Some(probe) = self.turn_phase_probe.as_ref() {
+            probe.end(phase);
         }
     }
 
@@ -28,14 +53,14 @@ impl RuntimeTurnDriver {
 
     pub(super) async fn run(
         &mut self,
-        messages: Vec<Message>,
-        event_tx: mpsc::Sender<SessionEvent>,
+        messages: crate::MessageSequence,
+        event_tx: mpsc::Sender<RuntimeStreamEvent>,
         cancel: CancellationToken,
         run_offset: usize,
-    ) -> (Vec<Message>, usize) {
+    ) -> (crate::MessageSequence, usize) {
         macro_rules! emit {
             ($event:expr) => {
-                crate::session_model::send_event(&event_tx, $event).await
+                send_session_event(&event_tx, $event).await
             };
         }
         let result = async {
@@ -46,10 +71,6 @@ impl RuntimeTurnDriver {
                 Ok(machine) => machine,
                 Err(result) => return result,
             };
-            let snapshot = self.durable_snapshot(machine.messages(), machine.iteration());
-            crate::session_model::send_event(&event_tx, SessionEvent::DurableSnapshot { snapshot })
-                .await;
-
             loop {
                 let Some(effect) = machine.poll_effect() else {
                     break;
@@ -63,7 +84,7 @@ impl RuntimeTurnDriver {
                     Effect::LlmCall { id, request } => {
                         if cancel.is_cancelled() {
                             emit!(SessionEvent::Done);
-                            return (Vec::new(), run_offset);
+                            return (crate::MessageSequence::default(), run_offset);
                         }
                         let iteration = machine.iteration();
                         let (result, text_streamed) = self
@@ -74,13 +95,6 @@ impl RuntimeTurnDriver {
                             result,
                             text_streamed,
                         });
-                        let snapshot =
-                            self.durable_snapshot(machine.messages(), machine.iteration());
-                        crate::session_model::send_event(
-                            &event_tx,
-                            SessionEvent::DurableSnapshot { snapshot },
-                        )
-                        .await;
                     }
                     Effect::Checkpoint { id, checkpoint } => {
                         match self
@@ -89,13 +103,6 @@ impl RuntimeTurnDriver {
                         {
                             Ok(messages) => {
                                 machine.handle_response(Response::Checkpoint { id, messages });
-                                let snapshot =
-                                    self.durable_snapshot(machine.messages(), machine.iteration());
-                                crate::session_model::send_event(
-                                    &event_tx,
-                                    SessionEvent::DurableSnapshot { snapshot },
-                                )
-                                .await;
                             }
                             Err(err) => {
                                 machine.fail_turn(make_error_event(
@@ -117,23 +124,17 @@ impl RuntimeTurnDriver {
                     }
                     Effect::ToolCalls { id, calls } => {
                         let results = self.run_tool_calls(calls, &event_tx).await;
-                        self.tool_calls
-                            .extend(results.iter().map(|outcome| ToolCallRecord {
+                        Arc::make_mut(&mut self.tool_calls).extend(results.iter().map(|outcome| {
+                            ToolCallRecord {
                                 call_id: Some(outcome.call_id.clone()),
                                 tool: outcome.tool_name.clone(),
                                 args: outcome.args.clone(),
                                 result: outcome.state_result.result.clone(),
                                 success: outcome.state_result.success,
                                 duration_ms: outcome.duration_ms,
-                            }));
+                            }
+                        }));
                         machine.handle_response(Response::ToolResults { id, results });
-                        let snapshot =
-                            self.durable_snapshot(machine.messages(), machine.iteration());
-                        crate::session_model::send_event(
-                            &event_tx,
-                            SessionEvent::DurableSnapshot { snapshot },
-                        )
-                        .await;
                     }
                     Effect::Sleep { id, duration } => {
                         tokio::time::sleep(duration).await;
@@ -154,18 +155,11 @@ impl RuntimeTurnDriver {
                             },
                         };
                         machine.handle_response(response);
-                        let snapshot =
-                            self.durable_snapshot(machine.messages(), machine.iteration());
-                        crate::session_model::send_event(
-                            &event_tx,
-                            SessionEvent::DurableSnapshot { snapshot },
-                        )
-                        .await;
                     }
                 }
             }
 
-            (Vec::new(), run_offset)
+            (crate::MessageSequence::default(), run_offset)
         }
         .await;
         self.prompt_bridge.clear_sender();
@@ -174,13 +168,13 @@ impl RuntimeTurnDriver {
 
     async fn prepare_turn_machine(
         &mut self,
-        messages: Vec<Message>,
-        event_tx: &mpsc::Sender<SessionEvent>,
+        messages: crate::MessageSequence,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         run_offset: usize,
-    ) -> Result<TurnMachine, (Vec<Message>, usize)> {
+    ) -> Result<TurnMachine, (crate::MessageSequence, usize)> {
         macro_rules! emit {
             ($event:expr) => {
-                crate::session_model::send_event(event_tx, $event).await
+                send_session_event(event_tx, $event).await
             };
         }
 
@@ -191,16 +185,15 @@ impl RuntimeTurnDriver {
             Err(event) => {
                 emit!(event);
                 emit!(SessionEvent::Done);
-                return Err((messages, run_offset));
+                return Err((messages.clone(), run_offset));
             }
         };
+        self.mark_phase_begin(RuntimeTurnPhase::PromptBuild);
         let mut preamble =
             build_execution_preamble(&self.session, &session_policy, execution_mode, model);
         let prompt_state = SessionStateEnvelope {
             session_id: self.session_id.clone(),
             policy: session_policy.clone(),
-            messages: messages.clone(),
-            tool_calls: self.tool_calls.clone(),
             iteration: run_offset,
             ..Default::default()
         };
@@ -211,7 +204,12 @@ impl RuntimeTurnDriver {
                 session_id: self.session_id.clone(),
                 host: Arc::clone(&self.session_manager),
                 prompt: preamble.prompt.clone(),
-                state: prompt_state,
+                state: crate::SessionReadView::from_graph_projection(
+                    &prompt_state,
+                    self.base_graph.clone(),
+                    messages.shared(),
+                    Arc::clone(&self.tool_calls),
+                ),
             })
             .await
         {
@@ -232,7 +230,12 @@ impl RuntimeTurnDriver {
         preamble.prompt = finalize_prompt_context(preamble.prompt, all_prompt_contributions);
         self.policy = session_policy;
         let machine_config = self.machine_config(preamble, execution_mode);
-        Ok(TurnMachine::new(machine_config, messages, run_offset))
+        self.mark_phase_end(RuntimeTurnPhase::PromptBuild);
+        Ok(TurnMachine::new_shared(
+            machine_config,
+            messages,
+            run_offset,
+        ))
     }
 
     async fn run_llm_call(
@@ -241,7 +244,7 @@ impl RuntimeTurnDriver {
         effect_id: crate::sansio::EffectId,
         request: LlmRequest,
         iteration: usize,
-        event_tx: &mpsc::Sender<SessionEvent>,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> (Result<LlmResponse, LlmCallError>, bool) {
         match self.policy.execution_mode {
@@ -262,30 +265,43 @@ impl RuntimeTurnDriver {
         self.policy.clone()
     }
 
-    fn checkpoint_state_snapshot(
+    fn checkpoint_state_view(
         &self,
-        messages: &[Message],
+        messages: Arc<Vec<Message>>,
         iteration: usize,
-    ) -> SessionStateEnvelope {
-        SessionStateEnvelope {
+    ) -> crate::SessionReadView {
+        let state = SessionStateEnvelope {
             session_id: self.session_id.clone(),
             policy: self.policy.clone(),
-            session_graph: crate::SessionGraph::from_projection(messages, &self.tool_calls),
-            messages: messages.to_vec(),
-            tool_calls: self.tool_calls.clone(),
+            session_graph: crate::SessionGraph::default(),
             iteration,
             token_usage: TokenUsage::default(),
             last_prompt_usage: None,
+            dynamic_state_ref: None,
+            dynamic_state_generation: None,
+            dynamic_state_snapshot: None,
+            plugin_snapshot_ref: None,
+            plugin_snapshot_revision: None,
+            plugin_snapshot: None,
             execution_state_snapshot: None,
             token_ledger: Vec::new(),
-        }
+            checkpoint_ref: None,
+            persisted_graph_node_count: 0,
+            graph_replace_required: false,
+        };
+        crate::SessionReadView::from_graph_projection(
+            &state,
+            self.base_graph.clone(),
+            messages,
+            Arc::clone(&self.tool_calls),
+        )
     }
 
     async fn run_checkpoint(
         &mut self,
         machine: &mut TurnMachine,
         checkpoint: CheckpointKind,
-        event_tx: &mpsc::Sender<SessionEvent>,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
     ) -> Result<Vec<PluginMessage>, RuntimeError> {
         let mut committed = self
             .session
@@ -300,7 +316,8 @@ impl RuntimeTurnDriver {
             .apply_checkpoint(CheckpointHookContext {
                 session_id: self.session_id.clone(),
                 checkpoint,
-                state: self.checkpoint_state_snapshot(machine.messages(), machine.iteration()),
+                state: self
+                    .checkpoint_state_view(machine.materialized_messages(), machine.iteration()),
                 host: Arc::clone(&self.session_manager),
             })
             .await
@@ -318,7 +335,7 @@ impl RuntimeTurnDriver {
         }
 
         if !committed.is_empty() {
-            crate::session_model::send_event(
+            send_session_event(
                 event_tx,
                 SessionEvent::InjectedMessagesCommitted {
                     messages: committed.clone(),
@@ -379,7 +396,7 @@ impl RuntimeTurnDriver {
 
     async fn transform_assistant_stream_chunk(
         &mut self,
-        event_tx: &mpsc::Sender<SessionEvent>,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         chunk: String,
     ) -> Result<String, LlmCallError> {
         let original = chunk.clone();
@@ -401,14 +418,15 @@ impl RuntimeTurnDriver {
                 first = false;
             }
             current = emitted.value.chunk.clone();
-            emit_plugin_surface_events(event_tx, &emitted.plugin_id, emitted.value.events).await;
+            emit_plugin_surface_events_runtime(event_tx, &emitted.plugin_id, emitted.value.events)
+                .await;
         }
         if first { Ok(original) } else { Ok(current) }
     }
 
     async fn transform_assistant_response(
         &mut self,
-        event_tx: &mpsc::Sender<SessionEvent>,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         response: LlmResponse,
     ) -> Result<LlmResponse, LlmCallError> {
         let original = response.clone();
@@ -429,7 +447,8 @@ impl RuntimeTurnDriver {
             })?;
         let mut current: Option<LlmResponse> = None;
         for emitted in transforms {
-            emit_plugin_surface_events(event_tx, &emitted.plugin_id, emitted.value.events).await;
+            emit_plugin_surface_events_runtime(event_tx, &emitted.plugin_id, emitted.value.events)
+                .await;
             current = Some(emitted.value.response);
         }
         Ok(current.unwrap_or(original))
@@ -440,29 +459,62 @@ impl RuntimeTurnDriver {
         preamble: crate::session_model::ExecutionPreamble,
         execution_mode: ExecutionMode,
     ) -> TurnMachineConfig {
-        let mut prompt_overrides = self.host.prompt_overrides.clone();
+        let mut prompt_overrides = self.host.core.prompt_overrides.clone();
         prompt_overrides.extend(self.session.context_prompt_overrides().iter().cloned());
+        let system_prompt = self.render_system_prompt(&preamble.prompt, &prompt_overrides);
         TurnMachineConfig {
             execution_mode,
             model: preamble.model,
             max_turns: self.policy.max_turns,
             model_variant: self.policy.model_variant.clone(),
             run_session_id: self.policy.session_id.clone(),
-            tool_specs: preamble.tool_specs,
-            prompt: preamble.prompt,
-            prompt_renderer: Arc::clone(&self.host.prompt_renderer),
-            prompt_overrides,
+            tool_specs: Arc::clone(&preamble.tool_specs),
+            system_prompt,
             session_id: self.session_id.clone(),
-            emit_llm_debug_log: self.host.llm_log_path.is_some(),
+            emit_llm_debug_log: self.host.core.llm_log_path.is_some(),
             rlm_termination: rlm_termination_to_sansio(&self.rlm_termination),
         }
+    }
+
+    fn render_system_prompt(
+        &self,
+        prompt: &crate::PromptContext,
+        overrides: &[crate::PromptSectionOverride],
+    ) -> String {
+        struct HashWriter(Sha256);
+        impl std::io::Write for HashWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.update(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = HashWriter(Sha256::new());
+        let _ = serde_json::to_writer(&mut writer, &(prompt, overrides));
+        let key: [u8; 32] = writer.0.finalize().into();
+        let mut cache = self
+            .prompt_render_cache
+            .lock()
+            .expect("prompt render cache lock");
+        if cache.last_key == Some(key) {
+            return cache.last_rendered.clone();
+        }
+        let rendered = self.host.core.prompt_renderer.render(prompt, overrides);
+        cache.last_key = Some(key);
+        cache.last_rendered = rendered.clone();
+        rendered
     }
 
     async fn run_exec_code(
         &mut self,
         code: &str,
-        event_tx: &mpsc::Sender<SessionEvent>,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
     ) -> Result<crate::ExecResponse, String> {
+        let (session_event_tx, mut session_event_rx) = mpsc::channel::<SessionEvent>(100);
         let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
         self.session.set_message_sender(msg_tx);
         let event_tx_clone = event_tx.clone();
@@ -470,22 +522,36 @@ impl RuntimeTurnDriver {
             while let Some(sandbox_msg) = msg_rx.recv().await {
                 if sandbox_msg.kind != "final" && !event_tx_clone.is_closed() {
                     let _ = event_tx_clone
-                        .send(SessionEvent::Message {
+                        .send(RuntimeStreamEvent::Session(SessionEvent::Message {
                             text: sandbox_msg.text,
                             kind: sandbox_msg.kind,
-                        })
+                        }))
                         .await;
                 }
+            }
+        });
+        let forward_tx = event_tx.clone();
+        let forward_handle = tokio::spawn(async move {
+            while let Some(event) = session_event_rx.recv().await {
+                send_session_event(&forward_tx, event).await;
             }
         });
         let manager = Arc::clone(&self.session_manager);
         let accept_finish = matches!(self.rlm_termination, crate::RlmTermination::Finish { .. });
         let result = self
             .session
-            .run_code(&self.session_id, manager, event_tx, code, accept_finish)
+            .run_code(
+                &self.session_id,
+                manager,
+                &session_event_tx,
+                code,
+                accept_finish,
+            )
             .await
             .map_err(|e| e.to_string());
+        drop(session_event_tx);
         self.session.clear_message_sender();
+        let _ = forward_handle.await;
         let _ = drain_handle.await;
         result
     }
@@ -494,10 +560,15 @@ impl RuntimeTurnDriver {
         &mut self,
         request: LlmRequest,
         iteration: usize,
-        event_tx: &mpsc::Sender<SessionEvent>,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> (Result<LlmResponse, LlmCallError>, bool) {
-        let fallback_request_body = debug_request_body(&request);
+        let debug_request = self
+            .host
+            .core
+            .llm_log_path
+            .as_ref()
+            .map(|_| request.clone());
         let (llm_stream_tx, mut llm_stream_rx) =
             tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
         let llm_request = LlmRequest {
@@ -567,7 +638,9 @@ impl RuntimeTurnDriver {
                             }
                             streamed_output.apply_to_response(&mut resp);
                             if resp.request_body.is_none() {
-                                resp.request_body = Some(fallback_request_body.clone());
+                                resp.request_body = debug_request
+                                    .as_ref()
+                                    .map(debug_request_body);
                             }
                             let resp = match self.transform_assistant_response(event_tx, resp).await {
                                 Ok(resp) => resp,
@@ -593,8 +666,15 @@ impl RuntimeTurnDriver {
     async fn run_tool_calls(
         &mut self,
         pending_tools: Vec<crate::sansio::PendingToolCall>,
-        event_tx: &mpsc::Sender<SessionEvent>,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
     ) -> Vec<crate::sansio::CompletedToolCall> {
+        let (tool_event_tx, mut tool_event_rx) = tokio::sync::mpsc::channel::<SessionEvent>(64);
+        let runtime_event_tx = event_tx.clone();
+        let tool_event_forwarder = tokio::spawn(async move {
+            while let Some(event) = tool_event_rx.recv().await {
+                send_session_event(&runtime_event_tx, event).await;
+            }
+        });
         let plugins = Arc::clone(self.session.plugins());
         let manager = Arc::clone(&self.session_manager);
         let projector_manager = Arc::clone(&manager);
@@ -607,7 +687,7 @@ impl RuntimeTurnDriver {
             host: Arc::clone(&manager),
             session_id: self.session_id.clone(),
             execution_mode: self.policy.execution_mode,
-            event_tx: event_tx.clone(),
+            event_tx: tool_event_tx,
             turn_injection_bridge: self.session.turn_injection_bridge().clone(),
         });
         let mut join_set = tokio::task::JoinSet::new();
@@ -627,10 +707,10 @@ impl RuntimeTurnDriver {
                     while let Some(sandbox_msg) = progress_rx.recv().await {
                         if sandbox_msg.kind != "final" {
                             let _ = progress_event_tx
-                                .send(SessionEvent::Message {
+                                .send(RuntimeStreamEvent::Session(SessionEvent::Message {
                                     text: sandbox_msg.text,
                                     kind: sandbox_msg.kind,
-                                })
+                                }))
                                 .await;
                         }
                     }
@@ -709,12 +789,14 @@ impl RuntimeTurnDriver {
                 )),
             }
         }
+        drop(dispatch);
+        let _ = tool_event_forwarder.await;
         outcomes.sort_by_key(|(index, _)| *index);
         outcomes.into_iter().map(|(_, outcome)| outcome).collect()
     }
 
     fn handle_log_event(&mut self, event: crate::sansio::LogEvent) {
-        let Some(path) = &self.host.llm_log_path else {
+        let Some(path) = &self.host.core.llm_log_path else {
             return;
         };
 
@@ -771,7 +853,7 @@ impl RuntimeTurnDriver {
     }
 
     fn append_llm_debug_entry(&self, entry: serde_json::Value) {
-        let Some(path) = &self.host.llm_log_path else {
+        let Some(path) = &self.host.core.llm_log_path else {
             return;
         };
 
@@ -801,7 +883,7 @@ impl RuntimeTurnDriver {
     }
 
     fn log_llm_stream_event(&self, debug: &mut LlmStreamDebugState, log: LlmStreamEventLog<'_>) {
-        if self.host.llm_log_path.is_none() {
+        if self.host.core.llm_log_path.is_none() {
             return;
         }
 
@@ -875,7 +957,7 @@ impl RuntimeTurnDriver {
 
     async fn forward_standard_stream_event(
         &mut self,
-        event_tx: &mpsc::Sender<SessionEvent>,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         stream_event: LlmStreamEvent,
         state: &mut StandardStreamState<'_>,
     ) -> Result<(), LlmCallError> {
@@ -903,11 +985,8 @@ impl RuntimeTurnDriver {
                     );
                     if !delta.is_empty() {
                         state.streamed_output.push_text(delta.clone());
-                        crate::session_model::send_event(
-                            event_tx,
-                            SessionEvent::TextDelta { content: delta },
-                        )
-                        .await;
+                        send_session_event(event_tx, SessionEvent::TextDelta { content: delta })
+                            .await;
                     }
                 }
             }
@@ -934,11 +1013,8 @@ impl RuntimeTurnDriver {
                     );
                     if !text.is_empty() {
                         state.streamed_output.push_text(text.clone());
-                        crate::session_model::send_event(
-                            event_tx,
-                            SessionEvent::TextDelta { content: text },
-                        )
-                        .await;
+                        send_session_event(event_tx, SessionEvent::TextDelta { content: text })
+                            .await;
                     }
                 }
             }
@@ -992,7 +1068,7 @@ impl RuntimeTurnDriver {
 
     async fn drain_standard_stream_queue(
         &mut self,
-        event_tx: &mpsc::Sender<SessionEvent>,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         llm_stream_rx: &mut tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,
         state: &mut StandardStreamState<'_>,
     ) -> Result<(), LlmCallError> {

@@ -946,7 +946,7 @@ mod tests {
             model: "gpt-5.4".to_string(),
             messages,
             attachments: vec![],
-            tools: vec![],
+            tools: vec![].into(),
             tool_choice: crate::llm::types::LlmToolChoice::Auto,
             model_variant: None,
             session_id: None,

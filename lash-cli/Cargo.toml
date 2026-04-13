@@ -4,12 +4,17 @@ version.workspace = true
 edition = "2024"
 license.workspace = true
 
+[features]
+default = []
+dhat-heap = ["dep:dhat"]
+
 [[bin]]
 name = "lash"
 path = "src/main.rs"
 
 [dependencies]
 lash = { path = "../lash", default-features = false, features = ["full"] }
+lash-default-tools = { path = "../lash-default-tools" }
 lash-ui = { path = "../lash-ui" }
 lash-tui = { path = "../lash-tui" }
 crossterm = "0.28"
@@ -32,6 +37,8 @@ uuid = { version = "1", features = ["v4"] }
 rand = "0.9"
 sha2 = "0.10"
 base64 = "0.22"
+stats_alloc = "0.1"
+dhat = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

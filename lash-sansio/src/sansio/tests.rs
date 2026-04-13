@@ -1,5 +1,5 @@
 use super::*;
-use crate::session_model::{Message, MessageRole, Part, PartKind, PruneState};
+use crate::session_model::{Message, MessageRole, MessageSequence, Part, PartKind, PruneState};
 
 fn test_config(mode: ExecutionMode) -> TurnMachineConfig {
     TurnMachineConfig {
@@ -8,13 +8,8 @@ fn test_config(mode: ExecutionMode) -> TurnMachineConfig {
         max_turns: None,
         model_variant: None,
         run_session_id: None,
-        tool_specs: Vec::new(),
-        prompt: crate::PromptContext {
-            mode,
-            ..crate::PromptContext::default()
-        },
-        prompt_renderer: crate::default_prompt_renderer(),
-        prompt_overrides: Vec::new(),
+        tool_specs: Vec::new().into(),
+        system_prompt: String::new(),
         session_id: "test".to_string(),
         emit_llm_debug_log: false,
         rlm_termination: RlmTermination::default(),
@@ -67,7 +62,7 @@ fn find_llm_request(effects: &[Effect]) -> Option<&LlmRequest> {
     })
 }
 
-fn find_done(effects: &[Effect]) -> Option<(&Vec<Message>, usize)> {
+fn find_done(effects: &[Effect]) -> Option<(&MessageSequence, usize)> {
     effects.iter().find_map(|e| match e {
         Effect::Done {
             messages,

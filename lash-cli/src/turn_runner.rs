@@ -25,7 +25,7 @@ pub(crate) fn make_turn_input(turn: &PreparedTurn) -> TurnInput {
     }
 }
 
-fn append_turn_input_message(messages: &mut Vec<Message>, turn_input: &TurnInput) {
+fn turn_input_message(turn_input: &TurnInput) -> Message {
     let user_id = fresh_message_id();
     let mut image_ids = Vec::new();
     let mut user_parts = Vec::new();
@@ -105,26 +105,26 @@ fn append_turn_input_message(messages: &mut Vec<Message>, turn_input: &TurnInput
         });
     }
 
-    messages.push(Message {
+    Message {
         id: user_id,
         role: MessageRole::User,
         parts: user_parts,
         user_input: turn_input.user_input.clone(),
         origin: None,
-    });
+    }
 }
 
-pub(crate) fn pending_turn_snapshot(
+pub(crate) fn live_resume_graph_from_state(state: &SessionStateEnvelope) -> SessionGraph {
+    state.session_graph.clone()
+}
+
+pub(crate) fn pending_turn_graph(
     state: &SessionStateEnvelope,
     turn_input: &TurnInput,
-) -> DurableTurnSnapshot {
-    let mut messages = state.messages.clone();
-    append_turn_input_message(&mut messages, turn_input);
-    DurableTurnSnapshot {
-        messages,
-        tool_calls: state.tool_calls.clone(),
-        iteration: state.iteration,
-    }
+) -> SessionGraph {
+    let mut graph = live_resume_graph_from_state(state);
+    graph.append_message(turn_input_message(turn_input));
+    graph
 }
 
 pub(crate) fn persist_pending_turn(
@@ -138,22 +138,48 @@ pub(crate) fn persist_pending_turn(
     persist_live_runtime_snapshot(
         store,
         Some(persisted_state.session_graph.clone()),
-        pending_turn_snapshot(&persisted_state, turn_input),
+        pending_turn_graph(&persisted_state, turn_input),
         ui_state,
         dynamic_state,
         &persisted_state.policy,
-        persisted_state.token_usage.clone(),
-        persisted_state.last_prompt_usage.clone(),
+        lash::PersistedTurnState {
+            iteration: persisted_state.iteration,
+            token_usage: persisted_state.token_usage.clone(),
+            last_prompt_usage: persisted_state.last_prompt_usage.clone(),
+        },
         &persisted_state.token_ledger,
+        None,
+        None,
     );
 }
 
 fn refresh_state_from_committed_graph(store: &Store, state: &mut SessionStateEnvelope) {
-    let Some(graph) = store.load_session_graph() else {
+    let Some(head) = store.load_session_head() else {
         return;
     };
-    state.session_graph = graph;
-    state.refresh_from_session_graph();
+    let checkpoint = head
+        .checkpoint_ref
+        .as_ref()
+        .and_then(|blob_ref| store.get_checkpoint(blob_ref));
+    state.session_graph = head.graph;
+    state.checkpoint_ref = head.checkpoint_ref;
+    state.token_ledger = head.token_ledger;
+    state.persisted_graph_node_count = state.session_graph.nodes.len();
+    state.graph_replace_required = false;
+    if let Some(checkpoint) = checkpoint {
+        state.iteration = checkpoint.turn_state.iteration;
+        state.token_usage = checkpoint.turn_state.token_usage;
+        state.last_prompt_usage = checkpoint.turn_state.last_prompt_usage;
+        state.dynamic_state_ref = checkpoint.dynamic_state_ref;
+        state.dynamic_state_generation = checkpoint
+            .dynamic_state
+            .as_ref()
+            .map(|snapshot| snapshot.base_generation);
+        state.dynamic_state_snapshot = None;
+        state.plugin_snapshot_ref = checkpoint.plugin_snapshot_ref;
+        state.plugin_snapshot = None;
+        state.execution_state_snapshot = None;
+    }
 }
 
 async fn snapshot_execution_state_into(
@@ -182,18 +208,19 @@ pub(crate) async fn persist_runtime_turn_state(
     if interrupted {
         persist_live_runtime_snapshot(
             store,
-            store.load_session_graph(),
-            DurableTurnSnapshot {
-                messages: state.messages.clone(),
-                tool_calls: state.tool_calls.clone(),
-                iteration: state.iteration,
-            },
+            store.load_session_head().map(|head| head.graph),
+            live_resume_graph_from_state(state),
             ui_state,
             dynamic_state,
             &state.policy,
-            state.token_usage.clone(),
-            state.last_prompt_usage.clone(),
+            lash::PersistedTurnState {
+                iteration: state.iteration,
+                token_usage: state.token_usage.clone(),
+                last_prompt_usage: state.last_prompt_usage.clone(),
+            },
             &state.token_ledger,
+            state.plugin_snapshot.as_ref(),
+            state.execution_state_snapshot.as_deref(),
         );
     } else {
         refresh_state_from_committed_graph(store, state);
@@ -288,8 +315,28 @@ mod tests {
                 reasoning_tokens: 8,
             },
         }];
-        graph.record_runtime_state(
-            &PersistedSessionConfig {
+        let checkpoint_ref = store
+            .put_checkpoint(&lash::HydratedSessionCheckpoint {
+                turn_state: PersistedTurnState {
+                    iteration: 2,
+                    token_usage: TokenUsage {
+                        input_tokens: 30,
+                        output_tokens: 7,
+                        cached_input_tokens: 5,
+                        reasoning_tokens: 6,
+                    },
+                    last_prompt_usage: None,
+                },
+                dynamic_state_ref: None,
+                dynamic_state: None,
+                plugin_snapshot_ref: None,
+                plugin_snapshot_revision: None,
+                plugin_snapshot: None,
+            })
+            .checkpoint_ref;
+        store.save_session_head(lash::SessionHead {
+            graph: graph.clone(),
+            config: PersistedSessionConfig {
                 provider_id: "openai-compatible".into(),
                 configured_model: "gpt-5.4-mini".into(),
                 context_window: 0,
@@ -297,22 +344,9 @@ mod tests {
                 context_approach: ContextApproach::RollingHistory(RollingHistoryConfig::default()),
                 model_variant: None,
             },
-            &PersistedTurnState {
-                iteration: 2,
-                token_usage: TokenUsage {
-                    input_tokens: 30,
-                    output_tokens: 7,
-                    cached_input_tokens: 5,
-                    reasoning_tokens: 6,
-                },
-                last_prompt_usage: None,
-            },
-            None,
-            None,
-            None,
-            &ledger,
-        );
-        store.save_session_graph(graph.clone());
+            checkpoint_ref: Some(checkpoint_ref),
+            token_ledger: ledger,
+        });
 
         let mut stale_state = SessionStateEnvelope {
             session_graph: SessionGraph::default(),
@@ -322,7 +356,7 @@ mod tests {
         refresh_state_from_committed_graph(&store, &mut stale_state);
 
         assert_eq!(stale_state.iteration, 2);
-        assert_eq!(stale_state.messages.len(), 1);
+        assert_eq!(stale_state.projected_messages().len(), 1);
         assert_eq!(stale_state.token_ledger.len(), 1);
         assert_eq!(stale_state.token_ledger[0].source, "turn");
         assert_eq!(stale_state.token_ledger[0].model, "gpt-5.4-mini");

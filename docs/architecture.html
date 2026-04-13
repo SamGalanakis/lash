@@ -959,8 +959,8 @@ sequenceDiagram
           <div class="panel">
             <h3>Runtime host</h3>
             <ul>
-              <li><code>LashRuntime</code>, <code>RuntimeHostConfig</code>, <code>EventSink</code>, <code>AssembledTurn</code></li>
-              <li>Owns provider transport, tool dispatch, session lifecycle, and checkpoint coordination.</li>
+              <li><code>LashRuntime</code>, <code>RuntimeCoreConfig</code>, <code>EmbeddedRuntimeHost</code>, <code>BackgroundRuntimeHost</code>, <code>EventSink</code></li>
+              <li>Owns provider transport, tool dispatch, session lifecycle, and host-owned policies such as background execution and live snapshot delivery.</li>
             </ul>
           </div>
           <div class="panel">
@@ -973,8 +973,8 @@ sequenceDiagram
           <div class="panel">
             <h3>Persistence model</h3>
             <ul>
-              <li><code>RuntimeStore</code>, <code>Store</code>, <code>TurnCheckpoint</code>, <code>TranscriptEntry</code>, <code>TranscriptKeyspace</code></li>
-              <li>Separates canonical transcript rows from runtime-only snapshot state.</li>
+              <li><code>RuntimeStore</code>, <code>Store</code>, <code>SessionGraph</code>, <code>SessionNodeRecord</code>, <code>DurableTurnSnapshot</code></li>
+              <li>Persists the canonical session graph while leaving live snapshot policy to the host/runtime boundary.</li>
             </ul>
           </div>
           <div class="panel">

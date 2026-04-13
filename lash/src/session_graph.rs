@@ -1,29 +1,79 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
+use std::sync::{Arc, OnceLock};
 
-use base64::Engine;
 use chrono::Utc;
+use lash_sansio::session_model::message::{append_rendered_prompt, render_prompt};
+use serde::Deserialize;
 use sha2::Digest;
 
 use crate::{
-    ContextApproach, DynamicStateSnapshot, ExecutionMode, Message, MessageRole,
-    PluginSessionSnapshot, PromptUsage, TokenLedgerEntry, TokenUsage, ToolCallRecord,
+    ContextApproach, ExecutionMode, Message, MessageRole, PromptUsage, TokenUsage, ToolCallRecord,
 };
 
 pub const INTERNAL_TOOL_CALL_PLUGIN_TYPE: &str = "lash.tool_call_record";
-pub const INTERNAL_SESSION_CONFIG_PLUGIN_TYPE: &str = "lash.session_config";
-pub const INTERNAL_TURN_STATE_PLUGIN_TYPE: &str = "lash.turn_state";
-pub const INTERNAL_DYNAMIC_STATE_PLUGIN_TYPE: &str = "lash.dynamic_state";
-pub const INTERNAL_PLUGIN_SNAPSHOT_PLUGIN_TYPE: &str = "lash.plugin_snapshot";
-pub const INTERNAL_EXECUTION_STATE_PLUGIN_TYPE: &str = "lash.execution_state";
 pub const INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE: &str = "lash.execution.rlm.globals_patch";
-pub const INTERNAL_TOKEN_LEDGER_PLUGIN_TYPE: &str = "lash.token_ledger";
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct SessionGraph {
+pub struct SessionGraphData {
     #[serde(default)]
     pub nodes: Vec<SessionNodeRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leaf_node_id: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct SessionGraph {
+    inner: Arc<SessionGraphData>,
+    cache: Arc<OnceLock<SessionGraphCache>>,
+}
+
+impl Default for SessionGraph {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(SessionGraphData::default()),
+            cache: Arc::new(OnceLock::new()),
+        }
+    }
+}
+
+impl Clone for SessionGraph {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            cache: Arc::clone(&self.cache),
+        }
+    }
+}
+
+impl serde::Serialize for SessionGraph {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.inner.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SessionGraph {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let inner = SessionGraphData::deserialize(deserializer)?;
+        Ok(Self {
+            inner: Arc::new(inner),
+            cache: Arc::new(OnceLock::new()),
+        })
+    }
+}
+
+impl Deref for SessionGraph {
+    type Target = SessionGraphData;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.as_ref()
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -36,6 +86,42 @@ pub struct SessionNodeRecord {
     pub payload: SessionNodePayload,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SharedJsonValue(pub Arc<serde_json::Value>);
+
+impl SharedJsonValue {
+    pub fn new(value: serde_json::Value) -> Self {
+        Self(Arc::new(value))
+    }
+
+    pub fn as_ref(&self) -> &serde_json::Value {
+        self.0.as_ref()
+    }
+
+    pub fn to_owned(&self) -> serde_json::Value {
+        self.0.as_ref().clone()
+    }
+}
+
+impl serde::Serialize for SharedJsonValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SharedJsonValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(Self::new(value))
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionNodePayload {
@@ -44,7 +130,7 @@ pub enum SessionNodePayload {
     },
     Plugin {
         plugin_type: String,
-        body: serde_json::Value,
+        body: SharedJsonValue,
     },
 }
 
@@ -54,7 +140,7 @@ pub struct ToolCallPluginBody {
     pub record: ToolCallRecord,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct PersistedSessionConfig {
     pub provider_id: String,
     pub configured_model: String,
@@ -89,29 +175,6 @@ impl RlmGlobalsPatchPluginBody {
     }
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct ExecutionStatePluginBody {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot_base64: Option<String>,
-}
-
-impl ExecutionStatePluginBody {
-    pub fn from_snapshot(snapshot: Option<&[u8]>) -> Self {
-        Self {
-            snapshot_base64: snapshot
-                .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes)),
-        }
-    }
-
-    pub fn snapshot_bytes(&self) -> Option<Vec<u8>> {
-        self.snapshot_base64.as_ref().and_then(|encoded| {
-            base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .ok()
-        })
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct SessionMessageTreeNode {
     pub node_id: String,
@@ -131,6 +194,149 @@ enum ProjectionItem<'a> {
     },
 }
 
+#[derive(Debug)]
+struct SessionGraphCache {
+    by_id: HashMap<String, usize>,
+    active_path_indices: Vec<usize>,
+    projected_messages: Arc<Vec<Message>>,
+    projected_tool_calls: Arc<Vec<ToolCallRecord>>,
+    projected_rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
+    rendered_prompt_standard: Arc<crate::RenderedPrompt>,
+    rendered_prompt_rlm: Arc<crate::RenderedPrompt>,
+}
+
+impl SessionGraphCache {
+    fn build(graph: &SessionGraph) -> Self {
+        let by_id = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(idx, node)| (node.node_id.clone(), idx))
+            .collect::<HashMap<_, _>>();
+        let mut active_path_indices = Vec::new();
+        let mut current = graph
+            .leaf_node_id
+            .as_ref()
+            .and_then(|node_id| by_id.get(node_id).copied());
+        while let Some(idx) = current {
+            active_path_indices.push(idx);
+            current = graph.nodes[idx]
+                .parent_node_id
+                .as_ref()
+                .and_then(|node_id| by_id.get(node_id).copied());
+        }
+        active_path_indices.reverse();
+
+        let mut cache = Self {
+            by_id,
+            active_path_indices,
+            projected_messages: Arc::new(Vec::new()),
+            projected_tool_calls: Arc::new(Vec::new()),
+            projected_rlm_globals: Arc::new(serde_json::Map::new()),
+            rendered_prompt_standard: Arc::new(crate::RenderedPrompt::default()),
+            rendered_prompt_rlm: Arc::new(crate::RenderedPrompt::default()),
+        };
+        cache.rebuild_projection(graph);
+        cache
+    }
+
+    fn rebuild_projection(&mut self, graph: &SessionGraph) {
+        let mut projected_messages = Vec::with_capacity(self.active_path_indices.len());
+        let mut projected_tool_calls = Vec::with_capacity(self.active_path_indices.len());
+        let mut projected_rlm_globals = serde_json::Map::new();
+        let mut seen_ids = HashSet::with_capacity(self.active_path_indices.len());
+        for idx in &self.active_path_indices {
+            let node = &graph.nodes[*idx];
+            if let Some(message) = node.message() {
+                if !message.is_transient() && seen_ids.insert(message.id.clone()) {
+                    projected_messages.push(message.clone());
+                }
+                continue;
+            }
+            if let Some((INTERNAL_TOOL_CALL_PLUGIN_TYPE, body)) = node.plugin()
+                && let Ok(body) = ToolCallPluginBody::deserialize(body)
+            {
+                projected_tool_calls.push(body.record);
+                continue;
+            }
+            if let Some((INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE, body)) = node.plugin()
+                && let Ok(patch) = RlmGlobalsPatchPluginBody::deserialize(body)
+            {
+                apply_rlm_globals_patch_map(&mut projected_rlm_globals, patch);
+            }
+        }
+        self.projected_messages = Arc::new(projected_messages);
+        self.projected_tool_calls = Arc::new(projected_tool_calls);
+        self.projected_rlm_globals = Arc::new(projected_rlm_globals);
+        self.rendered_prompt_standard = Arc::new(render_prompt(
+            self.projected_messages.as_slice(),
+            ExecutionMode::Standard,
+        ));
+        self.rendered_prompt_rlm = Arc::new(render_prompt(
+            self.projected_messages.as_slice(),
+            ExecutionMode::Rlm,
+        ));
+    }
+
+    fn append_node(
+        &mut self,
+        node_index: usize,
+        node: &SessionNodeRecord,
+        previous_leaf_node_id: Option<&str>,
+    ) {
+        self.by_id.insert(node.node_id.clone(), node_index);
+        let parent_matches_leaf = node.parent_node_id.as_deref() == previous_leaf_node_id;
+        if !parent_matches_leaf {
+            return;
+        }
+        self.active_path_indices.push(node_index);
+        if let Some(message) = node.message() {
+            if !message.is_transient()
+                && !self
+                    .projected_messages
+                    .iter()
+                    .any(|existing| existing.id == message.id)
+            {
+                Arc::make_mut(&mut self.projected_messages).push(message.clone());
+                append_rendered_prompt(
+                    Arc::make_mut(&mut self.rendered_prompt_standard),
+                    std::slice::from_ref(message),
+                    ExecutionMode::Standard,
+                );
+                append_rendered_prompt(
+                    Arc::make_mut(&mut self.rendered_prompt_rlm),
+                    std::slice::from_ref(message),
+                    ExecutionMode::Rlm,
+                );
+            }
+            return;
+        }
+        if let Some((INTERNAL_TOOL_CALL_PLUGIN_TYPE, body)) = node.plugin()
+            && let Ok(body) = ToolCallPluginBody::deserialize(body)
+        {
+            Arc::make_mut(&mut self.projected_tool_calls).push(body.record);
+            return;
+        }
+        if let Some((INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE, body)) = node.plugin()
+            && let Ok(patch) = RlmGlobalsPatchPluginBody::deserialize(body)
+        {
+            apply_rlm_globals_patch_map(Arc::make_mut(&mut self.projected_rlm_globals), patch);
+        }
+    }
+}
+
+fn apply_rlm_globals_patch_map(
+    globals: &mut serde_json::Map<String, serde_json::Value>,
+    patch: RlmGlobalsPatchPluginBody,
+) {
+    for key in patch.unset {
+        globals.remove(&key);
+    }
+    for (key, value) in patch.set {
+        globals.insert(key, value);
+    }
+}
+
 impl SessionNodeRecord {
     pub fn message(&self) -> Option<&Message> {
         match &self.payload {
@@ -142,24 +348,106 @@ impl SessionNodeRecord {
     pub fn plugin(&self) -> Option<(&str, &serde_json::Value)> {
         match &self.payload {
             SessionNodePayload::Message { .. } => None,
-            SessionNodePayload::Plugin { plugin_type, body } => Some((plugin_type.as_str(), body)),
+            SessionNodePayload::Plugin { plugin_type, body } => {
+                Some((plugin_type.as_str(), body.as_ref()))
+            }
         }
     }
 }
 
 impl SessionGraph {
+    pub fn append_projection_delta(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
+        let mut seen_message_ids = self
+            .projected_messages()
+            .iter()
+            .map(|message| message.id.clone())
+            .collect::<HashSet<_>>();
+        for message in messages {
+            if message.is_transient() || !seen_message_ids.insert(message.id.clone()) {
+                continue;
+            }
+            self.append_message(message.clone());
+        }
+
+        let mut seen_tool_call_keys = self
+            .projected_tool_calls()
+            .iter()
+            .map(|record| tool_call_projection_key(&stable_tool_call_key(record), record))
+            .collect::<HashSet<_>>();
+        for record in tool_calls {
+            let stable_key = stable_tool_call_key(record);
+            let projection_key = tool_call_projection_key(&stable_key, record);
+            if !seen_tool_call_keys.insert(projection_key) {
+                continue;
+            }
+            self.append_plugin(
+                INTERNAL_TOOL_CALL_PLUGIN_TYPE,
+                serde_json::to_value(ToolCallPluginBody {
+                    stable_key,
+                    record: record.clone(),
+                })
+                .unwrap_or(serde_json::Value::Null),
+            );
+        }
+    }
+
+    pub fn from_nodes(nodes: Vec<SessionNodeRecord>, leaf_node_id: Option<String>) -> Self {
+        Self {
+            inner: Arc::new(SessionGraphData {
+                nodes,
+                leaf_node_id,
+            }),
+            cache: Arc::new(OnceLock::new()),
+        }
+    }
+
+    fn invalidate_cache(&mut self) {
+        self.cache = Arc::new(OnceLock::new());
+    }
+
+    fn data_mut(&mut self) -> &mut SessionGraphData {
+        self.invalidate_cache();
+        Arc::make_mut(&mut self.inner)
+    }
+
+    fn cache(&self) -> &SessionGraphCache {
+        self.cache.get_or_init(|| SessionGraphCache::build(self))
+    }
+
     pub fn append_message(&mut self, mut message: Message) -> String {
         if message.id.is_empty() {
             message.id = fresh_node_id("m");
         }
-        let node_id = message.id.clone();
-        self.nodes.push(SessionNodeRecord {
+        let existing_ids = self
+            .nodes
+            .iter()
+            .map(|node| node.node_id.clone())
+            .collect::<HashSet<_>>();
+        let node_id = unique_message_node_id(&message.id, &existing_ids);
+        let previous_leaf = self.leaf_node_id.clone();
+        let parent_node_id = previous_leaf.clone();
+        let node = SessionNodeRecord {
             node_id: node_id.clone(),
-            parent_node_id: self.leaf_node_id.clone(),
+            parent_node_id,
             timestamp: Utc::now().to_rfc3339(),
             payload: SessionNodePayload::Message { message },
-        });
-        self.leaf_node_id = Some(node_id.clone());
+        };
+        if let Some(cache_lock) = Arc::get_mut(&mut self.cache)
+            && let Some(cache) = cache_lock.get_mut()
+        {
+            let data = Arc::make_mut(&mut self.inner);
+            data.nodes.push(node);
+            cache.append_node(
+                data.nodes.len() - 1,
+                data.nodes.last().expect("just appended graph node"),
+                previous_leaf.as_deref(),
+            );
+            data.leaf_node_id = Some(node_id.clone());
+            return node_id;
+        }
+        let data = self.data_mut();
+        data.nodes.push(node);
+        data.leaf_node_id = Some(node_id.clone());
         node_id
     }
 
@@ -169,67 +457,85 @@ impl SessionGraph {
         body: serde_json::Value,
     ) -> String {
         let node_id = fresh_node_id("x");
-        self.nodes.push(SessionNodeRecord {
+        let previous_leaf = self.leaf_node_id.clone();
+        let parent_node_id = previous_leaf.clone();
+        let node = SessionNodeRecord {
             node_id: node_id.clone(),
-            parent_node_id: self.leaf_node_id.clone(),
+            parent_node_id,
             timestamp: Utc::now().to_rfc3339(),
             payload: SessionNodePayload::Plugin {
                 plugin_type: plugin_type.into(),
-                body,
+                body: SharedJsonValue::new(body),
             },
-        });
-        self.leaf_node_id = Some(node_id.clone());
+        };
+        if let Some(cache_lock) = Arc::get_mut(&mut self.cache)
+            && let Some(cache) = cache_lock.get_mut()
+        {
+            let data = Arc::make_mut(&mut self.inner);
+            data.nodes.push(node);
+            cache.append_node(
+                data.nodes.len() - 1,
+                data.nodes.last().expect("just appended graph node"),
+                previous_leaf.as_deref(),
+            );
+            data.leaf_node_id = Some(node_id.clone());
+            return node_id;
+        }
+        let data = self.data_mut();
+        data.nodes.push(node);
+        data.leaf_node_id = Some(node_id.clone());
         node_id
     }
 
     pub fn active_path_nodes(&self) -> Vec<&SessionNodeRecord> {
-        let by_id = self
-            .nodes
+        self.cache()
+            .active_path_indices
             .iter()
-            .map(|node| (node.node_id.as_str(), node))
-            .collect::<HashMap<_, _>>();
-        let mut out = Vec::new();
-        let mut current = self
-            .leaf_node_id
-            .as_deref()
-            .and_then(|node_id| by_id.get(node_id).copied());
-        while let Some(node) = current {
-            out.push(node);
-            current = node
-                .parent_node_id
-                .as_deref()
-                .and_then(|node_id| by_id.get(node_id).copied());
-        }
-        out.reverse();
-        out
+            .map(|idx| &self.nodes[*idx])
+            .collect()
     }
 
     pub fn project_messages(&self) -> Vec<Message> {
-        let mut seen_ids = HashSet::new();
-        self.active_path_nodes()
-            .into_iter()
-            .filter_map(|node| {
-                let message = node.message()?;
-                if message.is_transient() || !seen_ids.insert(message.id.clone()) {
-                    return None;
-                }
-                Some(message.clone())
-            })
-            .collect()
+        self.cache().projected_messages.as_ref().clone()
+    }
+
+    pub fn projected_messages(&self) -> &[Message] {
+        self.cache().projected_messages.as_slice()
+    }
+
+    pub fn shared_projected_messages(&self) -> Arc<Vec<Message>> {
+        Arc::clone(&self.cache().projected_messages)
+    }
+
+    pub fn shared_projected_rendered_prompt(
+        &self,
+        mode: ExecutionMode,
+    ) -> Arc<crate::RenderedPrompt> {
+        match mode {
+            ExecutionMode::Standard => Arc::clone(&self.cache().rendered_prompt_standard),
+            ExecutionMode::Rlm => Arc::clone(&self.cache().rendered_prompt_rlm),
+        }
     }
 
     pub fn project_tool_calls(&self) -> Vec<ToolCallRecord> {
-        self.active_path_nodes()
-            .into_iter()
-            .filter_map(|node| match node.plugin() {
-                Some((INTERNAL_TOOL_CALL_PLUGIN_TYPE, body)) => {
-                    serde_json::from_value::<ToolCallPluginBody>(body.clone())
-                        .ok()
-                        .map(|body| body.record)
-                }
-                _ => None,
-            })
-            .collect()
+        self.cache().projected_tool_calls.as_ref().clone()
+    }
+
+    pub fn projected_tool_calls(&self) -> &[ToolCallRecord] {
+        self.cache().projected_tool_calls.as_slice()
+    }
+
+    pub fn shared_projected_tool_calls(&self) -> Arc<Vec<ToolCallRecord>> {
+        Arc::clone(&self.cache().projected_tool_calls)
+    }
+
+    pub fn shared_projected_rlm_globals(&self) -> Arc<serde_json::Map<String, serde_json::Value>> {
+        Arc::clone(&self.cache().projected_rlm_globals)
+    }
+
+    pub fn replace_tool_call_projection(&mut self, tool_calls: &[ToolCallRecord]) {
+        let messages = Arc::clone(&self.cache().projected_messages);
+        self.merge_active_projection(messages.as_slice(), tool_calls);
     }
 
     pub fn active_path_plugins(&self, plugin_type: &str) -> Vec<&serde_json::Value> {
@@ -271,70 +577,8 @@ impl SessionGraph {
         Some(self.append_plugin(plugin_type.to_string(), body))
     }
 
-    pub fn latest_session_config(&self) -> Option<PersistedSessionConfig> {
-        self.latest_plugin_state(INTERNAL_SESSION_CONFIG_PLUGIN_TYPE)
-    }
-
-    pub fn latest_turn_state(&self) -> Option<PersistedTurnState> {
-        self.latest_plugin_state(INTERNAL_TURN_STATE_PLUGIN_TYPE)
-    }
-
-    pub fn latest_dynamic_state(&self) -> Option<DynamicStateSnapshot> {
-        self.latest_plugin_state(INTERNAL_DYNAMIC_STATE_PLUGIN_TYPE)
-    }
-
-    pub fn latest_plugin_snapshot(&self) -> Option<PluginSessionSnapshot> {
-        self.latest_plugin_state(INTERNAL_PLUGIN_SNAPSHOT_PLUGIN_TYPE)
-    }
-
-    pub fn latest_execution_state(&self) -> Option<Option<Vec<u8>>> {
-        self.latest_plugin_state::<ExecutionStatePluginBody>(INTERNAL_EXECUTION_STATE_PLUGIN_TYPE)
-            .map(|body| body.snapshot_bytes())
-    }
-
-    pub fn latest_token_ledger(&self) -> Option<Vec<TokenLedgerEntry>> {
-        self.latest_plugin_state(INTERNAL_TOKEN_LEDGER_PLUGIN_TYPE)
-    }
-
     pub fn projected_rlm_globals(&self) -> serde_json::Map<String, serde_json::Value> {
-        let mut globals = serde_json::Map::new();
-        for body in self.active_path_plugins(INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE) {
-            let Ok(patch) = serde_json::from_value::<RlmGlobalsPatchPluginBody>(body.clone())
-            else {
-                continue;
-            };
-            for key in patch.unset {
-                globals.remove(&key);
-            }
-            for (key, value) in patch.set {
-                globals.insert(key, value);
-            }
-        }
-        globals
-    }
-
-    pub fn record_runtime_state(
-        &mut self,
-        config: &PersistedSessionConfig,
-        turn_state: &PersistedTurnState,
-        dynamic_state: Option<&DynamicStateSnapshot>,
-        plugin_snapshot: Option<&PluginSessionSnapshot>,
-        execution_state_snapshot: Option<&[u8]>,
-        token_ledger: &[TokenLedgerEntry],
-    ) {
-        let _ = self.set_plugin_state(INTERNAL_SESSION_CONFIG_PLUGIN_TYPE, config);
-        let _ = self.set_plugin_state(INTERNAL_TURN_STATE_PLUGIN_TYPE, turn_state);
-        if let Some(dynamic_state) = dynamic_state {
-            let _ = self.set_plugin_state(INTERNAL_DYNAMIC_STATE_PLUGIN_TYPE, dynamic_state);
-        }
-        if let Some(plugin_snapshot) = plugin_snapshot {
-            let _ = self.set_plugin_state(INTERNAL_PLUGIN_SNAPSHOT_PLUGIN_TYPE, plugin_snapshot);
-        }
-        let _ = self.set_plugin_state(
-            INTERNAL_EXECUTION_STATE_PLUGIN_TYPE,
-            &ExecutionStatePluginBody::from_snapshot(execution_state_snapshot),
-        );
-        let _ = self.set_plugin_state(INTERNAL_TOKEN_LEDGER_PLUGIN_TYPE, &token_ledger);
+        self.cache().projected_rlm_globals.as_ref().clone()
     }
 
     pub fn user_message_count(&self) -> usize {
@@ -355,7 +599,22 @@ impl SessionGraph {
     }
 
     pub fn branch_to(&mut self, node_id: Option<String>) {
-        self.leaf_node_id = node_id;
+        self.data_mut().leaf_node_id = node_id;
+    }
+
+    pub fn set_leaf_node_id(&mut self, node_id: Option<String>) {
+        self.data_mut().leaf_node_id = node_id;
+    }
+
+    pub fn push_node_record(&mut self, node: SessionNodeRecord) {
+        self.data_mut().nodes.push(node);
+    }
+
+    pub fn extend_node_records<I>(&mut self, nodes: I)
+    where
+        I: IntoIterator<Item = SessionNodeRecord>,
+    {
+        self.data_mut().nodes.extend(nodes);
     }
 
     pub fn active_path_contains(&self, node_id: &str) -> bool {
@@ -381,7 +640,7 @@ impl SessionGraph {
                 .rev()
                 .find(|node| node.message().is_some())
                 .map(|node| node.node_id.clone());
-            self.leaf_node_id = fallback;
+            self.data_mut().leaf_node_id = fallback;
             return true;
         }
         false
@@ -389,14 +648,17 @@ impl SessionGraph {
 
     pub fn fork_current_path(&self) -> SessionGraph {
         let path = self.active_path_nodes();
-        SessionGraph {
-            nodes: path.into_iter().cloned().collect(),
-            leaf_node_id: self.leaf_node_id.clone(),
-        }
+        SessionGraph::from_nodes(
+            path.into_iter().cloned().collect(),
+            self.leaf_node_id.clone(),
+        )
     }
 
     pub fn find_node(&self, node_id: &str) -> Option<&SessionNodeRecord> {
-        self.nodes.iter().find(|node| node.node_id == node_id)
+        self.cache()
+            .by_id
+            .get(node_id)
+            .and_then(|idx| self.nodes.get(*idx))
     }
 
     pub fn merge_active_projection(&mut self, messages: &[Message], tool_calls: &[ToolCallRecord]) {
@@ -431,7 +693,7 @@ impl SessionGraph {
             }
         }
 
-        self.leaf_node_id = preserved_ids.last().cloned();
+        self.data_mut().leaf_node_id = preserved_ids.last().cloned();
         let mut existing_ids = self
             .nodes
             .iter()
@@ -442,16 +704,9 @@ impl SessionGraph {
             let parent_node_id = self.leaf_node_id.clone();
             let node = match item {
                 ProjectionItem::Message(message) => {
-                    if existing_ids.contains(&message.id) {
-                        tracing::warn!(
-                            message_id = %message.id,
-                            "skipping duplicate message id while merging active projection"
-                        );
-                        self.leaf_node_id = Some(message.id.clone());
-                        continue;
-                    }
+                    let node_id = unique_message_node_id(&message.id, &existing_ids);
                     SessionNodeRecord {
-                        node_id: message.id.clone(),
+                        node_id,
                         parent_node_id,
                         timestamp: Utc::now().to_rfc3339(),
                         payload: SessionNodePayload::Message {
@@ -467,18 +722,21 @@ impl SessionGraph {
                         timestamp: Utc::now().to_rfc3339(),
                         payload: SessionNodePayload::Plugin {
                             plugin_type: INTERNAL_TOOL_CALL_PLUGIN_TYPE.to_string(),
-                            body: serde_json::to_value(ToolCallPluginBody {
-                                stable_key,
-                                record: record.clone(),
-                            })
-                            .unwrap_or(serde_json::Value::Null),
+                            body: SharedJsonValue::new(
+                                serde_json::to_value(ToolCallPluginBody {
+                                    stable_key,
+                                    record: record.clone(),
+                                })
+                                .unwrap_or(serde_json::Value::Null),
+                            ),
                         },
                     }
                 }
             };
             existing_ids.insert(node.node_id.clone());
-            self.leaf_node_id = Some(node.node_id.clone());
-            self.nodes.push(node);
+            let data = self.data_mut();
+            data.leaf_node_id = Some(node.node_id.clone());
+            data.nodes.push(node);
         }
     }
 
@@ -614,9 +872,9 @@ fn recognized_projection_key(node: &SessionNodeRecord) -> Option<String> {
         SessionNodePayload::Plugin { plugin_type, body }
             if plugin_type == INTERNAL_TOOL_CALL_PLUGIN_TYPE =>
         {
-            serde_json::from_value::<ToolCallPluginBody>(body.clone())
+            serde_json::from_value::<ToolCallPluginBody>(body.to_owned())
                 .ok()
-                .map(|body| format!("tool_call:{}", body.stable_key))
+                .map(|body| tool_call_projection_key(&body.stable_key, &body.record))
         }
         SessionNodePayload::Plugin { .. } => None,
     }
@@ -625,8 +883,15 @@ fn recognized_projection_key(node: &SessionNodeRecord) -> Option<String> {
 fn target_item_key(item: &ProjectionItem<'_>) -> String {
     match item {
         ProjectionItem::Message(message) => format!("message:{}", message.id),
-        ProjectionItem::ToolCall { stable_key, .. } => format!("tool_call:{stable_key}"),
+        ProjectionItem::ToolCall { stable_key, record } => {
+            tool_call_projection_key(stable_key, record)
+        }
     }
+}
+
+fn tool_call_projection_key(stable_key: &str, record: &ToolCallRecord) -> String {
+    let fingerprint = serde_json::to_string(record).unwrap_or_default();
+    format!("tool_call:{stable_key}:{fingerprint}")
 }
 
 fn unique_plugin_node_id(stable_key: &str, existing_ids: &HashSet<String>) -> String {
@@ -640,6 +905,23 @@ fn unique_plugin_node_id(stable_key: &str, existing_ids: &HashSet<String>) -> St
             return candidate;
         }
     }
+}
+
+fn unique_message_node_id(message_id: &str, existing_ids: &HashSet<String>) -> String {
+    if !existing_ids.contains(message_id) {
+        return message_id.to_string();
+    }
+    let base = format!("message:{message_id}");
+    if !existing_ids.contains(&base) {
+        return base;
+    }
+    for suffix in 2.. {
+        let candidate = format!("{base}:{suffix}");
+        if !existing_ids.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("message node id space exhausted")
 }
 
 fn fresh_node_id(prefix: &str) -> String {
@@ -732,7 +1014,7 @@ mod tests {
         let assistant = text_message("m2", MessageRole::Assistant, "world");
         graph.merge_active_projection(&[user.clone(), assistant.clone()], &[]);
 
-        graph.nodes.push(SessionNodeRecord {
+        graph.push_node_record(SessionNodeRecord {
             node_id: "m2".to_string(),
             parent_node_id: Some("m1".to_string()),
             timestamp: Utc::now().to_rfc3339(),
@@ -740,7 +1022,7 @@ mod tests {
                 message: assistant.clone(),
             },
         });
-        graph.leaf_node_id = Some("m2".to_string());
+        graph.set_leaf_node_id(Some("m2".to_string()));
 
         graph.merge_active_projection(&[user, assistant], &[]);
 

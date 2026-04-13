@@ -246,6 +246,10 @@ impl PluginFactory for ObservationalMemoryPluginFactory {
         OBSERVATIONAL_MEMORY_PLUGIN_ID
     }
 
+    fn supports_context_approach(&self, approach: &ContextApproach) -> bool {
+        matches!(approach, ContextApproach::ObservationalMemory(_))
+    }
+
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         let ContextApproach::ObservationalMemory(config) = &ctx.context_approach else {
             return Ok(Arc::new(DisabledObservationalMemoryPlugin));
@@ -329,7 +333,7 @@ impl TurnContextTransform for ObservationalMemoryTransform {
         ctx: &TurnTransformContext,
         input: PreparedContext,
     ) -> Result<PreparedContext, HistoryError> {
-        let Some(memory_state) = build_memory_state(&ctx.state.session_graph) else {
+        let Some(memory_state) = build_memory_state(ctx.state.session_graph()) else {
             return Ok(input);
         };
         if memory_state.observations.trim().is_empty()
@@ -339,8 +343,8 @@ impl TurnContextTransform for ObservationalMemoryTransform {
             return Ok(input);
         }
 
-        let prefix_len = input
-            .messages
+        let input_messages = input.messages.as_slice();
+        let prefix_len = input_messages
             .iter()
             .take_while(|message| matches!(message.role, MessageRole::System))
             .count();
@@ -348,8 +352,7 @@ impl TurnContextTransform for ObservationalMemoryTransform {
             .observed_through_message_id
             .as_deref()
             .and_then(|message_id| {
-                input
-                    .messages
+                input_messages
                     .iter()
                     .position(|message| message.id == message_id)
                     .map(|idx| idx + 1)
@@ -357,11 +360,14 @@ impl TurnContextTransform for ObservationalMemoryTransform {
             .unwrap_or(prefix_len);
 
         let mut messages = Vec::new();
-        messages.extend_from_slice(&input.messages[..prefix_len]);
+        messages.extend_from_slice(&input_messages[..prefix_len]);
         messages.extend(build_memory_context_messages(&memory_state));
-        messages.extend_from_slice(&input.messages[tail_start..]);
+        messages.extend_from_slice(&input_messages[tail_start..]);
 
-        Ok(PreparedContext { messages, ..input })
+        Ok(PreparedContext {
+            messages: crate::MessageSequence::from_owned(messages),
+            ..input
+        })
     }
 }
 
@@ -380,16 +386,16 @@ async fn run_async_maintenance(
 ) -> Result<(), PluginError> {
     tracing::debug!(
         rss_kb = debug_rss_kb(),
-        node_count = ctx.state.session_graph.nodes.len(),
-        message_count = ctx.state.session_graph.project_messages().len(),
+        node_count = ctx.state.session_graph().nodes.len(),
+        message_count = ctx.state.session_graph().project_messages().len(),
         "OM maintenance start"
     );
-    let mut graph = ctx.state.session_graph.clone();
+    let mut graph = ctx.state.session_graph().clone();
     if let Some(next) = maybe_run_observer_batches(
         &config,
         &ctx.session_id,
         &ctx.host,
-        &ctx.state.policy,
+        ctx.state.policy(),
         &graph,
     )
     .await?
@@ -405,7 +411,7 @@ async fn run_async_maintenance(
         &config,
         &ctx.session_id,
         &ctx.host,
-        &ctx.state.policy,
+        ctx.state.policy(),
         &graph,
     )
     .await?;

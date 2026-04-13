@@ -22,6 +22,7 @@ mod repo_status;
 mod resume;
 mod resume_snapshot;
 mod rlm_stream_mask;
+mod runtime_perf;
 mod scratch_tui;
 mod session_log;
 mod setup;
@@ -40,7 +41,13 @@ mod update;
 mod util;
 
 use clap::Parser;
+#[cfg(feature = "dhat-heap")]
+use dhat::Alloc as DhatAlloc;
 use lash::*;
+#[cfg(not(feature = "dhat-heap"))]
+use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
+#[cfg(not(feature = "dhat-heap"))]
+use std::alloc::System;
 
 #[cfg(test)]
 use app::PreparedTurn;
@@ -66,6 +73,14 @@ const LONG_VERSION: &str = concat!(
     "lash-sansio ",
     env!("CARGO_PKG_VERSION")
 );
+
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: DhatAlloc = DhatAlloc;
+
+#[cfg(not(feature = "dhat-heap"))]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 fn turn_has_visible_output(turn: &AssembledTurn) -> bool {
     !turn.assistant_output.safe_text.trim().is_empty()
@@ -266,6 +281,42 @@ struct Args {
     #[arg(long, hide = true, default_value_t = 1)]
     ui_perf_warmups: usize,
 
+    /// Run the synthetic non-inference runtime performance benchmark and exit
+    #[arg(long, hide = true)]
+    runtime_perf_benchmark: bool,
+
+    /// Write the runtime benchmark JSON report to this file
+    #[arg(long, hide = true, value_name = "OUT.json")]
+    runtime_perf_out: Option<std::path::PathBuf>,
+
+    /// Write a dhat heap profile for the measured runtime benchmark window
+    #[arg(long, hide = true)]
+    runtime_perf_dhat: bool,
+
+    /// Write a dhat heap profile for the measured runtime benchmark window
+    #[arg(long, hide = true, value_name = "OUT.json")]
+    runtime_perf_dhat_out: Option<std::path::PathBuf>,
+
+    /// Trim dhat backtraces to this many frames
+    #[arg(long, hide = true, value_name = "FRAMES")]
+    runtime_perf_dhat_frames: Option<usize>,
+
+    /// Number of measured runs for the runtime benchmark
+    #[arg(long, hide = true, default_value_t = 5)]
+    runtime_perf_runs: usize,
+
+    /// Number of warmup runs for the runtime benchmark
+    #[arg(long, hide = true, default_value_t = 1)]
+    runtime_perf_warmups: usize,
+
+    /// Limit the runtime benchmark to one or more named scenarios
+    #[arg(long, hide = true, value_name = "SCENARIO")]
+    runtime_perf_scenario: Vec<String>,
+
+    /// Number of committed turns to run inside each measured runtime session
+    #[arg(long, hide = true, default_value_t = 12)]
+    runtime_perf_turns: usize,
+
     /// Replace a prompt target: --prompt-replace section[.block]=text
     #[arg(long = "prompt-replace", value_name = "TARGET=TEXT")]
     prompt_replace: Vec<String>,
@@ -322,6 +373,20 @@ async fn main() -> anyhow::Result<()> {
             args.ui_perf_warmups,
             APP_VERSION,
         );
+    }
+    if args.runtime_perf_benchmark {
+        return runtime_perf::run_cli(
+            args.runtime_perf_out,
+            args.runtime_perf_dhat,
+            args.runtime_perf_dhat_out,
+            args.runtime_perf_dhat_frames,
+            args.runtime_perf_runs,
+            args.runtime_perf_warmups,
+            args.runtime_perf_scenario,
+            args.runtime_perf_turns,
+            APP_VERSION,
+        )
+        .await;
     }
     // Set up file-based structured tracing (JSON logs at $LASH_HOME/lash.log)
     {

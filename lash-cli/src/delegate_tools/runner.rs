@@ -176,7 +176,7 @@ impl DelegateTools {
                     };
                     let tool_call_summaries = turn
                         .state
-                        .tool_calls
+                        .projected_tool_calls()
                         .iter()
                         .map(|tool_call| {
                             json!({
@@ -195,7 +195,7 @@ impl DelegateTools {
                             "parent_session_id": parent_session_id,
                             "task": task,
                             "iterations": turn.state.iteration,
-                            "tool_calls": turn.state.tool_calls.len(),
+                            "tool_calls": turn.state.projected_tool_calls().len(),
                             "tool_call_details": tool_call_summaries,
                             "model": turn.state.policy.model,
                             "model_variant": turn.state.policy.model_variant,

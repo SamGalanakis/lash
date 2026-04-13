@@ -303,21 +303,30 @@ async fn handle_slash_command(
             *active_stream_id = active_stream_id.wrapping_add(1);
             if let Some(rt) = runtime.as_mut() {
                 let _ = rt.reset_session().await;
-                rt.set_state(SessionStateEnvelope {
+                let mut state = SessionStateEnvelope {
                     session_id: "root".to_string(),
                     policy: SessionPolicy {
                         execution_mode: *current_execution_mode,
                         ..rt.export_state().policy
                     },
                     session_graph: lash::SessionGraph::default(),
-                    messages: history.clone(),
-                    tool_calls: Vec::new(),
                     iteration: *turn_counter,
                     token_usage: app.token_usage.clone(),
                     last_prompt_usage: None,
+                    dynamic_state_ref: None,
+                    dynamic_state_generation: None,
+                    dynamic_state_snapshot: None,
+                    plugin_snapshot_ref: None,
+                    plugin_snapshot_revision: None,
+                    plugin_snapshot: None,
                     execution_state_snapshot: None,
                     token_ledger: Vec::new(),
-                });
+                    checkpoint_ref: None,
+                    persisted_graph_node_count: 0,
+                    graph_replace_required: false,
+                };
+                state.replace_projection(history, &[]);
+                rt.set_state(state);
                 match rt.session_manager() {
                     Ok(manager) => *session_manager = manager,
                     Err(err) => push_system_message(
@@ -1124,10 +1133,12 @@ async fn handle_slash_command(
                     Ok(true) => {
                         let state = rt.export_state();
                         history.clear();
-                        history.extend(state.messages.clone());
+                        let projected_messages = state.project_messages();
+                        let projected_tool_calls = state.project_tool_calls();
+                        history.extend(projected_messages.clone());
                         app.blocks = projected_blocks_from_state(
-                            &state.messages,
-                            &state.tool_calls,
+                            &projected_messages,
+                            &projected_tool_calls,
                             &app.ui_resume_state(),
                         );
                         app.invalidate_height_cache();

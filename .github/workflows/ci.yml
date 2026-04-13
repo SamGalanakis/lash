@@ -37,8 +37,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
-      - name: Run workspace tests
-        run: cargo test --workspace --locked
+      - name: Test lash-sansio
+        run: cargo test -p lash-sansio --locked
+
+      - name: Test lash core
+        run: cargo test -p lash --locked
+
+      - name: Test first-party default tools
+        run: cargo test -p lash-default-tools --locked
+
+      - name: Test lash CLI
+        run: cargo test -p lash-cli --locked
 
   build-release-assets:
     name: Build (${{ matrix.target }})
@@ -188,6 +197,63 @@ jobs:
           name: ui-perf
           path: .benchmarks/ui-perf/ci.json
 
+  runtime-perf:
+    name: Runtime Perf
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Run synthetic runtime performance benchmark
+        run: |
+          python3 scripts/profile_runtime.py --release --runs 5 --warmups 1 --out .benchmarks/runtime-perf/ci.json
+
+      - name: Publish runtime performance summary
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report = json.loads(Path(".benchmarks/runtime-perf/ci.json").read_text())
+          lines = [
+              "## Runtime Perf",
+              "",
+              f"- runs: `{report['runs']}`",
+              f"- warmups: `{report['warmups']}`",
+              f"- scenarios: `{', '.join(report['scenarios'])}`",
+          ]
+          for item in report["summary"]:
+              lines.extend([
+                  "",
+                  f"### {item['scenario']}",
+                  f"- `total_ms` mean: `{item['total_ms']['mean']}ms`",
+                  f"- `run_turn_ms` mean: `{item['run_turn_ms']['mean']}ms`",
+                  f"- `total_alloc_bytes` mean: `{item['total_alloc_bytes']['mean']}`",
+                  f"- `total_live_bytes` mean: `{item['total_live_bytes']['mean']}`",
+              ])
+          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text("\n".join(lines) + "\n")
+          PY
+
+      - name: Upload runtime performance artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-perf
+          path: .benchmarks/runtime-perf/ci.json
+
   prepare-release:
     name: Prepare release
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[skip ci]')
@@ -195,6 +261,7 @@ jobs:
       - test
       - build-release-assets
       - ui-perf
+      - runtime-perf
     runs-on: ubuntu-latest
     concurrency:
       group: lash-release-main

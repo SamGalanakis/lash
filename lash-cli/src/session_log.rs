@@ -283,14 +283,19 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
     if let Some(live) = resume_snapshot::load_live_resume_snapshot(&store) {
         let messages = live.graph.project_messages();
         let tool_calls = live.graph.project_tool_calls();
+        let checkpoint = live
+            .snapshot
+            .checkpoint_ref
+            .as_ref()
+            .and_then(|blob_ref| store.get_checkpoint(blob_ref));
+        let live_turn_state = live.delta.as_ref().map(|delta| &delta.turn_state);
         let blocks = projected_blocks_from_state(&messages, &tool_calls, &live.ui_state);
         return Ok(LoadedSession {
             messages,
             blocks,
-            last_token_usage: live
-                .graph
-                .latest_turn_state()
-                .map(|state| state.token_usage)
+            last_token_usage: live_turn_state
+                .map(|state| state.token_usage.clone())
+                .or_else(|| checkpoint.map(|checkpoint| checkpoint.turn_state.token_usage))
                 .unwrap_or_default(),
             plugin_mode_indicators: live.ui_state.plugin_mode_indicators.clone(),
             streaming_output: live.ui_state.streaming_output.clone(),
@@ -298,10 +303,15 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
             streaming_output_partial: live.ui_state.streaming_output_partial.clone(),
         });
     }
-    let graph = store.load_session_graph().unwrap_or_default();
+    let head = store.load_session_head().unwrap_or_default();
+    let graph = head.graph;
     let messages = graph.project_messages();
     let tool_calls = graph.project_tool_calls();
     let ui_state = ui_resume::load_ui_resume_state(&store);
+    let checkpoint = head
+        .checkpoint_ref
+        .as_ref()
+        .and_then(|blob_ref| store.get_checkpoint(blob_ref));
     let last_response_usage = ui_state.last_response_usage.clone();
     let plugin_mode_indicators = ui_state.plugin_mode_indicators.clone();
     let streaming_output = ui_state.streaming_output.clone();
@@ -321,9 +331,8 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
     Ok(LoadedSession {
         messages,
         blocks,
-        last_token_usage: graph
-            .latest_turn_state()
-            .map(|state| state.token_usage)
+        last_token_usage: checkpoint
+            .map(|checkpoint| checkpoint.turn_state.token_usage)
             .unwrap_or(last_response_usage),
         plugin_mode_indicators,
         streaming_output,
@@ -352,9 +361,28 @@ mod tests {
         ui_state: UiResumeState,
     ) {
         ui_resume::save_ui_resume_state(store, &ui_state);
-        let mut graph = lash::SessionGraph::from_projection(&messages, &tool_calls);
-        graph.record_runtime_state(
-            &lash::PersistedSessionConfig {
+        let graph = lash::SessionGraph::from_projection(&messages, &tool_calls);
+        let checkpoint_ref = store
+            .put_checkpoint(&lash::HydratedSessionCheckpoint {
+                turn_state: lash::PersistedTurnState {
+                    iteration: 1,
+                    token_usage: ui_state.last_response_usage.clone(),
+                    last_prompt_usage: None,
+                },
+                dynamic_state_ref: None,
+                dynamic_state: Some(lash::DynamicStateSnapshot {
+                    base_generation: 0,
+                    tools: BTreeMap::new(),
+                    enabled_tools: std::collections::BTreeSet::new(),
+                }),
+                plugin_snapshot_ref: None,
+                plugin_snapshot_revision: None,
+                plugin_snapshot: None,
+            })
+            .checkpoint_ref;
+        store.save_session_head(lash::SessionHead {
+            graph,
+            config: lash::PersistedSessionConfig {
                 provider_id: "openai_generic".to_string(),
                 configured_model: "gpt-test".to_string(),
                 context_window: 200_000,
@@ -362,21 +390,9 @@ mod tests {
                 context_approach: lash::ContextApproach::default(),
                 model_variant: None,
             },
-            &lash::PersistedTurnState {
-                iteration: 1,
-                token_usage: ui_state.last_response_usage.clone(),
-                last_prompt_usage: None,
-            },
-            Some(&lash::DynamicStateSnapshot {
-                base_generation: 0,
-                tools: BTreeMap::new(),
-                enabled_tools: std::collections::BTreeSet::new(),
-            }),
-            None,
-            None,
-            &[],
-        );
-        store.save_session_graph(graph);
+            checkpoint_ref: Some(checkpoint_ref),
+            token_ledger: Vec::new(),
+        });
     }
 
     fn text_message(role: MessageRole, id: &str, content: &str) -> Message {

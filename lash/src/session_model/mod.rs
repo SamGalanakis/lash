@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 pub mod context;
 pub use lash_sansio::session_model::message;
 pub use lash_sansio::session_model::prompt;
@@ -14,11 +16,11 @@ use crate::session::Session;
 use crate::{ContextApproach, ExecutionMode};
 
 pub use lash_sansio::session_model::{
-    DefaultPromptRenderer, DurableTurnSnapshot, ErrorEnvelope, LLM_MAX_RETRIES, LLM_RETRY_DELAYS,
-    Message, MessageRole, Part, PartKind, PromptOverrideMode, PromptRenderer, PromptSectionName,
-    PromptSectionOverride, PruneState, SessionEvent, TokenUsage, TurnTerminationPolicyState,
-    default_prompt_renderer, format_tool_result_content, fresh_message_id, make_error_envelope,
-    make_error_event, reassign_part_ids, render_prompt, render_transcript_prompt,
+    DefaultPromptRenderer, ErrorEnvelope, LLM_MAX_RETRIES, LLM_RETRY_DELAYS, Message, MessageRole,
+    Part, PartKind, PromptOverrideMode, PromptRenderer, PromptSectionName, PromptSectionOverride,
+    PruneState, SessionEvent, TokenUsage, TurnTerminationPolicyState, default_prompt_renderer,
+    format_tool_result_content, fresh_message_id, make_error_envelope, make_error_event,
+    reassign_part_ids, render_prompt, render_transcript_prompt,
 };
 
 /// Send an event to the channel if it's still open.
@@ -112,16 +114,8 @@ impl Default for SessionPolicy {
 
 pub(crate) struct ExecutionPreamble {
     pub(crate) model: String,
-    pub(crate) tool_specs: Vec<LlmToolSpec>,
+    pub(crate) tool_specs: Arc<Vec<LlmToolSpec>>,
     pub(crate) prompt: PromptContext,
-}
-
-fn rlm_model_tool_specs() -> Vec<LlmToolSpec> {
-    // RLM mode no longer uses native tool calling for the action call.
-    // The model writes lashlang inside a fenced ```lashlang block in its
-    // prose response and the dispatch loop extracts it via regex. See
-    // `lash_sansio::sansio::handle_repl_llm_success`.
-    Vec::new()
 }
 
 pub(crate) fn transport_stream_events(
@@ -157,33 +151,12 @@ pub(crate) fn build_execution_preamble(
     model: String,
 ) -> ExecutionPreamble {
     let session_id = policy.session_id.as_deref().unwrap_or("root");
-    let surface = session.execution_surface(session_id, mode);
-    let enabled_tools = surface.enabled_tools();
-    let prompt_tools = surface.prompt_tools();
-    let (tool_list, omitted_tool_count) = if matches!(mode, ExecutionMode::Rlm) {
-        let mut tool_list = ToolDefinition::format_tool_docs(&prompt_tools);
-        let omitted_tool_count = count_prompt_omitted_tools(&enabled_tools);
-        for note in &surface.tool_list_notes {
-            tool_list.push_str("\n\n");
-            tool_list.push_str(note);
-        }
-        (tool_list, omitted_tool_count)
-    } else {
-        (String::new(), 0)
-    };
-    let tool_specs = match mode {
-        ExecutionMode::Standard if !enabled_tools.is_empty() => {
-            lash_sansio::session_model::model_tool_specs(&enabled_tools)
-        }
-        ExecutionMode::Rlm => rlm_model_tool_specs(),
-        _ => Vec::new(),
-    };
-    let tool_names: Vec<String> = enabled_tools.iter().map(|t| t.name.clone()).collect();
+    let preamble = session.execution_preamble_data(session_id, mode);
     let prompt = PromptContext {
         mode,
-        tool_list,
-        tool_names,
-        omitted_tool_count,
+        tool_list: preamble.tool_list.as_ref().clone(),
+        tool_names: preamble.tool_names.as_ref().clone(),
+        omitted_tool_count: preamble.omitted_tool_count,
         contributions: Vec::new(),
     };
 
@@ -191,9 +164,8 @@ pub(crate) fn build_execution_preamble(
         session_id,
         ?mode,
         model,
-        enabled_tool_count = enabled_tools.len(),
-        prompt_tool_count = prompt_tools.len(),
-        omitted_tool_count,
+        enabled_tool_count = prompt.tool_names.len(),
+        omitted_tool_count = prompt.omitted_tool_count,
         tool_names = ?prompt.tool_names,
         tool_list_preview = %prompt.tool_list.chars().take(400).collect::<String>(),
         "built execution preamble"
@@ -201,7 +173,7 @@ pub(crate) fn build_execution_preamble(
 
     ExecutionPreamble {
         model,
-        tool_specs,
+        tool_specs: preamble.tool_specs,
         prompt,
     }
 }
@@ -214,7 +186,7 @@ pub(crate) fn finalize_prompt_context(
     prompt
 }
 
-fn count_prompt_omitted_tools(all_tools: &[ToolDefinition]) -> usize {
+pub(crate) fn count_prompt_omitted_tools(all_tools: &[ToolDefinition]) -> usize {
     all_tools
         .iter()
         .filter(|t| t.enabled)

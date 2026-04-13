@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use fff_search::git::format_git_status_opt;
@@ -27,7 +27,7 @@ const MAX_FIRST_MATCH_EXPAND: usize = 8;
 /// Search file contents using an indexed fff-search backend.
 pub struct Grep {
     base_path: Result<PathBuf, String>,
-    backend: OnceLock<Result<GrepBackend, String>>,
+    backend: OnceLock<Result<Arc<GrepBackend>, String>>,
     cursor_store: Mutex<CursorStore>,
 }
 
@@ -57,10 +57,10 @@ impl Grep {
         }
     }
 
-    fn ensure_ready(&self) -> Result<&GrepBackend, ToolResult> {
+    fn ensure_ready(&self) -> Result<Arc<GrepBackend>, ToolResult> {
         let backend = self
             .backend
-            .get_or_init(|| self.initialize_backend())
+            .get_or_init(|| self.shared_backend())
             .as_ref()
             .map_err(|err| ToolResult::err_fmt(format_args!("{err}")))?;
         if !backend.picker.wait_for_scan(Duration::from_secs(30)) {
@@ -68,11 +68,25 @@ impl Grep {
                 "fff-search initial scan timed out"
             )));
         }
-        Ok(backend)
+        Ok(Arc::clone(backend))
     }
 
-    fn initialize_backend(&self) -> Result<GrepBackend, String> {
+    fn shared_backend(&self) -> Result<Arc<GrepBackend>, String> {
         let base_path = self.base_path.as_ref().map_err(Clone::clone)?;
+        let cache_key = std::fs::canonicalize(base_path).unwrap_or_else(|_| base_path.clone());
+        let cache = shared_backend_cache();
+        let mut cache = cache
+            .lock()
+            .map_err(|_| "failed to lock shared grep backend cache".to_string())?;
+        if let Some(existing) = cache.get(&cache_key) {
+            return existing.clone();
+        }
+        let backend = self.initialize_backend(base_path).map(Arc::new);
+        cache.insert(cache_key, backend.clone());
+        backend
+    }
+
+    fn initialize_backend(&self, base_path: &PathBuf) -> Result<GrepBackend, String> {
         let picker = SharedPicker::default();
         FilePicker::new_with_shared_state(
             picker.clone(),
@@ -323,7 +337,7 @@ impl ToolProvider for Grep {
             GrepMode::PlainText
         };
 
-        match self.perform_grep(backend, query, mode, max_results, cursor, output_mode) {
+        match self.perform_grep(&backend, query, mode, max_results, cursor, output_mode) {
             Ok(text) => ToolResult::ok(json!(text)),
             Err(err) => err,
         }
@@ -332,6 +346,12 @@ impl ToolProvider for Grep {
 
 struct GrepBackend {
     picker: SharedPicker,
+}
+
+fn shared_backend_cache() -> &'static Mutex<HashMap<PathBuf, Result<Arc<GrepBackend>, String>>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Result<Arc<GrepBackend>, String>>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn parse_max_results(args: &serde_json::Value) -> Result<usize, ToolResult> {
@@ -975,5 +995,19 @@ mod tests {
         let result = tool.execute("grep", &json!({"query": "ctx"})).await;
         assert!(result.success);
         assert!(tool.backend.get().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_grep_backend_is_shared_process_wide_for_same_workspace() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("alpha.rs"), "ctx\n").unwrap();
+
+        let left = Grep::with_base_path(dir.path().to_path_buf());
+        let right = Grep::with_base_path(dir.path().to_path_buf());
+
+        let left_backend = left.ensure_ready().expect("left backend");
+        let right_backend = right.ensure_ready().expect("right backend");
+
+        assert!(Arc::ptr_eq(&left_backend, &right_backend));
     }
 }

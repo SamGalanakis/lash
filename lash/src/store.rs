@@ -10,7 +10,7 @@ use rusqlite::{Connection, OpenFlags, params};
 #[cfg(feature = "sqlite-store")]
 use sha2::{Digest, Sha256};
 
-/// SQLite-backed store for archive, runtime state, and the canonical session graph.
+/// SQLite-backed store for checkpoint blobs, live resume state, and the canonical session head.
 #[cfg(feature = "sqlite-store")]
 pub struct Store {
     conn: Mutex<Connection>,
@@ -21,14 +21,14 @@ pub type SqliteStore = Store;
 
 #[cfg(feature = "sqlite-store")]
 const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS archive (
+CREATE TABLE IF NOT EXISTS blobs (
     hash    TEXT PRIMARY KEY,
-    content TEXT NOT NULL
+    content BLOB NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS live_session_graph (
+CREATE TABLE IF NOT EXISTS live_resume (
     singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
-    graph_json     TEXT NOT NULL DEFAULT '{\"nodes\":[],\"leaf_node_id\":null}'
+    snapshot_json  TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS ui_resume_state (
@@ -36,9 +36,25 @@ CREATE TABLE IF NOT EXISTS ui_resume_state (
     state_json     TEXT NOT NULL DEFAULT '{}'
 );
 
-CREATE TABLE IF NOT EXISTS session_graph (
+CREATE TABLE IF NOT EXISTS session_head (
     singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
-    graph_json     TEXT NOT NULL DEFAULT '{\"nodes\":[],\"leaf_node_id\":null}'
+    head_json      TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS graph_nodes (
+    seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id   TEXT NOT NULL UNIQUE,
+    node_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS usage_deltas (
+    seq                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    source               TEXT NOT NULL,
+    model                TEXT NOT NULL,
+    input_tokens         INTEGER NOT NULL,
+    output_tokens        INTEGER NOT NULL,
+    cached_input_tokens  INTEGER NOT NULL,
+    reasoning_tokens     INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS session_meta (
@@ -53,7 +69,7 @@ CREATE TABLE IF NOT EXISTS session_meta (
 ";
 
 #[cfg(feature = "sqlite-store")]
-const SCHEMA_VERSION: i32 = 8;
+const SCHEMA_VERSION: i32 = 11;
 
 #[cfg(feature = "sqlite-store")]
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -104,27 +120,187 @@ pub struct SessionPickerInfo {
     pub user_message_count: usize,
 }
 
-/// Persistence backend for archived content, committed session graphs, and live graphs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct BlobRef(pub String);
+
+impl BlobRef {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for BlobRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for BlobRef {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct SessionCheckpoint {
+    #[serde(default)]
+    pub turn_state: crate::PersistedTurnState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_state_ref: Option<BlobRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_snapshot_ref: Option<BlobRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_snapshot_revision: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct HydratedSessionCheckpoint {
+    pub turn_state: crate::PersistedTurnState,
+    pub dynamic_state_ref: Option<BlobRef>,
+    pub dynamic_state: Option<crate::DynamicStateSnapshot>,
+    pub plugin_snapshot_ref: Option<BlobRef>,
+    pub plugin_snapshot: Option<crate::PluginSessionSnapshot>,
+    pub plugin_snapshot_revision: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct StoredSessionCheckpoint {
+    pub checkpoint_ref: BlobRef,
+    pub manifest: SessionCheckpoint,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct LiveResumeDelta {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub appended_graph_nodes: Vec<crate::SessionNodeRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaf_node_id: Option<String>,
+    #[serde(default)]
+    pub turn_state: crate::PersistedTurnState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_state: Option<crate::DynamicStateSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_snapshot: Option<crate::PluginSessionSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_state_snapshot: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub token_ledger: Vec<crate::TokenLedgerEntry>,
+}
+
+impl LiveResumeDelta {
+    pub fn apply_to_graph(&self, base: &crate::SessionGraph) -> crate::SessionGraph {
+        let mut graph = base.clone();
+        graph.extend_node_records(self.appended_graph_nodes.iter().cloned());
+        if self.leaf_node_id.is_some() {
+            graph.set_leaf_node_id(self.leaf_node_id.clone());
+        }
+        graph
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
+pub struct SessionHead {
+    pub graph: crate::SessionGraph,
+    pub config: crate::PersistedSessionConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_ref: Option<BlobRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub token_ledger: Vec<crate::TokenLedgerEntry>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct SessionHeadMeta {
+    pub config: crate::PersistedSessionConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_ref: Option<BlobRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaf_node_id: Option<String>,
+    #[serde(default)]
+    pub graph_node_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub token_ledger: Vec<crate::TokenLedgerEntry>,
+}
+
+fn session_head_meta(head: &SessionHead) -> SessionHeadMeta {
+    SessionHeadMeta {
+        config: head.config.clone(),
+        checkpoint_ref: head.checkpoint_ref.clone(),
+        leaf_node_id: head.graph.leaf_node_id.clone(),
+        graph_node_count: head.graph.nodes.len(),
+        token_ledger: head.token_ledger.clone(),
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
+pub struct LiveResumeSnapshot {
+    pub graph: crate::SessionGraph,
+    pub config: crate::PersistedSessionConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_ref: Option<BlobRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta_ref: Option<BlobRef>,
+}
+
+pub fn materialize_live_resume_graph(
+    snapshot: &LiveResumeSnapshot,
+    delta: Option<&LiveResumeDelta>,
+) -> crate::SessionGraph {
+    delta
+        .map(|delta| delta.apply_to_graph(&snapshot.graph))
+        .unwrap_or_else(|| snapshot.graph.clone())
+}
+
+/// Persistence backend for checkpoint blobs, committed session heads, and live resume snapshots.
 #[async_trait::async_trait]
 pub trait RuntimeStore: Send + Sync {
-    async fn store_archive(&self, content: &str) -> String;
-    async fn get_archive(&self, hash: &str) -> Option<String>;
-    async fn save_session_graph(&self, graph: crate::SessionGraph);
-    async fn load_session_graph(&self) -> Option<crate::SessionGraph>;
-    async fn save_live_session_graph(&self, graph: crate::SessionGraph);
-    async fn load_live_session_graph(&self) -> Option<crate::SessionGraph>;
-    async fn clear_live_session_graph(&self);
+    async fn put_blob(&self, content: &[u8]) -> BlobRef;
+    async fn get_blob(&self, blob_ref: &BlobRef) -> Option<Vec<u8>>;
+    async fn append_usage_deltas(&self, entries: &[crate::TokenLedgerEntry]);
+    async fn load_usage_deltas(&self) -> Vec<crate::TokenLedgerEntry>;
+    async fn save_session_head_meta(&self, meta: SessionHeadMeta);
+    async fn load_session_head_meta(&self) -> Option<SessionHeadMeta>;
+    async fn replace_session_graph(&self, graph: &crate::SessionGraph);
+    async fn append_session_graph_nodes(&self, nodes: &[crate::SessionNodeRecord]);
+    async fn load_session_graph(&self) -> crate::SessionGraph;
+    async fn save_live_resume(&self, snapshot: LiveResumeSnapshot);
+    async fn load_live_resume(&self) -> Option<LiveResumeSnapshot>;
+    async fn clear_live_resume(&self);
     async fn save_session_meta(&self, meta: SessionMeta);
     async fn load_session_meta(&self) -> Option<SessionMeta>;
 
-    async fn save_turn_checkpoint(&self, graph: crate::SessionGraph) {
-        self.save_session_graph(graph).await;
-        self.clear_live_session_graph().await;
+    async fn save_session_head(&self, head: SessionHead) {
+        self.replace_session_graph(&head.graph).await;
+        self.save_session_head_meta(session_head_meta(&head)).await;
     }
 
-    async fn graph_copy_from_store(&self, source: &(dyn RuntimeStore + '_)) {
-        if let Some(graph) = source.load_session_graph().await {
-            self.save_session_graph(graph).await;
+    async fn load_session_head(&self) -> Option<SessionHead> {
+        let meta = self.load_session_head_meta().await?;
+        let mut graph = self.load_session_graph().await;
+        graph.set_leaf_node_id(meta.leaf_node_id.clone());
+        Some(SessionHead {
+            graph,
+            config: meta.config,
+            checkpoint_ref: meta.checkpoint_ref,
+            token_ledger: meta.token_ledger,
+        })
+    }
+
+    async fn save_turn_checkpoint(&self, head: SessionHead) {
+        self.save_session_head(head).await;
+        self.clear_live_resume().await;
+    }
+
+    async fn head_copy_from_store(&self, source: &(dyn RuntimeStore + '_))
+    where
+        Self: Sized,
+    {
+        if let Some(head) = source.load_session_head().await {
+            if let Some(checkpoint_ref) = &head.checkpoint_ref {
+                let _ = copy_checkpoint_blobs_from_store(self, source, checkpoint_ref).await;
+            }
+            self.replace_session_graph(&head.graph).await;
+            self.save_session_head_meta(session_head_meta(&head)).await;
         }
     }
 }
@@ -134,8 +310,151 @@ fn encode_json<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string(value).expect("persisted state should serialize")
 }
 
+pub fn encode_checkpoint(checkpoint: &SessionCheckpoint) -> Vec<u8> {
+    encode_msgpack(checkpoint)
+}
+
+pub fn decode_checkpoint(bytes: &[u8]) -> Option<SessionCheckpoint> {
+    rmp_serde::from_slice(bytes).ok()
+}
+
+fn encode_msgpack<T: serde::Serialize>(value: &T) -> Vec<u8> {
+    rmp_serde::to_vec_named(value).expect("value should serialize")
+}
+
+fn decode_msgpack<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
+    rmp_serde::from_slice(bytes).ok()
+}
+
+pub async fn put_typed_blob<T: serde::Serialize>(
+    store: &(dyn RuntimeStore + '_),
+    value: &T,
+) -> BlobRef {
+    let bytes = encode_msgpack(value);
+    store.put_blob(&bytes).await
+}
+
+pub async fn get_typed_blob<T: serde::de::DeserializeOwned>(
+    store: &(dyn RuntimeStore + '_),
+    blob_ref: &BlobRef,
+) -> Option<T> {
+    let bytes = store.get_blob(blob_ref).await?;
+    decode_msgpack(&bytes)
+}
+
+pub async fn put_checkpoint(
+    store: &(dyn RuntimeStore + '_),
+    checkpoint: &HydratedSessionCheckpoint,
+) -> StoredSessionCheckpoint {
+    let dynamic_state_ref = match checkpoint.dynamic_state.as_ref() {
+        Some(snapshot) => Some(put_typed_blob(store, snapshot).await),
+        None => checkpoint.dynamic_state_ref.clone(),
+    };
+    let plugin_snapshot_ref = match checkpoint.plugin_snapshot.as_ref() {
+        Some(snapshot) => Some(put_typed_blob(store, snapshot).await),
+        None => checkpoint.plugin_snapshot_ref.clone(),
+    };
+    let record = SessionCheckpoint {
+        turn_state: checkpoint.turn_state.clone(),
+        dynamic_state_ref,
+        plugin_snapshot_ref,
+        plugin_snapshot_revision: checkpoint.plugin_snapshot_revision,
+    };
+    let checkpoint_ref = put_typed_blob(store, &record).await;
+    StoredSessionCheckpoint {
+        checkpoint_ref,
+        manifest: record,
+    }
+}
+
+pub async fn append_usage_deltas(
+    store: &(dyn RuntimeStore + '_),
+    entries: &[crate::TokenLedgerEntry],
+) {
+    store.append_usage_deltas(entries).await;
+}
+
+pub async fn load_usage_deltas(store: &(dyn RuntimeStore + '_)) -> Vec<crate::TokenLedgerEntry> {
+    store.load_usage_deltas().await
+}
+
+pub async fn get_checkpoint(
+    store: &(dyn RuntimeStore + '_),
+    checkpoint_ref: &BlobRef,
+) -> Option<HydratedSessionCheckpoint> {
+    let record: SessionCheckpoint = get_typed_blob(store, checkpoint_ref).await?;
+    let dynamic_state = match record.dynamic_state_ref.as_ref() {
+        Some(blob_ref) => get_typed_blob(store, blob_ref).await,
+        None => None,
+    };
+    let plugin_snapshot = match record.plugin_snapshot_ref.as_ref() {
+        Some(blob_ref) => get_typed_blob(store, blob_ref).await,
+        None => None,
+    };
+    Some(HydratedSessionCheckpoint {
+        turn_state: record.turn_state,
+        dynamic_state_ref: record.dynamic_state_ref,
+        dynamic_state,
+        plugin_snapshot_ref: record.plugin_snapshot_ref,
+        plugin_snapshot,
+        plugin_snapshot_revision: record.plugin_snapshot_revision,
+    })
+}
+
+pub async fn copy_checkpoint_blobs_from_store(
+    target: &(dyn RuntimeStore + '_),
+    source: &(dyn RuntimeStore + '_),
+    checkpoint_ref: &BlobRef,
+) -> Option<BlobRef> {
+    let record: SessionCheckpoint = get_typed_blob(source, checkpoint_ref).await?;
+    for blob_ref in [
+        record.dynamic_state_ref.as_ref(),
+        record.plugin_snapshot_ref.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(bytes) = source.get_blob(blob_ref).await {
+            let _ = target.put_blob(&bytes).await;
+        }
+    }
+    let checkpoint_bytes = source.get_blob(checkpoint_ref).await?;
+    Some(target.put_blob(&checkpoint_bytes).await)
+}
+
 #[cfg(feature = "sqlite-store")]
 impl Store {
+    fn load_session_graph_from_conn(
+        conn: &Connection,
+        leaf_node_id: Option<String>,
+    ) -> crate::SessionGraph {
+        let mut stmt = match conn.prepare("SELECT node_json FROM graph_nodes ORDER BY seq ASC") {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to prepare graph load statement");
+                return crate::SessionGraph::from_nodes(Vec::new(), leaf_node_id);
+            }
+        };
+        let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
+            Ok(rows) => rows,
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to query graph rows");
+                return crate::SessionGraph::from_nodes(Vec::new(), leaf_node_id);
+            }
+        };
+        let mut nodes = Vec::new();
+        for row in rows {
+            let Ok(node_json) = row else {
+                continue;
+            };
+            let Ok(node) = serde_json::from_str::<crate::SessionNodeRecord>(&node_json) else {
+                continue;
+            };
+            nodes.push(node);
+        }
+        crate::SessionGraph::from_nodes(nodes, leaf_node_id)
+    }
+
     /// Open (or create) a SQLite database at `path`.
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
@@ -176,14 +495,15 @@ impl Store {
             )
             .ok()?;
 
-        let graph_json: String = conn
+        let head_json: String = conn
             .query_row(
-                "SELECT graph_json FROM session_graph WHERE singleton = 1",
+                "SELECT head_json FROM session_head WHERE singleton = 1",
                 [],
                 |row| row.get(0),
             )
-            .unwrap_or_else(|_| "{\"nodes\":[],\"leaf_node_id\":null}".to_string());
-        let graph = serde_json::from_str::<crate::SessionGraph>(&graph_json).unwrap_or_default();
+            .unwrap_or_else(|_| "{}".to_string());
+        let head_meta = serde_json::from_str::<SessionHeadMeta>(&head_json).unwrap_or_default();
+        let graph = Self::load_session_graph_from_conn(&conn, head_meta.leaf_node_id);
 
         Some(SessionPickerInfo {
             session_id: meta.0,
@@ -204,59 +524,166 @@ impl Store {
         })
     }
 
-    /// Store content, return its 12-char hex SHA-256 hash.
-    pub fn store_archive(&self, content: &str) -> String {
-        let hash = format!("{:x}", Sha256::digest(content.as_bytes()));
-        let short = hash[..12].to_string();
+    pub fn put_blob(&self, content: &[u8]) -> BlobRef {
+        let hash = format!("{:x}", Sha256::digest(content));
         let conn = self.conn.lock().unwrap();
         if let Err(err) = conn.execute(
-            "INSERT OR IGNORE INTO archive (hash, content) VALUES (?1, ?2)",
-            params![short, content],
+            "INSERT OR IGNORE INTO blobs (hash, content) VALUES (?1, ?2)",
+            params![hash, content],
         ) {
-            tracing::warn!(error = %err, hash = %short, "failed to persist archive content");
+            tracing::warn!(error = %err, hash, "failed to persist checkpoint blob");
         }
-        short
+        BlobRef(hash)
     }
 
-    /// Retrieve archived content by short hash.
-    pub fn get_archive(&self, hash: &str) -> Option<String> {
+    pub fn get_blob(&self, blob_ref: &BlobRef) -> Option<Vec<u8>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT content FROM archive WHERE hash = ?1",
-            params![hash],
+            "SELECT content FROM blobs WHERE hash = ?1",
+            params![blob_ref.as_str()],
             |row| row.get(0),
         )
         .ok()
     }
 
-    /// Save or update the session runtime state in the store.
-    pub fn save_live_session_graph(&self, graph: crate::SessionGraph) {
+    pub fn put_typed_blob<T: serde::Serialize>(&self, value: &T) -> BlobRef {
+        let bytes = encode_msgpack(value);
+        self.put_blob(&bytes)
+    }
+
+    pub fn get_typed_blob<T: serde::de::DeserializeOwned>(&self, blob_ref: &BlobRef) -> Option<T> {
+        let bytes = self.get_blob(blob_ref)?;
+        decode_msgpack(&bytes)
+    }
+
+    pub fn put_checkpoint(
+        &self,
+        checkpoint: &HydratedSessionCheckpoint,
+    ) -> StoredSessionCheckpoint {
+        let dynamic_state_ref = checkpoint
+            .dynamic_state
+            .as_ref()
+            .map(|snapshot| self.put_typed_blob(snapshot))
+            .or_else(|| checkpoint.dynamic_state_ref.clone());
+        let plugin_snapshot_ref = checkpoint
+            .plugin_snapshot
+            .as_ref()
+            .map(|snapshot| self.put_typed_blob(snapshot))
+            .or_else(|| checkpoint.plugin_snapshot_ref.clone());
+        let manifest = SessionCheckpoint {
+            turn_state: checkpoint.turn_state.clone(),
+            dynamic_state_ref,
+            plugin_snapshot_ref,
+            plugin_snapshot_revision: checkpoint.plugin_snapshot_revision,
+        };
+        let checkpoint_ref = self.put_typed_blob(&manifest);
+        StoredSessionCheckpoint {
+            checkpoint_ref,
+            manifest,
+        }
+    }
+
+    pub fn get_checkpoint(&self, blob_ref: &BlobRef) -> Option<HydratedSessionCheckpoint> {
+        let record: SessionCheckpoint = self.get_typed_blob(blob_ref)?;
+        Some(HydratedSessionCheckpoint {
+            turn_state: record.turn_state,
+            dynamic_state_ref: record.dynamic_state_ref.clone(),
+            dynamic_state: record
+                .dynamic_state_ref
+                .as_ref()
+                .and_then(|blob_ref| self.get_typed_blob(blob_ref)),
+            plugin_snapshot_ref: record.plugin_snapshot_ref.clone(),
+            plugin_snapshot: record
+                .plugin_snapshot_ref
+                .as_ref()
+                .and_then(|blob_ref| self.get_typed_blob(blob_ref)),
+            plugin_snapshot_revision: record.plugin_snapshot_revision,
+        })
+    }
+
+    pub fn append_usage_deltas(&self, entries: &[crate::TokenLedgerEntry]) {
+        if entries.is_empty() {
+            return;
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().expect("usage delta transaction");
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO usage_deltas (
+                        source, model, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                )
+                .expect("usage delta statement");
+            for entry in entries {
+                stmt.execute(params![
+                    entry.source,
+                    entry.model,
+                    entry.usage.input_tokens,
+                    entry.usage.output_tokens,
+                    entry.usage.cached_input_tokens,
+                    entry.usage.reasoning_tokens,
+                ])
+                .expect("usage delta insert");
+            }
+        }
+        tx.commit().expect("usage delta commit");
+    }
+
+    pub fn load_usage_deltas(&self) -> Vec<crate::TokenLedgerEntry> {
         let conn = self.conn.lock().unwrap();
-        let graph_json = encode_json(&graph);
+        let mut stmt = match conn.prepare(
+            "SELECT source, model, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
+             FROM usage_deltas ORDER BY seq ASC",
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match stmt.query_map([], |row| {
+            Ok(crate::TokenLedgerEntry {
+                source: row.get(0)?,
+                model: row.get(1)?,
+                usage: crate::TokenUsage {
+                    input_tokens: row.get(2)?,
+                    output_tokens: row.get(3)?,
+                    cached_input_tokens: row.get(4)?,
+                    reasoning_tokens: row.get(5)?,
+                },
+            })
+        }) {
+            Ok(rows) => rows,
+            Err(_) => return Vec::new(),
+        };
+        rows.filter_map(Result::ok).collect()
+    }
+
+    pub fn save_live_resume(&self, snapshot: LiveResumeSnapshot) {
+        let conn = self.conn.lock().unwrap();
+        let snapshot_json = encode_json(&snapshot);
         conn.execute(
-            "INSERT OR REPLACE INTO live_session_graph (singleton, graph_json)
+            "INSERT OR REPLACE INTO live_resume (singleton, snapshot_json)
              VALUES (1, ?1)",
-            params![graph_json],
+            params![snapshot_json],
         )
         .unwrap();
     }
 
-    pub fn load_live_session_graph(&self) -> Option<crate::SessionGraph> {
+    pub fn load_live_resume(&self) -> Option<LiveResumeSnapshot> {
         let conn = self.conn.lock().unwrap();
-        let graph_json: String = conn
+        let snapshot_json: String = conn
             .query_row(
-                "SELECT graph_json FROM live_session_graph WHERE singleton = 1",
+                "SELECT snapshot_json FROM live_resume WHERE singleton = 1",
                 [],
                 |row| row.get(0),
             )
             .ok()?;
-        serde_json::from_str(&graph_json).ok()
+        serde_json::from_str(&snapshot_json).ok()
     }
 
-    pub fn clear_live_session_graph(&self) {
+    pub fn clear_live_resume(&self) {
         let conn = self.conn.lock().unwrap();
-        if let Err(err) = conn.execute("DELETE FROM live_session_graph WHERE singleton = 1", []) {
-            tracing::warn!(error = %err, "failed to clear live session graph");
+        if let Err(err) = conn.execute("DELETE FROM live_resume WHERE singleton = 1", []) {
+            tracing::warn!(error = %err, "failed to clear live resume snapshot");
         }
     }
 
@@ -290,33 +717,129 @@ impl Store {
         serde_json::from_str(&state_json).ok()
     }
 
-    pub fn save_session_graph(&self, graph: crate::SessionGraph) {
+    pub fn save_session_head_meta(&self, meta: SessionHeadMeta) {
         let conn = self.conn.lock().unwrap();
-        let graph_json = encode_json(&graph);
+        let head_json = encode_json(&meta);
         if let Err(err) = conn.execute(
-            "INSERT OR REPLACE INTO session_graph (singleton, graph_json)
+            "INSERT OR REPLACE INTO session_head (singleton, head_json)
              VALUES (1, ?1)",
-            params![graph_json],
+            params![head_json],
         ) {
-            tracing::warn!(error = %err, "failed to persist session graph");
+            tracing::warn!(error = %err, "failed to persist session head");
         }
     }
 
-    pub fn load_session_graph(&self) -> Option<crate::SessionGraph> {
+    pub fn load_session_head_meta(&self) -> Option<SessionHeadMeta> {
         let conn = self.conn.lock().unwrap();
-        let graph_json: String = conn
+        let head_json: String = conn
             .query_row(
-                "SELECT graph_json FROM session_graph WHERE singleton = 1",
+                "SELECT head_json FROM session_head WHERE singleton = 1",
                 [],
                 |row| row.get(0),
             )
             .ok()?;
-        serde_json::from_str(&graph_json).ok()
+        serde_json::from_str(&head_json).ok()
     }
 
-    pub fn graph_copy_from_store(&self, source: &Store) {
-        if let Some(graph) = source.load_session_graph() {
-            self.save_session_graph(graph);
+    pub fn replace_session_graph(&self, graph: &crate::SessionGraph) {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = match conn.transaction() {
+            Ok(tx) => tx,
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to begin graph replace transaction");
+                return;
+            }
+        };
+        if let Err(err) = tx.execute("DELETE FROM graph_nodes", []) {
+            tracing::warn!(error = %err, "failed to clear graph rows");
+            return;
+        }
+        for node in &graph.nodes {
+            let node_json = encode_json(node);
+            if let Err(err) = tx.execute(
+                "INSERT INTO graph_nodes (node_id, node_json) VALUES (?1, ?2)",
+                params![node.node_id, node_json],
+            ) {
+                tracing::warn!(error = %err, node_id = %node.node_id, "failed to persist graph node");
+                return;
+            }
+        }
+        if let Err(err) = tx.commit() {
+            tracing::warn!(error = %err, "failed to commit graph replace");
+        }
+    }
+
+    pub fn append_session_graph_nodes(&self, nodes: &[crate::SessionNodeRecord]) {
+        if nodes.is_empty() {
+            return;
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = match conn.transaction() {
+            Ok(tx) => tx,
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to begin graph append transaction");
+                return;
+            }
+        };
+        for node in nodes {
+            let node_json = encode_json(node);
+            if let Err(err) = tx.execute(
+                "INSERT INTO graph_nodes (node_id, node_json) VALUES (?1, ?2)",
+                params![node.node_id, node_json],
+            ) {
+                tracing::warn!(error = %err, node_id = %node.node_id, "failed to append graph node");
+                return;
+            }
+        }
+        if let Err(err) = tx.commit() {
+            tracing::warn!(error = %err, "failed to commit graph append");
+        }
+    }
+
+    pub fn load_session_graph(&self) -> crate::SessionGraph {
+        let conn = self.conn.lock().unwrap();
+        Self::load_session_graph_from_conn(&conn, None)
+    }
+
+    pub fn save_session_head(&self, head: SessionHead) {
+        self.replace_session_graph(&head.graph);
+        self.save_session_head_meta(session_head_meta(&head));
+    }
+
+    pub fn load_session_head(&self) -> Option<SessionHead> {
+        let meta = self.load_session_head_meta()?;
+        let mut graph = self.load_session_graph();
+        graph.set_leaf_node_id(meta.leaf_node_id.clone());
+        Some(SessionHead {
+            graph,
+            config: meta.config,
+            checkpoint_ref: meta.checkpoint_ref,
+            token_ledger: meta.token_ledger,
+        })
+    }
+
+    pub fn head_copy_from_store(&self, source: &Store) {
+        if let Some(head) = source.load_session_head() {
+            if let Some(checkpoint_ref) = &head.checkpoint_ref
+                && let Some(record) = source.get_typed_blob::<SessionCheckpoint>(checkpoint_ref)
+            {
+                for blob_ref in [
+                    record.dynamic_state_ref.as_ref(),
+                    record.plugin_snapshot_ref.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if let Some(blob) = source.get_blob(blob_ref) {
+                        let _ = self.put_blob(&blob);
+                    }
+                }
+                if let Some(blob) = source.get_blob(checkpoint_ref) {
+                    let _ = self.put_blob(&blob);
+                }
+            }
+            self.replace_session_graph(&head.graph);
+            self.save_session_head_meta(session_head_meta(&head));
         }
     }
 
@@ -367,32 +890,52 @@ impl Store {
 #[cfg(feature = "sqlite-store")]
 #[async_trait::async_trait]
 impl RuntimeStore for Store {
-    async fn store_archive(&self, content: &str) -> String {
-        Self::store_archive(self, content)
+    async fn put_blob(&self, content: &[u8]) -> BlobRef {
+        Self::put_blob(self, content)
     }
 
-    async fn get_archive(&self, hash: &str) -> Option<String> {
-        Self::get_archive(self, hash)
+    async fn get_blob(&self, blob_ref: &BlobRef) -> Option<Vec<u8>> {
+        Self::get_blob(self, blob_ref)
     }
 
-    async fn save_session_graph(&self, graph: crate::SessionGraph) {
-        Self::save_session_graph(self, graph);
+    async fn append_usage_deltas(&self, entries: &[crate::TokenLedgerEntry]) {
+        Self::append_usage_deltas(self, entries);
     }
 
-    async fn load_session_graph(&self) -> Option<crate::SessionGraph> {
+    async fn load_usage_deltas(&self) -> Vec<crate::TokenLedgerEntry> {
+        Self::load_usage_deltas(self)
+    }
+
+    async fn save_session_head_meta(&self, meta: SessionHeadMeta) {
+        Self::save_session_head_meta(self, meta);
+    }
+
+    async fn load_session_head_meta(&self) -> Option<SessionHeadMeta> {
+        Self::load_session_head_meta(self)
+    }
+
+    async fn replace_session_graph(&self, graph: &crate::SessionGraph) {
+        Self::replace_session_graph(self, graph);
+    }
+
+    async fn append_session_graph_nodes(&self, nodes: &[crate::SessionNodeRecord]) {
+        Self::append_session_graph_nodes(self, nodes);
+    }
+
+    async fn load_session_graph(&self) -> crate::SessionGraph {
         Self::load_session_graph(self)
     }
 
-    async fn save_live_session_graph(&self, graph: crate::SessionGraph) {
-        Self::save_live_session_graph(self, graph);
+    async fn save_live_resume(&self, snapshot: LiveResumeSnapshot) {
+        Self::save_live_resume(self, snapshot);
     }
 
-    async fn load_live_session_graph(&self) -> Option<crate::SessionGraph> {
-        Self::load_live_session_graph(self)
+    async fn load_live_resume(&self) -> Option<LiveResumeSnapshot> {
+        Self::load_live_resume(self)
     }
 
-    async fn clear_live_session_graph(&self) {
-        Self::clear_live_session_graph(self);
+    async fn clear_live_resume(&self) {
+        Self::clear_live_resume(self);
     }
 
     async fn save_session_meta(&self, meta: SessionMeta) {
@@ -513,18 +1056,23 @@ mod tests {
     #[test]
     fn graph_copy_from_store_round_trip() {
         let source = mem();
-        source.save_session_graph(crate::SessionGraph::from_projection(
-            &[
-                text_message("u0", MessageRole::User, "hello"),
-                text_message("a0", MessageRole::Assistant, "world"),
-            ],
-            &[],
-        ));
+        source.save_session_head(SessionHead {
+            graph: crate::SessionGraph::from_projection(
+                &[
+                    text_message("u0", MessageRole::User, "hello"),
+                    text_message("a0", MessageRole::Assistant, "world"),
+                ],
+                &[],
+            ),
+            config: crate::PersistedSessionConfig::default(),
+            checkpoint_ref: None,
+            token_ledger: Vec::new(),
+        });
 
         let target = mem();
-        target.graph_copy_from_store(&source);
+        target.head_copy_from_store(&source);
 
-        let graph = target.load_session_graph().expect("session graph");
+        let graph = target.load_session_head().expect("session head").graph;
         let messages = graph.project_messages();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].parts[0].content, "hello");
@@ -532,43 +1080,59 @@ mod tests {
     }
 
     #[test]
-    fn save_session_graph_rewrites_existing_snapshot() {
+    fn save_session_head_rewrites_existing_snapshot() {
         let store = mem();
-        store.save_session_graph(crate::SessionGraph::from_projection(
-            &[text_message("u0", MessageRole::User, "old")],
-            &[],
-        ));
+        store.save_session_head(SessionHead {
+            graph: crate::SessionGraph::from_projection(
+                &[text_message("u0", MessageRole::User, "old")],
+                &[],
+            ),
+            config: crate::PersistedSessionConfig::default(),
+            checkpoint_ref: None,
+            token_ledger: Vec::new(),
+        });
 
-        store.save_session_graph(crate::SessionGraph::from_projection(
-            &[text_message("u1", MessageRole::User, "updated")],
-            &[],
-        ));
+        store.save_session_head(SessionHead {
+            graph: crate::SessionGraph::from_projection(
+                &[text_message("u1", MessageRole::User, "updated")],
+                &[],
+            ),
+            config: crate::PersistedSessionConfig::default(),
+            checkpoint_ref: None,
+            token_ledger: Vec::new(),
+        });
 
-        let graph = store.load_session_graph().expect("session graph");
+        let graph = store.load_session_head().expect("session head").graph;
         let messages = graph.project_messages();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].parts[0].content, "updated");
     }
 
     #[test]
-    fn live_session_graph_rewrites_and_clears() {
+    fn live_resume_rewrites_and_clears() {
         let store = mem();
-        store.save_live_session_graph(crate::SessionGraph::from_projection(
-            &[text_message("u0", MessageRole::User, "first")],
-            &[],
-        ));
-        store.save_live_session_graph(crate::SessionGraph::from_projection(
-            &[text_message("u1", MessageRole::User, "second")],
-            &[],
-        ));
+        store.save_live_resume(LiveResumeSnapshot {
+            graph: crate::SessionGraph::from_projection(
+                &[text_message("u0", MessageRole::User, "first")],
+                &[],
+            ),
+            ..LiveResumeSnapshot::default()
+        });
+        store.save_live_resume(LiveResumeSnapshot {
+            graph: crate::SessionGraph::from_projection(
+                &[text_message("u1", MessageRole::User, "second")],
+                &[],
+            ),
+            ..LiveResumeSnapshot::default()
+        });
 
-        let graph = store.load_live_session_graph().expect("live session graph");
+        let graph = store.load_live_resume().expect("live resume").graph;
         let messages = graph.project_messages();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].parts[0].content, "second");
 
-        store.clear_live_session_graph();
-        assert!(store.load_live_session_graph().is_none());
+        store.clear_live_resume();
+        assert!(store.load_live_resume().is_none());
     }
 
     #[test]
@@ -582,18 +1146,59 @@ mod tests {
             cwd: Some("/tmp/demo".to_string()),
             parent_session_id: None,
         });
-        store.save_session_graph(crate::SessionGraph::from_projection(
-            &[
-                text_message("u0", MessageRole::User, "hello there"),
-                text_message("a0", MessageRole::Assistant, "response"),
-                text_message("u1", MessageRole::User, "follow up"),
-            ],
-            &[],
-        ));
+        store.save_session_head(SessionHead {
+            graph: crate::SessionGraph::from_projection(
+                &[
+                    text_message("u0", MessageRole::User, "hello there"),
+                    text_message("a0", MessageRole::Assistant, "response"),
+                    text_message("u1", MessageRole::User, "follow up"),
+                ],
+                &[],
+            ),
+            config: crate::PersistedSessionConfig::default(),
+            checkpoint_ref: None,
+            token_ledger: Vec::new(),
+        });
 
         let info = store.load_picker_info().expect("picker info");
         assert_eq!(info.session_id, "s1");
         assert_eq!(info.first_user_message, "hello there");
         assert_eq!(info.user_message_count, 2);
+    }
+
+    #[test]
+    fn checkpoint_round_trips_through_blob_store() {
+        let store = mem();
+        let checkpoint = HydratedSessionCheckpoint {
+            turn_state: crate::PersistedTurnState {
+                iteration: 7,
+                token_usage: crate::TokenUsage {
+                    input_tokens: 12,
+                    output_tokens: 3,
+                    cached_input_tokens: 1,
+                    reasoning_tokens: 2,
+                },
+                last_prompt_usage: None,
+            },
+            dynamic_state_ref: None,
+            dynamic_state: None,
+            plugin_snapshot_ref: None,
+            plugin_snapshot_revision: None,
+            plugin_snapshot: None,
+        };
+        let stored = store.put_checkpoint(&checkpoint);
+        let checkpoint_record = store
+            .get_blob(&stored.checkpoint_ref)
+            .and_then(|bytes| decode_checkpoint(&bytes))
+            .expect("checkpoint record");
+        assert_eq!(checkpoint_record.turn_state.iteration, 7);
+        assert!(checkpoint_record.dynamic_state_ref.is_none());
+        assert!(checkpoint_record.plugin_snapshot_ref.is_none());
+        let loaded = store
+            .get_checkpoint(&stored.checkpoint_ref)
+            .expect("checkpoint");
+        assert_eq!(loaded.turn_state.iteration, 7);
+        assert!(loaded.dynamic_state.is_none());
+        assert!(loaded.plugin_snapshot.is_none());
     }
 }
