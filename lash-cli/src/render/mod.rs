@@ -182,7 +182,6 @@ pub(crate) fn extract_history_selection_text(
 
 pub(crate) fn input_render_snapshot(app: &App, area: Rect) -> InputRenderSnapshot {
     let mut lines = Vec::new();
-    let image_markers = image_marker_ranges(app.input());
     let total_width = padded_content_width(area.width, INPUT_HORIZONTAL_PADDING);
     let prefix_w = 2;
 
@@ -197,13 +196,16 @@ pub(crate) fn input_render_snapshot(app: &App, area: Rect) -> InputRenderSnapsho
         ]));
     } else {
         for (i, logical_line) in app.input().split('\n').enumerate() {
+            // Compute image markers per-line so ranges are relative
+            // to the logical line, not the full multi-line input.
+            let line_image_markers = image_marker_ranges(logical_line);
             let segments = wrap_line(logical_line, prefix_w, prefix_w, total_width);
             for (j, &(seg_start, seg_end)) in segments.iter().enumerate() {
                 let seg_spans = styled_input_segment(
                     logical_line,
                     seg_start,
                     seg_end,
-                    &image_markers,
+                    &line_image_markers,
                     &app.skills,
                 );
                 let prefix = if i == 0 && j == 0 {

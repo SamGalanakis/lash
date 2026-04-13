@@ -16,6 +16,7 @@ pub use lash_sansio::{CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptC
 
 pub type PluginFuture<T> = Pin<Box<dyn Future<Output = Result<T, PluginError>> + Send>>;
 pub type PluginRuntimeEventHook = Arc<dyn Fn(PluginRuntimeEvent) -> PluginFuture<()> + Send + Sync>;
+pub type PluginBackgroundJob = PluginFuture<()>;
 pub type SessionConfigMutator = Arc<
     dyn Fn(SessionConfigChangedContext, SessionStateEnvelope) -> PluginFuture<SessionStateEnvelope>
         + Send
@@ -210,6 +211,7 @@ pub struct SessionContextSurface {
     pub include_base_tools: bool,
     pub tool_providers: Vec<Arc<dyn ToolProvider>>,
     pub prompt_contributions: Vec<PromptContribution>,
+    pub prompt_overrides: Vec<crate::PromptSectionOverride>,
 }
 
 impl Default for SessionContextSurface {
@@ -218,6 +220,7 @@ impl Default for SessionContextSurface {
             include_base_tools: true,
             tool_providers: Vec::new(),
             prompt_contributions: Vec::new(),
+            prompt_overrides: Vec::new(),
         }
     }
 }
@@ -231,6 +234,7 @@ impl std::fmt::Debug for SessionContextSurface {
                 "prompt_contribution_count",
                 &self.prompt_contributions.len(),
             )
+            .field("prompt_override_count", &self.prompt_overrides.len())
             .finish()
     }
 }
@@ -247,7 +251,7 @@ pub struct SessionCreateRequest {
     #[serde(default)]
     pub plugin_mode: SessionPluginMode,
     #[serde(default)]
-    pub initial_messages: Vec<PluginMessage>,
+    pub initial_nodes: Vec<SessionAppendNode>,
     #[serde(skip)]
     pub context_surface: SessionContextSurface,
     /// Per-execution-mode "extras" that configure mode-specific
@@ -255,6 +259,12 @@ pub struct SessionCreateRequest {
     /// mode-agnostic; each `ExecutionMode` defines its own struct.
     #[serde(default)]
     pub mode_extras: ModeExtras,
+    /// Label for the token-cost ledger. When this session's turns
+    /// complete, their token usage is accumulated under this label on
+    /// the parent session's `token_ledger`. Examples: `"predict"`,
+    /// `"agent_call"`. Defaults to `"child"` if unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_source: Option<String>,
 }
 
 /// Per-execution-mode configuration carried on a `SessionCreateRequest`.
@@ -266,7 +276,7 @@ pub struct SessionCreateRequest {
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum ModeExtras {
     Standard(StandardCreateExtras),
-    Repl(ReplCreateExtras),
+    Rlm(RlmCreateExtras),
 }
 
 impl Default for ModeExtras {
@@ -278,22 +288,48 @@ impl Default for ModeExtras {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StandardCreateExtras {}
 
-/// REPL-mode session config. Carries the choice of how the model
+/// RLM-mode session config. Carries the choice of how the model
 /// terminates the session (prose vs `finish`-with-optional-schema).
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct ReplCreateExtras {
+pub struct RlmCreateExtras {
     #[serde(default)]
-    pub termination: ReplTermination,
+    pub termination: RlmTermination,
 }
 
-/// How a REPL session ends. Top-level chat sessions use
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionAppendNode {
+    Message {
+        message: PluginMessage,
+    },
+    Plugin {
+        plugin_type: String,
+        #[serde(default)]
+        body: serde_json::Value,
+    },
+}
+
+impl SessionAppendNode {
+    pub fn message(message: PluginMessage) -> Self {
+        Self::Message { message }
+    }
+
+    pub fn plugin(plugin_type: impl Into<String>, body: serde_json::Value) -> Self {
+        Self::Plugin {
+            plugin_type: plugin_type.into(),
+            body,
+        }
+    }
+}
+
+/// How a RLM session ends. Top-level chat sessions use
 /// `ProseWithoutFence` (today's behavior); typed sub-sessions spawned
 /// via `predict` use `Finish` so the captured value is the terminal
 /// result.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[derive(Default)]
-pub enum ReplTermination {
+pub enum RlmTermination {
     /// Terminate when the model writes prose with no fenced lashlang
     /// block. The prose IS the assistant's final reply. lashlang
     /// `finish` inside a fenced block continues to be an error in this
@@ -504,6 +540,28 @@ pub trait SessionManager: Send + Sync {
     ) -> Result<SessionTurnHandle, PluginError>;
     async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError>;
     async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError>;
+    async fn spawn_background_job(
+        &self,
+        _session_id: &str,
+        _label: &str,
+        _job: PluginBackgroundJob,
+    ) -> Result<(), PluginError> {
+        Err(PluginError::Session(
+            "background jobs are unavailable in this session".to_string(),
+        ))
+    }
+    async fn await_background_jobs(&self, _session_id: &str) -> Result<(), PluginError> {
+        Ok(())
+    }
+    async fn append_session_nodes(
+        &self,
+        _session_id: &str,
+        _request: AppendSessionNodesRequest,
+    ) -> Result<AppendSessionNodesResult, PluginError> {
+        Err(PluginError::Session(
+            "session graph mutation is unavailable in this session".to_string(),
+        ))
+    }
     async fn prompt_user(
         &self,
         _request: crate::PromptRequest,
@@ -521,6 +579,47 @@ pub trait SessionManager: Send + Sync {
         drop(handle.events);
         self.await_turn(&handle.turn_id).await
     }
+    /// Make a single LLM call without creating a full session. Used by
+    /// plugins for structured extraction, summarization, observation,
+    /// and other one-shot calls that don't need tools, turn loops, or
+    /// session state. The `usage_source` label tags the resulting
+    /// token cost in the parent session's ledger.
+    async fn direct_completion(
+        &self,
+        _request: crate::DirectRequest,
+        _usage_source: &str,
+    ) -> Result<DirectCompletion, PluginError> {
+        Err(PluginError::Session(
+            "direct completions are unavailable in this session".to_string(),
+        ))
+    }
+}
+
+/// Result of a single-shot LLM call via
+/// [`SessionManager::direct_completion`].
+#[derive(Clone, Debug)]
+pub struct DirectCompletion {
+    pub text: String,
+    pub usage: crate::TokenUsage,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AppendSessionNodesRequest {
+    pub nodes: Vec<SessionAppendNode>,
+    #[serde(default)]
+    pub requires_ancestor_node_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AppendSessionNodesResult {
+    Appended {
+        node_ids: Vec<String>,
+        leaf_node_id: String,
+    },
+    StaleBranch {
+        current_leaf_node_id: Option<String>,
+    },
 }
 
 #[derive(Clone)]
@@ -554,8 +653,16 @@ pub struct SessionConfigChangedContext {
 }
 
 #[derive(Clone)]
+pub struct SessionStateChangedContext {
+    pub session_id: String,
+    pub state: SessionStateEnvelope,
+    pub host: Arc<dyn SessionManager>,
+}
+
+#[derive(Clone)]
 pub enum PluginRuntimeEvent {
     TurnCommitted(AssembledTurn),
+    TurnPersisted(SessionStateChangedContext),
     SessionRestored(SessionStateEnvelope),
     SessionConfigChanged(SessionConfigChangedContext),
 }
@@ -922,12 +1029,14 @@ impl PluginSpec {
 pub struct PluginSessionContext {
     pub session_id: String,
     pub execution_mode: ExecutionMode,
+    pub context_approach: crate::ContextApproach,
 }
 
 #[derive(Clone)]
 pub struct SessionReadyContext {
     pub session_id: String,
     pub execution_mode: ExecutionMode,
+    pub context_approach: crate::ContextApproach,
     pub host: PluginHost,
 }
 
@@ -1091,10 +1200,13 @@ impl SessionPlugin for SpecPlugin {
 mod runtime_impl;
 mod tool_result_projection_builtin;
 
+#[path = "plugin_builtin/observational_memory.rs"]
+mod observational_memory;
 #[path = "plugin_builtin/rolling_history.rs"]
 mod rolling_history;
 
-pub use rolling_history::{RollingHistoryConfig, RollingHistoryPluginFactory};
+pub use observational_memory::ObservationalMemoryPluginFactory;
+pub use rolling_history::RollingHistoryPluginFactory;
 
 pub use runtime_impl::{
     CommandRegistrations, ExternalInvokeError, ExternalRegistrations, HistoryRegistrations,
@@ -1324,7 +1436,11 @@ mod tests {
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
         let root = host.build_standard_session("root", None).expect("root");
         let child = root
-            .fork_for_session("child", ExecutionMode::Standard)
+            .fork_for_session(
+                "child",
+                ExecutionMode::Standard,
+                crate::ContextApproach::default(),
+            )
             .expect("child");
 
         let result = host

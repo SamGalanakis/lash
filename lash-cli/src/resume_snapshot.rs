@@ -25,6 +25,7 @@ fn stamp_live_graph(
             configured_model: state.policy.model.clone(),
             context_window: state.policy.max_context_tokens.unwrap_or_default() as u64,
             execution_mode: state.policy.execution_mode,
+            context_approach: state.policy.context_approach.clone(),
             model_variant: state.policy.model_variant.clone(),
         },
         &lash::PersistedTurnState {
@@ -35,6 +36,7 @@ fn stamp_live_graph(
         Some(dynamic_state),
         plugin_snapshot.as_ref(),
         state.execution_state_snapshot.as_deref(),
+        &state.token_ledger,
     );
     graph
 }

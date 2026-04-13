@@ -895,6 +895,75 @@ impl EditorState {
     }
 }
 
+fn complete_path(partial: &str) -> Vec<(String, String)> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    let (dir, prefix) = if partial.is_empty() {
+        (cwd.clone(), String::new())
+    } else if partial.ends_with('/') {
+        let dir = if partial.starts_with('/') {
+            PathBuf::from(partial)
+        } else {
+            cwd.join(partial)
+        };
+        (dir, String::new())
+    } else {
+        let path = if partial.starts_with('/') {
+            PathBuf::from(partial)
+        } else {
+            cwd.join(partial)
+        };
+        let parent = path.parent().unwrap_or(&cwd).to_path_buf();
+        let prefix = path
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+        (parent, prefix)
+    };
+
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        Err(_) => return Vec::new(),
+    };
+
+    let show_hidden = prefix.starts_with('.');
+    let mut dirs: Vec<(String, String)> = Vec::new();
+    let mut files: Vec<(String, String)> = Vec::new();
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !show_hidden && name.starts_with('.') {
+            continue;
+        }
+        if !prefix.is_empty() && !name.starts_with(&prefix) {
+            continue;
+        }
+        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+        let dir_part = if partial.is_empty() {
+            String::new()
+        } else if partial.ends_with('/') {
+            partial.to_string()
+        } else if let Some(slash) = partial.rfind('/') {
+            partial[..=slash].to_string()
+        } else {
+            String::new()
+        };
+
+        if is_dir {
+            dirs.push((format!("{}{}/", dir_part, name), "dir".to_string()));
+        } else {
+            files.push((format!("{}{}", dir_part, name), "file".to_string()));
+        }
+    }
+
+    dirs.sort_by(|a, b| a.0.cmp(&b.0));
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut result = dirs;
+    result.extend(files);
+    result.truncate(20);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -995,73 +1064,4 @@ mod tests {
         assert!(editor.pending_images.is_empty());
         assert!(!editor.has_selection());
     }
-}
-
-fn complete_path(partial: &str) -> Vec<(String, String)> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-
-    let (dir, prefix) = if partial.is_empty() {
-        (cwd.clone(), String::new())
-    } else if partial.ends_with('/') {
-        let dir = if partial.starts_with('/') {
-            PathBuf::from(partial)
-        } else {
-            cwd.join(partial)
-        };
-        (dir, String::new())
-    } else {
-        let path = if partial.starts_with('/') {
-            PathBuf::from(partial)
-        } else {
-            cwd.join(partial)
-        };
-        let parent = path.parent().unwrap_or(&cwd).to_path_buf();
-        let prefix = path
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_default();
-        (parent, prefix)
-    };
-
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd,
-        Err(_) => return Vec::new(),
-    };
-
-    let show_hidden = prefix.starts_with('.');
-    let mut dirs: Vec<(String, String)> = Vec::new();
-    let mut files: Vec<(String, String)> = Vec::new();
-
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !show_hidden && name.starts_with('.') {
-            continue;
-        }
-        if !prefix.is_empty() && !name.starts_with(&prefix) {
-            continue;
-        }
-        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-        let dir_part = if partial.is_empty() {
-            String::new()
-        } else if partial.ends_with('/') {
-            partial.to_string()
-        } else if let Some(slash) = partial.rfind('/') {
-            partial[..=slash].to_string()
-        } else {
-            String::new()
-        };
-
-        if is_dir {
-            dirs.push((format!("{}{}/", dir_part, name), "dir".to_string()));
-        } else {
-            files.push((format!("{}{}", dir_part, name), "file".to_string()));
-        }
-    }
-
-    dirs.sort_by(|a, b| a.0.cmp(&b.0));
-    files.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut result = dirs;
-    result.extend(files);
-    result.truncate(20);
-    result
 }

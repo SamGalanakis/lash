@@ -25,14 +25,14 @@ pub use session_model::{
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
-    Repl,
+    Rlm,
     #[default]
     Standard,
 }
 
 pub fn execution_mode_supported(mode: ExecutionMode) -> bool {
     match mode {
-        ExecutionMode::Repl | ExecutionMode::Standard => true,
+        ExecutionMode::Rlm | ExecutionMode::Standard => true,
     }
 }
 
@@ -44,7 +44,7 @@ pub fn default_execution_mode() -> ExecutionMode {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct ToolParam {
     pub name: String,
-    /// REPL type: "str", "int", "float", "bool", "list", "dict", "any"
+    /// RLM type: "str", "int", "float", "bool", "list", "dict", "any"
     #[serde(default = "ToolParam::default_type")]
     pub r#type: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]

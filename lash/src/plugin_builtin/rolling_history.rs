@@ -28,8 +28,9 @@ use crate::plugin::{
 use crate::session_model::context::PreparedContext;
 use crate::session_model::format_tool_result_content;
 use crate::{
-    ExecutionMode, InputItem, Message, MessageOrigin, MessageRole, Part, PartKind, PromptUsage,
-    SessionStateEnvelope, ToolCallRecord, TurnInput, lash_cache_dir,
+    ContextApproach, ExecutionMode, InputItem, Message, MessageOrigin, MessageRole, Part, PartKind,
+    PromptUsage, RollingHistoryConfig, SessionStateEnvelope, ToolCallRecord, TurnInput,
+    lash_cache_dir,
 };
 
 const TOOL_RESULT_MAX_LINES: usize = DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES;
@@ -418,7 +419,7 @@ fn strip_all_image_attachments(messages: &mut [Message], placeholder: &str) -> b
 fn is_compaction_summary_message(message: &Message) -> bool {
     matches!(
         message.origin,
-        Some(MessageOrigin::Plugin { ref plugin_id }) if plugin_id == ROLLING_HISTORY_PLUGIN_ID
+        Some(MessageOrigin::Plugin { ref plugin_id, .. }) if plugin_id == ROLLING_HISTORY_PLUGIN_ID
     )
 }
 
@@ -545,13 +546,15 @@ async fn summarize_compaction_prefix(
             },
             policy: Some(policy),
             plugin_mode: SessionPluginMode::Fresh,
-            initial_messages: Vec::new(),
+            initial_nodes: Vec::new(),
             context_surface: SessionContextSurface {
                 include_base_tools: false,
                 tool_providers: Vec::new(),
                 prompt_contributions: Vec::new(),
+                prompt_overrides: Vec::new(),
             },
             mode_extras: ModeExtras::default(),
+            usage_source: Some("compaction".to_string()),
         })
         .await
         .map_err(HistoryError::from)?;
@@ -605,6 +608,7 @@ fn apply_compaction_summary(messages: &[Message], summary: &str, cut_point: usiz
         user_input: None,
         origin: Some(MessageOrigin::Plugin {
             plugin_id: ROLLING_HISTORY_PLUGIN_ID.to_string(),
+            transient: false,
         }),
     });
     out.extend_from_slice(&messages[cut_point..]);
@@ -634,13 +638,6 @@ async fn compact_messages_core(
     )))
 }
 
-/// Runtime config for the rolling-history plugin. Reserved — no tunable
-/// knobs are exposed yet; the struct exists so callers can opt in via
-/// `RollingHistoryPluginFactory::new(Default::default())` and future
-/// knobs land here without breaking callers.
-#[derive(Clone, Debug, Default)]
-pub struct RollingHistoryConfig;
-
 pub struct RollingHistoryPluginFactory {
     config: RollingHistoryConfig,
 }
@@ -662,10 +659,25 @@ impl PluginFactory for RollingHistoryPluginFactory {
         ROLLING_HISTORY_PLUGIN_ID
     }
 
-    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+    fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        if !matches!(ctx.context_approach, ContextApproach::RollingHistory(_)) {
+            return Ok(Arc::new(DisabledRollingHistoryPlugin));
+        }
         Ok(Arc::new(RollingHistoryPlugin {
             config: self.config.clone(),
         }))
+    }
+}
+
+struct DisabledRollingHistoryPlugin;
+
+impl SessionPlugin for DisabledRollingHistoryPlugin {
+    fn id(&self) -> &'static str {
+        ROLLING_HISTORY_PLUGIN_ID
+    }
+
+    fn register(&self, _reg: &mut PluginRegistrar) -> Result<(), PluginError> {
+        Ok(())
     }
 }
 
@@ -701,14 +713,11 @@ impl SessionPlugin for RollingHistoryPlugin {
     }
 }
 
-struct RollingTurnTransform {
-    #[allow(dead_code)]
-    config: RollingHistoryConfig,
-}
+struct RollingTurnTransform;
 
 impl RollingTurnTransform {
-    fn new(config: RollingHistoryConfig) -> Self {
-        Self { config }
+    fn new(_config: RollingHistoryConfig) -> Self {
+        Self
     }
 }
 
@@ -759,14 +768,11 @@ impl TurnContextTransform for RollingTurnTransform {
     }
 }
 
-struct RollingHistoryRewriter {
-    #[allow(dead_code)]
-    config: RollingHistoryConfig,
-}
+struct RollingHistoryRewriter;
 
 impl RollingHistoryRewriter {
-    fn new(config: RollingHistoryConfig) -> Self {
-        Self { config }
+    fn new(_config: RollingHistoryConfig) -> Self {
+        Self
     }
 }
 

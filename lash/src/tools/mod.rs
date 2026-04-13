@@ -60,7 +60,7 @@ impl NativeTool {
 pub(crate) fn native_tools(mode: crate::ExecutionMode) -> &'static [NativeTool] {
     match mode {
         crate::ExecutionMode::Standard => &[NativeTool::Batch],
-        crate::ExecutionMode::Repl => &[],
+        crate::ExecutionMode::Rlm => &[],
     }
 }
 
@@ -69,7 +69,7 @@ pub(crate) fn all_native_tool_names() -> impl Iterator<Item = &'static str> {
 }
 
 pub(crate) fn find_native_tool(mode: crate::ExecutionMode, name: &str) -> Option<NativeTool> {
-    if matches!(mode, crate::ExecutionMode::Repl) && name == NativeTool::Batch.name() {
+    if matches!(mode, crate::ExecutionMode::Rlm) && name == NativeTool::Batch.name() {
         return Some(NativeTool::Batch);
     }
     native_tools(mode)
@@ -400,14 +400,14 @@ mod tests {
     }
 
     #[test]
-    fn repl_does_not_surface_batch_as_native_tool() {
-        assert!(native_tools(crate::ExecutionMode::Repl).is_empty());
+    fn rlm_does_not_surface_batch_as_native_tool() {
+        assert!(native_tools(crate::ExecutionMode::Rlm).is_empty());
     }
 
     #[test]
-    fn repl_still_dispatches_batch_as_native_tool() {
+    fn rlm_still_dispatches_batch_as_native_tool() {
         assert!(matches!(
-            find_native_tool(crate::ExecutionMode::Repl, "batch"),
+            find_native_tool(crate::ExecutionMode::Rlm, "batch"),
             Some(NativeTool::Batch)
         ));
     }

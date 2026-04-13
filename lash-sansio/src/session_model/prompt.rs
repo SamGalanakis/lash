@@ -191,7 +191,7 @@ fn no_blocks(_ctx: &PromptRenderContext<'_>) -> Vec<PromptBlockState> {
 }
 
 fn execution_blocks(ctx: &PromptRenderContext<'_>) -> Vec<PromptBlockState> {
-    if matches!(ctx.prompt.mode, crate::ExecutionMode::Repl)
+    if matches!(ctx.prompt.mode, crate::ExecutionMode::Rlm)
         && !ctx.prompt.tool_list.trim().is_empty()
     {
         vec![PromptBlockState::new(
@@ -410,13 +410,14 @@ observe files
 - Verify the concrete end state before finalizing in prose when possible.
 - Do not describe what you would do instead of doing it.
 
-### REPL Language
+### RLM Language
 
 `lashlang` is a small workflow language for tool orchestration.
 
 - Values are null, booleans, numbers, strings, lists, and records.
 - List and record literals use comma-separated entries: `[a, b]`, `{ a: 1, b: 2 }`. Tool-argument records follow the same rule.
 - Assign with `name = expr`. Variables persist across iterations — anything you bind in one fenced block is still in scope on the next.
+- If the prompt includes a **Bound Variables** section, those names are already in scope. Access them directly in lashlang instead of rebuilding them from prose.
 - Bare expressions are valid statements. In `parallel { ... }`, a bare-expression branch contributes that value to the result list.
 - Call tools with `call tool_name { arg: expr }`.
 - Use `parallel { ... }` only for independent tool calls. If one call needs another call's output, do not put them in the same `parallel { ... }`.
@@ -443,7 +444,7 @@ fn intro_section(ctx: &PromptRenderContext<'_>) -> Option<String> {
 }
 
 fn execution_section(ctx: &PromptRenderContext<'_>) -> Option<String> {
-    Some(if matches!(ctx.prompt.mode, crate::ExecutionMode::Repl) {
+    Some(if matches!(ctx.prompt.mode, crate::ExecutionMode::Rlm) {
         REPL_EXECUTION_SECTION.to_string()
     } else {
         STANDARD_EXECUTION_SECTION.to_string()
@@ -497,13 +498,13 @@ mod tests {
                 content: "B".into(),
             },
         ];
-        let text = DefaultPromptRenderer.render(&prompt(crate::ExecutionMode::Repl), &overrides);
+        let text = DefaultPromptRenderer.render(&prompt(crate::ExecutionMode::Rlm), &overrides);
         assert!(text.starts_with("A\n\nB"));
     }
 
     #[test]
     fn guidance_contributions_render_with_default_guidance_section() {
-        let mut prompt = prompt(crate::ExecutionMode::Repl);
+        let mut prompt = prompt(crate::ExecutionMode::Rlm);
         prompt.contributions = vec![
             PromptContribution::guidance("first_guide", "First Guide", "First details."),
             PromptContribution::guidance("second_guide", "Second Guide", "Second details."),
@@ -517,7 +518,7 @@ mod tests {
 
     #[test]
     fn prompt_contributions_append_to_sections() {
-        let mut prompt = prompt(crate::ExecutionMode::Repl);
+        let mut prompt = prompt(crate::ExecutionMode::Rlm);
         prompt.contributions = vec![
             PromptContribution::environment("runtime_context", "Runtime Context", "cwd: /tmp/demo"),
             PromptContribution::guidance(
@@ -535,7 +536,7 @@ mod tests {
 
     #[test]
     fn prompt_orders_environment_after_execution() {
-        let mut prompt = prompt(crate::ExecutionMode::Repl);
+        let mut prompt = prompt(crate::ExecutionMode::Rlm);
         prompt.contributions = vec![
             PromptContribution::guidance("custom", "Custom", "More guidance."),
             PromptContribution::environment("runtime_context", "Runtime Context", "cwd: /repo"),
@@ -551,7 +552,7 @@ mod tests {
 
     #[test]
     fn block_overrides_can_target_structured_prompt_blocks() {
-        let mut prompt = prompt(crate::ExecutionMode::Repl);
+        let mut prompt = prompt(crate::ExecutionMode::Rlm);
         prompt.contributions = vec![PromptContribution::guidance(
             "project_instructions",
             "Project Instructions",
@@ -571,7 +572,7 @@ mod tests {
 
     #[test]
     fn prompt_does_not_emit_runtime_prune_status() {
-        let text = DefaultPromptRenderer.render(&prompt(crate::ExecutionMode::Repl), &[]);
+        let text = DefaultPromptRenderer.render(&prompt(crate::ExecutionMode::Rlm), &[]);
         assert!(!text.contains("Context-pruned turns this run"));
         assert!(!text.contains("Skip history-mining detours"));
     }

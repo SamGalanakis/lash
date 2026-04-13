@@ -599,7 +599,7 @@ fn draw_session_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
     let width = 80u16.min(history_area.width.saturating_sub(4));
     // Empty state still gets a visible row so the popup isn't a hollow box,
     // plus a footer row with the dismissal hint.
-    let list_height = picker.items.len().min(15).max(1) as u16;
+    let list_height = picker.items.len().clamp(1, 15) as u16;
     let height = list_height + 3; // title + list + footer
     if width < 4 || history_area.height < height {
         return;
@@ -700,7 +700,7 @@ fn draw_tree(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
     };
     let rows = tree.rows();
     let width = 96u16.min(history_area.width.saturating_sub(4));
-    let list_height = rows.len().min(18).max(1) as u16;
+    let list_height = rows.len().clamp(1, 18) as u16;
     let height = list_height + 3;
     if width < 4 || history_area.height < height {
         return;
@@ -800,7 +800,7 @@ fn draw_skill_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
         return;
     };
     let width = 60u16.min(history_area.width.saturating_sub(4));
-    let list_height = picker.items.len().min(15).max(1) as u16;
+    let list_height = picker.items.len().clamp(1, 15) as u16;
     let height = list_height + 3; // title + list + footer
     if width < 4 || history_area.height < height {
         return;

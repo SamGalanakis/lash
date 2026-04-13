@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use tokio::sync::Notify;
 
 use lash::{
-    InputItem, ModeExtras, ProgressSender, ReplCreateExtras, ReplTermination, SandboxMessage,
+    InputItem, ModeExtras, ProgressSender, RlmCreateExtras, RlmTermination, SandboxMessage,
     SessionCreateRequest, SessionEvent, SessionPluginMode, SessionStartPoint, ToolExecutionContext,
     ToolResult, TurnInput,
 };
@@ -85,8 +85,8 @@ impl DelegateTools {
                 })
                 .unwrap_or_else(|| "Result".to_string());
             match agent_execution_mode {
-                lash::ExecutionMode::Repl => format!(
-                    "{prompt}\n\nWhen you are done, reply in plain text with a single JSON object matching this schema exactly:\n{schema_str}\n\nDo not wrap the final JSON in `<repl>`, markdown fences, or extra commentary. The object should represent a `{model_name}`."
+                lash::ExecutionMode::Rlm => format!(
+                    "{prompt}\n\nWhen you are done, reply in plain text with a single JSON object matching this schema exactly:\n{schema_str}\n\nDo not wrap the final JSON in `<rlm>`, markdown fences, or extra commentary. The object should represent a `{model_name}`."
                 ),
                 lash::ExecutionMode::Standard => format!(
                     "{prompt}\n\nReturn your final answer as a single JSON object matching this schema exactly:\n{schema_str}\n\nDo not wrap it in markdown fences or extra commentary."
@@ -151,10 +151,17 @@ impl DelegateTools {
             }
 
             let assembled = host.await_turn(&turn_id).await;
+            let assembled_safe_text = assembled
+                .as_ref()
+                .ok()
+                .map(|turn| turn.assistant_output.safe_text.trim().to_string())
+                .filter(|text| !text.is_empty());
             let mut result_json = match assembled {
                 Ok(turn) => {
                     let result_text = if let Some(message) = final_message {
                         message
+                    } else if !turn.assistant_output.safe_text.trim().is_empty() {
+                        turn.assistant_output.safe_text.trim().to_string()
                     } else if !current_prose.trim().is_empty() {
                         current_prose.trim().to_string()
                     } else if !turn.assistant_output.raw_text.trim().is_empty() {
@@ -210,6 +217,13 @@ impl DelegateTools {
             };
 
             if result_json
+                .get("result")
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| value.is_empty())
+                && assembled_safe_text.is_some()
+            {
+                result_json["result"] = json!(assembled_safe_text.as_deref().unwrap_or(""));
+            } else if result_json
                 .get("result")
                 .and_then(|value| value.as_str())
                 .is_some_and(|value| value.is_empty())
@@ -363,7 +377,7 @@ impl DelegateTools {
         ToolResult::ok(json!(null))
     }
 
-    /// Spawn a typed sub-session that runs the given task with seeded
+    /// Spawn a typed sub-session that runs the given task with bound
     /// inputs and returns a record matching the declared output schema.
     /// Synchronous: blocks the calling lashlang `call predict { ... }`
     /// until the child terminates via `finish <expr>`.
@@ -396,11 +410,11 @@ impl DelegateTools {
             }
         };
 
-        // Force the child to run in REPL mode regardless of the parent.
-        // Typed termination only makes sense inside REPL where lashlang
+        // Force the child to run in RLM mode regardless of the parent.
+        // Typed termination only makes sense inside RLM where lashlang
         // `finish <expr>` is the captured terminator.
         let mut child_policy = self.policy.clone();
-        child_policy.execution_mode = lash::ExecutionMode::Repl;
+        child_policy.execution_mode = lash::ExecutionMode::Rlm;
         let session_id = uuid::Uuid::new_v4().to_string();
         // Reuse the existing low-tier-style filtered tool surface — the
         // child gets the parent's tools (minus the denied set) plus
@@ -417,13 +431,27 @@ impl DelegateTools {
             start: SessionStartPoint::Empty,
             policy: Some(child_policy),
             plugin_mode: SessionPluginMode::InheritCurrent,
-            initial_messages: Vec::new(),
+            initial_nodes: vars
+                .as_object()
+                .filter(|obj| !obj.is_empty())
+                .map(|obj| {
+                    vec![lash::SessionAppendNode::plugin(
+                        lash::INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE,
+                        serde_json::to_value(lash::RlmGlobalsPatchPluginBody {
+                            set: obj.clone(),
+                            unset: Vec::new(),
+                        })
+                        .unwrap_or(serde_json::Value::Null),
+                    )]
+                })
+                .unwrap_or_default(),
             context_surface,
-            mode_extras: ModeExtras::Repl(ReplCreateExtras {
-                termination: ReplTermination::Finish {
+            mode_extras: ModeExtras::Rlm(RlmCreateExtras {
+                termination: RlmTermination::Finish {
                     schema: Some(schema.clone()),
                 },
             }),
+            usage_source: Some("predict".to_string()),
         };
 
         let session = match context.host.create_session(create_request).await {
@@ -518,33 +546,12 @@ fn type_descriptor_to_json_schema(descriptor: &str) -> Result<Value, String> {
 fn render_predict_initial_message(task: &str, vars: &Value, schema: &Value) -> String {
     let mut sections: Vec<String> = Vec::new();
     sections.push(task.to_string());
-    if let Some(obj) = vars.as_object()
-        && !obj.is_empty()
-    {
-        let mut lines = vec!["## Inputs (already bound as lashlang variables)".to_string()];
-        for (name, value) in obj {
-            let preview = preview_value(value, 500);
-            lines.push(format!("- `{name}` = {preview}"));
-        }
-        sections.push(lines.join("\n"));
-    }
+    let _ = vars;
     let schema_pretty = serde_json::to_string_pretty(schema).unwrap_or_else(|_| schema.to_string());
     sections.push(format!(
         "## Required output\n\nWhen done, end the task by calling `finish <expr>` from inside a fenced ```lashlang block. The value MUST match this JSON Schema exactly:\n\n```json\n{schema_pretty}\n```\n\nIf your `finish` value fails validation, you'll see the error on the next iteration and can retry."
     ));
     sections.join("\n\n")
-}
-
-fn preview_value(value: &Value, max_chars: usize) -> String {
-    let serialized = match value {
-        Value::String(s) => format!("{s:?}"),
-        other => other.to_string(),
-    };
-    if serialized.len() > max_chars {
-        format!("{}…", &serialized[..max_chars])
-    } else {
-        serialized
-    }
 }
 
 #[cfg(test)]
@@ -596,15 +603,12 @@ mod tests {
     }
 
     #[test]
-    fn render_predict_initial_message_includes_inputs_and_schema() {
+    fn render_predict_initial_message_includes_typed_vars_and_schema() {
         let task = "Extract the longest line".to_string();
         let vars = json!({"path": "src/main.rs", "limit": 200});
         let schema = json!({"type": "object", "properties": {"line": {"type": "string"}}});
         let rendered = render_predict_initial_message(&task, &vars, &schema);
         assert!(rendered.contains("Extract the longest line"));
-        assert!(rendered.contains("## Inputs"));
-        assert!(rendered.contains("`path`"));
-        assert!(rendered.contains("`limit`"));
         assert!(rendered.contains("## Required output"));
         assert!(rendered.contains("\"type\": \"object\""));
         assert!(rendered.contains("`finish <expr>`"));

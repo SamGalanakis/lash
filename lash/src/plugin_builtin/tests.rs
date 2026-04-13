@@ -227,14 +227,14 @@ async fn prompt_context_plugin_contributes_environment_and_project_instruction_s
 }
 
 #[test]
-fn repl_tool_surface_plugin_shapes_search_surface_and_omitted_tool_note() {
+fn rlm_tool_surface_plugin_shapes_search_surface_and_omitted_tool_note() {
     let host = PluginHost::new(vec![Arc::new(StateToolsPluginFactory::new())]);
     let session = host.build_standard_session("root", None).expect("session");
 
     let surface = session
         .resolve_tool_surface(ToolSurfaceContext {
             session_id: "root".to_string(),
-            mode: ExecutionMode::Repl,
+            mode: ExecutionMode::Rlm,
             tools: vec![
                 ToolDefinition {
                     name: "search_tools".to_string(),
@@ -285,14 +285,14 @@ fn repl_tool_surface_plugin_shapes_search_surface_and_omitted_tool_note() {
 }
 
 #[test]
-fn repl_tool_surface_plugin_hides_search_tools_when_nothing_is_omitted() {
+fn rlm_tool_surface_plugin_hides_search_tools_when_nothing_is_omitted() {
     let host = PluginHost::new(vec![Arc::new(StateToolsPluginFactory::new())]);
     let session = host.build_standard_session("root", None).expect("session");
 
     let surface = session
         .resolve_tool_surface(ToolSurfaceContext {
             session_id: "root".to_string(),
-            mode: ExecutionMode::Repl,
+            mode: ExecutionMode::Rlm,
             tools: vec![
                 ToolDefinition {
                     name: "search_tools".to_string(),
@@ -1018,7 +1018,9 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             .get("next_turn_input")
             .and_then(|value| value.as_str())
             .is_some_and(|value| {
-                value.contains("Execute the plan in `.lash/plans/run-session.md`.")
+                value.contains(
+                    "The user approved the plan. Execute the plan in `.lash/plans/run-session.md` now"
+                )
                     && value.contains("User note: start with the safe slice")
             })
     );
@@ -1389,11 +1391,16 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
     assert_eq!(manager.created.lock().expect("created").len(), 0);
     assert!(matches!(create_request.start, SessionStartPoint::Empty));
     assert_eq!(create_request.plugin_mode, SessionPluginMode::Fresh);
-    assert_eq!(create_request.initial_messages.len(), 1);
-    assert_eq!(
-        create_request.initial_messages[0].content,
-        "Do a full, faithful implementation of the plan found at: .lash/plans/run-session.md"
-    );
+    assert_eq!(create_request.initial_nodes.len(), 1);
+    match &create_request.initial_nodes[0] {
+        crate::SessionAppendNode::Message { message } => {
+            assert_eq!(
+                message.content,
+                "Do a full, faithful implementation of the plan found at: .lash/plans/run-session.md"
+            );
+        }
+        other => panic!("expected initial message node, got {other:?}"),
+    }
     assert!(
         directives
             .iter()

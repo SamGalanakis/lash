@@ -1778,7 +1778,7 @@
     },
     {
       "op": "system_message",
-      "text": "lash-cli: 0.2.34\nlash-sansio: 0.2.34\nprovider: OpenAI Codex OAuth (codex)\nconfigured model: gpt-5.4\nresolved model: gpt-5.4\nexecution mode: standard\nvariant: high\ncontext window: 1050000\ncontext strategy: rolling_context\ntools: 15 (hash aa5f4bd82cbb)\ncwd: ~/code/lash\nsession: ashen-harbor"
+      "text": "lash-cli: 0.2.34\nlash-sansio: 0.2.34\nprovider: OpenAI Codex OAuth (codex)\nconfigured model: gpt-5.4\nresolved model: gpt-5.4\nexecution mode: standard\nvariant: high\ncontext window: 1050000\ncontext approach: rolling_history\ntools: 15 (hash aa5f4bd82cbb)\ncwd: ~/code/lash\nsession: ashen-harbor"
     },
     {
       "op": "input_insert_text",

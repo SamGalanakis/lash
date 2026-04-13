@@ -31,6 +31,11 @@ pub enum LashlangRequest {
         id: String,
         data: String,
     },
+    PatchGlobals {
+        id: String,
+        set: serde_json::Map<String, Value>,
+        unset: Vec<String>,
+    },
     Reset {
         id: String,
     },
@@ -66,6 +71,10 @@ pub enum LashlangResponse {
     SnapshotResult {
         id: String,
         data: String,
+    },
+    PatchGlobalsResult {
+        id: String,
+        error: Option<String>,
     },
     ResetResult {
         id: String,
@@ -147,14 +156,14 @@ impl RuntimeConfig {
 
 struct RuntimeState {
     config: RuntimeConfig,
-    repl: FlowState,
+    rlm: FlowState,
 }
 
 impl RuntimeState {
     fn new() -> Self {
         Self {
             config: RuntimeConfig::default(),
-            repl: FlowState::new(),
+            rlm: FlowState::new(),
         }
     }
 }
@@ -191,13 +200,13 @@ fn runtime_thread_main(
             LashlangRequest::Snapshot { id } => {
                 let _ = response_tx.send(LashlangResponse::SnapshotResult {
                     id,
-                    data: snapshot_runtime(&state.repl).unwrap_or_default(),
+                    data: snapshot_runtime(&state.rlm).unwrap_or_default(),
                 });
             }
             LashlangRequest::Restore { id, data } => {
                 let error = match restore_runtime(&data) {
-                    Ok(repl) => {
-                        state.repl = repl;
+                    Ok(rlm) => {
+                        state.rlm = rlm;
                         None
                     }
                     Err(err) => Some(err),
@@ -210,8 +219,12 @@ fn runtime_thread_main(
                     terminal_finish: None,
                 });
             }
+            LashlangRequest::PatchGlobals { id, set, unset } => {
+                let error = patch_globals(&mut state.rlm, set, unset).err();
+                let _ = response_tx.send(LashlangResponse::PatchGlobalsResult { id, error });
+            }
             LashlangRequest::Reset { id } => {
-                state.repl = FlowState::new();
+                state.rlm = FlowState::new();
                 let _ = response_tx.send(LashlangResponse::ResetResult { id });
             }
             LashlangRequest::Reconfigure {
@@ -256,7 +269,7 @@ fn execute_code(
         observations: &observations,
     };
 
-    match lashlang::execute(code, &mut state.repl, &host) {
+    match lashlang::execute(code, &mut state.rlm, &host) {
         Ok(ExecutionOutcome::Finished(value)) => {
             if accept_finish {
                 ExecOutcome {
@@ -377,14 +390,30 @@ fn tool_error_message(value: Value) -> String {
     }
 }
 
-fn snapshot_runtime(repl: &FlowState) -> Result<String, String> {
-    serde_json::to_string(&repl.snapshot()).map_err(|err| format!("failed to snapshot REPL: {err}"))
+fn snapshot_runtime(rlm: &FlowState) -> Result<String, String> {
+    serde_json::to_string(&rlm.snapshot()).map_err(|err| format!("failed to snapshot RLM: {err}"))
 }
 
 fn restore_runtime(data: &str) -> Result<FlowState, String> {
     let snapshot: FlowSnapshot =
-        serde_json::from_str(data).map_err(|err| format!("failed to restore REPL: {err}"))?;
+        serde_json::from_str(data).map_err(|err| format!("failed to restore RLM: {err}"))?;
     Ok(FlowState::from_snapshot(snapshot))
+}
+
+fn patch_globals(
+    rlm: &mut FlowState,
+    set: serde_json::Map<String, Value>,
+    unset: Vec<String>,
+) -> Result<(), String> {
+    let mut snapshot = rlm.snapshot();
+    for key in unset {
+        snapshot.globals.remove(&key);
+    }
+    for (key, value) in set {
+        snapshot.globals.insert(key, json_to_flow_value(value));
+    }
+    *rlm = FlowState::from_snapshot(snapshot);
+    Ok(())
 }
 
 fn is_code_complete(code: &str) -> bool {

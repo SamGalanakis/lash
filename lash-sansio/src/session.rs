@@ -8,7 +8,7 @@ pub struct ExecResponse {
     pub images: Vec<ToolImage>,
     pub error: Option<String>,
     pub duration_ms: u64,
-    /// When the surrounding session uses `ReplTermination::Finish`,
+    /// When the surrounding session uses `RlmTermination::Finish`,
     /// this carries the value the lashlang program ended with via
     /// `finish <expr>`. The dispatch loop uses it as the terminal
     /// result of the session. `None` for chat-style sessions and for

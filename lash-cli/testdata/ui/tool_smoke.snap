@@ -41,7 +41,7 @@ resolved model: gpt-5.4
 execution mode: standard
 variant: high
 context window: 1050000
-context strategy: rolling_context
+context approach: rolling_history
 tools: 15 (hash aa5f4bd82cbb)
 cwd: ~/code/lash
 session: ashen-harbor

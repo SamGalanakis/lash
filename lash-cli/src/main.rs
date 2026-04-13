@@ -18,10 +18,10 @@ mod overlay;
 mod plugin_surface;
 mod prompt_overrides;
 mod render;
-mod repl_stream_mask;
 mod repo_status;
 mod resume;
 mod resume_snapshot;
+mod rlm_stream_mask;
 mod scratch_tui;
 mod session_log;
 mod setup;
@@ -31,6 +31,7 @@ mod text_display;
 mod text_layout;
 mod theme;
 mod tree;
+mod turn_runner;
 mod ui_action;
 mod ui_perf;
 mod ui_resume;
@@ -89,6 +90,36 @@ fn autonomous_prompt_overrides() -> Vec<PromptSectionOverride> {
     ]
 }
 
+fn normalized_cli_args() -> Vec<std::ffi::OsString> {
+    let mut out = Vec::new();
+    let mut iter = std::env::args_os();
+    if let Some(bin) = iter.next() {
+        out.push(bin);
+    }
+    for arg in iter {
+        if let Some(raw) = arg.to_str() {
+            if raw == "-ca" {
+                out.push("--context-approach".into());
+                continue;
+            }
+            if let Some(value) = raw.strip_prefix("-ca=") {
+                out.push(format!("--context-approach={value}").into());
+                continue;
+            }
+            if raw == "-em" {
+                out.push("--execution-mode".into());
+                continue;
+            }
+            if let Some(value) = raw.strip_prefix("-em=") {
+                out.push(format!("--execution-mode={value}").into());
+                continue;
+            }
+        }
+        out.push(arg);
+    }
+    out
+}
+
 #[derive(Parser)]
 #[command(name = "lash-cli", bin_name = "lash", version = APP_VERSION, long_version = LONG_VERSION)]
 struct Args {
@@ -108,9 +139,60 @@ struct Args {
     #[arg(long)]
     variant: Option<String>,
 
-    /// Execution backend (`repl` or `standard`, default: `standard`)
+    /// Execution backend (`rlm` or `standard`, default: `standard`)
     #[arg(long = "execution-mode")]
     execution_mode: Option<String>,
+
+    /// Context approach (`rolling_history` or `observational_memory`)
+    #[arg(short = 'c', long = "context-approach", value_name = "APPROACH")]
+    context_approach: Option<String>,
+
+    /// OM: observe once recent raw history reaches this many tokens
+    #[arg(long = "om-observation-message-tokens", value_name = "TOKENS")]
+    om_observation_message_tokens: Option<usize>,
+
+    /// OM: keep this many recent raw-history tokens unobserved on the active tail
+    #[arg(long = "om-observation-buffer-tokens", value_name = "TOKENS")]
+    om_observation_buffer_tokens: Option<usize>,
+
+    /// OM: hard ceiling for unobserved raw-history tokens before the tail is fully eligible
+    #[arg(long = "om-observation-block-after-tokens", value_name = "TOKENS")]
+    om_observation_block_after_tokens: Option<usize>,
+
+    /// OM: maximum tokens per observer batch sent to the background worker
+    #[arg(long = "om-observation-max-tokens-per-batch", value_name = "TOKENS")]
+    om_observation_max_tokens_per_batch: Option<usize>,
+
+    /// OM: how much prior memory text to carry into observer runs
+    #[arg(long = "om-previous-observer-tokens", value_name = "TOKENS")]
+    om_previous_observer_tokens: Option<usize>,
+
+    /// OM: reflect once accumulated memory reaches this many tokens
+    #[arg(long = "om-reflection-observation-tokens", value_name = "TOKENS")]
+    om_reflection_observation_tokens: Option<usize>,
+
+    /// OM: start reflection buffering at this percent of reflection tokens
+    #[arg(
+        long = "om-reflection-buffer-activation-percent",
+        value_name = "PERCENT"
+    )]
+    om_reflection_buffer_activation_percent: Option<u16>,
+
+    /// OM: hard ceiling for reflection memory tokens
+    #[arg(long = "om-reflection-block-after-tokens", value_name = "TOKENS")]
+    om_reflection_block_after_tokens: Option<usize>,
+
+    /// RLM only: upsert a bound variable from JSON, for example `--rlm-var input='{\"path\":\"src\"}'`
+    #[arg(long = "rlm-var", value_name = "NAME=JSON")]
+    rlm_var: Vec<String>,
+
+    /// RLM only: load a JSON object of bound variables from a file and upsert them before the next turn
+    #[arg(long = "rlm-vars-file", value_name = "PATH")]
+    rlm_vars_file: Option<std::path::PathBuf>,
+
+    /// RLM only: remove a previously bound variable before the next turn
+    #[arg(long = "rlm-unset", value_name = "NAME")]
+    rlm_unset: Vec<String>,
 
     /// Base URL for the LLM API
     #[arg(long, default_value = "")]
@@ -159,6 +241,14 @@ struct Args {
     /// Run autonomously: execute prompt, print response to stdout, exit
     #[arg(short = 'p', long = "print")]
     print_prompt: Option<String>,
+
+    /// In autonomous mode, wait for plugin background work for this session before exiting
+    #[arg(long)]
+    await_background_work: bool,
+
+    /// In autonomous mode, write token-usage delta and cumulative session usage for the turn to this JSON file
+    #[arg(long, value_name = "PATH")]
+    turn_usage_json: Option<std::path::PathBuf>,
 
     /// Run the synthetic non-provider UI performance benchmark and exit
     #[arg(long, hide = true)]
@@ -224,7 +314,7 @@ fn cleanup_terminal() {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    let args = Args::parse_from(normalized_cli_args());
     if args.ui_perf_benchmark {
         return ui_perf::run_cli(
             args.ui_perf_out,

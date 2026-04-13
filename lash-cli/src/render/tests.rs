@@ -298,7 +298,7 @@ fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
 
 #[test]
 fn assistant_text_keeps_literal_repl_tags_in_prose() {
-    let text = "Use the literal tag <repl> and then close </repl>.";
+    let text = "Use the literal tag <rlm> and then close </rlm>.";
     assert_eq!(normalize_assistant_text(text), text);
 }
 
@@ -825,7 +825,7 @@ fn snippet_preview_renders_markdown_list_snippet_without_literal_emphasis_marker
         path: "README.md".into(),
         start_line: 11,
         end_line: 14,
-        content: "- **Two execution modes**\n  - `repl` (default) — runs a persistent `lashlang` DSL runtime.\n  - `standard` — uses the provider's native tool-calling protocol directly.".into(),
+        content: "- **Two execution modes**\n  - `rlm` (default) — runs a persistent `lashlang` DSL runtime.\n  - `standard` — uses the provider's native tool-calling protocol directly.".into(),
         render_mode: SnippetRenderMode::Markdown,
         language: Some("markdown".into()),
     };
@@ -848,7 +848,7 @@ fn snippet_preview_renders_markdown_list_snippet_without_literal_emphasis_marker
             .iter()
             .any(|line| line.contains("**Two execution modes**"))
     );
-    assert!(text.iter().any(|line| line.contains("repl")));
+    assert!(text.iter().any(|line| line.contains("rlm")));
     assert!(text.iter().any(|line| line.contains("standard")));
 }
 

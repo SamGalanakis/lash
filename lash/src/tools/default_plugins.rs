@@ -28,6 +28,7 @@ pub fn default_tool_plugin_factories(
     let mut factories: Vec<Arc<dyn PluginFactory>> = vec![
         Arc::new(crate::BuiltinToolResultProjectionPluginFactory::default()),
         Arc::new(crate::BuiltinRollingHistoryPluginFactory::default()),
+        Arc::new(crate::BuiltinObservationalMemoryPluginFactory),
         Arc::new(StaticPluginFactory::new(
             "shell",
             PluginSpec::new()
@@ -78,7 +79,7 @@ pub fn default_tool_plugin_factories(
         )));
     }
 
-    if matches!(mode, ExecutionMode::Repl) {
+    if matches!(mode, ExecutionMode::Rlm) {
         factories.push(Arc::new(super::StateToolsPluginFactory::new()));
     }
 

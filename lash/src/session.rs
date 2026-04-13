@@ -48,9 +48,9 @@ pub enum SessionError {
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("repl execution mode is not available in this build or session")]
-    ReplUnavailable,
-    #[error("repl runtime exited unexpectedly")]
+    #[error("rlm execution mode is not available in this build or session")]
+    RlmUnavailable,
+    #[error("rlm runtime exited unexpectedly")]
     RuntimeExited,
     #[error("protocol error: {0}")]
     Protocol(String),
@@ -58,12 +58,13 @@ pub enum SessionError {
 
 pub struct Session {
     session_id: String,
-    repl_runtime: Option<LashlangRuntime>,
+    rlm_runtime: Option<LashlangRuntime>,
     last_repl_tools_json: Option<String>,
     services: RuntimeServices,
     include_base_tools: bool,
     context_tools: Vec<Arc<dyn ToolProvider>>,
     context_prompt_contributions: Vec<PromptContribution>,
+    context_prompt_overrides: Vec<crate::PromptSectionOverride>,
     tool_calls: Vec<ToolCallRecord>,
     tool_images: Vec<ToolImage>,
     message_tx: Option<UnboundedSender<SandboxMessage>>,
@@ -80,21 +81,22 @@ impl Session {
 
         let mut session = Self {
             session_id: session_id.to_string(),
-            repl_runtime: None,
+            rlm_runtime: None,
             last_repl_tools_json: None,
             services,
             include_base_tools: true,
             context_tools: Vec::new(),
             context_prompt_contributions: Vec::new(),
+            context_prompt_overrides: Vec::new(),
             tool_calls: Vec::new(),
             tool_images: Vec::new(),
             message_tx: None,
             scratch_dir,
         };
 
-        if matches!(execution_mode, crate::ExecutionMode::Repl) {
+        if matches!(execution_mode, crate::ExecutionMode::Rlm) {
             let runtime = LashlangRuntime::start()?;
-            session.repl_runtime = Some(runtime);
+            session.rlm_runtime = Some(runtime);
             session.initialize_execution_surface(session_id).await?;
         }
 
@@ -102,13 +104,13 @@ impl Session {
     }
 
     fn runtime(&self) -> Result<&LashlangRuntime, SessionError> {
-        self.repl_runtime
+        self.rlm_runtime
             .as_ref()
-            .ok_or(SessionError::ReplUnavailable)
+            .ok_or(SessionError::RlmUnavailable)
     }
 
     pub fn supports_repl(&self) -> bool {
-        self.repl_runtime.is_some()
+        self.rlm_runtime.is_some()
     }
 
     pub fn tools(&self) -> Arc<dyn ToolProvider> {
@@ -134,15 +136,21 @@ impl Session {
         &mut self,
         tool_providers: Vec<Arc<dyn ToolProvider>>,
         prompt_contributions: Vec<PromptContribution>,
+        prompt_overrides: Vec<crate::PromptSectionOverride>,
         include_base_tools: bool,
     ) {
         self.include_base_tools = include_base_tools;
         self.context_tools = tool_providers;
         self.context_prompt_contributions = prompt_contributions;
+        self.context_prompt_overrides = prompt_overrides;
     }
 
     pub fn context_prompt_contributions(&self) -> &[PromptContribution] {
         &self.context_prompt_contributions
+    }
+
+    pub fn context_prompt_overrides(&self) -> &[crate::PromptSectionOverride] {
+        &self.context_prompt_overrides
     }
 
     pub fn history_store(&self) -> Option<Arc<dyn crate::store::RuntimeStore>> {
@@ -183,8 +191,8 @@ impl Session {
         crate::tools::project_tool_catalog(self.execution_surface(session_id, mode).enabled_tools())
     }
 
-    fn repl_tools_json(&self, session_id: &str) -> String {
-        let catalog = self.tool_catalog(session_id, crate::ExecutionMode::Repl);
+    fn rlm_tools_json(&self, session_id: &str) -> String {
+        let catalog = self.tool_catalog(session_id, crate::ExecutionMode::Rlm);
         tracing::debug!(
             session_id,
             tool_count = catalog.len(),
@@ -192,7 +200,7 @@ impl Session {
                 .iter()
                 .filter_map(|tool| tool.get("name").and_then(|value| value.as_str()))
                 .collect::<Vec<_>>(),
-            "serializing REPL tool catalog"
+            "serializing RLM tool catalog"
         );
         serde_json::to_string(&catalog).unwrap_or_else(|_| "[]".to_string())
     }
@@ -211,12 +219,12 @@ impl Session {
         self.message_tx = None;
     }
 
-    /// Execute code in the persistent lashlang REPL.
+    /// Execute code in the persistent lashlang RLM.
     ///
     /// `accept_finish` controls how `lashlang::ExecutionOutcome::Finished`
     /// is treated: when true, the captured value flows back through
     /// `ExecResponse::terminal_finish`; when false (today's chat-style
-    /// REPL contract), it surfaces as an error telling the model to
+    /// RLM contract), it surfaces as an error telling the model to
     /// terminate via prose instead.
     pub async fn run_code(
         &mut self,
@@ -253,15 +261,15 @@ impl Session {
         })?;
 
         // Read messages until we get exec_result.
-        // Tool calls are spawned as concurrent tokio tasks so REPL parallel branches
+        // Tool calls are spawned as concurrent tokio tasks so RLM parallel branches
         // can dispatch multiple tools at the same time.
         let dispatch = Arc::new(ToolDispatchContext {
             plugins: Arc::clone(self.plugins()),
             tools: self.tools(),
-            surface: self.execution_surface(session_id, crate::ExecutionMode::Repl),
+            surface: self.execution_surface(session_id, crate::ExecutionMode::Rlm),
             host,
             session_id: session_id.to_string(),
-            execution_mode: crate::ExecutionMode::Repl,
+            execution_mode: crate::ExecutionMode::Rlm,
             event_tx: event_tx.clone(),
             turn_injection_bridge: self.turn_injection_bridge().clone(),
         });
@@ -365,6 +373,7 @@ impl Session {
                     // Unexpected but harmless
                 }
                 LashlangResponse::SnapshotResult { .. }
+                | LashlangResponse::PatchGlobalsResult { .. }
                 | LashlangResponse::ResetResult { .. }
                 | LashlangResponse::ReconfigureResult { .. }
                 | LashlangResponse::CheckCompleteResult { .. } => {
@@ -376,11 +385,11 @@ impl Session {
         }
     }
 
-    /// Check if a code string is syntactically complete for the lashlang REPL.
+    /// Check if a code string is syntactically complete for the lashlang RLM.
     pub fn check_complete(&self, code: &str) -> Result<bool, SessionError> {
         tracing::debug!(
             code_preview = %code.chars().take(300).collect::<String>(),
-            "checking REPL completeness"
+            "checking RLM completeness"
         );
         self.runtime()?.send(LashlangRequest::CheckComplete {
             code: code.to_string(),
@@ -390,14 +399,14 @@ impl Session {
             .map_err(|_| SessionError::RuntimeExited)?;
         match response {
             LashlangResponse::CheckCompleteResult { is_complete } => {
-                tracing::debug!(is_complete, "received REPL completeness result");
+                tracing::debug!(is_complete, "received RLM completeness result");
                 Ok(is_complete)
             }
             _ => Ok(false),
         }
     }
 
-    /// Reset the lashlang REPL state and re-register tools.
+    /// Reset the lashlang RLM state and re-register tools.
     pub async fn reset(&mut self) -> Result<(), SessionError> {
         let id = uuid::Uuid::new_v4().to_string();
         self.runtime()?
@@ -414,19 +423,52 @@ impl Session {
         Ok(())
     }
 
-    /// Re-register the current tool definitions in the live REPL.
+    /// Apply an in-place patch to the lashlang `FlowState.globals`
+    /// without replacing the rest of the execution snapshot.
+    pub async fn apply_rlm_globals_patch(
+        &mut self,
+        patch: &crate::RlmGlobalsPatchPluginBody,
+    ) -> Result<(), SessionError> {
+        if !self.supports_repl() || patch.is_empty() {
+            return Ok(());
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        self.runtime()?.send(LashlangRequest::PatchGlobals {
+            id: id.clone(),
+            set: patch.set.clone(),
+            unset: patch.unset.clone(),
+        })?;
+
+        loop {
+            match self.runtime()?.recv()? {
+                LashlangResponse::PatchGlobalsResult { id: got_id, error } if got_id == id => {
+                    if let Some(err) = error {
+                        return Err(SessionError::Protocol(format!(
+                            "failed to patch RLM globals: {err}"
+                        )));
+                    }
+                    break;
+                }
+                _ => continue,
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Re-register the current tool definitions in the live RLM.
     /// This is intended for turn-boundary runtime reconfiguration.
     pub async fn refresh_execution_surface(&mut self) -> Result<(), SessionError> {
         if !self.supports_repl() {
             return Ok(());
         }
 
-        let tools_json = self.repl_tools_json(&self.session_id);
+        let tools_json = self.rlm_tools_json(&self.session_id);
         tracing::debug!(
             session_id = self.session_id,
             generation = self.tools().dynamic_generation().unwrap_or(0),
             tools_json_preview = %tools_json.chars().take(400).collect::<String>(),
-            "refreshing REPL execution surface"
+            "refreshing RLM execution surface"
         );
         if self.last_repl_tools_json.as_deref() == Some(tools_json.as_str()) {
             return Ok(());
@@ -462,11 +504,11 @@ impl Session {
     }
 
     async fn initialize_execution_surface(&mut self, session_id: &str) -> Result<(), SessionError> {
-        let tools_json = self.repl_tools_json(session_id);
+        let tools_json = self.rlm_tools_json(session_id);
         tracing::debug!(
             session_id,
             tools_json_preview = %tools_json.chars().take(400).collect::<String>(),
-            "initializing REPL execution surface"
+            "initializing RLM execution surface"
         );
         self.runtime()?.send(LashlangRequest::Init {
             tools_json: tools_json.clone(),
@@ -522,17 +564,17 @@ impl Session {
 
         if parsed.get("version").is_none() || parsed.get("engine").is_none() {
             return Err(SessionError::Protocol(
-                "unsupported REPL snapshot format".to_string(),
+                "unsupported RLM snapshot format".to_string(),
             ));
         }
         if parsed.get("version").and_then(|v| v.as_u64()) != Some(REPL_SNAPSHOT_VERSION as u64) {
             return Err(SessionError::Protocol(
-                "unsupported REPL snapshot version".to_string(),
+                "unsupported RLM snapshot version".to_string(),
             ));
         }
         if parsed.get("engine").and_then(|v| v.as_str()) != Some("lashlang") {
             return Err(SessionError::Protocol(
-                "unsupported REPL snapshot engine".to_string(),
+                "unsupported RLM snapshot engine".to_string(),
             ));
         }
 
@@ -713,12 +755,17 @@ mod tests {
             PluginSpec::new().with_tool_provider(Arc::clone(&tools)),
         ))]);
         let plugin_session = plugin_host
-            .build_session("root", crate::ExecutionMode::Repl, None)
+            .build_session(
+                "root",
+                crate::ExecutionMode::Rlm,
+                crate::ContextApproach::default(),
+                None,
+            )
             .expect("plugin session");
         let mut session = Session::new(
             crate::RuntimeServices::new(plugin_session),
             "root",
-            crate::ExecutionMode::Repl,
+            crate::ExecutionMode::Rlm,
         )
         .await
         .expect("session");
@@ -755,7 +802,7 @@ finish "ok"
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn repl_run_code_can_call_common_repo_tools_without_model() {
+    async fn rlm_run_code_can_call_common_repo_tools_without_model() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("alpha.txt"), "hello\n").expect("write alpha");
         std::fs::write(temp.path().join("beta.rs"), "fn main() {}\n").expect("write beta");
@@ -766,16 +813,21 @@ finish "ok"
             ..Default::default()
         };
         let plugin_host = PluginHost::new(crate::default_tool_plugin_factories(
-            crate::ExecutionMode::Repl,
+            crate::ExecutionMode::Rlm,
             deps,
         ));
         let plugin_session = plugin_host
-            .build_session("root", crate::ExecutionMode::Repl, None)
+            .build_session(
+                "root",
+                crate::ExecutionMode::Rlm,
+                crate::ContextApproach::default(),
+                None,
+            )
             .expect("plugin session");
         let mut session = Session::new(
             crate::RuntimeServices::new(plugin_session),
             "root",
-            crate::ExecutionMode::Repl,
+            crate::ExecutionMode::Rlm,
         )
         .await
         .expect("session");
@@ -788,14 +840,12 @@ finish "ok"
                 "root",
                 manager,
                 &event_tx,
-                &format!(
-                    r#"
-files = call ls {{ path: "." }}
-match = call grep {{ query: "fn main" }}
+                r#"
+files = call ls { path: "." }
+match = call grep { query: "fn main" }
 observe files
 observe match
 "#,
-                ),
                 false,
             )
             .await
@@ -803,7 +853,7 @@ observe match
 
         assert!(
             response.error.is_none(),
-            "unexpected repl error: {:?}",
+            "unexpected rlm error: {:?}",
             response.error
         );
         assert_eq!(response.tool_calls.len(), 2);

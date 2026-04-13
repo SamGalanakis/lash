@@ -359,6 +359,7 @@ mod tests {
                 configured_model: "gpt-test".to_string(),
                 context_window: 200_000,
                 execution_mode: lash::ExecutionMode::Standard,
+                context_approach: lash::ContextApproach::default(),
                 model_variant: None,
             },
             &lash::PersistedTurnState {
@@ -373,6 +374,7 @@ mod tests {
             }),
             None,
             None,
+            &[],
         );
         store.save_session_graph(graph);
     }

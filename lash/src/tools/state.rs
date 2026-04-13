@@ -5,8 +5,8 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::plugin::{
-    PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
-    ToolSurfaceContribution, ToolSurfaceOverride,
+    PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, PromptHookContext,
+    SessionPlugin, ToolSurfaceContribution, ToolSurfaceOverride,
 };
 #[cfg(feature = "sqlite-store")]
 use crate::search::{SearchDoc, SearchMode, limit_from_args, rank_docs};
@@ -24,7 +24,7 @@ pub struct StateToolsPluginFactory {
     provider: Arc<StateStore>,
 }
 
-struct ReplStateToolsPlugin {
+struct RlmStateToolsPlugin {
     provider: Arc<StateStore>,
 }
 
@@ -226,13 +226,13 @@ impl PluginFactory for StateToolsPluginFactory {
     }
 
     fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        Ok(Arc::new(ReplStateToolsPlugin {
+        Ok(Arc::new(RlmStateToolsPlugin {
             provider: Arc::clone(&self.provider),
         }))
     }
 }
 
-pub(crate) fn repl_state_prompt_contributions(context: &PromptContext) -> Vec<PromptContribution> {
+pub(crate) fn rlm_state_prompt_contributions(context: &PromptContext) -> Vec<PromptContribution> {
     if context.omitted_tool_count == 0 {
         return Vec::new();
     }
@@ -244,7 +244,62 @@ pub(crate) fn repl_state_prompt_contributions(context: &PromptContext) -> Vec<Pr
     )]
 }
 
-impl SessionPlugin for ReplStateToolsPlugin {
+fn rlm_bound_variables_prompt_contributions(ctx: &PromptHookContext) -> Vec<PromptContribution> {
+    let globals = ctx.state.session_graph.projected_rlm_globals();
+    if globals.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = vec![
+        "These variables are already bound in lashlang. Access them directly in fenced `lashlang` code; do not recreate them manually.".to_string(),
+    ];
+    let mut entries = globals.into_iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    for (name, value) in entries {
+        let ty = json_value_type_label(&value);
+        let preview = preview_value(&value, 200);
+        lines.push(format!("- `{name}`: {ty} = {preview}"));
+    }
+
+    vec![PromptContribution::guidance(
+        "bound_variables",
+        "Bound Variables",
+        lines.join("\n"),
+    )]
+}
+
+fn json_value_type_label(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(n) => {
+            if n.is_f64() && n.as_f64().is_some_and(|v| v.fract() != 0.0) {
+                "float"
+            } else {
+                "int"
+            }
+        }
+        serde_json::Value::String(_) => "str",
+        serde_json::Value::Array(_) => "list",
+        serde_json::Value::Object(_) => "record",
+    }
+}
+
+fn preview_value(value: &serde_json::Value, max_chars: usize) -> String {
+    let serialized = match value {
+        serde_json::Value::String(s) => format!("{s:?}"),
+        other => other.to_string(),
+    };
+    let mut chars = serialized.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        serialized
+    }
+}
+
+impl SessionPlugin for RlmStateToolsPlugin {
     fn id(&self) -> &'static str {
         "state"
     }
@@ -253,7 +308,11 @@ impl SessionPlugin for ReplStateToolsPlugin {
         reg.tools()
             .provider(Arc::clone(&self.provider) as Arc<dyn ToolProvider>)?;
         reg.prompt().contribute(Arc::new(move |ctx| {
-            Box::pin(async move { Ok(repl_state_prompt_contributions(&ctx.prompt)) })
+            Box::pin(async move {
+                let mut contributions = rlm_state_prompt_contributions(&ctx.prompt);
+                contributions.extend(rlm_bound_variables_prompt_contributions(&ctx));
+                Ok(contributions)
+            })
         }));
         reg.surface().contribute(Arc::new(|ctx| {
             let omitted_tool_count = ctx
@@ -407,23 +466,52 @@ mod tests {
             omitted_tool_count: 1,
             ..PromptContext::default()
         };
-        let with_omissions = repl_state_prompt_contributions(&prompt);
+        let with_omissions = rlm_state_prompt_contributions(&prompt);
         assert_eq!(with_omissions.len(), 1);
         assert!(with_omissions[0].content.contains("search_tools"));
 
         prompt.omitted_tool_count = 0;
-        assert!(repl_state_prompt_contributions(&prompt).is_empty());
+        assert!(rlm_state_prompt_contributions(&prompt).is_empty());
     }
 
     #[test]
-    fn repl_tool_surface_hides_search_tools_when_nothing_is_omitted() {
+    fn prompt_contributions_include_bound_rlm_variables_from_graph_nodes() {
+        let mut snapshot = crate::SessionStateEnvelope::default();
+        snapshot.policy.execution_mode = crate::ExecutionMode::Rlm;
+        snapshot.session_graph.append_plugin(
+            crate::INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE,
+            serde_json::to_value(crate::RlmGlobalsPatchPluginBody {
+                set: serde_json::Map::from_iter([
+                    ("input".to_string(), json!({"path":"src/main.rs"})),
+                    ("limit".to_string(), json!(200)),
+                ]),
+                unset: Vec::new(),
+            })
+            .expect("patch json"),
+        );
+        let ctx = crate::PromptHookContext {
+            session_id: "root".to_string(),
+            host: Arc::new(MockSessionManager::default()),
+            prompt: PromptContext::default(),
+            state: snapshot,
+        };
+
+        let contributions = rlm_bound_variables_prompt_contributions(&ctx);
+        assert_eq!(contributions.len(), 1);
+        assert_eq!(contributions[0].title.as_deref(), Some("Bound Variables"));
+        assert!(contributions[0].content.contains("`input`: record"));
+        assert!(contributions[0].content.contains("`limit`: int"));
+    }
+
+    #[test]
+    fn rlm_tool_surface_hides_search_tools_when_nothing_is_omitted() {
         let host = crate::PluginHost::new(vec![Arc::new(StateToolsPluginFactory::new())]);
         let session = host.build_standard_session("root", None).expect("session");
 
         let surface = session
             .resolve_tool_surface(crate::plugin::ToolSurfaceContext {
                 session_id: "root".to_string(),
-                mode: ExecutionMode::Repl,
+                mode: ExecutionMode::Rlm,
                 tools: vec![
                     ToolDefinition {
                         name: "search_tools".to_string(),

@@ -5,8 +5,8 @@ use chrono::Utc;
 use sha2::Digest;
 
 use crate::{
-    DynamicStateSnapshot, ExecutionMode, Message, MessageRole, PluginSessionSnapshot, PromptUsage,
-    TokenUsage, ToolCallRecord,
+    ContextApproach, DynamicStateSnapshot, ExecutionMode, Message, MessageRole,
+    PluginSessionSnapshot, PromptUsage, TokenLedgerEntry, TokenUsage, ToolCallRecord,
 };
 
 pub const INTERNAL_TOOL_CALL_PLUGIN_TYPE: &str = "lash.tool_call_record";
@@ -15,6 +15,8 @@ pub const INTERNAL_TURN_STATE_PLUGIN_TYPE: &str = "lash.turn_state";
 pub const INTERNAL_DYNAMIC_STATE_PLUGIN_TYPE: &str = "lash.dynamic_state";
 pub const INTERNAL_PLUGIN_SNAPSHOT_PLUGIN_TYPE: &str = "lash.plugin_snapshot";
 pub const INTERNAL_EXECUTION_STATE_PLUGIN_TYPE: &str = "lash.execution_state";
+pub const INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE: &str = "lash.execution.rlm.globals_patch";
+pub const INTERNAL_TOKEN_LEDGER_PLUGIN_TYPE: &str = "lash.token_ledger";
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct SessionGraph {
@@ -58,6 +60,8 @@ pub struct PersistedSessionConfig {
     pub configured_model: String,
     pub context_window: u64,
     pub execution_mode: ExecutionMode,
+    #[serde(default)]
+    pub context_approach: ContextApproach,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_variant: Option<String>,
 }
@@ -69,6 +73,20 @@ pub struct PersistedTurnState {
     pub token_usage: TokenUsage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt_usage: Option<PromptUsage>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct RlmGlobalsPatchPluginBody {
+    #[serde(default)]
+    pub set: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    pub unset: Vec<String>,
+}
+
+impl RlmGlobalsPatchPluginBody {
+    pub fn is_empty(&self) -> bool {
+        self.set.is_empty() && self.unset.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -187,9 +205,16 @@ impl SessionGraph {
     }
 
     pub fn project_messages(&self) -> Vec<Message> {
+        let mut seen_ids = HashSet::new();
         self.active_path_nodes()
             .into_iter()
-            .filter_map(|node| node.message().cloned())
+            .filter_map(|node| {
+                let message = node.message()?;
+                if message.is_transient() || !seen_ids.insert(message.id.clone()) {
+                    return None;
+                }
+                Some(message.clone())
+            })
             .collect()
     }
 
@@ -267,6 +292,27 @@ impl SessionGraph {
             .map(|body| body.snapshot_bytes())
     }
 
+    pub fn latest_token_ledger(&self) -> Option<Vec<TokenLedgerEntry>> {
+        self.latest_plugin_state(INTERNAL_TOKEN_LEDGER_PLUGIN_TYPE)
+    }
+
+    pub fn projected_rlm_globals(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut globals = serde_json::Map::new();
+        for body in self.active_path_plugins(INTERNAL_RLM_GLOBALS_PATCH_PLUGIN_TYPE) {
+            let Ok(patch) = serde_json::from_value::<RlmGlobalsPatchPluginBody>(body.clone())
+            else {
+                continue;
+            };
+            for key in patch.unset {
+                globals.remove(&key);
+            }
+            for (key, value) in patch.set {
+                globals.insert(key, value);
+            }
+        }
+        globals
+    }
+
     pub fn record_runtime_state(
         &mut self,
         config: &PersistedSessionConfig,
@@ -274,6 +320,7 @@ impl SessionGraph {
         dynamic_state: Option<&DynamicStateSnapshot>,
         plugin_snapshot: Option<&PluginSessionSnapshot>,
         execution_state_snapshot: Option<&[u8]>,
+        token_ledger: &[TokenLedgerEntry],
     ) {
         let _ = self.set_plugin_state(INTERNAL_SESSION_CONFIG_PLUGIN_TYPE, config);
         let _ = self.set_plugin_state(INTERNAL_TURN_STATE_PLUGIN_TYPE, turn_state);
@@ -287,6 +334,7 @@ impl SessionGraph {
             INTERNAL_EXECUTION_STATE_PLUGIN_TYPE,
             &ExecutionStatePluginBody::from_snapshot(execution_state_snapshot),
         );
+        let _ = self.set_plugin_state(INTERNAL_TOKEN_LEDGER_PLUGIN_TYPE, &token_ledger);
     }
 
     pub fn user_message_count(&self) -> usize {
@@ -308,6 +356,12 @@ impl SessionGraph {
 
     pub fn branch_to(&mut self, node_id: Option<String>) {
         self.leaf_node_id = node_id;
+    }
+
+    pub fn active_path_contains(&self, node_id: &str) -> bool {
+        self.active_path_nodes()
+            .into_iter()
+            .any(|node| node.node_id == node_id)
     }
 
     /// If `leaf_node_id` points to a node that no longer exists in
@@ -350,9 +404,20 @@ impl SessionGraph {
         let target = build_projection_items(messages, tool_calls);
 
         let mut preserved_ids = Vec::new();
+        let mut seen_projection_keys = HashSet::new();
         let mut target_idx = 0usize;
         for node in current_nodes {
+            if node
+                .message()
+                .map(|message| message.is_transient())
+                .unwrap_or(false)
+            {
+                continue;
+            }
             if let Some(key) = recognized_projection_key(node) {
+                if !seen_projection_keys.insert(key.clone()) {
+                    continue;
+                }
                 let Some(target_item) = target.get(target_idx) else {
                     break;
                 };
@@ -376,14 +441,24 @@ impl SessionGraph {
         for item in target.into_iter().skip(target_idx) {
             let parent_node_id = self.leaf_node_id.clone();
             let node = match item {
-                ProjectionItem::Message(message) => SessionNodeRecord {
-                    node_id: message.id.clone(),
-                    parent_node_id,
-                    timestamp: Utc::now().to_rfc3339(),
-                    payload: SessionNodePayload::Message {
-                        message: message.clone(),
-                    },
-                },
+                ProjectionItem::Message(message) => {
+                    if existing_ids.contains(&message.id) {
+                        tracing::warn!(
+                            message_id = %message.id,
+                            "skipping duplicate message id while merging active projection"
+                        );
+                        self.leaf_node_id = Some(message.id.clone());
+                        continue;
+                    }
+                    SessionNodeRecord {
+                        node_id: message.id.clone(),
+                        parent_node_id,
+                        timestamp: Utc::now().to_rfc3339(),
+                        payload: SessionNodePayload::Message {
+                            message: message.clone(),
+                        },
+                    }
+                }
                 ProjectionItem::ToolCall { stable_key, record } => {
                     let node_id = unique_plugin_node_id(&stable_key, &existing_ids);
                     SessionNodeRecord {
@@ -497,7 +572,11 @@ fn build_projection_items<'a>(
     tool_calls: &'a [ToolCallRecord],
 ) -> Vec<ProjectionItem<'a>> {
     let mut first_message_for_call = HashMap::<String, usize>::new();
-    for (idx, message) in messages.iter().enumerate() {
+    let projected_messages = messages
+        .iter()
+        .filter(|message| !message.is_transient())
+        .collect::<Vec<_>>();
+    for (idx, message) in projected_messages.iter().enumerate() {
         for part in &message.parts {
             if let Some(call_id) = &part.tool_call_id {
                 first_message_for_call.entry(call_id.clone()).or_insert(idx);
@@ -512,7 +591,7 @@ fn build_projection_items<'a>(
             .call_id
             .as_ref()
             .and_then(|call_id| first_message_for_call.get(call_id).copied())
-            .unwrap_or_else(|| messages.len().saturating_sub(1));
+            .unwrap_or_else(|| projected_messages.len().saturating_sub(1));
         anchored
             .entry(anchor)
             .or_default()
@@ -520,7 +599,7 @@ fn build_projection_items<'a>(
     }
 
     let mut out = Vec::new();
-    for (idx, message) in messages.iter().enumerate() {
+    for (idx, message) in projected_messages.iter().enumerate() {
         out.push(ProjectionItem::Message(message));
         if let Some(items) = anchored.remove(&idx) {
             out.extend(items);
@@ -594,4 +673,87 @@ fn first_message_search_text(message: &Message) -> String {
         .join("\n\n")
         .trim()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{MessageRole, Part, PartKind, PruneState};
+
+    fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
+        Message {
+            id: id.to_string(),
+            role,
+            parts: vec![Part {
+                id: format!("{id}.p0"),
+                kind: PartKind::Text,
+                content: content.to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                prune_state: PruneState::Intact,
+            }],
+            user_input: None,
+            origin: None,
+        }
+    }
+
+    fn transient_plugin_message(id: &str, role: MessageRole, content: &str) -> Message {
+        Message {
+            origin: Some(crate::MessageOrigin::Plugin {
+                plugin_id: "test-plugin".to_string(),
+                transient: true,
+            }),
+            ..text_message(id, role, content)
+        }
+    }
+
+    #[test]
+    fn transient_messages_are_not_projected_or_persisted() {
+        let mut graph = SessionGraph::default();
+        let user = text_message("m1", MessageRole::User, "hello");
+        let transient = transient_plugin_message("mem", MessageRole::System, "memory");
+        let assistant = text_message("m2", MessageRole::Assistant, "world");
+
+        graph.merge_active_projection(&[user.clone(), transient, assistant.clone()], &[]);
+
+        let projected = graph.project_messages();
+        assert_eq!(
+            projected.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["m1", "m2"]
+        );
+        assert!(!graph.nodes.iter().any(|node| node.node_id == "mem"));
+    }
+
+    #[test]
+    fn merge_active_projection_drops_duplicate_active_message_ids() {
+        let mut graph = SessionGraph::default();
+        let user = text_message("m1", MessageRole::User, "hello");
+        let assistant = text_message("m2", MessageRole::Assistant, "world");
+        graph.merge_active_projection(&[user.clone(), assistant.clone()], &[]);
+
+        graph.nodes.push(SessionNodeRecord {
+            node_id: "m2".to_string(),
+            parent_node_id: Some("m1".to_string()),
+            timestamp: Utc::now().to_rfc3339(),
+            payload: SessionNodePayload::Message {
+                message: assistant.clone(),
+            },
+        });
+        graph.leaf_node_id = Some("m2".to_string());
+
+        graph.merge_active_projection(&[user, assistant], &[]);
+
+        let projected = graph.project_messages();
+        assert_eq!(
+            projected.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["m1", "m2"]
+        );
+        let m2_count = graph
+            .nodes
+            .iter()
+            .filter(|node| node.node_id == "m2")
+            .count();
+        assert_eq!(m2_count, 2);
+    }
 }

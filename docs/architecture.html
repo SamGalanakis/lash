@@ -567,8 +567,8 @@
           </div>
           <div class="meta-card">
             <div class="micro-label">Execution model</div>
-            <strong>Standard default + REPL alternate</strong>
-            <span><code>standard</code> uses provider-native tool calls; <code>repl</code> executes <code>lashlang</code> programs locally through the same runtime shell.</span>
+            <strong>Standard default + RLM alternate</strong>
+            <span><code>standard</code> uses provider-native tool calls; <code>rlm</code> executes <code>lashlang</code> programs locally through the same runtime shell.</span>
           </div>
           <div class="meta-card">
             <div class="micro-label">Hot files</div>
@@ -712,7 +712,7 @@ workspace helper]
             <p>Implements session metadata, runtime snapshots, canonical transcript rows, picker queries, fork copy, and the thin live-only resume overlay used by the CLI host.</p>
           </article>
           <article class="module">
-            <div class="tag">repl</div>
+            <div class="tag">rlm</div>
             <h3>lashlang</h3>
             <span class="path">/lashlang/src/runtime.rs · /lashlang/src/parser.rs · /lashlang/src/lexer.rs · /lashlang/src/ast.rs</span>
             <p>Provides the programmable execution substrate for REPL mode: parse source, evaluate statements, hold state snapshots, and call back into the tool host.</p>

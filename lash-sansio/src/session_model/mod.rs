@@ -30,10 +30,6 @@ impl TokenUsage {
         self.input_tokens + self.output_tokens + self.reasoning_tokens
     }
 
-    pub fn context_total(&self) -> i64 {
-        self.total() + self.cached_input_tokens
-    }
-
     pub fn add(&mut self, other: &TokenUsage) {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
@@ -118,7 +114,7 @@ pub enum SessionEvent {
         #[serde(skip)]
         snapshot: DurableTurnSnapshot,
     },
-    /// Emitted when a typed REPL session terminates via `finish <expr>`.
+    /// Emitted when a typed RLM session terminates via `finish <expr>`.
     /// The `value` is the captured (and schema-validated) result.
     /// Hosts that want the typed shape back (e.g. the parent of a
     /// `predict` call) listen for this event on the child's stream;
@@ -336,7 +332,7 @@ impl TurnTerminationPolicyState {
                         1. Summary of what you accomplished\n\
                         2. List of remaining tasks not yet completed\n\
                         3. Recommended next steps\n\
-                        Do NOT make any more tool calls and do NOT emit `<repl>`."
+                        Do NOT make any more tool calls and do NOT emit `<rlm>`."
                 ),
                 attachment: None,
                 tool_call_id: None,
@@ -392,40 +388,6 @@ pub fn truncate_raw_error(s: &str) -> String {
     )
 }
 
-pub fn is_malformed_assistant_output(text: &str) -> bool {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    if matches!(
-        trimmed,
-        "<" | "</" | "<repl" | "</repl" | "<repl>" | "</repl>"
-    ) {
-        return true;
-    }
-
-    if (trimmed.starts_with("<repl") && !trimmed.contains("</repl>"))
-        || trimmed.starts_with("</repl")
-        || trimmed.ends_with("<repl")
-        || trimmed.ends_with("</repl")
-    {
-        return true;
-    }
-
-    if trimmed.starts_with('<') && !trimmed.contains('>') && trimmed.len() <= 16 {
-        let looks_like_fragment = trimmed
-            .chars()
-            .skip(1)
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '/' || ch == '_' || ch == '-');
-        if looks_like_fragment {
-            return true;
-        }
-    }
-
-    false
-}
-
 pub fn format_tool_result_content(success: bool, result: &serde_json::Value) -> String {
     if success {
         match result {
@@ -447,67 +409,6 @@ pub fn format_tool_result_content(success: bool, result: &serde_json::Value) -> 
     }
 }
 
-pub fn build_assistant_parts(
-    msg_id: &str,
-    prose_parts: &[String],
-    code_parts: &[String],
-) -> Vec<Part> {
-    let mut parts = Vec::new();
-    let mut idx = 0;
-    let mut prose_iter = prose_parts.iter();
-    let mut code_iter = code_parts.iter();
-
-    loop {
-        let prose = prose_iter.next();
-        let code = code_iter.next();
-        if prose.is_none() && code.is_none() {
-            break;
-        }
-        if let Some(p) = prose
-            && !p.is_empty()
-        {
-            parts.push(Part {
-                id: format!("{}.p{}", msg_id, idx),
-                kind: PartKind::Prose,
-                content: p.clone(),
-                attachment: None,
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: PruneState::Intact,
-            });
-            idx += 1;
-        }
-        if let Some(c) = code
-            && !c.is_empty()
-        {
-            parts.push(Part {
-                id: format!("{}.p{}", msg_id, idx),
-                kind: PartKind::Code,
-                content: c.clone(),
-                attachment: None,
-                tool_call_id: None,
-                tool_name: None,
-                prune_state: PruneState::Intact,
-            });
-            idx += 1;
-        }
-    }
-
-    if parts.is_empty() {
-        parts.push(Part {
-            id: format!("{}.p0", msg_id),
-            kind: PartKind::Prose,
-            content: String::new(),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            prune_state: PruneState::Intact,
-        });
-    }
-
-    parts
-}
-
 pub fn fresh_message_id() -> String {
     format!("m{}", uuid::Uuid::new_v4().simple())
 }
@@ -516,90 +417,6 @@ pub fn reassign_part_ids(message_id: &str, parts: &mut [Part]) {
     for (idx, part) in parts.iter_mut().enumerate() {
         part.id = format!("{message_id}.p{idx}");
     }
-}
-
-pub struct FenceLineParse {
-    pub prose_delta: String,
-    pub codes_to_execute: Vec<String>,
-}
-
-pub fn append_line_segment(target: &mut String, segment: &str, line_started: &mut bool) {
-    if segment.is_empty() {
-        return;
-    }
-    if !*line_started {
-        if !target.is_empty() {
-            target.push('\n');
-        }
-        *line_started = true;
-    }
-    target.push_str(segment);
-}
-
-pub fn parse_fence_line(
-    line: &str,
-    in_code_fence: &mut bool,
-    current_prose: &mut String,
-    current_code: &mut String,
-    prose_parts: &mut Vec<String>,
-) -> FenceLineParse {
-    const OPEN_TAG: &str = "<repl>";
-    const CLOSE_TAG: &str = "</repl>";
-
-    let mut out = FenceLineParse {
-        prose_delta: String::new(),
-        codes_to_execute: Vec::new(),
-    };
-
-    let mut remaining = line;
-    let mut prose_started_this_line = false;
-    let mut code_started_this_line = false;
-
-    if *in_code_fence && line.is_empty() && !current_code.is_empty() {
-        current_code.push('\n');
-        return out;
-    }
-
-    loop {
-        if !*in_code_fence {
-            if let Some(idx) = remaining.find(OPEN_TAG) {
-                let before = &remaining[..idx];
-                append_line_segment(current_prose, before, &mut prose_started_this_line);
-                out.prose_delta.push_str(before);
-
-                let prose = current_prose.trim().to_string();
-                if !prose.is_empty() {
-                    prose_parts.push(prose);
-                }
-                current_prose.clear();
-                *in_code_fence = true;
-                current_code.clear();
-                code_started_this_line = false;
-                remaining = &remaining[idx + OPEN_TAG.len()..];
-                continue;
-            }
-
-            append_line_segment(current_prose, remaining, &mut prose_started_this_line);
-            out.prose_delta.push_str(remaining);
-            break;
-        }
-
-        if let Some(idx) = remaining.find(CLOSE_TAG) {
-            let before = &remaining[..idx];
-            append_line_segment(current_code, before, &mut code_started_this_line);
-            *in_code_fence = false;
-            let code = std::mem::take(current_code);
-            if !code.trim().is_empty() {
-                out.codes_to_execute.push(code);
-            }
-            break;
-        }
-
-        append_line_segment(current_code, remaining, &mut code_started_this_line);
-        break;
-    }
-
-    out
 }
 
 pub fn model_tool_specs(tools: &[ToolDefinition]) -> Vec<LlmToolSpec> {

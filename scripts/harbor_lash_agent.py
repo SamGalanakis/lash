@@ -124,7 +124,7 @@ class LashAgent(BaseInstalledAgent):
 
     @property
     def _install_agent_template_path(self) -> Path:
-        return Path(__file__).resolve().parent / "install-lash.sh.j2"
+        return REPO_ROOT / "bench" / "terminalbench2" / "install-lash.sh.j2"
 
     async def setup(self, environment: BaseEnvironment) -> None:
         await environment.exec(
@@ -181,9 +181,9 @@ class LashAgent(BaseInstalledAgent):
         execution_mode = os.environ.get("LASH_BENCH_EXECUTION_MODE", "").strip()
         if execution_mode == "native-tools":
             execution_mode = "standard"
-        if execution_mode not in {"repl", "standard"}:
+        if execution_mode not in {"rlm", "standard"}:
             raise ValueError(
-                "LASH_BENCH_EXECUTION_MODE must be set to 'repl' or 'standard'"
+                "LASH_BENCH_EXECUTION_MODE must be set to 'rlm' or 'standard'"
             )
 
         env: dict[str, str] = {
@@ -207,6 +207,7 @@ class LashAgent(BaseInstalledAgent):
             "LASH_LOG",
             "LASH_ALLOW_UNKNOWN_MODELS",
             "LASH_LLM_STREAM_TIMEOUT_SECS",
+            "LASH_AUTONOMOUS_SETTLE_MS",
         ):
             value = os.environ.get(key, "")
             if value:
@@ -218,13 +219,18 @@ class LashAgent(BaseInstalledAgent):
         )
         variant = os.environ.get("LASH_BENCH_MODEL_VARIANT", "").strip()
         variant_flag = f"--variant {shlex.quote(variant)} " if variant else ""
-        context_strategy = os.environ.get("LASH_BENCH_CONTEXT_STRATEGY", "").strip()
-        context_strategy_flag = (
-            f"--context-strategy {shlex.quote(context_strategy)} "
-            if context_strategy
+        context_approach = os.environ.get("LASH_BENCH_CONTEXT_APPROACH", "").strip()
+        context_approach_flag = (
+            f"--context-approach {shlex.quote(context_approach)} "
+            if context_approach
             else ""
         )
         execution_mode_flag = f"--execution-mode {shlex.quote(execution_mode)} "
+        rlm_task_var_flag = ""
+        if execution_mode == "rlm":
+            rlm_task_var_flag = (
+                f"--rlm-var {shlex.quote(f'task={json.dumps(instruction)}')} "
+            )
         prompt_flags = ""
         for env_key, section in (
             ("LASH_PROMPT_REPLACE_IDENTITY", "intro"),
@@ -260,7 +266,8 @@ class LashAgent(BaseInstalledAgent):
                 command=(
                     f"chmod +x {shlex.quote(lash_binary)} && "
                     f"{shlex.quote(lash_binary)} {provider_flag}{model_flag}{variant_flag}"
-                    f"{context_strategy_flag}{execution_mode_flag}{prompt_flags}--print {prompt}"
+                    f"{context_approach_flag}{execution_mode_flag}{rlm_task_var_flag}"
+                    f"{prompt_flags}--print {prompt}"
                 ),
                 env=env,
                 timeout_sec=None,

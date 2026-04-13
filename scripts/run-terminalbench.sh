@@ -26,12 +26,12 @@ Options:
                                 (optional for lash, required for opencode and codex)
   --variant <name>              Provider-native model variant passed through when supported
                                 (required for all benchmark runs)
-  --execution-mode <mode>       Lash execution mode: repl|standard
+  --execution-mode <mode>       Lash execution mode: rlm|standard
                                 (required for --agent lash; ignored for opencode)
-  --context-strategy <name>     Lash context strategy: rolling_context
+  --context-approach <name>     Lash context approach: rolling_history|observational_memory
                                 (optional for --agent lash; ignored for opencode)
   --jobs-dir <path>             Harbor jobs output dir (default: jobs)
-  --results-dir <path>          Persistent structured results dir (default: .benchmarks/terminalbench)
+  --results-dir <path>          Persistent structured results dir (default: .benchmarks/terminalbench2)
   --job-name <name>             Harbor job name (optional)
   --n-concurrent <int>          Concurrent trials (default: 1)
   --attempts <int>              Attempts per trial (default: 1)
@@ -51,9 +51,9 @@ Options:
   --help                        Show this help
 
 Examples:
-  scripts/run-terminalbench.sh --sample --execution-mode repl --variant high
-  scripts/run-terminalbench.sh --sample --preset trivial --execution-mode repl --model gpt-5.4 --variant high
-  scripts/run-terminalbench.sh --sample --preset smoke --execution-mode repl --model gpt-5.4 --variant high
+  scripts/run-terminalbench.sh --sample --execution-mode rlm --variant high
+  scripts/run-terminalbench.sh --sample --preset trivial --execution-mode rlm --model gpt-5.4 --variant high
+  scripts/run-terminalbench.sh --sample --preset smoke --execution-mode rlm --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --sample --preset fast-3 --execution-mode standard --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --sample --preset fast-medium --execution-mode standard --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --full --preset memory-3 --execution-mode standard --model gpt-5.4 --variant high
@@ -61,8 +61,8 @@ Examples:
   scripts/run-terminalbench.sh --full --preset representative-10 --execution-mode standard --model gpt-5.4 --variant high
   scripts/run-terminalbench.sh --full --execution-mode standard --task "git-*" --variant high
   scripts/run-terminalbench.sh --sample --execution-mode standard --tasks regex-log,fix-code-vulnerability --variant high
-  scripts/run-terminalbench.sh --sample --execution-mode standard --context-strategy rolling_context --model gpt-5.4 --variant high
-  scripts/run-terminalbench.sh --sample --execution-mode repl --task chess-best-move --model gpt-5.3-codex --variant high
+  scripts/run-terminalbench.sh --sample --execution-mode standard --context-approach rolling_history --model gpt-5.4 --variant high
+  scripts/run-terminalbench.sh --sample --execution-mode rlm --task chess-best-move --model gpt-5.3-codex --variant high
   scripts/run-terminalbench.sh --agent opencode --sample --model openai/gpt-5.4 --variant high
   scripts/run-terminalbench.sh --agent codex --sample --model o3 --variant high
 EOF
@@ -78,12 +78,12 @@ require_cmd() {
 DATASET="terminal-bench-sample@2.0"
 AGENT="lash"
 JOBS_DIR="jobs"
-RESULTS_DIR=".benchmarks/terminalbench"
+RESULTS_DIR=".benchmarks/terminalbench2"
 JOB_NAME=""
 MODEL=""
 VARIANT=""
 EXECUTION_MODE=""
-CONTEXT_STRATEGY=""
+CONTEXT_APPROACH=""
 BUILD_MODE="docker-bookworm"
 N_CONCURRENT="1"
 N_CONCURRENT_SET=0
@@ -323,8 +323,8 @@ while [[ $# -gt 0 ]]; do
       EXECUTION_MODE="${2:?missing value for --execution-mode}"
       shift 2
       ;;
-    --context-strategy)
-      CONTEXT_STRATEGY="${2:?missing value for --context-strategy}"
+    --context-approach)
+      CONTEXT_APPROACH="${2:?missing value for --context-approach}"
       shift 2
       ;;
     --jobs-dir)
@@ -419,23 +419,6 @@ if [[ -z "${VARIANT}" ]]; then
   exit 2
 fi
 
-require_cmd harbor
-if [[ "${ENV_BACKEND}" == "docker" ]] || [[ "${AGENT}" == "lash" && "${DO_BUILD}" -eq 1 && "${BUILD_MODE}" != "host" ]]; then
-  require_cmd docker
-fi
-if [[ "${AGENT}" == "lash" && "${DO_BUILD}" -eq 1 && "${BUILD_MODE}" == "host" ]]; then
-  require_cmd cargo
-fi
-
-if [[ "${AGENT}" == "lash" && "${REQUIRE_CONFIG}" -eq 1 && ! -f "${HOME}/.lash/config.json" ]]; then
-  cat >&2 <<EOF
-error: ${HOME}/.lash/config.json not found.
-This runner expects your local lash provider config (including OAuth tokens).
-Use --allow-no-config to bypass.
-EOF
-  exit 1
-fi
-
 if [[ ${#EXACT_TASKS[@]} -gt 0 ]]; then
   mapfile -t EXACT_TASKS < <(printf '%s\n' "${EXACT_TASKS[@]}" | awk '!seen[$0]++')
 fi
@@ -476,7 +459,7 @@ BINARY_PATH=""
 
 if [[ "${AGENT}" == "lash" ]]; then
   if [[ -z "${EXECUTION_MODE}" ]]; then
-    echo "error: --execution-mode is required for --agent lash (expected repl|standard)" >&2
+    echo "error: --execution-mode is required for --agent lash (expected rlm|standard)" >&2
     exit 2
   fi
 
@@ -484,13 +467,13 @@ if [[ "${AGENT}" == "lash" ]]; then
     EXECUTION_MODE="standard"
   fi
 
-  if [[ "${EXECUTION_MODE}" != "repl" && "${EXECUTION_MODE}" != "standard" ]]; then
-    echo "error: unsupported --execution-mode: ${EXECUTION_MODE} (expected repl|standard)" >&2
+  if [[ "${EXECUTION_MODE}" != "rlm" && "${EXECUTION_MODE}" != "standard" ]]; then
+    echo "error: unsupported --execution-mode: ${EXECUTION_MODE} (expected rlm|standard)" >&2
     exit 2
   fi
 
-  if [[ -n "${CONTEXT_STRATEGY}" && "${CONTEXT_STRATEGY}" != "rolling_context" ]]; then
-    echo "error: unsupported --context-strategy: ${CONTEXT_STRATEGY} (expected rolling_context)" >&2
+  if [[ -n "${CONTEXT_APPROACH}" && "${CONTEXT_APPROACH}" != "rolling_history" && "${CONTEXT_APPROACH}" != "observational_memory" ]]; then
+    echo "error: unsupported --context-approach: ${CONTEXT_APPROACH} (expected rolling_history or observational_memory)" >&2
     exit 2
   fi
 
@@ -512,29 +495,10 @@ if [[ "${AGENT}" == "lash" ]]; then
       ;;
   esac
 
-  if [[ "${DO_BUILD}" -eq 1 ]]; then
-    case "${BUILD_MODE}" in
-      host)
-        build_host_binary
-        ;;
-      docker-bookworm)
-        build_docker_binary "rust:1-bookworm" "target-bookworm"
-        ;;
-      docker-bullseye)
-        build_docker_binary "rust:1-bullseye" "target-bullseye"
-        ;;
-    esac
-  fi
-
-  if [[ ! -x "${BINARY_PATH}" ]]; then
-    echo "error: expected executable lash binary not found at ${BINARY_PATH}" >&2
-    exit 1
-  fi
-
   export LASH_BENCH_BINARY="${BINARY_PATH}"
   export LASH_BENCH_EXECUTION_MODE="${EXECUTION_MODE}"
   export LASH_BENCH_MODEL_VARIANT="${VARIANT}"
-  export LASH_BENCH_CONTEXT_STRATEGY="${CONTEXT_STRATEGY}"
+  export LASH_BENCH_CONTEXT_APPROACH="${CONTEXT_APPROACH}"
 
   if [[ -z "${LASH_PROMPT_REPLACE_IDENTITY:-}" ]]; then
     export LASH_PROMPT_REPLACE_IDENTITY="$(cat <<EOF
@@ -554,8 +518,8 @@ elif [[ "${AGENT}" == "opencode" ]]; then
   if [[ -n "${EXECUTION_MODE}" ]]; then
     echo "warning: --execution-mode is ignored for --agent opencode" >&2
   fi
-  if [[ -n "${CONTEXT_STRATEGY}" ]]; then
-    echo "warning: --context-strategy is ignored for --agent opencode" >&2
+  if [[ -n "${CONTEXT_APPROACH}" ]]; then
+    echo "warning: --context-approach is ignored for --agent opencode" >&2
   fi
   if [[ -z "${MODEL}" ]]; then
     echo "error: --model provider/model is required for --agent opencode" >&2
@@ -571,13 +535,51 @@ elif [[ "${AGENT}" == "codex" ]]; then
   if [[ -n "${EXECUTION_MODE}" ]]; then
     echo "warning: --execution-mode is ignored for --agent codex" >&2
   fi
-  if [[ -n "${CONTEXT_STRATEGY}" ]]; then
-    echo "warning: --context-strategy is ignored for --agent codex" >&2
+  if [[ -n "${CONTEXT_APPROACH}" ]]; then
+    echo "warning: --context-approach is ignored for --agent codex" >&2
   fi
   export CODEX_BENCH_MODEL_VARIANT="${VARIANT}"
 fi
 
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
+
+if [[ "${DRY_RUN}" -eq 0 ]]; then
+  require_cmd harbor
+  if [[ "${ENV_BACKEND}" == "docker" ]] || [[ "${AGENT}" == "lash" && "${DO_BUILD}" -eq 1 && "${BUILD_MODE}" != "host" ]]; then
+    require_cmd docker
+  fi
+  if [[ "${AGENT}" == "lash" && "${DO_BUILD}" -eq 1 && "${BUILD_MODE}" == "host" ]]; then
+    require_cmd cargo
+  fi
+
+  if [[ "${AGENT}" == "lash" ]] && [[ "${REQUIRE_CONFIG}" -eq 1 ]] && [[ ! -f "${HOME}/.lash/config.json" ]]; then
+    cat >&2 <<EOF
+error: ${HOME}/.lash/config.json not found.
+This runner expects your local lash provider config (including OAuth tokens).
+Use --allow-no-config to bypass.
+EOF
+    exit 1
+  fi
+
+  if [[ "${AGENT}" == "lash" && "${DO_BUILD}" -eq 1 ]]; then
+    case "${BUILD_MODE}" in
+      host)
+        build_host_binary
+        ;;
+      docker-bookworm)
+        build_docker_binary "rust:1-bookworm" "target-bookworm"
+        ;;
+      docker-bullseye)
+        build_docker_binary "rust:1-bullseye" "target-bullseye"
+        ;;
+    esac
+  fi
+
+  if [[ "${AGENT}" == "lash" ]] && [[ ! -x "${BINARY_PATH}" ]]; then
+    echo "error: expected executable lash binary not found at ${BINARY_PATH}" >&2
+    exit 1
+  fi
+fi
 
 if [[ -z "${JOB_NAME}" ]]; then
   dataset_slug="$(sanitize_job_fragment "${DATASET%@*}")"
@@ -684,8 +686,8 @@ if [[ -d "${JOB_DIR}" ]]; then
   if [[ -n "${VARIANT}" ]]; then
     EXPORT_CMD+=(--variant "${VARIANT}")
   fi
-  if [[ -n "${CONTEXT_STRATEGY}" ]]; then
-    EXPORT_CMD+=(--context-strategy "${CONTEXT_STRATEGY}")
+  if [[ -n "${CONTEXT_APPROACH}" ]]; then
+    EXPORT_CMD+=(--context-approach "${CONTEXT_APPROACH}")
   fi
   if [[ "${DELETE_AFTER_RUN}" -eq 1 ]]; then
     EXPORT_CMD+=(--delete-after-run)

@@ -497,6 +497,7 @@ mod tests {
                     execution_mode: lash::ExecutionMode::Standard,
                     max_context_tokens: Some(128_000),
                     max_turns: None,
+                    context_approach: lash::ContextApproach::default(),
                 },
                 events: rx,
             })
@@ -564,7 +565,7 @@ mod tests {
 
     #[test]
     fn docs_are_mode_specific() {
-        let repl = test_delegate_tools(lash::ExecutionMode::Repl)
+        let rlm = test_delegate_tools(lash::ExecutionMode::Rlm)
             .definitions()
             .into_iter()
             .find(|definition| definition.name == "agent_call")
@@ -575,9 +576,9 @@ mod tests {
             .find(|definition| definition.name == "agent_call")
             .expect("agent_call definition");
 
-        assert!(repl.description.contains("return a handle"));
+        assert!(rlm.description.contains("return a handle"));
         assert!(
-            repl.description
+            rlm.description
                 .contains("call agent_result { id: handle.value.id }")
         );
         assert!(
@@ -665,7 +666,12 @@ mod tests {
                 None,
             )),
         ])
-        .build_session("root", execution_mode, None)
+        .build_session(
+            "root",
+            execution_mode,
+            policy.context_approach.clone(),
+            None,
+        )
         .expect("plugins");
         DelegateTools::new(
             plugins.tools(),
@@ -743,7 +749,7 @@ mod tests {
             Arc::new(DelegateToolsPluginFactory::new(
                 policy.clone(),
                 DelegateToolConfig {
-                    low_tier_execution_mode: lash::ExecutionMode::Repl,
+                    low_tier_execution_mode: lash::ExecutionMode::Rlm,
                 },
                 None,
             )),
@@ -755,14 +761,14 @@ mod tests {
             plugins.tools(),
             &policy,
             DelegateToolConfig {
-                low_tier_execution_mode: lash::ExecutionMode::Repl,
+                low_tier_execution_mode: lash::ExecutionMode::Rlm,
             },
             None,
         );
 
         let low = delegate_tools.build_session_policy(&Tier::Low);
         let medium = delegate_tools.build_session_policy(&Tier::Medium);
-        assert_eq!(low.execution_mode, lash::ExecutionMode::Repl);
+        assert_eq!(low.execution_mode, lash::ExecutionMode::Rlm);
         assert_eq!(medium.execution_mode, lash::ExecutionMode::Standard);
     }
 
