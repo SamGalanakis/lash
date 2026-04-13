@@ -8,6 +8,7 @@ license.workspace = true
 # Keep core portable by default. The lashlang-backed `rlm` runtime is always on.
 default = []
 sqlite-store = ["dep:rusqlite"]
+fff-zlob = ["fff-search/zlob"]
 # Convenience umbrella for first-party consumers (e.g. lash-cli).
 full = ["sqlite-store"]
 
