@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 import shlex
-import shutil
 import statistics
 import subprocess
 import sys
@@ -43,6 +42,12 @@ def parse_args() -> argparse.Namespace:
         help="Write JSON results to this file. Defaults under .benchmarks/print-profile/.",
     )
     parser.add_argument(
+        "--cargo-feature",
+        action="append",
+        default=[],
+        help="Enable one or more Cargo features when building lash-cli.",
+    )
+    parser.add_argument(
         "--env",
         action="append",
         default=[],
@@ -73,11 +78,17 @@ def resolve_binary(args: argparse.Namespace, repo_root: Path) -> Path:
     return repo_root / "target" / profile / "lash"
 
 
-def maybe_build(binary: Path, release: bool, repo_root: Path) -> None:
+def maybe_build(
+    binary: Path,
+    release: bool,
+    repo_root: Path,
+    cargo_features: list[str],
+) -> None:
     if binary.exists():
         return
-    mode_flag = "--release" if release else ""
     cmd = ["cargo", "build", "-q", "-p", "lash-cli"]
+    if cargo_features:
+        cmd.extend(["--features", ",".join(cargo_features)])
     if release:
         cmd.append("--release")
     print(f"Building lash binary: {' '.join(cmd)}", file=sys.stderr)
@@ -172,7 +183,7 @@ def main() -> int:
     prompt = resolve_prompt(args)
     binary = resolve_binary(args, repo_root)
     if args.build:
-        maybe_build(binary, args.release, repo_root)
+        maybe_build(binary, args.release, repo_root, args.cargo_feature)
     if not binary.exists():
         raise SystemExit(f"error: binary not found: {binary}")
 

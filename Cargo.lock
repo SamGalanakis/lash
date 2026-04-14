@@ -1772,6 +1772,7 @@ dependencies = [
  "fff-search",
  "futures-util",
  "globset",
+ "ignore",
  "lash-sansio",
  "lashlang",
  "pdf-extract",

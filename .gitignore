@@ -7,7 +7,6 @@ target-bullseye/
 .direnv/
 .env
 .env.*
-!.env.example
 jobs/
 .benchmarks/
 __pycache__/

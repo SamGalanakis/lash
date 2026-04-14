@@ -4,10 +4,6 @@ version.workspace = true
 edition = "2024"
 license.workspace = true
 
-[features]
-default = []
-fff-zlob = ["lash/fff-zlob"]
-
 [dependencies]
 lash = { path = "../lash", default-features = false, features = ["full"] }
 async-trait = "0.1"
