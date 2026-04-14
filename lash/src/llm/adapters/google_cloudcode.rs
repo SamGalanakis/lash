@@ -511,6 +511,7 @@ impl GoogleCloudCodeAdapter {
 
         let start_resp = send_request(
             start,
+            None,
             self.request_timeout,
             "Gemini Files upload start timed out",
         )
@@ -529,6 +530,7 @@ impl GoogleCloudCodeAdapter {
                 retryable: status == 429 || status >= 500,
                 raw: Some(body),
                 code: Some(status.to_string()),
+                request_body: None,
             });
         }
 
@@ -557,6 +559,7 @@ impl GoogleCloudCodeAdapter {
 
         let finalize_resp = send_request(
             finalize,
+            None,
             self.request_timeout,
             "Gemini Files upload finalize timed out",
         )
@@ -575,6 +578,7 @@ impl GoogleCloudCodeAdapter {
                 retryable: status == 429 || status >= 500,
                 raw: Some(body),
                 code: Some(status.to_string()),
+                request_body: None,
             });
         }
 
@@ -765,6 +769,7 @@ impl GoogleCloudCodeAdapter {
         }
         let resp = send_request(
             http,
+            request_body.clone(),
             response_start_timeout(
                 self.request_timeout,
                 self.chunk_timeout,
@@ -788,6 +793,7 @@ impl GoogleCloudCodeAdapter {
                 retryable: status == 429 || status >= 500,
                 raw: Some(body),
                 code: Some(status.to_string()),
+                request_body,
             });
         }
 
@@ -897,6 +903,7 @@ impl GoogleCloudCodeAdapter {
             "cloudaicompanionProject": project_hint,
             "metadata": metadata,
         });
+        let request_body = serde_json::to_string(&req).ok();
 
         let resp = self
             .client
@@ -905,7 +912,14 @@ impl GoogleCloudCodeAdapter {
             .json(&req)
             .send()
             .await
-            .map_err(|e| LlmTransportError::new(format!("HTTP request failed: {e}")))?;
+            .map_err(|e| {
+                let error = LlmTransportError::new(format!("HTTP request failed: {e}"));
+                if let Some(request_body) = request_body.clone() {
+                    error.with_request_body(request_body)
+                } else {
+                    error
+                }
+            })?;
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
@@ -914,6 +928,7 @@ impl GoogleCloudCodeAdapter {
                 retryable: status == 429 || status >= 500,
                 raw: Some(body),
                 code: Some(status.to_string()),
+                request_body,
             });
         }
         let body: Value = resp.json().await.map_err(|e| {

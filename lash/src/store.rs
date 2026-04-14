@@ -723,7 +723,12 @@ pub trait RuntimeStore: Send + Sync {
     }
 
     async fn refresh_persisted_session_state(&self, state: &mut crate::PersistedSessionState) {
-        if let Some(fresh) = self.load_persisted_session_state().await {
+        if let Some(mut fresh) = self.load_persisted_session_state().await {
+            // The store owns persisted graph/checkpoint/config state, but not
+            // live provider credentials or other runtime-only policy fields.
+            fresh.policy.provider = state.policy.provider.clone();
+            fresh.policy.session_id = state.policy.session_id.clone();
+            fresh.policy.max_turns = state.policy.max_turns;
             *state = fresh;
         }
     }

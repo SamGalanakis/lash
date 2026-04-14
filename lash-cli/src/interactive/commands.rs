@@ -349,6 +349,7 @@ async fn handle_slash_command(
                 .as_ref()
                 .map(|rt| rt.export_state().policy.context_approach)
                 .unwrap_or_default();
+            let session_db_path = logger.db_path().to_string_lossy().to_string();
             push_system_message(
                 app,
                 info_text(
@@ -362,6 +363,8 @@ async fn handle_slash_command(
                     toolset_hash,
                     &cwd,
                     Some(&session_name),
+                    Some(&logger.session_id),
+                    Some(&session_db_path),
                 ),
             );
         }

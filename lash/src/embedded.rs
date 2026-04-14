@@ -9,11 +9,14 @@ use lashlang::{
 };
 use serde_json::Value;
 
+use crate::plugin::{ToolResultProjectionPluginConfig, truncate_observation_text};
+
 #[derive(Debug)]
 pub enum LashlangRequest {
     Init {
         tools_json: String,
         session_id: String,
+        observe_projection: ToolResultProjectionPluginConfig,
     },
     Exec {
         id: String,
@@ -42,6 +45,7 @@ pub enum LashlangRequest {
     Reconfigure {
         tools_json: String,
         generation: u64,
+        observe_projection: ToolResultProjectionPluginConfig,
     },
     CheckComplete {
         code: String,
@@ -162,11 +166,18 @@ impl Drop for LashlangRuntime {
 #[derive(Clone, Debug, Default)]
 struct RuntimeConfig {
     session_id: String,
+    observe_projection: ToolResultProjectionPluginConfig,
 }
 
 impl RuntimeConfig {
-    fn apply(&mut self, _tools_json: &str, session_id: String) {
+    fn apply(
+        &mut self,
+        _tools_json: &str,
+        session_id: String,
+        observe_projection: ToolResultProjectionPluginConfig,
+    ) {
         self.session_id = session_id;
+        self.observe_projection = observe_projection;
     }
 }
 
@@ -195,8 +206,11 @@ fn runtime_thread_main(
             LashlangRequest::Init {
                 tools_json,
                 session_id,
+                observe_projection,
             } => {
-                state.config.apply(&tools_json, session_id);
+                state
+                    .config
+                    .apply(&tools_json, session_id, observe_projection);
                 let _ = response_tx.send(LashlangResponse::Ready);
             }
             LashlangRequest::Exec {
@@ -246,10 +260,13 @@ fn runtime_thread_main(
             LashlangRequest::Reconfigure {
                 tools_json,
                 generation,
+                observe_projection,
             } => {
-                state
-                    .config
-                    .apply(&tools_json, state.config.session_id.clone());
+                state.config.apply(
+                    &tools_json,
+                    state.config.session_id.clone(),
+                    observe_projection,
+                );
                 let _ = response_tx.send(LashlangResponse::ReconfigureResult {
                     generation,
                     error: None,
@@ -282,6 +299,7 @@ fn execute_code(
     let host = HostBridge {
         response_tx,
         session_id: state.config.session_id.clone(),
+        observe_projection: &state.config.observe_projection,
         observations: &observations,
     };
 
@@ -329,6 +347,7 @@ fn execute_code(
 struct HostBridge<'a> {
     response_tx: &'a std_mpsc::Sender<LashlangResponse>,
     session_id: String,
+    observe_projection: &'a ToolResultProjectionPluginConfig,
     observations: &'a Mutex<Vec<String>>,
 }
 
@@ -366,7 +385,7 @@ impl ToolHost for HostBridge<'_> {
     }
 
     fn observe(&self, value: &FlowValue) -> Result<(), ToolHostError> {
-        let text = format_output_value(value);
+        let text = truncate_observation_text(&format_output_value(value), self.observe_projection);
         self.observations
             .lock()
             .map_err(|_| ToolHostError::new("observation buffer poisoned"))?

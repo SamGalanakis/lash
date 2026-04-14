@@ -55,6 +55,15 @@ pub enum LogEvent {
         response_text: String,
         response_parts: Option<Value>,
     },
+    LlmError {
+        session_id: String,
+        iteration: usize,
+        request_body: Option<String>,
+        message: String,
+        retryable: bool,
+        raw: Option<String>,
+        code: Option<String>,
+    },
 }
 
 /// An effect the host must fulfil.
@@ -100,6 +109,7 @@ pub struct LlmCallError {
     pub retryable: bool,
     pub raw: Option<String>,
     pub code: Option<String>,
+    pub request_body: Option<String>,
 }
 
 /// A response to a previously emitted effect.
@@ -677,6 +687,7 @@ impl TurnMachine {
         request: LlmRequest,
         rlm: Option<RlmState>,
     ) {
+        self.record_llm_error(&error);
         let delay = LLM_RETRY_DELAYS[retry_attempt];
         let reason = error.message.clone();
         self.emit(SessionEvent::RetryStatus {
@@ -769,7 +780,24 @@ impl TurnMachine {
         }
     }
 
+    fn record_llm_error(&mut self, error: &LlmCallError) {
+        if self.config.emit_llm_debug_log {
+            self.pending_effects.push_back(Effect::Log {
+                event: LogEvent::LlmError {
+                    session_id: self.config.session_id.clone(),
+                    iteration: self.iteration,
+                    request_body: error.request_body.clone(),
+                    message: error.message.clone(),
+                    retryable: error.retryable,
+                    raw: error.raw.clone(),
+                    code: error.code.clone(),
+                },
+            });
+        }
+    }
+
     fn emit_llm_error(&mut self, error: LlmCallError) {
+        self.record_llm_error(&error);
         self.emit(make_error_event(
             "llm_provider",
             error.code.as_deref(),

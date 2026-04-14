@@ -399,6 +399,7 @@ impl RuntimeTurnDriver {
                 retryable: false,
                 raw: None,
                 code: Some("plugin_assistant_stream".to_string()),
+                request_body: None,
             })?;
         let mut current = String::new();
         let mut first = true;
@@ -433,6 +434,7 @@ impl RuntimeTurnDriver {
                 retryable: false,
                 raw: None,
                 code: Some("plugin_assistant_response".to_string()),
+                request_body: None,
             })?;
         let mut current: Option<LlmResponse> = None;
         for emitted in transforms {
@@ -594,6 +596,7 @@ impl RuntimeTurnDriver {
                         retryable: false,
                         raw: None,
                         code: Some("cancelled".to_string()),
+                        request_body: debug_request.as_ref().map(debug_request_body),
                     });
                 }
                 Some(stream_event) = llm_stream_rx.recv() => {
@@ -612,6 +615,7 @@ impl RuntimeTurnDriver {
                             retryable: false,
                             raw: None,
                             code: Some("task_join_failed".to_string()),
+                            request_body: debug_request.as_ref().map(debug_request_body),
                         }),
                     };
                     self.policy.provider = provider_after;
@@ -643,12 +647,27 @@ impl RuntimeTurnDriver {
                             retryable: e.retryable,
                             raw: e.raw,
                             code: e.code,
+                            request_body: e
+                                .request_body
+                                .or_else(|| debug_request.as_ref().map(debug_request_body)),
                         }),
                     }
                 }
             }
         };
 
+        if let Err(err) = &result {
+            tracing::error!(
+                session_id = %self.session_id,
+                turn = iteration,
+                retryable = err.retryable,
+                code = ?err.code,
+                raw_present = err.raw.is_some(),
+                request_body_present = err.request_body.is_some(),
+                message = %err.message,
+                "llm call failed"
+            );
+        }
         self.llm_stream_summaries.insert(iteration, debug.summary);
         (result, text_streamed)
     }
@@ -785,7 +804,7 @@ impl RuntimeTurnDriver {
     }
 
     fn handle_log_event(&mut self, event: crate::sansio::LogEvent) {
-        let Some(path) = &self.host.core.llm_log_path else {
+        let Some(_path) = &self.host.core.llm_log_path else {
             return;
         };
 
@@ -828,22 +847,41 @@ impl RuntimeTurnDriver {
                 {
                     object.insert("stream_summary".to_string(), summary.to_json());
                 }
-                match std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
+                self.append_llm_debug_entry(entry);
+            }
+            crate::sansio::LogEvent::LlmError {
+                session_id,
+                iteration,
+                request_body,
+                message,
+                retryable,
+                raw,
+                code,
+            } => {
+                let stream_summary = self.llm_stream_summaries.remove(&iteration);
+                let mut entry = serde_json::json!({
+                    "kind": "llm_error",
+                    "turn": iteration,
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "session_id": session_id,
+                    "request": request_body,
+                    "error": {
+                        "message": message,
+                        "retryable": retryable,
+                        "code": code,
+                    }
+                });
+                if let Some(raw) = raw
+                    && let Some(object) = entry.as_object_mut()
                 {
-                    Ok(mut file) => {
-                        use std::io::Write;
-                        let _log_guard = self.host.core.llm_log_lock.lock().ok();
-                        if let Err(err) = writeln!(file, "{}", entry) {
-                            tracing::warn!(error = %err, path = %path.display(), "failed to append llm debug log");
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!(error = %err, path = %path.display(), "failed to open llm debug log");
-                    }
+                    object.insert("raw".to_string(), serde_json::Value::String(raw));
                 }
+                if let Some(summary) = stream_summary
+                    && let Some(object) = entry.as_object_mut()
+                {
+                    object.insert("stream_summary".to_string(), summary.to_json());
+                }
+                self.append_llm_debug_entry(entry);
             }
         }
     }

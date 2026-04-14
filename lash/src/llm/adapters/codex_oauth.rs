@@ -833,6 +833,7 @@ impl LlmTransport for CodexOAuthAdapter {
 
         let resp = send_request(
             http,
+            request_body.clone(),
             response_start_timeout(
                 self.request_timeout,
                 self.chunk_timeout,
@@ -869,6 +870,7 @@ impl LlmTransport for CodexOAuthAdapter {
                             || status.as_u16() >= 500,
                         raw: err.raw,
                         code: Some(status.as_u16().to_string()),
+                        request_body: request_body.clone().or(err.request_body),
                     });
                 }
             };
@@ -884,6 +886,7 @@ impl LlmTransport for CodexOAuthAdapter {
                 retryable: status.as_u16() == 429 || status.as_u16() >= 500,
                 raw: Some(text),
                 code: Some(status.as_u16().to_string()),
+                request_body,
             });
         }
 

@@ -209,6 +209,7 @@ where
                     kind: "runtime".to_string(),
                     code: Some(err.code),
                     message: err.message,
+                    raw: None,
                 }],
                 typed_finish: None,
             },
