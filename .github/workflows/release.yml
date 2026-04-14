@@ -16,6 +16,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  LASH_CI_ZIG_VERSION: 0.15.1
 
 jobs:
   validate-release-ref:
@@ -79,6 +80,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.LASH_CI_ZIG_VERSION }}
+
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
 
@@ -95,7 +101,7 @@ jobs:
       - name: Build release binary
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
-        run: cargo build --locked --release -p lash-cli --target ${{ matrix.target }}
+        run: cargo build --locked --release -p lash-cli --features fff-zlob --target ${{ matrix.target }}
 
       - name: Package release artifact
         run: scripts/package-release.sh ${{ matrix.target }} ${{ matrix.asset_name }}
